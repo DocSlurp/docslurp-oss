@@ -23,7 +23,7 @@ const pipeline = JSON.stringify({ ...defaultPipelineFeatures, quality: "auto" })
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
-  const runs = ["r-ab", "r-ba", "r-old", "r-fast", "r-plain"];
+  const runs = ["r-ab", "r-ba", "r-old", "r-fast", "r-plain", "r-big"];
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);
@@ -115,7 +115,13 @@ describe("page read charges settle across activities", () => {
     await activity("r-fast", ocr("d-r-fast", 1));
     const old = (runId: string, id: string) => db.query(`insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, amount, unit, cost_cents, metadata)
       values ($1, 'u1', $2, 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-fast', 3, 'page', 0.015, '{"billable": true, "unitCharge": true}')`, [id, runId]);
-    await expect(old("r-fast", "fast:r-fast")).rejects.toThrow(/predates it/);
+    await expect(old("r-fast", "fast:r-fast")).rejects.toMatchObject({ code: "DS001", message: expect.stringMatching(/page billing rules mismatch/) });
+    // The operator's rollback switch turns the backstop off (database setting).
+    await db.exec(`set docslurp.page_rules_guard = 'off'`);
+    await expect(old("r-fast", "fast-off:r-fast")).resolves.toBeDefined();
+    await db.exec(`reset docslurp.page_rules_guard`);
+    await db.exec(`delete from usage_events where id = 'fast-off:r-fast'`);
+    await db.exec(`update project_runs set spent_cents = spent_cents - 0.015 where id = 'r-fast'`);
     // The current worker's completion charge carries its rules version and is accepted: page 1 OCR, pages 2-3 Fast.
     const state = WorkflowState.create(await store.loadRun("r-fast"), []);
     pinRunPageBillingRules(state);
@@ -124,5 +130,36 @@ describe("page read charges settle across activities", () => {
     await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('r-legacy', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline}', 0, 0)`);
     await expect(old("r-legacy", "fast:r-legacy")).resolves.toBeDefined();
+  });
+
+  it("settles a 20,000-page document's OCR charges in one checkpoint transaction, then its Rich upgrades", { timeout: 600_000 }, async () => {
+    const pages = 20_000;
+    // One statement in one transaction, as a checkpoint writes a document's charges (the ledger path is covered above).
+    await db.exec(`insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, amount, unit, cost_cents, metadata)
+      select 'ocr:r-big:d-r-big:' || g, 'u1', 'r-big', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-ocr', 1, 'page', ${t.ocr},
+        jsonb_build_object('billable', true, 'unitCharge', true, 'documentId', 'd-r-big', 'pageNumber', g)
+      from generate_series(1, ${pages}) g`);
+    // A later activity reads every tenth page with a vision model: each pays Rich minus its OCR charge.
+    await activity("r-big", (state) => { for (let page = 10; page <= pages; page += 10) vision("d-r-big", page)(state); });
+    const { rows } = await db.query<{ metric: string; n: number; cents: string; upgrades: number }>(
+      `select metric, count(*)::int as n, sum(cost_cents)::text as cents, count(*) filter (where metadata ? 'upgradeOf')::int as upgrades
+       from usage_events where run_id = 'r-big' group by metric order by metric`);
+    const by = Object.fromEntries(rows.map((row) => [row.metric, row]));
+    expect(by["ingest-page-ocr"]).toMatchObject({ n: pages });
+    expect(by["ingest-page-rich"]).toMatchObject({ n: pages / 10, upgrades: pages / 10 });
+    expect(Number(by["ingest-page-ocr"]!.cents) + Number(by["ingest-page-rich"]!.cents)).toBeCloseTo((pages - pages / 10) * t.ocr + (pages / 10) * t.rich, 6);
+    expect(await spent("r-big")).toBeCloseTo((pages - pages / 10) * t.ocr + (pages / 10) * t.rich, 6);
+  });
+
+  it("releases the vision request of an OCR charge the run's Rich charge covers", async () => {
+    await db.exec(`insert into vision_org_attempts (id, org_id, weight_cents) values ('ticket-covered', 'o1', 1)`);
+    const exists = async () => (await db.query(`select 1 from vision_org_attempts where id = 'ticket-covered'`)).rows.length;
+    expect(await exists()).toBe(1);
+    await activity("r-ba", (state) => {
+      state.usageLedger.ocrPageClass = () => true;
+      state.usageLedger.record({ provider: "deepinfra", model: "m", metric: "hosted-ocr", amount: 1, unit: "page", costCents: 0,
+        metadata: { documentId: "d-r-ba", pageNumber: 1 } }, { visionAttemptTicket: "ticket-covered" });
+    });
+    expect(await exists()).toBe(0);
   });
 });

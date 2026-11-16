@@ -91,9 +91,10 @@ export interface PipelineUsageBatch {
  * itself (an OCR read of a page it already charged Rich), but the settlement
  * is the database's (migration 0185, settle_page_read_charge): reads of one
  * page may be recorded by different activities, workers or releases, whose
- * ledgers never see each other. Until a checkpoint persists them, an OCR page
- * this ledger then charges Rich counts both charges in `pendingBillableCents`
- * (an overestimate, so cost caps err on the safe side).
+ * ledgers never see each other. The pending total expects the settlement this
+ * ledger can see (its own OCR charge credited against the page's first Rich
+ * unit); an OCR charge another activity made is not known here, so such a page
+ * counts both until its checkpoint (an overestimate: cost caps err safe).
  */
 export class PipelineUsageEventLedger {
   readonly speedBoost: boolean;
@@ -116,6 +117,18 @@ export class PipelineUsageEventLedger {
   private readonly richCharged = new Map<string, { pages: number; readers: Map<string, number> }>();
   /** OCR page charges by `documentId:pageNumber`: the charge's event id. */
   private readonly ocrCharged = new Map<string, string>();
+
+  /**
+   * Whether OCR route reads bill the OCR page class (pipeline/ocr-page-class.ts). When it answers no, they bill exactly as
+   * before the class existed: as Rich reads (output-token units). Set by WorkflowState from the run's pin; default yes.
+   */
+  ocrPageClass: () => boolean = () => true;
+
+  /**
+   * Expected settlement credit of a pending first Rich unit for a page this ledger charged OCR (the database inserts it at
+   * the Rich price minus that OCR charge, migration 0185), so the pending total does not count the page twice.
+   */
+  private readonly settleCredit = new Map<UsageEvent, number>();
 
   /** Run being billed; set by WorkflowState. Rich page charges need it for their idempotent ids. */
   runId: string | null = null;
@@ -198,12 +211,19 @@ export class PipelineUsageEventLedger {
 
   /** Charge a page the OCR route read (OCR_PAGE_READ_METRICS) as one OCR page, once per run. */
   chargeOcrPage(args: { documentId: string; pageNumber: number; readBy: string; model?: string }): void {
+    if (!this.ocrPageClass()) {
+      this.chargeRichPage(args);
+      return;
+    }
     this.chargeOcrPageRead({ metric: args.readBy, model: args.model, metadata: { documentId: args.documentId, pageNumber: args.pageNumber } }, true);
   }
 
   private chargePageRead(event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null }, visionAttemptTicket: string | null = null): void {
-    if (OCR_PAGE_READ_METRICS.has(event.metric)) this.chargeOcrPageRead(event, false, visionAttemptTicket);
-    else this.chargeRichPageRead(event, false, visionAttemptTicket);
+    if (OCR_PAGE_READ_METRICS.has(event.metric)) {
+      // Before the OCR class (or with it off for this run), an OCR route read was a Rich read like a vision read.
+      if (this.ocrPageClass()) this.chargeOcrPageRead(event, false, visionAttemptTicket);
+      else this.chargeRichPageRead(event, true, visionAttemptTicket);
+    } else this.chargeRichPageRead(event, false, visionAttemptTicket);
   }
 
   /**
@@ -282,9 +302,11 @@ export class PipelineUsageEventLedger {
       outputTokens: 0,
       metadata: unitChargeMetadata({ documentId, pageNumber, readBy: event.metric, model: event.model, outputTokens: total, ...(n > 1 ? { unit: n } : {}) }),
     });
+    // The OCR charge this ledger made for the page is credited against the first Rich unit by the database.
+    const ocrCredit = this.ocrCharged.has(key) ? pageCredits("ocr", 1) : 0;
     for (let n = Math.max(1, charged + 1); n <= owed; n += 1) {
       // The vision call's request ticket rides on the page's first charge only: a later read of a charged page stays uncharged.
-      this.buffer(n === 1 && visionAttemptTicket ? { ...unit(n), visionAttemptTicket } : unit(n));
+      this.buffer(n === 1 && visionAttemptTicket ? { ...unit(n), visionAttemptTicket } : unit(n), n === 1 ? ocrCredit : 0);
     }
   }
 
@@ -353,12 +375,18 @@ export class PipelineUsageEventLedger {
         const taken = new Set(events);
         const remaining = this.pending.filter((event) => !taken.has(event));
         this.pending.splice(0, this.pending.length, ...remaining);
-        this.pendingBillable = remaining.reduce((sum, event) => sum + billableCents(event), 0);
+        for (const event of events) this.settleCredit.delete(event);
+        this.pendingBillable = remaining.reduce((sum, event) => sum + this.expectedCents(event), 0);
       },
     };
   }
 
-  private buffer(event: UsageEvent): UsageEvent {
+  /** What an event is expected to add to the run's spend once persisted: its billable cents less a settlement credit. */
+  private expectedCents(event: UsageEvent): number {
+    return Math.max(0, billableCents(event) - (this.settleCredit.get(event) ?? 0));
+  }
+
+  private buffer(event: UsageEvent, credit = 0): UsageEvent {
     const priced = applySpeedBoostUnitCharge(
       (event.inputTokens ?? 0) > 0 || (event.outputTokens ?? 0) > 0 ? priceAiUsageEvent(event) : event,
       this.speedBoost,
@@ -366,10 +394,11 @@ export class PipelineUsageEventLedger {
     const stamped = { ...priced, id: event.id ?? randomUUID(), metadata: { ...usageTraceContext(), ...priced.metadata } };
     recordUsageReceipt(stamped);
     this.pending.push(stamped);
-    this.pendingBillable += billableCents(stamped);
+    if (credit > 0) this.settleCredit.set(stamped, credit * speedBoostMultiplier(this.speedBoost));
+    this.pendingBillable += this.expectedCents(stamped);
     this.lifetime.inputTokens += stamped.inputTokens ?? 0;
     this.lifetime.outputTokens += stamped.outputTokens ?? 0;
-    this.lifetime.costCents += billableCents(stamped);
+    this.lifetime.costCents += this.expectedCents(stamped);
     return stamped;
   }
 }

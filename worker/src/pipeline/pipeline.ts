@@ -6,6 +6,7 @@ import { cloneArtifacts, cloneJsonMap } from "../models.js";
 import { DocumentArtifactLedger } from "./artifact-ledger.js";
 import { PipelineUsageEventLedger } from "./usage-ledger.js";
 import type { PageFactUpsert } from "./page-facts.js";
+import { runUsesOcrPageClass } from "./ocr-page-class.js";
 import {
   getPageProgressForDocumentStage,
   type PageProgress,
@@ -245,6 +246,9 @@ export class WorkflowState {
     this.documentStages = new Map();
     this.totalStages = 0;
     this.usageLedger.runId = run.id;
+    // The run's OCR page class decision (pipeline/ocr-page-class.ts), read when a charge is made: it may be pinned after
+    // construction (startRun) or arrive with hydrated artifacts.
+    this.usageLedger.ocrPageClass = () => runUsesOcrPageClass(this.artifactLedger);
   }
 
   static create(run: ProjectRun, documents: Document[]): WorkflowState {

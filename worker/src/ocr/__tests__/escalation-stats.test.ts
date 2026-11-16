@@ -31,7 +31,7 @@ describe("OCR escalation record", () => {
     recordOcrEscalationPages(l, "doc", { escalated: [2], capped: [6, 7] });
     // A page that a later call escalated is no longer capped.
     recordOcrEscalationPages(l, "doc", { escalated: [5] });
-    expect(ocrEscalationStageStats(l, "doc")).toEqual({ escalatedPages: 3, cappedPages: 2, capped: [6, 7] });
+    expect(ocrEscalationStageStats(l, "doc")).toEqual({ escalatedPages: 3, cappedPages: 2, capped: [6, 7], skippedPages: { unfunded: 0, "cost-cap": 0, "price-check": 0 } });
     // Another document's record is its own.
     expect(ocrEscalationStageStats(l, "other")).toBeNull();
     // Hostile or corrupt ledger values never throw and never count.
@@ -65,14 +65,25 @@ describe("OCR escalation record", () => {
     const read = outcome([{ pageNumber: 1, escalate: true }, { pageNumber: 2, escalate: false }, { pageNumber: 3, escalate: true }, { pageNumber: 4, escalate: true }]);
     const summary = await escalateOcrPages(read, reader, "doc");
     expect(summary).toMatchObject({ attempted: 2, replaced: 1, skipped: { budget: 1 }, capped: 2 });
-    expect(ocrEscalationStageStats(l, "doc")).toEqual({ escalatedPages: 1, cappedPages: 2, capped: [3, 4] });
-    // Pages skipped for another reason (cost cap, privacy) are not the per-document cap.
+    expect(ocrEscalationStageStats(l, "doc")).toMatchObject({ escalatedPages: 1, cappedPages: 2, capped: [3, 4] });
+    // Pages skipped for another reason (cost cap, privacy) are not the per-document cap; cost cap, funds and price are
+    // recorded under their own reason, privacy (a setting) is not recorded.
     const other = ledger();
     const refusing: HostedOcrReader = {
       async read() { throw new HostedOcrSkipped("cost-cap", "run cost cap"); },
       recordEscalation: (documentId, pages) => recordOcrEscalationPages(other, documentId, pages),
     };
     expect(await escalateOcrPages(outcome([{ pageNumber: 1, escalate: true }, { pageNumber: 2, escalate: true }]), refusing, "doc")).toMatchObject({ capped: 0 });
-    expect(ocrEscalationStageStats(other, "doc")).toBeNull();
+    expect(ocrEscalationStageStats(other, "doc")).toMatchObject({ cappedPages: 0, skippedPages: { "cost-cap": 2, unfunded: 0 } });
+    for (const [reason, recorded] of [["margin", "price-check"], ["unfunded", "unfunded"], ["privacy", null]] as const) {
+      const l2 = ledger();
+      const r: HostedOcrReader = {
+        async read() { throw new HostedOcrSkipped(reason, reason); },
+        recordEscalation: (documentId, pages) => recordOcrEscalationPages(l2, documentId, pages),
+      };
+      await escalateOcrPages(outcome([{ pageNumber: 1, escalate: true }]), r, "doc");
+      if (recorded) expect(ocrEscalationStageStats(l2, "doc")?.skippedPages[recorded]).toBe(1);
+      else expect(ocrEscalationStageStats(l2, "doc")).toBeNull();
+    }
   });
 });

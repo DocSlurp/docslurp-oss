@@ -5,7 +5,16 @@
  */
 import { recordPageEscalation } from "../pipeline/run-milestones.js";
 import type { OcrReadOutcome } from "./engine.js";
+import { SpendCheckUnavailableError } from "../db/spend-check.js";
+import type { OcrEscalationSkipReason } from "./escalation-stats.js";
 import { HostedOcrSkipped, type HostedOcrReader } from "./hosted-reader.js";
+
+/** The skip reasons the escalation record keeps (escalation-stats.ts), by the reader's reason. */
+const SKIP_REASON: Partial<Record<HostedOcrSkipped["reason"], OcrEscalationSkipReason>> = {
+  unfunded: "unfunded",
+  "cost-cap": "cost-cap",
+  margin: "price-check",
+};
 
 export interface EscalationSummary {
   attempted: number;
@@ -33,6 +42,7 @@ export async function escalateOcrPages(
   const summary: EscalationSummary = { attempted: 0, replaced: 0, skipped: {}, failed: 0, capped: 0 };
   const escalated: number[] = [];
   const capped: number[] = [];
+  const skipped: Partial<Record<OcrEscalationSkipReason, number[]>> = {};
   const candidates = outcome.pages.filter((page) => page.escalation);
   for (const [index, page] of candidates.entries()) {
     if (signal?.aborted) break;
@@ -52,18 +62,24 @@ export async function escalateOcrPages(
         // The per-document cap: this page and every later candidate keep their first OCR read. `budget` covers both
         // per-document bounds: the page budget (DOCSLURP_OCR_ESCALATION_MAX_PAGES) and the attempt budget
         // (DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS, retries included); either one spent leaves the rest on their first read.
-        if (error.reason === "budget") capped.push(...candidates.slice(index).map((candidate) => candidate.pageNumber));
+        const rest = candidates.slice(index).map((candidate) => candidate.pageNumber);
+        if (error.reason === "budget") capped.push(...rest);
+        // An unfunded balance, the run cost cap and a refused price stop the rest of this document the same way.
+        const reason = SKIP_REASON[error.reason];
+        if (reason) (skipped[reason] ??= []).push(...rest);
         // Once disabled, refused, capped or out of budget, later pages of this document would be skipped the same way.
         if (error.reason !== "guard") break;
         continue;
       }
       if (signal?.aborted) throw error;
+      // A balance check that could not decide is retried with the activity (retryable), never read as a failed escalation.
+      if (error instanceof SpendCheckUnavailableError) throw error;
       summary.failed += 1;
       console.warn(`[ocr] escalation failed document=${documentId} page=${page.pageNumber}: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`);
     }
   }
   summary.capped = capped.length;
-  if (escalated.length || capped.length) reader.recordEscalation?.(documentId, { escalated, capped });
+  if (escalated.length || capped.length || Object.keys(skipped).length) reader.recordEscalation?.(documentId, { escalated, capped, skipped });
   if (summary.attempted) {
     recordPageEscalation("ocr-hosted", "replaced", summary.replaced);
     recordPageEscalation("ocr-hosted", "failed", summary.failed);

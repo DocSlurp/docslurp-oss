@@ -13,6 +13,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { PRODUCER_MARKER, docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
+import { OCR_PAGE_CLASS_SLOT } from "../pipeline/ocr-page-class.js";
 import { PAGE_BILLING_RULES_SLOT } from "../db/page-base-fee.js";
 import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
@@ -461,6 +462,8 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     const h = await harness(provider);
     h.state.artifactLedger.record(PAGE_BILLING_RULES_SLOT, "test-pricing@1");
     h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    // Started with the OCR page class on (every live worker advertised it).
+    h.state.artifactLedger.record(OCR_PAGE_CLASS_SLOT, "1");
     return h;
   }
   const sourceRows = (h: Awaited<ReturnType<typeof harness>>) =>

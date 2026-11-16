@@ -288,16 +288,35 @@ start-up the provider needs. A reader without `warm` is unaffected.
   no Rich pages), and an escalation that returned no text charges nothing more (the page stays OCR); its provider cost is
   still recorded.
 - Before each new escalation read the balance must cover the page's upgrade from OCR to Rich plus the activity's
-  buffered charges (the store's spend check, as for every other read). An unfunded run is paused and the page keeps its
-  OCR read; a check that cannot decide is retried.
+  buffered charges. The check is read-only: an unfunded organization skips the escalation (the page keeps its OCR read)
+  and the run goes on, unpaused. Without a store, a user or an organization to check, the escalation is skipped too. A
+  check that cannot decide is retried with the activity.
 - The database settles a page's read charges (migration 0185, `settle_page_read_charge`), whichever activity, worker or
   release recorded them: an OCR charge for a page the run already charged Rich is not inserted, and a page's first Rich
-  unit is inserted at its price minus the run's OCR charge for that page. Fast charges carry `pageRules: 2`; the database
-  refuses a Fast charge without it for a run that has OCR charges, so a worker from before the OCR class cannot settle
-  such a run (its activity is retried on a current worker). Deploy order: migrate, then workers, then the API.
-- The per-document escalation cap: when a document spends its page budget (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`) or its
-  attempt budget (`DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`, retries included), the page that hit it and every later
-  candidate keep their first OCR read. Each document stage records the pages escalated and the pages
+  unit is inserted at its price minus the run's OCR charge for that page. Each charge locks its run's row first (the
+  same row the run spend trigger updates), so settlements of one run serialize without a lock per page.
+- Pages that wanted a second read but kept their first OCR read are recorded per document with the reason: the
+  per-document cap (its page budget, `DOCSLURP_OCR_ESCALATION_MAX_PAGES`, or its attempt budget,
+  `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`, retries included), the balance, the run cost cap, or the second-read model's
+  price check. The ingest report turns them into `ocr-escalation-cap` and `ocr-escalation-skipped`.
+
+### Rollout and rollback of the OCR page class
+
+A worker pins each new run to the OCR page class (`run:page-billing-ocr`) only when every live worker advertises
+`billing.ocr-page-class` in the capability registry (a worker advertises it once migration 0185's trigger exists) and
+`DOCSLURP_OCR_PAGE_CLASS` is not `off`. Otherwise the run bills OCR reads as Rich, as before. Runs started by an earlier
+release keep its rule.
+
+- Deploy order: apply migrations, roll every worker and confirm no older worker still polls (the fleet view lists each
+  worker's capabilities), then deploy the API. New runs use the class from the first run started after the last older
+  worker leaves.
+- Backstop: Fast charges carry `pageRules: 2`, and the database refuses (SQLSTATE `DS001`) a Fast charge without it for
+  a run that has OCR charges, so an older worker cannot bill a run's OCR pages Fast as well. Its message names the run
+  for operators; raw database errors stay in logs and traces.
+- Rollback of workers to a release before the class: set `DOCSLURP_OCR_PAGE_CLASS=off` on the current workers so new runs
+  stop using the class, let the runs pinned to it finish, then turn the backstop off
+  (`ALTER DATABASE <db> SET docslurp.page_rules_guard = 'off'`, effective for new connections) and roll back. Turn it
+  back on (`ALTER DATABASE <db> RESET docslurp.page_rules_guard`) once current workers run again. Each document stage records the pages escalated and the pages
   capped (`stats.ocrEscalation`), and the ingest report recommends reading the capped pages with a vision model
   (`ocr-escalation-cap`).
 - Page reader jobs are recorded as `ocr-page-reader` at provider cost, billing 0 credits (`providerCostCents`), also

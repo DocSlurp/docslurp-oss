@@ -23,7 +23,7 @@ import { findVisionGuardStop, recordVisionRead, withVisionCall } from "../lib/vi
 import { visionConfigForModel } from "../routing/routed-vision.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
-import { recordOcrEscalationPages } from "./escalation-stats.js";
+import { recordOcrEscalationPages, type OcrEscalationSkipReason } from "./escalation-stats.js";
 
 export const DEFAULT_OCR_ESCALATION_MODEL = "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct";
 /** Escalation reads per document unless `DOCSLURP_OCR_ESCALATION_MAX_PAGES` says otherwise. */
@@ -72,7 +72,7 @@ export class HostedOcrSkipped extends Error {
 export interface HostedOcrReader {
   read(page: HostedOcrPage, purpose: HostedOcrPurpose, signal?: AbortSignal): Promise<HostedOcrRead>;
   /** Record a document's escalated pages and the pages the per-document cap left on their first read (escalation-stats.ts). */
-  recordEscalation?(documentId: string, pages: { escalated: readonly number[]; capped: readonly number[] }): void;
+  recordEscalation?(documentId: string, pages: { escalated: readonly number[]; capped: readonly number[]; skipped?: Partial<Record<OcrEscalationSkipReason, readonly number[]>> }): void;
 }
 
 /** Whether escalation runs (`DOCSLURP_OCR_ESCALATION=on`): an explicit operator opt-in, off by default. */
@@ -161,8 +161,8 @@ export function createHostedOcrReader(args: {
         }
       }
       // A new escalation read upgrades its page from OCR to Rich: before the call, the balance must cover that upgrade plus the
-      // run's charges still buffered here, as every other read is authorized. Fails closed: an unfunded run is paused by the
-      // check and the page keeps its OCR read; a check that cannot decide throws SpendCheckUnavailableError (retryable).
+      // run's charges still buffered here. Read-only: an unfunded org skips the escalation (the page keeps its OCR read) and
+      // the run goes on, unpaused; a check that cannot decide throws SpendCheckUnavailableError (retryable).
       if (purpose === "ocr-escalation") await authorizeEscalationRead(state, page);
       // Unique per real call: two calls of the same page (overlapping activities) never share a usage id, so neither's cost
       // is dropped by the ledger's id dedup. Replays reuse the ids persisted with the call.
@@ -241,16 +241,21 @@ export function createHostedOcrReader(args: {
   };
 }
 
-/** The balance check before an escalation read: the page's upgrade from OCR to Rich, plus this activity's buffered charges. */
+/**
+ * The balance check before an escalation read: the page's upgrade from OCR to Rich, plus this activity's buffered charges.
+ * Read-only (largestFundedCharge): it never pauses the run. Fails closed: no store to check with, no user or no organization
+ * skips the escalation, as an unfunded balance does.
+ */
 async function authorizeEscalationRead(state: WorkflowState, page: HostedOcrPage): Promise<void> {
   const store = state.store;
-  if (!store?.enforceSpendForCharge || !state.run.userId) return;
+  const skip = (why: string): never => {
+    console.warn(`[ocr] ocr-escalation skipped run=${state.run.id} document=${page.documentId} page=${page.pageNumber} reason=${why}`);
+    throw new HostedOcrSkipped("unfunded", `the escalation read is not funded (${why}); the page keeps its OCR read`);
+  };
+  if (!store?.largestFundedCharge || !state.run.userId || !state.run.orgId) skip("no-balance-check");
   const credits = pageUpgradeCredits("ocr", "rich") * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
-  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, credits);
-  if (outcome.paused || outcome.blocked) {
-    console.warn(`[ocr] ocr-escalation refused run=${state.run.id} document=${page.documentId} page=${page.pageNumber} reason=unfunded credits=${credits.toFixed(4)}`);
-    throw new HostedOcrSkipped("unfunded", "credits do not cover the escalation read; the page keeps its OCR read");
-  }
+  const funded = await store!.largestFundedCharge!({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId }, 1, () => credits);
+  if (funded < 1) skip("unfunded");
 }
 
 function toMessage(error: unknown): string {

@@ -48,6 +48,11 @@ export const WORKER_CAPABILITIES = [
   /** Stamps documents.lexical_searchable_at at embed (schema 0051). */
   "search.early-lexical",
   /**
+   * Bills OCR route reads in the OCR page class and settles completion Fast charges with page rules 2 (schema 0185). A
+   * worker pins a new run to the class only when every live worker advertises this (worker pipeline/ocr-page-class.ts).
+   */
+  "billing.ocr-page-class",
+  /**
    * Understands extraction config v1 (design extraction-config-simplification.md, release R0): DOCSLURP_PROFILE, the
    * full DOCSLURP_DISABLE vocabulary enforced at execution, and the posture digest in its registry row (`config`).
    */

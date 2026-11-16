@@ -14,6 +14,7 @@ import type { executeVisionRuntime, VisionExecutionResult } from "../../tools/vi
 import type { OcrPageRead, OcrReadOutcome } from "../engine.js";
 import { escalateOcrPages } from "../escalation.js";
 import { ocrEscalationStageStats } from "../escalation-stats.js";
+import { SpendCheckUnavailableError } from "../../db/spend-check.js";
 import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped, ocrEscalationModel } from "../hosted-reader.js";
 import { installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests, TEST_PAGE_CREDITS } from "@docslurp/shared";
 import { ocrDocument } from "../read-document.js";
@@ -30,6 +31,8 @@ function runState(pipeline: Record<string, unknown> = {}, run: Record<string, un
   } as unknown as ProjectRun, []);
   state.visionAttempts = new MemoryVisionAttemptBackend();
   state.usageLedger.runId = "run-1";
+  // A funded organization: escalation reads check the balance first and skip without a store to check with.
+  (state as unknown as { store: unknown }).store = { largestFundedCharge: async (_run: unknown, max: number) => max };
   return state;
 }
 
@@ -111,7 +114,7 @@ describe("OCR escalation reads", () => {
     const summary = await escalateOcrPages(outcome, reader, "doc-1");
     expect(summary).toMatchObject({ attempted: 3, replaced: 2, skipped: { budget: 1 }, capped: 1 });
     // The document's record for the ingest report: two pages read a second time, one left on its first OCR read by the cap.
-    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toEqual({ escalatedPages: 2, cappedPages: 1, capped: [3] });
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ escalatedPages: 2, cappedPages: 1, capped: [3] });
     // The third read is refused at its first request's admission: nothing was sent and nothing is recorded for it.
     expect(execute).toHaveBeenCalledTimes(3);
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ocr-escalation")).toHaveLength(2);
@@ -122,14 +125,16 @@ describe("OCR escalation reads", () => {
     await expect(reader.read({ documentId: "doc-1", pageNumber: 3, imagePath: outcome.pages[2]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).rejects.toMatchObject({ reason: "budget" });
   });
 
-  it("checks the balance for the OCR-to-Rich upgrade before each escalation read: an org funded for OCR only never overdraws", async () => {
+  it("checks the balance for the OCR-to-Rich upgrade before each escalation read: an org funded for OCR only never overdraws, and the run is not paused", async () => {
     const state = runState();
     const execute = stubExecute();
     const checks: number[] = [];
-    // Enough for the pages' OCR charges, not for an upgrade to Rich.
+    // Enough for the pages' OCR charges, not for an upgrade to Rich. Read-only: nothing here can pause the run.
     const balance = 2 * TEST_PAGE_CREDITS.ocr;
+    const enforceSpendForCharge = vi.fn();
     (state as unknown as { store: unknown }).store = {
-      enforceSpendForCharge: async (_run: unknown, credits: number) => { checks.push(credits); return { paused: credits > balance, blocked: false }; },
+      enforceSpendForCharge,
+      largestFundedCharge: async (_run: unknown, max: number, creditsFor: (n: number) => number) => { checks.push(creditsFor(1)); return creditsFor(1) > balance ? 0 : max; },
     };
     state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 1, readBy: "page-ocr" });
     state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 2, readBy: "page-ocr" });
@@ -141,11 +146,26 @@ describe("OCR escalation reads", () => {
     expect(checks).toHaveLength(1);
     expect(checks[0]).toBeCloseTo(TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr + 2 * TEST_PAGE_CREDITS.ocr);
     expect(execute).not.toHaveBeenCalled();
+    expect(enforceSpendForCharge).not.toHaveBeenCalled();
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
     expect(outcome.pages.map((page) => page.text)).toEqual(["ocr 1", "ocr 2"]);
+    // Both pages are recorded as skipped for funds, for the ingest report.
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ escalatedPages: 0, skippedPages: { unfunded: 2 } });
+    // Fail closed: no store to check with, or no organization, skips the read too.
+    for (const strip of [(s: WorkflowState) => { (s as unknown as { store: unknown }).store = undefined; }, (s: WorkflowState) => { s.run.orgId = null as never; }]) {
+      const bare = runState();
+      strip(bare);
+      const bareExecute = stubExecute();
+      const bareOutcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+      expect(await escalateOcrPages(bareOutcome, createHostedOcrReader({ state: bare, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: bareExecute }), "doc-1")).toMatchObject({ skipped: { unfunded: 1 } });
+      expect(bareExecute).not.toHaveBeenCalled();
+    }
+    // A check that cannot decide is retried: the error propagates.
+    const broken = runState();
+    (broken as unknown as { store: unknown }).store = { largestFundedCharge: async () => { throw new SpendCheckUnavailableError("balance read failed"); } };
+    await expect(escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), createHostedOcrReader({ state: broken, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: stubExecute() }), "doc-1")).rejects.toBeInstanceOf(SpendCheckUnavailableError);
     // Funded: the read goes ahead.
     const funded = runState();
-    (funded as unknown as { store: unknown }).store = { enforceSpendForCharge: async () => ({ paused: false, blocked: false }) };
     const fundedExecute = stubExecute();
     const fundedOutcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
     expect(await escalateOcrPages(fundedOutcome, createHostedOcrReader({ state: funded, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: fundedExecute }), "doc-1")).toMatchObject({ replaced: 1 });

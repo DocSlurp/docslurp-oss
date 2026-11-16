@@ -519,6 +519,10 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
       documents: [doc("long-scan", { pageCount: 40 })],
       stages: [stage("long-scan", "extract-markdown", { ocrEscalation: { escalatedPages: 25, cappedPages: 6, capped: [26, 27, 28, 29, 30, 31] } })],
     }),
+    build({
+      documents: [doc("broke-scan", { pageCount: 40 })],
+      stages: [stage("broke-scan", "extract-markdown", { ocrEscalation: { escalatedPages: 3, cappedPages: 0, capped: [], skippedPages: { unfunded: 4, "cost-cap": 0, "price-check": 0 } } })],
+    }),
   ];
 
   it("accounts for every recommendation id the report can emit", () => {
@@ -853,7 +857,8 @@ describe("ingest report: OCR escalation cap", () => {
     expect(rec!.reason).toContain("per-document second-read cap");
     // What a vision read of those pages costs, through the pricing provider (test prices).
     expect(rec!.cost.reprocessCents).toBeCloseTo(13 * TEST_PAGE_CREDITS.rich, 2);
-    expect(rec!.cost.basis).toContain("bills Rich");
+    expect(rec!.cost.basis).toContain("Reprocessing is a new run");
+    expect(rec!.cost.basis).toContain("bills them Rich");
   });
 
   it("emits nothing without capped pages, under Good, for failed files, or for a malformed record", () => {
@@ -867,5 +872,38 @@ describe("ingest report: OCR escalation cap", () => {
     }
     // A record larger than the file's pages never claims more pages than the file has.
     expect(none({ documents: [doc("a", { pageCount: 4 })], stages: [stage("a", "extract-markdown", { escalatedPages: 0, cappedPages: 400 })] })[0]?.affectedPages).toBe(4);
+  });
+});
+
+describe("ingest report: OCR second reads skipped for other reasons", () => {
+  const stage = (documentId: string, ocrEscalation: unknown): Input["stages"][number] => ({
+    documentId, stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null,
+    tablePages: null, durationSeconds: null, ocrEscalation,
+  });
+
+  it("says why, with a count per reason, and what to do", () => {
+    const report = build({
+      documents: [doc("a", { pageCount: 30 }), doc("b", { pageCount: 30 })],
+      stages: [
+        stage("a", { escalatedPages: 2, cappedPages: 0, capped: [], skippedPages: { unfunded: 5, "cost-cap": 0, "price-check": 1 } }),
+        stage("b", { escalatedPages: 0, cappedPages: 0, capped: [], skippedPages: { unfunded: 0, "cost-cap": 3, "price-check": 0 } }),
+      ],
+    });
+    const rec = report.recommendations.find((entry) => entry.id === "ocr-escalation-skipped")!;
+    expect(rec).toMatchObject({ severity: "medium", affectedPages: 9, affectedDocuments: 2, patch: null });
+    expect(rec.reason).toContain("5 pages skipped it because the balance ran out");
+    expect(rec.reason).toContain("3 pages skipped it because the run cost cap was reached");
+    expect(rec.reason).toContain("1 page skipped it because the second-read model's current price was not accepted");
+    expect(rec.effect).toMatch(/^Add credits and raise or remove the run cost cap/);
+    expect(rec.reprocessDocumentIds.sort()).toEqual(["a", "b"]);
+    expect(report.recommendations.find((entry) => entry.id === "ocr-escalation-cap")).toBeUndefined();
+  });
+
+  it("ignores malformed records and failed files", () => {
+    for (const hostile of [{ escalatedPages: 0, cappedPages: 0, skippedPages: { unfunded: -1 } }, { escalatedPages: 0, cappedPages: 0, skippedPages: "x" }]) {
+      expect(build({ documents: [doc("a")], stages: [stage("a", hostile)] }).recommendations.filter((entry) => entry.id === "ocr-escalation-skipped")).toEqual([]);
+    }
+    expect(build({ documents: [doc("a", { status: "failed" })], stages: [stage("a", { escalatedPages: 0, cappedPages: 0, skippedPages: { unfunded: 2 } })] })
+      .recommendations.filter((entry) => entry.id === "ocr-escalation-skipped")).toEqual([]);
   });
 });
