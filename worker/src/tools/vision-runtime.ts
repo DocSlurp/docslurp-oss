@@ -920,9 +920,12 @@ export async function runVisionRequest(args: {
             { role: "user", content: shaped.promptMode === "image-only" ? [imagePart] : [{ type: "text", text: args.prompt }, imagePart] },
           ]
         : visionPromptMessages(args.prompt, args.requestText, imagePart, { cacheOrdered });
+      // A shaped (private) request may carry no system message, so the page image is its first token: vLLM's
+      // `cache_salt` keeps that endpoint's automatic prefix cache per organization instead.
       const body = {
         model: args.model,
         messages,
+        ...(shaped ? { cache_salt: orgPromptSaltLine(currentProviderRateOrg()) } : {}),
         temperature: profile?.temperature ?? 0,
         ...(profile?.topP !== undefined ? { top_p: profile.topP } : {}),
         // null (`server`, no call cap): no max_tokens, so the served context limit applies; admission weighed contextTokens.

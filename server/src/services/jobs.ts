@@ -268,16 +268,17 @@ export async function getJobStatus(
 /** Stamps job metadata on freshly created runs (before they start, so the worker reads it with the run). */
 export async function recordJobMeta(runIds: string[], meta: JobMeta, client: typeof sql = sql): Promise<void> {
   if (runIds.length === 0) return;
-  // A job never spans organizations: the update applies only when every listed run belongs to one organization.
-  const updated = await client`
+  // A job never spans organizations (a null org counts as its own): refuse before stamping anything.
+  const [scope] = await client<{ orgs: number }[]>`
+    select count(distinct coalesce(org_id, ''))::int as orgs from project_runs where id = any(${runIds})
+  `;
+  if ((scope?.orgs ?? 0) > 1) throw new Error("recordJobMeta refused: a job's runs must belong to one organization");
+  await client`
     update project_runs
     set job_id = ${meta.id},
         stats = coalesce(stats, '{}'::jsonb) || jsonb_build_object('job', ${client.json(JSON.parse(JSON.stringify(meta)))}::jsonb)
     where id = any(${runIds})
-      and (select count(distinct org_id) from project_runs where id = any(${runIds})) = 1
-    returning id
   `;
-  if (updated.length === 0) throw new Error("recordJobMeta refused: a job's runs must belong to one organization");
 }
 
 /**

@@ -250,6 +250,16 @@ describe("worker private endpoint vision request profiles", () => {
     expect("max_tokens" in body).toBe(false);
   });
 
+  it("keys a shaped request's endpoint prefix cache per organization (cache_salt), since the image is its first token", async () => {
+    const { runWithProviderRateScope } = await import("../lib/provider-rate-limit.js");
+    const salt = async (orgId: string | null) => (await runWithProviderRateScope({ orgId }, () => sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B")) as { cache_salt?: string }).cache_salt;
+    const a = await salt("org-a");
+    expect(a).toMatch(/^Workspace [0-9a-f]{16}\.$/);
+    expect(await salt("org-a")).toBe(a);
+    expect(await salt("org-b")).not.toBe(a);
+    expect(await salt(null)).not.toBe(await salt(null));
+  });
+
   it("applies an operator's registry profile over the generic request", async () => {
     const body = await sendPage("llm://private/gpu1/acme/tuned-vlm");
     expect(body.messages.map((message) => message.role)).toEqual(["system", "user"]);

@@ -1,5 +1,12 @@
 # TODO
 
+- Organization isolation follow-ups (council, PR #450, 2026-11-16):
+  - `quarantined_sources` (source quarantine) is keyed by `source_sha256` alone: org B's identical bytes are refused on a verdict from org A's run, which tells org B another tenant's upload of those bytes broke a parser. Look it up per organization and route a hash seen elsewhere to a fresh, disposable VM with a generic failure, instead of refusing it (sandbox owners).
+  - Unsalted tenant calls still left: page-router decision and verifier requests (`worker/src/routing/decision-client.ts`, page image first) and Llama Guard output moderation (`server/src/services/chat-output-moderation.ts`, question first). Salt both once routing calibration and the moderation template are checked with a salt line, and price moderation at list rate so a cache discount never shows in another org's cost.
+  - Shared caches evict across organizations (query-embedding and vector-result `TtlLruCache`, global pressure in the search response cache): one org's volume can turn another's hits into misses. Give each organization its own entry and byte budget.
+  - One salt helper: server `chatSystemSaltLine` and shared `orgPromptSaltLine` differ in HKDF label and short-key handling; consolidate on one with the production refusal of a short `EVIDENCE_TAG_KEY`.
+  - Private endpoints now always receive a system message (the salt). Add a per-model "no system role" registry option that moves the salt into the user turn or `cache_salt` for models whose chat template rejects the system role.
+
 - Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
 
 - Project activity counters (0165), council follow-ups 2026-11-14:

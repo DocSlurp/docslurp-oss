@@ -354,8 +354,9 @@ export async function generateOpenRouterDocumentText(args: {
     const generated = await generatePrivateEndpointText({
       operation: "api.chat.documents",
       modelUri: args.model,
-      system: args.system,
-      // Private routes keep the question-first order and a random per-call tag: they have no shared prompt cache.
+      // A shared private endpoint may prefix-cache (vLLM does by default): the org salt goes first, before the project's
+      // instructions. Private routes keep the question-first order and a random per-call evidence tag.
+      system: [chatSystemSaltLine(args.evidenceScope), args.system].filter(Boolean).join("\n\n"),
       prompt: `${withoutEvidenceTags(args.prompt)}\n\nProject evidence:\n\n${inlineDocuments}`,
       maxOutputTokens: args.maxOutputTokens,
       privacyMode: args.privacyMode,
