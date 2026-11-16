@@ -894,7 +894,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       cost: {
         centsPer100Pages: round(vision.cents * 100, 2),
         reprocessCents: round(estimate.cents, 2),
-        basis: `Pages read by a model bill Rich (${qualityModePriceRange("good")} per 1,000 pages); vision about ${formatCents(vision.cents)} per page (${vision.basis}).`,
+        basis: `Pages read by a vision model bill as Vision pages (${qualityModePriceRange("good")} per 1,000 pages); vision about ${formatCents(vision.cents)} per page (${vision.basis}).`,
       },
       patch: settingInPlace ? null : patch,
       reprocessDocumentIds: ids,
@@ -967,12 +967,12 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       id: "ocr-escalation-cap", severity: "medium",
       title: "Some scanned pages kept their first OCR read",
       reason: `${plural(capped.pages, "page")} in ${plural(capped.documentIds.length, "file")} read poorly by OCR kept ${agree(capped.pages, "its", "their")} first OCR read because the per-document second-read cap (pages or attempts) was reached, so ${agree(capped.pages, "its", "their")} text may be incomplete or garbled.`,
-      effect: `Reprocess the ${plural(capped.documentIds.length, "affected file")} with quality Good (or switch the project to Good) so a vision model reads every page, these included. Good reads bill Rich (${qualityModePriceRange("good")} per 1,000 pages).`,
+      effect: `Reprocess the ${plural(capped.documentIds.length, "affected file")} with quality Good (or switch the project to Good) so a vision model reads every page, these included. Good reads bill as Vision pages (${qualityModePriceRange("good")} per 1,000 pages).`,
       affectedPages: capped.pages, affectedDocuments: capped.documentIds.length,
       cost: {
         centsPer100Pages: round(pageCredits("rich", 100), 2),
         reprocessCents: round(rich, 2),
-        basis: `Reprocessing is a new run: reading these ${plural(capped.pages, "page")} with a vision model bills them Rich, about ${formatCents(rich)}, and the files' other pages are read with vision at Good too.`,
+        basis: `Reprocessing is a new run: reading these ${plural(capped.pages, "page")} with a vision model bills them as Vision pages, about ${formatCents(rich)}, and the files' other pages are read with vision at Good too.`,
       },
       patch: { quality: "good" },
       reprocessDocumentIds: capped.documentIds,
@@ -996,7 +996,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       cost: {
         centsPer100Pages: null,
         reprocessCents: round(rich, 2),
-        basis: `A second read by a vision model bills these ${plural(skippedEscalation.pages, "page")} Rich, about ${formatCents(rich)}; reprocessing runs the files again.`,
+        basis: `A second read by a vision model bills these ${plural(skippedEscalation.pages, "page")} as Vision pages, about ${formatCents(rich)}; reprocessing runs the files again.`,
       },
       patch: null,
       reprocessDocumentIds: skippedEscalation.documentIds,
@@ -1157,7 +1157,7 @@ type OcrEscalationSkipReason = "unfunded" | "cost-cap" | "price-check";
 const OCR_ESCALATION_SKIP_TEXT: ReadonlyArray<readonly [OcrEscalationSkipReason, string]> = [
   ["unfunded", "skipped it because the balance ran out"],
   ["cost-cap", "skipped it because the run cost cap was reached"],
-  ["price-check", "skipped it because the second-read model's current price was not accepted for an automatic read"],
+  ["price-check", "skipped it because no second-read model was available for it"],
 ];
 
 /** Pages that kept their first OCR read for a reason other than the cap, per reason and in all (largest count per document). */

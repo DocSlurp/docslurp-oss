@@ -9,7 +9,7 @@ region is decided, and what DocSlurp records.
 
 China-based providers are **allowed** by default (`allowChinaProviders: true` on organizations and projects).
 
-- **Vision (Rich pages):** the default model is `openai/gpt-6-luna`, served by OpenAI (never its Flex tier), with Amazon
+- **Vision (Vision pages):** the default model is `openai/gpt-6-luna`, served by OpenAI (never its Flex tier), with Amazon
   Bedrock us-east-1 and Azure US as fallbacks and as the retry route for content-filter stops; `max_price` is their
   $0.11 / $0.55 per million tokens. When a project picks `deepseek/deepseek-v4.1-flash-1017`, it is served by Fireworks
   or Parasail. OpenRouter picks the one with the lowest recent latency at request time

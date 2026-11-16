@@ -106,7 +106,7 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
 - `run` writes Markdown with one form-feed-separated slot per page. Throw `host.SandboxRunError(message, usage)` on
   failure so the usage is recorded; never put raw provider or parser text in the message. The host refuses Markdown
   that is not a regular file or exceeds 256 MiB (`SANDBOXED_PDF_MAX_MARKDOWN_BYTES`) before reading it.
-- `run` may return `ocrPages`: the 1-based pages whose text it read with OCR. Each is billed as one Rich page read.
+- `run` may return `ocrPages`: the 1-based pages whose text it read with OCR. Each is billed as one Scan page read.
   The host requires unique integers within the document's page count and refuses the run otherwise. Omit the field
   when unknown: the host then records no OCR reads for the document. It never infers them for this route.
 - `imageOrientation.orient` returns a record the host validates against `orientationResultSchema`

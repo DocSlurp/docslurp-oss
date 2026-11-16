@@ -858,7 +858,7 @@ describe("ingest report: OCR escalation cap", () => {
     // What a vision read of those pages costs, through the pricing provider (test prices).
     expect(rec!.cost.reprocessCents).toBeCloseTo(13 * TEST_PAGE_CREDITS.rich, 2);
     expect(rec!.cost.basis).toContain("Reprocessing is a new run");
-    expect(rec!.cost.basis).toContain("bills them Rich");
+    expect(rec!.cost.basis).toContain("bills them as Vision pages");
   });
 
   it("emits nothing without capped pages, under Good, for failed files, or for a malformed record", () => {
@@ -893,7 +893,7 @@ describe("ingest report: OCR second reads skipped for other reasons", () => {
     expect(rec).toMatchObject({ severity: "medium", affectedPages: 9, affectedDocuments: 2, patch: null });
     expect(rec.reason).toContain("5 pages skipped it because the balance ran out");
     expect(rec.reason).toContain("3 pages skipped it because the run cost cap was reached");
-    expect(rec.reason).toContain("1 page skipped it because the second-read model's current price was not accepted");
+    expect(rec.reason).toContain("1 page skipped it because no second-read model was available for it");
     expect(rec.effect).toMatch(/^Add credits and raise or remove the run cost cap/);
     expect(rec.reprocessDocumentIds.sort()).toEqual(["a", "b"]);
     expect(report.recommendations.find((entry) => entry.id === "ocr-escalation-cap")).toBeUndefined();

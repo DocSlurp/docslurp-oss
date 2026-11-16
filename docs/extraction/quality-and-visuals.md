@@ -13,9 +13,9 @@ quickest and cheapest route, the default balance, and the best measured reads.
 
 | Quality | Reads | Billing |
 |---|---|---|
-| `fastest` | Every page takes its text layer or the format's own structure. Pages without one are kept as page images, not read and not searchable. Never OCR, never a model. | Fast pages only |
-| `balanced` (default) | Text layer first; scans and pages whose text layer is missing, garbled or unreliable are read by OCR or AI vision; low-confidence OCR pages get a second read. | Fast pages for text pages, OCR pages for pages OCR read, Rich pages for pages a vision model read |
-| `smart` | Every page is read by AI vision (the text layer is a hint). A failed AI read falls back to `balanced`'s rules. | Rich pages for every page read |
+| `fastest` | Every page takes its text layer or the format's own structure. Pages without one are kept as page images, not read and not searchable. Never OCR, never a model. | Text pages only |
+| `balanced` (default) | Text layer first; scans and pages whose text layer is missing, garbled or unreliable are read by OCR or AI vision; low-confidence OCR pages get a second read. | Text pages for text pages, Scan pages for pages OCR read, Vision pages for pages a vision model read |
+| `smart` | Every page is read by AI vision (the text layer is a hint). A failed AI read falls back to `balanced`'s rules. | Vision pages for every page read |
 
 Office, HTML, EPUB, JSON and text files are read from their structure at every quality. Audio and video follow
 `mediaVideo`. Prices: [docslurp.io/pricing](https://docslurp.io/pricing); estimates quote them before you upload.

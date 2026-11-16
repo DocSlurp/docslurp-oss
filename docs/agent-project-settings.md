@@ -73,8 +73,8 @@ mode does not offer is refused, and chat never proposes one: no `charts-ai` unde
 `local-only` or `strict-privacy`.
 
 `quality` is `fastest` (reads the text layer only and keeps scanned pages as page images,
-billed as Fast pages), `balanced` (the default: reads each page the cheapest faithful way,
-Fast or Rich per page) or `smart` (reads every page with AI, Rich); prices come only from the
+billed as Text pages), `balanced` (the default: reads each page the cheapest faithful way,
+Text, Scan or Vision per page) or `smart` (reads every page with AI, Vision); prices come only from the
 estimate tools and [docslurp.io/pricing](https://docslurp.io/pricing). Quality is what the
 [ingest report](api-sdk.md#ingest-report) recommends for scanned pages that page triage
 skipped or that `fastest` kept as images, so its `patch` can be proposed as
