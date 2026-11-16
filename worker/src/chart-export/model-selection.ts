@@ -4,8 +4,11 @@
  * - Default: the first admitted model of `CHART_GENERATOR_CANDIDATES`, in preference order. GPT-6 Luna at reasoning
  *   `none` scored best on held-out charts and diagrams in the 2026-11-10 evaluation; Claude Haiku 5.5 (reasoning off)
  *   matched it on a 2026-11-13 development screen; GLM 5.3 Flash is last for its unstable latency. Removed: Gemini 3.1
- *   Flash Lite (cost per read on real documents) and DeepSeek V4.1 Flash (never selected automatically,
- *   automatic-model-selection.ts).
+ *   Flash Lite (cost per read on real documents). DeepSeek V4.1 Flash is not a candidate (removed 2026-11-13); were it
+ *   added, the margin gate below would price it at its route's current, time-of-day price.
+ * - Margin: a candidate (default or override) is selected only when one chart read on it keeps the automatic-call
+ *   margin at the highest price its route can reach now (automatic-call-margin.ts, kind `chart-read`); one that does
+ *   not is skipped with a logged reason and the next candidate is tried.
  * - Override: a configured model (managed setting: env `CHART_EXPORT_GENERATOR_MODEL`; projects never name one) is
  *   used only when it is one of the candidates, the routing-target catalog admits it (image input, a list price, not
  *   Pro/Ultra, runtime-accepted) and its input and output list prices are at most `chartGeneratorPriceCeiling()`. The
@@ -15,6 +18,7 @@
  *   priced for page reads, not for the flat per-visual charge.
  */
 import {
+  admitAutomaticCall,
   assertNoAutomaticSelectionDenied,
   creditsToDollars,
   isAutomaticSelectionDenied,
@@ -25,6 +29,7 @@ import {
   type OpenRouterReasoning,
   type RoutingTarget,
   type VisionConfig,
+  visionAutomaticRoute,
 } from "@docslurp/shared";
 
 import { visionConfigForModel } from "../routing/routed-vision.js";
@@ -111,7 +116,8 @@ function admittedGenerator(target: RoutingTarget | undefined, ceiling: ChartGene
     && target.pricing.inputUsdPerMTok !== undefined
     && target.pricing.outputUsdPerMTok !== undefined
     && (ceiling === null || (target.pricing.inputUsdPerMTok <= ceiling.inputUsdPerMTok && target.pricing.outputUsdPerMTok <= ceiling.outputUsdPerMTok))
-    && !isAutomaticSelectionDenied(target.ref.modelUri);
+    && !isAutomaticSelectionDenied(target.ref.modelUri)
+    && admitAutomaticCall("chart-read", visionAutomaticRoute(target.ref.modelUri), "chart generator").allowed;
 }
 
 function toSelection(target: RoutingTarget, reason: GeneratorSelection["reason"]): GeneratorSelection {

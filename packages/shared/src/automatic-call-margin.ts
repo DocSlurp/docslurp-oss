@@ -24,7 +24,8 @@
  */
 import { isModelInFamily } from "./automatic-model-selection.js";
 import { visionInputUsdPerMillion, visionModelTokenPricing } from "./embedding.js";
-import { endpointPriceAt, endpointPriceListing, ensureEndpointPrices, requestEndpointPrices } from "./endpoint-prices.js";
+import { endpointPriceAt, endpointPriceListing, ensureEndpointPrices, requestEndpointPrices, startEndpointPriceRefresh } from "./endpoint-prices.js";
+import { liveModelPricesDisabled } from "./live-model-prices.js";
 import { policyModelId } from "./model-call-policy.js";
 import {
   AUTOMATIC_CALL_KINDS,
@@ -370,4 +371,19 @@ export function visionAutomaticRoute(modelOrUri: string): AutomaticCallRoute {
   if (direct) return { model: trimmed, billing: "direct", capUsdPerMTok: cap };
   const hosts = catalog?.basis === "pinned-route" && catalog.providers?.length ? catalog.providers : null;
   return { model: trimmed, billing: "openrouter", capUsdPerMTok: cap, hosts };
+}
+
+/**
+ * Start the endpoint price refresher for automatic call candidates (worker and API startup), beside the live catalog
+ * prices: off with LIVE_MODEL_PRICES=off or without OPENROUTER_API_KEY, like them. Models are bare ids or `llm://` URIs;
+ * any other model the gate looks up is tracked and refreshed as well. Never throws.
+ */
+export function startAutomaticCallPriceRefresh(models: Iterable<string> = [], env: Env = processEnv()): void {
+  try {
+    if (liveModelPricesDisabled(env) || !env.OPENROUTER_API_KEY?.trim()) return;
+    const ids = [...models].filter((model) => routeBilling({ model }) === "openrouter").map((model) => policyModelId(model));
+    startEndpointPriceRefresh(ids);
+  } catch (error) {
+    console.warn(`[automatic-margin] price refresher not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

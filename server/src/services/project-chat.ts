@@ -3,7 +3,7 @@ import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/cha
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForProject, openRouterCall, privateTextModelForProject } from "../lib/privacy.js";
-import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport, withoutAutomaticSelectionDenied } from "@docslurp/shared";
+import { admitAutomaticCall, BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, prepareAutomaticCallPrices, reportAutomaticCallOutcome, requestsIngestReport, withoutAutomaticSelectionDenied } from "@docslurp/shared";
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
@@ -118,9 +118,10 @@ type ProjectChatRuntimeSummary = {
 };
 
 /**
- * The model a failed chat answer retries on. GPT-6 Luna since 2026-11-13: DeepSeek V4.1 Flash is never selected
- * automatically (automatic-model-selection.ts), so it is never a failover target; buildModelFailoverOrder also drops
- * any such model after the caller's own choice.
+ * The model a failed chat answer retries on: GPT-6 Luna first. A failover is an automatic call: each candidate is
+ * margin-checked at its current price when the failover happens (automatic-call-margin.ts, kind `chat-answer`), and a
+ * candidate that does not keep the margin is skipped for the next one. Denylisted models
+ * (automatic-model-selection.ts) are never candidates.
  */
 export const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
   "openai/gpt-6-luna";
@@ -513,11 +514,30 @@ export function buildModelFailoverOrder(
   preferredModel: string,
   failover = true,
 ): string[] {
-  if (!failover) return [preferredModel];
+  const [next] = projectChatFailoverCandidates(preferredModel, failover);
+  return next ? [preferredModel, next] : [preferredModel];
+}
+
+/** Failover candidates for a turn on `preferredModel`, in order (none when failover is off). One of them answers at most. */
+export function projectChatFailoverCandidates(preferredModel: string, failover = true): string[] {
+  if (!failover) return [];
   // A Speed boost variant is the same model: a Luna Nitro project fails over to Haiku, never to plain Luna.
   const base = nitroBaseModel(preferredModel) ?? preferredModel;
-  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== base);
-  return next ? [preferredModel, next] : [preferredModel];
+  return withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).filter((model) => model !== base);
+}
+
+/**
+ * The first failover candidate that keeps the automatic-call margin now, or null. Each refusal is logged with its reason
+ * by the gate; a refused candidate is skipped, never sent.
+ */
+export async function admittedChatFailover(candidates: readonly string[]): Promise<{ model: string; decision: ReturnType<typeof admitAutomaticCall> } | null> {
+  if (candidates.length === 0) return null;
+  await prepareAutomaticCallPrices("chat-answer", candidates.map((model) => ({ model })));
+  for (const model of candidates) {
+    const decision = admitAutomaticCall("chat-answer", { model }, "chat failover");
+    if (decision.allowed) return { model, decision };
+  }
+  return null;
 }
 
 /**
@@ -578,7 +598,17 @@ async function generateProjectChatTextWithFailover(args: {
   let lastError: unknown;
   const deltas = trackTextDeltas(args.onTextDelta);
 
-  for (const model of buildModelFailoverOrder(args.preferredModel, args.failover)) {
+  const candidates = projectChatFailoverCandidates(args.preferredModel, args.failover);
+  // The caller's model first; on failure, the first failover candidate that keeps the margin at that moment.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let model = args.preferredModel;
+    let failoverDecision: ReturnType<typeof admitAutomaticCall> | null = null;
+    if (attempt > 0) {
+      const admitted = await admittedChatFailover(candidates);
+      if (!admitted) break;
+      model = admitted.model;
+      failoverDecision = admitted.decision;
+    }
     try {
       const generated = await generateOpenRouterDocumentText({
         apiKey: args.apiKey,
@@ -594,6 +624,13 @@ async function generateProjectChatTextWithFailover(args: {
         signal,
       });
 
+      if (failoverDecision) {
+        reportAutomaticCallOutcome(failoverDecision, {
+          costUsd: generated.usage.costCents !== undefined ? generated.usage.costCents / 100 : null,
+          inputTokens: generated.usage.inputTokens,
+          outputTokens: generated.usage.outputTokens,
+        }, "chat failover");
+      }
       return {
         ...generated,
         model,
@@ -606,6 +643,7 @@ async function generateProjectChatTextWithFailover(args: {
       if (deltas.emitted) throw error;
       lastError = error;
     }
+    if (candidates.length === 0) break;
   }
 
   throw lastError instanceof Error

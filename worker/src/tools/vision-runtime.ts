@@ -1,6 +1,6 @@
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
-import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed } from "@docslurp/shared";
+import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed, AutomaticCallRefusedError, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
@@ -352,7 +352,19 @@ export async function executeVisionRuntime(args: {
     if (!selected.remoteFallbackModelUri || selected.runtime === "remote-openai") {
       throw error;
     }
-    if (args.gate) assertAutomaticModelCallAllowed(selected.remoteFallbackModelUri, "vision fallback model");
+    // The fallback is an automatic call: besides the call-time policy it must keep the margin at the fallback route's
+    // current price (automatic-call-margin.ts). Refused: the primary's error stands and no fallback request is sent.
+    let fallbackDecision: ReturnType<typeof assertAutomaticModelCallAllowed> = null;
+    if (args.gate) {
+      const fallbackRoute = visionAutomaticRoute(selected.remoteFallbackModelUri);
+      await prepareAutomaticCallPrices("page-transcription", [fallbackRoute]);
+      try {
+        fallbackDecision = assertAutomaticModelCallAllowed(selected.remoteFallbackModelUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute });
+      } catch (refusal) {
+        if (refusal instanceof AutomaticCallRefusedError) throw error;
+        throw refusal;
+      }
+    }
     const fallbackProvider = (() => {
       try {
         return new URL(selected.remoteFallbackModelUri).hostname.toLowerCase();
@@ -388,6 +400,13 @@ export async function executeVisionRuntime(args: {
       throw fallbackError;
     }
 
+    if (fallbackDecision) {
+      reportAutomaticCallOutcome(fallbackDecision, {
+        costUsd: fallback.costCents !== undefined ? fallback.costCents / 100 : null,
+        inputTokens: fallback.inputTokens,
+        outputTokens: fallback.outputTokens,
+      }, "vision fallback model");
+    }
     return {
       ...fallback,
       ...(primaryFailure ? { primaryFailure } : {}),
