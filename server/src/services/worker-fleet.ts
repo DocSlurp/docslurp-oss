@@ -12,6 +12,8 @@ import {
   type WorkerCapabilityRecord,
 } from "@docslurp/shared";
 
+import { assessOperatorConfigSkew, currentOperatorConfigDigest, type OperatorConfigSkew } from "@docslurp/shared/operator-config";
+
 import { sql } from "../db.js";
 
 /**
@@ -107,6 +109,16 @@ export interface FleetDeps {
   log: (line: string) => void;
 }
 
+/** A registry row's config digests: string or null values only; anything else is dropped. */
+export function configDigestsOf(value: unknown): Record<string, string | null> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out: Record<string, string | null> = {};
+  for (const [key, digest] of Object.entries(value as Record<string, unknown>)) {
+    if (digest === null || (typeof digest === "string" && digest.length <= 200)) out[key.slice(0, 64)] = digest as string | null;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 async function readRecordsFromDb(taskQueue: string, recentWindowMs: number, now: number): Promise<WorkerCapabilityRecord[]> {
   // Ages come from the database clock, so app/database skew cannot make rows look fresh.
   const rows = await sql<{
@@ -118,8 +130,11 @@ async function readRecordsFromDb(taskQueue: string, recentWindowMs: number, now:
     capabilities: string[] | null;
     age_ms: number | string;
     stopped_age_ms: number | string | null;
+    config_digests: unknown;
   }[]>`
     select instance_id, identity, task_queue, build_id, protocol, capabilities,
+      -- Read through to_jsonb so a database before migration 0182 answers null instead of failing the registry read.
+      to_jsonb(worker_capabilities) -> 'config_digests' as config_digests,
       extract(epoch from (now() - last_seen_at)) * 1000 as age_ms,
       extract(epoch from (now() - stopped_at)) * 1000 as stopped_age_ms
     from worker_capabilities
@@ -137,6 +152,7 @@ async function readRecordsFromDb(taskQueue: string, recentWindowMs: number, now:
     capabilities: row.capabilities ?? [],
     lastSeenAt: now - Number(row.age_ms),
     stoppedAt: row.stopped_age_ms === null ? null : now - Number(row.stopped_age_ms),
+    ...(configDigestsOf(row.config_digests) ? { configDigests: configDigestsOf(row.config_digests)! } : {}),
   }));
 }
 
@@ -345,7 +361,21 @@ export interface WorkerFleetReport {
   capabilities: WorkerCapability[];
   features: GatedFeatureState[];
   workers: FleetCapabilitySnapshot["workers"];
+  /**
+   * The operator config digest this API process runs with against every live worker's (`skew` when any differs or
+   * reports none; `unknown` without live pollers). The deploy's skew check fails on anything but `ok`.
+   */
+  operatorConfig: OperatorConfigSkew;
   checkedAt: string;
+}
+
+/** Pure: the operator config skew for a fleet snapshot. Only live pollers count; anything else is unknown. */
+export function operatorConfigSkewOf(snapshot: FleetCapabilitySnapshot, appDigest: string | null): OperatorConfigSkew {
+  if (snapshot.basis !== "pollers") return { app: appDigest, status: "unknown", workers: [] };
+  return assessOperatorConfigSkew(appDigest, snapshot.workers.map((worker) => ({
+    identity: worker.identity,
+    digest: worker.configDigests && "operator" in worker.configDigests ? worker.configDigests.operator : undefined,
+  })));
 }
 
 /** Operator view (GET /ops/worker-fleet, /metrics): configured vs effective flags. */
@@ -361,6 +391,8 @@ export async function workerFleetReport(taskQueue?: string, env: Env = process.e
     capabilities: snapshot.capabilities,
     features: gatedFeatureStates(configuredGatedFlags(env), gate ? new Set(snapshot.capabilities) : null),
     workers: snapshot.workers,
+    // Skew is checked whether or not the capability gate is on.
+    operatorConfig: operatorConfigSkewOf(gate ? snapshot : await workerFleet().resolve(queue), currentOperatorConfigDigest()),
     checkedAt: new Date().toISOString(),
   };
 }

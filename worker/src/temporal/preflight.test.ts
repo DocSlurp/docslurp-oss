@@ -30,6 +30,12 @@ vi.mock("@docslurp/shared", async (importOriginal) => {
   return { ...actual, startLiveModelPriceRefresh: started.priceRefresh };
 });
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { resetOperatorConfigState } from "@docslurp/shared/operator-config";
+
 import { resetExtractorPluginsForTest } from "../extractors/plugins.js";
 import { PREFLIGHT_SKIPPED_DATABASE_CHECKS, runWorkerPreflight, WorkerPreflightError, type WorkerPreflightDeps } from "./preflight.js";
 
@@ -44,18 +50,58 @@ function expectNothingStarted() {
 
 afterEach(() => {
   resetExtractorPluginsForTest();
+  resetOperatorConfigState();
   vi.clearAllMocks();
 });
+
+function operatorFile(contents: unknown): { path: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "preflight-operator-"));
+  const path = join(dir, "operator.json");
+  writeFileSync(path, JSON.stringify(contents));
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
 
 describe("worker preflight", () => {
   it("passes a valid configuration through the real checks and starts nothing", async () => {
     const results = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off" }, stubs);
     expect(results.map((r) => r.step)).toEqual([
-      "runtime environment", "parser sandbox", "extractor plugins", "extractor id aliases", "ocr configuration", "ocr model pins", "native pdf engine",
+      "operator config", "runtime environment", "parser sandbox", "extractor plugins", "extractor id aliases", "ocr configuration", "ocr model pins", "native pdf engine",
       ...PREFLIGHT_SKIPPED_DATABASE_CHECKS,
     ]);
     expect(results.find((r) => r.step === PREFLIGHT_SKIPPED_DATABASE_CHECKS[0])?.status).toBe("skipped");
     expectNothingStarted();
+  });
+
+  it("refuses a set but missing operator config file first", async () => {
+    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_OPERATOR_CONFIG: "/nonexistent/operator.json" }, stubs).catch((e) => e);
+    expect(error).toBeInstanceOf(WorkerPreflightError);
+    expect(error.step).toBe("operator config");
+    expect(error.message).toMatch(/cannot be read/);
+    expectNothingStarted();
+  });
+
+  it("applies the operator config before the checks that read it", async () => {
+    const file = operatorFile({ version: 1, ocr: { language: "eng" } });
+    try {
+      const env: NodeJS.ProcessEnv = { DOCSLURP_OCR_MODE: "off", DOCSLURP_OPERATOR_CONFIG: file.path };
+      const results = await runWorkerPreflight(env, stubs);
+      expect(results[0]).toMatchObject({ step: "operator config", status: "passed" });
+      expect(results[0]!.detail).toMatch(/digest=sha256:/);
+      expect(results.find((r) => r.step === "ocr configuration")?.detail).toMatch(/language=eng/);
+    } finally {
+      file.cleanup();
+    }
+  });
+
+  it("refuses a chart generator override outside the admitted candidates", async () => {
+    const file = operatorFile({ version: 1, models: { overrides: { chartGenerator: "llm://openrouter/google/gemini-3.1-flash-lite" } } });
+    try {
+      const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_OPERATOR_CONFIG: file.path }, stubs).catch((e) => e);
+      expect(error.step).toBe("operator config");
+      expect(error.message).toMatch(/chart generator candidates/);
+    } finally {
+      file.cleanup();
+    }
   });
 
   it("refuses an unknown extractor setting at the plugin step", async () => {

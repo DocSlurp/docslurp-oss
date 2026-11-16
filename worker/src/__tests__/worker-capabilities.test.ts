@@ -75,7 +75,7 @@ describe("WorkerCapabilityRegistry", () => {
     // so repeated failures use a client that always reports 42P01.
     const missing = Object.assign(
       () => Promise.reject(Object.assign(new Error('relation "worker_capabilities" does not exist'), { code: "42P01" })),
-      { array: (values: unknown[]) => values },
+      { array: (values: unknown[]) => values, json: (value: unknown) => value },
     ) as unknown as Sql;
     const logs: string[] = [];
     const reg = registry(logs, missing);
@@ -118,6 +118,47 @@ describe("WorkerCapabilityRegistry", () => {
     const rows = await sql<{ identity: string; build_id: string; stopped_at: Date | null }[]>`select identity, build_id, stopped_at from worker_capabilities`;
     expect(rows).toEqual([{ identity: "docslurp-worker-m1-8", build_id: "def456", stopped_at: null }]);
     await next.stop();
+  });
+
+  it("reports the operator config digest with every heartbeat (migration 0182)", { timeout: 60_000 }, async () => {
+    const reg = new WorkerCapabilityRegistry({
+      sql,
+      instanceId: "fly-digest",
+      identity: "docslurp-worker-digest",
+      taskQueue: "docslurp-pipeline",
+      buildId: "abc123",
+      capabilities: async () => [],
+      configDigests: () => ({ operator: "sha256:aa" }),
+      log: () => {},
+    });
+    expect(await reg.heartbeat()).toBe(true);
+    const [row] = await sql<{ config_digests: Record<string, string | null> }[]>`select config_digests from worker_capabilities where instance_id = 'fly-digest'`;
+    expect(row?.config_digests).toEqual({ operator: "sha256:aa" });
+    // Default: this process's operator config digest, null when none is configured.
+    const unset = new WorkerCapabilityRegistry({ sql, instanceId: "fly-digest", identity: "docslurp-worker-digest", taskQueue: "docslurp-pipeline", buildId: "abc123", capabilities: async () => [], log: () => {} });
+    expect(await unset.heartbeat()).toBe(true);
+    const [after] = await sql<{ config_digests: Record<string, string | null> }[]>`select config_digests from worker_capabilities where instance_id = 'fly-digest'`;
+    expect(after?.config_digests).toEqual({ operator: null });
+    await sql`delete from worker_capabilities where instance_id = 'fly-digest'`;
+  });
+
+  it("registers without digests on a schema before migration 0182", async () => {
+    const calls: string[] = [];
+    const client = Object.assign(
+      (strings: TemplateStringsArray) => {
+        const text = strings.join("?");
+        calls.push(text);
+        if (text.includes("config_digests")) return Promise.reject(Object.assign(new Error('column "config_digests" does not exist'), { code: "42703" }));
+        return Promise.resolve([]);
+      },
+      { array: (values: unknown[]) => values, json: (value: unknown) => value },
+    ) as unknown as Sql;
+    const logs: string[] = [];
+    const reg = registry(logs, client);
+    expect(await reg.heartbeat()).toBe(true);
+    expect(await reg.heartbeat()).toBe(true);
+    expect(logs.filter((line) => line.includes("migration 0182"))).toHaveLength(1);
+    expect(calls.filter((text) => text.includes("insert into worker_capabilities") && !text.includes("config_digests")).length).toBe(2);
   });
 
   it("probes the lexical column and lease schema for runtime capabilities", async () => {

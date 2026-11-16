@@ -242,7 +242,9 @@ Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
 | `DOCSLURP_OCR_PYTHON`, `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-venv/bin/python3`, `/opt/docslurp/ocr-models` | The local OCR runtime (`local` mode). The full worker image sets both. |
 
 The other OCR settings (escalation, the page reader, attempts, language, size and concurrency limits) are in `.env.example` and
-[OCR](../extraction/ocr.md).
+[OCR](../extraction/ocr.md). They, the vision run guards, chart defaults, figure resume budgets and deploy-wide model
+overrides can also live in one versioned [operator config file](operator-config.md) (`DOCSLURP_OPERATOR_CONFIG`), which
+refuses startup on an unknown key, an out-of-range value or a file that is set but missing.
 
 ## Removed and deprecated
 

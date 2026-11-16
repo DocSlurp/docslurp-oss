@@ -1,10 +1,11 @@
-import type { Sql } from "postgres";
+import type { JSONValue, Sql } from "postgres";
 import { withBackgroundSpan } from "@docslurp/shared/observability";
 
 import {
   WORKER_CAPABILITY_PROTOCOL,
   type WorkerCapability,
 } from "@docslurp/shared";
+import { currentOperatorConfigDigest } from "@docslurp/shared/operator-config";
 
 /**
  * Worker side of the capability handshake (migration 0055,
@@ -73,12 +74,26 @@ export interface WorkerCapabilityRegistryOptions {
   taskQueue: string;
   buildId: string | null;
   capabilities: () => Promise<WorkerCapability[]>;
+  /**
+   * Digests of the configuration this process runs with, by name (`operator`: the operator config file, null when none is
+   * configured). Reported so the app can show and refuse app/worker config skew. Default: the operator config's.
+   */
+  configDigests?: () => Record<string, string | null>;
   intervalMs?: number;
   log?: (line: string) => void;
 }
 
 function isUndefinedTable(error: unknown): boolean {
   return (error as { code?: string } | null)?.code === "42P01";
+}
+
+function isUndefinedColumn(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "42703";
+}
+
+/** What this process reports by default: the operator config digest (null when none is configured). */
+export function defaultConfigDigests(): Record<string, string | null> {
+  return { operator: currentOperatorConfigDigest() };
 }
 
 /** Host key: the Fly machine id, else hostname plus pid (several local workers per host). */
@@ -96,6 +111,7 @@ export class WorkerCapabilityRegistry {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastAdvertised: string | null = null;
   private missingTableLogged = false;
+  private missingDigestColumnLogged = false;
   private readonly log: (line: string) => void;
   readonly intervalMs: number;
 
@@ -125,34 +141,69 @@ export class WorkerCapabilityRegistry {
     try {
       const capabilities = await this.options.capabilities();
       const schemaWhen = await this.schemaAppliedWhen();
-      await sql`
-        insert into worker_capabilities (
-          instance_id, identity, task_queue, build_id, protocol, capabilities,
-          schema_applied_when, started_at, last_seen_at, stopped_at
-        ) values (
-          ${instanceId}, ${identity}, ${taskQueue}, ${buildId}, ${WORKER_CAPABILITY_PROTOCOL},
-          ${sql.array(capabilities)}::text[], ${schemaWhen}, now(), now(), null
-        )
-        on conflict (instance_id) do update set
-          identity = excluded.identity,
-          task_queue = excluded.task_queue,
-          build_id = excluded.build_id,
-          protocol = excluded.protocol,
-          capabilities = excluded.capabilities,
-          schema_applied_when = excluded.schema_applied_when,
-          started_at = case
-            when worker_capabilities.identity = excluded.identity then worker_capabilities.started_at
-            else now()
-          end,
-          last_seen_at = now(),
-          stopped_at = null
-      `;
-      const advertised = `${buildId ?? "auto"}:${capabilities.join(",")}`;
+      const digests = (this.options.configDigests ?? defaultConfigDigests)();
+      try {
+        await sql`
+          insert into worker_capabilities (
+            instance_id, identity, task_queue, build_id, protocol, capabilities,
+            schema_applied_when, config_digests, started_at, last_seen_at, stopped_at
+          ) values (
+            ${instanceId}, ${identity}, ${taskQueue}, ${buildId}, ${WORKER_CAPABILITY_PROTOCOL},
+            ${sql.array(capabilities)}::text[], ${schemaWhen}, ${sql.json(digests as unknown as JSONValue)}::jsonb, now(), now(), null
+          )
+          on conflict (instance_id) do update set
+            identity = excluded.identity,
+            task_queue = excluded.task_queue,
+            build_id = excluded.build_id,
+            protocol = excluded.protocol,
+            capabilities = excluded.capabilities,
+            schema_applied_when = excluded.schema_applied_when,
+            config_digests = excluded.config_digests,
+            started_at = case
+              when worker_capabilities.identity = excluded.identity then worker_capabilities.started_at
+              else now()
+            end,
+            last_seen_at = now(),
+            stopped_at = null
+        `;
+      } catch (error) {
+        if (!isUndefinedColumn(error)) throw error;
+        // A database before migration 0182: register without digests (the app then reports this worker's config as
+        // unknown, which the deploy's skew check refuses).
+        if (!this.missingDigestColumnLogged) {
+          this.missingDigestColumnLogged = true;
+          this.log("[worker-capabilities] worker_capabilities.config_digests missing (migration 0182 not applied); registering without config digests");
+        }
+        await sql`
+          insert into worker_capabilities (
+            instance_id, identity, task_queue, build_id, protocol, capabilities,
+            schema_applied_when, started_at, last_seen_at, stopped_at
+          ) values (
+            ${instanceId}, ${identity}, ${taskQueue}, ${buildId}, ${WORKER_CAPABILITY_PROTOCOL},
+            ${sql.array(capabilities)}::text[], ${schemaWhen}, now(), now(), null
+          )
+          on conflict (instance_id) do update set
+            identity = excluded.identity,
+            task_queue = excluded.task_queue,
+            build_id = excluded.build_id,
+            protocol = excluded.protocol,
+            capabilities = excluded.capabilities,
+            schema_applied_when = excluded.schema_applied_when,
+            started_at = case
+              when worker_capabilities.identity = excluded.identity then worker_capabilities.started_at
+              else now()
+            end,
+            last_seen_at = now(),
+            stopped_at = null
+        `;
+      }
+      const advertised = `${buildId ?? "auto"}:${capabilities.join(",")}:${JSON.stringify(digests)}`;
       if (advertised !== this.lastAdvertised) {
         this.lastAdvertised = advertised;
         this.log(
           `[worker-capabilities] registered instance=${instanceId} identity=${identity} taskQueue=${taskQueue} ` +
-          `buildId=${buildId ?? "auto"} protocol=${WORKER_CAPABILITY_PROTOCOL} capabilities=${capabilities.join(",") || "none"}`,
+          `buildId=${buildId ?? "auto"} protocol=${WORKER_CAPABILITY_PROTOCOL} capabilities=${capabilities.join(",") || "none"} ` +
+          `operatorConfig=${digests.operator ?? "none"}`,
         );
       }
       return true;

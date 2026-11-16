@@ -159,3 +159,44 @@ describe("synchronous readers", () => {
     setIntervalSpy.mockRestore();
   });
 });
+
+describe("operator config skew (/ops/worker-fleet operatorConfig)", () => {
+  it("passes registry digests through to the fleet view and compares them with the API's", async () => {
+    const { instance } = harness({
+      readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: "sha256:a" } }), record("w2", { configDigests: { operator: "sha256:b" } })]),
+      readPollers: vi.fn(async () => [
+        { identity: "w1", lastAccessMs: NOW - 1_000, buildId: "new" },
+        { identity: "w2", lastAccessMs: NOW - 1_000, buildId: "new" },
+      ]),
+    });
+    const snapshot = await instance.resolve();
+    expect(snapshot.workers.map((worker) => worker.configDigests)).toEqual([{ operator: "sha256:a" }, { operator: "sha256:b" }]);
+    expect(fleet.operatorConfigSkewOf(snapshot, "sha256:a")).toMatchObject({ app: "sha256:a", status: "skew" });
+    expect(fleet.operatorConfigSkewOf(snapshot, "sha256:a").workers.find((worker) => worker.identity === "w2")).toMatchObject({ matches: false });
+  });
+
+  it("is ok when every live worker runs the API's digest, and skew for an older build that reports none", async () => {
+    const same = harness({ readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: "sha256:a" } })]) });
+    expect(fleet.operatorConfigSkewOf(await same.instance.resolve(), "sha256:a").status).toBe("ok");
+    const unset = harness({ readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: null } })]) });
+    expect(fleet.operatorConfigSkewOf(await unset.instance.resolve(), null).status).toBe("ok");
+    const old = harness();
+    expect(fleet.operatorConfigSkewOf(await old.instance.resolve(), null).status).toBe("skew");
+    const unregistered = harness({ readRecords: vi.fn(async () => []) });
+    expect(fleet.operatorConfigSkewOf(await unregistered.instance.resolve(), null).status).toBe("skew");
+  });
+
+  it("is unknown without live pollers", async () => {
+    const idle = harness({ readPollers: vi.fn(async () => []) });
+    const snapshot = await idle.instance.resolve();
+    expect(snapshot.basis).toBe("recent");
+    expect(fleet.operatorConfigSkewOf(snapshot, null).status).toBe("unknown");
+  });
+
+  it("keeps only string or null digests from a registry row", () => {
+    expect(fleet.configDigestsOf({ operator: "sha256:a", posture: null, bad: 3, nested: { x: 1 } })).toEqual({ operator: "sha256:a", posture: null });
+    expect(fleet.configDigestsOf(null)).toBeUndefined();
+    expect(fleet.configDigestsOf([])).toBeUndefined();
+    expect(fleet.configDigestsOf({})).toBeUndefined();
+  });
+});
