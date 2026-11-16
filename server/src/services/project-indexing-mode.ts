@@ -276,12 +276,12 @@ async function validateBatches(batches: RunBatch[]): Promise<void> {
  * per-project lock, re-checking in-flight work inside it so concurrent or
  * repeated requests cannot double-spend. All-or-nothing.
  */
-export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string, origin: RunOrigin = "machine"): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
+export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string, origin: RunOrigin = "machine", transaction?: Parameters<typeof admissionBlock>[0]): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
   const result = { runIds: [] as string[], pipelines: new Map<string, PipelineFeatures>() };
   if (prepared.batches.length === 0) return result;
   for (const batch of prepared.batches) assertPipelineSpeedBoost(batch.pipeline);
-  await enforceLiveBudgetCaps(prepared.projectId, prepared.orgId);
-  await sql.begin(async (tx) => {
+  if (!transaction) await enforceLiveBudgetCaps(prepared.projectId, prepared.orgId);
+  const commit = async (tx: Parameters<typeof admissionBlock>[0]) => {
     // Lock organization before project, matching other admission paths.
     await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${prepared.orgId}))`;
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.projectId}`}, 0))`;
@@ -358,7 +358,9 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       result.runIds.push(runId);
       result.pipelines.set(runId, runPipeline);
     }
-  });
+  };
+  if (transaction) await commit(transaction);
+  else await sql.begin(commit);
   return result;
 }
 

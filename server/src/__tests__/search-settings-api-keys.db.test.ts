@@ -181,3 +181,27 @@ describe("search settings with API keys (real keys and middleware)", () => {
     expect(await storedChat("ws-owner")).toBeNull();
   });
 });
+
+it("atomic publication uses the existing key gates and rejects revoked, narrow, cross-tenant, malformed and oversized requests", async () => {
+  const path = '/v1/projects/ws-owner/settings-publication';
+  const request = (key: string, payload: unknown = {}) => app.request(path, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  const allowed = await keys.createApiKey('owner', 'publish', { orgId: 'org-owner', keyType: 'server', scopes: ['projects:manage'] });
+  const read = await app.request(path, { headers: { authorization: `Bearer ${allowed.rawKey}` } });
+  expect(read.status).toBe(200);
+  const snapshot = await read.json();
+  const payload = { requestId: 'ced4a8b2-a850-4dd9-931a-1109846ab9af', expected: snapshot.revision, project: { pipeline: { preserveCode: false } }, search: { chat: { enabled: false } } };
+  expect((await request(allowed.rawKey, { ...payload, extra: true })).status).toBe(400);
+  expect((await request(allowed.rawKey, { ...payload, search: { retrievalDefaults: { rerankProvider: 'bm25' } } })).status).toBe(400);
+  expect((await request(allowed.rawKey, { ...payload, project: { pipeline: { embedding: { modelUri: 'llm://transformers.js/Xenova/gte-small' } } } })).status).toBe(400);
+  expect((await request(allowed.rawKey, { ...payload, search: { chat: { searchInstructions: 'x'.repeat(150000) } } })).status).toBe(413);
+  const wrong = await keys.createApiKey('owner', 'read only', { orgId: 'org-owner', keyType: 'server', scopes: ['search:deep'] });
+  expect((await request(wrong.rawKey, payload)).status).toBe(403);
+  const foreign = await keys.createApiKey('other', 'foreign publish', { orgId: 'org-other', keyType: 'server', scopes: ['projects:manage'] });
+  expect((await request(foreign.rawKey, payload)).status).toBe(404);
+  const narrow = await keys.createApiKey('owner', 'narrow publish', { orgId: 'org-owner', keyType: 'server', scopes: ['projects:manage'], projectIds: ['ws-owner-2'] });
+  expect((await request(narrow.rawKey, payload)).status).toBe(404);
+  expect((await request(allowed.rawKey, payload)).status).toBe(200);
+  expect((await request(allowed.rawKey, payload)).status).toBe(200);
+  await keys.revokeApiKey(allowed.key.id, 'owner');
+  expect((await request(allowed.rawKey, payload)).status).toBe(401);
+});

@@ -82,7 +82,7 @@ describe("worker table classification", () => {
     for (const table of [
       "account", "session", "verification", "api_keys", "oauth_accounts", "credit_grants",
       "mcp_oauth_tokens", "mcp_oauth_clients", "sso_identity_links", "stripe_webhook_events", "project_connectors",
-      "intake_request_receipts", "pending_monthly_capacity",
+      "intake_request_receipts", "pending_monthly_capacity", "project_settings_publications",
     ]) {
       expect(WORKER_DENIED_TABLES[table], table).toBeTruthy();
     }
@@ -90,6 +90,13 @@ describe("worker table classification", () => {
 });
 
 describe("worker role", () => {
+  it("refuses worker access to settings publication receipts while the app can read them", async () => {
+    for (const statement of ["select * from public.project_settings_publications", "insert into public.project_settings_publications default values", "update public.project_settings_publications set request_hash='forged'", "delete from public.project_settings_publications"]) {
+      expect(await denied(worker, statement)).toBe(true);
+    }
+    expect(await denied(app, "select * from public.project_settings_publications")).toBe(false);
+  });
+
   it("refuses worker access to API intake receipts and admission capacity", async () => {
     expect(await denied(worker, "select * from public.intake_request_receipts")).toBe(true);
     expect(await denied(worker, "insert into public.intake_request_receipts default values")).toBe(true);

@@ -1399,7 +1399,7 @@ export async function applyIngestRecommendation(args: RecommendationAction): Pro
   const current = await getProject(args.project.id, args.userId);
   if (!current) throw new IngestReportActionError("Project not found", 404);
   const next = applyRecommendationPatch(current.pipeline, recommendation.patch);
-  const updated = await updateProject(args.project.id, args.userId, { pipeline: next });
+  const updated = await updateProject(args.project.id, args.userId, { pipeline: next }, { expectedUpdatedAt: args.project.updatedAt });
   if (!updated) throw new IngestReportActionError("Only project editors can change ingest settings.", 403);
   if (!patchHolds(updated.pipeline, recommendation.patch)) {
     throw new IngestReportActionError("The project template locks this setting, so it was not changed.", 409);

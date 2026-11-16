@@ -140,6 +140,7 @@ export * from "./document-failure.js";
 
 export * from "./upload-recovery.js";
 
+export * from "./settings-projection.js";
 export type { ComputePriceObservation, ComputeCalibrationObservation, ComputeObservations } from "./compute-observations.js";
 export { computePriceColumns, computeCalibrationColumns, decodeComputeObservation } from "./compute-observations.js";
 export type { ComputeExecutionScope, ComputeCohortGrant } from "./compute-observations.js";
