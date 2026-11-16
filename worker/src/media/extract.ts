@@ -11,8 +11,7 @@ import {
   UNIT_CHARGE_PROVIDER,
   mediaRichPages,
   pageCredits,
-  unitChargeMetadata,
-} from "@docslurp/shared";
+  unitChargeMetadata, switchDisabled } from "@docslurp/shared";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -90,8 +89,9 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
       // Missing project configuration opts in; explicit false wins even for silent video.
       // Platform, privacy, budget and durable quota checks still apply.
+      // DOCSLURP_DISABLE=ai turns off the vision read of video frames (transcription is the baseline read, like OCR).
       const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
-        && state.run.pipeline.mediaVideo?.enabled !== false;
+        && state.run.pipeline.mediaVideo?.enabled !== false && !switchDisabled(process.env, "ai");
       if (!hasAudio && !visualEnabled) throw new Error(DOCUMENT_FAILURE_MARKERS.silentVideo);
       const policy = hasVideo ? videoPolicy(duration, state.run.pipeline.mediaVideo) : undefined;
       if (policy) {

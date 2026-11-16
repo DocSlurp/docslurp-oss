@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { WORKER_CAPABILITIES, WORKER_CAPABILITY_PROTOCOL, resolveCreditLeaseConfig, type WorkerCapabilityRecord } from "@docslurp/shared";
+import { WORKER_CAPABILITIES, WORKER_CAPABILITY_PROTOCOL, parseWorkerAdvertisedConfig, resolveCreditLeaseConfig, type WorkerCapabilityRecord } from "@docslurp/shared";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 
@@ -163,22 +163,22 @@ describe("synchronous readers", () => {
 describe("operator config skew (/ops/worker-fleet operatorConfig)", () => {
   it("passes registry digests through to the fleet view and compares them with the API's", async () => {
     const { instance } = harness({
-      readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: "sha256:a" } }), record("w2", { configDigests: { operator: "sha256:b" } })]),
+      readRecords: vi.fn(async () => [record("w1", { config: { operatorConfig: "sha256:a" } }), record("w2", { config: { operatorConfig: "sha256:b" } })]),
       readPollers: vi.fn(async () => [
         { identity: "w1", lastAccessMs: NOW - 1_000, buildId: "new" },
         { identity: "w2", lastAccessMs: NOW - 1_000, buildId: "new" },
       ]),
     });
     const snapshot = await instance.resolve();
-    expect(snapshot.workers.map((worker) => worker.configDigests)).toEqual([{ operator: "sha256:a" }, { operator: "sha256:b" }]);
+    expect(snapshot.workers.map((worker) => worker.config?.operatorConfig)).toEqual(["sha256:a", "sha256:b"]);
     expect(fleet.operatorConfigSkewOf(snapshot, "sha256:a")).toMatchObject({ app: "sha256:a", status: "skew" });
     expect(fleet.operatorConfigSkewOf(snapshot, "sha256:a").workers.find((worker) => worker.identity === "w2")).toMatchObject({ matches: false });
   });
 
   it("is ok when every live worker runs the API's digest, and skew for an older build that reports none", async () => {
-    const same = harness({ readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: "sha256:a" } })]) });
+    const same = harness({ readRecords: vi.fn(async () => [record("w1", { config: { operatorConfig: "sha256:a" } })]) });
     expect(fleet.operatorConfigSkewOf(await same.instance.resolve(), "sha256:a").status).toBe("ok");
-    const unset = harness({ readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: null } })]) });
+    const unset = harness({ readRecords: vi.fn(async () => [record("w1", { config: { operatorConfig: null } })]) });
     expect(fleet.operatorConfigSkewOf(await unset.instance.resolve(), null).status).toBe("ok");
     const old = harness();
     expect(fleet.operatorConfigSkewOf(await old.instance.resolve(), null).status).toBe("skew");
@@ -187,7 +187,7 @@ describe("operator config skew (/ops/worker-fleet operatorConfig)", () => {
   });
 
   it("does not trust the digest of a worker whose registry row is stale", async () => {
-    const stale = harness({ readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: "sha256:a" }, lastSeenAt: NOW - 10 * 60_000 })]) });
+    const stale = harness({ readRecords: vi.fn(async () => [record("w1", { config: { operatorConfig: "sha256:a" }, lastSeenAt: NOW - 10 * 60_000 })]) });
     expect(fleet.operatorConfigSkewOf(await stale.instance.resolve(), "sha256:a").status).toBe("skew");
   });
 
@@ -198,10 +198,10 @@ describe("operator config skew (/ops/worker-fleet operatorConfig)", () => {
     expect(fleet.operatorConfigSkewOf(snapshot, null).status).toBe("unknown");
   });
 
-  it("keeps only string or null digests from a registry row", () => {
-    expect(fleet.configDigestsOf({ operator: "sha256:a", posture: null, bad: 3, nested: { x: 1 } })).toEqual({ operator: "sha256:a", posture: null });
-    expect(fleet.configDigestsOf(null)).toBeUndefined();
-    expect(fleet.configDigestsOf([])).toBeUndefined();
-    expect(fleet.configDigestsOf({})).toBeUndefined();
+  it("keeps a string or null operator digest from a registry row's config", () => {
+    expect(parseWorkerAdvertisedConfig({ operatorConfig: "sha256:a" })).toMatchObject({ operatorConfig: "sha256:a" });
+    expect(parseWorkerAdvertisedConfig({ operatorConfig: null })).toMatchObject({ operatorConfig: null });
+    expect(parseWorkerAdvertisedConfig({ operatorConfig: 3 })).not.toHaveProperty("operatorConfig");
+    expect(parseWorkerAdvertisedConfig({})).not.toHaveProperty("operatorConfig");
   });
 });

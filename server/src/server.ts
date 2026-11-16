@@ -1,6 +1,6 @@
 import { deprecationWarnings } from "./lib/deprecation.js";
 import { realtimeMetrics } from "./realtime/broker.js";
-import { chartExportDefaultsWarnings, chartExportSwitchWarning, summaryTreeSwitchWarnings } from "@docslurp/shared";
+import { chartExportDefaultsWarnings, chartExportSwitchWarning, resolveDeploymentProfile, summaryTreeSwitchWarnings } from "@docslurp/shared";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
@@ -320,6 +320,12 @@ export function ensureApiStartup(): Promise<void> {
       // Environment only, so it runs first: production refuses to start when chat concurrency caps
       // would be counted per process (no shared Redis, or half of a REST pair) without the explicit opt-out.
       assertChatConcurrencyBackend();
+      // The deployment posture (DOCSLURP_PROFILE, DOCSLURP_DISABLE): refuses an unknown switch, an unknown or conflicting
+      // profile, dev outside development and service without NODE_ENV=production. Release R0 warns (R1 refuses) when
+      // the API runs outside development with no profile; the worker, which reads customer bytes, always refuses.
+      const posture = resolveDeploymentProfile(process.env, { requireProfile: false });
+      for (const warning of posture.warnings) console.warn(`[deployment-profile] ${warning}`);
+      console.log(`[deployment-profile] api profile=${posture.profile} source=${posture.profileSource} vmOnlyParsing=${posture.vmOnlyParsing} disabled=${posture.disabled.join(",") || "none"}`);
       initializeObservability({ serviceName: "docslurp-api" });
       // An unknown DOCSLURP_CHART_EXPORT (or default) value is off (fail closed); say so once.
       const chartExportWarning = chartExportSwitchWarning(process.env);

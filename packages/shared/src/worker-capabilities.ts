@@ -47,6 +47,11 @@ export const WORKER_CAPABILITIES = [
   "billing.credit-leases",
   /** Stamps documents.lexical_searchable_at at embed (schema 0051). */
   "search.early-lexical",
+  /**
+   * Understands extraction config v1 (design extraction-config-simplification.md, release R0): DOCSLURP_PROFILE, the
+   * full DOCSLURP_DISABLE vocabulary enforced at execution, and the posture digest in its registry row (`config`).
+   */
+  "extraction.config-v1",
 ] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
@@ -99,7 +104,41 @@ export const GATED_FEATURES: readonly GatedFeature[] = [
     capability: "search.early-lexical",
     description: "keyword search serves documents before the index stage completes",
   },
+  {
+    flag: "DOCSLURP_DISABLE",
+    capability: "extraction.config-v1",
+    description: "kill switches enforced by every worker at execution (the app's own lowering applies either way)",
+  },
 ];
+
+/** What a worker advertises about its configuration in its registry row (`worker_capabilities.config`, migration 0182). */
+export interface WorkerAdvertisedConfig {
+  /** Extraction config version the worker understands (1 from release R0). */
+  extractionConfig?: number;
+  /** Digest of the worker's deployment posture (profile, isolation floor, switches). */
+  postureDigest?: string;
+  profile?: string;
+  /** The switches that are off on the worker, with implications. */
+  disabled?: string[];
+  /**
+   * Digest of the worker's operator config file (DOCSLURP_OPERATOR_CONFIG, operator-config.ts): null when the worker runs
+   * without one, absent from builds that do not report it (which the skew check counts as skew).
+   */
+  operatorConfig?: string | null;
+}
+
+/** Parse a registry row's `config` defensively: anything malformed is dropped, never trusted. */
+export function parseWorkerAdvertisedConfig(value: unknown): WorkerAdvertisedConfig | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const out: WorkerAdvertisedConfig = {};
+  if (typeof record.extractionConfig === "number" && Number.isSafeInteger(record.extractionConfig)) out.extractionConfig = record.extractionConfig;
+  if (typeof record.postureDigest === "string" && record.postureDigest.length <= 100) out.postureDigest = record.postureDigest;
+  if (typeof record.profile === "string" && record.profile.length <= 20) out.profile = record.profile;
+  if (Array.isArray(record.disabled)) out.disabled = record.disabled.filter((entry): entry is string => typeof entry === "string" && entry.length <= 40).slice(0, 20);
+  if (record.operatorConfig === null || (typeof record.operatorConfig === "string" && record.operatorConfig.length <= 100)) out.operatorConfig = record.operatorConfig;
+  return out;
+}
 
 /** One worker_capabilities row, times in epoch ms. */
 export interface WorkerCapabilityRecord {
@@ -112,8 +151,8 @@ export interface WorkerCapabilityRecord {
   capabilities: string[];
   lastSeenAt: number;
   stoppedAt: number | null;
-  /** Configuration digests the worker reported (migration 0182), e.g. `operator`; undefined from an older build or schema. */
-  configDigests?: Record<string, string | null>;
+  /** The row's advertised configuration (null for builds before release R0 or a schema without migration 0182). */
+  config?: WorkerAdvertisedConfig | null;
 }
 
 export interface FleetPoller {
@@ -152,8 +191,8 @@ export interface FleetWorkerView {
   capabilities: WorkerCapability[];
   /** Why this worker contributes no capabilities, when it does not. */
   note?: string;
-  /** The configuration digests its registry row reports (absent when it reports none). */
-  configDigests?: Record<string, string | null>;
+  /** What the worker's registry row advertises about its configuration (posture digest, switches). */
+  config?: WorkerAdvertisedConfig | null;
 }
 
 export interface FleetCapabilitySnapshot {
@@ -220,10 +259,25 @@ export function intersectFleetCapabilities(input: {
   }
 
   if (live.size > 0) {
-    const workers: FleetWorkerView[] = [...live.values()].map((poller): FleetWorkerView => {
+    const workers: FleetWorkerView[] = [...live.values()].map((poller) => {
       const record = latestByIdentity.get(poller.identity);
-      const view = viewOf(poller, record);
-      return record?.configDigests ? { ...view, configDigests: record.configDigests } : view;
+      const buildId = poller.buildId || record?.buildId || null;
+      if (!record) {
+        return { identity: poller.identity, buildId, registered: false, capabilities: [], note: "not registered (older build?)" };
+      }
+      if (record.stoppedAt != null) {
+        return { identity: poller.identity, buildId, registered: true, capabilities: [], note: "registry row stopped but the poller is still active" };
+      }
+      if (input.now - record.lastSeenAt > options.liveWindowMs) {
+        return { identity: poller.identity, buildId, registered: true, capabilities: [], note: "registry heartbeat is stale" };
+      }
+      if (poller.buildId && record.buildId && poller.buildId !== record.buildId) {
+        return { identity: poller.identity, buildId, registered: true, capabilities: [], note: `Temporal build ${poller.buildId} differs from registered ${record.buildId}` };
+      }
+      if (record.protocol !== WORKER_CAPABILITY_PROTOCOL) {
+        return { identity: poller.identity, buildId, registered: true, capabilities: [], note: `registry protocol ${record.protocol} is not ${WORKER_CAPABILITY_PROTOCOL}` };
+      }
+      return { identity: poller.identity, buildId, registered: true, capabilities: knownCapabilities(record), config: record.config ?? null };
     }).sort((a, b) => a.identity.localeCompare(b.identity));
     return {
       capabilities: intersect(workers.map((worker) => worker.capabilities)),
@@ -231,26 +285,6 @@ export function intersectFleetCapabilities(input: {
       reason: `${workers.length} live worker(s) on the task queue`,
       workers,
     };
-  }
-
-  function viewOf(poller: FleetPoller, record: WorkerCapabilityRecord | undefined): FleetWorkerView {
-    const buildId = poller.buildId || record?.buildId || null;
-    if (!record) {
-      return { identity: poller.identity, buildId, registered: false, capabilities: [], note: "not registered (older build?)" };
-    }
-    if (record.stoppedAt != null) {
-      return { identity: poller.identity, buildId, registered: true, capabilities: [], note: "registry row stopped but the poller is still active" };
-    }
-    if (input.now - record.lastSeenAt > options.liveWindowMs) {
-      return { identity: poller.identity, buildId, registered: true, capabilities: [], note: "registry heartbeat is stale" };
-    }
-    if (poller.buildId && record.buildId && poller.buildId !== record.buildId) {
-      return { identity: poller.identity, buildId, registered: true, capabilities: [], note: `Temporal build ${poller.buildId} differs from registered ${record.buildId}` };
-    }
-    if (record.protocol !== WORKER_CAPABILITY_PROTOCOL) {
-      return { identity: poller.identity, buildId, registered: true, capabilities: [], note: `registry protocol ${record.protocol} is not ${WORKER_CAPABILITY_PROTOCOL}` };
-    }
-    return { identity: poller.identity, buildId, registered: true, capabilities: knownCapabilities(record) };
   }
 
   if (options.idleFallback === "none") {
@@ -262,12 +296,12 @@ export function intersectFleetCapabilities(input: {
   if (recent.length === 0) {
     return { capabilities: [], basis: "unknown", reason: "no live pollers and no recently seen workers", workers: [] };
   }
-  const workers = recent.map((record): FleetWorkerView => ({
+  const workers = recent.map((record) => ({
     identity: record.identity,
     buildId: record.buildId,
     registered: true,
     capabilities: knownCapabilities(record),
-    ...(record.configDigests ? { configDigests: record.configDigests } : {}),
+    config: record.config ?? null,
   }));
   return {
     capabilities: intersect(workers.map((worker) => worker.capabilities)),

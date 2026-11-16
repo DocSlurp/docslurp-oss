@@ -4,6 +4,7 @@
  * tooling, and the vision stage's own per-image model call (usage ledger, cost, privacy gate).
  */
 
+import { assertLocalCliReaderAllowed } from "../../lib/vm-only-parsing.js";
 import { randomUUID } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -320,6 +321,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       const started = Date.now();
       const model = input.labelerModel ?? readRoutingFlags().labelerModel;
       const outputPath = `${raster.path}.label.json`;
+      assertLocalCliReaderAllowed();
       const plan = await input.runner.florence2(raster.path, outputPath, "<CAPTION>", model);
       if (!plan.available) throw new Error(`local labeler unavailable: ${model}`);
       try {

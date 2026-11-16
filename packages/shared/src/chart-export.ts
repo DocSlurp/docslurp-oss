@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { switchDisabled } from "./kill-switches.js";
+
 /**
  * Chart & diagram export: shared contract.
  *
@@ -44,7 +46,9 @@ export const CHART_EXPORT_ENV_OFF_VALUES: readonly string[] = ["", "off", "0", "
 export function chartExportSwitch(env: Readonly<Record<string, string | undefined>>): ChartExportSwitch {
   const value = env[CHART_EXPORT_ENV_FLAG]?.trim().toLowerCase();
   if (value === undefined) return "off";
-  if (CHART_EXPORT_ENV_ON_VALUES.includes(value)) return "on";
+  // DOCSLURP_DISABLE only lowers: `charts` turns chart export off, `charts-ai` (or `ai`) keeps it on its free steps.
+  if (switchDisabled(env, "charts")) return "off";
+  if (CHART_EXPORT_ENV_ON_VALUES.includes(value)) return switchDisabled(env, "charts-ai") ? "free" : "on";
   if (CHART_EXPORT_ENV_FREE_VALUES.includes(value)) return "free";
   return "off";
 }

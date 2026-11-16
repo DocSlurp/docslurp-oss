@@ -1,6 +1,6 @@
 import { QUALITY_RANK, runLegacyQualitySql } from "@docslurp/shared";
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
@@ -69,7 +69,7 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
     const capped = QUALITY_RANK[clamped.quality] > QUALITY_RANK[cap]
       ? { ...clamped, quality: cap, ...(cap === "auto" ? { visionFallback: true } : {}) }
       : clamped;
-    return { ...value, pipeline: applyLadderLimits(capped) };
+    return { ...value, pipeline: applyKillSwitchesToPipeline(applyLadderLimits(capped), process.env) };
   };
   const [own] = await sql<{ empty: boolean }[]>`
     select (pipeline = '{}'::jsonb) as empty from project_runs where id = ${run.id}

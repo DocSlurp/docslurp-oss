@@ -193,7 +193,7 @@ Flags for unfinished features. Each entry names its owner and the ticket that re
 
 The digest is the sha-256 of the validated file in canonical form (sorted keys, no whitespace), so reformatting the file
 does not change it and any value change does. Each worker reports its digest with its capability heartbeat
-(`worker_capabilities.config_digests`, migration 0182). `GET /ops/worker-fleet` (the `METRICS_SECRET` bearer) returns
+(`worker_capabilities.config.operatorConfig`, migration 0182). `GET /ops/worker-fleet` (the `METRICS_SECRET` bearer) returns
 `operatorConfig`:
 
 ```json

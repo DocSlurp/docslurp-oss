@@ -2,7 +2,9 @@ import type { Context } from "hono";
 import { apiKeyCanUseProject } from "./api-key-project-scope.js";
 import { actorHasAnyApiKeyScope, getRequestActor } from "./request-actor.js";
 import { apiErrorResponse, apiStatusError } from "./api-error.js";
-import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, extractionChoicesFor, extractionPolicyFromEnv, type ExtractionChoices } from "@docslurp/shared";
+import { sql } from "../db.js";
+import { runOriginOf } from "./run-origin.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "./content-update-access.js";
 import { canEditProject, canManageProject, getProjectAccess, listManageableProjectIds, listReprocessableProjectIds } from "../services/organizations.js";
 
@@ -61,6 +63,42 @@ export async function denyReprocessOfVisible(c: Context, targets: ReadonlyArray<
 
 /** This request's project flags, so labelling several responses (or one project twice) costs one lookup. */
 const requestFlags = new WeakMap<object, Map<string, { canEdit: boolean; canManage: boolean }>>();
+/** This request's API key scopes as run creation reads them (stored, unrevoked), or null. */
+const requestKeyScopes = new WeakMap<object, Promise<readonly string[] | null>>();
+
+/**
+ * The stored scopes of the request's API key, read as run creation reads them (`api_keys`, unrevoked). A token whose
+ * row cannot be read (an OAuth or MCP token id, a revoked key, a failed read) gets null and can never raise (fail closed).
+ */
+function requestApiKeyScopes(c: Context, apiKeyId: string): Promise<readonly string[] | null> {
+  let pending = requestKeyScopes.get(c.req.raw);
+  if (!pending) {
+    pending = sql<{ scopes: string[] }[]>`select scopes from api_keys where id = ${apiKeyId} and revoked_at is null limit 1`
+      .then(([row]) => row?.scopes ?? null)
+      .catch(() => null);
+    requestKeyScopes.set(c.req.raw, pending);
+  }
+  return pending;
+}
+
+/**
+ * The extraction rungs this caller may request on a new run in the project (`extractionChoices`), decided by the same
+ * resolution function run creation uses: `editor` is the caller's own editor right (canEditProject), and a key adds
+ * its stored scopes. A record without a pipeline gets none.
+ */
+async function extractionChoicesOf(c: Context, project: { id: string; orgId: string; pipeline?: unknown }, editor: boolean): Promise<ExtractionChoices | undefined> {
+  if (!("pipeline" in project)) return undefined;
+  const apiKey = c.get("apiKey");
+  const usable = !apiKey || apiKeyCanUseProject(apiKey, { orgId: project.orgId, projectId: project.id });
+  // Scopes only matter for an editor's key (a non-editor never raises), so a non-editor key costs no lookup.
+  const scopes = apiKey && editor && usable ? (typeof apiKey.keyId === "string" ? await requestApiKeyScopes(c, apiKey.keyId) : null) : null;
+  return extractionChoicesFor({
+    pipeline: project.pipeline,
+    origin: runOriginOf(c),
+    caller: { canEdit: editor && usable, apiKey: apiKey ? { scopes: scopes ?? null } : null },
+    policy: extractionPolicyFromEnv(process.env),
+  });
+}
 
 /**
  * Project records with this caller's `canEdit` (the callerCanReprocess rule: an editor or admin of the project; a server
@@ -69,7 +107,7 @@ const requestFlags = new WeakMap<object, Map<string, { canEdit: boolean; canMana
  * one indexed access lookup, never a scan of the caller's projects: the 10,000-file intake path stays O(1) per request.
  * A list uses two set queries. Results are cached for the request.
  */
-export async function withCanEdit<T extends { id: string; orgId: string }>(c: Context, projects: T[]): Promise<Array<T & { canEdit: boolean; canManage: boolean }>> {
+export async function withCanEdit<T extends { id: string; orgId: string }>(c: Context, projects: T[]): Promise<Array<T & { canEdit: boolean; canManage: boolean; extractionChoices?: ExtractionChoices }>> {
   const actor = getRequestActor(c);
   const userId = actor.userId as string | undefined;
   const apiKey = c.get("apiKey");
@@ -86,10 +124,16 @@ export async function withCanEdit<T extends { id: string; orgId: string }>(c: Co
   }
   const keyMayEdit = (project: T) => !apiKey || (apiKeyCanUpdateContent(apiKey) && apiKeyCanUseProject(apiKey, { orgId: project.orgId, projectId: project.id }));
   const keyMayManage = (project: T) => !apiKey || (actorHasAnyApiKeyScope(actor, ["projects:manage"]) && apiKeyCanUseProject(apiKey, { orgId: project.orgId, projectId: project.id }));
-  return projects.map((project) => {
+  return Promise.all(projects.map(async (project) => {
     const flags = userId ? cache!.get(project.id) : undefined;
-    return { ...project, canEdit: Boolean(flags?.canEdit) && keyMayEdit(project), canManage: Boolean(flags?.canManage) && keyMayManage(project) };
-  });
+    const extractionChoices = await extractionChoicesOf(c, project, Boolean(flags?.canEdit));
+    return {
+      ...project,
+      canEdit: Boolean(flags?.canEdit) && keyMayEdit(project),
+      canManage: Boolean(flags?.canManage) && keyMayManage(project),
+      ...(extractionChoices ? { extractionChoices } : {}),
+    };
+  }));
 }
 
 type MaybeProject = { id?: unknown; orgId?: unknown } | null | undefined;

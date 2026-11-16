@@ -15,8 +15,7 @@ import {
   qualityReadsEveryPage,
   richPagesForOutputTokens,
   type MaterializePagesInput,
-  type PipelineFeatures,
-} from "@docslurp/shared";
+  type PipelineFeatures, switchDisabled } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
@@ -385,8 +384,9 @@ export async function materializePageRange(
   // An Auto ladder above-fast share (pipeline.ladder.maxEscalationShare.aboveFast) is planned per document at ingest; query-time reads
   // have no document-wide plan to count against, so they read no page under one (fail closed: the page stays an image). Query-time reads are plain transcription (the
   // ocr rung), so maxRung and the above-ocr share change nothing here.
-  const readsPages = qualityAllowsPageReading(pipeline.quality) && ladderAllowsOffPlanReads(pipeline).pageReads;
-  const readsEveryPage = qualityReadsEveryPage(pipeline.quality);
+  // DOCSLURP_DISABLE: `ai` stops every model read here; `ai-rescue` stops reads of pages without a text layer.
+  const readsPages = qualityAllowsPageReading(pipeline.quality) && ladderAllowsOffPlanReads(pipeline).pageReads && !switchDisabled(process.env, "ai-rescue");
+  const readsEveryPage = qualityReadsEveryPage(pipeline.quality) && !switchDisabled(process.env, "ai");
   const ocrPages: number[] = [];
   const keptUnread: number[] = [];
   for (const page of pages) {

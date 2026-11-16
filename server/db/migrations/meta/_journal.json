@@ -1224,7 +1224,7 @@
       "idx": 174,
       "version": "7",
       "when": 1798800000002,
-      "tag": "0182_worker_config_digests",
+      "tag": "0182_worker_capabilities_config",
       "breakpoints": true
     }
   ]

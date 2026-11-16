@@ -1,6 +1,6 @@
 import { realtimeCanaryOrgAllowed } from "./rollout-scope.js";
 import { readPageImageReadiness } from "../services/page-image-readiness.js";
-import { customerPipelineView, realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
+import { customerPipelineView, extractionChoicesFor, extractionPolicyFromEnv, realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
 import { readProjectSuggestions } from "../services/project-suggestions.js";
 import type { RealtimeBackend, DashboardResource } from "./broker.js";
 import { sql } from "../db.js";
@@ -159,7 +159,10 @@ export const realtimeBackend: RealtimeBackend = {
         if (!record) throw new Error("not_found");
         // Each subscription is one user's (broker entries are keyed by user), so canEdit is that subscriber's, like REST.
         const access = await getProjectAccess(record.id, userId);
-        const project = { ...record, canEdit: Boolean(access && access.orgId === record.orgId && canEditProject(access, userId)) };
+        const canEdit = Boolean(access && access.orgId === record.orgId && canEditProject(access, userId));
+        // A browser session (the app's origin), so its extraction choices are the REST ones for the same user.
+        const extractionChoices = extractionChoicesFor({ pipeline: record.pipeline, origin: "app", caller: { canEdit }, policy: extractionPolicyFromEnv(process.env) });
+        const project = { ...record, canEdit, extractionChoices };
         // The REST routes return publicProjectView; the socket applies the same customer view (no managed model fields).
         if (await isConfiguredAdminUserSql(sql, userId)) return project;
         return { ...project, pipeline: customerPipelineView(project.pipeline) };

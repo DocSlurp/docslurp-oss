@@ -42,7 +42,8 @@ const ALLOWED = [
   /^dist\/chart-export\/extractors\/[\w-]+\.js$/,
   /^dist\/lib\/(quarantine-bytes|archive-nesting|pdf-encryption-structure)\.js$/,
   /^dist\/tools\/clam-limits\.js$/,
-  /^\.\.\/packages\/shared\/dist\/(chart-export|file-sniff|file-formats|zod-jitless)\.js$/,
+  // kill-switches: the import-free DOCSLURP_DISABLE parser chart-export.ts applies (no I/O, no imports).
+  /^\.\.\/packages\/shared\/dist\/(chart-export|file-sniff|file-formats|zod-jitless|kill-switches)\.js$/,
   /(^|\/)node_modules\/(\.pnpm\/zod@[^/]+\/node_modules\/)?zod\//,
 ];
 const inputs = Object.keys(result.metafile.inputs);
