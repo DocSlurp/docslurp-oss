@@ -1226,6 +1226,13 @@
       "when": 1798800000002,
       "tag": "0182_worker_capabilities_config",
       "breakpoints": true
+    },
+    {
+      "idx": 175,
+      "version": "7",
+      "when": 1798800000003,
+      "tag": "0183_extraction_config_v1_projects",
+      "breakpoints": true
     }
   ]
 }

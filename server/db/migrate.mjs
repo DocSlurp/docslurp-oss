@@ -65,6 +65,15 @@ await client.connect();
 // create unqualified objects in the first schema listed, and "pg_catalog, public" fails each with "permission denied to
 // create pg_catalog.<name>".
 await client.query("set search_path = public, pg_catalog");
+// Data migrations report what they change with RAISE NOTICE (e.g. 0183's counts); print them in the release log.
+client.on("notice", (notice) => console.log(`[migrate] notice: ${notice.message}`));
+// 0183 (extraction config v1) pauses when more projects than this would gain rescue reads (Q1): the owner reviews the
+// dry run (server/db/extraction-config-v1-report.mjs) and raises the limit to confirm. Default 100.
+{
+  const raw = process.env.DOCSLURP_EXTRACTION_CONFIG_V1_MAX_Q1?.trim();
+  const limit = raw && /^\d{1,9}$/.test(raw) ? raw : "100";
+  await client.query("select set_config('docslurp.extraction_config_v1_max_q1', $1, false)", [limit]);
+}
 try {
   const started = Date.now();
   // Bounded wait: fail with a clear message instead of hanging a deploy.

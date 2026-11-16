@@ -178,7 +178,7 @@ export function figureResumeUnavailableReason(blocked: string | null | undefined
   switch (blocked) {
     case null: case undefined: case "": return null;
     case "unscanned": return "needs-reprocess";
-    case "figures-off": case "resume-off": return "disabled";
+    case "figures-off": case "resume-off": case "resume-off-v1": return "disabled";
     case "attempts": case "refused": return "not-extracted";
     case "stale": return "processing";
     default: return "not-extracted";

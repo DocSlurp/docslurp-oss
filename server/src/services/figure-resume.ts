@@ -42,7 +42,9 @@ function assertScope(scope: FigureResumeScope): void {
 }
 
 /** Blocks no request clears (`unscanned`: only a new run that records a parse decision, R6-H1 F3). */
-const STICKY_BLOCKS = ["unscanned"] as const;
+// `resume-off-v1`: a partial pass from before extraction config v1 whose project opted out of resuming (migration 0183,
+// Q3) stays as it is; only a new run (a fresh pass) clears it. (`resume-off` itself stays request-clearable.)
+const STICKY_BLOCKS = ["unscanned", "resume-off-v1"] as const;
 
 /**
  * Live, completed documents of the scope whose current level has figure work left (the unsharded document's resumable
@@ -65,6 +67,8 @@ export function resumableWhere(scope: FigureResumeScope, budget: "exclude" | "gr
   return sql`
     l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
       and l.images_status = 'resumable' and l.assets_current and l.markdown_complete and ${blockOk}
+      -- A run started under figureResume off keeps that until it completes, for requests too (extraction config v1, Q3).
+      and not exists (select 1 from project_runs r where r.id = l.run_id and r.pipeline ->> 'figureResume' = 'off')
       and d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id is not distinct from l.run_id
       and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
       and (
@@ -229,6 +233,8 @@ export async function sweepFigureResumeQueue(now = Date.now()): Promise<number> 
         and l2.updated_at < now() - interval '5 minutes'
         and coalesce(p.pipeline ->> 'figureResume', 'auto') = 'auto'
         and ${sql.unsafe(figuresOnSqlText("p"))}
+        -- A run started under figureResume off/manual keeps that (legacy runs keep their semantics until they complete).
+        and not exists (select 1 from project_runs r where r.id = l2.run_id and coalesce(r.pipeline ->> 'figureResume', 'auto') <> 'auto')
       order by l2.updated_at
       limit 200)
     returning l.document_id`;

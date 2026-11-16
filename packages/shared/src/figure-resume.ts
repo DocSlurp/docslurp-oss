@@ -60,6 +60,8 @@ export function figureResumeDeployEnabled(env: Record<string, string | undefined
  */
 export function projectFiguresOff(pipeline: unknown): boolean {
   // figuresEnabled (doppler-figures.ts) for the project part, failing closed on other shapes; the deploy flag is apart.
+  // The new shape says it with `visuals: "none"` (extraction config v1), as figuresOnSqlText reads it.
+  if ((pipeline as { visuals?: unknown } | null | undefined)?.visuals === "none") return true;
   const figures = (pipeline as { figures?: unknown } | null | undefined)?.figures;
   if (figures === false || figures === "off") return true;
   return !!figures && typeof figures === "object" && (figures as { enabled?: unknown }).enabled === false;
