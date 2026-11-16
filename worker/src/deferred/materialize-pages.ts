@@ -10,6 +10,7 @@ import {
   buildPricedAiUsageLedgerEvent,
   calculateAiUsageCostCents,
   pageCredits,
+  ladderAllowsOffPlanReads,
   qualityAllowsPageReading,
   qualityReadsEveryPage,
   richPagesForOutputTokens,
@@ -381,7 +382,10 @@ export async function materializePageRange(
   }
   // Quality decides which pages a model reads, as in the eager pipeline: Fast reads none (pages without a text layer
   // stay unread, kept as page images that render on demand), Good reads every page, Auto only pages without text.
-  const readsPages = qualityAllowsPageReading(pipeline.quality);
+  // An Auto ladder above-fast share (pipeline.ladder.maxEscalationShare.aboveFast) is planned per document at ingest; query-time reads
+  // have no document-wide plan to count against, so they read no page under one (fail closed: the page stays an image). Query-time reads are plain transcription (the
+  // ocr rung), so maxRung and the above-ocr share change nothing here.
+  const readsPages = qualityAllowsPageReading(pipeline.quality) && ladderAllowsOffPlanReads(pipeline).pageReads;
   const readsEveryPage = qualityReadsEveryPage(pipeline.quality);
   const ocrPages: number[] = [];
   const keptUnread: number[] = [];

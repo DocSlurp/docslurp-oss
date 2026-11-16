@@ -35,7 +35,9 @@ export interface VisionPageOutcome {
     | "document-attempt-limit"
     | "blank-render"
     /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
-    | "unverified-render";
+    | "unverified-render"
+    /** Outside the document's Auto ladder plan (pipeline.ladder): no model reads the page. */
+    | "ladder-capped";
   /** The page has usable native or OCR text to keep when vision gives nothing. */
   fallbackText: boolean;
 }
@@ -56,6 +58,7 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
       return "guarded";
     case "blank-render":
     case "unverified-render":
+    case "ladder-capped":
       return "not-selected";
     default:
       return "failed";

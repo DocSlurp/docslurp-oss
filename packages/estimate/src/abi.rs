@@ -132,7 +132,7 @@ pub fn probe_json(meta: &[u8], head: &[u8], tail: Option<&[u8]>) -> String {
         if (head.len() as u64) > meta.size || tail.is_some_and(|tail| tail.len() as u64 > meta.size) {
             return Err(Error::invalid_request("head and tail cannot be longer than the file"));
         }
-        let input = ProbeInput { name: &meta.name, mime_type: meta.mime_type.as_deref(), size: meta.size, head, tail };
+        let input = ProbeInput { name: &meta.name, mime_type: meta.mime_type.as_deref(), size: meta.size, head, tail, bounded: meta.bounded };
         Ok(probe(Rules::bundled(), &input))
     })())
 }
@@ -232,3 +232,106 @@ pub unsafe extern "C" fn ds_probe(
     let tail = (tail_len > 0).then(|| slice(tail_ptr, tail_len));
     into_host(probe_json(slice(meta_ptr, meta_len), slice(head_ptr, head_len), tail))
 }
+
+/// Why the module last trapped, readable after the trap without allocating: a panic's message (the panic hook writes it
+/// into a fixed static buffer) or the size of an allocation the allocator refused (an out-of-memory abort never reaches
+/// the panic hook). Hosts call `ds_init` once after instantiating, `ds_clear_trap` before each call, and
+/// `ds_last_panic` / `ds_last_failed_alloc` when a call traps.
+#[cfg(target_arch = "wasm32")]
+mod trap_note {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const CAP: usize = 1024;
+    // `{"panic":"...","failedAlloc":N}` is assembled by the host from these two; the buffer holds the message only.
+    static mut MESSAGE: [u8; CAP] = [0; CAP];
+    static MESSAGE_LEN: AtomicUsize = AtomicUsize::new(0);
+    static FAILED_ALLOC: AtomicUsize = AtomicUsize::new(0);
+
+    struct Note(usize);
+    impl core::fmt::Write for Note {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let bytes = text.as_bytes();
+            let n = bytes.len().min(CAP - self.0);
+            // SAFETY: single-threaded module; the hook is the only writer and the host reads only after a trap.
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), core::ptr::addr_of_mut!(MESSAGE).cast::<u8>().add(self.0), n) };
+            self.0 += n;
+            Ok(())
+        }
+    }
+
+    /// Forget the last call's note: a refusal a dependency handled (`try_reserve`) must not label a later panic.
+    pub fn clear() {
+        MESSAGE_LEN.store(0, Ordering::SeqCst);
+        FAILED_ALLOC.store(0, Ordering::SeqCst);
+    }
+
+    pub fn install() {
+        clear();
+        // The message and the source file's name and line only: the full location would carry the build machine's
+        // dependency paths into the host's error text.
+        std::panic::set_hook(Box::new(|info| {
+            let mut note = Note(0);
+            let message = info.payload_as_str().unwrap_or("panic");
+            let _ = match info.location() {
+                Some(at) => {
+                    let file = at.file().rsplit(['/', '\\']).next().unwrap_or("");
+                    core::fmt::write(&mut note, format_args!("{message} ({file}:{})", at.line()))
+                }
+                None => core::fmt::write(&mut note, format_args!("{message}")),
+            };
+            MESSAGE_LEN.store(note.0, Ordering::SeqCst);
+        }));
+    }
+
+    /// `(ptr << 32) | len` of the message, and the refused allocation size (0 for none).
+    pub fn last() -> (u64, u64) {
+        let ptr = core::ptr::addr_of!(MESSAGE) as usize as u64;
+        ((ptr << 32) | MESSAGE_LEN.load(Ordering::SeqCst) as u64, FAILED_ALLOC.load(Ordering::SeqCst) as u64)
+    }
+
+    /// The system allocator, recording the size of a refused allocation before the abort it leads to.
+    pub struct Recording;
+    unsafe impl GlobalAlloc for Recording {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc(layout);
+            if ptr.is_null() { FAILED_ALLOC.store(layout.size(), Ordering::SeqCst); }
+            ptr
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc_zeroed(layout);
+            if ptr.is_null() { FAILED_ALLOC.store(layout.size(), Ordering::SeqCst); }
+            ptr
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            let out = System.realloc(ptr, layout, size);
+            if out.is_null() { FAILED_ALLOC.store(size, Ordering::SeqCst); }
+            out
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { System.dealloc(ptr, layout) }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOCATOR: trap_note::Recording = trap_note::Recording;
+
+/// Install the trap note (the panic hook). Call once after instantiating; calling again resets the note.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_init() { trap_note::install() }
+
+/// Clear the trap note before a call, so it describes only that call.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_clear_trap() { trap_note::clear() }
+
+/// The last trap's panic message as `(ptr << 32) | len` into a static buffer (not freed by the host; 0 length for none).
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_last_panic() -> u64 { trap_note::last().0 }
+
+/// The size of the allocation the allocator last refused (0 for none): the module ran out of its memory.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_last_failed_alloc() -> u64 { trap_note::last().1 }

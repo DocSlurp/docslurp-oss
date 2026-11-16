@@ -37,6 +37,24 @@ export type IndexingMode = "full" | "map" | "visual";
  */
 export type QualityMode = "fast" | "auto" | "good";
 
+/**
+ * Auto ladder rung (`pipeline.ladder`): `fast` reads the text layer only; `ocr` transcribes pixels (scans, table rescue)
+ * with OCR or plain page transcription; `intelligent` lets a vision model read figure pages (charts, diagrams, images).
+ * Docs: https://docslurp.io/docs/extraction/auto-ladder
+ */
+export type LadderRung = "fast" | "ocr" | "intelligent";
+
+/**
+ * Auto ladder limits (`pipeline.ladder`), applied in `auto` quality only. `maxRung` (default `intelligent`) is the highest
+ * rung any page may be read on. `maxEscalationShare.aboveFast` / `.aboveOcr` (0..1, unset by default) cap the share of
+ * each document's pages read above `fast` / above `ocr` (floor of share x pages, at least 1 while above 0). Set either to
+ * null to remove it. A non-editor's per-upload override can only tighten the project's limits.
+ */
+export type PipelineLadder = {
+  maxRung?: LadderRung;
+  maxEscalationShare?: { aboveFast?: number | null; aboveOcr?: number | null } | null;
+};
+
 export type ProjectRecord = JsonObject & {
   id: string;
   name: string;
@@ -276,6 +294,8 @@ export type QuoteSettings = {
    * adds a `charts` line; `free` costs nothing. Refused where the deployment does not offer `models`.
    */
   chartExport: ChartExportTier;
+  /** Auto ladder above-fast share (0..1): the largest share of each document's pages a model may read. Omitted: the project's. */
+  aboveFastShare?: number | null;
 };
 export type EstimateInput = {
   files: Array<{ name: string; size: number; type?: string; pages?: number; durationSeconds?: number; profile?: FileProfile }>;
@@ -303,6 +323,8 @@ export type EstimateProfile = {
   workerSlots?: number;
   stageCount: number;
   billing: "enforced" | "disabled";
+  /** The project's Auto ladder above-fast share, when set (`pipeline.ladder`). */
+  aboveFastShare?: number;
 };
 
 /** Counts across a job's runs. */

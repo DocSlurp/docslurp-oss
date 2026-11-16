@@ -7,7 +7,8 @@ import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, CHART_EXPORT_FORMATS, chartExportFo
 import type { PipelineFeatures } from "./pipeline.js";
 import type { CostEstimate } from "./jobs.js";
 import type { UploadMediaEstimate } from "./media-upload-estimate.js";
-import { applyFileProfile, estimateProfileFor, type EstimateProfile, type QuoteFile } from "./upload-quote.js";
+import { applyFileProfile, capCreditsToLadderShare, estimateProfileFor, ladderShareProfile, type EstimateProfile, type QuoteFile } from "./upload-quote.js";
+import { ladderChartExportTier, pageReadingQuality } from "./auto-ladder.js";
 
 /*
  * The one estimate: `POST /v1/estimate` (anonymous or authenticated) and the authenticated upload estimate both answer
@@ -58,6 +59,11 @@ export const quoteSettingsSchema = z.strictObject({
   /** Chart export formats and diagrams the `models` tier prices with: the project's own, so the quote's charts line equals the upload's `chartExport.credits`. */
   chartFormats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length),
   chartDiagrams: z.boolean(),
+  /**
+   * Auto ladder above-fast share (`pipeline.ladder.maxEscalationShare.aboveFast`): the largest share of each document's
+   * pages a model may read; the rest are quoted Fast. Omitted: the project's, else no cap. Only `auto` uses it.
+   */
+  aboveFastShare: z.number().finite().min(0).max(1).nullable().optional(),
 });
 export type QuoteSettings = z.infer<typeof quoteSettingsSchema>;
 
@@ -166,14 +172,18 @@ export type ProviderEstimateArgs = {
 /** The knobs a project pipeline is set to: the base an authenticated caller's settings override. */
 export function quoteSettingsForPipeline(pipeline: PipelineFeatures): Partial<QuoteSettings> {
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
+  const ladderShare = ladderShareProfile(pipeline).aboveFastShare;
+  const chartTier = ladderChartExportTier(pipeline, pipeline.chartExport?.tier);
   return {
-    quality: pipeline.quality,
+    // Auto capped at the fast rung (pipeline.ladder) reads, and is quoted, as Fast.
+    quality: pageReadingQuality(pipeline),
+    ...(ladderShare !== undefined ? { aboveFastShare: ladderShare } : {}),
     indexing: pipeline.indexingMode === "visual" ? "visual" : pipeline.indexingMode === "map" ? "on-demand" : "full",
     ...features,
     videoFrames: pipeline.mediaVideo?.enabled !== false,
     speedBoost: pipeline.speedBoost === true,
     // Only an explicit project tier; an unset one resolves per caller at quote time.
-    ...(pipeline.chartExport?.tier ? { chartExport: pipeline.chartExport.tier } : {}),
+    ...(chartTier ? { chartExport: chartTier } : {}),
     ...(pipeline.chartExport?.formats?.length ? { chartFormats: [...pipeline.chartExport.formats] } : {}),
     ...(pipeline.chartExport ? { chartDiagrams: pipeline.chartExport.diagrams !== false } : {}),
   };
@@ -222,9 +232,38 @@ export function quoteStoredWork(args: {
   const billing = isBillingEnforced(args.env ?? process.env) ? "enforced" : "disabled";
   const files = args.files.map(({ profile: _ignored, ...file }) => file);
   const profile = estimateProfileForSettings(settings, { billing, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
-  const quote = pricing().quote({ files, settings, profile, ...(args.work ? { work: args.work } : {}) });
+  // Stage-precise work estimates already price the ladder (estimatePipelineWork); a fresh ingest quote is capped here.
+  return providerQuote({ files, settings, profile, ...(args.work ? { work: args.work } : {}) }, billing, !args.work);
+}
+
+/**
+ * The provider's quote for these settings, the ladder's above-fast share applied: the provider prices the settings
+ * without it (it never sees the knob), and a share below 1 on `auto` caps the ingest credits at Fast plus the Rich
+ * surcharge of the pages the share allows (capCreditsToLadderShare).
+ */
+function providerQuote(args: ProviderEstimateArgs, billing: "enforced" | "disabled", capIngest: boolean): EstimateQuote {
+  const { aboveFastShare, ...settings } = args.settings;
+  const quote = pricing().quote({ ...args, settings: settings as QuoteSettings });
   if (quote.kind !== "estimate" || quote.billing !== billing) throw new Error("pricing provider returned an invalid estimate");
-  return quote;
+  if (!capIngest || typeof aboveFastShare !== "number" || args.profile.quality !== "auto" || !quote.ingest.credits) return quote;
+  const fast = pricing().quote({ ...args, settings: { ...settings, quality: "fast" } as QuoteSettings, profile: { ...args.profile, quality: "fast" } });
+  if (fast.kind !== "estimate" || !fast.ingest.credits) return quote;
+  const before = quote.ingest.credits;
+  const ingest = capCreditsToLadderShare({ credits: before, fastCredits: fast.ingest.credits, files: args.files, share: aboveFastShare });
+  const saved = { low: before.low - ingest.low, high: before.high - ingest.high };
+  const pagesPerDollar = quote.rates.pagesPerDollar && ingest.high > 0 && ingest.low > 0
+    ? { low: quote.pages.low / (ingest.high / 100), high: quote.pages.high / (ingest.low / 100) }
+    : quote.rates.pagesPerDollar;
+  return {
+    ...quote,
+    settings: { ...quote.settings, aboveFastShare },
+    ingest: { ...quote.ingest, credits: ingest },
+    lines: quote.lines.map((line) => line.id === "pages"
+      ? { ...line, credits: { low: Math.max(0, line.credits.low - saved.low), high: Math.max(0, line.credits.high - saved.high) } }
+      : line),
+    rates: { ...quote.rates, pagesPerDollar },
+    basis: `${quote.basis}; at most ${Math.round(aboveFastShare * 1000) / 10}% of each document's pages read by a model (pipeline.ladder)`,
+  };
 }
 
 /** Settings a project could not be configured with (a quote refuses them as the project API does). */
@@ -255,7 +294,5 @@ export function quoteEstimate(
   const billing = isBillingEnforced(options.env ?? process.env) ? "enforced" : "disabled";
   const files = request.files.map((file) => applyFileProfile(file));
   const profile = estimateProfileForSettings(settings, { billing, ...(options.workerSlots ? { workerSlots: options.workerSlots } : {}) });
-  const quote = pricing().quote({ files, settings, profile });
-  if (quote.kind !== "estimate" || quote.billing !== billing) throw new Error("pricing provider returned an invalid estimate");
-  return quote;
+  return providerQuote({ files, settings, profile }, billing, true);
 }

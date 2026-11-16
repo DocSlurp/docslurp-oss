@@ -6,7 +6,7 @@ import { FILE_PROFILE_SCHEMA, decodeTextBytes, fileProfileSchema, normalizeFileP
 
 import { createEstimator, EstimatorError, requestQuote } from "../js/index.mjs";
 import { estimatePaths, profilePath } from "../js/node.mjs";
-import { lazyObjectStreamBomb } from "./hostile.mjs";
+import { lazyObjectStreamBomb, manyObjectsPdf } from "./hostile.mjs";
 
 const fixture = (name) => new URL(`../tests/fixtures/${name}`, import.meta.url).pathname;
 const fixtureNames = ["form_amplification.pdf", "no_text_small_images.pdf", "page_tree_cycle.pdf", "scan_big_mediabox.pdf", "scan_glyph_title.pdf", "scan_inline.pdf", "scan_ocr_invisible_wrapped.pdf", "scan_plain.pdf", "text_wrapped_with_photo.pdf", "vector_page_in_text_doc.pdf"];
@@ -106,28 +106,62 @@ describe("@docslurp/estimate (wasm)", () => {
     assert.throws(() => new WebAssembly.Instance(module, { env: { memory: new WebAssembly.Memory({ initial: 256, maximum: 8_192 }) } }));
   });
 
-  it("survives hostile PDFs that escape every budget, reusing one bounded memory", () => {
+  it("survives hostile PDFs that escape every budget, one bounded memory at a time", () => {
     const bomb = lazyObjectStreamBomb();
     const file = { name: "bomb.pdf", size: bomb.length };
     const before = process.memoryUsage().rss;
     for (let round = 0; round < 6; round += 1) {
       try {
         const profile = estimator.profile(file, bomb);
-        assert.equal(profile.pdf, undefined); // refused by a budget: fine too
+        assert.equal(profile.pdf, undefined); // refused by a budget, or retried without the whole load: fine too
       } catch (error) {
         assert.ok(error instanceof EstimatorError);
-        assert.equal(error.code, "crashed");
+        assert.ok(["crashed", "out_of_memory"].includes(error.code), error.code);
       }
     }
-    // Six crashes reuse the same 256 MiB memory instead of leaving six behind for the garbage collector.
-    assert.ok(process.memoryUsage().rss - before < 512 * 1024 * 1024, `rss grew ${(process.memoryUsage().rss - before) >> 20} MiB`);
+    // A trapped memory is dropped for a fresh one and left to the garbage collector: six traps must not keep six
+    // 256 MiB memories alive.
+    assert.ok(process.memoryUsage().rss - before < 1024 * 1024 * 1024, `rss grew ${(process.memoryUsage().rss - before) >> 20} MiB`);
     assert.deepEqual(estimator.readPlan({ name: "a.pdf", size: 10 }), { head: 10, tail: 0 });
   });
 
-  it("reports an input larger than the module's memory as a crash and recovers", () => {
+  it("reports an input larger than the module's memory as out of memory and recovers", () => {
     const huge = new Uint8Array(300 * 1024 * 1024);
-    assert.throws(() => estimator.profile({ name: "huge.pdf", size: huge.length }, huge), (error) => error instanceof EstimatorError && error.code === "crashed");
+    const crashes = estimator.health().crashes;
+    assert.throws(() => estimator.profile({ name: "huge.pdf", size: huge.length }, huge), (error) => error instanceof EstimatorError && error.code === "out_of_memory" && /allocation was refused/.test(error.message));
+    // Larger than the memory: never retried, one trap only.
+    assert.equal(estimator.health().crashes, crashes + 1);
     assert.equal(estimator.info().profileSchema, FILE_PROFILE_SCHEMA);
+  });
+
+  it("does not starve later files after a file exhausts the memory", async () => {
+    const fresh = await createEstimator();
+    // Declares 10 objects, holds 400,000 (about 0.85 KiB each loaded): the load-cost check passes, the whole-document load fills the memory and
+    // traps. The retry reads only the page tree, so the file still gets its page count.
+    const liar = manyObjectsPdf({ objects: 400_000, pages: 2, declaredSize: 10 });
+    const lied = fresh.profile({ name: "liar.pdf", size: liar.length }, liar);
+    assert.equal(lied.pages, 2);
+    assert.equal(lied.pdf, undefined);
+    assert.ok(lied.notes.some((note) => /retried without loading the whole document/.test(note)), lied.notes.join("; "));
+    assert.equal(fresh.health().crashes, 1);
+    // About 90 MiB loaded, more than the room left in a memory the liar grew to over 200 MiB: before the fix, the
+    // trapped memory was zeroed and reused, the new instance's allocator could not grow it, and this file trapped too.
+    const heavy = manyObjectsPdf({ objects: 100_000, pages: 3 });
+    const profiled = fresh.profile({ name: "heavy.pdf", size: heavy.length }, heavy);
+    assert.equal(profiled.pages, 3);
+    assert.equal(profiled.pdf.sampledPages, 3);
+    assert.equal(fresh.health().crashes, 1);
+  });
+
+  it("reads the page tree instead of loading a document that declares too many objects", async () => {
+    const fresh = await createEstimator();
+    // 500,000 declared objects would take over 600 MiB to load; the file itself is small.
+    const big = manyObjectsPdf({ objects: 1_000, pages: 4, declaredSize: 500_000 });
+    const profile = fresh.profile({ name: "big.pdf", size: big.length }, big);
+    assert.equal(profile.pages, 4);
+    assert.equal(profile.pdf, undefined);
+    assert.ok(profile.notes.some((note) => /too many objects to load the whole document/.test(note)), profile.notes.join("; "));
+    assert.equal(fresh.health().crashes, 0);
   });
 
   it("reads a WAV duration from its header without a name hint", () => {

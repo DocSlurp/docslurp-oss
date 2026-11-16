@@ -3,7 +3,7 @@ import { assertPolicyTransitionAllowed } from "./policy-transition.js";
 import { HTTPException } from "hono/http-exception";
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
-import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
+import { chartExportDefaults, effectiveLadder, pageReadingQuality, upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import {
   defaultSummaryTreePipelineConfig, SUMMARY_TREE_REQUIRES_VECTORS_CODE, SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SummaryTreeConfigError,
   type SummaryTreePipelineConfig,
@@ -1116,7 +1116,7 @@ export async function updateProject(
     pipeline = await resolveUpdatedPipeline(projectId, current, parsed, options);
   }
   // With precomputed inputs the caller already validated the switch (this may run inside its transaction).
-  if (!options.precomputed && deferredProfilesEnabled() && (pipeline.indexingMode !== current.pipeline.indexingMode || (pipeline.indexingMode === "visual" && pipeline.quality === "fast"))) {
+  if (!options.precomputed && deferredProfilesEnabled() && (pipeline.indexingMode !== current.pipeline.indexingMode || (pipeline.indexingMode === "visual" && (pageReadingQuality(pipeline) === "fast" || effectiveLadder(pipeline).active)))) {
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
 
