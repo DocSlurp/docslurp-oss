@@ -540,6 +540,7 @@ export async function countDeferredPdfPages(args: {
       try {
         // The same admission as any parser command: a quarantined source or organization fails here, never reaches a VM.
         await admitBatchDocument(state, document);
+        // runDocumentStage's context carries this organization's run (and the run's usage ledger) to the count's commands.
         await recordMeasuredPdfPageCount({
           state, document, runner: args.runner, signal: args.signal,
           sourcePath: async () => args.stagedSource?.(document.id)

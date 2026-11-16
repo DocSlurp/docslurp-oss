@@ -306,12 +306,14 @@ export interface SandboxedOcrProvider {
 
 /**
  * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
- * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to `scope.orgId`
- * for that VM's whole life (it may serve several jobs of that organization, never another's), reads them there, and returns only bounded Markdown per page. The VM gets no
+ * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to `scope` (one
+ * organization's run) for that VM's whole life, both in its own lease table and inside the VM: it may serve several jobs of
+ * that run, never another run's or another organization's, and a VM it cannot prove bound to the scope is never used (a
+ * fresh one is started). It reads them there and returns only bounded Markdown per page. The VM gets no
  * credentials, no metadata endpoint and no network beyond the job's own connection.
  */
 export interface PageImageReadJob {
-  /** Tenant scope of every page. A provider binds an isolated VM to one organization and refuses a job for another. */
+  /** Tenant scope of every page. A provider binds an isolated VM to this organization's run and refuses a job of any other. */
   scope: { orgId: string; runId: string };
   /** Opaque keys (never document ids) and absolute paths of PNGs the OCR boundary wrote and the host validated by signature and size. */
   pages: Array<{ key: string; imagePath: string }>;

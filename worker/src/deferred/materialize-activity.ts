@@ -1,4 +1,5 @@
 import { QUALITY_RANK, runLegacyQualitySql } from "@docslurp/shared";
+import { runWithPerfContext } from "../lib/perf-context.js";
 import type { Sql } from "postgres";
 import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
@@ -105,7 +106,13 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
 export async function runMaterializeRange(deps: MaterializeActivityDeps, input: MaterializePagesInput): Promise<MaterializeResult> {
   const result: MaterializeResult = { indexed: [], blocked: [], failed: [], costCredits: 0 };
   try {
-    return await materializeRange(deps, input, result);
+    // Organization isolation: parser commands carry this organization's run, so a pooled parser VM serves only it (and
+    // is reused across the range's commands instead of each command getting a single-use VM).
+    const owner = await deps.store.loadRun(input.runId);
+    return await runWithPerfContext({
+      runId: input.runId, orgId: owner.orgId, ...(owner.projectId ? { projectId: owner.projectId } : {}), documentId: input.documentId,
+      scope: "document", stageName: "materialize-pages", pushPerformance: () => {},
+    }, () => materializeRange(deps, input, result));
   } catch (error) {
     // The document was deleted while (or before) its pages were materialized: stop cleanly. Retrying would
     // only repeat the foreign-key error; pages already written were billed as they finished, the rest are not.

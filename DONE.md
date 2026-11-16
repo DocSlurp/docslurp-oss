@@ -1,3 +1,9 @@
+## Organization isolation for compute reuse (2026-11-16)
+
+- Pooled Modal parser VMs are bound to one organization's run: host-side (each lane takes its first command's org+run scope and is never offered another; a session refuses, with an ALERT, a command of a second organization) and in-guest (the root reset records the scope in a root-only marker and exits 9 on any other, so the host terminates the VM). Commands without both an organization and a run get a single-use VM. The runner sends `runKey` with every remote command.
+- The worker's process-local PDF source cache keys entries by run and requester as well as the storage key.
+- The page-image-reader contract now binds reader VMs to one organization's run. AGENTS.md: compute units are never reused across organizations; fail closed to a fresh unit.
+
 ## Automatic-call margin gate (2026-11-15)
 
 - Automatic model calls (vision fallback, OCR escalation, chart generators, page-router targets, route tiers, chat failover, Speed boost swaps) are allowed only when the pricing provider's billed value covers planning tokens times the route's highest current price (per OpenRouter endpoint, time-of-day overrides, verified host schedules) by `DOCSLURP_AUTOMATIC_MIN_MARGIN` (1.3). Unknown or stale prices fail closed; refused candidates are skipped with a logged reason; losing calls log `[automatic-margin] overrun loss=true`.
