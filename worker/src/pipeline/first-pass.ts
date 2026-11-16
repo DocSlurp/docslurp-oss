@@ -540,15 +540,12 @@ export async function countDeferredPdfPages(args: {
       try {
         // The same admission as any parser command: a quarantined source or organization fails here, never reaches a VM.
         await admitBatchDocument(state, document);
-        // Organization isolation: the count's parser commands carry this organization's run (a pooled VM serves only it).
-        await runWithPerfContext({
-          runId: state.run.id, documentId: document.id, orgId: state.run.orgId, scope: "document", stageName: FIRST_PASS_PAGE_COUNT_STAGE,
-          pageCount: document.pageCount, pushPerformance: () => {},
-        }, () => recordMeasuredPdfPageCount({
+        // runDocumentStage's context carries this organization's run (and the run's usage ledger) to the count's commands.
+        await recordMeasuredPdfPageCount({
           state, document, runner: args.runner, signal: args.signal,
           sourcePath: async () => args.stagedSource?.(document.id)
             ?? (temp ??= await stageSourceFile(args.storage, document, trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
-        }));
+        });
         return { stats: { pages: document.pageCount, handedBack: args.reason?.(document.id) ?? "deferred" } };
       } finally {
         if (temp) await cleanupTempFile(temp).catch(() => undefined);

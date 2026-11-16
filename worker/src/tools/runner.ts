@@ -2798,7 +2798,8 @@ export function buildSandboxCommand(args: {
  */
 export function recordRemoteUsage(usage: UsageEvent): void {
   const context = currentPerfContext();
-  if (!context) {
+  // A context without a usage ledger (an isolation-only context of a deferred activity) is as unrecorded as none.
+  if (!context?.pushUsage) {
     console.error(
       `[usage-unrecorded] provider=${usage.provider} model=${usage.model} metric=${usage.metric} amount=${usage.amount} ` +
         `unit=${usage.unit} costCents=${usage.costCents}: remote usage outside a stage context has no usage ledger`,

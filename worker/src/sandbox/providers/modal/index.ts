@@ -1206,6 +1206,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
          * from the lane: a host routing bug that put another scope's command here is refused inside the VM.
          */
         let commandToken: string | undefined;
+        /** The token this VM's in-guest binding last verified (bindVmScope). */
+        let boundToken: string | undefined;
 
         async function resetVm(keepFor?: string): Promise<void> {
           // The same document's next command reuses its inputs; any other document gets a full wipe first (W #3 holds).
@@ -1247,14 +1249,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           } catch (error) {
             throw new SandboxInfrastructureError(`parser VM scope binding could not run: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
           }
-          if (code === 0) return;
+          if (code === 0) { boundToken = commandToken ?? lane.scopeToken; return; }
           await terminate().catch(() => {});
           if (code === RESET_SCOPE_REFUSED) {
             console.error(`[parser-sandbox] ALERT provider=modal vm-scope-mismatch activity=${context.activityId} lane=${lane.id} phase=before-staging: VM terminated`);
             throw new SandboxInfrastructureError("parser VM is bound to another organization or run; VM terminated", meterLane(lane));
           }
-          // The binding could not be written (a disk the previous document filled): that document's doing, as in probeJobTree.
-          throw new SandboxInfrastructureError("parser VM scope binding failed; VM terminated", meterLane(lane), previous !== undefined ? { blameDocumentId: previous } : undefined);
+          // Exit 5: the binding could not be written (a disk the previous document filled), that document's doing as in
+          // probeJobTree. Any other code is the sandbox's: a plain retry, no strike.
+          throw new SandboxInfrastructureError("parser VM scope binding failed; VM terminated", meterLane(lane), code === 5 && previous !== undefined ? { blameDocumentId: previous } : undefined);
         }
 
         /** The job roots as the next document's staging finds them; a broken one blames `previous` (council X #1). */
@@ -1378,7 +1381,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // Another document's inputs kept on this VM go first: the next document sees nothing of them (council X #7, W #3).
             // In-guest binding before a new document's inputs reach the VM (organization isolation): a fresh VM is bound to
             // this command's scope; a VM bound to any other refuses, and is terminated before anything is staged.
-            if (commandCount === 1 || lane.previousKey !== command.affinityKey) await bindVmScope(lane.previousKey);
+            if (commandCount === 1 || lane.previousKey !== command.affinityKey || (commandToken ?? lane.scopeToken) !== boundToken) await bindVmScope(lane.previousKey);
             if (keptFor !== undefined && keptFor !== command.affinityKey) await resetVm();
             if (lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) await probeJobTree(lane.previousKey);
             // Only the command's inputs travel; the parser runtime comes from the image. From here a failure the VM itself
