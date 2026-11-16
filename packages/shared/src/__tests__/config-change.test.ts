@@ -6,6 +6,7 @@ import {
   analyzeSearchSettingsChange,
   estimatePipelineWork,
   indexConfigOf,
+  indexConfigHash,
 } from "../config-change.js";
 import { affectedStages, defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, pipelineStagePlan, compilePipelinePlan } from "../index.js";
 
@@ -244,5 +245,24 @@ describe("estimatePipelineWork", () => {
     const small = estimatePipelineWork({ features: base, stages: ["index"], pages: 500, documents: 5, env });
     expect(small.credits!.high).toBeLessThan(full.credits!.high);
     expect(estimatePipelineWork({ features: base, stages: [], pages: 500, documents: 5, env }).credits!.high).toBe(0);
+  });
+});
+
+
+describe("vector identity", () => {
+  const identity = (patch: Record<string, unknown>) => indexConfigHash(indexConfigOf(withF(patch)));
+  it("separates normalized and unnormalized vectors", () => {
+    expect(identity({ embedding: { ...base.embedding, normalize: false } })).not.toBe(identity({ embedding: { ...base.embedding, normalize: true } }));
+  });
+  it("does not claim compatibility with legacy records missing normalization", () => {
+    const config = indexConfigOf(base);
+    const { normalize: _normalize, ...legacy } = config;
+    expect(indexConfigHash(config)).not.toBe(indexConfigHash(legacy));
+  });
+  it("ignores task labels that are not consumed by embedding execution", () => {
+    expect(identity({ embedding: { ...base.embedding, task: "code" } })).toBe(identity({}));
+  });
+  it("ignores query preferences and budgets", () => {
+    expect(identity({ maxCostCents: 123, webTools: false })).toBe(identity({}));
   });
 });

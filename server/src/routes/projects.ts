@@ -1,3 +1,5 @@
+import { bodyLimit } from "hono/body-limit";
+import { readSettingsSnapshot, publishSettings, SettingsPublicationError } from "../services/settings-publication.js";
 import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
@@ -669,6 +671,36 @@ const searchSettingsKeyGate: MiddlewareHandler = async (c, next) => {
 };
 
 export const projectsRoutes = new Hono()
+  .get("/:projectId/settings-publication", searchSettingsKeyGate, async c => {
+    try {
+      const result = await readSettingsSnapshot(getRequestActor(c), String(c.req.param("projectId")));
+      return c.json({ ...result, project: publicProjectView((await withCanEdit(c, [result.project]))[0], getRequestActor(c)), settings: customerSearchSettingsView(result.settings) });
+    } catch (error) {
+      if (error instanceof SettingsPublicationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      throw error;
+    }
+  })
+  .post("/:projectId/settings-publication", searchSettingsKeyGate, bodyLimit({ maxSize: 128 * 1024 }), async c => {
+    const raw = await c.req.json().catch(() => null);
+    const managed = refuseManagedPipelineFields(c, raw?.project?.pipeline);
+    if (managed) return managed;
+    if (findProhibitedModelId(raw?.project?.pipeline)) return apiStatusError(c, 400, "A model in this pipeline configuration is not permitted");
+    try {
+      const result = await publishSettings({ actor: getRequestActor(c), projectId: String(c.req.param("projectId")), input: raw, origin: runOriginOf(c) });
+      for (const runId of result.queuedRunIds) {
+        try { const run = await getRun(runId, c.get("sessionUser").id); if (run) await runLifecycle.start(run); }
+        catch { console.warn("[settings-publication] run start deferred to recovery"); }
+      }
+      return c.json({ ...result, snapshot: { ...result.snapshot, project: publicProjectView((await withCanEdit(c, [result.snapshot.project]))[0], getRequestActor(c)), settings: customerSearchSettingsView(result.snapshot.settings) } });
+    } catch (error) {
+      if (error instanceof SettingsPublicationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
+      if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
+      if (error instanceof z.ZodError) return apiStatusError(c, 400, "Invalid project settings", { details: { issues: error.issues } });
+      if (error instanceof ChartExportUnavailableError || error instanceof SummaryTreeConfigError) return apiStatusError(c, 400, error.message, { code: error.code });
+      throw error;
+    }
+  })
   .route("/", projectRecommendationVisitsRoutes)
   .post("/:projectId/settings-proposals/apply", zValidator("json", applyProjectSettingsProposalSchema, validationHook), async c => {
     try {
@@ -1785,4 +1817,4 @@ export const projectsRoutes = new Hono()
   );
 
 // Project reads and rename/settings updates (the PATCHes and their estimates require projects:manage).
-acceptApiKeys(projectsRoutes, ["PATCH /:projectId/search-settings", "POST /:projectId/search-settings/estimate", "GET /", "GET /:projectId", "GET /:projectId/tags", "GET /:projectId/state", "GET /:projectId/ingest-report", "POST /:projectId/ingest-report/apply", "POST /:projectId/ingest-report/reprocess", "POST /:projectId/documents/bulk/estimate", "PATCH /:projectId", "POST /:projectId/estimate", "POST /:projectId/full-index", "POST /:projectId/full-index/estimate", "POST /:projectId/indexing-mode/estimate"]);
+acceptApiKeys(projectsRoutes, ["GET /:projectId/settings-publication", "POST /:projectId/settings-publication", "PATCH /:projectId/search-settings", "POST /:projectId/search-settings/estimate", "GET /", "GET /:projectId", "GET /:projectId/tags", "GET /:projectId/state", "GET /:projectId/ingest-report", "POST /:projectId/ingest-report/apply", "POST /:projectId/ingest-report/reprocess", "POST /:projectId/documents/bulk/estimate", "PATCH /:projectId", "POST /:projectId/estimate", "POST /:projectId/full-index", "POST /:projectId/full-index/estimate", "POST /:projectId/indexing-mode/estimate"]);

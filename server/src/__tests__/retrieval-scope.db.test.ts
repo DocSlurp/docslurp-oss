@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import { defaultEmbeddingConfig, resolveEmbeddingRoute } from "@docslurp/shared";
+import { defaultEmbeddingConfig, indexConfigHash, indexConfigOf, normalizePipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
 import type { SearchFilters } from "../search/filters.js";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
@@ -201,6 +201,8 @@ it.each([
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values (${id + '-vector'}, ${id}, 'lancedb', 'test', ${id}, ${embedding.model}, 3)
       on conflict do nothing`;
+    // These synthetic vectors implement the declared default recipe; unknown legacy vectors are tested separately.
+    await sql`update documents set index_config_hash=${indexConfigHash(indexConfigOf(normalizePipelineFeatures(null)))} where id=${id}`;
   }
   // The fixture adds vectors without the run_events hint a worker sends; drop cached eligibility (native search).
   (await import("../search/eligible-documents.js")).resetEligibleDocumentCachesForTests();

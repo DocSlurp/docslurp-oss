@@ -212,6 +212,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   project_members: "membership and roles",
   project_activity_stats: "search and chat counters (API only): written by triggers on search_sessions, chat_turns and chat_sessions, and removed by a delete trigger on projects, none of which the worker can write or delete",
   project_search_settings: "search (API only)",
+  project_settings_publications: "actor-scoped settings retry receipts (API only)",
   project_slugs: "slug history (API only)",
   user_client_surfaces: "admin user directory analytics (API only)",
   user_signup_attribution: "admin user directory analytics (API only)",
