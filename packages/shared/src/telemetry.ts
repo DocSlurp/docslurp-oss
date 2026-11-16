@@ -502,6 +502,10 @@ export function recordPipelineTelemetry(name: string, value: number, labels: Rec
   if (!/^[a-z0-9_.]{1,64}$/.test(name) || !Number.isFinite(value) || value < 0) return;
   const meter = getRuntime()?.metrics?.getMeter("docslurp.pipeline");
   if (!meter) return;
+  // Bounded categories only: a value that is not a short plain token (an id, a file name, free text) becomes "other".
+  for (const key of Object.keys(labels)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.+-]{0,47}$/.test(labels[key]!)) labels = { ...labels, [key]: "other" };
+  }
   bestEffort(() => {
     if (kind === "counter") meter.createCounter(`docslurp.${name}`).add(value, labels);
     else meter.createHistogram(`docslurp.${name}`, kind === "duration"

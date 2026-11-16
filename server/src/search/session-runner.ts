@@ -135,7 +135,7 @@ export async function runSearchSession(args: {
   validateRetrievalControls(args.options);
   try {
     const response = await executeSearchSession(args);
-    recordPipelineTelemetry("search.requests", 1, { results: response.results.length > 0 ? "some" : "zero", mode: response.searchMode ?? "unknown" });
+    recordPipelineTelemetry("search.requests", 1, { results: response.results.length > 0 ? "some" : "zero" });
     // Child searches suppress result-session rows, but their paid usage must
     // survive even when a sibling later fails before the parent can adopt it.
     await args.setup.session.flushUsage(args.userId);

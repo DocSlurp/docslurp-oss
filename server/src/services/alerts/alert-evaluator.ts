@@ -102,7 +102,9 @@ async function readQueueSnapshot(): Promise<QueueSnapshot> {
         where status = 'processing' and coalesce(lease_expires_at, to_timestamp(0)) < now()
       )::int as stale_leases,
       count(*) filter (
-        where status = 'processing' and coalesce(control_state, '') not in ('paused', 'pause_requested', 'cancel_requested', 'cancelled')
+        where status = 'processing' and coalesce(control_state, '') not in ('paused', 'pause_requested', 'cancel_requested', 'cancelled', 'dead-letter')
+          -- An expired lease is stale-leases' finding, not a second one here.
+          and coalesce(lease_expires_at, to_timestamp(0)) >= now()
           and created_at < now() - make_interval(secs => ${stalledSeconds})
           and not exists (
             select 1 from project_run_events event

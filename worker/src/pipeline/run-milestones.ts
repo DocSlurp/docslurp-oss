@@ -5,15 +5,17 @@ import type { WorkflowState } from "./pipeline.js";
 /**
  * Run milestones: the first time each happens for a run, stamped once on `project_runs` (migration 0183) and recorded
  * as `docslurp.run.milestone.duration`, seconds since the run was accepted (`created_at`), so queue wait is inside
- * the number. The conditional update makes the stamp exactly-once across workers, retries and resumes; the in-process
- * set only saves the round trip after this process has tried.
+ * the number. The conditional update makes the stamp exactly-once across workers, retries and resumes, so the metric
+ * is recorded at most once (a worker that dies before its next export loses the sample; the column keeps the time).
+ * The in-process set only saves the round trip after this process has stamped or seen the stamp.
  */
-export type RunMilestone = "worker_started" | "first_page_extracted" | "first_page_completed";
+export type RunMilestone = "worker_started" | "first_page_extracted" | "first_page_completed" | "outcome_recorded";
 
 export const RUN_MILESTONE_COLUMNS: Readonly<Record<RunMilestone, string>> = {
   worker_started: "worker_started_at",
   first_page_extracted: "first_page_extracted_at",
   first_page_completed: "first_page_completed_at",
+  outcome_recorded: "outcome_recorded_at",
 };
 
 export type RunMilestoneHit = { seconds: number; pages: number };
@@ -56,8 +58,12 @@ export async function noteRunMilestone(store: RunMilestoneStore | undefined, run
   attempted.add(key);
   try {
     const hit = await store.markRunMilestone(runId, milestone);
-    if (hit) recordPipelineTelemetry("run.milestone.duration", hit.seconds, { milestone, pages: pageCountBucket(hit.pages), ...labels }, "duration");
+    // The page count is rarely measured when a worker first picks a run up, so start latency carries no page bucket.
+    const pages: Record<string, string> = milestone === "worker_started" ? {} : { pages: pageCountBucket(hit?.pages ?? 0) };
+    if (hit) recordPipelineTelemetry("run.milestone.duration", hit.seconds, { milestone, ...pages, ...labels }, "duration");
   } catch (error) {
+    // Not stamped: let this process try again on its next page or stage rather than lose the milestone.
+    attempted.delete(key);
     console.warn(`[run-milestone] run=${runId} milestone=${milestone} not recorded: ${error instanceof Error ? error.name : "error"}`);
   }
 }
@@ -106,6 +112,20 @@ export function recordDocumentMilestone(run: { createdAt: Date }, milestone: "le
 export function resetRunMilestoneMemory(): void {
   attempted.clear();
   finalStages.clear();
+}
+
+/**
+ * Records a run's terminal outcome once: the `outcome_recorded_at` stamp makes a retried terminal activity, or a late
+ * one that the store ignored, record nothing. Cancelled runs are not counted.
+ */
+export async function noteRunOutcome(store: RunMilestoneStore | undefined, run: { id: string; createdAt: Date; pagesTotal: number },
+  outcome: "completed" | "completed_with_failures" | "failed", failedStage?: string): Promise<void> {
+  if (!store?.markRunMilestone) return;
+  try {
+    if (await store.markRunMilestone(run.id, "outcome_recorded")) recordRunOutcome(run, outcome, failedStage);
+  } catch (error) {
+    console.warn(`[run-milestone] run=${run.id} outcome not recorded: ${error instanceof Error ? error.name : "error"}`);
+  }
 }
 
 /**

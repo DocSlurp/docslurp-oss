@@ -9,7 +9,7 @@ vi.mock("@docslurp/shared/observability", () => ({
 }));
 
 const {
-  finalPageStage, noteDocumentStageComplete, noteRunMilestone, noteRunPageStage, recordPagesRouted, recordRunOutcome,
+  finalPageStage, noteDocumentStageComplete, noteRunMilestone, noteRunOutcome, noteRunPageStage, recordPagesRouted, recordRunOutcome,
   resetRunMilestoneMemory, workerStartKind,
 } = await import("../pipeline/run-milestones.js");
 const { defaultPipelineFeatures: DEFAULT_PIPELINE } = await import("@docslurp/shared");
@@ -44,7 +44,7 @@ describe("run milestones", () => {
     await noteRunMilestone(store, "run-1", "worker_started", { start: "cold" });
     await noteRunMilestone(store, "run-1", "worker_started", { start: "cold" });
     expect(store.calls).toEqual(["run-1:worker_started"]);
-    expect(recorded).toEqual([{ name: "run.milestone.duration", value: 4, labels: { milestone: "worker_started", pages: "11-100", start: "cold" }, kind: "duration" }]);
+    expect(recorded).toEqual([{ name: "run.milestone.duration", value: 4, labels: { milestone: "worker_started", start: "cold" }, kind: "duration" }]);
 
     recorded.length = 0;
     const already = fakeStore({ worker_started: null });
@@ -53,14 +53,25 @@ describe("run milestones", () => {
     expect(recorded).toEqual([]);
   });
 
-  it("never throws when the stamp fails, and does not hammer the database afterwards", async () => {
+  it("never throws when the stamp fails, logs no error text, and tries again later", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     let calls = 0;
-    const store = { async markRunMilestone() { calls += 1; throw new Error("connection lost: secret-dsn"); } };
+    const store = { async markRunMilestone() { calls += 1; if (calls === 1) throw new Error("connection lost: secret-dsn"); return { seconds: 9, pages: 3 }; } };
     await expect(noteRunMilestone(store, "run-1", "first_page_extracted")).resolves.toBeUndefined();
-    await noteRunMilestone(store, "run-1", "first_page_extracted");
-    expect(calls).toBe(1);
+    expect(recorded).toEqual([]);
     expect(warn.mock.calls.flat().join(" ")).not.toContain("secret-dsn");
+    await noteRunMilestone(store, "run-1", "first_page_extracted");
+    await noteRunMilestone(store, "run-1", "first_page_extracted");
+    expect(calls).toBe(2);
+    expect(recorded).toHaveLength(1);
+  });
+
+  it("records a run's outcome only for the caller that stamped it", async () => {
+    const run = { id: "run-9", createdAt: new Date(Date.now() - 60_000), pagesTotal: 8 };
+    await noteRunOutcome(fakeStore(), run, "completed");
+    await noteRunOutcome(fakeStore({ outcome_recorded: null }), run, "failed", "embed");
+    await noteRunOutcome(undefined, run, "failed", "embed");
+    expect(recorded.filter((entry) => entry.name === "run.outcomes").map((entry) => entry.labels)).toEqual([{ outcome: "completed", pages: "2-10" }]);
   });
 
   it("stamps first-extracted on an extraction stage and first-completed on the plan's last page stage", async () => {

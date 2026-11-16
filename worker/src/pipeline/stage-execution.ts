@@ -3,7 +3,7 @@ import { reportException, initializeWorkerErrorReporting } from "@docslurp/share
 import type { PreloadedRunState } from "../db/store.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
 import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
-import { noteRunMilestone, recordRunOutcome, workerStartKind, type RunMilestoneStore } from "./run-milestones.js";
+import { noteRunMilestone, noteRunOutcome, workerStartKind, type RunMilestoneStore } from "./run-milestones.js";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
 
@@ -735,7 +735,7 @@ export function createStageExecution(deps: {
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
       await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
-      recordRunOutcome(state.run, "failed", first?.[0] ?? state.stage);
+      await noteRunOutcome(store as RunMilestoneStore, state.run, "failed", first?.[0] ?? state.stage);
       await notifyTerminal(input.runId, "run.failed");
       return;
     }
@@ -744,7 +744,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
     );
     await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
-    recordRunOutcome(state.run, failed.length > 0 ? "completed_with_failures" : "completed");
+    await noteRunOutcome(store as RunMilestoneStore, state.run, failed.length > 0 ? "completed_with_failures" : "completed");
 
     await notifyTerminal(input.runId, "run.completed");
   }
@@ -767,7 +767,7 @@ export function createStageExecution(deps: {
     await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration },
       // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
       { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
-    recordRunOutcome(state.run, "failed", stage);
+    await noteRunOutcome(store as RunMilestoneStore, state.run, "failed", stage);
 
     await notifyTerminal(input.runId, "run.failed");
   }

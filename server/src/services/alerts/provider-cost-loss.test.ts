@@ -63,41 +63,67 @@ describe("ProviderCostLossMonitor", () => {
     expect(await m.instance.evaluate()).toEqual([expect.objectContaining({ id: "provider-cost-loss:o1", state: "ok" })]);
   });
 
-  it("records settled totals once per window, tick to tick, and keeps alerting when the totals query fails", async () => {
+  it("counts each settled item once, off the alert path, and survives failures and leader handovers", async () => {
     let now = 10_000_000;
     const windows: Array<{ since: number; until: number }> = [];
-    const record = vi.fn();
+    const recorded: Array<{ kind: string; items: number; lossItems: number; creditCents: number; providerCostCents: number; pages: number }> = [];
     let fail = false;
-    const totalsQuery = vi.fn(async (args: { since: Date; until: Date }) => {
-      if (fail) throw new Error("statement timeout: secret");
+    let batch = [
+      { kind: "run" as const, key: "r1", orgId: "o1", creditCents: 20, providerCostCents: 2, estimatedCostCents: 2, pages: 200 },
+      { kind: "run" as const, key: "r2", orgId: "o2", creditCents: 1, providerCostCents: 4, estimatedCostCents: 0, pages: 50 },
+    ];
+    const settled = vi.fn(async (args: { since: Date; until: Date }) => {
       windows.push({ since: args.since.getTime(), until: args.until.getTime() });
-      return [{ kind: "run" as const, items: 2, lossItems: 1, creditCents: 21, providerCostCents: 6, estimatedCostCents: 2, pages: 250 }];
+      if (fail) throw new Error("statement timeout: secret");
+      return batch;
     });
-    const instance = new ProviderCostLossMonitor(settings, {
-      query: async () => ({ items: [], orgs: [] }), now: () => now, emit: vi.fn(), billingEnforced: () => true, totals: totalsQuery, record,
+    const instance = new ProviderCostLossMonitor({ ...settings, thresholdCents: 0 }, {
+      query: async () => ({ items: [], orgs: [] }), now: () => now, emit: vi.fn(), billingEnforced: () => true, settled,
+      record: (totals) => { recorded.push(totals); },
     });
+    // The loss alert is switched off (threshold 0); the counters still run.
     await instance.evaluate();
-    // First tick of a leader looks one interval back from the settled edge.
+    await vi.waitFor(() => expect(recorded).toHaveLength(1));
     expect(windows[0]).toEqual({ since: now - settings.settleMs - settings.intervalMs, until: now - settings.settleMs });
+    expect(recorded[0]).toMatchObject({ kind: "run", items: 2, lossItems: 1, creditCents: 21, providerCostCents: 6, pages: 250 });
+
+    // Throttled inside the interval; then the same items reappear (late usage) with one new item: only the new one counts.
     now += 60_000;
     await instance.evaluate();
-    expect(totalsQuery).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+    batch = [...batch, { kind: "run" as const, key: "r3", orgId: "o1", creditCents: 5, providerCostCents: 1, estimatedCostCents: 0, pages: 10 }];
     now += settings.intervalMs;
     await instance.evaluate();
-    // The next window starts exactly where the last one ended: nothing counted twice, nothing skipped.
+    await vi.waitFor(() => expect(recorded).toHaveLength(2));
     expect(windows[1]!.since).toBe(windows[0]!.until);
-    expect(record).toHaveBeenCalledTimes(2);
+    expect(recorded[1]).toMatchObject({ items: 1, creditCents: 5, pages: 10 });
 
+    // A failed pass is skipped rather than retried over a growing window, and logs no error text.
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     fail = true;
     now += settings.intervalMs;
-    await expect(instance.evaluate()).resolves.toEqual([]);
+    await instance.evaluate();
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
     expect(error.mock.calls.flat().join(" ")).not.toContain("secret");
+    await new Promise((resolve) => setTimeout(resolve, 0));
     fail = false;
     now += settings.intervalMs;
     await instance.evaluate();
-    // The failed window is retried from the last recorded edge.
-    expect(windows[2]!.since).toBe(windows[1]!.until);
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(4));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(windows[3]!.since).toBe(windows[2]!.until);
+    // A long outage is capped at three intervals back.
+    now += 20 * settings.intervalMs;
+    await instance.evaluate();
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(5));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(windows[4]!.until - windows[4]!.since).toBe(3 * settings.intervalMs);
+    // Regaining leadership restarts one interval back instead of replaying what another leader counted.
+    instance.reset();
+    now += 10 * settings.intervalMs;
+    await instance.evaluate();
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(6));
+    expect(windows[5]!.until - windows[5]!.since).toBe(settings.intervalMs);
     error.mockRestore();
   });
 

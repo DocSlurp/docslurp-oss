@@ -710,7 +710,7 @@ function settledUsageItems(db: SqlClient, args: { since: Date; until: Date }, fr
       group by item_kind, item_key, org_id
     )
     select i.kind, i.key, i.org_id, i.credit_cents, i.provider_cost_cents, i.estimated_cost_cents, i.refunded, i.top_model,
-      case when i.kind = 'run' then coalesce(wr.pages_total, 0) else 0 end as pages,
+      case when i.kind = 'run' then coalesce(wr.pages_processed, 0) else 0 end as pages,
       case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end as judged_at
     from items i
     left join project_runs wr on i.kind = 'run' and wr.id = i.key
@@ -781,47 +781,44 @@ export async function providerCostLossItems(
   return { items, orgs };
 }
 
-/** What settled items of one kind charged and cost in a window (refunded chat turns excluded). */
-export interface SettledItemTotals {
+/** One settled item (profitable or not) with what it charged and what providers charged for it. */
+export interface SettledItem {
   kind: ProviderCostLossItem["kind"];
-  items: number;
-  /** Items whose provider cost exceeded the credits they charged. */
-  lossItems: number;
+  key: string;
+  orgId: string;
   creditCents: number;
   providerCostCents: number;
   estimatedCostCents: number;
-  /** Pages of the runs among the items (0 for chat turns and search sessions). */
+  /** Pages the run processed (0 for chat turns and search sessions). */
   pages: number;
 }
 
 /**
- * Every settled item in a window (not only the loss-making ones), totalled by kind: what each kind charged against
- * what providers charged for it. Same item rules, lookback and statement timeout as providerCostLossItems.
+ * Every item that settled in a window, not only the loss-making ones; refunded chat turns are left out. Same item
+ * rules, lookback and statement timeout as providerCostLossItems. An item's sums cover its events in the lookback, so
+ * a caller that totals across windows must count each item once (ProviderCostLossMonitor keeps the keys it counted).
+ * Capped at `limit` items, oldest first.
  */
-export async function settledItemTotals(
-  args: { since: Date; until: Date; lookbackMs?: number; statementTimeoutMs?: number },
+export async function settledItems(
+  args: { since: Date; until: Date; lookbackMs?: number; limit?: number; statementTimeoutMs?: number },
   client: SqlClient = sql,
-): Promise<SettledItemTotals[]> {
+): Promise<SettledItem[]> {
   const from = new Date(args.since.getTime() - (args.lookbackMs ?? 6 * 60 * 60_000));
   const timeoutMs = Math.max(1_000, Math.round(args.statementTimeoutMs ?? 20_000));
-  type Row = { kind: SettledItemTotals["kind"]; items: number; loss_items: number; credit_cents: number; provider_cost_cents: number;
+  type Row = { kind: SettledItem["kind"]; key: string; org_id: string; credit_cents: number; provider_cost_cents: number;
     estimated_cost_cents: number; pages: number };
   const rows = await client.begin(async (tx) => {
     const db = tx as unknown as SqlClient;
     await db`select set_config('statement_timeout', ${String(timeoutMs)}, true)`;
     return db<Row[]>`
-      select kind, count(*)::int as items,
-        (count(*) filter (where provider_cost_cents > credit_cents + 0.000001))::int as loss_items,
-        coalesce(sum(credit_cents), 0)::double precision as credit_cents,
-        coalesce(sum(provider_cost_cents), 0)::double precision as provider_cost_cents,
-        coalesce(sum(estimated_cost_cents), 0)::double precision as estimated_cost_cents,
-        coalesce(sum(pages), 0)::double precision as pages
+      select kind, key, org_id, credit_cents, provider_cost_cents, estimated_cost_cents, pages
       from (${settledUsageItems(db, args, from, false)}) settled
       where not refunded
-      group by kind`;
+      order by judged_at
+      limit ${args.limit ?? 5_000}`;
   }) as Row[];
   return rows.map((row) => ({
-    kind: row.kind, items: Number(row.items), lossItems: Number(row.loss_items), creditCents: Number(row.credit_cents),
+    kind: row.kind, key: row.key, orgId: row.org_id, creditCents: Number(row.credit_cents),
     providerCostCents: Number(row.provider_cost_cents), estimatedCostCents: Number(row.estimated_cost_cents), pages: Number(row.pages),
   }));
 }
