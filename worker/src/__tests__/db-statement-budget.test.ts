@@ -217,8 +217,11 @@ const STATEMENTS_PER_PAGE_BUDGET = 24;
 // 206 flights, 241 statements, 13 notify-bearing statements for this 10-page run.
 // Keep the original per-page slope; explicitly budget the fixed safety overhead
 // instead of removing transaction barriers to satisfy the old baseline.
-const TERMINAL_ROUND_TRIP_ALLOWANCE = 6;
-const TERMINAL_STATEMENT_ALLOWANCE = 1;
+// 2026-11-16: four run milestones (worker started, first page extracted, first page completed, outcome recorded;
+// pipeline/run-milestones.ts) are each one conditional UPDATE per run, so +4 flights and +4 statements whatever the
+// page count. Measured: 210 flights, 245 statements for this 10-page run. The per-page slope is unchanged.
+const TERMINAL_ROUND_TRIP_ALLOWANCE = 10;
+const TERMINAL_STATEMENT_ALLOWANCE = 5;
 const TERMINAL_NOTIFY_STATEMENT_ALLOWANCE = 3;
 // The same stages as one stage group: 14.9 after.
 const GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET = 16.5;
