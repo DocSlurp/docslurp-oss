@@ -308,10 +308,10 @@ describe("route tiers under the margin gate", () => {
   afterEach(() => resetPricingProviderForTests());
 
   it("prices an observed host at its verified schedule at the request time and skips it under the minimum margin", () => {
-    const input = { capability: "page-ocr" as const, tier: "balanced" as const, options: [option!], unitRevenueUsd: 0.0025, unit: CHART_UNIT };
+    const input = { capability: "page-ocr" as const, tier: "balanced" as const, options: [option!], unitRevenueUsd: 0.003, unit: CHART_UNIT };
     expect(selectTierRoute({ ...input, observations: [observation(PEAK)], now: PEAK }).basis).toBe("none");
     expect(selectTierRoute({ ...input, observations: [observation(OFF_PEAK)], now: OFF_PEAK }).basis).toBe("live");
-    expect(selectTierRoute({ ...input, observations: [observation(OFF_PEAK)], now: OFF_PEAK, minMarginRatio: 2 }).basis).toBe("none");
+    expect(selectTierRoute({ ...input, observations: [observation(OFF_PEAK)], now: OFF_PEAK, minMarginRatio: 2.5 }).basis).toBe("none");
   });
 
   it("takes the billed value from the pricing provider, and never picks on reviewed order alone when a value must be kept", () => {
