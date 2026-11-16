@@ -597,8 +597,9 @@ export function initializeOperatorConfig(role: OperatorConfigRole, env: Record<s
     agreed: [...new Set([...(previous?.agreed ?? []), ...result.agreed])],
   };
   log(`[operator-config] loaded role=${role} path=${loaded.path} version=${loaded.config.version} digest=${loaded.digest} applied=${result.applied.join(",") || "none"}`);
-  if (result.agreed.length) {
-    log(`[operator-config] also set in the environment (same value; the environment names retire later): ${result.agreed.join(",")}`);
+  const alsoInEnvironment = result.agreed.filter((name) => !previous?.applied.includes(name));
+  if (alsoInEnvironment.length) {
+    log(`[operator-config] also set in the environment (same value; the environment names retire later): ${alsoInEnvironment.join(",")}`);
   }
   return state;
 }

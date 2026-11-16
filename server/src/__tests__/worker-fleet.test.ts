@@ -186,6 +186,11 @@ describe("operator config skew (/ops/worker-fleet operatorConfig)", () => {
     expect(fleet.operatorConfigSkewOf(await unregistered.instance.resolve(), null).status).toBe("skew");
   });
 
+  it("does not trust the digest of a worker whose registry row is stale", async () => {
+    const stale = harness({ readRecords: vi.fn(async () => [record("w1", { configDigests: { operator: "sha256:a" }, lastSeenAt: NOW - 10 * 60_000 })]) });
+    expect(fleet.operatorConfigSkewOf(await stale.instance.resolve(), "sha256:a").status).toBe("skew");
+  });
+
   it("is unknown without live pollers", async () => {
     const idle = harness({ readPollers: vi.fn(async () => []) });
     const snapshot = await idle.instance.resolve();

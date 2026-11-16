@@ -374,7 +374,9 @@ export function operatorConfigSkewOf(snapshot: FleetCapabilitySnapshot, appDiges
   if (snapshot.basis !== "pollers") return { app: appDigest, status: "unknown", workers: [] };
   return assessOperatorConfigSkew(appDigest, snapshot.workers.map((worker) => ({
     identity: worker.identity,
-    digest: worker.configDigests && "operator" in worker.configDigests ? worker.configDigests.operator : undefined,
+    // A worker whose registry row is stale, stopped or from another build cannot vouch for its digest (an N-1 image keeps
+    // the row's old digest after a rollback): it counts as unknown, which is skew.
+    digest: !worker.note && worker.registered && worker.configDigests && "operator" in worker.configDigests ? worker.configDigests.operator : undefined,
   })));
 }
 
