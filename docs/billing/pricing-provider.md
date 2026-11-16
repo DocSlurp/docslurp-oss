@@ -85,7 +85,7 @@ restores the current value); an existing key rises by at most 1000 per raise, a 
 Fail closed:
 
 - a named plugin that does not load, exports no `register`, or returns an incomplete provider is a startup error;
-- `DOCSLURP_SERVICE_PROFILE=service` (or `DOCSLURP_PRICING_REQUIRED=1`) without `DOCSLURP_PRICING_PLUGIN` is a startup
+- `DOCSLURP_PROFILE=service` (or `DOCSLURP_PRICING_REQUIRED=1`) without `DOCSLURP_PRICING_PLUGIN` is a startup
   error, and `pricing()` throws under either setting until a provider is installed, so a billing deployment never prices
   with the open default, even in a process whose startup did not load one;
 - the id `open` is reserved for the open default; a second, different provider in one process is refused.

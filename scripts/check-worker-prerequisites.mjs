@@ -121,8 +121,12 @@ if (profile !== 'routing') {
     failures.push(`DOCSLURP_OCR_MODE=local needs the OCR venv (DOCSLURP_OCR_PYTHON=${ocrPython}) and models (DOCSLURP_OCR_MODEL_DIR=${ocrModels}); run scripts/install-ocr-runtime.sh`);
   }
   // Local OCR parses customer bytes on the worker host: only customer-owned self-hosting may choose it.
-  if (ocrMode === 'local' && (process.env.DOCSLURP_SERVICE_PROFILE ?? '').trim().toLowerCase() !== 'self-hosted') {
-    failures.push('DOCSLURP_OCR_MODE=local requires DOCSLURP_SERVICE_PROFILE=self-hosted');
+  // DOCSLURP_PROFILE=selfhost, or the deprecated DOCSLURP_SERVICE_PROFILE=self-hosted; either name saying service wins.
+  const profile = (process.env.DOCSLURP_PROFILE ?? '').trim().toLowerCase();
+  const legacyProfile = (process.env.DOCSLURP_SERVICE_PROFILE ?? '').trim().toLowerCase();
+  const selfhost = !profile.includes('service') && !legacyProfile.includes('service') && (profile === 'selfhost' || legacyProfile === 'self-hosted');
+  if (ocrMode === 'local' && !selfhost) {
+    failures.push('DOCSLURP_OCR_MODE=local requires DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted)');
   }
 }
 if (args.includes('--sandbox')) {

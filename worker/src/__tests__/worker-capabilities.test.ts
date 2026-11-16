@@ -120,16 +120,55 @@ describe("WorkerCapabilityRegistry", () => {
     await next.stop();
   });
 
+  it("advertises its extraction config and posture digest (migration 0182) for /ops/worker-fleet", { timeout: 60_000 }, async () => {
+    const config = { extractionConfig: 1, postureDigest: "sha256:0123456789abcdef", profile: "service", disabled: ["ocr"] };
+    const logs: string[] = [];
+    const reg = new WorkerCapabilityRegistry({
+      sql, instanceId: "fly-cfg", identity: "docslurp-worker-cfg", taskQueue: "docslurp-pipeline", buildId: "cfg",
+      capabilities: async () => ["extraction.config-v1"], config: () => config, log: (line) => logs.push(line),
+    });
+    expect(await reg.heartbeat()).toBe(true);
+    const [row] = await sql<{ config: unknown; capabilities: string[] }[]>`select config, capabilities from worker_capabilities where instance_id = 'fly-cfg'`;
+    expect(row).toEqual({ config, capabilities: ["extraction.config-v1"] });
+    expect(logs.some((line) => line.includes("posture=sha256:0123456789abcdef"))).toBe(true);
+    await reg.stop();
+    await sql`delete from worker_capabilities where instance_id = 'fly-cfg'`;
+  });
+
+  it("falls back to the old row on a schema without migration 0182, logging it once", async () => {
+    const statements: string[] = [];
+    const client = Object.assign(
+      (strings: TemplateStringsArray) => {
+        const text = strings.join("?");
+        statements.push(text);
+        if (text.includes("drizzle.__drizzle_migrations")) return Promise.resolve([{ latest: null }]);
+        if (text.includes("capabilities, config")) return Promise.reject(Object.assign(new Error('column "config" does not exist'), { code: "42703" }));
+        return Promise.resolve([]);
+      },
+      { array: (values: unknown[]) => values, json: (value: unknown) => value },
+    ) as unknown as Sql;
+    const logs: string[] = [];
+    const reg = new WorkerCapabilityRegistry({
+      sql: client, instanceId: "fly-old", identity: "w", taskQueue: "q", buildId: "b",
+      capabilities: async () => ["extraction.config-v1"], config: () => ({ extractionConfig: 1, postureDigest: "sha256:x" }), log: (line) => logs.push(line),
+    });
+    expect(await reg.heartbeat()).toBe(true);
+    expect(await reg.heartbeat()).toBe(true);
+    expect(logs.filter((line) => line.includes("migration 0182"))).toHaveLength(1);
+    // The second heartbeat skips the config statement until the schema is re-checked.
+    expect(statements.filter((text) => text.includes("capabilities, config"))).toHaveLength(1);
+  });
+
   it("probes the lexical column and lease schema for runtime capabilities", async () => {
     expect(await lexicalColumnProbe(sql)()).toBe(true);
     expect(await resolveWorkerCapabilities({
       creditLeasesActive: async () => false,
       lexicalColumnPresent: async () => true,
-    })).toEqual(["search.early-lexical", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
+    })).toEqual(["extraction.config-v1", "search.early-lexical", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
     expect(await resolveWorkerCapabilities({
       creditLeasesActive: async () => { throw new Error("db down"); },
       lexicalColumnPresent: async () => false,
-    })).toEqual(["workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
+    })).toEqual(["extraction.config-v1", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
   });
 });
 

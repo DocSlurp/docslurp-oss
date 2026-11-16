@@ -21,6 +21,7 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  */
 import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { serviceProfileFromEnv } from "@docslurp/shared";
 import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
@@ -988,8 +989,8 @@ export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = proc
   }
   if (local) {
     if (sandboxed) throw new Error(`DOCSLURP_PDF_MODE=local parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);
-    if (env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() !== "self-hosted") {
-      throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_SERVICE_PROFILE=self-hosted; refusing to start");
+    if (serviceProfileFromEnv(env) !== "self-hosted") {
+      throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted); refusing to start");
     }
     if (!(deps.dopplerInstalled ?? (() => dopplerConverterInstalled(env)))()) {
       throw new Error(`DOCSLURP_PDF_MODE=local needs Doppler's pdftomarkdown and pdfpagecount at ${dopplerBinDir(env)}, and prlimit on PATH (worker images ship them; DOCSLURP_DOPPLER_BIN_DIR points elsewhere); refusing to start`);

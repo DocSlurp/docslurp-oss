@@ -4,7 +4,7 @@ The worker runs file parsers (poppler, pandoc, LibreOffice and similar) on untru
 
 Production uses Modal's explicit VM runtime with filesystem and full network isolation. Local providers remain available for trusted development fixtures. In-process native PDF parsing is refused in production; image, PDF.js and quarantine byte inspection use VM entrypoints. See [Security](security.md#parser-sandbox) for the required image contract and credential boundary. Historical platform measurements below predate this VM-only production policy.
 
-OCR follows the same rule. For files the service manages, OCR runs only in an extractor plugin's VM provider (`DOCSLURP_OCR_MODE=vm`). `DOCSLURP_OCR_MODE=local` runs `worker/scripts/docslurp_ocr.py` under the provider on this page, so it is allowed only for customer-owned self-hosting (`DOCSLURP_SERVICE_PROFILE=self-hosted`). See [OCR](../extraction/ocr.md).
+OCR follows the same rule. For files the service manages, OCR runs only in an extractor plugin's VM provider (`DOCSLURP_OCR_MODE=vm`). `DOCSLURP_OCR_MODE=local` runs `worker/scripts/docslurp_ocr.py` under the provider on this page, so it is allowed only for customer-owned self-hosting (`DOCSLURP_PROFILE=selfhost`; see [Deployment profile](deployment-profile.md)). See [OCR](../extraction/ocr.md).
 
 ## Providers
 

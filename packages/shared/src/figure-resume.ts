@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { switchDisabled } from "./deployment-profile.js";
+
 /*
  * Figure resume (docs/extraction/doppler-figures.md, "Resuming partial figures"): when the worker finishes the images a
  * figure pass left resumable, and who may ask for it. The deploy flag DOCSLURP_FIGURE_RESUME is the ceiling; a project
@@ -46,7 +48,8 @@ export function figureGcDeletes(env: Record<string, string | undefined> = proces
 export function figureResumeDeployEnabled(env: Record<string, string | undefined> = process.env): boolean {
   const raw = (env[FIGURE_RESUME_ENV] ?? "").trim().toLowerCase();
   if (raw === "" || raw === "0" || raw === "false" || raw === "off") return false;
-  if (raw === "1" || raw === "true" || raw === "on") return true;
+  // DOCSLURP_DISABLE=figure-resume stops the runner and on-demand resume (requests still queue; switches only lower).
+  if (raw === "1" || raw === "true" || raw === "on") return !switchDisabled(env, "figure-resume");
   console.warn(`[figure-resume] ${FIGURE_RESUME_ENV}=${JSON.stringify(raw.slice(0, 16))} is not on/off; treated as off`);
   return false;
 }

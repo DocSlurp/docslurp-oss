@@ -46,3 +46,53 @@ describe("assertServiceProfileRuntime", () => {
     await expect(initializeParserSandbox({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PARSER_SANDBOX: "none" }, "linux")).rejects.toThrow(/refusing to start/);
   });
 });
+
+// #502: DOCSLURP_PROFILE never lowers the floor. Under a non-development NODE_ENV every in-process reader is refused
+// whatever the profile says, and the startup check refuses the profiles that would contradict it.
+describe("deployment profile (DOCSLURP_PROFILE) and the VM-only floor", () => {
+  it("refuses dev outside development, service outside production and an unset profile outside development", () => {
+    expect(() => assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "dev" })).toThrow(/only for development/);
+    expect(() => assertServiceProfileRuntime({ NODE_ENV: "development", DOCSLURP_PROFILE: "service" })).toThrow(/requires NODE_ENV=production/);
+    expect(() => assertServiceProfileRuntime({ NODE_ENV: "production" })).toThrow(/DOCSLURP_PROFILE is required outside development/);
+    expect(() => assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "service", DOCSLURP_DISABLE: "ocr,figuers" })).toThrow(/unknown token/);
+    expect(() => assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/conflicts/);
+    expect(assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost" }).vmOnlyParsing).toBe(true);
+  });
+
+  it.each([
+    { NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost" },
+    { NODE_ENV: "production", DOCSLURP_PROFILE: "dev" },
+    { NODE_ENV: "staging", DOCSLURP_PROFILE: "selfhost" },
+    { NODE_ENV: "development", DOCSLURP_PROFILE: "service" },
+  ])("refuses the in-process probe, native engine and local-cli reader under %j", async (env) => {
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+    expect(vmOnlyParsing(env)).toBe(true);
+    const { loadProbeBinding, setProbeBindingForTesting } = await import("../routing/probe/binding.js");
+    // Even a test override of the binding is never reached under VM-only.
+    setProbeBindingForTesting({ version: () => ({ version: "x", gitSha: "x", features: [] }), openPath: () => { throw new Error("opened"); } } as never);
+    try {
+      expect(loadProbeBinding(env)).toEqual({ ok: false, reason: expect.stringMatching(/VM boundary/) });
+    } finally {
+      setProbeBindingForTesting(null);
+    }
+    const { loadNativePdfEngine, loadNativePdfModule } = await import("../native-pdf/loader.js");
+    expect(loadNativePdfModule(env)).toMatchObject({ ok: false });
+    expect(await loadNativePdfEngine(env)).toMatchObject({ ok: false });
+    const { CommandRunner } = await import("../tools/runner.js");
+    await expect(new CommandRunner().florence2("/nonexistent.png", "/nonexistent.json", "<OCR>")).rejects.toThrow(/local-cli vision reader is refused outside development/);
+  });
+
+  it("refuses the local-cli reader under DOCSLURP_DISABLE=ai even in development", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    vi.stubEnv("DOCSLURP_DISABLE", "ai");
+    const { CommandRunner } = await import("../tools/runner.js");
+    await expect(new CommandRunner().florence2("/nonexistent.png", "/nonexistent.json", "<OCR>")).rejects.toThrow(/DOCSLURP_DISABLE=ai/);
+  });
+
+  it("a selfhost profile outside development cannot select a host sandbox", async () => {
+    await expect(initializeParserSandbox({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", DOCSLURP_PARSER_SANDBOX: "bubblewrap" }, "linux")).rejects.toThrow();
+    await expect(initializeParserSandbox({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", DOCSLURP_PARSER_SANDBOX: "none" }, "linux")).rejects.toThrow(/only in development or test/);
+    expect(resolveSandboxProviderId({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost" }, "linux")).toBe("modal");
+    expect(resolveSandboxProviderId({ NODE_ENV: "test", DOCSLURP_PROFILE: "service" }, "linux")).toBe("modal");
+  });
+});

@@ -38,7 +38,7 @@ off `PATH`. `pdfpagecount` is the structural PDF page count (run under `prlimit`
 
 Where it runs is `DOCSLURP_PDF_MODE` ([Docker Compose](self-host/docker-compose.md#pdfs)): in a VM (`vm`, the sandboxed PDF
 provider; production) or, for customer-owned execution only, on the worker host under the parser sandbox (`local`, which needs
-`DOCSLURP_SERVICE_PROFILE=self-hosted`). With neither, PDFs are refused and no other host parser runs.
+`DOCSLURP_PROFILE=selfhost`). With neither, PDFs are refused and no other host parser runs.
 
 ### OCR
 
@@ -54,7 +54,7 @@ see [OCR](extraction/ocr.md) for the modes, the service and self-hosted profiles
   `worker/ocr-models.json` at `/opt/docslurp/ocr-models` (84 MB). Both are root-owned and read-only. The build verifies
   every model hash and runs `docslurp_ocr.py --self-test`; a missing or mismatched model fails the build. The image
   sets `DOCSLURP_OCR_PYTHON` and `DOCSLURP_OCR_MODEL_DIR` only. It does not set `DOCSLURP_OCR_MODE` or
-  `DOCSLURP_SERVICE_PROFILE`: the operator chooses them.
+  `DOCSLURP_PROFILE`: the operator chooses them.
 
 Images used to ship 21 OCR language packs (107 MiB on lean, measured 2026-10-26). Removing them makes lean about
 1,980 MiB uncompressed (estimate: the 2,085 MiB measured then, less the packs; not re-measured). The full image gains the OCR venv and models
@@ -62,7 +62,7 @@ and loses the language packs and ocrmypdf, which depends on a system OCR engine.
 
 The prerequisite check (`scripts/check-worker-prerequisites.mjs`) runs `docslurp_ocr.py --self-test` whenever the OCR
 venv and model directory exist, and fails when `DOCSLURP_OCR_MODE=local` is set without them or without
-`DOCSLURP_SERVICE_PROFILE=self-hosted`. For a local install outside Docker, run `scripts/install-ocr-runtime.sh` (or
+`DOCSLURP_PROFILE=selfhost`. For a local install outside Docker, run `scripts/install-ocr-runtime.sh` (or
 `scripts/setup-cli-linux.sh --with-ocr`); it builds the same venv and models under `~/.cache/docslurp/ocr` and prints
 the variables to set.
 

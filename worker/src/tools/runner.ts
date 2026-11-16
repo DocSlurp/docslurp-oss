@@ -18,7 +18,7 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
-import { isDevelopmentEnvironment, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
+import { isDevelopmentEnvironment, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL, switchDisabled } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -1056,6 +1056,10 @@ export class CommandRunner {
     prompt: string,
     model = process.env.DOCSLURP_LOCAL_OCR_MODEL?.trim() || DEFAULT_LOCAL_OCR_MODEL,
   ): Promise<CommandPlan> {
+    // The `local-cli` vision reader is an operator opt-in for development only: refused under the VM-only floor
+    // (every non-development environment, whatever DOCSLURP_PROFILE says), and under DOCSLURP_DISABLE=ai.
+    if (vmOnlyParsing()) throw new Error("the local-cli vision reader is refused outside development (VM-only parsing); configure a hosted or private vision route");
+    if (switchDisabled(process.env, "ai")) throw new Error("the local-cli vision reader is off (DOCSLURP_DISABLE=ai)");
     return await this.planScript(
       "python3",
       "florence2_extract.py",

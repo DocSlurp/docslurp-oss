@@ -38,7 +38,7 @@ function explicitPdfMode(env: Record<string, string | undefined>): (typeof PDF_M
 export function sandboxedPdfConfigured(env: Record<string, string | undefined> = extractorEnvironment()): boolean {
   const installed = env.DOCSLURP_VM_PDF_INSTALLED?.trim() ?? "";
   if (!["", "0", "1"].includes(installed)) throw new Error("DOCSLURP_VM_PDF_INSTALLED must be empty, 0 or 1");
-  const serviceProfile = env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service";
+  const serviceProfile = serviceProfileActive(env);
   const mode = explicitPdfMode(env);
   return mode === "vm" || resolvePdfExtractorSetting(env) === "vm-pdf" || installed === "1" || serviceProfile;
 }
@@ -68,6 +68,7 @@ export const PDF_EXTRACTION_UNCONFIGURED =
 
 import type { ExtractionImage, ExtractionTable } from "./extraction.js";
 import type { UsageEvent } from "./usage.js";
+import { serviceProfileActive } from "./deployment-profile.js";
 
 /** JSON-safe metadata. Executable methods and options validators live in the worker. */
 export type ExtractorKind = "document" | "converter" | "component" | "page";

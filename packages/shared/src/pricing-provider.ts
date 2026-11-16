@@ -16,6 +16,7 @@ import type { CostEstimate } from "./jobs.js";
 import { OPEN_PRICING } from "./pricing-open.js";
 import type { QualityMode } from "./quality.js";
 import type { SearchMode } from "./project.js";
+import { serviceProfileActive } from "./deployment-profile.js";
 
 /** What a search is priced on: the mode it ran in and whether LLM query strategies ran. */
 export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode };
@@ -296,9 +297,9 @@ export const OPEN_PRICING_ID = "open";
 
 let installed: PricingProvider | null = null;
 
-/** Whether this process runs the hosted service profile, where the open default is never allowed. */
+/** Whether this process runs the hosted service profile (DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE), where the open default is never allowed. */
 export function pricingServiceProfile(env: Record<string, string | undefined> | undefined = processEnv()): boolean {
-  return env?.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service";
+  return env !== undefined && serviceProfileActive(env);
 }
 
 function processEnv(): Record<string, string | undefined> | undefined {

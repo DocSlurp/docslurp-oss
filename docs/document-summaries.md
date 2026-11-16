@@ -448,7 +448,7 @@ call is made, so a cap can hold one unit back for every call in flight.
 - **A deployment that charges but has no price builds nothing.** A deployment
   charges for work when billing is enforced (`STRIPE_SECRET_KEY`, or a
   `DOCSLURP_BILL_*` flag set to `true`), when pricing is required
-  (`DOCSLURP_SERVICE_PROFILE=service` or `DOCSLURP_PRICING_REQUIRED=1`), or when
+  (`DOCSLURP_PROFILE=service` or `DOCSLURP_PRICING_REQUIRED=1`), or when
   a pricing provider is installed (`DOCSLURP_PRICING_PLUGIN`). There, a provider
   without the method, one that throws, and any answer that is not a finite
   number above zero all mean `unpriced`:

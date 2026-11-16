@@ -13,6 +13,8 @@
  * - `off`: no OCR. The default everywhere else (a stock self-hosted install runs with NODE_ENV=production and no plugin;
  *   it reads no OCR rather than refusing to start).
  */
+import { DEPLOYMENT_PROFILES, serviceProfileFromEnv, switchDisabled } from "@docslurp/shared";
+
 import { sandboxedOcrProvider } from "../extractors/plugins.js";
 import { assertOcrPageReaderConfiguration, assertVisionPageReaderConfiguration } from "./page-reader-mode.js";
 
@@ -114,24 +116,40 @@ export function recordOcrFailedPages(
   return list;
 }
 
-/** `DOCSLURP_OCR_MODE`, or the default: `vm` under the service profile, `off` elsewhere. Throws on an unknown value. */
+/**
+ * `DOCSLURP_OCR_MODE`, or the default: `vm` under the service profile, `off` elsewhere. Throws on an unknown value.
+ * `DOCSLURP_DISABLE=ocr` turns OCR off whatever the mode says; `ai` turns off `hosted` (a model reads the page).
+ */
 export function resolveOcrMode(env: NodeJS.ProcessEnv = process.env): OcrMode {
   const raw = env.DOCSLURP_OCR_MODE?.trim().toLowerCase();
-  if (!raw) return resolveServiceProfile(env) === "service" ? "vm" : "off";
-  if (!(OCR_MODES as readonly string[]).includes(raw)) {
+  if (raw && !(OCR_MODES as readonly string[]).includes(raw)) {
     throw new Error(`DOCSLURP_OCR_MODE must be one of ${OCR_MODES.join(", ")}; got ${JSON.stringify(raw)}`);
   }
-  return raw as OcrMode;
+  const mode = (raw || (resolveServiceProfile(env) === "service" ? "vm" : "off")) as OcrMode;
+  if (switchDisabled(env, "ocr")) return "off";
+  if (mode === "hosted" && switchDisabled(env, "ai")) return "off";
+  return mode;
 }
 
-/** `DOCSLURP_SERVICE_PROFILE`, or null when unset. Throws on an unknown value. */
+/**
+ * The legacy profile (`service` | `self-hosted`), from `DOCSLURP_PROFILE` (`service`, `selfhost`) or the old
+ * `DOCSLURP_SERVICE_PROFILE`, or null when neither is set (or `DOCSLURP_PROFILE=dev`). Throws on an unknown value or a
+ * disagreement between the two names (startup refuses those first: @docslurp/shared resolveDeploymentProfile).
+ */
 export function resolveServiceProfile(env: NodeJS.ProcessEnv = process.env): ServiceProfile | null {
   const raw = env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase();
-  if (!raw) return null;
-  if (!(SERVICE_PROFILES as readonly string[]).includes(raw)) {
+  if (raw && !(SERVICE_PROFILES as readonly string[]).includes(raw)) {
     throw new Error(`DOCSLURP_SERVICE_PROFILE must be one of ${SERVICE_PROFILES.join(", ")}; got ${JSON.stringify(raw)}`);
   }
-  return raw as ServiceProfile;
+  const profile = env.DOCSLURP_PROFILE?.trim().toLowerCase();
+  if (profile && !(DEPLOYMENT_PROFILES as readonly string[]).includes(profile)) {
+    throw new Error(`DOCSLURP_PROFILE must be one of ${DEPLOYMENT_PROFILES.join(", ")}; got ${JSON.stringify(profile)}`);
+  }
+  const mappedNew = profile === "service" ? "service" : profile === "selfhost" ? "self-hosted" : null;
+  if (raw && profile && mappedNew !== raw) {
+    throw new Error(`DOCSLURP_PROFILE=${profile} conflicts with DOCSLURP_SERVICE_PROFILE=${raw}`);
+  }
+  return serviceProfileFromEnv(env);
 }
 
 /** Why `local` mode is refused under this environment, or null when it is allowed. */
@@ -142,8 +160,8 @@ export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | 
   const profile = resolveServiceProfile(env);
   if (profile === "self-hosted") return null;
   return profile === "service"
-    ? "DOCSLURP_OCR_MODE=local runs OCR inside the worker host, which does not meet the VM boundary required for service-managed customer files (DOCSLURP_SERVICE_PROFILE=service)"
-    : "DOCSLURP_OCR_MODE=local is only for customer-owned execution and needs DOCSLURP_SERVICE_PROFILE=self-hosted";
+    ? "DOCSLURP_OCR_MODE=local runs OCR inside the worker host, which does not meet the VM boundary required for service-managed customer files (DOCSLURP_PROFILE=service)"
+    : "DOCSLURP_OCR_MODE=local is only for customer-owned execution and needs DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted)";
 }
 
 /**
@@ -157,7 +175,7 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
   // A loaded VM OCR provider means a deployment that reads customer files in VMs: it must say which profile it is, and it
   // never runs OCR on the worker host instead.
   if (provider && profile === null) {
-    throw new Error("a sandboxedOcr provider plugin is loaded but DOCSLURP_SERVICE_PROFILE is unset; set it (service) rather than let the OCR boundary depend on a default; refusing to start");
+    throw new Error("a sandboxedOcr provider plugin is loaded but DOCSLURP_PROFILE is unset; set it (service) rather than let the OCR boundary depend on a default; refusing to start");
   }
   if (provider && mode === "local") {
     throw new Error(`DOCSLURP_OCR_MODE=local would run OCR on the worker host while the ${provider.id} VM provider is loaded; use vm; refusing to start`);
