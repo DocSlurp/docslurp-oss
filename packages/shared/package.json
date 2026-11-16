@@ -34,6 +34,10 @@
       "types": "./dist/env-flags.d.ts",
       "import": "./dist/env-flags.js"
     },
+    "./org-prompt-salt": {
+      "types": "./dist/org-prompt-salt.d.ts",
+      "import": "./dist/org-prompt-salt.js"
+    },
     "./observability": {
       "types": "./dist/observability.d.ts",
       "import": "./dist/observability.js"

@@ -1,4 +1,5 @@
-import { currentProviderPolicy } from "./provider-rate-limit.js";
+import { withOrgPromptSalt } from "@docslurp/shared/org-prompt-salt";
+import { currentProviderPolicy, currentProviderRateOrg } from "./provider-rate-limit.js";
 import { speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -70,7 +71,9 @@ async function generatePrivateText(args: {
   const operation = `worker.text.${args.operation}`;
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: args.model, capability: "text", operation });
   const settings = resolvePipelineTextGenerationOptions({ operation: args.operation, config: args.textGeneration, deploymentProfile: args.deploymentProfile, maxOutputTokens: args.maxOutputTokens });
-  const system = [args.system, settings.systemSuffix].filter(Boolean).join("\n\n") || undefined;
+  // Tenant text follows the job's org salt line (runWithProviderRateScope), so prefix caches (hosted or a shared private
+  // endpoint) never match across organizations; outside a job scope the salt is random and nothing is reused.
+  const system = withOrgPromptSalt(currentProviderRateOrg(), [args.system, settings.systemSuffix].filter(Boolean).join("\n\n") || undefined);
   return withObservation(
     {
       name: operation,
@@ -130,7 +133,7 @@ export async function generateOpenRouterText(args: {
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model, operation: `worker.text.${args.operation}`, target: "hosted" });
   args = { ...args, model: speedBoostModel(resolveSupportedModelIdWithWarning(args.model), currentProviderPolicy().speedBoost === true) };
   const settings = resolvePipelineTextGenerationOptions({ operation: args.operation, config: args.textGeneration, deploymentProfile: args.deploymentProfile, maxOutputTokens: args.maxOutputTokens });
-  const system = [args.system, settings.systemSuffix].filter(Boolean).join("\n\n") || undefined;
+  const system = withOrgPromptSalt(currentProviderRateOrg(), [args.system, settings.systemSuffix].filter(Boolean).join("\n\n") || undefined);
   return withObservation(
     {
       name: `worker.text.${args.operation}`,
@@ -205,7 +208,7 @@ export async function generateAnthropicText(args: {
       });
       const result = await generateText({
         model: provider(args.model),
-        system: args.system,
+        system: withOrgPromptSalt(currentProviderRateOrg(), args.system),
         prompt: args.prompt,
         maxOutputTokens: args.maxOutputTokens,
         // Bounded per request (WORKER_AI_REQUEST_TIMEOUT_MS): a dead socket must not hold the stage for hours.

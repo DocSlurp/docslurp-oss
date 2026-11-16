@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { requireOrgId } from "@docslurp/shared";
 
 import { envInt, TtlLruCache } from "./ttl-lru.js";
 
@@ -33,8 +34,9 @@ export function normalizeEmbeddingQuery(query: string): string {
 }
 
 export function embeddingCacheKey(identity: EmbeddingCacheIdentity, query: string): string {
+  const orgId = requireOrgId(identity.orgId, "query-embedding cache key");
   return createHash("sha256").update(JSON.stringify([
-    identity.orgId, identity.provider, identity.runtime, identity.model, identity.modelUri ?? null,
+    "embedding/v1", orgId, identity.provider, identity.runtime, identity.model, identity.modelUri ?? null,
     identity.baseUrl ?? null, identity.dimensions, identity.requestedDimensions ?? null, identity.normalize,
     normalizeEmbeddingQuery(query),
   ])).digest("hex");

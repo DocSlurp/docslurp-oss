@@ -29,6 +29,7 @@ export default defineConfig({
       "@docslurp/shared/env-flags": shared("env-flags"),
       "@docslurp/shared/operator-config": shared("operator-config"),
       "@docslurp/shared/observability": shared("observability"),
+      "@docslurp/shared/org-prompt-salt": shared("org-prompt-salt"),
       "@docslurp/shared/lancedb-s3-trace": shared("lancedb-s3-trace"),
       "@docslurp/shared/lancedb-query-tuning": shared("lancedb-query-tuning"),
       "@docslurp/shared/lancedb-session": shared("lancedb-session"),

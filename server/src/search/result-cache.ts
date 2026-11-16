@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { requireOrgId } from "@docslurp/shared";
 
 import { envInt, TtlLruCache } from "./ttl-lru.js";
 
@@ -31,8 +32,9 @@ export function hashVector(vector: number[]): string {
 }
 
 export function resultCacheKey(input: ResultCacheKeyInput): string {
+  const orgId = requireOrgId(input.orgId, "vector-result cache key");
   return createHash("sha256").update(JSON.stringify([
-    input.orgId,
+    "vector-result/v1", orgId,
     input.targets.map((target) => [target.uri, target.name, target.version,
       target.documentIds ? [...new Set(target.documentIds)].sort() : null]),
     hashVector(input.queryVector), input.queryVector.length, input.limit, input.refineFactor ?? null,

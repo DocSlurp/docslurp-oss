@@ -3,6 +3,7 @@ import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/share
 import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, createOpenRouterPromptCacheFetch, needsExplicitPromptCache, chatModelPromptAddendum, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { createHmac, randomBytes } from "node:crypto";
 import { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, evidenceTagKeyBytes, resetEvidenceTagKeyForTests } from "./chat-prompt-salt.js";
+import { currentRequestOrgId } from "./request-context.js";
 
 export { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, resetEvidenceTagKeyForTests };
 import { homedir } from "node:os";
@@ -183,10 +184,16 @@ export async function generateOpenRouterText(args: {
    * organization's China-provider restriction is still added on top.
    */
   providerPreferences?: Record<string, unknown>;
+  /**
+   * The tenant whose content or query is sent; defaults to the request's organization. The prompt goes after that
+   * org's salt line, so provider prefix caches never match across organizations (random line without an org).
+   */
+  orgId?: string | null;
 }): Promise<{ text: string; usage: TextGenerationUsage }> {
+  const saltLine = chatSystemSaltLine(args.orgId ?? currentRequestOrgId());
   // `llm://private/<alias>/<model>` routes go to the operator-registered endpoint.
   if (isPrivateModelUri(args.model)) {
-    const generated = await generatePrivateEndpointText({ ...args, operation: args.operation ?? "api.text.private", modelUri: args.model });
+    const generated = await generatePrivateEndpointText({ ...args, system: saltLine, operation: args.operation ?? "api.text.private", modelUri: args.model });
     return { text: generated.text, usage: generated.usage };
   }
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: args.operation ?? "api.text.openrouter", target: "hosted" });
@@ -227,6 +234,7 @@ export async function generateOpenRouterText(args: {
           context: args.observability,
         }),
         model: provider(model),
+        system: saltLine,
         prompt: args.prompt,
         maxOutputTokens: args.maxOutputTokens,
         abortSignal: args.signal,
@@ -346,8 +354,9 @@ export async function generateOpenRouterDocumentText(args: {
     const generated = await generatePrivateEndpointText({
       operation: "api.chat.documents",
       modelUri: args.model,
-      system: args.system,
-      // Private routes keep the question-first order and a random per-call tag: they have no shared prompt cache.
+      // A shared private endpoint may prefix-cache (vLLM does by default): the org salt goes first, before the project's
+      // instructions. Private routes keep the question-first order and a random per-call evidence tag.
+      system: [chatSystemSaltLine(args.evidenceScope), args.system].filter(Boolean).join("\n\n"),
       prompt: `${withoutEvidenceTags(args.prompt)}\n\nProject evidence:\n\n${inlineDocuments}`,
       maxOutputTokens: args.maxOutputTokens,
       privacyMode: args.privacyMode,

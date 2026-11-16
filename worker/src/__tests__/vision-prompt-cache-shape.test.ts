@@ -5,11 +5,21 @@ const image = { type: "image_url", image_url: { url: "data:image/png;base64,AA==
 const CACHED = { cacheOrdered: true };
 
 describe("vision prompt shape for prompt caching", () => {
-  it("keeps the original shape, byte for byte, for every model that is not cache-ordered (all but Claude)", () => {
+  it("never lets two organizations share an uncached-shape prefix (tenant labels and the page image follow the salt)", async () => {
+    const { runWithProviderRateScope } = await import("../lib/provider-rate-limit.js");
     const prompt = buildSchemaAwareVisionPrompt("schema-form-fields", { properties: { total: {} } });
-    const messages = visionPromptMessages(prompt, schemaLabelsRequestText(prompt), image, { cacheOrdered: false });
+    const shape = (orgId: string | null) => runWithProviderRateScope({ orgId }, async () => visionPromptMessages(prompt, undefined, image, { cacheOrdered: false })[0]);
+    expect(await shape("org-a")).toEqual(await shape("org-a"));
+    expect(await shape("org-a")).not.toEqual(await shape("org-b"));
+    expect(await shape(null)).not.toEqual(await shape(null));
+  });
+
+
+  it("keeps the original shape for every model that is not cache-ordered (all but Claude), with the org salt first", () => {
+    const prompt = buildSchemaAwareVisionPrompt("schema-form-fields", { properties: { total: {} } });
+    const messages = visionPromptMessages(prompt, schemaLabelsRequestText(prompt), image, { cacheOrdered: false, orgSaltLine: "Workspace 0123456789abcdef." });
     expect(messages).toEqual([
-      { role: "system", content: VISION_SYSTEM_INSTRUCTION },
+      { role: "system", content: `${VISION_SYSTEM_INSTRUCTION}\nWorkspace 0123456789abcdef.` },
       { role: "user", content: [{ type: "text", text: prompt }, image] },
     ]);
     expect(visionPromptFromMessages(messages as never)).toBe(prompt);
@@ -40,7 +50,7 @@ describe("vision prompt shape for prompt caching", () => {
 
   it("sends the whole prompt in the user message when the request tail does not match (fails closed)", () => {
     const messages = visionPromptMessages("fixed rules\n\ndigest A", "digest B", image, CACHED) as Array<{ role: string; content: any }>;
-    expect(messages[0]!.content).toBe(VISION_SYSTEM_INSTRUCTION);
+    expect(messages[0]!.content).toMatch(new RegExp(`^${VISION_SYSTEM_INSTRUCTION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\nWorkspace [0-9a-f]{16}\\.$`));
     expect(messages[1]!.content).toEqual([{ type: "text", text: "fixed rules\n\ndigest A" }, image]);
   });
 

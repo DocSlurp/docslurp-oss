@@ -74,6 +74,14 @@ describe("runWebCapability", () => {
     expect(t.run).toHaveBeenCalledTimes(2);
   });
 
+  it.each([null, "", "  "])("never caches a call without an organization (orgId %j)", async orgId => {
+    const t = setup({}, { orgPerMinute: 20 });
+    const unscoped = { ...ctx, orgId };
+    expect((await runWebCapability("search", search, unscoped)).cached).toBe(false);
+    expect((await runWebCapability("search", search, unscoped)).cached).toBe(false);
+    expect(t.run).toHaveBeenCalledTimes(2);
+  });
+
   it("charges nothing when nothing comes back, but still records the provider cost", async () => {
     const t = setup();
     t.run.mockResolvedValueOnce({ data: { results: [] }, costUsd: 0.0005, costSource: "reported" as const, units: { amount: 10_000, unit: "tokens" } });

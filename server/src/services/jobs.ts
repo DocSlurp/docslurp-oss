@@ -229,11 +229,18 @@ export async function getJobStatus(
     order by r.created_at, r.id
   `;
   if (rows.length > 0) {
-    const first = rows[0]!;
-    if (options.apiKey && !apiKeyCanUseProject(options.apiKey, { id: first.project_id, orgId: first.org_id })) return null;
-    const access = await getProjectAccess(first.project_id, userId);
-    if (!access) return null;
-    return jobFromRunRows(rows, first.job_id ?? first.id);
+    // Every run is authorized on its own: a job id shared by runs of several projects (or, historically, several
+    // organizations) only reports the runs this caller and key may see, never another tenant's ids or counts.
+    const allowed = new Map<string, boolean>();
+    for (const row of rows) {
+      if (allowed.has(row.project_id)) continue;
+      const keyAllows = !options.apiKey || apiKeyCanUseProject(options.apiKey, { id: row.project_id, orgId: row.org_id });
+      allowed.set(row.project_id, keyAllows && Boolean(await getProjectAccess(row.project_id, userId)));
+    }
+    const visible = rows.filter((row) => allowed.get(row.project_id) === true);
+    if (visible.length === 0) return null;
+    const first = visible[0]!;
+    return jobFromRunRows(visible, first.job_id ?? first.id);
   }
   const [graph] = await sql<GraphJobRow[]>`
     select id, org_id, project_id, status, estimate, documents_total, documents_processed, documents_failed
@@ -261,6 +268,11 @@ export async function getJobStatus(
 /** Stamps job metadata on freshly created runs (before they start, so the worker reads it with the run). */
 export async function recordJobMeta(runIds: string[], meta: JobMeta, client: typeof sql = sql): Promise<void> {
   if (runIds.length === 0) return;
+  // A job never spans organizations (a null org counts as its own): refuse before stamping anything.
+  const [scope] = await client<{ orgs: number }[]>`
+    select count(distinct coalesce(org_id, ''))::int as orgs from project_runs where id = any(${runIds})
+  `;
+  if ((scope?.orgs ?? 0) > 1) throw new Error("recordJobMeta refused: a job's runs must belong to one organization");
   await client`
     update project_runs
     set job_id = ${meta.id},

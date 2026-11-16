@@ -452,7 +452,8 @@ export async function embedQuery(
       usage.recordDiagnostic("embeddingCache", { hit: false, bypassed: true, bypassReason, privacyMode });
     } else {
       countSearchEvent(cached ? "embedCacheHit" : "embedCacheMiss");
-      usage.recordDiagnostic("embeddingCache", { hit: cached !== undefined, hits: cache.hits, misses: cache.misses, entries: cache.size, privacyMode });
+      // Only this search's own hit: process-wide hit, miss and size counts mix every organization's traffic.
+      usage.recordDiagnostic("embeddingCache", { hit: cached !== undefined, privacyMode });
     }
     if (cached) {
       console.info(`[search-cache] embedding hit model=${model} privacy=${privacyMode} entries=${cache.size}`);
