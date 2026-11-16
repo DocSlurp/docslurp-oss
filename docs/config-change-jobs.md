@@ -75,3 +75,35 @@ Mutations that queue work return a `job`:
 const { job } = await client.updateProject("legal", { embedding: { model: "…" } });
 if (job) for await (const event of client.streamJob(job.id)) console.log(event.event, event.job.status);
 ```
+
+## Coherent settings publication
+
+`GET /v1/projects/:projectId/settings-publication` reads the public project and search/chat settings under the config lock and returns opaque `revision.project` and `revision.search` preconditions. The search revision is `absent` before the first stored row. The endpoint requires edit access; a live server API key additionally needs `projects:manage` and the matching organization/project allowlist. Browser and delegated OAuth keys cannot use it.
+
+`POST` to that path publishes one sparse intent:
+
+```json
+{
+  "requestId": "617a1ce0-bf14-429b-bbc8-7f0c72c71562",
+  "expected": { "project": "opaque-from-get", "search": "absent" },
+  "project": { "pipeline": { "chunkOverlap": true }, "apply": "reindex" },
+  "search": { "chat": { "citations": true }, "retrievalDefaults": { "resultCount": 6 } }
+}
+```
+
+The server checks both revisions under the existing config lock. Pipeline, search/chat, admitted work, reservations, audit and actor-scoped retry receipt commit together or roll back. Retry an unchanged intent with the same request ID; changing its parameters requires a new ID. A stale project or search row returns 409, including a concurrent first search-row insertion. Existing independent preference writers also serialize with publication.
+
+Omitted fields retain their stored values; `false` remains explicit. Supported nullable search fields reset to inherited behavior with `null`. Arrays replace. `clearOutputSchema: true` explicitly removes the output schema; omission preserves it. Unknown keys and managed model/provider bindings are refused. The body is limited to 128 KiB. Existing estimates, billing and scope checks remain authoritative; this endpoint does not grant new execution authority. A deferred-mode change that queues work requires explicit `project.apply: "reindex"` consent.
+
+The snapshot includes safe effective-value explanations and bounded legacy-index coverage. Resolved values cannot reconstruct whether an old normalized setting was explicitly chosen or defaulted, so their origin is labeled `project-resolved`. Template locks, independent organization/key ceilings and unavailable/inactive preferences are explained without exporting managed bindings or secrets. Saving desired settings is not proof that existing documents have migrated.
+
+Normalization is part of vector generation identity and query-vector cache identity. Historical records without normalization cannot establish compatibility. Vector retrieval returns `index_rebuild_required` rather than reproducing an unknown space with current settings; keyword retrieval does not reproduce vectors. Use existing authorized document reprocessing, with an estimate and explicit confirmation, to rebuild bounded batches. Missing hashes are not backfilled by assuming the current recipe. A worker-written current-generation hash clears the rebuild-required condition for that document.
+
+Privacy/PII tightening over retained documents requires immediate artifact fencing. The shared project-settings writer refuses tightening whenever any tenant/project-scoped document or run row remains, including archived/superseded versions, deferred or unindexed documents, and queued/running/terminal history. It checks inside the writing transaction under organization spend admission and project-row locks, independently of rebuild eligibility. Journaled migration `0180_policy_admission_fence.sql` makes every run insert take the same row lock and validate its policy against the committed project policy, so a stale request cannot arrive after an empty-project tightening. Stricter request policies remain allowed; weaker policies are refused. This is a conservative refusal, not artifact fencing or automatic compliance. A genuinely empty project can tighten. Template-locked pipeline mutations are rejected rather than silently restored. Full desired/building/serving lifecycle, policy purge/fencing, retained-extraction compatibility and playground workflows remain separate work.
+
+
+### Admission lock order
+
+Every common project-settings write now takes the project config advisory lock, then the organization spend-admission advisory lock, before any project row lock or UPDATE. This includes ordinary embedding/chunk rebuilds, non-reindex publication callbacks that enqueue mode work, PATCH/proposals and the common history/graph/summary writer. Taking spend only for privacy tightening would leave ordinary rebuilds holding the project while intake held spend, producing a deadlock when each requested the other lock.
+
+The standalone full-index/mode job commit already takes spend before its full-index advisory lock and before inserting runs; publication reuses it inside the already ordered transaction. Version restoration uses the common settings writer. The stored-mode compensation helper and managed-model writer finish their own transactions without later run admission, so they do not request spend after their project writes. Intake takes spend before the policy admission trigger's project row lock. No deadlock retry or policy-fence bypass is added.

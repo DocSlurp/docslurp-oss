@@ -1,3 +1,6 @@
+import { lockProjectConfigurationWrite } from "./project-write-lock.js";
+import { assertPolicyTransitionAllowed } from "./policy-transition.js";
+import { HTTPException } from "hono/http-exception";
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
@@ -682,13 +685,13 @@ export async function ensurePersonalDefaultProject(userId: string): Promise<void
 }
 
 /** Read-only: automatic titles advance after ingest (project-naming.ts sweepProjectAutoTitles), never on a read. */
-export async function getProject(projectId: string, userId: string): Promise<ProjectRecord | null> {
-  const access = await getProjectAccess(projectId, userId);
+export async function getProject(projectId: string, userId: string, client: typeof sql = sql): Promise<ProjectRecord | null> {
+  const access = await getProjectAccess(projectId, userId, client);
   if (!access) {
     return null;
   }
 
-  return await readProject(projectId, access.orgId);
+  return await readProject(projectId, access.orgId, client);
 }
 
 /**
@@ -700,8 +703,8 @@ export async function getAuthorizedProjectRecord(projectId: string, orgId: strin
   return await readProject(projectId, orgId);
 }
 
-async function readProject(projectId: string, orgId: string): Promise<ProjectRecord | null> {
-  const [row] = await sql<ProjectRow[]>`
+async function readProject(projectId: string, orgId: string, client: typeof sql = sql): Promise<ProjectRecord | null> {
+  const [row] = await client<ProjectRow[]>`
     select
       w.id,
       w.org_id,
@@ -1012,7 +1015,14 @@ export async function listProjectBoardRecords(userId: string): Promise<ProjectBo
 
 type ProjectSqlClient = typeof sql;
 
+export class ProjectSettingsStaleError extends HTTPException {
+  readonly code = "settings_stale" as const;
+  constructor() { super(409, { message: "Project settings changed. Reload before saving." }); }
+}
+
 export type ProjectUpdateOptions = {
+  /** Snapshot used to construct a whole-pipeline patch outside this service. */
+  expectedUpdatedAt?: string;
   indexingMode?: PipelineFeatures["indexingMode"];
   /**
    * The summary-tree setting to store. Only services/project-summary-tree.ts passes it. Without it every update keeps
@@ -1060,6 +1070,13 @@ export async function resolveUpdatedPipeline(
   const draftPipeline = normalizePipelineFeatures(draftSource);
   // The tree keeps document summaries on (summary-tree.ts); `summaries: false` cannot turn them off under it.
   if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries || summaryTree.enabled;
+  // Reject a bypassed read-only control instead of silently reporting a successful save.
+  if (parsed.pipeline && (parsed.templateKey === undefined || parsed.templateKey === current.templateKey) && template) {
+    const at = (source: unknown, path: string): unknown => path.split(".").reduce<unknown>((value, key) => value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined, source);
+    if (template.lockedSettings.some(path => JSON.stringify(at(draftPipeline, path)) !== JSON.stringify(at(current.pipeline, path)))) {
+      throw new HTTPException(409, { message: "This setting is locked by the project template." });
+    }
+  }
   // Managed model fields (backend models, providers, routes) are never a customer choice: keep the stored ones
   // (platform-admin settings) across every edit; the routes refuse them in requests.
   // Managed model fields (backend models, providers, routes) are never a customer choice: whatever the draft holds
@@ -1102,6 +1119,26 @@ export async function updateProject(
   if (!options.precomputed && deferredProfilesEnabled() && (pipeline.indexingMode !== current.pipeline.indexingMode || (pipeline.indexingMode === "visual" && pipeline.quality === "fast"))) {
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
+
+  if (options.expectedUpdatedAt !== undefined && options.expectedUpdatedAt !== current.updatedAt) throw new ProjectSettingsStaleError();
+  if (!options.client) {
+    // All project preference writers share publication's lock, including graph, history and section summaries.
+    // Resolution/validation stays outside the transaction; a stale resolution is refused rather than replayed.
+    return await sql.begin(async tx => {
+      const client = tx as unknown as typeof sql;
+      await lockProjectConfigurationWrite(client, projectId, current.orgId);
+      const [revision] = await client<{ version: string }[]>`select updated_at::text as version from projects where id=${projectId}`;
+      if (revision?.version !== current.updatedAt) throw new ProjectSettingsStaleError();
+      const access = await getProjectAccess(projectId, userId, client);
+      if (!access || !canEditProject(access, userId)) return null;
+      await updateProject(projectId, userId, parsed, { ...options, client, precomputed: { current, pipeline } });
+      return getProject(projectId, userId, client);
+    }) as ProjectRecord | null;
+  }
+
+  // Also covers internal transaction callers; acquire before any project write, not only on tightening.
+  await lockProjectConfigurationWrite(options.client, projectId, current.orgId);
+  await assertPolicyTransitionAllowed(options.client, current, pipeline);
 
   const nextSlug = parsed.slug === undefined ? current.slug : parsed.slug.toLowerCase();
   if (nextSlug !== current.slug) {
@@ -1173,7 +1210,7 @@ export async function updateProject(
   if (parsed.allowChinaProviders !== undefined) forgetProjectProviderPolicy(projectId);
   // Settings, pipeline and privacy changes drop cached search answers in every API process (on commit inside a transaction).
   await notifySearchEligibilityChanged(client, [projectId]);
-  return options.client ? current : await getProject(projectId, userId);
+  return current;
 }
 
 async function mutateProjectArchiveState(args: {
