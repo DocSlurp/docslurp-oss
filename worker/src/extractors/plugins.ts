@@ -1,9 +1,12 @@
+import { candidatesFromPageFacts, FACTS_CANDIDATE_RULES } from "../chart-export/facts-candidates.js";
+import { classifyAdaptivePage } from "../stages/classify-route.js";
+import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
 /*
  * Extractor plugins: optional providers a deployment loads by configuration, never by import.
  *
  * DocSlurp ships an open default for everything here. A deployment may add one sandboxed PDF extractor (served as the
- * `vm-pdf` extractor id), one image orientation provider and one sandboxed OCR provider (`DOCSLURP_OCR_MODE=vm`) by naming
- * plugin modules in DOCSLURP_EXTRACTOR_PLUGINS (comma-separated absolute paths or file: URLs). Each module exports
+ * `vm-pdf` extractor id), one image orientation provider, one sandboxed OCR provider (`DOCSLURP_OCR_MODE=vm`) and one page
+ * image reader (`DOCSLURP_OCR_PAGE_READER`, a second read of OCR page images in its own VM) by naming plugin modules in DOCSLURP_EXTRACTOR_PLUGINS (comma-separated absolute paths or file: URLs). Each module exports
  * `register(host)`, which returns the plugin.
  *
  * Rules the host enforces:
@@ -28,8 +31,9 @@ import {
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
-import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
-import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
+import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
+import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
+import { settleUnknownGrids } from "../lib/doppler-page-facts-layout.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -54,7 +58,52 @@ export interface SandboxedPdfJob {
    * `--images-doc-max-bytes`, `--images-batch-pages`, `--images-link-prefix`): a provider passes them so that Doppler's own
    * budgets stop it (a resumable `budget`/`doc_budget`) before the host would refuse the folder.
    */
-  figures?: { dir: string; limits?: DopplerImageLimits };
+  figures?: {
+    dir: string; limits?: DopplerImageLimits;
+    /**
+     * Also extract charts from the figure SVGs in the same VM (the free chart rungs, given each figure's words), writing
+     * `charts.json` (FIGURE_CHARTS_FILE, doppler-figure-charts@1) into `dir` beside the figures. Only when the provider
+     * declares `figures.charts` and the run's chart tier asks for it (chart-export/figure-charts.ts figureChartsRequest).
+     * A provider must never fail the figures or the Markdown because the charts failed: it writes a refusal instead.
+     */
+    charts?: { diagrams: boolean };
+  };
+}
+
+/**
+ * One figure resume (provider `figures.resume`), always for one range: a shard's pages, a gap's pages, or (for an unsharded
+ * document) the whole document. Paths are host paths the provider stages into a fresh VM; the host reads nothing of the
+ * source. The answer is a figure outcome like SandboxedPdfResult.figures (`extracted`, `partial` with optional `gaps`
+ * inside the range, or `failed` with a telemetry-only reason), and the host validates `dir` exactly like a first pass's
+ * folder (no figure file it already stores may come back different: `resume-rewrite`).
+ *
+ * Folder the provider writes into `dir` (created empty):
+ * - a range (`pages` set): `shards/<first>-<last>/manifest.jsonl` (4-digit zero padding, the converter's own manifest for
+ *   `--images-pages first-last`) and only the new files under `page-NNNN/`;
+ * - a whole document (`pages` null): `manifest.jsonl` and only the new files under `page-NNNN/`.
+ */
+export interface FigureResumeJob {
+  /** The document's PDF (the converter checks it against `sourceSha256` and refuses another). */
+  input: string;
+  sourceSha256: string;
+  /**
+   * The range's stored manifest (the resume folder holds only it: `--images-resume` with a manifest-only folder), or null
+   * for a gap (no manifest ever came back): a fresh figure pass over `pages` (`--images-pages first-last`).
+   */
+  manifest: string | null;
+  /** The range (bound into the manifest's settings digest by `--images-pages`), or null for an unsharded document. */
+  pages: [number, number] | null;
+  /**
+   * Narrow a resume inside the range (Doppler `--images-resume-pages A-B`, not part of the settings digest); null resumes
+   * all of it. Always within `pages`; never set for a gap.
+   */
+  resumePages: [number, number] | null;
+  /** Empty folder for the resumed images (layout above). */
+  dir: string;
+  /** The document's caps as Doppler flags (as for a first pass): a resume never exceeds them. */
+  limits: DopplerImageLimits;
+  /** Wall-time budget for the VM run; the guest should set `--images-deadline` a margin below it. */
+  timeoutMs: number;
 }
 
 export interface SandboxedPdfRunContext {
@@ -153,7 +202,16 @@ export interface SandboxedPdfExtractorProvider {
     read(output: string, signal?: AbortSignal): Promise<EmbeddedImageSet>;
   };
   /** Present when the provider can return Doppler figure crops beside the Markdown (SandboxedPdfJob.figures). */
-  figures?: { producerId: string };
+  figures?: {
+    producerId: string;
+    /**
+     * Finish the images a figure pass left resumable, in a fresh VM (`pdftomarkdown --images-resume` with the stored
+     * manifest only: no figure file goes back into the VM). Optional: without it, resumable documents stay resumable.
+     */
+    resume?(job: FigureResumeJob, signal?: AbortSignal): Promise<unknown>;
+    /** True when the provider can extract charts from its figures in the same VM (SandboxedPdfJob.figures.charts). */
+    charts?: boolean;
+  };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**
@@ -215,6 +273,17 @@ export interface SandboxedOcrJob {
 /** What a sandboxed OCR run returns: the command result. The host reads and validates `job.output` itself. */
 export type SandboxedOcrResult = SandboxResult;
 
+/**
+ * Job ownership from the stage run context, for accounting and placement hints. Organization membership alone
+ * does not establish equal project/API-key access. Neither key authorizes VM reuse: each job gets a fresh VM.
+ */
+export interface SandboxedOcrRunContext {
+  tenantKey?: string;
+  affinityKey?: string;
+  /** Revalidate live authorization before admission and publication; an expired/revoked scope returns null. */
+  authorizeCohort?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
+}
+
 export interface SandboxedOcrProvider {
   /** Stable id for telemetry and ledger metadata, chosen by the plugin. */
   id: string;
@@ -229,20 +298,122 @@ export interface SandboxedOcrProvider {
    * killed by its own resource limits), throw an error carrying `ocrRefused: true`: the page fails without a retry. Any
    * other throw (VM creation, capacity, a deadline, a dropped transfer) is treated as infrastructure and retried later.
    */
-  run(job: SandboxedOcrJob, signal?: AbortSignal): Promise<SandboxedOcrResult>;
+  run(job: SandboxedOcrJob, signal?: AbortSignal, context?: SandboxedOcrRunContext): Promise<SandboxedOcrResult>;
   /** Upper bound on one run's wall time for this many frames: the remote command budget. */
   timeoutMs(frames: number): number;
+}
+
+/**
+ * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
+ * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to `scope.orgId`
+ * for that VM's whole life (it may serve several jobs of that organization, never another's), reads them there, and returns only bounded Markdown per page. The VM gets no
+ * credentials, no metadata endpoint and no network beyond the job's own connection.
+ */
+export interface PageImageReadJob {
+  /** Tenant scope of every page. A provider binds an isolated VM to one organization and refuses a job for another. */
+  scope: { orgId: string; runId: string };
+  /** Opaque keys (never document ids) and absolute paths of PNGs the OCR boundary wrote and the host validated by signature and size. */
+  pages: Array<{ key: string; imagePath: string }>;
+}
+
+export const PAGE_IMAGE_READ_FAILURES = ["timeout", "refused", "oversized", "invalid", "vm-lost", "capacity"] as const;
+export type PageImageReadFailure = (typeof PAGE_IMAGE_READ_FAILURES)[number];
+
+export type PageImageReadResult =
+  | { key: string; status: "read"; markdown: string; inputTokens?: number; outputTokens?: number }
+  | { key: string; status: "failed"; reason: PageImageReadFailure };
+
+export interface PageImageReaderProvider {
+  /** Stable id for telemetry and ledger metadata, chosen by the plugin. */
+  id: string;
+  /** Model id logged in `[ai-usage]` and usage events; never shown in the product UI. */
+  model: string;
+  /** Pages one job carries at most. */
+  maxPagesPerJob: number;
+  /** Largest PNG the provider accepts; the host never sends a larger one. */
+  maxImageBytes: number;
+  /** Largest Markdown (UTF-8 bytes) one page may return; a larger result fails the job. */
+  maxMarkdownBytes: number;
+  /**
+   * Optional: the longest page-image edge, in pixels, the reader's model reads at (256..4000). vision-extract renders PDF
+   * pages for the reader at this size and refuses a PNG whose header reports a longer edge. Without it pages render at the
+   * renderer's default size.
+   */
+  maxLongEdgePx?: number;
+  /**
+   * Optional: the ISO 3166-1 alpha-2 country where the reader's VMs process pages (`US`, `FR`). vision-extract sends pages
+   * to the reader only when the organization's provider-region policy admits that country (`CN`, `HK` and `MO` need
+   * allowChinaProviders); a reader without it is never used for vision transcription (fail closed).
+   */
+  hostCountry?: string;
+  /**
+   * Optional: the ISO 3166-1 alpha-2 country of the company that operates those VMs, by controlling ownership and
+   * jurisdiction as packages/shared/src/provider-regions.ts classifies providers (`CN` for a Chinese-owned cloud wherever
+   * it is listed). Vision page reads require it beside `hostCountry`; both must pass the organization's region policy.
+   */
+  operatorCountry?: string;
+  /** Throw when the deployment is not ready (unpinned image, missing endpoint). The worker then refuses to start. */
+  assertConfigured(): void;
+  /**
+   * Optional upper estimate of one job's provider cost in cents, for `pages` pages. The host reserves it against the
+   * organization's daily reader budget before sending the job (DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS), so
+   * concurrent jobs cannot pass the cap together; the job's recorded cost replaces it. Without it the host reserves 0.
+   */
+  estimateJobCostCents?(pages: number): number;
+  /**
+   * Optional: the reader's composite on the page-OCR tier benchmark (0-1, tolerant-markdown@v1 `content`) from a recorded
+   * run (`evalRef`). A tier word in DOCSLURP_OCR_PAGE_READER ranks the reader by it (@docslurp/shared selectOcrRoute);
+   * without it the reader is unmeasured and never chosen by a tier.
+   */
+  evalScore?: number;
+  evalRef?: string;
+  /**
+   * Read the job's pages. Resolves with one result per page it answers (at most one per key) and the provider cost of
+   * every VM or request it ran. A rejection that spent compute carries that cost as `pageReaderUsage` (PAGE_READER_USAGE_PROPERTY,
+   * read with pageReaderUsageOf); set `ocrRefused: true` when the reader refused the job's input rather than failing to run.
+   * Either way the host keeps the recogniser's text for the job's pages: a page reader never fails a page or document.
+   */
+  read(job: PageImageReadJob, signal?: AbortSignal): Promise<{ results: PageImageReadResult[]; usage: UsageEvent[] }>;
+}
+
+/** The property a page reader's rejection carries its incurred usage on (PageImageReaderProvider.read). */
+export const PAGE_READER_USAGE_PROPERTY = "pageReaderUsage";
+
+/** The usage a page reader rejection carries (shape-checked; never throws). A single SandboxRunError `usage` counts too. */
+export function pageReaderUsageOf(error: unknown): UsageEvent[] {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return [];
+  const isEvent = (event: unknown): event is UsageEvent => !!event && typeof event === "object" && typeof (event as { metric?: unknown }).metric === "string";
+  const raw = (error as Record<string, unknown>)[PAGE_READER_USAGE_PROPERTY];
+  if (!Array.isArray(raw)) { const single = (error as { usage?: unknown }).usage; return isEvent(single) ? [single] : []; }
+  return raw.filter(isEvent);
 }
 
 export interface ExtractorPlugin {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   name: string;
+  /** Count-only observations from already validated results; never source bytes. */
+  costEvidence?: (facts: unknown, text: ReadonlyMap<number, string>, tools: { nominate: typeof candidatesFromPageFacts; rules: typeof FACTS_CANDIDATE_RULES; classify: typeof classifyAdaptivePage }) => ReadonlyMap<number, unknown>;
   sandboxedPdf?: SandboxedPdfExtractorProvider;
   imageOrientation?: ImageOrientationProvider;
   sandboxedOcr?: SandboxedOcrProvider;
+  pageImageReader?: PageImageReaderProvider;
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
+export function providerCostEvidence(facts: unknown, text: ReadonlyMap<number, string>, pageCount: number): Map<number, unknown> {
+  const out = new Map<number, unknown>();
+  if (!facts || !Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > 100_000) return out;
+  for (const plugin of plugins) {
+    if (!plugin.costEvidence) continue;
+    try {
+      for (const [page, value] of plugin.costEvidence(facts, text, { nominate: candidatesFromPageFacts, rules: FACTS_CANDIDATE_RULES, classify: classifyAdaptivePage })) {
+        if (Number.isSafeInteger(page) && page >= 1 && page <= pageCount) out.set(page, parsePageCostEvidence(value));
+      }
+    } catch { /* A refused observation stays unknown; extraction is independent. */ }
+  }
+  return out;
+}
+
 export interface ExtractorPluginHost {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   SandboxRunError: typeof SandboxRunError;
@@ -256,12 +427,30 @@ export interface ExtractorPluginHost {
    * database bound (setExtractorDocumentOwners): a provider must then refuse the batch, never skip the check.
    */
   documentOwners(documentIds: readonly string[]): Promise<ReadonlyMap<string, { orgId: string | null; runId: string }>>;
+  /** Bounded, content-free operational observations; unavailable storage refuses automatic host selection. */
+  computeObservations(profileIds: readonly string[]): Promise<import("@docslurp/shared").ComputeObservations>;
+  authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
   /** The figure outcomes this core accepts: a provider reports `partial` (exit 5, folder kept) only when it is listed. */
   figureOutcomes: readonly ("extracted" | "partial" | "failed")[];
 }
 
 type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
 let documentOwnersLookup: DocumentOwnersLookup | undefined;
+let computeObservationsLookup: ExtractorPluginHost["computeObservations"] | undefined;
+let computeCohortAuthorizer: ExtractorPluginHost["authorizeComputeCohort"] | undefined;
+
+export function setExtractorComputeCohortAuthorizer(lookup: ExtractorPluginHost["authorizeComputeCohort"] | undefined): void {
+  computeCohortAuthorizer = lookup;
+}
+
+export async function authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
+  if (!computeCohortAuthorizer) throw new SandboxRunError("Compute cohort authorizer is not bound in this worker");
+  return await computeCohortAuthorizer(scope);
+}
+
+export function setExtractorComputeObservations(lookup: ExtractorPluginHost["computeObservations"] | undefined): void {
+  computeObservationsLookup = lookup;
+}
 
 /** Bind the database lookup behind ExtractorPluginHost.documentOwners (worker startup; tests). */
 export function setExtractorDocumentOwners(lookup: DocumentOwnersLookup | undefined): void {
@@ -284,6 +473,11 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
       if (!documentOwnersLookup) throw new SandboxRunError("Document ownership lookup is not bound in this worker");
       return await documentOwnersLookup(documentIds);
     },
+    computeObservations: async (profileIds) => {
+      if (!computeObservationsLookup) throw new SandboxRunError("Compute observations lookup is not bound in this worker");
+      return await computeObservationsLookup(profileIds);
+    },
+    authorizeComputeCohort,
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,
   };
 }
@@ -292,6 +486,8 @@ const plugins: ExtractorPlugin[] = [];
 let loadedFrom: string | undefined;
 
 const PROVIDER_ID = /^[a-z][a-z0-9-]{1,63}$/;
+/** A model id safe to log and store: no spaces or control characters. */
+const PAGE_READER_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 
 /** Register a plugin. Exactly one provider per capability; a second one is a configuration error. */
 export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
@@ -328,6 +524,32 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
       if (typeof ocr[name] !== "function") throw new Error(`Sandboxed OCR provider lacks ${name}()`);
     }
   }
+  const reader = plugin.pageImageReader;
+  if (reader) {
+    if (pageImageReaderProvider()) throw new Error("Only one page image reader provider may be registered");
+    if (!PROVIDER_ID.test(reader.id ?? "")) throw new Error("Page image reader provider needs a lowercase id");
+    if (typeof reader.model !== "string" || !PAGE_READER_MODEL_ID.test(reader.model)) throw new Error("Page image reader provider needs a model id");
+    for (const name of ["maxPagesPerJob", "maxImageBytes", "maxMarkdownBytes"] as const) {
+      if (!Number.isSafeInteger(reader[name]) || reader[name] < 1) throw new Error(`Page image reader provider needs a positive ${name}`);
+    }
+    for (const name of ["assertConfigured", "read"] as const) {
+      if (typeof reader[name] !== "function") throw new Error(`Page image reader provider lacks ${name}()`);
+    }
+    if (reader.maxLongEdgePx !== undefined && !(Number.isSafeInteger(reader.maxLongEdgePx) && reader.maxLongEdgePx >= 256 && reader.maxLongEdgePx <= 4000)) {
+      throw new Error("Page image reader provider's maxLongEdgePx must be an integer from 256 to 4000");
+    }
+    for (const field of ["hostCountry", "operatorCountry"] as const) {
+      const value = reader[field];
+      if (value !== undefined && !(typeof value === "string" && /^[A-Z]{2}$/.test(value))) {
+        throw new Error(`Page image reader provider's ${field} must be an ISO 3166-1 alpha-2 code such as US`);
+      }
+    }
+    if (reader.estimateJobCostCents !== undefined && typeof reader.estimateJobCostCents !== "function") throw new Error("Page image reader provider's estimateJobCostCents must be a function");
+    if (reader.evalScore !== undefined && !(typeof reader.evalScore === "number" && reader.evalScore >= 0 && reader.evalScore <= 1)) throw new Error("Page image reader provider's evalScore must be from 0 to 1");
+    if ((reader.evalScore === undefined) !== (reader.evalRef === undefined) || (reader.evalRef !== undefined && (typeof reader.evalRef !== "string" || !reader.evalRef.trim()))) {
+      throw new Error("Page image reader provider needs evalScore and evalRef together");
+    }
+  }
   plugins.push(plugin);
   if (pdf?.shardProfile) registerShardProfile(pdf.shardProfile.key, pdf.shardProfile.prior);
 }
@@ -345,6 +567,12 @@ export function requireSandboxedPdfProvider(): SandboxedPdfExtractorProvider {
 
 const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
 const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutFacts>>();
+const reportedWalkerUnknown = new WeakMap<SandboxedPdfJob, LayoutWalkerUnknown>();
+/** The host's page count for the job's accepted result (bounds the pages settleJobLayout fills). */
+const reportedPageCount = new WeakMap<SandboxedPdfJob, number>();
+/** settleJobLayout's answer per job, computed once per accepted result. */
+const settledLayouts = new WeakMap<SandboxedPdfJob, SettledLayout | null>();
+interface SettledLayout { layout: Map<number, PageLayoutFacts>; fromFacts: number; unknown: number; filled: number; walker: number }
 const reportedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
 
 /**
@@ -438,9 +666,12 @@ function figureOutcome(job: SandboxedPdfJob, raw: unknown, pages: number): Sandb
  * Validate a provider run's `ocrPages` against the page count and keep them for the job. A malformed list refuses the
  * run: provider output is untrusted, and billing evidence must not be guessed from it.
  */
-export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number): SandboxedPdfResult {
+export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number, options: { glyphs?: boolean } = {}): SandboxedPdfResult {
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
+  reportedWalkerUnknown.delete(job);
+  reportedPageCount.delete(job);
+  settledLayouts.delete(job);
   reportedFigures.delete(job);
   clearSandboxedPdfPageFacts(job);
   const figures = figureOutcome(job, result.figures, pages);
@@ -448,11 +679,18 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   if (result.figures !== undefined) result = { ...result, figures: undefined };
   const pageFacts = result.pageFacts;
   if (pageFacts !== undefined) result = { ...result, pageFacts: undefined };
+  if (Number.isSafeInteger(pages) && pages > 0) reportedPageCount.set(job, Math.min(pages, MAX_REPORTED_PAGES));
   if (result.layoutFacts !== undefined) {
     // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.
     const layout = parsePageLayoutFacts(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
+    // A whole file the walker could not walk (a page tree that does not check out, say): counted, so it is never silent.
+    const walkerUnknown = pageLayoutWalkerUnknown(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
+    if (walkerUnknown) {
+      reportedWalkerUnknown.set(job, walkerUnknown);
+      console.warn(`[vm-pdf] layout walker unknown reason=${walkerUnknown.reason} pages=${walkerUnknown.pages}`);
+    }
     if (layout.size > 0) reportedLayoutFacts.set(job, layout);
-    else console.warn("[vm-pdf] layout facts unusable; routing continues without them");
+    else if (!walkerUnknown) console.warn("[vm-pdf] layout facts unusable; routing continues without them");
     result = { ...result, layoutFacts: undefined };
   }
   const raw: unknown = result.ocrPages;
@@ -467,21 +705,110 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
     reportedOcrPages.set(job, ocrPages);
   }
   // Last, once nothing else can refuse the result: page facts bounded by the host's own count only (without one, dropped).
-  acceptSandboxedPdfPageFacts(job, pageFacts, pages);
+  // `glyphs`: the run read math, so its facts are not walker-parity facts (acceptSandboxedPdfPageFacts).
+  acceptSandboxedPdfPageFacts(job, pageFacts, pages, process.env, { glyphs: options.glyphs === true });
   return ocrPages ? { ...result, ocrPages } : result;
 }
 
+/** Pages whose ruled grids the walker itself reported (layout source per page: walker; the rest came from facts or stay unknown). */
+function walkerPages(reported: ReadonlyMap<number, PageLayoutFacts> | undefined): number {
+  let pages = 0;
+  for (const page of reported?.values() ?? []) if (page.grids !== null) pages += 1;
+  return pages;
+}
+
+/** A page neither the walker nor the page facts could describe: everything unknown, its grids too (routed as tables). */
+const UNKNOWN_PAGE: PageLayoutFacts = { images: null, tables: null, words: null, grids: null, tableCoverage: null, gridsUnknown: true };
+
 /**
- * The validated layout facts a finished job returned, or undefined when it returned none usable. With
- * DOCSLURP_DOPPLER_PAGE_FACTS=use, layout facts mapped from its page facts stand in when it returned none.
+ * The job's layout with its unknown grids settled from its Doppler page facts, or null when it has no page facts. Every
+ * page 1..the host's page count gets an entry (council #2 F1/F2): a page the walker left out (it failed for the whole
+ * file, for that chunk, or for that page; its time budget ran out) takes the page facts' grids where they know them, and
+ * is otherwise marked gridsUnknown. Only grids come from the facts for such a page (outside `use` mode they steer nothing
+ * else). A run that returned no layout facts and no walker reason is left without layout facts. Computed once per
+ * accepted result.
+ */
+function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
+  if (settledLayouts.has(job)) return settledLayouts.get(job)!;
+  const facts = sandboxedPdfPageFacts(job);
+  const reported = reportedLayoutFacts.get(job) ?? sandboxedPdfPageFactsLayout(job);
+  let settled: SettledLayout | null = null;
+  // Only a job that has layout facts to settle: the walker's, the facts' own (`use`), or a walker that said why it could
+  // not walk the file. A run that returned no layout at all keeps routing without one, as before (store mode).
+  // Without page facts (core refused them, or a non-walker source the guest marked), a layout that says it is partial (a
+  // gridsUnknown page or a walker reason) still gets every page: the missing ones unknown, routed as tables (council #2
+  // re-check N1).
+  if (!facts && reported && (reportedWalkerUnknown.has(job) || [...reported.values()].some((page) => page.gridsUnknown === true))) {
+    const layout = new Map(reported);
+    const last = reportedPageCount.get(job) ?? Math.max(0, ...layout.keys());
+    let filled = 0;
+    for (let page = 1; page <= last; page += 1) if (!layout.has(page)) { layout.set(page, { ...UNKNOWN_PAGE }); filled += 1; }
+    const unknown = [...layout.values()].filter((page) => page.gridsUnknown === true).length;
+    settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts: 0, unknown, filled, walker: walkerPages(reported) };
+  }
+  if (facts && (reported || reportedWalkerUnknown.has(job))) {
+    const base = new Map(reported ?? []);
+    let last = reportedPageCount.get(job) ?? 0;
+    if (last === 0) for (const page of [...base.keys(), ...facts.pages.keys()]) last = Math.max(last, page);
+    let filled = 0;
+    for (let page = 1; page <= last; page += 1) {
+      if (base.has(page)) continue;
+      base.set(page, { ...UNKNOWN_PAGE });
+      filled += 1;
+    }
+    const { layout, fromFacts, unknown } = settleUnknownGrids(base, facts);
+    settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts, unknown, filled, walker: walkerPages(reported) };
+  }
+  settledLayouts.set(job, settled);
+  return settled;
+}
+
+/**
+ * The validated layout facts a finished job returned, or undefined when it returned none usable. With page facts in hand
+ * (layout source selective, both or facts), unknown grids are settled from them and every page has an entry
+ * (settleJobLayout); with DOCSLURP_DOPPLER_PAGE_FACTS=use, their layout stands in when the walker returned none.
  */
 export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageLayoutFacts> | undefined {
+  const settled = settleJobLayout(job);
+  if (settled) return settled.layout;
   return reportedLayoutFacts.get(job) ?? sandboxedPdfPageFactsLayout(job);
+}
+
+/** How many of the job's pages had unknown walker grids settled from page facts, were left unknown (routed as tables), or
+ * were missing from the walker's layout and filled in. */
+export function sandboxedPdfGridSettlement(job: SandboxedPdfJob): { fromFacts: number; unknown: number; filled: number; walker: number } | undefined {
+  const settled = settleJobLayout(job);
+  return settled ? { fromFacts: settled.fromFacts, unknown: settled.unknown, filled: settled.filled, walker: settled.walker } : undefined;
+}
+
+/** The whole-file reason the provider's layout walker reported for a finished job (a fixed slug and a page count), if any. */
+export function sandboxedPdfLayoutWalkerUnknown(job: SandboxedPdfJob): LayoutWalkerUnknown | undefined {
+  return reportedWalkerUnknown.get(job);
 }
 
 /** Where `sandboxedPdfLayoutFacts` came from: the provider's layout walker, or its page facts (`use` mode). */
 export function sandboxedPdfLayoutFactsSource(job: SandboxedPdfJob): "vm-pdf" | "vm-pdf-facts" | undefined {
-  return reportedLayoutFacts.has(job) ? "vm-pdf" : sandboxedPdfPageFactsLayout(job) ? "vm-pdf-facts" : undefined;
+  if (reportedLayoutFacts.has(job)) return "vm-pdf";
+  return sandboxedPdfLayoutFacts(job) ? "vm-pdf-facts" : undefined;
+}
+
+/**
+ * Figures a failed job salvaged (the provider's `error.figures`, published into `job.figures.dir`; only when the host
+ * declares `partial` in figureOutcomes): the shards that finished before the failure. Parsed as untrusted; anything but
+ * `extracted` or `partial` salvages nothing.
+ */
+const salvagedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
+export function noteSalvagedFigures(job: SandboxedPdfJob, error: unknown, pages: number): void {
+  salvagedFigures.delete(job);
+  const raw = (error as { figures?: unknown } | null)?.figures;
+  if (!job.figures || raw === undefined) return;
+  const outcome = parseSandboxedPdfFigureOutcome(raw, MAX_FIGURE_REASON_CHARS, pages);
+  if (outcome.status !== "failed") salvagedFigures.set(job, outcome);
+}
+export function sandboxedPdfSalvagedFigures(job: SandboxedPdfJob): SandboxedPdfFigureOutcome | undefined {
+  const outcome = salvagedFigures.get(job);
+  salvagedFigures.delete(job);
+  return outcome;
 }
 
 /** The figure outcome of a finished job that asked for figures, or undefined when it did not ask. */
@@ -509,12 +836,17 @@ export function requireSandboxedOcrProvider(): SandboxedOcrProvider {
   return provider;
 }
 
-/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`, `vm-ocr`). */
+export function pageImageReaderProvider(): PageImageReaderProvider | null {
+  return plugins.find((plugin) => plugin.pageImageReader)?.pageImageReader ?? null;
+}
+
+/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`, `vm-ocr`, `page-reader`). */
 export function loadedPluginCapabilities(): string[] {
   return [
     ...(sandboxedPdfProvider() ? [VM_PDF_EXTRACTOR_ID] : []),
     ...(imageOrientationProvider() ? ["image-orientation"] : []),
     ...(sandboxedOcrProvider() ? ["vm-ocr"] : []),
+    ...(pageImageReaderProvider() ? ["page-reader"] : []),
   ];
 }
 

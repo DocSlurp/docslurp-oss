@@ -18,9 +18,10 @@ export default defineConfig({
     setupFiles: ["./src/test-setup.ts"],
   },
   resolve: {
-    alias: {
+    alias: Object.entries({
       "@docslurp/worker/testing": resolve(__dirname, "../worker/src/testing.ts"),
       "@docslurp/shared/cancellation": shared("cancellation"),
+      "@docslurp/shared/page-table-routing": shared("page-table-routing"),
       "@docslurp/shared/pricing-loader": shared("pricing-loader"),
       "@docslurp/shared/error-reporting": shared("error-reporting"),
       "@docslurp/shared/error-response": shared("error-response"),
@@ -28,6 +29,7 @@ export default defineConfig({
       "@docslurp/shared/env-flags": shared("env-flags"),
       "@docslurp/shared/observability": shared("observability"),
       "@docslurp/shared/lancedb-s3-trace": shared("lancedb-s3-trace"),
+      "@docslurp/shared/lancedb-query-tuning": shared("lancedb-query-tuning"),
       "@docslurp/shared/lancedb-session": shared("lancedb-session"),
       "@docslurp/shared/lancedb-hydration": shared("lancedb-hydration"),
       "@docslurp/shared/lancedb-ddb": shared("lancedb-ddb"),
@@ -42,6 +44,10 @@ export default defineConfig({
       "@docslurp/sdk/embed": resolve(__dirname, "../packages/sdk/src/embed/index.tsx"),
       "@docslurp/sdk/search-adapters": resolve(__dirname, "../packages/sdk/src/search-adapters.ts"),
       "@docslurp/sdk": resolve(__dirname, "../packages/sdk/src/index.ts"),
-    },
+    }).map(([find, replacement]) => ({
+      // Match the root exactly so package-exported subpaths resolve normally.
+      find: find === "@docslurp/shared" ? /^@docslurp\/shared$/ : find,
+      replacement,
+    })),
   },
 });

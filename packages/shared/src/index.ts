@@ -32,6 +32,7 @@ export * from "./image-routing.js";
 export * from "./image-anchors.js";
 export * from "./doppler-figures.js";
 export * from "./doppler-assets.js";
+export * from "./figure-resume.js";
 export * from "./structured.js";
 export * from "./connectors.js";
 export * from "./artifacts.js";
@@ -39,6 +40,8 @@ export * from "./pii.js";
 export * from "./pii-withholding.js";
 export * from "./temporal-connection.js";
 export * from "./vector-namespace.js";
+export * from "./summary-tree.js";
+export * from "./summary-tree-job.js";
 
 // Sub-modules created during refactor
 export * from "./embedding.js";
@@ -54,6 +57,7 @@ export * from "./page-table-routing.js";
 export * from "./file-formats.js";
 export * from "./file-sniff.js";
 export * from "./page-raster-routing.js";
+export * from "./page-cost-route.js";
 export * from "./text-layer-quality.js";
 export { buildProfilerRules, type ProfilerRules } from "./estimate-profiler-rules.js";
 export * from "./upload-quote.js";
@@ -70,6 +74,7 @@ export * from "./project-slug.js";
 export * from "./connection-uri.js";
 export * from "./chunks.js";
 export * from "./search.js";
+export * from "./search-stream.js";
 export * from "./usage.js";
 export * from "./text-normalization.js";
 export * from "./document-title.js";
@@ -88,8 +93,11 @@ export type {
 } from "./layout.js";
 
 export * from "./openrouter-usage.js";
+export * from "./openrouter-prompt-cache.js";
+export * from "./chat-model-prompts.js";
 export * from "./openrouter-routing.js";
 export * from "./provider-pools.js";
+export * from "./automatic-model-selection.js";
 export * from "./provider-tiers.js";
 export * from "./tier-options.js";
 export * from "./provider-regions.js";
@@ -105,6 +113,9 @@ export * from "./page-routing.js";
 export * from "./routing-targets.js";
 export * from "./public-errors.js";
 export * from "./parse-source-decision.js";
+export * from "./runtime-environment.js";
+export * from "./test-database-guard.js";
+export * from "./ingest-version.js";
 export * from "./api-error.js";
 export * from "./frontend-api.js";
 
@@ -122,3 +133,13 @@ export * from "./geo-projection-contract.js";
 export * from "./realtime.js";
 
 export * from "./reserved-email.js";
+export * from "./managed-pipeline-models.js";
+export * from "./model-call-policy.js";
+export * from "./vision-request-profile.js";
+export * from "./document-failure.js";
+
+export * from "./upload-recovery.js";
+
+export type { ComputePriceObservation, ComputeCalibrationObservation, ComputeObservations } from "./compute-observations.js";
+export { computePriceColumns, computeCalibrationColumns, decodeComputeObservation } from "./compute-observations.js";
+export type { ComputeExecutionScope, ComputeCohortGrant } from "./compute-observations.js";

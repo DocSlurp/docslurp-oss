@@ -14,6 +14,7 @@ import { chatScopeFor } from "../services/chat-scope.js";
 import { describeSearchSettingsForAgent } from "../services/chat-search-options.js";
 import { describeCurrentSearchSettings } from "../services/project-chat.js";
 import { canEditProject, getProjectAccess } from "../services/organizations.js";
+import { editorRequired } from "../lib/reprocess-access.js";
 import { getProjectSearchSettings } from "../services/search-controls.js";
 import { getProject } from "../services/projects.js";
 import { resolveScopeDeclineThreshold } from "../search/scope-relevance.js";
@@ -108,7 +109,8 @@ export const chatInstructionsRoutes = new Hono()
       const access = await getProjectAccess(projectId, userId);
       const project = access ? await getProject(projectId, userId) : null;
       // Improve suggests settings, so it needs edit access, like saving them.
-      if (!access || !project || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      if (!access || !project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      if (!canEditProject(access, userId)) return editorRequired(c);
 
       // The project limit is checked first, so a project refusal never uses up the user's allowance.
       for (const [subject, limit] of [

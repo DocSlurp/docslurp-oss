@@ -160,7 +160,26 @@ function gemini2Tokens(width: number, height: number): number {
 
 // Nemotron (`nemotronTokens`) and MiMo (`qwen2vlTokens`) are refused: their processor maxima are not proven at the
 // serving level, so they carry no bound; the rules stay for the evidence their re-admission needs.
+/**
+ * Claude high-resolution tier (Claude 4.7 and later models, Haiku 5.5 included): ceil(w / 28) x ceil(h / 28) visual tokens,
+ * after downscaling to at most 2,576 px on the long edge and 4,784 tokens, aspect ratio kept
+ * (platform.claude.com/docs/en/build-with-claude/vision, 2026-11-13).
+ */
+function anthropicHighResolutionTokens(width: number, height: number): number {
+  const tokens = (w: number, h: number) => Math.ceil(w / 28) * Math.ceil(h / 28);
+  let scale = Math.min(1, 2_576 / Math.max(width, height));
+  let w = Math.max(1, Math.round(width * scale));
+  let h = Math.max(1, Math.round(height * scale));
+  while (tokens(w, h) > 4_784) {
+    scale *= 0.995;
+    w = Math.max(1, Math.floor(width * scale));
+    h = Math.max(1, Math.floor(height * scale));
+  }
+  return tokens(w, h);
+}
+
 const RULES: Record<string, (width: number, height: number) => number | null> = {
+  "anthropic/claude-haiku-5.5": anthropicHighResolutionTokens,
   "deepseek/deepseek-v4.1-flash-1017": deepseekTokens,
   "z-ai/glm-5.3-flash": glm5NextTokens,
   "gpt-4.1-mini": openAiTokens(1.62),
@@ -197,6 +216,13 @@ describe("vision image-token bounds against each model's published image process
       expect(visionImageTokens(model, null)!).toBeGreaterThanOrEqual(rule(4_096, 4_096) ?? 0);
     });
   }
+
+  it("matches the published Claude high-resolution examples", () => {
+    expect(anthropicHighResolutionTokens(1_000, 1_000)).toBe(1_296);
+    expect(anthropicHighResolutionTokens(1_920, 1_080)).toBe(2_691);
+    expect(anthropicHighResolutionTokens(2_000, 1_500)).toBe(3_888);
+    expect(anthropicHighResolutionTokens(3_840, 2_160)).toBe(4_784);
+  });
 
   it("covers the minimum-size upscaling the patch formula alone would miss", () => {
     // A 14 px square is one 14-px patch, but these processors enlarge it to their minimum size.

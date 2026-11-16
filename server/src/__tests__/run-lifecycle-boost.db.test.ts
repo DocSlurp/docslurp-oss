@@ -9,7 +9,7 @@ import type { SqlClient } from "../db.js";
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 beforeAll(async () => {
-  const databaseUrl = process.env.RUN_RETRY_BOOST_TEST_DATABASE_URL;
+  const databaseUrl = process.env.TEST_DATABASE_URL;
   const database = databaseUrl ? null : await startMigratedPostgres();
   stop = database?.stop ?? (async () => {});
   sql = postgres(databaseUrl ?? database!.url, { max: 1, prepare: false, onnotice: () => {} });
@@ -23,8 +23,8 @@ it("rolls back boosted retry state when admission fails, then starts only after 
   const pipeline = { ...defaultPipelineFeatures, speedBoost: true };
   await sql`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,creation_ready_at,pipeline)
     values ('retry-r','retry-o','retry-u','retry-w','upload','failed','extract-markdown',now(),${sql.json(JSON.parse(JSON.stringify(pipeline)))})`;
-  await sql`insert into documents (id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
-    values ('retry-d','retry-o','retry-u','retry-w','retry-r','a.txt','text/plain','a','failed')`;
+  await sql`insert into documents (id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,file_size)
+    values ('retry-d','retry-o','retry-u','retry-w','retry-r','a.txt','text/plain','a','failed',1000)`;
   const [original] = await sql`select execution_generation from project_runs where id='retry-r'`;
   const startWorkflow = vi.fn(async () => {});
   const lifecycle = createRunLifecycle({ sql: sql as unknown as SqlClient, startWorkflow, failureThreshold: 3 });

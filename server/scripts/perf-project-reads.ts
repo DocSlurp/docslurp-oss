@@ -23,6 +23,6 @@ async function time(name: string, run: () => Promise<unknown>) {
   console.log(JSON.stringify({ label, name, iterations, rows, p50_ms: +quantile(samples, 0.5).toFixed(1), p95_ms: +quantile(samples, 0.95).toFixed(1), samples: samples.map(s => +s.toFixed(1)) }));
 }
 
-await time("listProjects(bootstrap)", () => listProjects("u", { refineNames: false }));
+await time("listProjects(bootstrap)", () => listProjects("u"));
 await time("getProject", () => getProject("ws-7", "u"));
 await sql.end({ timeout: 1 });

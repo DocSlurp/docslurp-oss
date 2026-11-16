@@ -20,13 +20,13 @@ import type { executeVisionRuntime, VisionExecutionResult } from "../tools/visio
  * The OCR escalation page budget and migration 0128 against a real, migrated Postgres (PGlite serves one connection at a
  * time, so it cannot show a race):
  *
- *   OCR_BUDGET_TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- ocr-escalation-budget
+ *   TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- ocr-escalation-budget
  *
  * The budget is counted in vision_run_attempts under the run's advisory lock, so concurrent activities on one run and
  * document (separate pools, as separate workers would have) admit at most the budget between them, and a retried activity
  * starts from the rows its predecessors left.
  */
-const url = process.env.OCR_BUDGET_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const runId = "ocrbudget-run";
 const budget = 25;
 const config: VisionGuardConfig = {
@@ -53,8 +53,8 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     await admin`insert into organizations (id, name, slug, created_by_user_id) values ('ocrb-org', 'O', 'ocrb-org', 'ocrb-u1') on conflict do nothing`;
     await admin`insert into projects (id, org_id, user_id, name) values ('ocrb-ws', 'ocrb-org', 'ocrb-u1', 'W') on conflict do nothing`;
     for (const id of [runId, "ocrbudget-run-2"]) {
-      await admin`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-        values (${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
+      await admin`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
+        values (100, ${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
     }
     scratch = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "docslurp-ocr-budget-"));
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -145,8 +145,8 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
   }, 60_000);
 
   it("fails closed for two TIFFs authorizing at the same time while the spend check's database errors", async () => {
-    await admin`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-      values ('ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
+    await admin`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
+      values (100, 'ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
     for (const id of ["ocrb-tiff-a", "ocrb-tiff-b"]) {
       await admin`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
         values (${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'ocrb-tiff-run', ${`${id}.tiff`}, 'image/tiff', ${`raw/${id}`}, 'processing', 1, 'assumed')`;

@@ -82,6 +82,7 @@ describe("worker table classification", () => {
     for (const table of [
       "account", "session", "verification", "api_keys", "oauth_accounts", "credit_grants",
       "mcp_oauth_tokens", "mcp_oauth_clients", "sso_identity_links", "stripe_webhook_events", "project_connectors",
+      "intake_request_receipts", "pending_monthly_capacity",
     ]) {
       expect(WORKER_DENIED_TABLES[table], table).toBeTruthy();
     }
@@ -89,6 +90,40 @@ describe("worker table classification", () => {
 });
 
 describe("worker role", () => {
+  it("refuses worker access to API intake receipts and admission capacity", async () => {
+    expect(await denied(worker, "select * from public.intake_request_receipts")).toBe(true);
+    expect(await denied(worker, "insert into public.intake_request_receipts default values")).toBe(true);
+    expect(await denied(worker, "update public.intake_request_receipts set request_hash='forged'")).toBe(true);
+    expect(await denied(worker, "delete from public.intake_request_receipts")).toBe(true);
+    expect(await denied(worker, "select * from public.pending_monthly_capacity")).toBe(true);
+    expect(await denied(app, "select * from public.intake_request_receipts")).toBe(false);
+    expect(await denied(app, "select * from public.pending_monthly_capacity")).toBe(false);
+  });
+
+  it("runs admitted worker transitions without API-only capacity access and refuses reactivation", async () => {
+    await db.exec(`insert into "user"(id,name,email) values('capacity-role-u','Roles','roles@example.test');
+      insert into organizations(id,name,created_by_user_id) values('capacity-role-o','Roles','capacity-role-u');
+      insert into projects(id,org_id,user_id,name) values('capacity-role-p','capacity-role-o','capacity-role-u','Roles');
+      insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents)
+        values('capacity-role-r','capacity-role-o','capacity-role-u','capacity-role-p','upload','queued','queued','{}',100);`);
+    // Store.updateProgress(init) and Store.releaseRunLease only move active work;
+    // reserve_monthly_run_capacity returns before reading API admission state.
+    for (const [from, to] of [['queued','processing'], ['processing','queued'], ['queued','failed']]) {
+      const result = await as(worker, () => db.query<{ status: string }>(
+        "update project_runs set status=$1 where id='capacity-role-r' and status=$2 returning status", [to, from]));
+      expect(result.rows).toEqual([{ status: to }]);
+    }
+    await as(worker, async () => {
+      await expect(db.exec("update project_runs set status='queued' where id='capacity-role-r'"))
+        .rejects.toThrow(/permission denied/);
+    });
+    expect((await db.query<{status:string}>("select status from project_runs where id='capacity-role-r'")).rows[0]!.status).toBe('failed');
+    for (const privilege of ['select','insert','update','delete']) {
+      const result = await db.query<{ granted: boolean }>("select has_table_privilege($1, 'public.pending_monthly_capacity', $2) as granted", [worker, privilege]);
+      expect(result.rows[0]!.granted, privilege).toBe(false);
+    }
+  });
+
   it("denies chat operations, output and dependency discovery for every DML privilege", async () => {
     for (const table of ["chat_operations", "chat_operation_events", "chat_run_dependencies", "realtime_revisions", "realtime_revision_counters"]) {
       for (const privilege of ["select", "insert", "update", "delete"]) {
@@ -125,12 +160,29 @@ describe("worker role", () => {
     } finally { await db.exec(`revoke execute on function public.realtime_changed() from ${worker}`); }
   });
 
+  it("rejects forged statement-trigger sources even if EXECUTE were accidentally granted", async () => {
+    expect(await denied(worker, `create temp table document_chunks(document_id text, run_id text);
+      create trigger realtime_changed_insert after insert on document_chunks referencing new table as new_rows
+        for each statement execute function public.realtime_statement_changed()`)).toBe(true);
+    await db.exec(`grant execute on function public.realtime_statement_changed() to ${worker}`);
+    try {
+      // A look-alike temp table, the wrong trigger name, and a row-level attachment are all refused.
+      expect(await denied(worker, `create temp table document_chunks(document_id text, run_id text);
+        create trigger realtime_changed_insert after insert on document_chunks referencing new table as new_rows
+          for each statement execute function public.realtime_statement_changed();
+        insert into document_chunks values('role-realtime-doc','role-realtime-run')`)).toBe(true);
+    } finally { await db.exec(`revoke execute on function public.realtime_statement_changed() from ${worker}`); }
+    const { rows } = await db.query<{ prosecdef: boolean; owner: string }>(
+      "select prosecdef, pg_get_userbyid(proowner) as owner from pg_proc where proname = 'realtime_statement_changed'");
+    expect(rows).toEqual([{ prosecdef: true, owner: "docslurp_realtime_publisher" }]);
+  });
+
   it("publishes ingestion revisions through validated triggers immediately after migration", async () => {
     await db.exec(`insert into "user"(id,name,email) values('role-realtime','Test','role-realtime@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('role-realtime','Test','role-realtime','role-realtime');
       insert into projects(id,org_id,user_id,name) values('role-realtime','role-realtime','role-realtime','Test');
-      insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
-        values('role-realtime-run','role-realtime','role-realtime','role-realtime','upload','processing','extract');
+      insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage)
+        values(100, 'role-realtime-run','role-realtime','role-realtime','role-realtime','upload','processing','extract');
       insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
         values('role-realtime-doc','role-realtime','role-realtime','role-realtime','role-realtime-run','test.txt','text/plain','fixture','queued');`);
     const read = async () => (await db.query<{revision:string}>("select revision::text from realtime_revisions where org_id='role-realtime'")).rows[0]!.revision;
@@ -141,6 +193,10 @@ describe("worker role", () => {
     await as(worker, () => db.exec(`insert into document_page_states(document_id,page_number,state)
       values('role-realtime-doc',1,'indexed')`));
     expect(BigInt(await read())).toBe(before + 3n);
+    // The statement-level triggers (pages, chunks, page stages) publish as the worker too.
+    await as(worker, () => db.exec(`insert into document_chunks(id,document_id,run_id,user_id,chunk_index,text,token_estimate)
+      select 'role-realtime-chunk-'||g,'role-realtime-doc','role-realtime-run','role-realtime',g,'text',1 from generate_series(1,25) g`));
+    expect(BigInt(await read())).toBe(before + 4n);
     const { rows } = await db.query<{prosecdef:boolean}>(`select prosecdef from pg_proc where proname in
       ('realtime_changed','realtime_record_change','realtime_materialization_changed','realtime_search_session_changed')`);
     expect(rows).toHaveLength(4);
@@ -289,8 +345,8 @@ describe("ocr_escalation_reads (migration 0129)", () => {
       insert into "user" (id, name, email) values ('esc-roles-u', 'U', 'esc-roles@example.com') on conflict do nothing;
       insert into organizations (id, name, slug, created_by_user_id) values ('esc-roles-org', 'O', 'esc-roles-org', 'esc-roles-u') on conflict do nothing;
       insert into projects (id, org_id, user_id, name) values ('esc-roles-ws', 'esc-roles-org', 'esc-roles-u', 'W') on conflict do nothing;
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-        values ('esc-roles-run', 'esc-roles-org', 'esc-roles-u', 'esc-roles-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}') on conflict do nothing;`);
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+        values (100, 'esc-roles-run', 'esc-roles-org', 'esc-roles-u', 'esc-roles-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}') on conflict do nothing;`);
   });
 
   it("lets the worker write a read, read it back and replay the write on retry, as the store does", async () => {
@@ -435,6 +491,32 @@ describe("runtime database identity gate (council N #1)", () => {
   it("passes the API and executor role and the worker role as themselves", async () => {
     expect(await check(app, app)).toEqual([]);
     expect(await check(worker, worker)).toEqual([]);
+  });
+
+  it("recognizes the admission trigger without granting runtime access to the fence", async () => {
+    for (const role of [app, worker]) {
+      const { rows: [privileges] } = await db.query<{ execute: boolean; schema: boolean }>(
+        "select has_function_privilege($1, 'docslurp_deploy.check_ingest_admission()', 'EXECUTE') as execute, has_schema_privilege($1, 'docslurp_deploy', 'USAGE') as schema",
+        [role],
+      );
+      expect(privileges).toEqual({ execute: false, schema: false });
+      expect(await denied(role, "update docslurp_deploy.ingest_admission set holder = null")).toBe(true);
+    }
+  });
+
+  it("refuses custom-type definer overloads regardless of search_path", async () => {
+    await db.exec(`create domain public.text as pg_catalog.text;
+      create function public.pricing_state_raise(public.text,bigint) returns bigint language sql as 'select $2';
+      revoke all on function public.pricing_state_raise(public.text,bigint) from public;
+      create function public.realtime_compact_revisions(public.text) returns int language sql security definer as 'select 1'`);
+    try {
+      for (const searchPath of ["public,pg_catalog", "pg_catalog,public"]) {
+        await db.exec(`set search_path=${searchPath}`);
+        expect((await check(app, app)).join("\n")).toMatch(/SECURITY DEFINER/);
+      }
+    } finally {
+      await db.exec("set search_path=public; drop function public.realtime_compact_revisions(public.text); drop function public.pricing_state_raise(public.text,bigint); drop domain public.text");
+    }
   });
 
   it("refuses the owner or a superuser, whatever role it claims", async () => {

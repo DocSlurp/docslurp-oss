@@ -1,4 +1,5 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
+import { sandboxedPdfProvider } from "../extractors/plugins.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { startLiveModelPriceRefresh } from "@docslurp/shared";
 import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
@@ -31,8 +32,9 @@ import { createSandboxActivityInterceptor } from "../sandbox/activity-intercepto
 import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/source-quarantine.js";
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
+import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
-import { loadExtractorPlugins, setExtractorDocumentOwners } from "../extractors/plugins.js";
+import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
 import { assertOcrConfiguration } from "../ocr/mode.js";
@@ -83,6 +85,13 @@ let quarantineExitTimer: NodeJS.Timeout | null = null;
 
 async function main(): Promise<void> {
   installWorkerProcessGuards({ report: (error, attributes) => reportException(error, attributes) });
+  // Development-only fail-open settings stop startup before anything else outside development (#398).
+  // initializeParserSandbox repeats the check for CLIs and preflight that start there.
+  try {
+    assertNoUnsafeOverrides(process.env);
+  } catch (error) {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  }
   const cfg = fromEnv();
   initializeObservability({ serviceName: "docslurp-worker" });
   initializeWorkerErrorReporting();
@@ -142,6 +151,8 @@ async function main(): Promise<void> {
   // configuration that selects the VM PDF extractor without a provider, refuses to start.
   // Providers check batch ownership against the database themselves (ExtractorPluginHost.documentOwners).
   setExtractorDocumentOwners((documentIds) => store.documentScopes(documentIds));
+  setExtractorComputeObservations((profileIds) => store.computeObservations(profileIds));
+  setExtractorComputeCohortAuthorizer((scope) => store.authorizeComputeCohort(scope));
   await loadExtractorPlugins(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
@@ -361,9 +372,7 @@ async function main(): Promise<void> {
   // a stale WORKER_ACTIVITY_CONCURRENCY=1 secret once left every machine running
   // one activity while the scaler counted eight.
   const assumedSlots = resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency).slotsPerMachine;
-  // WORKER_ALLOW_SLOT_MISMATCH=true is for the small always-on floor machine (fly.worker.toml), which runs
-  // fewer slots than the burst fleet on purpose and is outside the autoscaler's sizing.
-  if (assumedSlots !== slotTuning.nominalSlots && process.env.WORKER_ALLOW_SLOT_MISMATCH !== "true") {
+  if (assumedSlots !== slotTuning.nominalSlots) {
     console.error(
       `[temporal-worker] WORKER_ACTIVITY_CONCURRENCY=${slotTuning.nominalSlots} but the autoscaler assumes ` +
         `${assumedSlots} slots per machine (DOCSLURP_WORKER_SLOTS_PER_MACHINE); the fleet will be mis-sized. ` +
@@ -546,6 +555,70 @@ async function main(): Promise<void> {
     : null;
   graphJobTimer?.unref();
 
+  // Summary tree backfill (summary_tree_jobs, summary-tree/backfill-job.ts): one job at a time on the maintenance
+  // leader, leased so a crashed worker's job resumes elsewhere. A no-op while no job is queued; a job parks itself
+  // while DOCSLURP_SUMMARY_TREE_BUILD is off or the deployment's balance probe reports below its floor.
+  let summaryTreeJobRunning = false;
+  const runSummaryTreeJobs = () => {
+    if (summaryTreeJobRunning) return;
+    summaryTreeJobRunning = true;
+    withBackgroundSpan("worker.summary-tree-jobs", () => store.runSummaryTreeJobs({
+      workerId: workerIdentity,
+      config: cfg,
+      storage,
+      runner,
+      documentConcurrency: cfg.summaryTreeJobDocumentConcurrency,
+    }))
+      .catch((err) => {
+        console.error(
+          "summary tree job sweep failed:",
+          err instanceof Error ? err.message : String(err)
+        );
+      })
+      .finally(() => {
+        summaryTreeJobRunning = false;
+      });
+  };
+  const summaryTreeJobPollIntervalMs = cfg.summaryTreeJobPollIntervalMs ?? 5_000;
+  const summaryTreeJobTimer = summaryTreeJobPollIntervalMs > 0
+    ? setInterval(onLeader(runSummaryTreeJobs), summaryTreeJobPollIntervalMs)
+    : null;
+  summaryTreeJobTimer?.unref();
+
+  // Figure resumes (figures/resume-runner.ts): every worker runs the runner (the fenced lease makes that safe), at most
+  // DOCSLURP_FIGURE_RESUME_CONCURRENCY at once here and one per organization fleet-wide; a no-op unless
+  // DOCSLURP_FIGURE_RESUME and DOCSLURP_DOPPLER_IMAGE_EXTRACT are on and the PDF provider can resume. The leader runs the
+  // audit and orphan GC every 30 minutes (dry run unless DOCSLURP_FIGURE_AUDIT / DOCSLURP_FIGURE_GC_DELETE) and the
+  // backlog gauges every minute; all of them emit on the OTel meter (recordFigureTelemetry).
+  let figureResumeRunning = false;
+  const figureProvider = () => {
+    const pdf = sandboxedPdfProvider();
+    return pdf?.figures?.resume ? { resume: pdf.figures.resume.bind(pdf.figures), timeoutMs: (pages: number) => pdf.timeoutMs(pages) } : null;
+  };
+  const runFigureResumes = () => {
+    if (figureResumeRunning) return;
+    figureResumeRunning = true;
+    withBackgroundSpan("figure-resume", () => store.runFigureResumes({ storage, provider: figureProvider(), workerId: workerIdentity }))
+      .catch((err) => console.error(`[doppler-figures] resume sweep failed: ${err instanceof Error ? err.name : typeof err}`))
+      .finally(() => { figureResumeRunning = false; });
+  };
+  const figureResumeTimer = setInterval(runFigureResumes, 30_000);
+  figureResumeTimer.unref();
+  const figureBacklogTimer = setInterval(onLeader(() => {
+    void withBackgroundSpan("figure-resume-backlog", () => store.figureResumeBacklog())
+      .catch((err) => console.error(`[doppler-figures] backlog gauge failed: ${err instanceof Error ? err.name : typeof err}`));
+  }), 60_000);
+  figureBacklogTimer.unref();
+  let figureAuditRunning = false;
+  const figureAuditTimer = setInterval(onLeader(() => {
+    if (figureAuditRunning) return;
+    figureAuditRunning = true;
+    withBackgroundSpan("figure-audit", () => store.auditFigureStorage({ storage, limit: 50 }))
+      .catch((err) => console.error(`[figure-audit] sweep failed: ${err instanceof Error ? err.name : typeof err}`))
+      .finally(() => { figureAuditRunning = false; });
+  }), 30 * 60_000);
+  figureAuditTimer.unref();
+
   // LanceDB maintenance runs off the index stage's critical path (lancedb-maintenance-pool.ts).
   // Drainers schedule it as they commit; this sweep catches tables that became due with no
   // drainer coming (traffic stopped) and checks lost to a crash or a shutdown drain timeout.
@@ -661,6 +734,10 @@ async function main(): Promise<void> {
     clearInterval(retentionTimer);
     if (purgeTimer) clearInterval(purgeTimer);
     if (graphJobTimer) clearInterval(graphJobTimer);
+    if (summaryTreeJobTimer) clearInterval(summaryTreeJobTimer);
+    clearInterval(figureResumeTimer);
+    clearInterval(figureAuditTimer);
+    clearInterval(figureBacklogTimer);
     if (creditFlushTimer) clearInterval(creditFlushTimer);
     if (lanceSweepTimer) clearInterval(lanceSweepTimer);
     // Activities have drained; let background LanceDB maintenance finish (bounded) before

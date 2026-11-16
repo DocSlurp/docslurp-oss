@@ -1,6 +1,18 @@
+import { SPEED_BOOST_UNAVAILABLE_MESSAGE } from "./project-chat-models.js";
 import { z } from "zod";
 import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { PARSE_SOURCE_RESCAN_MESSAGE } from "./parse-source-decision.js";
+import { SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE, SUMMARY_TREE_UNPRICED_MESSAGE } from "./summary-tree.js";
+
+/**
+ * The one refusal for work that needs edit access to the project: reprocessing, re-indexing, full index, figure resume,
+ * settings and their estimates, run control beyond a creator's own upload, corrections, deletes and tag changes, and the
+ * chat proposal Apply routes. HTTP 403 with this code and message, for a caller who can see the project or document but
+ * may not change it (org owners and admins, the project's owner, and its admins and editors may). Clients show "ask a
+ * project editor", never a retry.
+ */
+export const EDITOR_REQUIRED_CODE = "editor_required" as const;
+export const EDITOR_REQUIRED_MESSAGE = "This needs edit access to the project. Ask a project editor or an organization admin.";
 
 /**
  * The native API error envelope: `{ error: { code, message, details?, requestId } }`.
@@ -17,6 +29,7 @@ export const API_ERROR_CODES = [
   "idempotency_conflict",
   "unauthorized",
   "forbidden",
+  "editor_required",
   "web_scope_required",
   "mfa_required",
   "not_found",
@@ -66,8 +79,17 @@ export const API_ERROR_CODES = [
   "client_key_origin_not_allowed",
   "api_key_ip_not_allowed",
   "model_not_allowed",
+  "speed_boost_unavailable",
+  "chart_export_tier_unavailable",
+  "chart_export_models_forbidden",
+  "summary_tree_unavailable",
+  "summary_tree_requires_vectors",
+  "summary_tree_summarize_locked",
+  "summary_tree_unpriced",
+  "summary_tree_backfill_cap_too_high",
   "chat_deadline_exceeded",
   "chat_tool_failed",
+  "chat_capacity_unavailable",
   "invalid_search_scope",
   "web_disabled",
   "url_blocked",
@@ -120,6 +142,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   idempotency_conflict: "This credit request ID belongs to different parameters or an administrator. Reconcile the original request.",
   unauthorized: PUBLIC_ERROR_MESSAGES.unauthorized,
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  editor_required: EDITOR_REQUIRED_MESSAGE,
   not_found: PUBLIC_ERROR_MESSAGES.missing,
   project_not_found: PUBLIC_ERROR_MESSAGES.projectMissing,
   project_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
@@ -169,8 +192,17 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   api_key_ip_not_allowed: "This API key can't be used from this IP address. Add the address or its range to the key's IP allowlist, or call from an allowed server.",
   client_key_origin_not_allowed: "This browser API key isn't allowed on this website. Add the site to the key's allowed websites (for example docs.example.com, or *.example.com for its subdomains), or call DocSlurp from your server with a server key.",
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
+  speed_boost_unavailable: SPEED_BOOST_UNAVAILABLE_MESSAGE,
+  chart_export_tier_unavailable: "That chart export tier isn’t available on this deployment. Leave the tier unset to use the deployment’s default, or turn chart export off.",
+  chart_export_models_forbidden: "This project’s chart export tier is set below reading charts with AI. Ask a project editor to change it, or use an API key with the pipeline:billed-features scope.",
+  summary_tree_unavailable: "The summary tree isn’t available on this deployment.",
+  summary_tree_requires_vectors: SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE,
+  summary_tree_summarize_locked: SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE,
+  summary_tree_unpriced: SUMMARY_TREE_UNPRICED_MESSAGE,
+  summary_tree_backfill_cap_too_high: "That cost cap is above this deployment’s limit for one summary tree backfill. Start with a lower cap; another job continues where this one stops.",
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
   chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
+  chat_capacity_unavailable: PUBLIC_ERROR_MESSAGES.chatCapacityUnavailable,
   invalid_search_scope: PUBLIC_ERROR_MESSAGES.searchScope,
   web_disabled: "Web tools are turned off for this server or project.",
   url_blocked: "This URL can't be fetched. Use a public HTTP or HTTPS address.",

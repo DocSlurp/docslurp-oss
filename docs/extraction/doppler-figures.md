@@ -98,6 +98,16 @@ Doppler's images manifest comes in two newer shapes, accepted beside version 1 u
   counts, and `sha256`, the SHA-256 of every byte before the end line).
 - **Version 2, `manifest.json`**: the same fields as one JSON object (`"version": 2`).
 
+`scan_pages` is one of `copy`, `image`, `skip` or `render`. `copy` is Doppler's default from Doppler PR #39: a full-page
+scan that can be copied as its own bytes (a JPEG or bilevel stream, upright) gets its marker and file; any other scan
+(JPEG 2000, Flate, tiled, layered, turned, ...) gets no marker and no file, and Doppler reports it as an `unlinked`
+image with `fate: background` (a `picture`, or the `mask` of a layered scan) and `reason: scan-not-copyable`. A page
+scan whose copy failed its checks is `not-extracted` with `reason: copy` (for example `error: xref`, a cross-reference
+table the producer rebuilt) and keeps its link, with no file. For both, when the project keeps page images
+(`preserveImages`), render-images renders that page from the asset ledger (the write still waiting for its checkpoint,
+or the stored rows of the document's organization), so the page image is the host's; Fast quality keeps its own
+page-image rule (textless pages, within its caps).
+
 The worker reads version 3 **one line at a time in fixed memory** (`DopplerManifestV3Validator`,
 `packages/shared/src/doppler-assets.ts`): each line is parsed and validated as it arrives and becomes one ledger row,
 spilled to a private temporary file, so memory does not grow with the number of images. It refuses the folder when a line
@@ -118,19 +128,21 @@ Doppler says a resume would retry them. The worker checks the outcome against th
 folder (`outcome-mismatch`) otherwise.
 
 Either way the folder holds only the manifest, optionally `page-facts.jsonl` (allowed, but never read or stored: see
-"Page facts" below), and `page-NNNN` real directories holding
-only `(image|figure)-NNN.<format>` regular files. Every entry is checked strictly: unknown fields, values outside each
-closed enum (`status`, `reason`, `fate`, `source`, batch `status`, `fallback`), non-finite or out-of-range numbers and
-over-long strings refuse it. A linked image's `path` must be exactly the one derived from its own id and format, with no
-extra leading zeros; only an image without a file of its own may share the path of the image it repeats, which must be an
-earlier linked image that is not itself a repeat (no chains, no cycles). `link` must be the manifest's `link_prefix`
-followed by that path, and the prefix must be `images/`, the one the host asks for (so the stored Markdown resolves with
-no rewriting). Only page scans are copied or decoded, and a decoded scan is never a JPEG. `complete` with a stopped batch
-or an image a stopped batch left is refused, as is `resumable` disagreeing with the images. Every total (`images`,
-`linked`, `extracted`, `not_extracted`, `unlinked`, `bytes`, `repeats`, `fallbacks`, `scans`, `scan_bytes`, `batches`,
-`batches_cut`: the batches whose status is not `ok`) must match the entries. The manifest must name this document's PDF
-(`source_sha256`, when the host knows it). The files present must be exactly the paths of the `extracted` images, each of
-its stated size.
+"Page facts" below), and `page-NNNN` real directories holding only `(image|figure)-NNN.<format>` regular files. Every
+entry is checked strictly: unknown fields, values outside each closed enum (`status`, `reason`, `fate`, `source`, batch
+`status`, `fallback`), non-finite or out-of-range numbers and over-long strings refuse it. A linked image's `path` must
+be exactly the one derived from its own id and format, with no extra leading zeros; only an image without a file of its
+own may share the path of the image it repeats, which must be an earlier linked image that is not itself a repeat (no
+chains, no cycles). `link` must be the manifest's `link_prefix` followed by that path, and the prefix must be `images/`,
+the one the host asks for (so the stored Markdown resolves with no rewriting). Only page scans are copied or decoded,
+and a decoded scan is never a JPEG. A `reason` must fit the status: a `not-extracted` image has one of the not-extracted
+reasons below, an `unlinked` image has none or `scan-not-copyable` (only on a `background` `picture` or `mask`, never
+with `repeat_of`; an `unlinked` image never repeats another), and an `extracted` image has none; anything else refuses
+the folder. `complete` with a stopped batch or an image a stopped batch left is refused, as is `resumable` disagreeing
+with the images. Every total (`images`, `linked`, `extracted`, `not_extracted`, `unlinked`, `bytes`, `repeats`,
+`fallbacks`, `scans`, `scan_bytes`, `batches`, `batches_cut`: the batches whose status is not `ok`) must match the
+entries. The manifest must name this document's PDF (`source_sha256`, when the host knows it). The files present must be
+exactly the paths of the `extracted` images, each of its stated size.
 
 **Sharded documents.** A provider that converts a long document in page ranges (one VM per shard, each running Doppler
 with its own `-f/-l` and `--images-pages`) cannot merge the shards into one valid manifest: each shard's settings digest
@@ -278,13 +290,14 @@ version 2 is held to fewer entries and its parse is reserved from the worker bud
 
 ## Asset ledger
 
-Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration
-0141), and the document's extraction level is a row of `document_extraction_levels`. The figure step **queues** the write
-on the run's state; the store writes it in one transaction after the stage checkpoint that records the Markdown and the
-image slots commits, never before (`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete`
-is whether that committed checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued
-write. The write never fails the document: a refused, stale or failed write is logged
-(`[asset-ledger] document=... status=refused rule=...`, `status=stale-write`) and the stage stats say `ledger: "queued"`.
+Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration 0141;
+0150 lets an unlinked image carry `scan-not-copyable`), and the document's extraction level is a row of
+`document_extraction_levels`. The figure step **queues** the write on the run's state; the store writes it in one
+transaction after the stage checkpoint that records the Markdown and the image slots commits, never before
+(`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete` is whether that committed
+checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued write. The write never
+fails the document: a refused, stale or failed write is logged (`[asset-ledger] document=... status=refused rule=...`,
+`status=stale-write`) and the stage stats say `ledger: "queued"`.
 
 **Scope.** Both tables carry `org_id` and `project_id` (NOT NULL) and reference the document's own
 `(id, project_id, org_id)` with a composite foreign key, so a row cannot name another organization's or project's
@@ -309,16 +322,17 @@ rows and records `images_status: failed`.
 | --- | --- |
 | `extracted` | The image owns a stored file: `format`, `bytes`, `sha256`, `width`, `height`, `source` and `storage_key` are set. |
 | `not-extracted` | The Markdown links it (or, for version 1, marks it) but it has no file of its own; `reason` says why. |
-| `unlinked` | Doppler placed it without a link (`fate` furniture, watermark, background, small, fragment, grouped, ...). |
+| `unlinked` | Doppler placed it without a link (`fate` furniture, watermark, background, small, fragment, grouped, ...); `reason` is null, or `scan-not-copyable`. |
 
 | `reason` | Meaning |
 | --- | --- |
 | `repeat` | Same image as `repeat_of`; `file_of` names the image whose file shows it. |
 | `min_side`, `bbox`, `id`, `pages` | Too small, an unusable box or id, or outside `--images-pages`. |
 | `file_bytes`, `encode`, `error` | Over the per-file cap, the encoder failed, or the renderer reported an error for this image. |
-| `scan-pages`, `copy` | Page scans skipped (`--scan-pages skip`), or a scan copy failed its checks. |
+| `scan-pages`, `copy` | Page scans skipped (`--scan-pages skip`), or a scan copy failed its checks (`copy`; on a `page-scan`, render-images renders the page). |
 | `budget`, `doc_budget`, `timeout`, `deadline`, `aborted` | The batch or document stopped; `resumable` is true when Doppler says a resume retries it. |
 | `renderer` | The batch's renderer failed; not resumable. |
+| `scan-not-copyable` | Only on an `unlinked` `picture` or `mask` with `fate: background` and no `repeat_of`: a page scan `--scan-pages copy` could not copy; render-images renders the page. Not resumable. |
 | `other` | A version 1 skip reason outside this vocabulary. |
 
 | `source` | Meaning |
@@ -371,16 +385,257 @@ returned; a slot resolves to a file URL through the document detail, under the f
 whose `images_status` is `resumable` and that have a stored manifest, and, for a sharded document, each resumable shard
 as its own entry (`shard: { first, last }`), oldest first with a keyset cursor, with the hashes a resume must present and
 the manifest's SHA-256. A shard's resume writes with `resume: { first, last }` and that shard alone: only its pages' rows
-are upserted and pruned, its record's `resumes` goes up by one (capped at 3 like a whole document's), and the level is
-recomputed from all rows and shard records. A sharded document's resumes across all its shards are capped too, at
-`min(3 x shards, 12)`: past it neither the queue lists nor the ledger accepts a resume of any of its shards. The host counts resumes itself (previous + 1 on each resume write; the
-manifest's own `resumes` is telemetry only) and leaves a document out of the queue at 3, so a manifest that never finishes
-cannot keep it there. A resume worker rebuilds Doppler's DIR from stored state with `downloadDopplerImagesDir`: it
+are upserted and pruned, its record's `resumes` goes up by one, and the level is recomputed from all rows and shard
+records. The ledger's own caps are backstops: 128 resumes per unit (a shard or a whole document) and 512 across a
+sharded document's shards. Past them neither the queue lists nor the ledger accepts a resume (`resume-cap`). The resume
+policy (see "Caps" below) scales with pages and stops far below them. The host counts resumes itself (previous + 1 on
+each resume write; the manifest's own `resumes` is telemetry only), so a manifest that never finishes cannot keep a
+document in the queue. A resume worker rebuilds Doppler's DIR from stored state with `downloadDopplerImagesDir`: it
 downloads `images/manifest.jsonl`, checks its SHA-256 against the level's `manifest_sha256`, validates it line by line,
 and downloads each `extracted` file from the key derived from its id (never a listing) into `DIR/page-NNNN/...`, checking
 its size and SHA-256. `DIR` must be absent or an empty directory. It then runs `pdftomarkdown --images-resume DIR` in the PDF VM with the
 same PDF and settings, validates the returned folder like any other, stores it, and writes the ledger with
 `resume: true`. Nothing runs resumes yet.
+
+## Pending and stored files
+
+Migration 0156 makes the asset ledger keep extracted figures on every failure path:
+
+- **Pending, then stored.** Before each upload step (64 files), the figure step records the files as `pending` rows
+  under their exact keys. After the step's uploads land and check out, it flips them to `stored`, in the same order for
+  the first pass and `extract-markdown`. It does this as soon as the VM job returns, before the Markdown is stored, so a
+  later failure keeps them. Such failures include the Markdown or text pass, a later stage, a cancelled or failed run, or
+  a worker killed mid-upload. The level stays honest: `markdown_complete = false` until the checkpoint commits the
+  Markdown, and `partial` or `resumable` from the rows.
+- **Only stored rows count.** Only stored rows are served (slots, the assets route) or billed (`asset_bytes`). A crash
+  can leave unbilled orphans, never billed ghosts.
+- **Adopt, no VM.** The next attempt checks each pending row of the document's current run by streaming its object and
+  hashing it (`adoptPendingAssets`). An object of exactly the row's size and SHA-256 becomes `stored`. A missing object,
+  or one with other bytes, turns the image back into a resumable `aborted` one.
+- **Never overwritten.** Keys stay exactly Doppler's layout, so the stored `images/` folder is a plain `--images-resume`
+  DIR and `document.md`'s relative links resolve. Each figure is created with `If-None-Match: *`; Tigris returns 412
+  for a taken key, for both buffered and streamed bodies (probed 2026-11-13). An object already at the key is accepted
+  only when its SHA-256 is the manifest's, else the folder is refused (`object-conflict`) and the object is left as it
+  is. A store without conditional creates still writes under the run's own artifact root, and a stale run's ledger writes
+  are refused (`stale-write`).
+- **Never deleted on failure.** No failure path deletes a figure object or row:
+  - a failed upload reports `cleanup: "kept"`;
+  - the failed-figures and no-figures ledger writes are level-only.
+  A re-run that skips the figure step still takes the document off the resume queue: the level becomes that run's
+  (`none` or `disabled`, with no rows of that run).
+- **Only the level's run is current.** Rows an earlier run left are never served, counted or billed as current. The
+  assets route reads only rows of the level's run, and slots come from the document's current run.
+- **Who deletes.** Deleting the document or tenant purges its folder, as before. Run artifact retention purges a run's
+  prefix. Otherwise, the orphan GC sweep (`figure-orphan-gc` in the maintenance sweeper, resume runner PR) is the only
+  deleter: it removes objects under a document's `images/` folder that no ledger row vouches for, 24 hours after their
+  last write. Objects of a failed run that still have rows are kept until that run's purge or the document's deletion.
+- **A resume only adds.** It never rewrites or prunes a stored file (`resume-rewrite`). Its input is the shard's
+  `manifest.jsonl` alone: `downloadDopplerImagesDir` defaults to `manifestOnly`, so finished figures never travel back
+  into the VM.
+
+## Resuming partial figures
+
+A figure pass can leave images resumable: a batch or document budget, a deadline, or a shard that timed out. The resume
+runner (`worker/src/figures/resume-runner.ts`) finishes them in the background.
+
+**Queueing.** A document is queued in the same transaction that commits its resumable level
+(`document_extraction_levels.resume_after`, migration 0159), when its project's `pipeline.figureResume` is `auto` (the
+default). A backstop sweep in the API's maintenance sweeper (`figure-resume-enqueue`) re-queues any the commit missed.
+`manual` projects queue only on request, and `off` projects (or projects whose figures are off) never do. Requests:
+
+- `POST /v1/documents/{id}/assets/resume`, or the SDK's `resumeDocumentFigures(id)`;
+- `POST /v1/projects/{id}/figures/resume?limit=N` (at most 100 per request), or `resumeProjectFigures(id, { limit })`;
+- in the app's chat, the `proposeFigureResume` tool, which offers to "finish extracting the missing figures" for one
+  document or the project. The user applies the card (`POST /v1/projects/{id}/figure-resume-proposals/apply`).
+
+All three only queue. They need a server API key with `ingest`, or a session that may edit the project; anything outside
+the caller's organization or project is a 404. `getProjectSettings` reports `figures.resumableDocuments`.
+
+**Setting scope.** `figureResume` is a project setting. DocSlurp has no organization-level pipeline settings, so there is
+no organization default above it.
+
+**Running.**
+
+- *When it runs.* The runner runs only while all of these hold:
+  - `DOCSLURP_FIGURE_RESUME` is on (default off; queued documents wait and nothing is lost);
+  - `DOCSLURP_DOPPLER_IMAGE_EXTRACT` is on;
+  - the PDF provider implements `figures.resume`.
+
+  Every worker runs it, with at most `DOCSLURP_FIGURE_RESUME_CONCURRENCY` resumes at once (default 2).
+- *Claiming.* Each claim takes the oldest due document of each organization that holds no live lease, re-locks it
+  `for update skip locked`, and checks it again. The rules:
+  - at most one resume per organization;
+  - at most `DOCSLURP_FIGURE_RESUME_GLOBAL_MAX` resumes across the fleet (default 8), counted under one advisory lock;
+  - only `completed` documents whose Markdown committed, on their current run.
+- *Blocking and deferring.*
+  - A project or run whose figures are off is blocked `figures-off`, and its level is closed `disabled`.
+  - A project whose resumes are off is blocked `resume-off`.
+  - An organization that may not spend is re-queued an hour later.
+  - An organization past its daily resume VM budget (`DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES`, default 120) is
+    re-queued for the next UTC day.
+- *The lease.* Each claim holds a lease token (`<worker>:<uuid>`). Every later write matches that token and the claimed
+  run: the release, the heartbeat, launch counting, the ledger writes (`scope.lease`), the pending and stored hooks, and
+  the slot update. The lease is renewed every two minutes while a unit runs, and a lease that is lost aborts the unit.
+
+**Caps.** Every limit lives in `packages/shared/src/figure-resume-limits.ts`, with its environment override and bounds.
+An override outside its bounds, or one that does not parse, keeps the default and logs a warning; it is never clamped.
+One resume VM returns at most 64 MiB and 2,048 files, whatever the document's own allowance (2,048 + 2 per page files,
+64 MiB + 1.25 MiB per page, up to 32,768 files and 4 GiB). So a big figure-heavy document needs many passes, and a small
+one at most one or two. The caps scale with pages:
+
+- *Launches:* 1.5 × the passes the allowance needs after the first pass, and at least one per open unit, clamped to
+  `DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR`..`_CEILING` (default 3..128). 10 pages: 3. 1,000 pages: 30. 20,000 pages: 95.
+- *VM time:* `DOCSLURP_FIGURE_RESUME_VM_HEADROOM` (2) × the expected passes × one launch's estimated time. A launch is
+  `DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH` (15,000) plus `DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` (200) for each page it
+  converts: one shard of a sharded document, every page of an unsharded one (gaps or not). Both defaults are measured on
+  resume launches in the production VM: the estimate covers about nine in ten manifest resumes, and the 2× headroom about
+  nine in ten fresh gap passes. A
+  launch's time includes staging the source PDF into its VM, which every launch repeats. Each pass logs
+  `resume pass … pages vmMs msPerPage estimateMs` for re-tuning. Clamped to
+  `DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR`..`_CEILING` (180 s..4 h, the ceiling at most 12 h). Grants included, no
+  document's budget passes a hard 12 hours per run. Measured VM time is charged to the document
+  (`resume_vm_ms`), each launch's timeout is capped at what is left, and under a minute left the document stops.
+- *Per unit:* the passes its share of the allowance needs (1.25 MiB a page for a shard; the whole document's expected
+  passes for an unsharded one) plus two, at least 3, at most 128. 625-page shard: 15. 3,000 pages unsharded: 61.
+- *Per-unit strikes:* a unit is closed after 3 failures of its own (`resume_unit_failures`) or
+  `DOCSLURP_FIGURE_RESUME_NO_PROGRESS` resumes of its own without progress (`resume_unit_stalls`). Units run fewest strikes
+  first, then in page order, so a unit that keeps failing yields to the others. A unit closing at its limit, with others
+  still open, resets the document's no-progress count. One failing shard never blocks the others.
+- *No progress:* `DOCSLURP_FIGURE_RESUME_NO_PROGRESS` (3) launched resumes in a row, across units, whose gain is under
+  the minimum (failed ones included) stop the document. With units taken fewest strikes first, that means every open
+  unit is stalling, not one. The gain is measured against what one pass can deliver (64 MiB / 2,048 files), never against
+  the backlog, so a big document storing full passes always progresses. A pass progresses with
+  `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_PERCENT` (5) of a pass's bytes (3.2 MiB), or that share of its files (103, carrying
+  `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_BYTES`, 4,096, in all), or that share of the work items one pass could close (at
+  least one). A source that yields one tiny figure a pass on a big backlog still stops. Enough progress resets the count; a resume that
+  never launched a VM does not count.
+- *Per organization:* one resume at a time, and the daily VM budget as before. Each launch's timeout is capped at what is
+  left of the day, reserved at launch and settled to the real time on return. With under a minute left, the unit waits
+  for the next UTC day and no failure is counted.
+- *Backstop:* the ledger refuses a resume write past 128 per unit or 512 per document (`resume-cap`), whatever the policy.
+  The database allows at most 10 grants per run (`resume_grants`, `DOCSLURP_FIGURE_RESUME_MAX_GRANTS`'s bound).
+
+| Document | Old launches | New launches | New VM budget | Expected resume VM time |
+|---|---|---|---|---|
+| 10 pages | 6 (3 per unit) | 3 | 180 s | 1 pass, at most 17 s |
+| 1,000 pages, unsharded | 6 | 30 | 8,600 s | 20 passes × 215 s = 4,300 s |
+| 20,000 pages, 32 shards | 12 | 95 | 14,400 s (ceiling) | 63 passes × 140 s = 8,820 s |
+
+**Blocks.** A stopped document is blocked with a reason code (`attempts` for launches, `vm-budget`, `no-progress`; the
+others are `figures-off`, `resume-off`, `stale`, `refused` and `unscanned`), with `resume_blocked_at`, a log line with its
+numbers (`pages`, `launches`, `vmMs`, `stalls`, `grants`) and the `resume.capped` counter by reason. Nothing is dropped:
+the level stays resumable. The document detail (`figureResume`) and the asset ledger (`level.resume`) show `queued`,
+`blocked`, `blockedAt` and `grantsLeft` while the figures are resumable. A bulk request answers `blocked`, the documents
+it skipped by reason.
+
+- A reprocess (a new run) clears every block and counter.
+- A single-document request (`POST /v1/documents/{id}/assets/resume`, or the chat's offer for one document) clears a
+  budget block by granting one extension. The document's launch cap, VM budget and each unit's resume cap grow by half
+  their base again (at least the floors: 3 launches, 180 s, 3 resumes), each unit's strike limits by their base again,
+  and the document's no-progress count resets. A unit's own strike counts are kept, so a poisoned unit stays last. At most `DOCSLURP_FIGURE_RESUME_MAX_GRANTS` (2) per run, so a request buys a bounded amount of VM time.
+  `DOCSLURP_FIGURE_RESUME_MAX_GRANTS=0` is the kill switch: no request extends a budget, and only a reprocess does.
+  The answer carries `reason`, `granted` and `grantsLeft`; past the grants it is `capped` with its reason.
+- Bulk requests and the backstop sweep never grant: they leave budget-blocked documents blocked.
+- `unscanned` is cleared only by a reprocess. Other blocks are cleared by any request, without a grant, and the clear
+  resets `resume_blocked_at` too.
+
+**One unit per claim.** A unit is the unsharded document, one resumable shard, one gap with no shard, or a gap inside a
+shard that is not complete. The last kind runs as that shard's resume narrowed to the gap's pages (`resumePages`). For
+the claimed unit:
+
+1. Pending uploads are adopted, and slots a crash left out are re-added.
+2. Only the unit's stored manifest is downloaded (none for a gap), and the provider runs it in a fresh VM on the
+   document's **parse source**: quarantine's decision, resolved by the loader's rule (`lib/parse-source.ts`). For an
+   encrypted PDF that is its scanned copy; otherwise the upload exactly as the scan read it. It is staged with hash
+   verification, and its hash must be the level's source digest (the bytes the figures were made from). The upload's
+   key is never read. A document with no decision from this build's quarantine (never scanned, refused or rejected) is
+   blocked `unscanned` with no VM. No request clears that block; only a reprocess (a new run that records a decision)
+   does. A hash mismatch or a swapped object is `refused`.
+3. The folder is validated whole and must be exactly one shard folder for a range, or one manifest for the document.
+   Anything else is refused before any upload.
+4. PII (see below).
+5. The new manifest is staged by content first, then the figure files are stored (pending, then stored).
+6. The ledger is written as a resume. `resume-rewrite` is refused at once; it could only repeat.
+7. After the commit, the manifests are published and an unsharded document's `index.json` is rebuilt. The new slots join
+   the run.
+
+**PII.** A resume narrows withholding to pages only for a page-scoped outcome that the PII stage wrote itself
+(`scope: "pages"` with `withheldPages`). There, figures on withheld pages are added to the withheld list before upload:
+they are stored, never served, and not billed. Clean pages resume normally.
+
+Every other outcome that withholds anything refuses the resume, with no VM:
+- a legacy outcome with no scope (`main`'s PII stage withholds every artifact under `redact_artifacts`);
+- `scope: "none"` or `"sections"` with `redacted`, `blocked` or a withheld list;
+- `pii_blocked`.
+
+`pii_detections` is never used to infer pages: it records only the primary source's matches.
+
+**Retention, orphan GC and audit.** Every 30 minutes the leader audits up to 50 documents from the partial index
+(`asset_bytes > 0 or assets_pending > 0 or not assets_current`), oldest audited first. A document whose figure step never
+ran stays current with no bytes, so it is never in that set.
+
+- Pending rows older than 24 hours are adopted, and missing slots re-added.
+- Each folder is listed whole. A truncated listing skips the document.
+- Unvouched page files are collected after 24 hours.
+- Retention collects everything of two kinds of document, so they are not kept unbilled:
+  - a failed, cancelled or `pii_blocked` document, 7 days after it ended;
+  - a non-current level, after 24 hours.
+- Collection runs in batches of 500, each under the document's ledger lock. The full retention rule is re-checked against
+  the selected level and run, so a document retried, reprocessed or revived meanwhile is left alone. Only rows whose
+  objects were collected are dropped.
+- A fully collected document's level is closed (`none`, current, no bytes), and its run's `extract-markdown` checkpoint
+  and figure slots are reset, so "Retry failed documents" re-extracts.
+- Kill switches: the ledger writes need `DOCSLURP_FIGURE_AUDIT=1` and the deletes `DOCSLURP_FIGURE_GC_DELETE=1`. Both
+  default to a dry run.
+
+**Rollout.** Retention bounds unpaid storage (failed, cancelled, `pii_blocked` and non-current figures) only once
+`DOCSLURP_FIGURE_GC_DELETE=1`. Enable it in production after this is council-clear, once the dry-run `gc.expired_files`
+and `gc.orphan_bytes` have been observed.
+
+**Resume and reprocess.** A resume holds within a run. A reprocess is a new run: it re-extracts figures from scratch and
+queues the old run's folder for purge.
+
+**Chat.** The chat's offer (`proposeFigureResume`, its instruction, and `getProjectSettings`' figures block) needs both
+`DOCSLURP_FIGURE_RESUME` and `DOCSLURP_FIGURE_RESUME_CHAT`. It stays off until the app's proposal card ships.
+
+**Cost.** VM time, including failed and timed-out runs, is a cost-only usage event (`doppler-figures-resume-vm`) at its
+real allocated cost, `billable: false`. It is never a customer charge.
+
+**Salvaged figures.** A failed VM job can hand back the shards that finished (`error.figures`, only when the host
+declares `partial` in `figureOutcomes`). The stage stores them idempotently, with conditional creates and pending then
+stored, before the failure stands, so a retry or resume starts from them.
+
+**Telemetry.**
+- Log lines: `[doppler-figures] resume claim|unit|done|failed|stale|capped|deferred|requested|backstop|salvaged` and
+  `[figure-audit]`.
+- Spans: `figure-resume`, `figure-resume-backlog` and `figure-audit`.
+- Metrics are on the OTel meter `docslurp.figures` (`recordFigureTelemetry`), so they reach SigNoz from background
+  timers:
+  - `resume.claimed`, `resume.attempts{outcome}`, `resume.capped{reason}`, `resume.deferred{reason}`, `resume.vm_ms`,
+    `resume.added_files`, `resume.pii_withheld_files` and `adopted_files`;
+  - the gauges `resumable_backlog` and `resume_oldest_age_s` (live documents only);
+  - `gc.orphan_files`, `gc.orphan_bytes`, `gc.expired_files`, `audit.ledger_storage_drift`, `audit.adopted_files` and
+    `audit.skipped_truncated`.
+
+## Storage billing
+
+Stored figures are billed as storage, measured rather than estimated. The daily storage meter
+(`server/src/services/billing/storage-meter.ts`) reads `getOrgStorage`, which adds the sum of
+`document_extraction_levels.asset_bytes` to `objectBytes`. The figure bytes follow the same rules as source bytes:
+
+- Live documents (completed, not superseded) count. The daily meter leaves out extracts, which pay for their own
+  retention window.
+- Archived versions that are not yet purged also count.
+- Superseded, purged and failed documents add nothing.
+- Every sum is filtered by the organization, and the ledger's composite foreign key ties each row to its document's own
+  organization.
+
+The per-page artifact estimate (96 KiB per page) never included figures, so nothing is counted twice. The figure bytes
+are charged through the existing daily storage event and credit debit, once per organization per day. The event's
+metadata records `measuredArtifactBytes`, and so does `storage_meter_days.measured_artifact_bytes`. Pending uploads and
+orphaned objects that no committed ledger row vouches for are never billed. A failed document's figures are not billed
+while it is failed, exactly like its source file (the meter counts completed, non-superseded documents plus archived,
+not purged ones); they are billed once a retry completes it.
 
 ## Not yet
 

@@ -1,3 +1,4 @@
+import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { decodeDelimitedBytes, delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, createOpenRouterChargeTotal, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolveAllowedPipelineTextModel, createOpenRouterRoutingFetch, createOpenRouterChargeTotal, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { blankPages, embedPerplexity, imageAnchorsToAltText, pageImageReferencePages } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
@@ -1321,6 +1322,7 @@ export function packEmbeddingBatches(chunks: readonly string[], maxInputs: numbe
 }
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
+  assertTenantModelEndpointAllowed(`llm://${profile.provider}/local`);
   switch (profile.provider) {
     case "deepinfra":
       if (profile.model !== "BAAI/bge-m3" || profile.dimensions !== 1024) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
@@ -1402,7 +1404,7 @@ async function buildDocumentContextSummary(args: {
   config: Config;
   signal?: AbortSignal;
 }): Promise<{ summary: string; usage?: ContextualChunkUsage }> {
-  const model = resolvePipelineTextModel(args, "contextual-chunk-preamble", args.config.textGenerationModel);
+  const model = resolveAllowedPipelineTextModel(args, "contextual-chunk-preamble", args.config.textGenerationModel);
   const heuristicSummary = buildHeuristicDocumentSummary(
     args.documentTitle,
     args.documentText,

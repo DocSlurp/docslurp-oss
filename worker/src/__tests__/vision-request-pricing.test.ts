@@ -59,6 +59,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -292,7 +293,7 @@ describe("hosted vision is limited to the priced catalog", () => {
 
   it.each([
     "llm://acme/o3-pro", "llm://anthropic/gpt-5-pro", "llm://huggingface/Qwen/Qwen2.5-VL-7B-Instruct", "llm://openrouter/someone/unlisted-vl",
-    "llm://openai/gpt-unlisted-vision", "llm://vllm/acme/plain-vl?baseUrl=https://gpu.example/v1", "llm://openai/gpt-4.1-mini?baseUrl=https://evil.example/v1",
+    "llm://openai/gpt-unlisted-vision", "llm://openai/gpt-4.1-mini?baseUrl=https://evil.example/v1",
     // Cataloged but refused: no serving-level image-token evidence.
     "llm://openrouter/xiaomi/mimo-v2.6-flash", "llm://openrouter/nvidia/nemotron-3.5-super-vl",
   ])(
@@ -306,9 +307,23 @@ describe("hosted vision is limited to the priced catalog", () => {
     },
   );
 
+  it("refuses a tenant-selected local endpoint before pricing, sends and charges", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "false");
+    try {
+      const uri = "llm://vllm/acme/plain-vl?baseUrl=https://gpu.example/v1";
+      const { result, fetch, weights } = await read({ modelUri: uri, vision: unvalidated(uri) });
+      expect(result).toBeInstanceOf(Error);
+      expect((result as Error).message).toBe("Tenant-selected local model endpoints are disabled");
+      expect(fetch).not.toHaveBeenCalled();
+      expect(weights).toEqual([]);
+      expect(backend.orgCents("org-1")).toBe(0);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it.each(["llm://acme/o3-pro", "llm://anthropic/gpt-5-pro", "llm://openrouter/someone/unlisted-vl"])(
     "refuses an unvalidated fallback %s before the primary route sends",
     async (uri) => {
+      vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
       const vision = unvalidated("llm://vllm/acme/plain-vl", { remoteFallbackModelUri: uri, target: "local" });
       const { result, fetch, weights } = await read({ modelUri: vision.modelUri, vision });
       expect(result).toBeInstanceOf(UnpricedVisionRouteError);
@@ -342,6 +357,7 @@ describe("hosted vision is limited to the priced catalog", () => {
   });
 
   it("sends the OpenAI key only to the OpenAI base URL: a loopback server gets no key", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     const local = await read({ modelUri: "llm://vllm/acme/plain-vl" });
     expect(local.sends).toHaveLength(1);
     expect(local.sends[0]!.url).toBe("http://127.0.0.1:8000/v1/chat/completions");

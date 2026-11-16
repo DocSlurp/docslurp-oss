@@ -13,7 +13,8 @@ import type { CommandRunner } from "../../tools/runner.js";
 import type { executeVisionRuntime, VisionExecutionResult } from "../../tools/vision-runtime.js";
 import type { OcrPageRead, OcrReadOutcome } from "../engine.js";
 import { escalateOcrPages } from "../escalation.js";
-import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped } from "../hosted-reader.js";
+import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped, ocrEscalationModel } from "../hosted-reader.js";
+import { isAutomaticSelectionDenied } from "@docslurp/shared";
 import { ocrDocument } from "../read-document.js";
 
 const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
@@ -260,5 +261,17 @@ describe("DOCSLURP_OCR_MODE=hosted", () => {
     const hostedReader = createHostedOcrReader({ state, cfg: CFG, runner: runner as unknown as CommandRunner, env: HOSTED, execute });
     await expect(hostedReader.read({ documentId: "doc-1", pageNumber: 1, imagePath: source, mimeType: "image/webp" }, "hosted-ocr")).resolves.toMatchObject({ text: "Hosted transcription" });
     await expect(hostedReader.read({ documentId: "doc-1", pageNumber: 2, imagePath: source, mimeType: "image/webp" }, "ocr-escalation")).rejects.toBeInstanceOf(HostedOcrSkipped);
+  });
+});
+
+describe("OCR escalation model override", () => {
+  it("never escalates to a model that is never selected automatically (DeepSeek V4.1 Flash, any build or route)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(isAutomaticSelectionDenied(DEFAULT_OCR_ESCALATION_MODEL)).toBe(false);
+    for (const model of ["llm://openrouter/deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash", "llm://deepinfra/deepseek-ai/DeepSeek-V4.1-Flash"]) {
+      expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: model })).toBe(DEFAULT_OCR_ESCALATION_MODEL);
+    }
+    expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: "llm://openrouter/openai/gpt-6-luna" })).toBe("llm://openrouter/openai/gpt-6-luna");
+    warn.mockRestore();
   });
 });

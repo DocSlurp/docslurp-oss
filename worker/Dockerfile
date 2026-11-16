@@ -11,6 +11,7 @@ COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
 RUN pnpm install --frozen-lockfile
 COPY worker/src ./worker/src
 COPY worker/scripts/copy-routing-assets.mjs ./worker/scripts/copy-routing-assets.mjs
+COPY worker/scripts/bundle-chart-guest.mjs worker/scripts/chart-guest-bundle.mjs worker/scripts/chart-export-worker.mjs ./worker/scripts/
 COPY scripts/lib/model-prices.json ./scripts/lib/model-prices.json
 RUN pnpm --filter @docslurp/worker build
 
@@ -144,6 +145,10 @@ ENV DOCSLURP_VERSION=${DOCSLURP_VERSION}
 ARG DOCSLURP_GIT_SHA=
 ENV DOCSLURP_GIT_SHA=${DOCSLURP_GIT_SHA}
 
+# Published images run with the deployed posture (#398): development-only fail-open settings, disabled quarantine and
+# the unisolated `none` parser sandbox are refused, and ClamAV problems stop startup. An unset NODE_ENV would count as
+# development. Run a local development container with `-e NODE_ENV=development`.
+ENV NODE_ENV=production
 USER docslurp
 
 CMD ["bash", "/app/scripts/start-worker.sh"]

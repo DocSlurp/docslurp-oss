@@ -70,8 +70,8 @@ async function seedProject(id: string, orgId: string, userId: string) {
   await sql`insert into projects(id, org_id, user_id, name) values (${id}, ${orgId}, ${userId}, ${`WS ${id}`})`;
   for (const [runId, status] of [[`${id}-done`, "completed"], [`${id}-live`, "processing"]] as const) {
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
-      values (${runId}, ${orgId}, ${userId}, ${id}, 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb)
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
+      values (100, ${runId}, ${orgId}, ${userId}, ${id}, 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb)
     `;
   }
   await sql`
@@ -124,6 +124,8 @@ describe("organization deletion", () => {
       { kind: "vector_table", target: "team|legacy" },
       { kind: "vector_table", target: "team|legacy|model-x|4" },
       { kind: "vector_table", target: "team|ws|model-x|4" },
+      // The summary tree's table beside it: organization deletion drops it by name as well.
+      { kind: "vector_table", target: "team|ws|model-x|4|summaries" },
     ]);
     const [org] = await sql`select name, slug, deleted_at is not null as deleted, offboarded_at is not null as offboarded,
       stripe_customer_id, auto_recharge_enabled from organizations where id = 'team'`;

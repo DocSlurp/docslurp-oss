@@ -1,9 +1,11 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveGeoDocumentScope } from "./geo-scope.js";
 import {
   defaultProjectSearchSettings,
   normalizePipelineFeatures,
   normalizeStoredPipelineFeatures,
   privacyModeAllowsHosted,
+  summaryTreeSearchModeSchema,
   type PrivacyMode,
   type PipelineFeatures,
   type ProjectSearchSettings,
@@ -13,8 +15,8 @@ import { sql } from "../db.js";
 import { resolveOpenRouterApiKey, SEARCH_OPENROUTER_MODEL } from "../lib/ai.js";
 import { hostedApiKeyForProject, openRouterCall } from "../lib/privacy.js";
 import { canSpend } from "../services/billing/spend-guard.js";
+import { assertSearchAccessScope, effectiveProjectAllowlist, type SearchAccessScope } from "./access-scope.js";
 import { getProjectAccess } from "../services/organizations.js";
-import { currentRequestApiKeyProjectIds } from "../lib/request-context.js";
 import { getProjectSearchSettings, parseProjectSearchSettingsRow, type SettingsRow } from "../services/search-controls.js";
 import { loadCachedSearchAvailability, searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import type { SearchOptions } from "../services/search.js";
@@ -23,6 +25,8 @@ import { resolveProjectRetrievalControls } from "./project-retrieval-session.js"
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 import { clampToSearchMode, effectiveSearchMode } from "./search-mode.js";
+import { planSummaryTreeSearch, type SummaryTreeSearchPlan } from "./summary-tree.js";
+import { callerMayRaiseSummaryTree, exceedsSummaryTreeCeiling, knownSummaryTreeMode } from "./summary-tree-ceiling.js";
 
 /**
  * The project does not exist or the caller may not see it (the two are indistinguishable by design).
@@ -68,6 +72,8 @@ export interface SearchSetup {
   privacyMode: PrivacyMode;
   /** SEARCH_LANCEDB_NATIVE for this project: lexical, vector and hydration come from LanceDB. */
   lanceNative?: boolean;
+  /** How this search uses the project's summary tree; null when it plays no part (search/summary-tree.ts). */
+  summaryTree?: SummaryTreeSearchPlan | null;
 }
 
 export type SearchAvailabilityRow = {
@@ -98,18 +104,21 @@ type ProjectPipelineRow = {
 export async function resolveSearchSetup(
   userId: string,
   options: SearchOptions,
+  accessScope: SearchAccessScope,
 ): Promise<SearchSetup> {
+  // Fail closed: no explicit scope, no search (search/access-scope.ts).
+  assertSearchAccessScope(accessScope);
   const requestedProjectId = options.filters?.projectId?.trim();
   const lanceNative = searchLanceDbNativeEnabled(requestedProjectId);
   let normalizedScope: SearchProjectScope;
   let projectSettings: ProjectSearchSettings;
   let projectIndexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   if (lanceNative && requestedProjectId) {
-    // Access, settings and pipeline in one round trip (never cached: they decide authorization and privacy).
+    // Access, settings and pipeline in one round trip (never cached across requests: they decide authorization and privacy).
     ({ scope: normalizedScope, settings: projectSettings, indexing: projectIndexing } =
-      await loadSearchProjectContext(requestedProjectId, userId));
+      await loadSearchProjectContext(requestedProjectId, userId, accessScope));
   } else {
-    normalizedScope = await normalizeSearchScope({ userId, options });
+    normalizedScope = await normalizeSearchScope({ userId, options, accessScope });
     // Independent lookups run together: each is a database round trip.
     [projectSettings, projectIndexing] = await Promise.all([
       getProjectSearchSettings(normalizedScope.projectId, userId).catch(() => ({
@@ -138,8 +147,29 @@ export async function resolveSearchSetup(
   });
   session.recordDiagnostic("retrievalControls", retrievalControls.diagnostics);
   // Clamped after project defaults, so no project setting runs more than the mode (and the key) allows.
-  const resolvedOptions = clampToSearchMode(retrievalControls.options, effectiveSearchMode(options));
+  const resolvedOptions = clampToSearchMode(retrievalControls.options, effectiveSearchMode(options, accessScope.modeCeiling));
   session.recordDiagnostic("searchMode", resolvedOptions.searchMode);
+  // The request's own value wins over the project default; neither runs unless the pipeline and the deployment allow it.
+  // The project default is also a ceiling: a request may ask for less, and for more only when its caller may change
+  // the project's settings (summary-tree-ceiling.ts). Asked only when the request does ask for more.
+  const treeDefault = knownSummaryTreeMode(projectSettings.retrievalDefaults?.summaryTree);
+  const treeAsked = options.summaryTree === undefined ? undefined : summaryTreeSearchModeSchema.safeParse(options.summaryTree);
+  const treeCeiling = treeAsked?.success && exceedsSummaryTreeCeiling(treeAsked.data, treeDefault)
+    && !(await callerMayRaiseSummaryTree({ userId, projectId: normalizedScope.projectId, orgId: normalizedScope.orgId, actor: accessScope.actor }))
+    ? treeDefault
+    : undefined;
+  if (treeCeiling !== undefined) session.recordDiagnostic("summaryTreeCeiling", { asked: treeAsked!.data, ceiling: treeCeiling });
+  const summaryTree = planSummaryTreeSearch({
+    explicit: options.summaryTree,
+    ceiling: treeCeiling,
+    projectDefault: projectSettings.retrievalDefaults?.summaryTree,
+    pipeline: projectPipeline,
+    env: process.env,
+    searchMode: resolvedOptions.searchMode ?? "deep",
+    native: lanceNative,
+    filters: resolvedOptions.filters,
+    subSearch: Boolean(options.rootSessionId),
+  });
   const availabilityPromise = (lanceNative ? loadCachedSearchAvailability : loadSearchAvailability)({
     projectId: normalizedScope.projectId,
     runId:
@@ -198,42 +228,88 @@ export async function resolveSearchSetup(
     indexConfigs: projectIndexing.indexConfigs,
     privacyMode,
     lanceNative,
+    summaryTree,
   };
 }
 
 type SearchProjectContextRow = Partial<SettingsRow> & {
   project_id: string;
   org_id: string;
+  project_name: string;
+  system_prompt: string | null;
   pipeline: PipelineFeatures | null;
   index_configs: unknown;
   settings_project_id: string | null;
 };
 
 /**
- * getProjectAccess + getProjectSearchSettings + loadProjectIndexing as
- * one query, with the same access rule (G-06) and API-key allowlist.
+ * getProjectAccess + getProjectSearchSettings + loadProjectIndexing as one
+ * query, with the same access rule (G-06), held to the explicit access scope:
+ * the project's org must be the scope's and the project inside its allowlist.
+ * A project outside the scope is indistinguishable from a missing one.
  */
-export async function loadSearchProjectContext(projectId: string, userId: string): Promise<{
+export async function loadSearchProjectContext(projectId: string, userId: string, accessScope: SearchAccessScope, options: {
+  /** Rethrow unreadable stored settings instead of using defaults (chat: a malformed `chat.enabled` must not turn chat on). */
+  strictSettings?: boolean;
+} = {}): Promise<SearchProjectContext> {
+  assertSearchAccessScope(accessScope);
+  const memo = requestContextMemo.getStore();
+  if (!memo) return await readSearchProjectContext(projectId, userId, accessScope, options);
+  // Same request only (the store exists for one `withSearchRequestMemo` call). The key holds everything the read is scoped
+  // by: user, project, the scope's org and project list, the request key's allowlist and how settings errors are handled.
+  const key = JSON.stringify([userId, projectId, accessScope.orgId, accessScope.projectIds, effectiveProjectAllowlist(accessScope), options.strictSettings === true]);
+  let read = memo.get(key);
+  if (!read) {
+    read = readSearchProjectContext(projectId, userId, accessScope, options);
+    memo.set(key, read);
+    // A refusal or failure is not kept: the next search of the request asks again.
+    read.catch(() => { if (memo.get(key) === read) memo.delete(key); });
+  }
+  // Each search gets its own copy, so one cannot change what another resolves.
+  return structuredClone(await read);
+}
+
+type SearchProjectContext = {
   scope: SearchProjectScope;
   settings: ProjectSearchSettings;
   indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
-}> {
+  /** The project's name and system prompt, for chat turns. */
+  project: { name: string; systemPrompt: string | null };
+};
+
+const requestContextMemo = new AsyncLocalStorage<Map<string, Promise<SearchProjectContext>>>();
+
+/**
+ * Runs `fn` (one HTTP request's searches, such as a batch) so that repeated `loadSearchProjectContext` reads for the same
+ * user, project, access scope and strictness are answered by the first. The memo lives only for this call and never
+ * outlives the request, so a revoked key or removed member loses access on the next request.
+ */
+export function withSearchRequestMemo<T>(fn: () => Promise<T>): Promise<T> {
+  return requestContextMemo.run(new Map(), fn);
+}
+
+async function readSearchProjectContext(projectId: string, userId: string, accessScope: SearchAccessScope, options: {
+  strictSettings?: boolean;
+}): Promise<SearchProjectContext> {
+  const allowlist = effectiveProjectAllowlist(accessScope);
+  if (allowlist && !allowlist.includes(projectId)) throw new ProjectNotFoundError();
   const [row] = await sql<SearchProjectContextRow[]>`
-    select w.id as project_id, w.org_id, w.pipeline, w.index_configs,
+    select w.id as project_id, w.org_id, w.name as project_name, w.system_prompt, w.pipeline, w.index_configs,
       s.project_id as settings_project_id, s.user_id, s.typo_tolerance, s.dedupe_by_filename, s.ranking_rules,
       s.boosts, s.pinned_results, s.synonyms, s.compat_settings, s.rules, s.compat_metadata
     from projects w
     left join project_search_settings s on s.project_id = w.id
     where w.id = ${projectId}
+      and w.org_id = ${accessScope.orgId}
       and docslurp_project_access(w.id, ${userId})
     limit 1
   `;
-  const allowlist = currentRequestApiKeyProjectIds();
-  if (!row || (allowlist && !allowlist.includes(row.project_id))) throw new ProjectNotFoundError();
+  if (!row || row.org_id !== accessScope.orgId || (allowlist && !allowlist.includes(row.project_id))) throw new ProjectNotFoundError();
   let settings: ProjectSearchSettings;
   try {
     settings = parseProjectSearchSettingsRow(row.settings_project_id ? row as SettingsRow : undefined, row.project_id, userId);
-  } catch {
+  } catch (error) {
+    if (options.strictSettings) throw error;
     settings = { ...defaultProjectSearchSettings, projectId: row.project_id, userId };
   }
   let indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
@@ -243,7 +319,10 @@ export async function loadSearchProjectContext(projectId: string, userId: string
     // Fail closed, as loadProjectIndexing does.
     indexing = { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
   }
-  return { scope: { projectId: row.project_id, orgId: row.org_id }, settings, indexing };
+  return {
+    scope: { projectId: row.project_id, orgId: row.org_id }, settings, indexing,
+    project: { name: row.project_name, systemPrompt: row.system_prompt ?? null },
+  };
 }
 
 export interface SearchProjectScope {
@@ -251,19 +330,22 @@ export interface SearchProjectScope {
   orgId: string;
 }
 
+/** A run- or document-scoped search's project, held to the explicit access scope (org and allowlist). */
 async function resolveSearchProjectScope(args: {
   userId: string;
   runId?: string;
   filters?: SearchOptions["filters"];
+  accessScope: SearchAccessScope;
 }): Promise<SearchProjectScope> {
-  const requestedProjectId = args.filters?.projectId?.trim();
-  const allowlist = currentRequestApiKeyProjectIds();
+  const allowlist = effectiveProjectAllowlist(args.accessScope);
   const keyAllowlist = allowlist ? sql.array([...allowlist]) : null;
+  const orgId = args.accessScope.orgId;
+  const requestedProjectId = args.filters?.projectId?.trim();
   if (requestedProjectId) {
+    if (allowlist && !allowlist.includes(requestedProjectId)) throw new ProjectNotFoundError();
+    // The user's own access (G-06, plus the request key's allowlist), then the scope's org.
     const access = await getProjectAccess(requestedProjectId, args.userId);
-    if (!access) {
-      throw new ProjectNotFoundError();
-    }
+    if (!access || access.projectId !== requestedProjectId || access.orgId !== orgId) throw new ProjectNotFoundError();
     return { projectId: access.projectId, orgId: access.orgId };
   }
 
@@ -279,6 +361,7 @@ async function resolveSearchProjectScope(args: {
       from documents d
       join projects w on w.id = d.project_id
       where d.id = any(${sql.array(documentIds)})
+        and w.org_id = ${orgId}
         and docslurp_project_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
     `;
@@ -300,6 +383,7 @@ async function resolveSearchProjectScope(args: {
       from project_runs runs
       join projects w on w.id = runs.project_id
       where runs.id = ${args.runId}
+        and w.org_id = ${orgId}
         and docslurp_project_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
       limit 1
@@ -318,8 +402,10 @@ async function resolveSearchProjectScope(args: {
 async function normalizeSearchScope(args: {
   userId: string;
   options: SearchOptions;
+  accessScope: SearchAccessScope;
 }): Promise<SearchProjectScope> {
   return await resolveSearchProjectScope({
+    accessScope: args.accessScope,
     userId: args.userId,
     runId:
       args.options.runId?.trim() ||

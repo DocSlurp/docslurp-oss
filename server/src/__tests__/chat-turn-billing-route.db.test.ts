@@ -57,6 +57,8 @@ beforeEach(async () => {
   await sql`delete from projects`;
   await sql`delete from organizations`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 1000)`;
+  // The route's access read (lib/search-access.ts) is the real one: u1 must be a member of the project's org.
+  await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner') on conflict do nothing`;
   await sql`insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W')`;
 });
 

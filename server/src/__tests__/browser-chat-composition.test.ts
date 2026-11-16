@@ -7,6 +7,11 @@ import { defaultProjectSearchSettings } from "@docslurp/shared";
 // Keep routes, actor authorization, project-chat, agent SDK loop, tool catalog,
 // tool composition and MCP dispatch real. Only persistence/provider ports are fake.
 const m = vi.hoisted(() => ({ sql: Object.assign(vi.fn(), { unsafe: vi.fn(), begin: vi.fn() }), key: vi.fn(), provider: vi.fn(), search: vi.fn() }));
+// Route access reads (lib/search-access.ts) answered from this file's getProject mock with the real scope rules.
+vi.mock("../lib/search-access.js", async () => {
+  const { authorizeFromProjectMock } = await import("./helpers/search-access.js");
+  return { authorizeActorProjectSearch: authorizeFromProjectMock(async (id, userId) => (await import("../services/projects.js")).getProject(id, userId)) };
+});
 vi.mock("../db.js", () => ({ sql: m.sql }));
 vi.mock("../lib/auth.js", () => ({ auth: {}, appDbPool: {} }));
 vi.mock("../services/api-keys.js", async original => ({ ...await original<typeof import("../services/api-keys.js")>(), validateApiKey: m.key }));
@@ -25,6 +30,16 @@ vi.mock("../services/organizations.js", async original => ({
   }),
 }));
 vi.mock("../services/search-controls.js", () => ({ getProjectSearchSettings: vi.fn(async () => ({ ...defaultProjectSearchSettings, chat: { ...defaultProjectSearchSettings.chat, mode: "retrieval" } })) }));
+// The chat turn's one context read, from the project and settings mocks above (its SQL is covered in chat-turn-scope.db.test.ts).
+vi.mock("../services/chat-turn-context.js", () => ({
+  loadChatTurnContext: vi.fn(async (projectId: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(projectId, userId) as { orgId: string; name: string; pipeline: unknown; systemPrompt: string | null };
+    const settings = await (await import("../services/search-controls.js")).getProjectSearchSettings(projectId, userId);
+    const { normalizePipelineFeatures } = await import("@docslurp/shared");
+    return { projectId, orgId: project.orgId, name: project.name, systemPrompt: project.systemPrompt,
+      pipeline: normalizePipelineFeatures(null), privacyMode: "standard", settings };
+  }),
+}));
 vi.mock("../services/search.js", async original => ({ ...await original<typeof import("../services/search.js")>(), hybridSearch: m.search, loadProjectWholeCorpusContext: vi.fn(async () => ({ eligible: false, results: [], stats: {} })) }));
 vi.mock("../lib/chat-agent-model.js", async original => ({ ...await original<typeof import("../lib/chat-agent-model.js")>(), createChatAgentModel: m.provider }));
 vi.mock("../lib/ai.js", async original => ({ ...await original<typeof import("../lib/ai.js")>(), resolveOpenRouterApiKey: () => "fake-no-network" }));

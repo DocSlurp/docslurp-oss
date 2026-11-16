@@ -115,7 +115,7 @@ If you raise `DOCSLURP_EXTRACT_MAX_RETENTION_DAYS`, raise this too, or extended 
 - A paid window is checked before anything is stored: the organization must be allowed to spend (`assertCanSpend`) and, when billing is enforced, must hold the estimated charge for the declared size. Otherwise the request fails with `402 credit_exhausted`.
 - It is charged as soon as intake has created the run and the sizes are known (`extract-retention:<extract>`), so parallel extracts can't all pass the pre-check and then overdraw. When the run finishes, any rise in the measured size is charged (`extract-retention:<extract>:settle`). An extract whose run never finished is charged at expiry (`…:expiry`). There are no refunds when the stored size turns out smaller. Each charge is a billable unit event (`storage-extract-retention`, provider `docslurp`) recorded through the usage ledger with the extract's org, project, run and API key, plus the matching credit debit. It counts as storage spend.
 
-For example, 1,000 pages with 75 KB sources kept for 30 days store about 0.19 GB and cost about 9.5 credits ($0.095) of retention, about 10,500 pages per $1 for retention alone. Storage for those pages costs us about $0.013 a month (Tigris objects at $0.02 per GB-month and Neon index storage at $0.35 per GB-month).
+For example, 1,000 pages with 75 KB sources kept for 30 days store about 0.19 GB and cost about 9.5 credits ($0.095) of retention, about 10,500 pages per $1 for retention alone.
 
 ## Measuring extract on its own
 

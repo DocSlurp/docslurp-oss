@@ -5,6 +5,7 @@ import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { detectHtmlEmbeds as localDetect, type HtmlEmbedReport } from "./html-embeds-guest.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 export type { HtmlEmbedReport, HtmlEmbeddedItem, HtmlEmbedKind } from "./html-embeds-guest.js";
 export function detectHtmlEmbeds(html: string): HtmlEmbedReport {
   if (vmOnlyParsing()) throw new Error("HTML source inspection requires the parser VM");
@@ -16,7 +17,7 @@ export async function detectHtmlEmbedsFile(input: string, runner: Pick<CommandRu
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-embeds-"));
   try {
     const output = path.join(dir, "report.json");
-    await runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "html-embeds.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
+    await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "html-embeds.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
     if ((await stat(output)).size > 4 * 1024 * 1024) throw new Error("HTML embed report exceeds limit");
     const result = JSON.parse(await readFile(output, "utf8")) as HtmlEmbedReport;
     const kinds = new Set(["iframe", "iframe-srcdoc", "embed", "object", "video", "audio", "canvas", "svg-foreign-object", "script-external", "script-rendered"]);

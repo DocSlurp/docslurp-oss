@@ -128,6 +128,8 @@ answers searches. Instead the server re-prewarms open tables every
 | `LANCEDB_INDEX_CACHE_MB` | 25% of usable memory, 64 MB to 6 GB | Index cache size. LanceDB's own default is a fixed 6 GB. Usable memory is the container limit when one is set. |
 | `LANCEDB_METADATA_CACHE_MB` | 5% of usable memory, 32 MB to 1 GB | File footer and schema cache size. LanceDB's own default is a fixed 1 GB. |
 | `LANCEDB_PREWARM_INDEX` | `false` | Prewarm vector and FTS indexes when a table opens. Off by default: on MinIO with injected 40 ms latency it did not measurably change search latency (`server/scripts/lancedb-session-bench.ts`). Failures are logged (`[lancedb-session] prewarm ... errors=`), never thrown. |
+| `SEARCH_LANCE_WARM_INDEX` | `1` | A search starts loading its table's vector and full-text indexes while the query is planned and embedded: once per open table and index generation, at most two tables at a time, shared by concurrent searches. It loads what the first query would read anyway (at 100,000 chunks: a 106 MB vector index read either way, plus about 6 MB for the whole full-text index and about 35 MB of memory). `[search-timing]` reports `lanceIndexCold` and `lanceIndexLoad` (ms) on a cold table, `lanceIndexWarm` afterwards. `0` disables. |
+| `SEARCH_BOOT_WARM_PROJECTS` | `5` | With `NODE_ENV=production`, a few seconds after it starts the server opens the LanceDB tables of the most searched projects of the last 7 days and loads their indexes in the background, so the first search after a restart is not the slow one. It warms the embedding space the project's pipeline names, skips archived projects, and gives one organization at most two places. At most 50; `0` turns it off, as does `SEARCH_LANCE_WARM=0`. Logs `[search] boot warm projects=… ms=…`. |
 | `LANCEDB_PREWARM_BLOCKING` | `false` | `true` makes the first search wait for the prewarm. Off, the first searches run while it loads. |
 | `LANCEDB_PREWARM_REFRESH_SECONDS` | `60` | With `LANCEDB_PREWARM_INDEX=true`, re-prewarm open tables this often. `0` disables. |
 | `LANCEDB_PREWARM_DATA` | `false` | Also load the `vector`, `id` and `documentId` columns, so refine and `documentId` filters read memory. Costs RAM of that size. |
@@ -153,13 +155,16 @@ trip the watchdog.
 | --- | --- | --- |
 | `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + 12` per process against Postgres `max_connections` (LISTEN, the probe and Better Auth's own pool of 10), and double it for deploys that overlap old and new machines. |
 | `SEARCH_STATEMENT_TIMEOUT_MS` | `8000` | `SET LOCAL statement_timeout` for each search statement (lexical, page, community and graph branches). A timed-out branch contributes no results and the search continues with the others; `0` disables. Search SQL is also cancelled when the client disconnects. |
+| `SEARCH_STREAM_DETACHED_TIMEOUT_MS` | `120000` | Longest a streamed search (`/v1/search/stream`) may keep running after its client disconnected once passages had been sent, which makes the search billable. Then the search is aborted. Values above `600000` are clamped to it; values below `1000` or unparsable use the default. A client that leaves before any hits are sent aborts the search at once. |
 | `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Deadline for one search-agent chat turn, kept below the ~120 s edge proxy timeout. Near it, tools are disabled and the turn answers from the evidence it has (`stopReason: "deadline"`, HTTP 200); if a model/turn deadline expires it returns 424 `chat_deadline_exceeded`, even after partial text. All model, tool, search and SQL work of the turn is cancelled at it. |
 | `CHAT_AGENT_STEP_TIMEOUT_MS` | `45000` | Longest model call for a tool-calling agent step (capped to end before the final reserve). |
 | `CHAT_AGENT_FIRST_TOKEN_TIMEOUT_MS` | `15000` | Time to the first non-empty text, reasoning or tool-call output for each agent model step (maximum 60000 ms, bounded by the existing step/turn deadline). Headers and heartbeats do not count. Existing OpenRouter provider fallback remains enabled; this timeout cancels the call without replaying it. |
 | `CHAT_AGENT_TOOL_TIMEOUT_MS` | `30000` | Longest agent tool call (capped to end before the final reserve); a slower tool is cancelled and blocks the turn with 424 `chat_tool_failed`. |
 | `CHAT_AGENT_FINAL_RESERVE_MS` | `20000` | Part of the turn deadline kept for the final answer, at most half of it. |
+| `CHAT_CONCURRENCY_LOCAL_ONLY` | off | Chat turns in progress are capped per API key and per visitor, counted in a shared Redis chosen in the rate limiter's order: `API_RATE_LIMIT_REDIS_REST_URL` with `API_RATE_LIMIT_REDIS_REST_TOKEN` (or the `UPSTASH_REDIS_REST_*` pair), `API_RATE_LIMIT_REDIS_URL` (set by `compose.selfhost.yml`), `REDIS_URL`, then `MASTRA_REDIS_URL`. With `NODE_ENV=production` the API refuses to start when none is set or a REST pair is half set. `1` opts out for a single API instance without Redis and counts per process (logged once at startup); with several instances each would allow the full cap. If the configured Redis is unreachable, capped chat turns get 503 `chat_capacity_unavailable` and the API logs `[chat-concurrency] status=refused reason=backend-unavailable` once per refused turn. |
 | `SEARCH_LEXICAL_CANDIDATES` | `1000` | Keyword matches ranked per lexical statement. Broader queries rank the first N matches; only the top results fetch their text. |
 | `SEARCH_MAX_CONCURRENCY` | `max(2, DATABASE_POOL_MAX / 3)` (6) | Concurrent hybrid searches per process. Extra searches wait in the app instead of the pool. `0` disables the limit. Nested searches (decompose, stepback, multi-hop) share their parent's slot. |
+| `SEARCH_FAST_LANE_CONCURRENCY` | `max(4, 2 × SEARCH_MAX_CONCURRENCY)` | Concurrent search setups per process. Every search resolves its project here before queueing for a search slot; a keyword or hybrid search over a project with no searchable documents finishes here and never takes a slot. `0` restores a single lane, with setup inside the search slot. |
 | `SEARCH_QUEUE_MAX` | `200` | Searches allowed to wait for a slot; beyond it a search fails at once with 503. |
 | `SEARCH_QUEUE_TIMEOUT_MS` | `30000` | Longest wait for a slot before a 503 with `Retry-After`. The wait appears as `queueMs` in search timings. |
 | `SEARCH_FAIR_ADMISSION` | with `SEARCH_LANCEDB_NATIVE` (on) | Serve waiting searches round-robin per organization, so one tenant's fan-out cannot starve another. Off (the default when `SEARCH_LANCEDB_NATIVE=0`, even with `SEARCH_LANCEDB_NATIVE_PROJECTS`), the queue is one FIFO. |
@@ -167,9 +172,13 @@ trip the watchdog.
 | `SEARCH_LANCEDB_NATIVE` | on | Serve keyword (BM25), vector and citation hydration from LanceDB instead of Postgres: the LanceDB table's full-text index replaces Postgres FTS, the row's hydration columns replace the `document_chunks` read, and the eligible-document set and coverage are cached per project. Set `0` (or `false`) to turn it off everywhere: every search then takes the Postgres path. Until a table is prepared (worker maintenance with `LANCEDB_FTS_INDEX`, or the backfill below) native search falls back per case: a project whose table lacks an FTS index (or fails to open) uses Postgres FTS for keyword search, and rows without hydration columns hydrate from Postgres. Queries with "quoted phrases" or `-negation` always use Postgres FTS (the BM25 index honours neither), as do documents whose chunks a correction reindex rewrote after their vectors were written. Every LanceDB hit is checked against `document_chunks` (one primary-key read), so a deleted or replaced chunk is never served. Batch searches (`queries`) embed their queries in one provider request. The API logs `[search] native keyword search fell back to Postgres FTS org=… reason=…` (at most every ten minutes per org and reason) while an org still needs the backfill. |
 | `SEARCH_LANCEDB_NATIVE_PROJECTS` | empty | Comma-separated project ids that keep native search while `SEARCH_LANCEDB_NATIVE=0`. |
 | `SEARCH_ELIGIBLE_CACHE_TTL_MS` | `15000` | Native search: how long a project's eligible documents and coverage are cached. Worker `run_events` hints drop a project's entries sooner. |
-| `SEARCH_SESSION_WRITE_BEHIND` | with `SEARCH_LANCEDB_NATIVE` (on) | Write search sessions, result ranks and zero-result diagnostics after the response. Usage events (billing) still commit before the response. Writes for one session stay ordered; `GET /v1/search/diagnostics` waits for them. |
-| `SEARCH_WRITE_BEHIND_CONCURRENCY` | `2` | Background search writes running at once. |
-| `SEARCH_WRITE_BEHIND_MAX_PENDING` | `200` | Background search writes allowed to wait for a slot. Past it a search waits for its own writes, so the backlog (session rows a crash could lose) stays bounded. The standalone server drains the backlog on `SIGTERM`/`SIGINT`; an embedding host should call `drainSearchSessionWrites(ms)` from `@docslurp/server/server` on shutdown. |
+| `SEARCH_SESSION_WRITE_BEHIND` | with `SEARCH_LANCEDB_NATIVE` (on) | Write search sessions, result ranks and zero-result diagnostics after the response. Usage events also commit after the response within `SEARCH_WRITE_BEHIND_MAX_CREDITS`, and before it otherwise. Writes for one session stay ordered; `GET /v1/search/diagnostics` waits for them. |
+| `SEARCH_KEYWORD_FANOUT_CONCURRENCY` | `16` | BM25 queries one keyword fan-out (array `q`) runs at once. A fan-out that fails stops starting queries and waits for the running ones. |
+| `SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY` | `4` | Postgres full-text queries all keyword fan-outs in one process may run at once: phrase and negation terms, fallbacks when native BM25 is unavailable or misses, and documents not yet in LanceDB. |
+| `SEARCH_WRITE_BEHIND_MAX_CREDITS` | `10` | Billed search writes (per-search charges and usage events), in credits, that one API process may answer before they commit, per organization (10 credits = $0.10). Each organization has its own allowance, so one organization's unwritten or failing charges never slow another's searches; a write without an organization is never deferred. Past it a search waits for its own write. A deferred write that fails keeps holding its credits and is retried until it commits; one given up on (integrity error, or about ten minutes of retries) stays counted against its organization until the process restarts, so failures cannot free the allowance. The cap bounds what a crash could lose and what spend checks cannot see yet. `0` writes every billed insert before the response. The shutdown drain (`drainSearchSessionWrites`) waits for them. |
+| `SEARCH_WRITE_BEHIND_CONCURRENCY` | `2` | Background search writes running at once. Organizations take turns for these slots. |
+| `SEARCH_WRITE_BEHIND_MAX_PENDING` | `200` | Background search writes one organization may have waiting (queued for a slot or behind an earlier write of the same session), and deferred billed writes per organization. Past it that organization's searches wait for their own writes, so the backlog (session rows a crash could lose) stays bounded. The standalone server drains the backlog on `SIGTERM`/`SIGINT`; an embedding host should call `drainSearchSessionWrites(ms)` from `@docslurp/server/server` on shutdown. |
+| `SEARCH_WRITE_BEHIND_MAX_PENDING_TOTAL` | `5000` | Memory bound on the same counts across all organizations in one process. Past it every search writes before it answers. |
 | `LANCEDB_FTS_LANGUAGE` | `auto` | Worker: analyzer of the LanceDB chunk-text full-text index. `auto` segments words with ICU (Japanese, Chinese, Thai and every other script), lower-cases and folds accents, and does not stem or drop stop words, because either one is per-language. Name one language (`English`, `German`, ...) to restore stemming and stop words for a deployment whose documents are in that language. An index built with the old English analyzer is replaced by the next maintenance run. |
 | `LANCEDB_FTS_INDEX` | on | Worker: LanceDB maintenance also builds and refreshes a full-text index on chunk text, which native search queries; `0` disables it. Existing tables: run the backfill, `node worker/dist/stages/lancedb-native-backfill-cli.js --all` in the worker image (or `--org <id>`, `--project <id>`; from a checkout, `pnpm --filter @docslurp/worker exec tsx scripts/lancedb-native-backfill.ts …`) with `DATABASE_URL` and `LANCEDB_URI` set. For every project database in scope (one per project and embedding space) it adds the hydration columns, fills them from Postgres, builds the index and optimizes the table once so the rewritten rows return to the vector index; no re-embedding. It is idempotent and safe beside ingest, but it rewrites every row of each table: run it off-peak, try `--dry-run` first, and do not pass `--skip-optimize` unless maintenance will optimize the table soon after. It reports a failing table and continues, exiting 1 at the end. |
 | `DB_WATCHDOG_INTERVAL_MS` | `15000` | How often the production watchdog probes. |
@@ -212,7 +221,7 @@ read them through `packages/shared/src/temporal-security.ts`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DOCSLURP_PARSER_SANDBOX` | `bubblewrap` on Linux; `none` elsewhere outside production | Provider: `bubblewrap`, `landlock`, `modal` or `none`. |
-| `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | unset | `true` allows provider `none` in production and logs `[parser-sandbox] status=unisolated` at start. |
+| `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | unset | Development and test only: `true` lets provider `none` run without a PID namespace and logs `[parser-sandbox] status=unisolated` at start. Anywhere else (any `NODE_ENV` other than `development`, `test` or unset, or the service profile) the worker refuses to start with it set. See [Development-only settings](#development-only-settings). |
 | `DOCSLURP_PARSER_SANDBOX_ROOT` | `/tmp/docslurp-parser-sandbox` | Scratch root (bubblewrap, landlock). |
 | `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS` | empty | Comma-separated private projects parsers may write (bubblewrap, landlock). |
 | `DOCSLURP_LANDRUN_BINARY` | `landrun` | landrun executable (landlock). |
@@ -232,7 +241,7 @@ Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
 | `DOCSLURP_DOPPLER_BIN_DIR` | `/usr/lib/doppler/bin` | Where Doppler's `pdftomarkdown` is (the worker images install it there, off `PATH`). `local` mode refuses to start without it. |
 | `DOCSLURP_OCR_PYTHON`, `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-venv/bin/python3`, `/opt/docslurp/ocr-models` | The local OCR runtime (`local` mode). The full worker image sets both. |
 
-The other OCR settings (escalation, attempts, language, size and concurrency limits) are in `.env.example` and
+The other OCR settings (escalation, the page reader, attempts, language, size and concurrency limits) are in `.env.example` and
 [OCR](../extraction/ocr.md).
 
 ## Removed and deprecated
@@ -240,9 +249,31 @@ The other OCR settings (escalation, attempts, language, size and concurrency lim
 `DOCSLURP_PARSER_SANDBOX_ENABLED`, `DOCSLURP_PARSER_SANDBOX_MODE` and
 `DOCSLURP_PARSER_SANDBOX_SCRIPT` were removed with no replacement of the same
 name. Use `DOCSLURP_PARSER_SANDBOX` to choose a provider; to run without
-isolation, set `DOCSLURP_PARSER_SANDBOX=none` (and
-`DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` in production). Setting the old
-names has no effect.
+isolation in development, set `DOCSLURP_PARSER_SANDBOX=none`. Production
+never runs without isolation. Setting the old names has no effect.
+
+### Development-only settings
+
+These settings weaken untrusted-file protection. They exist for local
+development and tests. `scripts/start-worker.sh` and the worker both refuse to
+start when one of the fail-open flags is set to anything other than an explicit
+off value (`false`, `0`, `no`, `off` or empty), when `QUARANTINE_ENABLED` is set
+to anything other than an on value (`true`, `1`, `yes`, `on` or empty), or when
+`DOCSLURP_PARSER_SANDBOX` is `none`, unless `NODE_ENV` is `development`, `test`
+or unset and the service profile is off. `NODE_ENV` is compared after trimming
+ASCII whitespace and ignoring ASCII case; any other value, staging and preview
+included, counts as deployed. Compose sets `NODE_ENV=production`, and so do the
+published worker images, so a Compose deployment or a bare `docker run` refuses
+them.
+
+| Variable | Effect in development |
+| --- | --- |
+| `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | Provider `none` runs parsers without a PID namespace. |
+| `DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS` | Socket-denied commands run on a provider that cannot filter UNIX sockets. |
+| `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` | A missing quarantine inspection tool accepts the file. Defaults to `true` in development and test so local ingestion works without ClamAV; set `false` to block. |
+| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | A stale or missing ClamAV signature database only warns. Defaults to `false` everywhere, development included: set `true` in a local `.env` if you run without fresh signatures. |
+| `QUARANTINE_ENABLED=false` | Files parse unscanned. Outside development quarantine is always on. |
+| `DOCSLURP_PARSER_SANDBOX=none` | Parsers run on the host with no filesystem or network isolation. Outside development the worker also refuses `none` as the platform default. |
 
 The pre-URI variables `S3_BUCKET`, `AWS_ENDPOINT_URL_S3`, and `AWS_REGION` are
 deprecated. They are honored only when `STORAGE_URI` is unset and are no longer

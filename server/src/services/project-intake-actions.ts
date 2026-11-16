@@ -1,14 +1,19 @@
+import { intakeReceiptContext } from "./intake-receipt-context.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
 /**
  * HTTP-facing Project Intake actions: request parsing, idempotency, and the
  * response payload. Each action is a thin source adapter over
  * `intakeIntoProject`, which owns validation, storage, project resolution,
  * run creation, processing start, and audit.
  */
+import { chartExportOverrideError } from "./chart-export-availability.js";
+import type { ChartExportTier } from "@docslurp/shared";
 import { createHash } from "node:crypto";
 
 import {
   documentTagsSchema,
   pipelineFeatureOverridesSchema,
+  publicPipelineFeatureOverridesSchema,
   sanitizeStoredPipeline,
   projectTemplateKeySchema,
   type ExtractRecord,
@@ -19,8 +24,9 @@ import {
 
 import { sql } from "../db.js";
 import { discardUnstartedRun } from "./run-creation.js";
-import { mapDocument, mapProjectRun, type DocumentRow, type ProjectRunRow } from "./run-records.js";
-import { getProject } from "./projects.js";
+import { type ProjectRunRow } from "./run-records.js";
+import { canContributeToProject, getProjectAccess } from "./organizations.js";
+import { getLiveApiKeyById } from "./api-keys.js";
 
 import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
@@ -73,7 +79,7 @@ export type BulkProjectIntakeFile = Pick<File, "arrayBuffer" | "name" | "size" |
 
 type IntakeTargetArgs = Pick<
   ProjectIntakeRequest,
-  "speedBoost" | "userId" | "orgId" | "project" | "newProject" | "templateKey" | "allowedProjectIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId"
+  "speedBoost" | "userId" | "orgId" | "project" | "newProject" | "templateKey" | "allowedProjectIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId" | "origin"
 >;
 
 /**
@@ -121,44 +127,98 @@ function actionResult(
   };
 }
 
+async function authorizeReceiptProject(projectId: string, userId: string, orgId?: string | null, apiKeyId?: string | null): Promise<void> {
+  const access = await getProjectAccess(projectId, userId);
+  if (!access || !canContributeToProject(access, userId) || (orgId && access.orgId !== orgId)) {
+    throw new ProjectIntakeError("Upload project is no longer accessible", 403);
+  }
+  if (apiKeyId) {
+    const key = await getLiveApiKeyById(apiKeyId);
+    if (!key || key.orgId !== access.orgId || !key.scopes.includes("ingest")
+      || (key.projectIds.length > 0 && !key.projectIds.includes(projectId))) {
+      throw new ProjectIntakeError("API key no longer permits this upload", 403);
+    }
+  }
+}
+
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
-  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null },
+  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null },
   run: () => Promise<ProjectIntakeActionResult>,
 ): Promise<ProjectIntakeActionResult> {
   if (!args.idempotencyKey) return await run();
   // Clients choose their keys, so two tenants will pick the same one: the cache key is scoped to organization and user.
-  const idempotencyKey = scopedIdempotencyKey({ orgId: args.orgId, userId: args.userId }, args.idempotencyKey);
+  const idempotencyKey = scopedIdempotencyKey({ orgId: args.orgId, userId: args.userId, apiKeyId: args.apiKeyId, project: args.project }, args.idempotencyKey);
 
-  let cached;
-  try {
-    cached = await getCachedIdempotentResponse({
+  return await withDirectUploadLock(`intake:${args.routeKey}:${idempotencyKey}`, async () => {
+    let cached;
+    try {
+      cached = await getCachedIdempotentResponse({
+        idempotencyKey,
+        routeKey: args.routeKey,
+        requestHash: args.requestHash,
+      });
+    } catch (error) {
+      throw new ProjectIntakeError(error instanceof Error ? error.message : "Idempotency conflict", 409);
+    }
+    if (!cached) {
+      const receipts = await sql`select r.*, p.creation_ready_at from intake_request_receipts r
+        left join project_runs p on p.id = r.run_id
+        where r.idempotency_key = ${idempotencyKey} and r.route_key = ${args.routeKey}`;
+      let receipt: (typeof receipts)[number] | undefined = receipts[0];
+      if (receipt) {
+        if (receipt.request_hash !== args.requestHash) throw new ProjectIntakeError("Idempotency conflict", 409);
+        if (!receipt.creation_ready_at) {
+          if (receipt.external_effect_started !== false) throw new ProjectIntakeError("Intake outcome is uncertain; reconciliation required", 409, undefined, "intake_reconciliation_required");
+          if (receipt.run_id && !await discardUnstartedRun(receipt.run_id)) throw new ProjectIntakeError("Committed intake is still recovering; retry shortly", 409);
+          await sql`delete from intake_request_receipts where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey} and run_id is null and external_effect_started = false`;
+          receipt = undefined;
+        }
+      }
+      if (receipt) {
+        if (!receipt.stable_result) throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
+        const stable = receipt.stable_result as ProjectIntakeActionResult;
+        cached = { status: stable.status, body: stable.payload as unknown as Record<string, unknown> };
+      }
+    }
+    if (cached) {
+      const payload = cached.body as ProjectIntakePayload;
+      // Authorize the actual persisted target, including an omitted/default
+      // target. A cache namespace is identity, never current permission.
+      const projectId = payload.project?.id;
+      if (!projectId) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
+      await authorizeReceiptProject(projectId, args.userId, args.orgId, args.apiKeyId);
+      const [stableReceipt] = await sql`select stable_result from intake_request_receipts
+        where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey}`;
+      const stable = stableReceipt?.stable_result as ProjectIntakeActionResult | undefined;
+      if (!stable || stable.status !== 201 || typeof stable.temporalDeferred !== "boolean" ||
+          !stable.payload || stable.payload.project?.id !== projectId ||
+          !stable.payload.run?.id || !Array.isArray(stable.payload.documents) || !Array.isArray(stable.payload.warnings)) {
+        throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
+      }
+      return { ...stable, idempotencyReplayed: true };
+    }
+
+    // Claim before work. Safe preparation can retry under this same lock; a crawl
+    // durably marks its uncertain external-effect boundary before invocation.
+    await sql`insert into intake_request_receipts (idempotency_key, route_key, request_hash, user_id, external_effect_started)
+      values (${idempotencyKey}, ${args.routeKey}, ${args.requestHash}, ${args.userId}, false)`;
+    const result = await intakeReceiptContext.run({ key: idempotencyKey, route: args.routeKey, hash: args.requestHash, userId: args.userId }, run);
+    const [saved] = await sql`update intake_request_receipts set stable_result = ${sql.json(JSON.parse(JSON.stringify(result)))}
+      where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey}
+        and request_hash = ${args.requestHash} and user_id = ${args.userId}
+      returning run_id`;
+    if (!saved) throw new ProjectIntakeError("Intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
+    await storeIdempotentResponse({
       idempotencyKey,
       routeKey: args.routeKey,
       requestHash: args.requestHash,
+      userId: args.userId,
+      status: result.status,
+      body: result.payload as unknown as Record<string, unknown>,
     });
-  } catch (error) {
-    throw new ProjectIntakeError(error instanceof Error ? error.message : "Idempotency conflict", 409);
-  }
-  if (cached) {
-    return {
-      payload: cached.body as ProjectIntakePayload,
-      status: cached.status as 201,
-      temporalDeferred: false,
-      idempotencyReplayed: true,
-    };
-  }
-
-  const result = await run();
-  await storeIdempotentResponse({
-    idempotencyKey,
-    routeKey: args.routeKey,
-    requestHash: args.requestHash,
-    userId: args.userId,
-    status: result.status,
-    body: result.payload as unknown as Record<string, unknown>,
-  });
-  return result;
+    return result;
+  }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight");
 }
 
 /**
@@ -166,7 +226,7 @@ async function idempotently(
  * pipeline (and its template locks) instead of replacing it.
  */
 export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrides {
-  const parsed = pipelineFeatureOverridesSchema.safeParse(raw === undefined || raw === null ? {} : raw);
+  const parsed = publicPipelineFeatureOverridesSchema.safeParse(raw === undefined || raw === null ? {} : raw);
   if (!parsed.success) {
     throw new ProjectIntakeError("Invalid pipeline payload", 422, parsed.error.issues.map((issue) => ({
       path: ["pipeline", ...issue.path].join("."),
@@ -174,7 +234,19 @@ export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrid
       code: issue.code,
     })));
   }
+  assertIntakeChartExportTier((parsed.data as { chartExport?: { tier?: ChartExportTier } }).chartExport?.tier, "intake");
   return parsed.data;
+}
+
+/**
+ * Refuses an upload, URL ingest, extract or crawl override for a tier the deployment does not offer: 400
+ * `chart_export_tier_unavailable`, the same code and status as reprocess, estimates and project changes.
+ */
+export function assertIntakeChartExportTier(tier: ChartExportTier | null | undefined, context: string): void {
+  const refused = chartExportOverrideError(tier, context);
+  if (refused) {
+    throw new ProjectIntakeError(refused, 400, [{ path: "pipeline.chartExport.tier", message: refused, code: CHART_EXPORT_TIER_UNAVAILABLE_CODE }], CHART_EXPORT_TIER_UNAVAILABLE_CODE);
+  }
 }
 
 export function parseProjectIntakeTemplateKey(raw: unknown): ProjectTemplateKey | undefined {
@@ -203,21 +275,19 @@ export async function confirmDirectUploadProjectIntake(
     const loaded = await loadDirectUploadSession(args.sessionId, args.userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
     if (["aborted", "failed"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
-    if (loaded.session.result) return loaded.session.result as ProjectIntakeActionResult;
+    if (loaded.session.result) {
+      const result = loaded.session.result as ProjectIntakeActionResult;
+      await authorizeReceiptProject(result.payload.project.id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
+      return result;
+    }
     if (!loaded.files.every(file => file.status === "completed")) throw new ProjectIntakeError("Upload session still has incomplete files", 409);
 
     // Run identity is chosen before intake. A process crash after publication can
     // recover the same manifest rather than creating a second billable run.
     const [existing] = await sql<Array<ProjectRunRow & { creation_ready_at?: string | null }>>`select * from project_runs where id = ${args.sessionId} and user_id = ${args.userId}`;
     if (existing && existing.creation_ready_at) {
-      const project = await getProject(existing.project_id, args.userId);
-      if (!project) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
-      const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${args.sessionId} order by created_at, id`;
-      if (loaded.session.extract_id) await attachExtractRun(loaded.session.extract_id, args.sessionId);
-      const extract = loaded.session.extract_id ? await describeExtractById(loaded.session.extract_id) : null;
-      const result = actionResult({ project, run: mapProjectRun(existing), documents: documents.map(mapDocument), pipeline: existing.pipeline, deferredReason: null, rejected: [], ...(extract ? { extract } : {}) });
-      await persistDirectUploadResult(args.sessionId, result);
-      return result;
+      await authorizeReceiptProject(existing.project_id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
+      throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
     }
     if (existing) await discardUnstartedRun(args.sessionId);
     const { session, items } = await prepareDirectUploadProjectIntake(args.sessionId, args.userId);
@@ -237,6 +307,10 @@ export async function confirmDirectUploadProjectIntake(
         return project;
       },
     } };
+    const sessionPipeline = session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined;
+    // Re-checked at confirm: a session opened before the deployment stopped offering a tier (or before migration 0151
+    // mapped enabled:true to models) is refused with the same code, not run at a tier no estimate showed.
+    assertIntakeChartExportTier((sessionPipeline as { chartExport?: { tier?: ChartExportTier } } | undefined)?.chartExport?.tier, `upload session ${args.sessionId}`);
     const intake = await requiredIntake({
       userId: args.userId,
       orgId: session.org_id,
@@ -245,9 +319,11 @@ export async function confirmDirectUploadProjectIntake(
       templateKey: session.template_key ? projectTemplateKeySchema.parse(session.template_key) : undefined,
       // Stored with the session; a session created before an extractor schema tightened is read leniently.
       speedBoost: session.pipeline?.speedBoost === true,
-      pipeline: session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined,
+      pipeline: sessionPipeline,
       tags: session.tags ?? [],
       apiKeyId: session.api_key_id,
+      // Recorded from the principal that opened the session (never a request field); older rows are machine.
+      origin: session.origin === "app" ? "app" : "machine",
       allowedProjectIds: session.allowed_project_ids,
       runId: args.sessionId,
       kind: "direct-upload",
@@ -315,7 +391,7 @@ export async function createBulkProjectIntake(
   });
 
   return await idempotently(
-    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId },
+    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId, apiKeyId: args.apiKeyId, project: args.project },
     async () =>
       actionResult(
         await requiredIntake(
@@ -350,6 +426,8 @@ export async function createRemoteUrlProjectIntake(
       requestHash: hashIdempotencyPayload({ ...hashedTarget, canonicalIds: canonicalIds ?? null, idempotencyKey }),
       userId: args.userId,
       orgId: args.orgId,
+      apiKeyId: args.apiKeyId,
+      project: args.project,
     },
     async () => {
       const intake = await requiredIntake(
@@ -404,8 +482,13 @@ export async function createWebsiteProjectIntake(
       requestHash: hashIdempotencyPayload({ ...target, startUrl, crawlOptions, idempotencyKey }),
       userId: args.userId,
       orgId: args.orgId,
+      apiKeyId: args.apiKeyId,
+      project: args.project,
     },
     async () => {
+      const receipt = intakeReceiptContext.getStore();
+      if (receipt) await sql`update intake_request_receipts set external_effect_started = true
+        where idempotency_key = ${receipt.key} and route_key = ${receipt.route}`;
       const crawled = await crawl();
       const pages = crawled.pages.filter((page) => page.markdown?.trim());
       if (!pages.length) throw new ProjectIntakeError("The crawl found no readable pages at this URL.", 422);

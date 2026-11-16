@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks=vi.hoisted(()=>({ search:vi.fn(), project:vi.fn(), scope:vi.fn() }));
-vi.mock('../middleware/api-key-auth.js',()=>({apiKeyAuth:async(c:any,next:any)=>{if(!c.req.header('Authorization'))return c.json({error:'Unauthorized'},401);c.set('apiKey',{userId:'u'});await next();}}));
+vi.mock('../middleware/api-key-auth.js',()=>({apiKeyAuth:async(c:any,next:any)=>{if(!c.req.header('Authorization'))return c.json({error:'Unauthorized'},401);c.set('apiKey',{userId:'u',orgId:'o',keyType:'server',projectIds:[],scopes:['search:deep']});await next();}}));
 vi.mock('../lib/api-key-authorization.js',()=>({apiKeyHasAnyScope:mocks.scope,loadApiKeyScopedProject:mocks.project}));
 vi.mock('../services/search.js',()=>({hybridSearch:mocks.search}));
 vi.mock('../lib/request-actor.js',()=>({resolveActorProjectId:async(_actor:unknown,id:string)=>id,}));
@@ -9,7 +9,7 @@ import { searchCompatRoutes } from '../routes/search-compat';
 const app=new Hono().route('/compat',searchCompatRoutes);
 const request=(path:string,body:unknown,key=true)=>app.request('/compat'+path,{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer key'}:{})},body:JSON.stringify(body)});
 describe('search compatibility routes',()=>{
-  beforeEach(()=>{vi.clearAllMocks();mocks.scope.mockReturnValue(true);mocks.project.mockResolvedValue({id:'ws'});mocks.search.mockResolvedValue({results:[{text:'hello',score:1,citation:{documentId:'doc',filename:'Guide',chunkIndex:0}}],sessionId:'session',availability:null,usageEvents:[]});});
+  beforeEach(()=>{vi.clearAllMocks();mocks.scope.mockReturnValue(true);mocks.project.mockResolvedValue({id:'ws',orgId:'o'});mocks.search.mockResolvedValue({results:[{text:'hello',score:1,citation:{documentId:'doc',filename:'Guide',chunkIndex:0}}],sessionId:'session',availability:null,usageEvents:[]});});
   it('uses scoped retrieval and preserves usage metadata',async()=>{
     const res=await request('/meilisearch/indexes/ws/search',{q:'hello',limit:5});expect(res.status).toBe(200);
     const data=await res.json();expect(data.hits[0].text).toBe('hello');expect(data.docslurp.sessionId).toBe('session');expect(res.headers.get('Cache-Control')).toBe('private, no-store');
@@ -27,7 +27,7 @@ describe('search compatibility routes',()=>{
     expect((await request('/typesense/collections/ws/documents/search',{q:'x',page:8,per_page:20})).status).toBe(400);expect(mocks.search).not.toHaveBeenCalled();
   });
   it('authorizes the entire batch before retrieval and preserves order',async()=>{
-    mocks.project.mockImplementation(async(id)=>id==='denied'?null:{id});
+    mocks.project.mockImplementation(async(id)=>id==='denied'?null:{id,orgId:'o'});
     const body={searches:[{collection:'ws',q:'x'},{collection:'denied',q:'y'}]};
     expect((await request('/typesense/multi_search',body)).status).toBe(404);expect(mocks.search).not.toHaveBeenCalled();
     body.searches[1].collection='ws';const res=await request('/typesense/multi_search',body);expect(res.status).toBe(200);expect((await res.json()).results).toHaveLength(2);

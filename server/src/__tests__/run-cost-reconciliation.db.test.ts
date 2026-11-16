@@ -172,3 +172,19 @@ describe("run cost reconciliation", () => {
     expect((await runs.listRuns("u2")).map((entry) => entry.id)).not.toContain("r1");
   });
 });
+
+it("viewer and realtime never retain previous-attempt failure after restart", async () => {
+  await sql`insert into document_run_stage_states (run_id,document_id,stage_name,status,failure)
+    values ('r1','d1','embed','failed','{"code":"source_rejected","retryable":false}'::jsonb)
+    on conflict (run_id,document_id,stage_name) do update set status='failed',failure=excluded.failure`;
+  for (const [attempt, status] of ["failed", "processing", "failed", "completed"].entries()) {
+    if (status === "processing") {
+      await sql`update document_run_stage_states set status='processing',failure=null,error=null where run_id='r1' and document_id='d1' and stage_name='embed'`;
+    } else await sql`update document_run_stage_states set status=${status} where run_id='r1' and document_id='d1' and stage_name='embed'`;
+    const viewer = await documents.getDocumentViewerPayload("d1", "u1");
+    const realtime = await documents.getRealtimeViewerPayload("d1", "u1");
+    const expected = attempt === 0 ? { code: "source_rejected", retryable: false } : null;
+    expect(viewer?.stages.find(stage => stage.stage_name === "embed")?.failure).toEqual(expected);
+    expect(realtime?.stages.find(stage => stage.stage_name === "embed")?.failure).toEqual(expected);
+  }
+});

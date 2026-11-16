@@ -26,7 +26,11 @@ import type {
   SearchResponse,
 } from "../services/search.js";
 import { timePhase } from "./timings.js";
+import { currentSearchStreamSink } from "./stream-events.js";
+import { createProvisionalHitPolicy, emitLegHits, type ProvisionalHitPolicy } from "./stream-hits.js";
 import { acquisitionDepth, validateRetrievalControls } from "./retrieval-controls.js";
+import { lostSummaryTreeLeg, summaryTreeLegResultOf, type SummaryTreeLegResult } from "./summary-tree.js";
+import type { EvidenceLegTiming } from "./retrieval-adapters.js";
 
 export interface SearchSessionRunnerAdapters {
   /** Start warming the vector index tables; called before query rewrite/embedding so they overlap it. Must not throw. */
@@ -77,6 +81,19 @@ export interface SearchSessionRunnerAdapters {
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   wholeCorpusFallback(filters?: SearchOptions["filters"]): Promise<SearchResult[]>;
+  /**
+   * The summary-tree leg (search/summary-tree.ts), set only when this search runs it. It needs `parallelRetrieval`:
+   * its deadline is relative to the vector leg running beside it.
+   */
+  summaryTreeSearch?(args: {
+    query: string;
+    queryVector: number[] | null;
+    projectId: string;
+    options: SearchOptions;
+    timing: EvidenceLegTiming;
+    /** `embeddingPipelineId` of the project's embedding route, for the relevance floor on summary hits. */
+    embeddingPipeline: string | null;
+  }): Promise<SearchChunk[]>;
   /**
    * Deferred (map/visual) documents: locate and materialize candidate pages,
    * then return chunks over them. Absent unless deferred profiles are enabled;
@@ -229,6 +246,9 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       const textQuery = retrievalPlan.textQuery;
 
       let deferred: { stats: DeferredSearchStats; documentIds: string[] } | null = null;
+      let treeResult: SummaryTreeLegResult | null = null;
+      const treePlan = setup.summaryTree ?? null;
+      const runTree = Boolean(treePlan?.run && adapters.summaryTreeSearch && adapters.parallelRetrieval);
       let scopeSignal: ScopeSignal | null = null;
       const strongEvidenceKeys = new Set<string>();
       const response = await executeSearchSessionRetrieval({
@@ -242,6 +262,18 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         retrieveCandidateLists: async () => {
           // Runs alongside normal retrieval, not before it: the hot path adds no
           // latency, and a cold one overlaps materialization with retrieval.
+          // Only a streaming search builds the provisional-hit policy (it filters like the final list).
+          const provisional: ProvisionalHitPolicy | undefined = currentSearchStreamSink()
+            ? createProvisionalHitPolicy({
+                query: retrievalQuery,
+                embeddingPipeline: embeddingPipelineOf(setup),
+                minScore: resolveMinScore(effectiveOptions.minScore),
+                candidateDepth: effectiveOptions.candidateDepth,
+                filters: effectiveOptions.filters,
+                runId: effectiveOptions.runId,
+              })
+            : undefined;
+          const deferredStartedAt = performance.now();
           const deferredPromise = adapters.deferredPageSearch
             ? Promise.resolve(queryVector).then((resolvedVector) => adapters.deferredPageSearch!({
                 query,
@@ -249,7 +281,11 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
                 queryVector: resolvedVector,
                 userId,
                 options: { ...effectiveOptions, limit: options.limit ?? 20 },
-              })).catch(() => null)
+              })).then((result) => {
+                // A scope without deferred documents (null) or a failed leg (below) reports nothing.
+                if (result) emitLegHits({ leg: "deferred", chunks: result.chunks, startedAt: deferredStartedAt, policy: provisional });
+                return result;
+              }).catch(() => null)
             : Promise.resolve(null);
           const evidenceResults = await timePhase("retrieve", () => retrieveEvidence(
             createEvidenceRetrievalAdapters({
@@ -259,6 +295,10 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
               communitySummarySearch: adapters.communitySummarySearch,
               progressivePageSearch: adapters.progressivePageSearch,
               completedPageSearch: adapters.completedPageSearch,
+              ...(runTree ? {
+                summaryTreeSearch: (treeArgs: { query: string; queryVector: number[] | null; projectId: string; options: SearchOptions; timing: EvidenceLegTiming }) =>
+                  adapters.summaryTreeSearch!({ ...treeArgs, embeddingPipeline: embeddingPipelineOf(setup) }),
+              } : {}),
             }),
             {
               query: retrievalQuery,
@@ -268,9 +308,12 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
               userId,
               projectId: normalizedScope.projectId,
               options: { ...effectiveOptions, limit: acquisitionDepth(effectiveOptions, options.limit ?? 20) },
+              provisional,
             },
             { parallel: adapters.parallelRetrieval },
           ));
+          treeResult = summaryTreeLegResultOf(evidenceResults.find((result) => result.adapter === "summary-tree")?.chunks)
+            ?? (runTree ? lostSummaryTreeLeg() : null);
           const boundedResults = effectiveOptions.candidateDepth === undefined
             ? evidenceResults
             : evidenceResults.map((result) => ({ ...result, chunks: result.chunks.slice(0, effectiveOptions.candidateDepth) }));
@@ -304,6 +347,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         rerankApiKey: setup.rerankApiKey,
         rerankScope: normalizedScope,
         privacyMode,
+        ...(treePlan ? { summaryTree: { plan: treePlan, result: () => treeResult } } : {}),
       });
       // Assigned inside the retrieval callback, which TypeScript cannot see.
       const signal = scopeSignal as ScopeSignal | null;

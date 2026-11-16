@@ -181,7 +181,7 @@ describe("algolia compat", () => {
     expect(hybridSearchMock).toHaveBeenCalledWith("alpha", "demo-user", expect.objectContaining({
       useHyDE: false, useRerank: false, queryRewrite: false, queryDecompose: false,
       useContextualCompression: false, stepback: false,
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 
   it("conceals projects outside the API key organization across search and settings", async () => {
@@ -299,7 +299,7 @@ describe("algolia compat", () => {
         mimeTypes: ["application/pdf"],
         pageRange: { from: 3, to: undefined }
       })
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
 
     const body = await res.json();
     expect(body.page).toBe(1);
@@ -339,7 +339,7 @@ describe("algolia compat", () => {
       headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
       body: JSON.stringify({ query: "alpha", hitsPerPage: 50, page: 3 })
     });
-    expect(hybridSearchMock).toHaveBeenLastCalledWith("alpha", "demo-user", expect.objectContaining({ limit: 400 }));
+    expect(hybridSearchMock).toHaveBeenLastCalledWith("alpha", "demo-user", expect.objectContaining({ limit: 400 }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 
   it.each([null, { query: {} }, { facetQuery: 1 }, { maxFacetHits: -1 }])("rejects invalid facet requests before retrieval: %j", async (payload) => {
@@ -376,7 +376,7 @@ describe("algolia compat", () => {
     expect(res.status).toBe(200);
     expect(hybridSearchMock).toHaveBeenCalledWith("invoice", "demo-user", expect.objectContaining({
       limit: 50
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
     const body = await res.json();
     expect(body.exhaustiveFacetsCount).toBe(true);
     expect(body.facetHits).toEqual([
@@ -397,8 +397,8 @@ describe("algolia compat", () => {
     });
     await post({ facetQuery: "alpha" });
     await post({});
-    expect(hybridSearchMock).toHaveBeenNthCalledWith(1, "alpha", "demo-user", expect.objectContaining({ minScore: 0 }));
-    expect(hybridSearchMock).toHaveBeenNthCalledWith(2, "*", "demo-user", expect.objectContaining({ minScore: 0 }));
+    expect(hybridSearchMock).toHaveBeenNthCalledWith(1, "alpha", "demo-user", expect.objectContaining({ minScore: 0 }), expect.objectContaining({ orgId: expect.any(String) }));
+    expect(hybridSearchMock).toHaveBeenNthCalledWith(2, "*", "demo-user", expect.objectContaining({ minScore: 0 }), expect.objectContaining({ orgId: expect.any(String) }));
     await post({ facetQuery: "alpha", query: "invoice" });
     expect(hybridSearchMock.mock.calls[2]![2]).not.toHaveProperty("minScore");
   });
@@ -555,7 +555,7 @@ describe("algolia compat", () => {
     const text = strings.join("$").replace(/\s+/g, " ");
     // Sessions without a projectId must not fall through into every project's totals.
     expect(text).not.toMatch(/coalesce\(\s*s\.metadata/);
-    expect(text).toContain("where s.metadata->>'projectId' = $");
+    expect(text).toContain("where s.project_id = $");
     expect(text).toContain("a.resource_type = 'project'");
     expect(values.length).toBeGreaterThan(0);
     expect(values.every((value) => value === "ws-1")).toBe(true);

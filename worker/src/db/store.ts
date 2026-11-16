@@ -1,3 +1,4 @@
+import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation, type ComputeObservations, type ComputePriceObservation, type ComputeCalibrationObservation } from "@docslurp/shared";
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
@@ -12,15 +13,17 @@ import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
+import { reserveChartExportFreeVmRun } from "./chart-export-free-vm-cap.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { flushAssetLedger, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
+import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, piiWithholding, type PiiWithholding, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
+import { completingDocumentStamp, runReusesExtraction, runStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
   Document,
@@ -47,6 +50,7 @@ import {
 } from "../graph/communities.js";
 import { lockProjectGraph, replaceDocumentGraph, type ReplaceDocumentGraphInput } from "../graph/graph-store.js";
 import { runGraphJobs, type GraphJobRunnerOptions } from "../graph/rebuild-job.js";
+import { runSummaryTreeJobs, type SummaryTreeJobRunnerOptions } from "../summary-tree/backfill-job.js";
 import {
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
@@ -61,7 +65,8 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
-import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord } from "../lib/parse-source.js";
+import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
+import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -77,6 +82,7 @@ import {
 
 type ProjectRunRow = {
   id: string;
+  execution_generation?: string | null;
   org_id: string;
   /**
    * The run's org, else its project's (runRowQuery): the one org admission, usage attribution and the
@@ -706,6 +712,35 @@ export class Store {
    * document, run, user or org identifiers, so one tenant's plan cannot learn anything about another's content.
    * Served by performance_log_shard_timing_idx (0098).
    */
+  async authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
+    for (const value of [scope.orgId, scope.projectId, scope.runId, scope.documentId]) {
+      if (!value || value.length > 200) throw new Error("Invalid compute execution scope");
+    }
+    const [row] = await this.sql<{ cohort_id: string | null; valid_until: Date }[]>`
+      select * from public.authorize_compute_cohort(${scope.orgId}, ${scope.projectId}, ${scope.runId}, ${scope.documentId}, ${scope.executionGeneration})`;
+    return row ? { cohortId: row.cohort_id, validUntil: new Date(row.valid_until).toISOString() } : null;
+  }
+
+  async computeObservations(profileIds: readonly string[]): Promise<ComputeObservations> {
+    if (profileIds.length > 100 || profileIds.some((id) => !id || id.length > 200)) throw new Error("Invalid compute profile selection");
+    if (!profileIds.length) return { prices: [], calibrations: [] };
+    const calibrations = await this.sql`
+      select distinct on (profile_id) * from compute_calibration_observations
+      where profile_id = any(${[...profileIds]}) and observed_at <= now() and valid_until > now()
+        and observed_at > now() - interval '7 days'
+      order by profile_id, observed_at desc, id desc`;
+    const offers = calibrations.map((row) => String(row.offer_id));
+    const prices = offers.length ? await this.sql`
+      select distinct on (offer_id) * from compute_price_observations
+      where offer_id = any(${offers}) and observed_at <= now() and valid_until > now()
+      order by offer_id, observed_at desc, id desc` : [];
+    const valid = new Set(prices.map((row) => row.offer_id));
+    return {
+      prices: prices.map((row) => decodeComputeObservation<ComputePriceObservation>(row, computePriceColumns)),
+      calibrations: calibrations.filter((row) => valid.has(row.offer_id)).map((row) => decodeComputeObservation<ComputeCalibrationObservation>(row, computeCalibrationColumns)),
+    };
+  }
+
   async loadShardObservations(profileKey: string, limit = 200): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>> {
     const rows = await this.sql<Array<{ ms: string | number; pages: string | number | null; max_rss_mib: string | number | null }>>`
       select perf.value as ms,
@@ -1172,10 +1207,15 @@ export class Store {
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
-        await client`update project_runs set status = 'completed', stage = 'completed',
+        // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
+        const stamps = runStampsIngestVersion(state.run.kind);
+        const stampMode = runReusesExtraction(state.run.pipeline) ? "inherited" as const : "extracted" as const;
+        const stampDocuments = stamps ? client`with stamped as (${stampDocumentIngestVersion(client, state.run.id, stampMode)} returning 1)` : client``;
+        const stampRun = stamps ? runStamp(client, stampMode) : client``;
+        await client`${stampDocuments} update project_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
           stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
-          lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
+          lease_expires_at = null, updated_at = now() ${stampRun} where id = ${state.run.id}`;
         await insertProjectRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
       });
@@ -1653,6 +1693,7 @@ export class Store {
         set status = 'processing',
             attempts = document_run_stage_states.attempts + 1,
             error = null,
+            failure = null,
             started_at = now(),
             completed_at = null,
             updated_at = now()
@@ -1731,6 +1772,7 @@ export class Store {
             artifact_uri = ${artifactUri || null},
             stats = ${this.toJson(stats)}::jsonb,
             error = null,
+            failure = null,
             completed_at = now(),
             updated_at = now()
         where run_id = ${state.run.id} and document_id = ${documentId} and stage_name = ${stage}`;
@@ -1741,14 +1783,17 @@ export class Store {
           ...this.vectorIndexStatements(vectors, client),
           stageStateUpdate(client),
           client`
-            update documents
+            update documents d
             set status = case
                   when status = 'pii_blocked' then status
                   when status = 'completed' and ${indexedInRun(client, state.run.id, documentId)} then status
                   else 'completed'
                 end,
                 updated_at = now()
-            where id = ${documentId}`,
+                ${runStampsIngestVersion(state.run.kind)
+                  ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
+                  : client``}
+            where d.id = ${documentId}`,
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
@@ -1883,6 +1928,7 @@ export class Store {
     message: string,
     artifactUri?: string,
     stats?: Record<string, unknown>,
+    failure?: import("@docslurp/shared").DocumentFailure,
   ): Promise<void> {
     // Checkpoint and document status in one statement (one commit).
     await this.sql`
@@ -1896,6 +1942,7 @@ export class Store {
         artifact_uri,
         stats,
         error,
+        failure,
         started_at,
         updated_at
       )
@@ -1908,6 +1955,7 @@ export class Store {
         ${artifactUri || null},
         ${this.toJson(stats ?? {})}::jsonb,
         ${message},
+        ${this.toJson(failure ?? null)}::jsonb,
         now(),
         now()
       )
@@ -1916,6 +1964,7 @@ export class Store {
           artifact_uri = ${artifactUri || null},
           stats = ${this.toJson(stats ?? {})}::jsonb,
           error = ${message},
+          failure = ${this.toJson(failure ?? null)}::jsonb,
           updated_at = now()
       returning 1
       )
@@ -2688,15 +2737,55 @@ export class Store {
     return this.visionAttemptBackend;
   }
 
+  private pageReaderBudgetBackend: PostgresPageReaderOrgBudget | null = null;
+
+  /** The page reader's fleet-wide org daily spend ledger (ocr/page-reader-budget.ts, migration 0163). */
+  get pageReaderBudget(): PostgresPageReaderOrgBudget {
+    this.pageReaderBudgetBackend ??= new PostgresPageReaderOrgBudget(this.sql);
+    return this.pageReaderBudgetBackend;
+  }
+
   /** Reserves a document's share of the run's Fast page-image render budget, shared by every worker (fast-page-image-budget.ts). */
   async reserveFastPageImageRenders(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number> {
     return await reserveFastPageImageRenders(this.sql, args);
 
   }
 
+  /** Reserves one free-tier chart-export VM run against the org's hourly cap, shared by every worker (chart-export-free-vm-cap.ts). */
+  async reserveChartExportFreeVmRun(args: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> {
+    return await reserveChartExportFreeVmRun(this.sql, args);
+  }
+
   /** Document asset ledger (db/document-asset-ledger.ts): one org-scoped transaction for a document's images and level. */
+  async listHostPageImagePages(scope: { orgId: string; documentId: string }): Promise<number[]> {
+    return await listHostPageImagePages(this.sql, scope);
+  }
+
   async writeDocumentAssetLedger(write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
     return await writeDocumentAssetLedger(this.sql, write);
+  }
+
+  /** Figure uploads in progress (document-asset-ledger.ts): pending rows before an upload step, stored once it landed. */
+  async markAssetsPending(args: Parameters<typeof markAssetsPending>[1]): Promise<{ pending: number }> {
+    return await markAssetsPending(this.sql, args);
+  }
+
+  async markAssetsStored(args: Parameters<typeof markAssetsStored>[1]): Promise<{ stored: number }> {
+    return await markAssetsStored(this.sql, args);
+  }
+
+  /** The adopt pass: pending rows checked against storage (streamed SHA-256), no VM. */
+  async adoptPendingAssets(reader: FigureObjectReader, args: Parameters<typeof adoptPendingAssets>[2]) {
+    return await adoptPendingAssets(this.sql, reader, args);
+  }
+
+  async markAssetsLost(args: Parameters<typeof markAssetsLost>[1]): Promise<{ lost: number }> {
+    return await markAssetsLost(this.sql, args);
+  }
+
+  /** Repair a figure object of other bytes under the document's ledger lock (document-asset-ledger.ts). */
+  async replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void> {
+    await replaceUnvouchedObject(this.sql, args);
   }
 
   /**
@@ -3374,6 +3463,29 @@ export class Store {
     });
   }
 
+  /** Claims and runs queued figure resumes (figures/resume-runner.ts); a no-op while DOCSLURP_FIGURE_RESUME is off. */
+  async runFigureResumes(deps: Omit<import("../figures/resume-runner.js").FigureResumeDeps, "sql">): Promise<number> {
+    const { runFigureResumes } = await import("../figures/resume-runner.js");
+    return await runFigureResumes({ ...deps, sql: this.sql });
+  }
+
+  /** Orphan GC and the stored-figure audit (figures/resume-runner.ts). */
+  async auditFigureStorage(deps: { storage: import("../figures/resume-runner.js").FigureResumeStorage; limit?: number }) {
+    const { auditFigureStorage } = await import("../figures/resume-runner.js");
+    return await auditFigureStorage({ ...deps, sql: this.sql });
+  }
+
+  /** The resume backlog gauges (emitted on the OTel meter by figureResumeBacklog). */
+  async figureResumeBacklog() {
+    const { figureResumeBacklog } = await import("../figures/resume-runner.js");
+    return await figureResumeBacklog(this.sql);
+  }
+
+  /** Claims and runs one queued, parked or lease-expired summary tree backfill job (see summary-tree/backfill-job.ts). */
+  async runSummaryTreeJobs(options: SummaryTreeJobRunnerOptions): Promise<number> {
+    return await runSummaryTreeJobs(this.sql, options);
+  }
+
   /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */
   async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
     return await runGraphJobs(this.sql, options);
@@ -3395,7 +3507,8 @@ export class Store {
    * evidence and extraction state) before retention drops their chunks or the
    * run itself, then re-derive the touched nodes and edges. Facts that other
    * documents still support survive with recomputed weights and counts;
-   * project communities are recounted rather than deleted.
+   * communities that lost a member or an internal relation are deleted with
+   * their summaries (see `refreshKnowledgeGraphNodes`).
    */
   private async removeRunGraphContributions(projectId: string, runId: string): Promise<void> {
     if (!(await this.tableExists("kg_nodes"))) return;
@@ -3786,6 +3899,18 @@ export class Store {
         await this.sql`
           delete from document_summaries
           where run_id = ${row.run_id}
+        `;
+      }
+      if (await this.tableExists("document_summary_trees")) {
+        // The summary tree is derived from this run's chunks. Its registry rows go here; its rows in the project's
+        // summaries table go with the vector targets handed to the cleanup sweep below (strict delete).
+        await this.sql`
+          delete from document_summary_tree_nodes
+          where document_id in (select id from documents where run_id = ${row.run_id})
+        `;
+        await this.sql`
+          delete from document_summary_trees
+          where document_id in (select id from documents where run_id = ${row.run_id})
         `;
       }
       if (await this.tableExists("document_chunks")) {
@@ -4265,6 +4390,7 @@ export class Store {
 function mapRun(row: ProjectRunRow): ProjectRun {
   return {
     id: row.id,
+    executionGeneration: row.execution_generation ?? null,
     orgId: row.canonical_org_id ?? row.org_id ?? null,
     ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
     allowChinaProviders: row.allow_china_providers === true,
@@ -4564,6 +4690,22 @@ function mapStageState(row: StageStateRow): StageState {
 
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * The parse source of one document for a reader outside the stage pipeline (the figure resume runner): the loader's own
+ * resolution (lib/parse-source.ts resolveDocumentSource), so it is quarantine's decision and never the upload's key unless
+ * the scan read the upload itself. Org-scoped; null when the document is not the organization's. Only this module reads
+ * the upload's key (quarantine-council-r6 tripwire). Read for the claimed run only, and only while the document is completed
+ * (a reprocess or a failure since the claim reads nothing).
+ */
+export async function documentParseSource(
+  sql: Sql<Record<string, unknown>>, scope: { orgId: string; documentId: string; runId: string }, env: NodeJS.ProcessEnv = process.env,
+): Promise<ResolvedDocumentSource | null> {
+  const [row] = await sql<Array<{ id: string; source_key: string; source_sha256: string | null; parse_source_key: string | null; parse_source_sha256: string | null; parse_source_scan_version: number | null }>>`
+    select id, source_key, source_sha256, parse_source_key, parse_source_sha256, parse_source_scan_version
+    from documents where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId} and status = 'completed'`;
+  return row ? resolveDocumentSource(row, env) : null;
 }
 
 /**

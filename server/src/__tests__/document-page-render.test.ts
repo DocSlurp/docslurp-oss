@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const dbMock = vi.hoisted(() => ({ capacity: null as { count: number; own: boolean } | null, decision: null as Record<string, unknown> | null, metadata: {} as unknown, calls: [] as Array<[TemplateStringsArray, ...unknown[]]> }));
-vi.mock("../db.js", () => { const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { dbMock.calls.push([strings, ...values]); if (strings.join("").includes("insert into document_page_renders")) return [{generation:"2026-10-23 12:00:00+00"}]; if (strings.join("").includes("parse_source_scan_version")) return dbMock.decision ? [dbMock.decision] : []; if (strings.join("").includes("select status, metadata from documents")) return [{ status: "completed", metadata: dbMock.metadata }]; return strings.join("").includes("count(*)") && dbMock.capacity ? [dbMock.capacity] : []; }), { begin: vi.fn(async (fn: (sql: unknown) => unknown) => fn(sql)) }); return { sql }; });
+const dbMock = vi.hoisted(() => ({ capacity: null as { count: number; own: boolean } | null, decision: null as Record<string, unknown> | null, queued: true, metadata: {} as unknown, calls: [] as Array<[TemplateStringsArray, ...unknown[]]> }));
+vi.mock("../db.js", () => { const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { dbMock.calls.push([strings, ...values]); if (strings.join("").includes("insert into document_page_renders")) return [{generation:"2026-10-23 12:00:00+00"}]; if (strings.join("").includes("select true as queued")) return dbMock.queued ? [{ queued: true }] : []; if (strings.join("").includes("parse_source_scan_version")) return dbMock.decision ? [dbMock.decision] : []; if (strings.join("").includes("select status, metadata from documents")) return [{ status: "completed", metadata: dbMock.metadata }]; return strings.join("").includes("count(*)") && dbMock.capacity ? [dbMock.capacity] : []; }), { begin: vi.fn(async (fn: (sql: unknown) => unknown) => fn(sql)) }); return { sql }; });
 vi.mock("../lib/temporal.js", () => ({ startPageRenderWorkflow: vi.fn() }));
 vi.mock("../services/documents.js", () => ({ getDocumentViewerPayload: vi.fn() }));
 vi.mock("../services/organizations.js", () => ({ getProjectAccess: vi.fn(), canEditProject: vi.fn() }));
@@ -8,17 +8,17 @@ vi.mock("../services/billing/spend-guard.js", () => ({ assertCanSpend: vi.fn() }
 import { getDocumentViewerPayload } from "../services/documents.js";
 import { getProjectAccess, canEditProject } from "../services/organizations.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
-import { requestDocumentPageRender } from "../services/document-page-render.js";
+import { pageRenderUnavailableReason, requestDocumentPageRender } from "../services/document-page-render.js";
 const viewer = { document: { id: "doc", runId: "run", orgId: "org", projectId: "project", mimeType: "application/pdf", status: "completed", pageCount: 3 }, artifacts: [], source: { url: "/source" } };
 const decided = { source_sha256: "a".repeat(64), parse_source_key: null, parse_source_sha256: "a".repeat(64), parse_source_scan_version: 1 };
-beforeEach(() => { vi.clearAllMocks(); dbMock.capacity = null; dbMock.decision = { ...decided }; dbMock.metadata = {}; dbMock.calls.length = 0; vi.mocked(getDocumentViewerPayload).mockResolvedValue(structuredClone(viewer) as never); vi.mocked(getProjectAccess).mockResolvedValue({} as never); vi.mocked(canEditProject).mockReturnValue(true); });
+beforeEach(() => { vi.clearAllMocks(); dbMock.capacity = null; dbMock.queued = true; dbMock.decision = { ...decided }; dbMock.metadata = {}; dbMock.calls.length = 0; vi.mocked(getDocumentViewerPayload).mockResolvedValue(structuredClone(viewer) as never); vi.mocked(getProjectAccess).mockResolvedValue({} as never); vi.mocked(canEditProject).mockReturnValue(true); });
 describe("page-scoped PII", () => {
   const scoped = { pii: { scope: "pages", withheldPages: [2], withheldArtifactUris: ["s3://bucket/source"] } };
   it("never serves or queues a withheld page, even with cached pixels", async () => {
     dbMock.metadata = scoped;
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, artifacts: [{ slot: "doc:raster-v3-reader-120dpi-page-2", url: "/signed", uri: "s3://page" }] } as never);
-    expect(await requestDocumentPageRender("doc", 2, "user", false, () => {})).toEqual({ status: "unavailable" });
-    expect(await requestDocumentPageRender("doc", 2, "user", true, () => {})).toEqual({ status: "unavailable" });
+    expect(await requestDocumentPageRender("doc", 2, "user", false, () => {})).toMatchObject({ status: "unavailable" });
+    expect(await requestDocumentPageRender("doc", 2, "user", true, () => {})).toMatchObject({ status: "unavailable" });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();
   });
   it("renders a clean page of a partly withheld PDF although its source is withheld", async () => {
@@ -30,11 +30,11 @@ describe("page-scoped PII", () => {
   it("fails closed on a blocked or malformed outcome, and a withheld source without page scope stays unrenderable", async () => {
     for (const metadata of [{ pii: { blocked: true } }, { pii: { scope: "pages", withheldPages: "2" } }]) {
       dbMock.metadata = metadata;
-      expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "unavailable" });
+      expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable" });
     }
     dbMock.metadata = { pii: { scope: "sections", withheldSectionCount: 1 } };
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, source: { url: "", withheld: true } } as never);
-    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "unavailable" });
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable" });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();
   });
 });
@@ -44,10 +44,11 @@ describe("exact page image requests", () => {
     expect(await requestDocumentPageRender("doc", 4, "user", true, () => {})).toEqual({ status: "missing" });
     expect(await requestDocumentPageRender("doc", 0, "user", true, () => {})).toEqual({ status: "missing" });
     vi.mocked(canEditProject).mockReturnValue(false);
-    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "missing" });
+    // A read-only user may see the document: starting a render is refused as editor-only (403), not "missing".
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "editor-required" });
     vi.mocked(canEditProject).mockReturnValue(true);
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, source: { url: "" } } as never);
-    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "unavailable" });
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable", reason: "withheld", document: { id: "doc" } });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();
   });
   it("authorizes cached images before returning signed URLs", async () => {
@@ -74,7 +75,8 @@ describe("exact page image requests", () => {
   it("requires editor access even when a POST could return cached pixels", async () => {
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, artifacts: [{ slot: "doc:raster-v3-reader-120dpi-page-3", url: "/signed", uri: "s3://page" }] } as never);
     vi.mocked(canEditProject).mockReturnValue(false);
-    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "missing" });
+    // A read-only user may see the document: starting a render is refused as editor-only (403), not "missing".
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "editor-required" });
     expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "ready" });
   });
   it("queues only the exact authorized known page", async () => {
@@ -127,8 +129,8 @@ describe("PR #339 rescan", () => {
     try {
       for (const decision of [{ ...decided, parse_source_scan_version: null, parse_source_sha256: null }, { ...decided, parse_source_sha256: null }, { ...decided, parse_source_sha256: "c".repeat(64) }]) {
         dbMock.decision = decision;
-        expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "rescan-required", documentId: "doc" });
-        expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toEqual({ status: "rescan-required", documentId: "doc" });
+        expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "rescan-required", document: { id: "doc" } });
+        expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "rescan-required", document: { id: "doc" } });
       }
       // Cached pixels still serve.
       vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, artifacts: [{ slot: "doc:raster-v3-reader-120dpi-page-3", url: "/signed", uri: "s3://page" }] } as never);
@@ -136,6 +138,37 @@ describe("PR #339 rescan", () => {
     } finally {
       warn.mockRestore();
     }
+    expect(startPageRenderWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe("typed unavailable reasons (ingest-version.ts)", () => {
+  const pdf = { mimeType: "application/pdf", status: "completed", runId: "run" };
+  it("maps each document state to one stable reason and never queues a render", async () => {
+    expect(pageRenderUnavailableReason(pdf, true)).toBeNull();
+    expect(pageRenderUnavailableReason(pdf, false)).toBe("withheld");
+    expect(pageRenderUnavailableReason({ ...pdf, status: "pii_blocked" }, true)).toBe("withheld");
+    expect(pageRenderUnavailableReason({ ...pdf, mimeType: "text/plain" }, true)).toBe("not-supported");
+    // A PII block wins over the file type: the reason never hints at what a withheld file is.
+    expect(pageRenderUnavailableReason({ ...pdf, mimeType: "text/plain", status: "pii_blocked" }, true)).toBe("withheld");
+    for (const status of ["queued", "processing", "extract", "embed"]) expect(pageRenderUnavailableReason({ ...pdf, status }, true)).toBe("processing");
+    expect(pageRenderUnavailableReason({ ...pdf, runId: null }, true)).toBe("processing");
+    for (const status of ["failed", "cancelled"]) expect(pageRenderUnavailableReason({ ...pdf, status }, true)).toBe("not-extracted");
+    vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, document: { ...viewer.document, status: "embed" } } as never);
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable", reason: "processing" });
+    expect(startPageRenderWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe("a read with no render in flight (re-check Medium)", () => {
+  it("answers pending only while a render is queued; otherwise not-rendered for an editor, editor-required for anyone else", async () => {
+    dbMock.queued = false;
+    expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "not-rendered", capabilities: { sharperImage: true } });
+    vi.mocked(canEditProject).mockReturnValue(false);
+    expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toEqual({ status: "editor-required" });
+    vi.mocked(canEditProject).mockReturnValue(true);
+    dbMock.queued = true;
+    expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "pending" });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();
   });
 });

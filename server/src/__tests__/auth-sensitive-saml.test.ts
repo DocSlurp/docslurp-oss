@@ -18,9 +18,9 @@ beforeAll(() => {
 });
 afterAll(() => { if (scratch) rmSync(scratch, { recursive: true }); });
 const idp = "urn:synthetic-idp"; const audience = "https://api.example.com/docslurp-sp"; const recipient = "https://api.example.com/callback";
-function signedResponse(request: string, authInstant = new Date().toISOString()) {
+function signedResponse(request: string, authInstant = new Date().toISOString(), responseIssuer = idp) {
   const issued = new Date().toISOString(); const before = new Date(Date.now() - 60_000).toISOString(); const after = new Date(Date.now() + 300_000).toISOString();
-  let xml = `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="response-id" Version="2.0" IssueInstant="${issued}" Destination="${recipient}" InResponseTo="${request}"><saml:Issuer>${idp}</saml:Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status><saml:Assertion ID="assertion-id" Version="2.0" IssueInstant="${issued}"><saml:Issuer>${idp}</saml:Issuer><saml:Subject><saml:NameID>linked-subject</saml:NameID><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData InResponseTo="${request}" NotOnOrAfter="${after}" Recipient="${recipient}"/></saml:SubjectConfirmation></saml:Subject><saml:Conditions NotBefore="${before}" NotOnOrAfter="${after}"><saml:AudienceRestriction><saml:Audience>${audience}</saml:Audience></saml:AudienceRestriction></saml:Conditions><saml:AuthnStatement AuthnInstant="${authInstant}"><saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement></saml:Assertion></samlp:Response>`;
+  let xml = `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="response-id" Version="2.0" IssueInstant="${issued}" Destination="${recipient}" InResponseTo="${request}"><saml:Issuer>${responseIssuer}</saml:Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status><saml:Assertion ID="assertion-id" Version="2.0" IssueInstant="${issued}"><saml:Issuer>${responseIssuer}</saml:Issuer><saml:Subject><saml:NameID>linked-subject</saml:NameID><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData InResponseTo="${request}" NotOnOrAfter="${after}" Recipient="${recipient}"/></saml:SubjectConfirmation></saml:Subject><saml:Conditions NotBefore="${before}" NotOnOrAfter="${after}"><saml:AudienceRestriction><saml:Audience>${audience}</saml:Audience></saml:AudienceRestriction></saml:Conditions><saml:AuthnStatement AuthnInstant="${authInstant}"><saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement></saml:Assertion></samlp:Response>`;
   for (const element of ["Assertion", "Response"]) {
     const signer = new SignedXml({ privateKey: key, publicCert: cert });
     signer.signatureAlgorithm = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
@@ -35,6 +35,9 @@ function client(request: string) {
   return new SAML({ entryPoint: "https://idp.example.com/login", idpCert: cert, issuer: audience, callbackUrl: recipient, idpIssuer: idp, wantAssertionsSigned: true, wantAuthnResponseSigned: true, validateInResponseTo: ValidateInResponseTo.always, acceptedClockSkewMs: 5_000, cacheProvider: sensitiveSamlRequestCache(request, new Date().toISOString(), new Date(Date.now() + 600_000).toISOString()) });
 }
 describe("sensitive SAML signed proof", () => {
+  it("rejects a correctly signed assertion from a different issuer", async () => {
+    await expect(client("request-one").validatePostResponseAsync({ SAMLResponse: signedResponse("request-one", new Date().toISOString(), "urn:other-tenant") })).rejects.toThrow();
+  });
   it("reads fresh AuthnInstant only from the signature-verified assertion and rejects replay", async () => {
     const verifier = client("request-one"); const response = signedResponse("request-one");
     const validated = await verifier.validatePostResponseAsync({ SAMLResponse: response });

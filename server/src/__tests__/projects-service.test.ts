@@ -44,10 +44,10 @@ describe("listProjects", () => {
     listAccessibleProjectIdsMock.mockReset();
   });
 
-  it("does not refine titles during dashboard bootstrap reads", async () => {
+  it("never refines titles on a read (the maintenance sweep does, after ingest)", async () => {
     listAccessibleProjectIdsMock.mockResolvedValue(["ws-1"]);
     sqlMock.mockResolvedValueOnce([]);
-    expect(await listProjects("user-1", { refineNames: false })).toEqual([]);
+    expect(await listProjects("user-1")).toEqual([]);
     expect(refineProjectNames).not.toHaveBeenCalled();
     expect(sqlMock).toHaveBeenCalledOnce();
   });

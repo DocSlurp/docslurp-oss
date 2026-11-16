@@ -15,6 +15,92 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::probe::{probe, read_plan, FileMeta, ProbeInput};
 use crate::rules::{Rules, PROFILE_SCHEMA};
+use crate::probe::{DetailOptions, DetailSession};
+use std::cell::RefCell;
+use crate::probe::{RangeSession,RangeRequest};
+use std::cell::Cell;
+
+thread_local! {
+    // One active detailed session per module; explicit close and trap recovery release it.
+    static DETAIL: RefCell<Option<DetailSession>> = const { RefCell::new(None) };
+    static RANGE: RefCell<Option<RangeSession>> = const { RefCell::new(None) };
+    static RANGE_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+pub fn range_open_json(options:&[u8],meta:&[u8])->String {
+    envelope((|| {
+        #[derive(serde::Deserialize)] #[serde(deny_unknown_fields)] struct Meta{size:u64}
+        let meta:Meta=parse("range metadata",meta)?;
+        let options:DetailOptions=parse("range options",options)?;
+        if DETAIL.with(|slot|slot.borrow().is_some()) {return Err(Error::invalid_request("close the active detailed session first"));}
+        RANGE.with(|slot|{
+            let mut slot=slot.borrow_mut();if slot.is_some(){return Err(Error::invalid_request("close the active range session first"));}
+            let epoch=RANGE_EPOCH.with(|epoch|{let next=epoch.get().checked_add(1u64<<32).filter(|next|*next<(1u64<<53)-(1u64<<32)).ok_or_else(||Error::invalid_request("session epoch overflow"))?;epoch.set(next);Ok::<_,Error>(next)})?;
+            *slot=Some(RangeSession::new(meta.size,options,epoch)?);Ok(true)
+        })
+    })())
+}
+pub fn range_step_json()->String {
+    envelope(RANGE.with(|slot|slot.borrow_mut().as_mut().ok_or_else(||Error::invalid_request("no active range session"))?.step()))
+}
+pub fn range_supply_json(meta:&[u8],bytes:&[u8])->String {
+    envelope((||{let request:RangeRequest=parse("range response",meta)?;
+        RANGE.with(|slot|{slot.borrow_mut().as_mut().ok_or_else(||Error::invalid_request("no active range session"))?.supply(request,bytes)?;Ok(true)})
+    })())
+}
+pub fn range_close_json()->String { RANGE.with(|slot|*slot.borrow_mut()=None);envelope(Ok::<_,Error>(true)) }
+
+#[cfg(target_arch="wasm32")] #[no_mangle]
+pub unsafe extern "C" fn ds_range_open(options:*const u8,options_len:usize,meta:*const u8,meta_len:usize)->u64 {into_host(range_open_json(slice(options,options_len),slice(meta,meta_len)))}
+#[cfg(target_arch="wasm32")] #[no_mangle]
+pub extern "C" fn ds_range_step()->u64 {into_host(range_step_json())}
+#[cfg(target_arch="wasm32")] #[no_mangle]
+pub unsafe extern "C" fn ds_range_supply(meta:*const u8,meta_len:usize,bytes:*const u8,len:usize)->u64 {into_host(range_supply_json(slice(meta,meta_len),slice(bytes,len)))}
+#[cfg(target_arch="wasm32")] #[no_mangle]
+pub extern "C" fn ds_range_close()->u64 {into_host(range_close_json())}
+
+pub fn detail_open_json(options: &[u8], bytes: &[u8]) -> String {
+    envelope((|| {
+        if RANGE.with(|slot|slot.borrow().is_some()){return Err(Error::invalid_request("close the active range session first"));}
+        DETAIL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_some() { return Err(Error::invalid_request("close the active detail session first")); }
+            let options: DetailOptions = parse("detail options", options)?;
+            let (session, header) = DetailSession::open(bytes, options)?;
+            *slot = Some(session);
+            Ok(header)
+        })
+    })())
+}
+
+pub fn detail_next_json() -> String {
+    envelope(DETAIL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let session = slot.as_mut().ok_or_else(||Error::invalid_request("no active detail session"))?;
+        let output = session.next();
+        if output.is_none() { *slot = None; }
+        Ok(output)
+    }))
+}
+
+pub fn detail_close_json() -> String {
+    DETAIL.with(|slot| *slot.borrow_mut() = None);
+    envelope(Ok::<_, Error>(true))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub unsafe extern "C" fn ds_detail_open(options: *const u8, options_len: usize, bytes: *const u8, bytes_len: usize) -> u64 {
+    into_host(detail_open_json(slice(options, options_len), slice(bytes, bytes_len)))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_detail_next() -> u64 { into_host(detail_next_json()) }
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_detail_close() -> u64 { into_host(detail_close_json()) }
 
 /// Envelope JSON for a result.
 pub fn envelope<T: Serialize>(result: Result<T, Error>) -> String {

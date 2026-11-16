@@ -14,7 +14,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
  * concurrency. PGlite serves one connection at a time, so this needs a real,
  * migrated, throwaway Postgres:
  *
- *   CHECKPOINT_LOCK_TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- checkpoint-lock-order
+ *   TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- checkpoint-lock-order
  *
  * Regression for the `deadlock detected` (40P01) a 10-document sharded batch
  * hit in extract-markdown (internal research notes):
@@ -26,7 +26,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
  */
 type Sql = postgres.Sql<Record<string, unknown>>;
 
-const realUrl = process.env.CHECKPOINT_LOCK_TEST_DATABASE_URL;
+const realUrl = process.env.TEST_DATABASE_URL;
 const prefix = "lockorder";
 const runId = `${prefix}-run`;
 const docIds = Array.from({ length: 16 }, (_, index) => `${prefix}-doc-${index}`);
@@ -53,8 +53,8 @@ async function seed(pg: Sql) {
   await pg`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents)
     values (${`${prefix}-org`}, 'Lock', ${`${prefix}-org`}, 'lock-u1', 1000000)`;
   await pg`insert into projects (id, org_id, user_id, name) values (${`${prefix}-ws`}, ${`${prefix}-org`}, 'lock-u1', 'W')`;
-  await pg`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-    values (${runId}, ${`${prefix}-org`}, 'lock-u1', ${`${prefix}-ws`}, 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
+  await pg`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
+    values (100, ${runId}, ${`${prefix}-org`}, 'lock-u1', ${`${prefix}-ws`}, 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
   for (const id of docIds) {
     await pg`insert into documents (id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values (${id}, 'lock-u1', ${`${prefix}-ws`}, ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`k/${id}`}, 'processing', 10)`;

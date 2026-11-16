@@ -15,8 +15,8 @@ let url: string;
 
 async function seedRun(runId: string) {
   await db.exec(`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
-      values ('${runId}', 'o1', 'u1', 'w', 'upload', 'processing', 'embed', '{}', 3, null);
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation, monthly_reservation_cents)
+      values ('${runId}', 'o1', 'u1', 'w', 'upload', 'processing', 'embed', '{}', 3, null, 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, created_at)
       values ('${runId}-bad', 'o1', 'u1', 'w', '${runId}', 'bad.pdf', 'application/pdf', 'k1', 'processing', 2, '2026-01-01'),
              ('${runId}-mid', 'o1', 'u1', 'w', '${runId}', 'mid.pdf', 'application/pdf', 'k2', 'processing', 1, '2026-01-02'),
@@ -143,8 +143,8 @@ describe("partial Document failure in the store", () => {
     await db.exec(`
       update documents set status = 'cancelled' where id = '${runId}-bad';
       update documents set canonical_id = '/${runId}' where id = '${runId}-mid';
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-        values ('${runId}-replacement', 'o1', 'u1', 'w', 'upload', 'processing', 'index', '{}');
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, monthly_reservation_cents)
+        values ('${runId}-replacement', 'o1', 'u1', 'w', 'upload', 'processing', 'index', '{}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
         values ('${runId}-replacement-doc', 'o1', 'u1', 'w', '${runId}-replacement', 'mid.pdf', 'application/pdf', 'replacement', 'completed', '/${runId}', '2026-01-04');
     `);
@@ -184,7 +184,9 @@ describe("partial Document failure in the store", () => {
     await withStore(async (store) => {
       const state = await loadRunState(store, "run-fail");
       await store.startDocumentStage(state, "run-fail-bad", "embed");
-      await store.failDocumentStage(state, "run-fail-bad", "embed", "unparseable");
+      await store.failDocumentStage(state, "run-fail-bad", "embed", "unparseable", undefined, undefined, { code: "source_rejected", retryable: false });
+      const saved = await db.query<{ failure: unknown }>("select failure from document_run_stage_states where run_id='run-fail' and document_id='run-fail-bad' and stage_name='embed'");
+      expect(saved.rows[0]?.failure).toEqual({ code: "source_rejected", retryable: false });
       await store.startDocumentStage(state, "run-fail-mid", "extract");
       await store.completeDocumentStage(state, "run-fail-mid", "extract", "s3://x", {});
       await store.failRun("run-fail", "embed", "database went away", { runId: "run-fail", orgId: "o1", projectId: "w" });
@@ -216,4 +218,26 @@ describe("partial Document failure in the store", () => {
       `select payload from webhook_outbox where event_type = 'run.completed' and payload->>'runId' = 'run-ok'`);
     expect(outbox.rows[0]!.payload).toMatchObject({ runId: "run-ok", status: "completed", failedDocuments: 1 });
   });
+});
+
+it.each(["interruption", "completion"])("clears previous failure through restart and %s", async ending => {
+  const run = "restart-" + ending;
+  await seedRun(run);
+  await withStore(async store => {
+    const state = await loadRunState(store, run);
+    const document = run + "-bad";
+    await store.startDocumentStage(state, document, "embed");
+    await store.failDocumentStage(state, document, "embed", "rejected", undefined, undefined, { code: "source_rejected", retryable: false });
+    await store.startDocumentStage(state, document, "embed");
+    const processing = (await db.query<{ status: string; failure: unknown }>(
+      "select status,failure from document_run_stage_states where run_id=$1 and document_id=$2", [run, document])).rows[0];
+    expect(processing).toEqual({ status: "processing", failure: null });
+    expect(state.documentStages.get(document)?.get("embed")?.status).toBe("processing");
+    if (ending === "completion") await store.completeDocumentStage(state, document, "embed", "s3://result", {});
+    else await store.failRunStage(state, "embed", "worker interrupted", { countFailure: false });
+  });
+  const row = (await db.query<{ status: string; failure: unknown }>(
+    "select status,failure from document_run_stage_states where run_id=$1 and document_id=$2", [run, run + "-bad"])).rows[0];
+  expect(row?.failure).toBeNull();
+  expect(row?.status).toBe(ending === "completion" ? "completed" : "failed");
 });

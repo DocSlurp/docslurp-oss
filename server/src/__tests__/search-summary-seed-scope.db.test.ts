@@ -1,6 +1,9 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "syntax-org", projectIds: "org", modeCeiling: null } as const;
+
 
 // LanceDB is an external storage adapter; keep SQL scope and hydration real.
 vi.mock("../search/lancedb.js", () => ({
@@ -47,7 +50,7 @@ it("keeps an explicit document selection when summary seeds point to a different
     const result = await hybridSearch("budget", "syntax-user", {
       filters: { projectId: "syntax-project", ...selection },
       summarySeed: true, queryVector: [], parentRetrieval: false, useRerank: false,
-    });
+    }, TEST_SEARCH_SCOPE);
     expect(result.results.map((hit) => hit.citation.documentId)).toEqual(["finance"]);
   }
 });

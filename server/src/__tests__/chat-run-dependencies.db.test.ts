@@ -9,7 +9,7 @@ let deps: typeof import("../search/deferred/materialize-client.js").defaultMater
 let snapshots: typeof import("../services/chat-operation-access.js");
 let allowed = true;
 beforeAll(async () => {
-  const external=process.env.CHAT_OPERATION_TEST_DATABASE_URL;
+  const external=process.env.TEST_DATABASE_URL;
   if(external && new URL(external).hostname!=="127.0.0.1")throw new Error("Requires isolated loopback database");
   const pg=external ? {url:external,stop:async()=>{}} : await startMigratedPostgres(); stop=pg.stop;
   sql=postgres(pg.url,{max:external?5:1,prepare:false,onnotice:()=>{}});
@@ -20,10 +20,10 @@ beforeAll(async () => {
   snapshots=await import("../services/chat-operation-access.js");
   ({defaultMaterializeDeps:deps}=await import("../search/deferred/materialize-client.js"));
   await sql`insert into "user"(id,name,email) values('u','U','u@example.test')`;
-  await sql`insert into organizations(id,name,slug,created_by_user_id) values('o','O','o','u')`;
+  await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents) values('o','O','o','u',1000)`;
   await sql`insert into projects(id,org_id,user_id,name) values('w','o','u','W')`;
-  await sql`insert into documents(id,org_id,user_id,project_id,filename,mime_type,source_key,status)
-    values('d','o','u','w','d.pdf','application/pdf','private','completed')`;
+  await sql`insert into documents(id,org_id,user_id,project_id,filename,mime_type,source_key,status,page_count,billing_pages,page_count_source)
+    values('d','o','u','w','d.pdf','application/pdf','private','completed',1,1,'counted')`;
 },120000);
 beforeEach(async()=>{allowed=true;
   await sql`delete from session`;
@@ -33,7 +33,7 @@ await sql`delete from chat_operations`;await sql`delete from project_runs`;await
 afterAll(async()=>{await sql?.end();await stop?.();});
 const actor = {type:"session" as const,userId:"u",sessionId:"session",user:{id:"u",email:"u@example.test",name:"U"}};
 async function task(){await ops.launchChatOperation({userId:"u",orgId:"o",projectId:"w",key:"dependency_test",input:{q:"question",authSessionId:"session"}});return {...(await ops.claimChatOperation())!,signal:new AbortController().signal};}
-const allocate=()=>deps.createRun({userId:"u",orgId:"o",projectId:"w",documentId:"d",documents:1,pages:1,pageNumbers:[1]});
+const allocate=()=>deps.createRun({userId:"u",orgId:"o",projectId:"w",documentId:"d",documents:1,pages:1,maxCredits:1,pageNumbers:[1]});
 it("recovers shared work after parent completion and cancellation, then observes durable page results",async()=>{
   const t=await task();const run=await links.withChatRunOwner(t,allocate);
   await ops.appendChatOperation(t.id,t.attempt_id!,"result",{answer:"parent available"},"completed");
@@ -87,7 +87,7 @@ it("counts completed answers with outstanding shared work against active root ad
   await expect(ops.launchChatOperation({userId:"u",orgId:"o",projectId:"w",key:"ninth_root",input:{}})).resolves.toBeTruthy();
 });
 
-it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(['session','membership','abort'])("rejects %s invalidation while materialization waits for the root lock", async reason => {
+it.skipIf(!process.env.TEST_DATABASE_URL).each(['session','membership','abort'])("rejects %s invalidation while materialization waits for the root lock", async reason => {
   const t=await task();
   const abort=new AbortController();
   let locked!:()=>void, unlock!:()=>void;

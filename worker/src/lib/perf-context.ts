@@ -7,6 +7,7 @@ type PerformanceSink = (event: PerformanceEvent) => void;
 
 interface WorkerPerfContext {
   runId: string;
+  executionGeneration?: string | null;
   scope: string;
   stageName: string;
   documentId?: string;

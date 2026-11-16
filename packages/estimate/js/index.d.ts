@@ -83,6 +83,8 @@ export type FileProfile = {
     scanBesideTextUnknownPages: number;
     /** Pages table-heavy from their ruled grids alone (a grid of 5+ rows, or grids covering 40% of the page). */
     ruledTablePages: number;
+    /** Sampled pages per cost route: ocr-read, ocr-blank, table, text, unknown (`pageCostRoute`). */
+    routePages: [number, number, number, number, number];
   };
   /** Package structure: slide and worksheet parts, body bytes; `declaredPages` is authored metadata, informational only. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };
@@ -93,6 +95,8 @@ export type FileProfile = {
 export type EstimateRequestFile = { name: string; size: number; type?: string; profile?: FileProfile };
 
 export type FileMeta = { name: string; type?: string; size: number };
+export type PageProfileOptions = { maxDeepPages?: number; batchPages?: number; groups?: Array<"text" | "images" | "vectors" | "tables" | "captions" | "charts">; rankedPages?: number; signal?: AbortSignal };
+export type LocalRangeSource = { size: number; read(offset: number, length: number): Promise<Uint8Array>; close?(): Promise<void> | void };
 export type ReadPlan = { head: number; tail: number };
 export type EstimatorInfo = { profileSchema: number; profiler: string };
 
@@ -109,12 +113,15 @@ export type Estimator = {
   readPlan(file: FileMeta): ReadPlan;
   profile(file: FileMeta, head: Uint8Array, tail?: Uint8Array): FileProfile;
   profileBlob(blob: Blob, name?: string): Promise<FileProfile>;
+  /** Local PDF evidence through bounded range reads, up to 2 GiB. */
+  profileJsonl(blob: Blob, options?: PageProfileOptions): AsyncGenerator<string>;
+  profileSourceJsonl(source: LocalRangeSource, options?: PageProfileOptions): AsyncGenerator<string>;
   estimateFiles(files: ArrayLike<Blob & { name: string }> | Iterable<Blob & { name: string }>, options?: EstimateOptions): Promise<EstimateResult>;
   /** Calls into the module, traps (`crashed`) and fresh instances made after them. */
   health(): EstimatorHealth;
 };
 
-export type EstimatorHealth = { calls: number; crashes: number; resets: number };
+export type EstimatorHealth = { calls: number; crashes: number; resets: number; memoryBytes: number };
 
 export type EstimateOptions = {
   /** Stops work between files and between 1 MiB reads; the result is then partial. */

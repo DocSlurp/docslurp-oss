@@ -14,10 +14,27 @@ const NONE_NO_PID_NAMESPACE = iso(false, "none", false);
 const PROD = { NODE_ENV: "production" };
 
 describe("assertSandboxPolicy in production", () => {
-  it.each(["bubblewrap", "landlock", "none"])("refuses local %s even with the unisolated override", (providerId) => {
+  it.each(["bubblewrap", "landlock"])("refuses local %s even with the unisolated override", (providerId) => {
     const env = { ...PROD, DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" };
     expect(() => assertSandboxPolicy({ providerId, isolation: iso(true, "full"), env })).toThrow(/VM boundary/);
   });
+
+  it("refuses none even with the unisolated override", () => {
+    const env = { ...PROD, DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" };
+    expect(() => assertSandboxPolicy({ providerId: "none", isolation: iso(true, "full"), env })).toThrow(SandboxPolicyError);
+  });
+
+  // #398: the override has no effect outside development, and none itself is refused there; worker startup also
+  // refuses both (lib/unsafe-overrides.ts).
+  it.each([PROD, { NODE_ENV: "staging" }, { DOCSLURP_SERVICE_PROFILE: "service" }])(
+    "the unisolated override never lets none run (%o)",
+    (base) => {
+      const env = { ...base, DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" };
+      expect(() => assertSandboxPolicy({ providerId: "none", isolation: NONE_NO_PID_NAMESPACE, env })).toThrow(
+        /'none'.*allowed only in development or test/,
+      );
+    },
+  );
 
   it("accepts the remote Modal VM boundary", () => {
     expect(assertSandboxPolicy({ providerId: "modal", isolation: { ...iso(true, "full"), location: "remote" }, env: PROD }))
@@ -34,6 +51,26 @@ describe("assertSandboxPolicy in production", () => {
     expect(() => assertSandboxPolicy({ providerId, isolation, env: PROD })).toThrow(SandboxPolicyError);
   });
 
+});
+
+// #398: provider none has no filesystem or network isolation, so it is development and test only.
+describe("assertSandboxPolicy outside development, short of production", () => {
+  const DEPLOYED = ["staging", "preview", "Staging", " production2", "\u00a0development", "\ufeff", "dev elopment"];
+
+  it.each(DEPLOYED)("refuses none under NODE_ENV=%j even with process teardown", (nodeEnv) => {
+    expect(() => assertSandboxPolicy({ providerId: "none", isolation: NONE_ISOLATION, env: { NODE_ENV: nodeEnv } })).toThrow(
+      /'none'.*allowed only in development or test/,
+    );
+  });
+
+  it.each(["bubblewrap", "landlock"])("refuses %s in staging even with a successful namespace probe", (providerId) => {
+    expect(() => assertSandboxPolicy({ providerId, isolation: iso(true, "full"), env: { NODE_ENV: "staging" } })).toThrow(/VM boundary/);
+  });
+
+  it("refuses none under the service profile without NODE_ENV", () => {
+    expect(() => assertSandboxPolicy({ providerId: "none", isolation: NONE_ISOLATION, env: { DOCSLURP_SERVICE_PROFILE: "service" } }))
+      .toThrow(SandboxPolicyError);
+  });
 });
 
 describe("assertSandboxPolicy outside production", () => {

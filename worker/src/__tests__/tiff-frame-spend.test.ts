@@ -33,9 +33,9 @@ beforeAll(async () => {
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
       values ('o-low', 'Low', 'low', 'u1', 8, 5), ('o-ten', 'Ten', 'ten', 'u1', 8, 10);
     insert into projects(id, org_id, user_id, name) values ('w-low', 'o-low', 'u1', 'L'), ('w-ten', 'o-ten', 'u1', 'T');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('run-low', 'o-low', 'u1', 'w-low', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 1),
-             ('run-ten', 'o-ten', 'u1', 'w-ten', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 2);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'run-low', 'o-low', 'u1', 'w-low', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 1),
+             (100, 'run-ten', 'o-ten', 'u1', 'w-ten', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 2);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
       ('tiff-40', 'o-low', 'u1', 'w-low', 'run-low', 'deposition.tiff', 'image/tiff', 'raw/t40', 'processing', 1, 'assumed'),
       ('tiff-a', 'o-ten', 'u1', 'w-ten', 'run-ten', 'a.tiff', 'image/tiff', 'raw/ta', 'processing', 1, 'assumed'),

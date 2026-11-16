@@ -14,6 +14,10 @@ const evidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/model-p
 const routeEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/vision-route-prices-2026-10-29.json", import.meta.url), "utf8")) as {
   endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
 };
+/** Endpoints of GPT-6 Luna's pinned route (OpenAI plus the content-filter retry hosts), fetched when it became the default. */
+const lunaRouteEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/vision-route-prices-2026-11-13.json", import.meta.url), "utf8")) as {
+  endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
+};
 /** DeepInfra's /models/list pricing for vision routes priced from a direct provider's list (`basis: "provider-list"`). */
 const deepInfraEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/deepinfra-vision-prices-2026-11-04.json", import.meta.url), "utf8")) as {
   models: { model_name: string; pricing: { cents_per_input_token: number; cents_per_output_token: number } }[];
@@ -82,7 +86,7 @@ describe("official model price evidence", () => {
       // A pinned route is priced at its most expensive pinned provider's cheapest endpoint, from the retained endpoint
       // response: every pinned provider can serve at or under the route price. A provider's dearer variants (for
       // example `fireworks/us`) never serve, since the request's max_price is the route price.
-      const endpoints = [...(evidence.endpoints[id] ?? []), ...(routeEvidence.endpoints[id] ?? [])];
+      const endpoints = [...(evidence.endpoints[id] ?? []), ...(routeEvidence.endpoints[id] ?? []), ...(lunaRouteEvidence.endpoints[id] ?? [])];
       const cheapestOf = (provider: string, side: "prompt" | "completion") => {
         const own = endpoints.filter((endpoint) => endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`));
         expect(own.length, `${id} ${provider}`).toBeGreaterThan(0);

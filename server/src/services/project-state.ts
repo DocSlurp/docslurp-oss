@@ -1,6 +1,7 @@
 import type { ProjectState } from "@docslurp/shared";
 import { sql, type SqlClient } from "../db.js";
 import { attributedUsage } from "./usage-attribution.js";
+import { getProjectSummaryTreeState } from "./project-summary-tree.js";
 
 export type ProjectStateRow = Record<string, unknown>;
 
@@ -16,7 +17,7 @@ function nullableNumber(value: unknown): number | null {
 function distribution(row: ProjectStateRow, prefix: string) {
   return { sampleCount: number(row[`${prefix}_samples`]), p50: nullableNumber(row[`${prefix}_p50`]), p95: nullableNumber(row[`${prefix}_p95`]), max: nullableNumber(row[`${prefix}_max`]) };
 }
-export function mapProjectState(row: ProjectStateRow, args: { projectId: string; orgId: string; recentWindowHours: number }): ProjectState {
+export function mapProjectState(row: ProjectStateRow, args: { projectId: string; orgId: string; recentWindowHours: number }): Omit<ProjectState, "summaryTree"> {
   const observedAt = new Date(String(row.observed_at)).toISOString();
   const total = number(row.total_pages);
   const indexed = Math.min(total, number(row.indexed_pages));
@@ -104,6 +105,7 @@ export async function getProjectState(args: { projectId: string; orgId: string; 
     search_metadata as (
       select s.*, case when jsonb_typeof(metadata) = 'string' and pg_input_is_valid(metadata #>> '{}', 'jsonb') then (metadata #>> '{}')::jsonb else metadata end as normalized_metadata
       from search_sessions s
+      where s.project_id = ${args.projectId}
     ),
     searches as (
       select s.*, s.created_at >= clock.observed_at - (${args.recentWindowHours} * interval '1 hour') as recent,
@@ -111,8 +113,6 @@ export async function getProjectState(args: { projectId: string; orgId: string; 
           case when (s.normalized_metadata ->> 'durationMs')::numeric >= 0
             then (s.normalized_metadata ->> 'durationMs')::numeric end end as duration_ms
       from search_metadata s cross join clock
-      where s.normalized_metadata ->> 'projectId' = ${args.projectId}
-        or (s.normalized_metadata -> 'projectIds') @> ${client.json([args.projectId])}::jsonb
     ),
     search_summary as (
       select count(*) as total_searches, count(*) filter (where recent) as recent_searches,
@@ -130,5 +130,7 @@ export async function getProjectState(args: { projectId: string; orgId: string; 
       (select count(*) from valid_pages) as indexed_pages
     from clock cross join document_summary ds cross join text_summary ts cross join run_summary rs cross join search_summary ss cross join usage_summary us
   `;
-  return mapProjectState(row!, args);
+  // Read-only summary tree block: stored setting, deployment switches, build status, document counts, server constants.
+  const summaryTree = await getProjectSummaryTreeState({ projectId: args.projectId, orgId: args.orgId }, client);
+  return { ...mapProjectState(row!, args), summaryTree };
 }

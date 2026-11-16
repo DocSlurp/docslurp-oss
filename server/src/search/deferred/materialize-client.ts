@@ -1,4 +1,6 @@
-import { pageCredits, sanitizeStoredPipeline } from "@docslurp/shared";
+import { pageCredits, speedBoostMultiplier, sanitizeStoredPipeline, parseManagedPipelineOverrides, resolveManagedPipeline } from "@docslurp/shared";
+import { stampRunChartExport } from "../../services/chart-export-availability.js";
+import type { PipelineFeatures } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -12,8 +14,10 @@ import {
 import { acceptChatRunDependency } from "../../services/chat-run-dependencies.js";
 import { sql } from "../../db.js";
 import { startMaterializeWorkflow } from "../../lib/temporal.js";
-import { canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
+import { assertCanSpend, canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
 import { enforceLiveBudgetCaps } from "../../services/run-creation.js";
+import { storedSummaryTree, withProjectSummaryTree } from "../../services/run-summary-tree.js";
+import { createMaterializationPlan, materializationForecast } from "../../services/materialization-capacity.js";
 import type { MaterializeEvent } from "./deferred-context.js";
 
 export const MATERIALIZE_POLL_MS = 250;
@@ -28,7 +32,7 @@ export interface PageState {
 export interface MaterializeDeps {
   loadPageStates(pairs: Array<{ documentId: string; page: number }>): Promise<Map<string, PageState>>;
   canSpend(orgId: string, projectId: string): Promise<boolean>;
-  createRun(args: { orgId: string; userId: string; projectId: string; documentId: string; documents: number; pages: number; pageNumbers?: number[] }): Promise<string>;
+  createRun(args: { orgId: string; userId: string; projectId: string; documentId: string; documents: number; pages: number; maxCredits: number; pageNumbers?: number[] }): Promise<string>;
   /** Marks a run whose workflow start was deduplicated; the winning workflow owns the real work. */
   closeDedupedRun(runId: string): Promise<void>;
   /** Marks a run whose workflow could not be started. */
@@ -75,7 +79,14 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     return canSpend(orgId, projectId);
   },
   async createRun(args) {
-    const id = `mat_${randomUUID()}`;
+    const id = randomUUID();
+    const maxCredits = args.maxCredits;
+    if (!Number.isSafeInteger(args.pages) || args.pages < 1 || !Number.isFinite(maxCredits) || maxCredits <= 0) {
+      throw new Error("Invalid bounded materialization workload");
+    }
+    return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
+    await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${args.orgId}))`;
+    const plan = await createMaterializationPlan(tx as import("postgres").TransactionSql, args);
     // The run carries the source document's pipeline (its ingest run, else the project's), so the
     // worker applies the same PII policy, privacy mode and embedding model as the original ingest.
     // It is inserted `processing` with a confirmed workflow start: run-start recovery and the stale
@@ -84,20 +95,34 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     // so the stale-lease alerts and health counts flag a materialize run only when its worker really died.
     // The stored source pipeline may predate the strict extractor schemas: drop what they reject (a Dolphin
     // repoPath, an unknown extractor id) before it is copied into the new run, as every other run path does.
-    const [source] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
-      select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline
-      from (select 1) one
-      left join documents d on d.id = ${args.documentId} and d.project_id = ${args.projectId}
-      left join project_runs r on r.id = d.run_id and r.project_id = ${args.projectId}
-      left join projects w on w.id = ${args.projectId}
+    const [source] = await tx<{ pipeline: Record<string, unknown> | null; managed: unknown; origin: string | null; summary_tree: unknown }[]>`
+      select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline,
+        w.managed_models -> 'pipeline' as managed, r.origin, w.pipeline -> 'summaryTree' as summary_tree
+      from documents d join projects w on w.id=d.project_id and w.org_id=d.org_id
+      left join project_runs r on r.id = d.run_id and r.project_id = d.project_id and r.org_id=d.org_id
+      where d.id=${args.documentId} and d.org_id=${args.orgId} and d.project_id=${args.projectId}
     `;
-    const pipeline = sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`);
-    return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
+    // Its model values are history, never configuration: the project's explicit overrides and current defaults apply.
+    const resolved = resolveManagedPipeline(
+      sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`),
+      parseManagedPipelineOverrides(source?.managed, `project ${args.projectId}`),
+      `materialize run ${id}`,
+    ).pipeline;
+    // A materialize run reads pages a query needs: never chart export beyond what the source run already resolved (a
+    // project pipeline with no stamped tier resolves as machine, i.e. off by default).
+    // The summary tree is the project's stored setting, not the source run's snapshot (run-summary-tree.ts).
+    const pipeline = withProjectSummaryTree(
+      stampRunChartExport(resolved as PipelineFeatures, "machine", process.env, { stamped: true }),
+      storedSummaryTree({ summaryTree: source?.summary_tree }),
+    );
+    const origin = source?.origin === "app" ? "app" : "machine";
+    const reservationCents = materializationForecast(plan.pages.length, maxCredits * speedBoostMultiplier(pipeline.speedBoost), pipeline.speedBoost === true);
+    await assertCanSpend(args.orgId, args.projectId, { client: tx, kind: "interactive", hold: false });
     await tx`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin, stats, monthly_reservation_cents)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',
              ${args.documents}, ${args.pages}, ${tx.json(pipeline as never)}, now(),
-             now() + interval '15 minutes', now(), null)
+             now() + interval '15 minutes', now(), null, ${origin}, ${tx.json({ materialization: plan })}, ${reservationCents})
     `;
     return { runId: id, value: id };
     });
@@ -218,7 +243,7 @@ export async function materializeForQuery(
     try {
       args.signal?.throwIfAborted();
       runId = await deps.createRun({
-        orgId: args.orgId, userId: args.userId, projectId: args.projectId, documentId, documents: 1, pages: pages.length, pageNumbers: pages,
+        orgId: args.orgId, userId: args.userId, projectId: args.projectId, documentId, documents: 1, pages: pages.length, pageNumbers: pages, maxCredits: (policy.maxCreditsPerQuery * pages.length) / pending.length,
       });
       args.signal?.throwIfAborted();
       const outcome = await deps.startWorkflow(

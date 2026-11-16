@@ -118,6 +118,115 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 
 
 Escalation reads survive activity retries. Each hosted call is persisted as it returns (`ocr_escalation_reads`, migration 0129, deleted with its run): a retried activity reuses a page's completed read instead of calling the provider again, and re-records every earlier call's usage under its original id, so a call's provider cost is recorded exactly once even when the activity that made it failed before its checkpoint. A call that does repeat (the first one failed) is recorded again with its own cost and counts against `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`. Escalation rows bill 0 credits and keep their cost as `providerCostCents`, which the provider-cost loss alert reads.
+
+## Page reader
+
+A deployment can give OCR'd pages a second read by a page image reader: an extractor plugin's `pageImageReader`
+provider ([Extractor plugins](extractor-plugins.md#page-image-reader-pageimagereader)) that reads the PNGs the OCR
+boundary wrote, inside its own isolated VM, and returns Markdown per page. It runs after the recogniser's read and
+before hosted escalation.
+
+`DOCSLURP_OCR_PAGE_READER` chooses what it reads:
+
+- `off` (the default, also when unset): nothing changes.
+- `escalation`: the pages escalation would read (degraded, low-confidence, Arabic or Devanagari, unsupported script).
+  The boundary keeps their PNGs even when hosted escalation is off.
+- `all`: every page the boundary read. The boundary keeps a PNG of every frame it found text or text regions on; blank
+  frames have nothing to read.
+- A tier word, `fastest`, `balanced` or `smart`: the reviewed OCR route options (`OCR_ROUTE_OPTIONS` and `selectOcrRoute`
+  in `packages/shared/src/tier-options.ts`) pick the mode. `fastest` is the recogniser alone (`off`). `smart` ranks the
+  measured readers by their composite on the page-OCR tier benchmark: the registered reader's own `evalScore` against the
+  hosted escalation reader's recorded score (when escalation is on); the page reader, if it scores higher, reads every
+  page (`all`), else `off`. `balanced` sends the pages escalation would read to a measured page reader (`escalation`),
+  else `off`. A reader without `evalScore` is never chosen by a tier. Hosted escalation remains the fallback for every
+  page the reader does not return.
+
+A page the reader returns Markdown for takes that text (reader `page-reader:<provider id>`) and leaves hosted escalation.
+A page it fails, answers empty, or never reaches keeps the recogniser's text and stays an escalation candidate, so the
+hosted reader handles it exactly as it would without a page reader. Markdown tables in a read are rebuilt in the parser
+VM, as for escalation reads.
+
+What fails closed:
+
+- An unknown `DOCSLURP_OCR_PAGE_READER` or `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` stops the worker at start.
+- With the reader on, the worker refuses to start without a registered provider, when the provider's
+  `assertConfigured()` throws, or when `DOCSLURP_OCR_MODE` is not `vm` or `local` (no boundary PNGs to read).
+- A job is sent only under an explicit tenant scope, the run's organization and run. A run without an organization is
+  skipped and logged; the provider is never called without a scope.
+- The host re-checks every PNG by signature and IHDR size against the frame the boundary read and the provider's byte
+  cap. It never decodes pixels. A PNG that fails is not sent.
+- Each page gets an opaque key, never a document id. The response is validated strictly: known keys, at most one result
+  per key, a known status and failure reason, Markdown within the provider's byte cap, token counts as non-negative
+  integers. A malformed response rejects the whole job, logged to telemetry only.
+- A job that throws, whether refused or failed to run, never fails a page or a document, and the read never moves to
+  the worker host or a weaker boundary: its pages keep the recogniser's text and fall through to hosted escalation.
+
+Isolation: a provider meets the same requirements as every VM provider
+([Isolation requirements](extractor-plugins.md#isolation-requirements)). Pages are read in a VM bound to one
+organization for that VM's whole life (it may serve several jobs of that organization, never another's), with no network beyond the job's own connection, no credentials, no cloud metadata
+access and bounded output that the host validates.
+
+Reader usage bills 0 credits, so the run cost cap does not bound it: `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`
+(default 2000, 0 to 10000000; 0 sends nothing) caps the provider cost one organization's reader jobs may commit per UTC
+day, across every worker. Each job is admitted against a shared ledger before it is sent: under the organization's
+advisory lock, the day's settled cost plus the reservations of unsettled jobs plus this job's reservation (the provider's
+optional `estimateJobCostCents`) must stay within the cap, or the job's pages keep the recogniser read. A completed job
+settles its reservation with the cost it recorded; a job that throws (a lease that failed while booting, an abort) settles
+at no less than its reservation, since it may have run a VM it could not report; a job that never settles (a crashed
+worker) keeps its reservation for the day. A ledger that cannot answer, or whose organization lock is not free within
+10 s, sends nothing. A tier word never picks a reader scoring at or under the recogniser alone, and treats a hosted
+escalation model other than the measured one as unmeasured. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
+and any error inside the reader path is logged and leaves the pages with their reads (only an abort propagates).
+
+Budget and cost: `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` (default 2000, 0 to 20000) bounds the pages a document sends,
+counted across its OCR batches in one activity. Jobs carry at most the provider's `maxPagesPerJob` pages; the run's
+cost cap is checked before each job. Each job logs
+`[ai-usage] ocr-page-reader model=<model> input_tokens=<n> output_tokens=<n>`, and once per document
+`[ocr] page-reader document=... attempted=... replaced=... failed={...} skipped={...}`.
+
+## Vision page reader
+
+The same page image reader can also read vision-extract's plain page transcription, the pages a hosted vision model
+would otherwise transcribe (`DOCSLURP_VISION_PAGE_READER`, off by default). It is a deployment setting: it applies to
+every eligible run, whatever vision model a project configured.
+
+- `all` sends them to the reader. A tier word (`fastest`, `balanced`, `smart`) is resolved by `selectVisionTranscriptionRoute`
+  (`packages/shared/src/tier-options.ts`) against the reader's `evalScore` and the best measured hosted page-ocr option:
+  `fastest` picks a measured reader, `balanced` one within 0.02 of the best hosted composite, `smart` only one at or above
+  it. An unmeasured reader, or one scoring at or under the OCR recogniser alone, is never picked. With the flag on, the
+  worker refuses to start without a ready provider that implements `estimateJobCostCents`.
+- Only plain transcription is sent: a transcription prompt template, no output schema, no task prompt, on a PDF page the
+  renderer wrote as PNG, in a `standard` privacy project whose configured vision route is hosted (not a local model such
+  as `local-cli` or a loopback vLLM or Ollama server, and not an operator-private model), in the legacy whole-document read
+  of a document with page triage. Schema and task-prompt reads, pages triage routed as `chart-or-figure` or `image-heavy`,
+  drawn-content and table-rescue pages, page-router groups and cascade legs, raster uploads, documents without triage,
+  `local-only` and `strict-privacy` projects keep the hosted route. A run without an organization sends nothing. So does
+  a cost-capped run (`maxCostCents`), which reads one page per admission on the hosted route.
+- The reader must declare where it processes pages (`hostCountry`) and the country of the company that operates its VMs
+  by ownership and jurisdiction (`operatorCountry`), both ISO 3166-1 alpha-2, and the organization's provider-region
+  policy must admit both: China (`CN`, `HK`, `MO`) needs `allowChinaProviders`, and a reader missing either is never used
+  for vision transcription. Planning runs without the run's provider-policy scope, so a reader that needs
+  `allowChinaProviders` is not held back at planning (stricter, never looser, than the read).
+- Planning holds back from one-page task fan-out at most the document's remaining reader page budget, and nothing when
+  the organization's daily reader cap has no headroom or its ledger cannot answer; every other page still fans out. The run reads them in jobs
+  of at most `maxPagesPerJob`, two in flight per document, each rendered at the provider's `maxLongEdgePx`, one run of one
+  organization per job, with the same PNG checks (signature, byte cap, header size within the long edge and 40 million
+  pixels, never decoded), response validation and organization daily cost cap
+  (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, one ledger for both readers). `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`
+  bounds the pages a document sends in one activity; nothing past it is rendered at the reader's size, no further batch
+  starts once a budget, a cap or the ledger stopped one, and pages a stop left unsent return to the budget. Every job
+  reserves the provider's cost estimate: an estimate that is missing, 0 or not finite sends nothing. When one batch's
+  render or download fails, the other batch is aborted and the error is raised once both have stopped. The budget is
+  kept per activity: a retried activity can send a document's pages again, bounded by the organization's daily cap.
+- A page the reader does not return (a failed, refused or timed-out job, a failed page, empty or invalid Markdown, a
+  refused image, the budget or a cap) goes to the run's hosted vision route as it would without the reader. That route is
+  the run's own configured model, never one the system picks as a fallback. A render or download error propagates as it
+  would on the hosted route; only reader errors fall back.
+- Usage: `[ai-usage] vision-page-reader model=<model> input_tokens=<n> output_tokens=<n>` per job, provider cost on the
+  ledger at 0 credits; each page read is one Rich page, charged once per run.
+- The reader's Markdown passes through vision-extract's own post-processing: HTML tables are rebuilt in the parser VM and
+  `$...$` / `$$...$$` math is kept, the conventions the hosted transcription prompts ask for.
+
 ## Billing and usage
 
 - An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
@@ -133,6 +242,9 @@ Escalation reads survive activity retries. Each hosted call is persisted as it r
   actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
   (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
   cost is still recorded.
+- Page reader jobs are recorded as `ocr-page-reader` at provider cost, billing 0 credits (`providerCostCents`), also
+  when the job failed. The host sets the metric, model and tenant scope of each event; a provider cannot record a
+  billable charge. A page the reader replaced is one Rich page, charged once per run like the recogniser's read of it.
 - Quotes count a TIFF's frames as its pages, up to 64.
 
 ## Host phases outside OCR
@@ -210,6 +322,10 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_ESCALATION_MODEL` | `llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct` | Hosted reader for escalation and `hosted` mode. |
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS` | pages + a fifth (`30`) | Hosted requests per document, every page and retry included, counted in the durable vision attempt ledger. |
+| `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first, or a tier word (`fastest`, `balanced`, `smart`) resolved by the OCR route options (see [Page reader](#page-reader)). |
+| `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS` | `2000` | Reader provider cost one organization may commit per UTC day, across workers (0 to 10000000; 0 sends nothing). |
+| `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Most pages one document sends to the page reader (0 to 20000). |
+| `DOCSLURP_VISION_PAGE_READER` | `off` | `all` to read vision-extract's plain page transcription with the page image reader plugin, or a tier word (`fastest`, `balanced`, `smart`); see [Vision page reader](#vision-page-reader). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |
 | `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |

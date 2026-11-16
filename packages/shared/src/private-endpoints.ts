@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { visionRequestProfileSchema } from "./vision-request-profile.js";
 
 /**
  * Operator-registered private model endpoints.
@@ -50,7 +51,15 @@ export const privateEndpointModelSchema = z.object({
    * that otherwise spend the output budget on reasoning.
    */
   chatTemplateKwargs: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/), z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()])).optional(),
+  /**
+   * Vision request profile for this model (vision-request-profile.ts), applied over any built-in profile for the same
+   * model id: prompt mode, sampling, output cap and page-image long edge.
+   */
+  vision: visionRequestProfileSchema.optional(),
 }).strict().superRefine((value, ctx) => {
+  if (value.vision !== undefined && value.capability !== "vision") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["vision"], message: "vision only applies to vision models" });
+  }
   if (value.capability === "embedding" && value.dimensions === undefined) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dimensions"], message: "Embedding models must declare dimensions" });
   }
@@ -393,7 +402,7 @@ export function createPrivateEndpointFetch(
         body = JSON.stringify({ ...parsed, chat_template_kwargs: { ...options.chatTemplateKwargs, ...existing } });
       } catch { /* Not JSON: send unchanged. */ }
     }
-    return await baseFetch(input, { ...init, headers, body });
+    return await baseFetch(input, { ...init, headers, body, redirect: "error" });
   }) as typeof fetch;
 }
 

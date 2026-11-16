@@ -18,6 +18,8 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
 import wasmtime
 
+from .range import profile_range_jsonl
+
 __all__ = ["Estimator", "EstimatorError", "request_quote"]
 
 ProgressCallback = Callable[[dict], None]
@@ -71,7 +73,8 @@ class Estimator:
     def _instantiate(self) -> None:
         instance = wasmtime.Instance(self._store, self._module, [self._memory])
         exports = instance.exports(self._store)
-        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe")}
+        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe", "ds_detail_open", "ds_detail_next", "ds_detail_close", "ds_range_open", "ds_range_step", "ds_range_supply", "ds_range_close")}
+        self._detail_token = None
 
     def _reset(self) -> None:
         # A store keeps a little bookkeeping per instance; start a new one now and then so it stays bounded.
@@ -86,6 +89,8 @@ class Estimator:
         self._instantiate()
 
     def _call(self, name: str, *inputs: Optional[bytes]) -> Any:
+        if self._detail_token is not None and name == "ds_probe":
+            raise EstimatorError("invalid_request", "close the detailed profile before a legacy probe")
         store = self._store
         try:
             args: list[int] = []
@@ -149,7 +154,21 @@ class Estimator:
 
     def health(self) -> dict:
         """Traps (``crashed``) and the fresh instances made after them."""
-        return {"crashes": self._crashes, "resets": self._total_resets}
+        return {"crashes": self._crashes, "resets": self._total_resets, "memoryBytes": self._memory.data_len(self._store)}
+
+    def profile_jsonl(self, path: str | os.PathLike, *, max_deep_pages: int = 1000,
+                      batch_pages: int = 64, groups: Optional[list[str]] = None, ranked_pages: int = 32, cancel: Optional[Cancel] = None):
+        """Yield local PDF JSONL through bounded positional reads, up to 2 GiB.
+
+        Close the generator when stopping early. One active session per estimator.
+        """
+        options = {"maxDeepPages": max_deep_pages, "batchPages": batch_pages, "rankedPages": ranked_pages}
+        if groups is not None:
+            options["groups"] = groups
+        try:
+            yield from profile_range_jsonl(self, path, options=options, cancel=cancel)
+        except ValueError as error:
+            raise EstimatorError("invalid_request", str(error)) from error
 
     def estimate_paths(
         self,

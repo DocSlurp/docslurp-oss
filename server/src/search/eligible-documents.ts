@@ -1,3 +1,5 @@
+import { summaryTreeServeAvailable } from "@docslurp/shared";
+
 import { apiPool, sql } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
 import { SEARCH_ELIGIBILITY_CHANNEL } from "./eligibility-hint.js";
@@ -14,11 +16,23 @@ import { envInt, TtlLruCache } from "./ttl-lru.js";
  * the LanceDB prefilter (documentId IN …) for vector and full-text queries.
  *
  * Freshness: entries live SEARCH_ELIGIBLE_CACHE_TTL_MS (default 15000) and are
- * dropped early when the worker's `run_events` NOTIFY hint names a run of the
- * project, i.e. when a document or run of the project changes state. A
- * document that completes indexing is therefore searchable within one hint
- * (or at worst one TTL), and one that is deleted or superseded stops being
- * served by the same bound; hits are still filtered to this set, never wider.
+ * dropped early by two NOTIFY hints with different urgency:
+ * - `search_eligibility` (eligibility-hint.ts, and the documents/runs/corrections
+ *   triggers of migration 0153): something left the set (deleted, superseded,
+ *   blocked, failed, cancelled, corrected, purged, or served early by a run that
+ *   stopped before completing it). Dropped immediately, always. A run that
+ *   finishes with every document completed withdraws nothing and sends none.
+ *   A hint carrying `"debounce": true` is an arrival instead (a summary tree became ready, migration 0165) and is
+ *   debounced like run progress.
+ * - `run_events` (worker run progress): mostly documents arriving. During a bulk
+ *   ingest these fire many times a second, and reloading a 10,000-document set on
+ *   each one made nearly every search pay the full eligibility query. They are
+ *   debounced: at most one drop per project per SEARCH_ELIGIBLE_DEBOUNCE_MS
+ *   (default 1000; 0 disables), with a timer dropping the set at the end of the
+ *   window so the first search after it sees every document that arrived.
+ * A newly completed document is therefore searchable within one debounce window
+ * (at worst one TTL if hints are lost); one that is withdrawn stops being served
+ * as soon as its hint arrives. Hits are still filtered to this set, never wider.
  */
 
 export interface EligibleDocument {
@@ -41,6 +55,14 @@ export interface EligibleDocument {
    * search leaves the document to Postgres FTS.
    */
   lanceStale: boolean;
+  /**
+   * The document has a summary tree search may read (summary-tree.ts): its `document_summary_trees` row is `ready`
+   * for the document's current run and the set's embedding space, in this project, and the document has no
+   * completed correction reindex (a tree is never built from corrected chunks, so a correction disqualifies it
+   * whenever it was built). Always false while the deployment's serve switch is off. This flag, never a probe
+   * of the summaries table, decides whether the table is read at all.
+   */
+  treeReady: boolean;
 }
 
 export interface EligibleDocumentSet {
@@ -65,6 +87,7 @@ type EligibleRow = {
   owner_id: string | null;
   owner_index_config_hash: string | null;
   lance_stale: boolean;
+  tree_ready: boolean;
 };
 
 function falsy(value: string | undefined): boolean {
@@ -124,8 +147,23 @@ export function onSearchProjectInvalidated(listener: SearchProjectInvalidationLi
   invalidationListeners.add(listener);
 }
 
+export function eligibleInvalidationDebounceMs(env: NodeJS.ProcessEnv = process.env): number {
+  return envInt("SEARCH_ELIGIBLE_DEBOUNCE_MS", 1_000, env);
+}
+
+/** When each project's caches were last dropped, and the pending end-of-window drops. */
+const lastInvalidatedAt = new Map<string, number>();
+const pendingInvalidations = new Map<string, ReturnType<typeof setTimeout>>();
+
 /** Drop every cached eligibility and availability entry of the project (and of registered caches). */
 export function invalidateSearchProject(projectId: string): void {
+  const pending = pendingInvalidations.get(projectId);
+  if (pending) {
+    clearTimeout(pending);
+    pendingInvalidations.delete(projectId);
+  }
+  if (lastInvalidatedAt.size >= 100_000) lastInvalidatedAt.clear();
+  lastInvalidatedAt.set(projectId, Date.now());
   for (const listener of invalidationListeners) {
     try { listener.invalidate(projectId); } catch { /* one cache must not block the others */ }
   }
@@ -138,12 +176,33 @@ export function invalidateSearchProject(projectId: string): void {
   }
 }
 
-/** A run_events hint: invalidate the projects of the hinted runs (unknown runs are looked up off the search path). */
+/**
+ * Run progress for the project (a run_events hint): drop its caches now unless they
+ * were dropped within the debounce window, otherwise once at the end of the window.
+ * Only for hints that add documents; withdrawals use invalidateSearchProject.
+ */
+export function invalidateSearchProjectDebounced(projectId: string, now = Date.now()): void {
+  const windowMs = eligibleInvalidationDebounceMs();
+  const wait = (lastInvalidatedAt.get(projectId) ?? -Infinity) + windowMs - now;
+  if (windowMs <= 0 || wait <= 0) {
+    invalidateSearchProject(projectId);
+    return;
+  }
+  if (pendingInvalidations.has(projectId)) return;
+  const timer = setTimeout(() => {
+    pendingInvalidations.delete(projectId);
+    invalidateSearchProject(projectId);
+  }, wait);
+  timer.unref?.();
+  pendingInvalidations.set(projectId, timer);
+}
+
+/** A run_events hint: invalidate the projects of the hinted runs, debounced (unknown runs are looked up off the search path). */
 export async function invalidateSearchRuns(runIds: string[]): Promise<void> {
   const unknown: string[] = [];
   for (const runId of runIds) {
     const projectId = runProjects.get(runId);
-    if (projectId) invalidateSearchProject(projectId);
+    if (projectId) invalidateSearchProjectDebounced(projectId);
     else unknown.push(runId);
   }
   const listenersActive = [...invalidationListeners].some((listener) => listener.active());
@@ -153,7 +212,7 @@ export async function invalidateSearchRuns(runIds: string[]): Promise<void> {
   `;
   for (const row of rows) {
     if (runProjects.size < 100_000) runProjects.set(row.id, row.project_id);
-    invalidateSearchProject(row.project_id);
+    invalidateSearchProjectDebounced(row.project_id);
   }
 }
 
@@ -169,9 +228,26 @@ function stringIds(payload: string, field: "runIds" | "projectIds"): string[] {
   }
 }
 
-/** A search_eligibility hint (search/eligibility-hint.ts): drop the named projects. */
+/** Only the literal `"debounce": true` marks an arrival; anything else (absent, malformed) is a withdrawal. */
+function isArrivalHint(payload: string): boolean {
+  try {
+    return (JSON.parse(payload) as Record<string, unknown>).debounce === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A search_eligibility hint. A withdrawal (the default) drops the named projects immediately, never debounced. An
+ * arrival (`"debounce": true`: a summary tree became ready) adds something to search and is debounced like run
+ * progress, so a backfill does not reload the eligible set on every commit.
+ */
 export function handleSearchEligibilityHint(payload: string): void {
-  for (const projectId of stringIds(payload, "projectIds")) invalidateSearchProject(projectId);
+  const arrival = isArrivalHint(payload);
+  for (const projectId of stringIds(payload, "projectIds")) {
+    if (arrival) invalidateSearchProjectDebounced(projectId);
+    else invalidateSearchProject(projectId);
+  }
 }
 
 /**
@@ -195,6 +271,24 @@ export function ensureInvalidationListener(): void {
   });
 }
 
+/**
+ * `tree_ready` of the eligibility query. With the serve switch off it is the constant false, so the query reads
+ * neither summary-tree table.
+ */
+function treeReadyColumn(embeddingModel: string, dimension: number): SqlFragment {
+  if (!summaryTreeServeAvailable(process.env)) return sql`false`;
+  return sql`(d.status = 'completed' and d.superseded_at is null and exists (
+    select 1 from document_summary_trees t
+    where t.document_id = d.id and t.project_id = d.project_id and t.org_id = d.org_id
+      and t.status = 'ready' and t.run_id = d.run_id and t.built_at is not null
+      and t.embedding_model = ${embeddingModel} and t.dimension = ${dimension}
+      and not exists (
+        select 1 from document_corrections dc
+        where dc.document_id = d.id and dc.reindex_completed_at is not null
+      )
+  ))`;
+}
+
 async function queryEligibleDocuments(projectId: string, embeddingModel: string, dimension: number): Promise<EligibleDocumentSet> {
   const lexical: SqlFragment = lexicalSearchableDocument("d");
   // The vector part is the per-search `current_docs` CTE of vectorSearch,
@@ -214,7 +308,8 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
           select 1 from document_corrections dc
           join vector_indexes v on v.document_id = d.id and v.backend = 'lancedb'
           where dc.document_id = d.id and dc.reindex_completed_at > v.created_at
-        ) as lance_stale
+        ) as lance_stale,
+        ${treeReadyColumn(embeddingModel, dimension)} as tree_ready
       from documents d
       where d.project_id = ${projectId}
         and ((d.status = 'completed' and d.superseded_at is null) or ${lexical})
@@ -235,7 +330,7 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
       from chain join documents owner on owner.id = chain.node
       order by chain.id, chain.depth desc
     )
-    select s.id, s.filename, s.mime_type, s.run_id, s.vector_ready, s.lexical, s.page_only_completed, s.lance_stale,
+    select s.id, s.filename, s.mime_type, s.run_id, s.vector_ready, s.lexical, s.page_only_completed, s.lance_stale, s.tree_ready,
       o.owner_id, o.index_config_hash as owner_index_config_hash,
       (select array_agg(t.tag) from document_tags t where t.document_id = s.id) as tags
     from scoped s
@@ -252,6 +347,7 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
     ownerId: row.vector_ready ? row.owner_id ?? row.id : null,
     ownerIndexConfigHash: row.owner_index_config_hash,
     lanceStale: row.lance_stale,
+    treeReady: row.vector_ready && row.tree_ready === true,
   }));
   return {
     projectId,
@@ -378,6 +474,29 @@ export function scopeEligibleDocuments(
     && runIds.every((id) => document.runId === id));
 }
 
+/** Documents whose rows the set expects in the project's LanceDB table: each vector-ready document's row owner. */
+const tableDocumentsBySet = new WeakMap<EligibleDocumentSet, string[]>();
+function tableDocuments(set: EligibleDocumentSet): string[] {
+  let ids = tableDocumentsBySet.get(set);
+  if (!ids) {
+    ids = [...new Set(set.documents.filter((document) => document.vectorReady).map((document) => document.ownerId ?? document.id))];
+    tableDocumentsBySet.set(set, ids);
+  }
+  return ids;
+}
+
+/**
+ * The LanceDB plan hint for a scoped search (lancedb.ts LanceScopePlan): documents
+ * the set expects in the table that the search scope leaves out. Empty when the scope
+ * is every vector-ready document, the common unfiltered search. A hint only: rows the
+ * set does not know (deleted or superseded documents awaiting purge) are still removed
+ * by the search's own documentIds guard.
+ */
+export function excludedTableDocuments(set: EligibleDocumentSet, searchDocumentIds: Iterable<string>): string[] {
+  const scope = new Set(searchDocumentIds);
+  return tableDocuments(set).filter((id) => !scope.has(id));
+}
+
 /** Index-config serving: keep documents whose owner was indexed under (or not under) the hash. */
 export function matchesServingHash(document: EligibleDocument, hash: HashFilter | null | undefined): boolean {
   if (!hash) return true;
@@ -389,4 +508,7 @@ export function resetEligibleDocumentCachesForTests(): void {
   availabilityCache = null;
   runProjects.clear();
   keysByProject.clear();
+  for (const timer of pendingInvalidations.values()) clearTimeout(timer);
+  pendingInvalidations.clear();
+  lastInvalidatedAt.clear();
 }

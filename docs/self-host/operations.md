@@ -165,10 +165,40 @@ LANCEDB_S3_CACHE_MAX_GB=10               # LRU limit, default 10
 LANCEDB_S3_CACHE_BLOCK_KB=1024           # fill granularity, default 1024
 ```
 
+Check that it is in use: the `[lancedb-s3]` log line must show `requests` above zero after a
+search. A line that stays at zero means Lance is not going through the proxy.
+
 Setting the directory starts the same localhost re-signing proxy that
 `LANCEDB_S3_TRACE` uses (tracing itself stays off) and needs explicit credentials in the
 storage URI or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. It works with any
 S3-compatible provider.
+
+The proxy and the cache directory serve this process only:
+
+- The proxy listens on `127.0.0.1` and answers only requests that carry its own per-process
+  session-token header (never a URL capability), for keys under the bucket and first path segment of `LANCEDB_URI` (`lancedb/` in
+  `s3://bucket/lancedb`). Anything else gets 403 and counts as `refused` on
+  the `[lancedb-s3]` line; a non-zero count means something else on the host is probing it.
+- The cache directory must be owned by the server's user and not writable by group or others.
+  It is kept at mode 0700. A directory that fails this is not used: the server logs
+  `disk cache ... is unusable` and searches without it.
+- Changing `LANCEDB_S3_CACHE_BLOCK_KB` empties the cache at the next start.
+- With `HTTP_PROXY` or `ALL_PROXY` set, add the literal `127.0.0.1` to `NO_PROXY` (upper case
+  if you set it at all; `*` is not enough). Otherwise the proxy and the cache stay off
+  (logged), because Lance would send its loopback requests to that proxy.
+- The proxy sends to the endpoint a direct connection would use: `AWS_ENDPOINT_URL_S3` when
+  set, then the storage URI's endpoint.
+- Cache bytes and validation leases are isolated by a nonreversible fingerprint of the upstream
+  endpoint and credentials; a less privileged credential cannot reuse another caller's cache.
+- Each object is checked against origin before its first cached read after process start,
+  then at most every 30 seconds. Set `LANCEDB_S3_CACHE_REVALIDATE_SECONDS=0` to check every
+  cached read (allowed range 0–30). A refusal, missing object or failed check drops cached
+  bytes and never serves a stale response. Changed ETags invalidate outstanding fills.
+- A sweep every 30 seconds removes objects idle for five minutes, including orphan blocks
+  whose metadata was evicted. Thus external deletions are noticed on active reads within
+  the validation interval, and unused disk copies disappear within five minutes plus the
+  sweep interval. This is a disk-cache bound; native memory caches and request result caches
+  have their own lifetimes. Delete the cache directory to clear disk bytes immediately.
 
 What is cached, and what is not:
 
@@ -257,10 +287,11 @@ version and the sha256 of the bytes parsers read. Every parser, the page
 renderer and materialization refuse a document without a decision from the
 current scan. That includes every document ingested before this upgrade. Its
 existing Markdown, search index and cached page images keep working. A page
-image that was never rendered gets HTTP 409 `quarantine_rescan_required`
-("This document needs to be scanned again; reprocess it to view pages"), and
-search materialization reports such pages with reason
-`quarantine-rescan-required`. Reprocessing a document runs quarantine again
+image that was never rendered answers the typed state `{ "status":
+"unavailable", "reason": "needs-reprocess", "canReprocess": ... }` (HTTP 200,
+see [ingest versions](../ingest-version.md)). Search materialization reports
+such pages with reason `quarantine-rescan-required` and the same typed
+`availability`. Reprocessing a document runs quarantine again
 first and records a decision.
 
 1. Drain every worker running an older release before starting new workers.
@@ -301,6 +332,55 @@ shows the rescan message.
 
 Watch disk, memory, worker errors and `/health` before inviting users.
 
+## Project search and chat counters
+
+The project list and board read each project's search and chat totals from
+`project_activity_stats` instead of counting history on every request. Triggers
+on `search_sessions`, `chat_turns` and `chat_sessions` keep those counters equal
+to history in the same transaction as each write.
+
+The counters can only drift when a write bypasses the triggers:
+
+- `session_replication_role = replica` (logical replication apply, and some
+  restore and copy tools set it);
+- `ALTER TABLE ... DISABLE TRIGGER` on one of the three tables;
+- a manual change to `project_activity_stats` or to history with triggers off;
+- a restore of some of these tables without the others. A full `pg_restore` of
+  the database restores the counters with the history and needs nothing.
+
+**Detect.** The server compares a few projects with their history every 10
+minutes (`PROJECT_ACTIVITY_STATS_DRIFT_CHECK_INTERVAL_MS`, `0` turns it off) and
+logs `[project-activity-stats] counter drift in ...` with the stored and actual
+numbers. It reports only; it never repairs. (The same sweep folds the spare
+counter rows that concurrent writers leave for a project into one, which changes
+no total.) To check every project on demand:
+
+```sh
+docker compose --env-file .env.selfhost -f compose.selfhost.yml exec server \
+  node server/db/project-activity-stats.mjs            # exit 1 and one line per project on drift
+node server/db/project-activity-stats.mjs --project <project-id>   # from a checkout, with DATABASE_URL set
+```
+
+The check is one read-only statement (`select * from project_activity_stats_drift()`):
+it blocks nothing and is exact while traffic flows. Without `--project` it reads
+all search and chat history, about a second per million search sessions, so run
+it off-peak on a large database.
+
+**Repair.**
+
+```sh
+node server/db/project-activity-stats.mjs --rebuild
+```
+
+This recomputes every counter from history (`rebuild_project_activity_stats()`)
+in one transaction and then runs the check. While it reads the history, search
+and chat writes wait (reads continue): about a second per million search
+sessions. It waits at most `PROJECT_ACTIVITY_STATS_LOCK_TIMEOUT_MS` (default
+`5000`) for its table locks and retries, so it never queues traffic behind a
+long-open transaction, and a failed attempt changes nothing. Running it twice
+stores the same totals. After any operation from the list above, run the
+rebuild once the triggers are back on.
+
 ## Scaling workers on one host
 
 Each worker processes `WORKER_DOC_CONCURRENCY` documents at a time (default `1`).
@@ -340,7 +420,8 @@ This is scaling on a single host, not a multi-host design.
 | `Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE (DOCSLURP_VERSION is unset, ...)` (provider `modal`) | The worker runs from source or a local image build, which has no release version to pick the default image from. | Set `DOCSLURP_MODAL_IMAGE` to an image that contains the parser binaries. |
 | `Invalid sandbox configuration; invalid: DOCSLURP_MODAL_IMAGE_DIGEST (...)` or `invalid: DOCSLURP_MODAL_IMAGE (digest must be sha256:<64 hex>)` (provider `modal`) | The digest is not `sha256:` plus 64 lowercase hex characters, or it differs from the digest already in `DOCSLURP_MODAL_IMAGE`. | Copy the digest from the `worker-images.yml` run summary or `docker buildx imagetools inspect`, after verifying it ([Verifying worker images](security.md#verifying-worker-images)). Set it in one place, or the same value in both. |
 | Activities fail with `modal sandbox creation failed: ...` although the worker started (provider `modal`) | The start-up probe only checks the token and app; it does not pull the image. A wrong `DOCSLURP_MODAL_IMAGE`, a private GHCR package, or a missing `DOCSLURP_MODAL_REGISTRY_SECRET` shows up at the first activity that runs a parser. `probe-cli` and `check-worker-prerequisites.mjs --sandbox` skip the binary checks for Modal, so they do not catch it either. | Check the image name and that Modal can pull it: make the GHCR package public, or set `DOCSLURP_MODAL_REGISTRY_SECRET`. |
-| `parser sandbox provider 'none' is not allowed in production` | `DOCSLURP_PARSER_SANDBOX=none` with `NODE_ENV=production`. | Choose a real provider, or set `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` knowing parsers then run on the host. |
+| `parser sandbox provider 'none' runs parsers on the host ... allowed only in development or test` | Provider `none` (set, or the non-Linux default) outside development or test. | Configure the VM provider in production, or `bubblewrap` or `landlock` elsewhere. Only development runs parsers on the host unisolated. |
+| `... weakens untrusted-file protection as set and is allowed only in development or test ...; refusing to start` | A [development-only setting](configuration.md#development-only-settings) is set outside development or test. | Unset it, or set it to `false`. |
 | `Unknown DOCSLURP_PARSER_SANDBOX provider` | Typo in the provider id. | Use `bubblewrap`, `landlock`, `modal` or `none`. |
 | `TEMPORAL_NAMESPACE must be set to a non-default namespace in production` | `TEMPORAL_NAMESPACE` is unset or `default`. | Compose sets `docslurp`. Set a non-default namespace if you changed it. |
 | Full worker shows `[worker-start] installing deferred Python deps` for a long time | With no vendor bundle source, the full worker pip-installs several GB on first boot. | Wait, or set `DOCSLURP_VENDOR_BUNDLE_BASE_URL`. See [Worker image and vendor bundles](../worker-image.md). |
@@ -366,3 +447,62 @@ Merge this rule into any existing lifecycle configuration (such as incomplete-mu
 ## Worker notification events
 
 Workers never send email. Run completed/failed, extraction plausibility warnings, budget alerts and secret-expiry alerts are written to the in-app notification inbox and emitted as `notification.<event>` OTLP log records (logger `docslurp.events`), so they show up in SigNoz with the run, document, project and organization IDs as attributes. The API sends email only for sign-in codes and links, organization and project invites, and export or extract downloads, and it never sends to reserved domains (`*.local`, `*.test`, `*.invalid`, `*.example`, `localhost`, `example.com/net/org`); those sends are logged as `provider=suppressed`.
+
+
+### Search readiness and warm-up admission
+
+In production, startup awaits the most recently searched projects' selected indexes before
+standalone listening or embedded `/ready` can succeed. `SEARCH_BOOT_WARM_PROJECTS` defaults
+to 5 (maximum 50); 0 disables this readiness warm-up. The startup attempt is shared across
+requests and has a 30-second deadline. Exceeding it keeps readiness unsuccessful for that
+process, even if a native load later completes: restart after resolving storage/size trouble,
+or explicitly set the warm-up limit to 0. Liveness remains separate in the embedded app.
+
+Eager loading requires known manifest size. Twice the table's total on-disk bytes must fit
+within both half the configured index cache and one eighth of usable machine RAM. Unknown
+or oversized tables skip eager loading and search them on demand. At most two native eager
+loads run concurrently; a caller timeout does not release a still-running native load's slot,
+and expired queued jobs do not begin native work. These conservative estimates are admission
+limits, not a guarantee of exact allocator memory use.
+
+### Partitioned vector indexes and index-only reindexing
+
+New and consolidated HNSW-SQ indexes target 1,000 rows per partition, rounded up to a
+power of two, at most 4,096 partitions and with at least 256 training rows per partition.
+`LANCEDB_VECTOR_PARTITION_ROWS` changes this target; 0 restores the former one-partition
+per million-row policy. Existing indexes are not rebuilt merely because the setting changes.
+
+Search uses L2 with scalar quantization, at least 100 HNSW candidates for unfiltered
+queries, 32 probes and refinement of two candidates per returned hit. Document/page filters
+probe all partitions (up to the build cap) and remain prefilters. This preserves narrow-scope
+recall at the cost of cold-read savings for filtered searches. `LANCEDB_REFINE_FACTOR` can
+explicitly select 1–16. Recall and latency remain corpus-dependent: validate a new corpus
+before changing build policy, and retain the per-scope results rather than only an average.
+
+Reindexing replaces only the vector index, without extraction, embedding calls, table
+replacement, compaction, pruning, or touching the FTS index. Stop writers to the selected
+project while applying it: the row/memory estimate is a preflight check, not a transactional
+limit on concurrent ingestion. Use the deployment's normal storage environment:
+
+```sh
+pnpm --filter @docslurp/worker exec tsx scripts/reindex-vector.ts \
+  --org ORG_ID --project PROJECT_ID --model provider/model --dimensions 1024
+# Review the dry-run plan, then repeat with --apply.
+```
+
+The default row budget is 100,000; `--max-rows` raises it explicitly, while the machine-memory
+check still applies. A catalogued legacy URI may be selected with `--uri`, but must remain
+inside that exact organization's project root and its vector dimension must match. Apply
+one project at a time. Replacement commits a new index version atomically; older table
+versions remain available for the configured retention window. A rollback changes the build
+policy and rebuilds the vector index again; rolling back application code alone does not
+restore the previous on-disk index layout.
+
+For a bounded local comparison, prepare a local table with only `id`, `documentId` and
+`vector` columns and run `worker/scripts/vector-index-recall.ts --database PATH --table NAME
+--output NEW_DIRECTORY --tuned`. It holds out 64 real vectors, compares both arms against
+exact flat search, reports screening/confirmation separately for unfiltered and document
+scopes, records production query policy, and exits nonzero if either scope misses 95% mean
+recall@10 or regresses more than one percentage point. Its output stays local; do not publish
+customer vectors/identifiers. `vector-index-cold.ts` measures process-cold local read bytes;
+these are neither physical I/O nor a production S3 latency measurement.

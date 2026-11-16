@@ -43,8 +43,8 @@ beforeAll(async () => {
   await admin`insert into organizations (id, name, slug, created_by_user_id) values ('esc-org', 'O', 'esc-org', 'esc-u')`;
   await admin`insert into projects (id, org_id, user_id, name) values ('esc-ws', 'esc-org', 'esc-u', 'W')`;
   for (const id of ["esc-run-1", "esc-run-2", "esc-run-3", "esc-run-role", "esc-run-race"]) {
-    await admin`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-      values (${id}, 'esc-org', 'esc-u', 'esc-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
+    await admin`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, monthly_reservation_cents)
+      values (${id}, 'esc-org', 'esc-u', 'esc-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}', 1)`;
   }
   scratch = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "docslurp-esc-retry-"));
   vi.spyOn(console, "log").mockImplementation(() => undefined);

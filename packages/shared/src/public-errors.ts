@@ -1,5 +1,6 @@
 /** Browser-safe, closed vocabulary. Never use an exception's text as public copy. */
 export const PUBLIC_ERROR_MESSAGES = {
+  chatCapacityUnavailable: "Chat is temporarily unavailable. Please try again in a few seconds.",
   chatToolFailed: "A required tool failed. The task is blocked. No successful answer or action has been confirmed. Try again after resolving the error.",
   noSpeech: "No speech was detected. Try again.",
   noAudio: "No audio was recorded. Try again.",
@@ -25,6 +26,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   unreadableSource: "This file couldn’t be read. It may be corrupt, truncated or password-protected.",
   processing: "We couldn’t finish processing this document. Please try again.",
   graphRebuildFailed: "The knowledge graph rebuild failed. Start it again; if it keeps failing, contact support.",
+  summaryTreeBackfillFailed: "The summary tree backfill failed. Start it again; what was already built is kept. If it keeps failing, contact support.",
   silentVideo: "This video has no audio track, and video frame reading is disabled for this project or server.",
   imageNeedsVision: "This image can only be read with OCR or vision, and neither is available for this project. Check the project's vision and privacy settings.",
   imageTooManyFrames: "This image has more than 64 frames (pages), the most one image file can hold. Split it into files of 64 frames or fewer, or upload it as a PDF.",
@@ -37,7 +39,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   organizationMissing: "We couldn’t find that organization. It may have been moved or removed.",
   chatDisabled: "Chat is turned off for this project. Enable it in project settings.",
   searchScope: "Search must stay within a single project.",
-  modelNotAllowed: "That chat model isn’t available for this request. Omit model to use the default.",
+  modelNotAllowed: "DocSlurp manages the models behind each tier and category. Send a chat tier (fastest, balanced or smart) or a pipeline category instead of a model.",
   chatDeadline: "The chat turn reached its time limit. The task is blocked; no successful answer or action has been confirmed.",
   creditExhausted: "Your organization is out of credits. Buy credits to continue.",
   budgetPaused: "The monthly budget cap has been reached, so AI processing is paused. Raise the budget to resume.",

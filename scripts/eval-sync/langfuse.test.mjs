@@ -52,7 +52,7 @@ import { join } from "node:path";
 import { assertTuningReadable, datasetNameFor, isHeldoutSplit } from "./langfuse.mjs";
 import { runSync } from "./sync.mjs";
 import { desiredScoreConfigs, syncScoreConfigs } from "./score-configs.mjs";
-import { otlpPayload, prepareRun, scoreId, syncRun } from "./runs.mjs";
+import { otlpPayload, prepareRun, scoreId, syncRun, readScoresByIds } from "./runs.mjs";
 
 /** In-memory stand-in for the subset of the Langfuse public API the sync uses. */
 function fakeLangfuse({ failOn = null, experimentScoresWithoutConfig = false, scoreLookupDrops = () => false } = {}) {
@@ -85,9 +85,12 @@ function fakeLangfuse({ failOn = null, experimentScoresWithoutConfig = false, sc
       }));
       return { data: rows, meta: {} };
     }
-    if (route === "/v2/scores") {
-      const ids = (params.get("scoreIds") ?? "").split(",").filter(Boolean);
-      return { data: ids.map((id) => state.scores.get(id)).filter((score) => score && !scoreLookupDrops(score)).map((score) => structuredClone(score)), meta: { totalPages: 1 } };
+    // events_only v4 deployments 404 /v2/scores; /v3/scores returns configId only with fields=details.
+    if (route === "/v2/scores") return null;
+    if (route === "/v3/scores") {
+      const ids = (params.get("id") ?? "").split(",").filter(Boolean);
+      const details = (params.get("fields") ?? "").split(",").includes("details");
+      return { data: ids.map((id) => state.scores.get(id)).filter((score) => score && !scoreLookupDrops(score)).map(({ configId, ...rest }) => structuredClone(details ? { configId, ...rest } : rest)), meta: {} };
     }
     throw new Error(`fake: unhandled ${route}`);
   };
@@ -430,7 +433,7 @@ test("benchmark kind: s3 inputs, verified local bytes, categories flattened into
   await assert.rejects(loadManifest(await manifest("escape.json")), /escapes the corpus root|ENOENT/);
 });
 
-test("run readback fills a missing ScoreV3 configId from /v2/scores and still fails closed without it", async () => {
+test("run readback fills a missing ScoreV3 configId from /v3/scores and still fails closed without it", async () => {
   const setup = async (options) => {
     const fake = fakeLangfuse(options);
     const items = buildRecordItems({ name: "fixture/corpus-v1/development", split: "development", records: [{ id: "doc-1", split: "development", input: { caseId: "doc-1" }, expectedOutput: null, metadata: {} }], commit: "c" });
@@ -449,4 +452,111 @@ test("run readback fills a missing ScoreV3 configId from /v2/scores and still fa
   // The lookup cannot vouch for a score it does not return: verification fails closed.
   const closed = await setup({ experimentScoresWithoutConfig: true, scoreLookupDrops: () => true });
   await assert.rejects(syncRun(closed.api, closed.prepared, { sleep: async () => {}, timeoutMs: 0 }), /missing scores/);
+});
+
+test("empty embedded experiment scores are discovered by deterministic IDs with zero repeat writes", async () => {
+  const { api, state, run } = await scoredRunFixture();
+  const empty = async (path, body, opts) => {
+    const out = await api(path, body, opts);
+    if (path.startsWith("/experiment-items?")) for (const row of out.data) row.scores = [];
+    return out;
+  };
+  const before = state.writes.length;
+  const result = await syncRun(empty, run, { timeoutMs: -1 });
+  assert.equal(result.itemsWritten + result.scoresWritten, 0);
+  assert.equal(state.writes.length, before);
+});
+
+for (const [label, patch] of Object.entries({
+  trace: { subject: { kind: "observation", id: "wrong", traceId: "wrong" } },
+  observation: { subject: { kind: "observation", id: "wrong" } },
+  config: { configId: "wrong" }, name: { name: "wrong" }, value: { value: 0.1 },
+  numericString: { value: "0.9" }, missingTrace: { subject: { kind: "observation" } },
+})) {
+  test(`empty embedded scores reject lookup ${label} mismatch`, async () => {
+    const { api, run } = await scoredRunFixture();
+    const corrupt = async (path, body, opts) => {
+      const out = await api(path, body, opts);
+      if (path.startsWith("/experiment-items?")) for (const row of out.data) row.scores = [];
+      if (path.startsWith("/v3/scores?")) out.data = out.data.map(score => {
+        const subject = { kind: "observation", id: score.observationId, traceId: score.traceId };
+        const change = label === "trace" ? { subject: { ...subject, traceId: "wrong" } }
+          : label === "observation" ? { subject: { ...subject, id: "wrong" } }
+          : label === "missingTrace" ? { subject: { kind: "observation", id: score.observationId } } : patch;
+        return { ...score, subject, ...change };
+      });
+      return out;
+    };
+    await assert.rejects(syncRun(corrupt, run, { timeoutMs: -1 }), /readback incomplete/);
+  });
+}
+
+test("missing lookup scores never verify and v3 absence or corruption never falls back to v2", async () => {
+  for (const lookup of [{ data: [], meta: {} }, null, {}, { data: "corrupt" }]) {
+    const { api, run } = await scoredRunFixture();
+    const missing = async (path, body, opts) => {
+      assert.ok(!path.startsWith("/v2/scores"));
+      if (path.startsWith("/v3/scores?")) return lookup;
+      const out = await api(path, body, opts);
+      if (path.startsWith("/experiment-items?")) for (const row of out.data) row.scores = [];
+      return out;
+    };
+    await assert.rejects(syncRun(missing, run, { timeoutMs: -1 }), /readback incomplete|Score readback failed/);
+  }
+});
+
+test("deterministic score lookup batches unique IDs and follows v3 cursors", async () => {
+  const ids = Array.from({ length: 103 }, (_, i) => `score-${i}`);
+  const calls = [];
+  const api = async path => {
+    const url = new URL(path, "https://example.test");
+    assert.equal(url.pathname, "/v3/scores");
+    assert.equal(url.searchParams.get("fields"), "details,subject");
+    const batch = url.searchParams.get("id").split(",");
+    assert.ok(batch.length <= 50);
+    calls.push(batch);
+    const second = url.searchParams.has("cursor");
+    return { data: (second ? batch.slice(25) : batch.slice(0, 25)).map(id => ({ id })), meta: !second && batch.length > 25 ? { cursor: "next" } : {} };
+  };
+  const found = await readScoresByIds(api, [...ids, ids[0]]);
+  assert.equal(found.size, 103);
+  assert.equal(calls.length, 5);
+});
+
+test("score lookup rejects unrelated IDs, duplicates, repeated or malformed cursors and unauthorized responses", async () => {
+  for (const response of [
+    { data: [{ id: "other" }] }, { data: [{ id: "a" }, { id: "a" }] },
+    { data: [], meta: { cursor: "loop" } }, { data: [], meta: { cursor: 3 } },
+  ]) await assert.rejects(readScoresByIds(async () => response, ["a"]), /Score readback|score pagination/);
+  await assert.rejects(readScoresByIds(async () => { throw new Error("Langfuse HTTP 401"); }, ["a"]), /401/);
+});
+
+test("empty embedded scores accept exact v3 subject identity, including boolean values", async () => {
+  const { api, state, run } = await scoredRunFixture();
+  const subjects = async (path, body, opts) => {
+    const out = await api(path, body, opts);
+    if (path.startsWith("/experiment-items?")) for (const row of out.data) row.scores = [];
+    if (path.startsWith("/v3/scores?")) out.data = out.data.map(({ observationId, traceId, ...score }) => ({ ...score,
+      value: score.name.endsWith(".pass") ? Boolean(score.value) : score.value,
+      subject: { kind: "observation", id: observationId, traceId },
+    }));
+    return out;
+  };
+  const writes = state.writes.length;
+  const again = await syncRun(subjects, run, { timeoutMs: -1 });
+  assert.equal(again.itemsWritten + again.scoresWritten, 0);
+  assert.equal(state.writes.length, writes);
+});
+
+test("config enrichment rejects a lookup with a different subject or value", async () => {
+  const { api, run } = await scoredRunFixture();
+  for (const patch of [{ traceId: "wrong" }, { observationId: "wrong" }, { value: 0.1 }]) {
+    const corrupt = async (path, body, opts) => {
+      const out = await api(path, body, opts);
+      if (path.startsWith("/experiment-items?")) for (const row of out.data) for (const score of row.scores) delete score.configId;
+      if (path.startsWith("/v3/scores?")) out.data = out.data.map(score => ({ ...score, ...patch }));
+      return out;
+    };
+    await assert.rejects(syncRun(corrupt, run, { timeoutMs: -1 }), /readback incomplete/);
+  }
 });

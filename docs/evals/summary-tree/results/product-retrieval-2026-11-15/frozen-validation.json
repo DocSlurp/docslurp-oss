@@ -1,0 +1,80 @@
+[
+  {
+    "documentId": "origin-of-species",
+    "nodes": 109,
+    "maxLevel": 5,
+    "invalid": []
+  },
+  {
+    "documentId": "federalist-papers",
+    "nodes": 285,
+    "maxLevel": 6,
+    "invalid": []
+  },
+  {
+    "documentId": "walden",
+    "nodes": 79,
+    "maxLevel": 5,
+    "invalid": []
+  },
+  {
+    "documentId": "voyage-of-the-beagle",
+    "nodes": 130,
+    "maxLevel": 4,
+    "invalid": []
+  },
+  {
+    "documentId": "rfc9110",
+    "nodes": 392,
+    "maxLevel": 7,
+    "invalid": []
+  },
+  {
+    "documentId": "rfc9293",
+    "nodes": 119,
+    "maxLevel": 9,
+    "invalid": [
+      {
+        "id": "rfc9293:0492eaf871c8e49b774a23b33029b9f46aefb199cde1a741ae9be3c029430d57",
+        "issues": [
+          {
+            "code": "too_big",
+            "path": [
+              "level"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "documentId": "huckleberry-finn",
+    "nodes": 48,
+    "maxLevel": 3,
+    "invalid": []
+  },
+  {
+    "documentId": "sherlock-holmes",
+    "nodes": 47,
+    "maxLevel": 3,
+    "invalid": []
+  },
+  {
+    "documentId": "frankenstein",
+    "nodes": 38,
+    "maxLevel": 3,
+    "invalid": []
+  },
+  {
+    "documentId": "second-treatise",
+    "nodes": 34,
+    "maxLevel": 3,
+    "invalid": []
+  },
+  {
+    "documentId": "leviathan",
+    "nodes": 114,
+    "maxLevel": 4,
+    "invalid": []
+  }
+]

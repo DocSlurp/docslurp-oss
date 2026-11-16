@@ -34,8 +34,8 @@ const env = {
 } as unknown as NodeJS.ProcessEnv;
 
 /** Hosted targets the seed and transcription catalogs offer that are outside the priced vision catalog today. */
+// Claude Haiku 5.5 left this list on 2026-11-13: it is in the priced vision catalog (a chart export generator).
 const FILTERED_TODAY = [
-  "vlm:openrouter/anthropic/claude-haiku-5.5",
   "vlm:openrouter/anthropic/claude-sonnet-5.5",
   "vlm:openrouter/google/gemini-3.5-flash-lite",
 ];

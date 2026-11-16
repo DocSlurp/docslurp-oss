@@ -3,6 +3,8 @@ import { z } from "zod";
 import {
   DOCUMENT_FEATURES,
   pricing,
+  pricingProviderInstalled,
+  pricingRequired,
   type ChatAnswerTier,
   type DocumentFeature,
   type IngestEstimate,
@@ -89,6 +91,45 @@ export function visualExportCredits(args: {
   const credits = pricing().visualExportCredits({ visuals, callsPerVisual, formats: [...new Set(args.formats)] });
   if (!Number.isFinite(credits) || credits < 0) throw new Error("pricing provider returned invalid visual export credits");
   return credits;
+}
+
+/**
+ * Credits for the second read of a model-read visual (the one repair of an invalid answer, or the one retry after an
+ * answer cut off at its output cap): billed as its own read, at most once per visual.
+ */
+export function visualExportRetryCredits(): number {
+  const credits = pricing().visualExportRetryCredits();
+  if (!Number.isFinite(credits) || credits < 0) throw new Error("pricing provider returned invalid visual export retry credits");
+  return credits;
+}
+
+/** Expected second reads per model-read visual (0 to 1), as the pricing provider measures them, for estimates. */
+export function chartExportExpectedRetriesPerRead(): number {
+  const share = pricing().chartExportExpectedRetriesPerRead();
+  if (!Number.isFinite(share) || share < 0 || share > 1) throw new Error("pricing provider returned an invalid expected chart retry share");
+  return share;
+}
+
+/**
+ * Expected credits for `visuals` model-read visuals: their first reads (`visualExportCredits`: one per generator call
+ * their formats need) plus, when a derived spec call runs (some requested format is derived), the expected share of a
+ * billed second read each (`chartExportExpectedRetriesPerRead` x `visualExportRetryCredits`): only a spec call has a
+ * repair or cut-off retry. Estimates and quotes price chart export with this; the worker charges what each read made.
+ * Not modelled: an all-direct export of a visual of unknown kind runs an unbilled spec call first, whose repair or
+ * retry is billed as a second read.
+ */
+export function expectedVisualExportCredits(args: {
+  visuals: number;
+  formats: readonly ChartExportFormat[];
+  modes?: VisualExportModes;
+}): number {
+  const first = visualExportCredits({ visuals: args.visuals, source: "vision", formats: args.formats, ...(args.modes ? { modes: args.modes } : {}) });
+  if (first === 0) return 0;
+  // Unlisted formats are derived (chartExportModelCallsPerVisual); an all-direct export makes no spec call to repair.
+  const specCallRuns = args.formats.some((format) => args.modes?.[format] !== "direct");
+  if (!specCallRuns) return first;
+  const visuals = Math.max(0, Math.trunc(Number.isFinite(args.visuals) ? args.visuals : 0));
+  return first + visuals * chartExportExpectedRetriesPerRead() * visualExportRetryCredits();
 }
 
 /**
@@ -230,6 +271,8 @@ export const BILLABLE_UNIT_METRICS = {
   webMap: "web-map",
   /** Extended extract retention, prepaid as storage (extract-mode.ts). */
   extractRetention: "storage-extract-retention",
+  /** Summary tree, per section-summary model call that returned (`summaryTreeUnitPrice`). */
+  summaryTree: "feature-summary-tree",
 } as const;
 export type BillableUnitMetric = (typeof BILLABLE_UNIT_METRICS)[keyof typeof BILLABLE_UNIT_METRICS];
 
@@ -286,6 +329,50 @@ export function unitChargeMetadata(extra: Record<string, unknown> = {}): Record<
 /** Whether an event is a billable unit charge (as opposed to an internal cost event). */
 export function isUnitChargeEvent(event: { metric?: string | null; metadata?: Record<string, unknown> | null }): boolean {
   return event.metadata?.unitCharge === true && isBillableUnitMetric(event.metric);
+}
+
+// ---------------------------------------------------------------------------
+// Summary tree unit
+//
+// One unit is one section-summary model call that returned (first answers, the one retry of a cut-off answer and the
+// retry of a failed group alike): the call is known before it is made, so a cap can hold a unit back for every call in
+// flight, and a document's units are bounded by its node cap. What a unit costs is the pricing provider's
+// (`summaryTreeCallCredits`); this repository holds no price for it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether this deployment charges for work, as far as the summary tree is concerned: billing is enforced
+ * (`isBillingEnforced`: Stripe, or a `DOCSLURP_BILL_*` flag), pricing is required (`pricingRequired`: the service
+ * profile or DOCSLURP_PRICING_REQUIRED=1), or a deployment pricing provider is installed. A self-hosted deployment
+ * with none of the three runs on the open pricing default, which charges nothing for optional features.
+ */
+export function summaryTreeBillingActive(env: Record<string, string | undefined> = process.env): boolean {
+  return isBillingEnforced(env) || pricingRequired(env) || pricingProviderInstalled();
+}
+
+export type SummaryTreeUnitPrice =
+  /** The deployment charges and its provider prices the unit: every summary call that returned bills `credits`. */
+  | { billing: "active"; credits: number }
+  /** The deployment does not charge (no billing, no pricing provider): nothing is billed and no unit is recorded. */
+  | { billing: "inactive"; credits: 0 }
+  /** The deployment charges but has no usable price for the unit: nothing may be built. */
+  | { billing: "unpriced" };
+
+/**
+ * The summary tree unit's price on this deployment, read now. Fails closed: where billing is active, a provider
+ * without `summaryTreeCallCredits`, one that throws, and any answer that is not a finite number above zero all read as
+ * `unpriced`. A price of zero is not a price: a deployment that bills never builds trees for nothing by omission.
+ */
+export function summaryTreeUnitPrice(env: Record<string, string | undefined> = process.env): SummaryTreeUnitPrice {
+  if (!summaryTreeBillingActive(env)) return { billing: "inactive", credits: 0 };
+  try {
+    const provider = pricing();
+    const credits = typeof provider.summaryTreeCallCredits === "function" ? provider.summaryTreeCallCredits() : null;
+    if (typeof credits === "number" && Number.isFinite(credits) && credits > 0) return { billing: "active", credits };
+  } catch {
+    // No provider where one is required, or a provider that throws: unpriced.
+  }
+  return { billing: "unpriced" };
 }
 
 /** Monthly forecast shown on the billing page; every input is something the user can see. */

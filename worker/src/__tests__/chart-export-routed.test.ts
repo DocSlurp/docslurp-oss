@@ -98,7 +98,7 @@ describe("chart export on the routed executor path (council round 2, detail M5)"
   it("sends the chart crop to the generator instead of the role's read, merges the marked group and charges the read", async () => {
     const state = WorkflowState.create({
       id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
-      pipeline: { vision: VISION, privacyMode: "standard", visionFallback: true, chartExport: { enabled: true, formats: ["description", "csv"], diagrams: true, generatorModel: null } },
+      pipeline: { vision: VISION, privacyMode: "standard", visionFallback: true, chartExport: { tier: "models", formats: ["description", "csv"], diagrams: true } },
     } as unknown as ProjectRun, []);
     state.visionAttempts = new MemoryVisionAttemptBackend();
     const stage = new VisionExtractStage({} as never, { bucket: "bucket", uri: (k: string) => `s3://bucket/${k}` } as never, CFG, { renderSelectedPages: vi.fn(async () => []) } as never);

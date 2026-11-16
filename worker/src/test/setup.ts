@@ -23,5 +23,9 @@ process.env.DOCSLURP_IMAGE_ORIENTATION = "false";
 // Billing suites price through an installed provider with arbitrary, distinct test prices (a Rich page costs more than a
 // Fast one, a long output adds Rich pages, video frames add media pages), never a deployment's real prices. Suites that
 // need other numbers install their own (`installTestPricing`).
-import { DISTINCT_TEST_PRICING, installTestPricing } from "@docslurp/shared";
+import { assertDisposableTestDatabaseUrl, DISTINCT_TEST_PRICING, installTestPricing } from "@docslurp/shared";
+
+// Gated database tests (#400) write and drop data: TEST_DATABASE_URL must name a disposable database on a loopback host
+// (scripts/run-database-tests.mjs creates one per file). A wrong URL fails every test here instead of reaching it.
+if (process.env.TEST_DATABASE_URL) assertDisposableTestDatabaseUrl(process.env.TEST_DATABASE_URL);
 installTestPricing(DISTINCT_TEST_PRICING);

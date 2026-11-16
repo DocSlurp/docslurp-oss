@@ -1,0 +1,34 @@
+[
+  {
+    "id": "irs-tax-tables",
+    "kind": "table",
+    "url": "https://www.irs.gov/pub/irs-prior/p1040--2025.pdf",
+    "sha256": "8ae019bd3b28b07b37e46e18597d8e899222a2224ce7482c015b130033403532",
+    "bytes": 1452403,
+    "downloadedAt": "2026-11-15T19:11:53.858185+00:00"
+  },
+  {
+    "id": "census-population",
+    "kind": "table",
+    "url": "https://www2.census.gov/library/publications/2011/compendia/statab/131ed/tables/pop.pdf",
+    "sha256": "a349543ec8a2444d2c897c8aab5555c80cdc905b25192437b7636ea99981a221",
+    "bytes": 3571461,
+    "downloadedAt": "2026-11-15T19:11:54.579554+00:00"
+  },
+  {
+    "id": "ti-tps54302",
+    "kind": "vector",
+    "url": "https://www.ti.com/lit/ds/symlink/tps54302.pdf",
+    "sha256": "d81679ba6ba0a366e372ff8184c4e4b6c20383bdad41c90d636b75d097ae51b8",
+    "bytes": 2316963,
+    "downloadedAt": "2026-11-15T19:11:55.616121+00:00"
+  },
+  {
+    "id": "ti-bq25570",
+    "kind": "vector",
+    "url": "https://www.ti.com/lit/ds/symlink/bq25570.pdf",
+    "sha256": "3caec3945eab27823d07532c39a862bb8f90927019dd8c3811836bedad6b33b7",
+    "bytes": 2040178,
+    "downloadedAt": "2026-11-15T19:11:55.959347+00:00"
+  }
+]

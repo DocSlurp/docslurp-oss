@@ -33,6 +33,7 @@ import {
 import { measureOp, pushPerfMetric } from "../lib/perf-context.js";
 import { extractTextForEmbedding } from "./embedding-runtime.js";
 import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
+import { withdrawSummaryTreeForPii } from "../summary-tree/state-store.js";
 
 export interface PiiDetectionArtifact {
   documentId: string;
@@ -177,6 +178,9 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             detectedAt: new Date().toISOString(),
           }
         : null;
+      // A summary tree the document already has was written from the text this outcome withholds: it stops being
+      // served now and its rows and artifact are queued for strict removal (summary-tree/state-store.ts).
+      if (outcome.blocked || outcome.redacted) await withdrawSummaryTreeForPii(db as never, documentId);
       if (outcome.blocked) {
         await db`
           update documents

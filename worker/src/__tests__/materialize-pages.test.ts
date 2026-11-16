@@ -40,9 +40,9 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1),
-             ('run-2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1),
+             (100, 'run-2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('d1', 'o1', 'u1', 'w', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 6);
   `);
@@ -136,8 +136,8 @@ beforeEach(async () => {
 describe("materializePageRange", () => {
   it.each([false, true])("bills materialized pages from the immutable run boost snapshot (%s), once", async speedBoost => {
     const runId = `materialized-boost-${speedBoost}`;
-    await sql`insert into project_runs(id, org_id, user_id, project_id, kind, status, stage, pipeline)
-      values (${runId}, 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', ${sql.json({ speedBoost })})`;
+    await sql`insert into project_runs(monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, ${runId}, 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', ${sql.json({ speedBoost })})`;
     const h = harness({ 1: LONG, 2: "" });
     h.run.id = runId;
     h.usage.runId = runId;

@@ -1,6 +1,6 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { CURRENT_INGEST_VERSION, defaultPipelineFeatures } from "@docslurp/shared";
 import type postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -155,8 +155,8 @@ const stages: Stage[] = [
 
 async function seedRun(runId: string): Promise<void> {
   await db.exec(`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
-      values ('${runId}', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '${JSON.stringify(defaultPipelineFeatures)}', 1, ${PAGES}, '${runId}-generation');
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values (100, '${runId}', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '${JSON.stringify(defaultPipelineFeatures)}', 1, ${PAGES}, '${runId}-generation');
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, parse_source_scan_version, parse_source_sha256)
       values ('${runId}-doc', 'o1', 'u1', 'w', '${runId}', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', ${PAGES}, 'counted', 1, repeat('0', 64));
   `);
@@ -261,6 +261,14 @@ describe("database statement budget per page", () => {
       // locks or updates the org's organizations row (it stalled one org at 576 slots).
       expect(counter.pendingDebits).toBeGreaterThan(0);
       expect(counter.orgRowTouches).toEqual([]);
+
+      // The completed run and its document carry this build's ingest version (db/ingest-version.ts), at no extra round trip.
+      const stamped = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
+      const [run] = await stamped<{ ingest_version: number }[]>`select ingest_version from project_runs where id = 'run-1'`;
+      expect(run!.ingest_version).toBe(CURRENT_INGEST_VERSION);
+      const docs = await stamped<{ ingest_version: number }[]>`select ingest_version from documents where run_id = 'run-1'`;
+      expect(docs.length).toBeGreaterThan(0);
+      for (const doc of docs) expect(doc.ingest_version).toBe(CURRENT_INGEST_VERSION);
 
       // The flusher applies them: the balance falls by exactly the run's billable unit charges.
       // (Read through the store's connection: PGlite serves one session.)

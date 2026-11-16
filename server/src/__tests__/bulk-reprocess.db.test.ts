@@ -56,11 +56,11 @@ beforeEach(async () => {
 async function seedDocument(id: string, pipeline: object) {
   const runId = `run-${id}`;
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-    values (${runId}, 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as postgres.JSONValue)}, 1, 2)`;
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+    values (100, ${runId}, 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as postgres.JSONValue)}, 1, 2)`;
   await sql`
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
-    values (${id}, 'o', 'u', 'w', ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`u/raw/${id}.pdf`}, 'completed', 2)`;
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
+    values (${id}, 'o', 'u', 'w', ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`u/raw/${id}.pdf`}, 'completed', 1000, 2)`;
 }
 
 describe("bulkReprocessDocuments", () => {
@@ -153,8 +153,8 @@ describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
   describe("queued-run recovery", () => {
     const queued = async (id: string, pipeline: object) => {
       await sql`
-        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
-        values (${id}, 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as postgres.JSONValue)}, 0, now())`;
+        insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
+        values (100, ${id}, 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as postgres.JSONValue)}, 0, now())`;
     };
     const sweeper = async () => {
       const { createRunLifecycle } = await import("../services/run-lifecycle.js");
@@ -194,5 +194,29 @@ describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
         errors.mockRestore();
       }
     });
+  });
+});
+
+describe("bulk reprocess never replays an old run snapshot's model values", () => {
+  it("creates the new run on the current defaults and the project's explicit overrides", async () => {
+    const legacy = {
+      ...defaultPipelineFeatures,
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted", remoteFallbackModelUri: null },
+      textGeneration: { model: "z-ai/glm-5.3-flash", models: { "document-summary": "qwen/qwen3.5-flash-02-23" } },
+      visualPages: { route: "gemini", coarseFallback: false },
+    };
+    await seedDocument("legacy", legacy);
+    await sql`update projects set managed_models = ${sql.json({ pipeline: { structuredExtraction: { model: "llm://private/gpu1/acme/extract" } } })} where id = 'w'`;
+    try {
+      const result = await bulkReprocessDocuments(["legacy"], "u");
+      expect(result.failed).toEqual([]);
+      const [run] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where kind = 'bulk-reprocess' order by created_at desc limit 1`;
+      expect(run!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+      expect(run!.pipeline.textGeneration).toMatchObject({ model: null, models: {} });
+      expect(run!.pipeline.visualPages!.route).toBe("auto");
+      expect(run!.pipeline.structuredExtraction!.model).toBe("llm://private/gpu1/acme/extract");
+    } finally {
+      await sql`update projects set managed_models = '{}'::jsonb where id = 'w'`;
+    }
   });
 });

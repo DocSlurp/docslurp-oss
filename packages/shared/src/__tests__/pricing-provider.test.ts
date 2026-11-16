@@ -17,6 +17,7 @@ import {
   normalizeFileProfile,
   OPEN_CREDITS_PER_PAGE,
   OPEN_PRICING,
+  type PricingProvider,
   pageCredits,
   pricing,
   pricingVersion,
@@ -128,6 +129,24 @@ describe("installed pricing provider", () => {
     const { quoteUpload: _missing, ...partial } = OPEN_PRICING;
     expect(() => installPricingProvider({ ...partial, id: "x" } as never)).toThrow(/quoteUpload/);
     expect(() => installPricingProvider({ ...OPEN_PRICING, id: "x", plans: { ...OPEN_PRICING.plans, workerSlots: { starter: 0, funded: 1 } } })).toThrow(/plans/);
+  });
+
+  it("requires the chart seam methods under their one name: chartGeneratorMaxPricesUsdPerMTok, the retry credits and share", () => {
+    // Type level: the seam's one name, returning input and output ceilings (a stale singular name does not compile).
+    type Ceiling = ReturnType<PricingProvider["internalCost"]["chartGeneratorMaxPricesUsdPerMTok"]>;
+    const shape: Ceiling = { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 };
+    expect(shape.outputUsdPerMTok).toBe(0.5);
+    // @ts-expect-error the singular output-only name is not part of the seam
+    void (OPEN_PRICING.internalCost.chartGeneratorMaxOutputUsdPerMTok);
+    // Runtime: a provider without it, or with only the old name, is refused at install.
+    const { chartGeneratorMaxPricesUsdPerMTok: _ceiling, ...cost } = OPEN_PRICING.internalCost;
+    expect(() => installPricingProvider({ ...OPEN_PRICING, id: "x", internalCost: cost } as never)).toThrow(/incomplete internalCost/);
+    expect(() => installPricingProvider({ ...OPEN_PRICING, id: "x", internalCost: { ...cost, chartGeneratorMaxOutputUsdPerMTok: () => 1 } } as never))
+      .toThrow(/incomplete internalCost/);
+    for (const method of ["visualExportRetryCredits", "chartExportExpectedRetriesPerRead"] as const) {
+      const { [method]: _missing, ...rest } = OPEN_PRICING;
+      expect(() => installPricingProvider({ ...rest, id: "x" } as never)).toThrow(new RegExp(method));
+    }
   });
 
   it("refuses a second, different provider", () => {

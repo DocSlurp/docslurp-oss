@@ -80,7 +80,7 @@ export function otlpPayload(prepared, datasetId, items = prepared.items) {
   return { resourceSpans: [{ resource: { attributes: [attr("service.name", "docslurp-eval-sync")] }, scopeSpans: [{ scope: { name: "docslurp-eval-sync", version: "1" }, spans }] }] };
 }
 
-async function listExperimentItems(api, prepared) {
+async function listExperimentItems(api, prepared, configs) {
   const from = new Date(prepared.started - 60_000).toISOString();
   const out = new Map();
   let cursor = null, guard = 0;
@@ -91,26 +91,72 @@ async function listExperimentItems(api, prepared) {
     for (const row of page.data) if (row.experimentItemId) out.set(row.experimentItemId, row);
     cursor = page.meta?.cursor ?? null;
   } while (cursor && ++guard < 1000);
-  await fillScoreConfigIds(api, out);
+  await fillScoreConfigIds(api, out, prepared, configs);
+  // Some builds omit scores altogether. Discover only expected IDs, never by name or a broad trace query.
+  const missing = prepared.items.flatMap(item => {
+    const row = out.get(item.datasetItemId);
+    if (!matchesItem(row, item)) return [];
+    return item.scores.filter(score => !(row.scores ?? []).some(remote => remote.id === scoreId(item, score.name) || remote.name === score.name))
+      .map(score => ({ item, score, row }));
+  });
+  const found = await readScoresByIds(api, missing.map(({ item, score }) => scoreId(item, score.name)));
+  for (const { item, score, row } of missing) {
+    const remote = found.get(scoreId(item, score.name));
+    // Lookup subjects must carry their own trace identity; no inference from the experiment row.
+    if (remote && hasVerifiedScore({ ...row, scores: [remote] }, item, score, configs.get(score.name), false)) {
+      row.scores = [...(row.scores ?? []), remote];
+    }
+  }
   return out;
 }
 
 /**
- * Some Langfuse v4 builds return experiment-item scores (ScoreV3) without `configId`. Read those scores back by id from
- * GET /v2/scores, which carries it, and copy only `configId` onto the matching score. A score the lookup does not
- * return keeps no config and still fails verification (fail closed); nothing else from the lookup is trusted here.
+ * Bounded deterministic-ID readback using the current v3 API (never legacy v2).
+ * Contract checked 2026-11-15: https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/scores.yml
+ * Request details + subject for config and explicit observation/trace identity, following each cursor.
  */
-async function fillScoreConfigIds(api, rows) {
-  const missing = [...rows.values()].flatMap((row) => (row.scores ?? []).filter((score) => score.configId === undefined && typeof score.id === "string"));
-  const configOf = new Map();
-  const ids = [...new Set(missing.map((score) => score.id))];
-  for (let i = 0; i < ids.length; i += 50) {
-    const batch = ids.slice(i, i + 50);
-    const page = await api(`/v2/scores?${new URLSearchParams({ scoreIds: batch.join(","), limit: "50" })}`);
-    if (!page || !Array.isArray(page.data)) throw new Error("Score readback failed");
-    for (const score of page.data) if (batch.includes(score.id) && typeof score.configId === "string") configOf.set(score.id, score.configId);
+export async function readScoresByIds(api, ids) {
+  const found = new Map();
+  const unique = [...new Set(ids)];
+  for (let start = 0; start < unique.length; start += 50) {
+    const batch = unique.slice(start, start + 50);
+    let cursor = null, pages = 0;
+    const cursors = new Set();
+    do {
+      if (++pages > 1000) throw new Error("Score pagination exceeds safety bound");
+      const query = new URLSearchParams({ id: batch.join(","), fields: "details,subject", limit: "50", ...(cursor ? { cursor } : {}) });
+      const page = await api(`/v3/scores?${query}`);
+      if (!page || !Array.isArray(page.data)) throw new Error("Score readback failed");
+      for (const score of page.data) {
+        if (!score || !batch.includes(score.id) || found.has(score.id)) throw new Error("Score readback returned unexpected or duplicate ID");
+        found.set(score.id, score);
+      }
+      cursor = page.meta?.cursor ?? null;
+      if (cursor !== null && (typeof cursor !== "string" || !cursor || cursors.has(cursor))) throw new Error("Invalid score pagination");
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
   }
-  for (const score of missing) if (configOf.has(score.id)) score.configId = configOf.get(score.id);
+  return found;
+}
+
+/** Embedded ScoreV3 may omit configId; enrich only that field and retain its original identity/value for verification. */
+async function fillScoreConfigIds(api, rows, prepared, configs) {
+  const missing = prepared.items.flatMap(item => {
+    const row = rows.get(item.datasetItemId);
+    if (!matchesItem(row, item)) return [];
+    return item.scores.flatMap(score => (row.scores ?? [])
+      .filter(remote => remote.id === scoreId(item, score.name) && remote.configId === undefined)
+      .map(remote => ({ item, score, row, remote })));
+  });
+  const found = await readScoresByIds(api, missing.map(({ remote }) => remote.id));
+  for (const { item, score, row, remote } of missing) {
+    const lookup = found.get(remote.id);
+    const config = configs.get(score.name);
+    if (lookup && hasVerifiedScore({ ...row, scores: [lookup] }, item, score, config, false)
+      && hasVerifiedScore({ ...row, scores: [{ ...remote, configId: lookup.configId }] }, item, score, config)) {
+      remote.configId = lookup.configId;
+    }
+  }
 }
 const remoteOutputSha = (row) => row?.experimentItemMetadata?.outputSha256 ?? null;
 // API shapes: https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/experiments.yml
@@ -118,13 +164,13 @@ const remoteOutputSha = (row) => row?.experimentItemMetadata?.outputSha256 ?? nu
 // Both item readback and skip decisions require the exact observation identity.
 const matchesItem = (row, item) => row?.id === item.spanId && row?.traceId === item.traceId && remoteOutputSha(row) === item.outputSha256;
 
-function hasVerifiedScore(row, item, score, config) {
+function hasVerifiedScore(row, item, score, config, allowRowTrace = true) {
   if (!matchesItem(row, item)) return false;
   return (row.scores ?? []).some((remote) => {
     // Experiment API v4 uses ScoreV3 subjects; older v4 previews used flat IDs.
     // Missing identity/config fields fail closed, rather than proving a name alone.
     const observationId = remote.subject ? (remote.subject.kind === "observation" ? remote.subject.id : null) : remote.observationId;
-    const traceId = remote.subject ? (remote.subject.traceId ?? row.traceId) : remote.traceId;
+    const traceId = remote.subject ? (remote.subject.traceId ?? (allowRowTrace ? row.traceId : null)) : remote.traceId;
     const value = config.dataType === "BOOLEAN" && typeof remote.value === "boolean" ? Number(remote.value) : remote.value;
     // sameJson's documented relative 1e-12 tolerance handles JSON storage rounding;
     // boolean scores must still be exactly 0 or 1 and numeric strings are refused.
@@ -151,7 +197,7 @@ export async function syncRun(api, prepared, { targetName = null, allowHeldout =
   const scoreNames = new Set(prepared.items.flatMap((item) => item.scores.map((score) => score.name)));
   for (const name of scoreNames) if (!configs.get(name)?.id) throw new Error(`Score config ${name} is not registered on this target`);
 
-  let existing = await listExperimentItems(api, prepared);
+  let existing = await listExperimentItems(api, prepared, configs);
   const stale = prepared.items.filter((item) => !matchesItem(existing.get(item.datasetItemId), item));
   // Batch by count and by serialised size so large inline outputs never exceed request body limits.
   let chunk = [];
@@ -173,7 +219,7 @@ export async function syncRun(api, prepared, { targetName = null, allowHeldout =
   }
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (stale.length || scoreWrites.length) existing = await listExperimentItems(api, prepared);
+    if (stale.length || scoreWrites.length) existing = await listExperimentItems(api, prepared, configs);
     const pendingItems = prepared.items.filter((item) => !matchesItem(existing.get(item.datasetItemId), item));
     const pendingScores = prepared.items.filter((item) => item.scores.some((score) => !hasVerifiedScore(existing.get(item.datasetItemId), item, score, configs.get(score.name))));
     if (!pendingItems.length && !pendingScores.length) break;

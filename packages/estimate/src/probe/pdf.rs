@@ -20,6 +20,15 @@ use super::{PdfProfile, ProbeInput, ProbeKind, ProbeResult, AREA_EQUIVALENT_BUCK
 use super::layout;
 use crate::rules::{PageRasterRouting, Rules};
 
+#[path = "detail.rs"]
+pub mod detail;
+#[path = "range.rs"]
+pub mod range;
+#[path = "features.rs"]
+mod features;
+#[path = "inline.rs"]
+mod inline;
+
 /// Decompressed bytes of one content stream or form XObject.
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 /// Content bytes interpreted per page, page content and every form invocation together.
@@ -176,6 +185,21 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
             let bpp = [0.0, 0.05, 0.2, 0.5, 1.0].iter().rposition(|bound| image.bytes_per_pixel >= *bound).unwrap_or(0);
             profile.image_bytes_per_pixel[bpp] = profile.image_bytes_per_pixel[bpp].saturating_add(1);
         }
+        profile.observed_vector_paths = profile.observed_vector_paths.saturating_add(reading.path_operations as u64);
+        profile.observed_image_placements = profile.observed_image_placements.saturating_add(reading.images.len() as u32);
+        profile.lexical_pages[match reading.lexical { Some(true) => 0, Some(false) => 1, None => 2 }] += 1;
+        profile.chart_candidate_unknown_pages += 1;
+        for image in &reading.images {
+            let repeated_image = image.id.is_some_and(|id| repeated.contains(&id));
+            if repeated_image { profile.repeated_image_placements += 1; }
+            let mp = image.width_px * image.height_px / 1_000_000.0;
+            let bin = [0.0625, 0.25, 1.0, 4.0].iter().filter(|floor| mp >= **floor).count();
+            profile.image_region_sizes[bin] += 1;
+            let class = if image.placement.is_none() || image.width_px <= 0.0 || image.height_px <= 0.0 { 3 }
+                else if repeated_image || image.width_px.min(image.height_px) < 32.0 || image.coverage < 0.02 { 0 }
+                else if image.coverage >= 0.5 { 2 } else { 1 };
+            profile.image_region_classes[class] += 1;
+        }
         let facts = page_layout(rules, reading, &repeated);
         profile.glyphs_over_images = profile.glyphs_over_images.saturating_add(count(facts.glyphs_over_images));
         if facts.glyphs_over_images >= 20.0 {
@@ -190,6 +214,16 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         if facts.ruled_table_heavy {
             profile.ruled_table_pages += 1;
         }
+        // `pageCostRoute`: what production does with the page (scan-fill OCR, table path or text layer).
+        let grids: Option<Vec<(u32, Option<f64>)>> = facts.grids.as_ref().map(|grids| grids.iter().map(|grid| (grid.0, Some(grid.2))).collect());
+        let route = super::cost_route::page_cost_route(&rules.page_table_routing, &super::cost_route::PageCostFacts {
+            words: reading.lexical.map(|present| if present { reading.words.max(1.0) } else { 0.0 }),
+            images: (!reading.exhausted).then_some(reading.images.len() as f64),
+            vector_paths: (!reading.exhausted).then_some(reading.path_operations as f64),
+            grids: grids.as_deref(),
+            grid_coverage: facts.grid_coverage,
+        });
+        profile.route_pages[route as usize] += 1;
     }
     let points = |value: f64| value.round().clamp(0.0, 10_000_000.0) as u32;
     let median = |mut values: Vec<f64>| { values.sort_by(f64::total_cmp); values[values.len() / 2] };
@@ -307,7 +341,10 @@ impl FormCache {
         if limit == 0 {
             return None;
         }
-        let content = stream.decompressed_content_with_limit(limit).ok()?;
+        let content = match stream.decompressed_content_with_limit(limit) {
+            Ok(content) => content,
+            Err(_) => { self.charge(limit); return None; }
+        };
         self.charge(content.len());
         Some(Rc::new(content))
     }
@@ -384,6 +421,7 @@ fn has_name(bytes: &[u8], name: &[u8]) -> bool {
 #[derive(Default)]
 struct WordCounter {
     runs: f64,
+    encoding_unknown: bool,
     characters: f64,
     run_length: usize,
     /// Glyphs shown since the last text move, to tell a next-character move from a word gap.
@@ -402,6 +440,7 @@ impl WordCounter {
         if bytes.is_empty() {
             return;
         }
+        self.encoding_unknown |= bytes.iter().any(|byte| !byte.is_ascii() || *byte == 0);
         let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
         if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 {
             let glyphs = bytes.len() as f64 / 2.0;
@@ -445,12 +484,15 @@ impl WordCounter {
 
 #[derive(Default)]
 struct PageStats {
+    inline_budget: inline::Budget,
+    vector_bounds: Option<[f64;4]>,
     words: WordCounter,
     path_operations: usize,
     operations: usize,
     interpreted_bytes: usize,
     form_calls: usize,
     exhausted: bool,
+    failure_bits: u64,
     /// Text was shown in a font with no Unicode mapping (`unmapped_font`).
     unmapped_text: bool,
     /// Text volume: glyphs shown and text lines started (both as extraction would see them).
@@ -497,6 +539,8 @@ struct WordAt {
     x: f64,
     y: f64,
     glyphs: f64,
+    width: f64,
+    height: f64,
 }
 
 /// Words in one shown string as text extraction splits them, as (first glyph, glyph count): whitespace-separated runs,
@@ -546,10 +590,11 @@ impl PageStats {
 }
 
 impl PageStats {
+    fn fail(&mut self, bit: u64) { self.exhausted = true; self.failure_bits |= bit; }
     fn charge_bytes(&mut self, bytes: usize) -> bool {
         self.interpreted_bytes = self.interpreted_bytes.saturating_add(bytes);
         if self.interpreted_bytes > MAX_INTERPRETED_BYTES_PER_PAGE {
-            self.exhausted = true;
+            self.fail(1);
         }
         !self.exhausted
     }
@@ -697,11 +742,37 @@ fn lookup_xobject<'a>(document: &'a Document, resources: &[&'a Dictionary], name
     })
 }
 
+fn inline_color_components(document:&Document,resources:&[&Dictionary],name:&[u8],depth:usize)->Option<usize>{
+    if depth>8{return None;}
+    match name{b"G"|b"DeviceGray"=>return Some(1),b"RGB"|b"DeviceRGB"=>return Some(3),b"CMYK"|b"DeviceCMYK"=>return Some(4),_=>{}}
+    let value=resources.iter().find_map(|r|{
+        let colors=dictionary(document,r.get(b"ColorSpace").ok()?)?;
+        deref(document,colors.get(name).ok()?).map(|(_,v)|v)
+    })?;
+    match value{
+        Object::Name(name)=>inline_color_components(document,resources,name,depth+1),
+        Object::Array(values)=>match values.first()?.as_name().ok()?{
+            b"CalGray"|b"Indexed"|b"I"=>Some(1),b"CalRGB"|b"Lab"=>Some(3),
+            b"ICCBased"=>{
+                let (_,Object::Stream(profile))=deref(document,values.get(1)?)? else{return None;};
+                let n=usize::try_from(profile.dict.get(b"N").ok()?.as_i64().ok()?).ok()?;
+                [1,3,4].contains(&n).then_some(n)
+            }
+            _=>None,
+        },
+        _=>None,
+    }
+}
+
 struct PageReading {
+    vector_bounds: Option<[f64;4]>,
+    operations: usize,
     words: f64,
+    lexical: Option<bool>,
     path_operations: usize,
     images: Vec<ImageUse>,
     exhausted: bool,
+    failure_bits: u64,
     /// Text was shown in a font with no Unicode mapping.
     unmapped_text: bool,
     /// Visible page area in square points, and the visible box's width and height in points.
@@ -728,7 +799,15 @@ impl PageReading {
 }
 
 fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: ObjectId, forms: &mut FormCache) -> Option<PageReading> {
-    let content = document.get_page_content_with_limit(page_id, forms.stream_limit()).ok()?;
+    classify_page_checked(routing, document, page_id, forms, false)
+}
+
+fn classify_page_checked(routing: &PageRasterRouting, document: &Document, page_id: ObjectId, forms: &mut FormCache, strict_validation: bool) -> Option<PageReading> {
+    let limit = forms.stream_limit();
+    let content = match document.get_page_content_with_limit(page_id, limit) {
+        Ok(content) => content,
+        Err(_) => { forms.charge(limit); return None; }
+    };
     forms.charge(content.len());
     let resources = page_resources(document, page_id);
     let area = page_area(document, page_id);
@@ -738,8 +817,9 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     let rules = &bundled.extraction;
     let limits = ExtractionLimitsCopy { tiny_points: rules.tiny_glyph_points, tiny_per_page: rules.tiny_glyphs_per_page };
     let mut stats = PageStats::default();
+    stats.rules.eligible_only = strict_validation;
     let display = layout::DisplaySpace::new(media, visible, page_rotate(document, page_id));
-    let mut context = Context { document, routing, forms, area, visible, media, limits, display, layout: &bundled.layout };
+    let mut context = Context { document, routing, forms, area, visible, media, limits, display, layout: &bundled.layout, strict_validation };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
     if stats.exhausted && stats.text.chars > 0.0 {
         // A page with text that was not read to the end: estimate its glyphs from its own content stream's size (forms it
@@ -752,7 +832,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
         stats.text.estimated = true;
     }
     let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
+    Some(PageReading { vector_bounds:stats.vector_bounds, operations: stats.operations, lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, failure_bits: stats.failure_bits, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -905,6 +985,7 @@ fn is_raster_page(routing: &PageRasterRouting, words: f64, images: &ImageTotals)
 }
 
 struct Context<'a, 'f> {
+    strict_validation: bool,
     document: &'a Document,
     routing: &'a PageRasterRouting,
     forms: &'f mut FormCache,
@@ -983,6 +1064,7 @@ impl<'a> Context<'a, '_> {
             return;
         }
         let device = multiply(&text.matrix, ctm);
+        if device.iter().any(|value|!value.is_finite()){stats.fail(2);return;}
         text.matrix = multiply(&[1.0, 0.0, 0.0, 1.0, all * 0.5 * font_size, 0.0], &text.matrix);
         let volume = &mut stats.text;
         let (x, y) = (device[4], device[5]);
@@ -1022,7 +1104,13 @@ impl<'a> Context<'a, '_> {
             let v = 0.3 * font_size;
             let (ux, uy) = (u * device[0] + v * device[2] + device[4], u * device[1] + v * device[3] + device[5]);
             let (dx, dy) = self.display.point(ux, uy);
-            stats.words_at.push(WordAt { x: dx, y: dy, glyphs: count as f64 });
+            let left=first as f64*0.5*font_size;let right=(first+count) as f64*0.5*font_size;
+            let corners=[(left,-0.2*font_size),(right,-0.2*font_size),(right,0.8*font_size),(left,0.8*font_size)]
+                .map(|(u,v)|self.display.point(u*device[0]+v*device[2]+device[4],u*device[1]+v*device[3]+device[5]));
+            let width=corners.iter().map(|p|p.0).fold(f64::NEG_INFINITY,f64::max)-corners.iter().map(|p|p.0).fold(f64::INFINITY,f64::min);
+            let height=corners.iter().map(|p|p.1).fold(f64::NEG_INFINITY,f64::max)-corners.iter().map(|p|p.1).fold(f64::INFINITY,f64::min);
+            if !width.is_finite() || !height.is_finite() || width<=0.0 || height<=0.0{stats.words_overflow=true;continue;}
+            stats.words_at.push(WordAt { x: dx, y: dy, glyphs: count as f64, width,height });
         }
         let volume = &mut stats.text;
         if text.new_line {
@@ -1057,6 +1145,8 @@ impl<'a> Context<'a, '_> {
         if stats.images.len() < MAX_TRACKED_IMAGES_PER_PAGE {
             stats.images.push(image);
         } else if let Some(smallest) = stats.images.iter_mut().min_by(|a, b| a.coverage.total_cmp(&b.coverage)) {
+            stats.exhausted = true;
+            stats.failure_bits |= 512;
             // A page of hundreds of images keeps the largest ones: they decide the class.
             if coverage > smallest.coverage {
                 *smallest = image;
@@ -1089,18 +1179,27 @@ impl<'a> Context<'a, '_> {
         if !stats.charge_bytes(content.len()) {
             return;
         }
+        let normalized = if self.strict_validation && content.windows(2).any(|w| w == b"BI") {
+            inline::normalize_inline_images(content, &mut stats.inline_budget, &|name| inline_color_components(self.document, resources, name, 0))
+        } else { None };
+        if let Some(ref normalized) = normalized {
+            if !stats.charge_bytes(normalized.content.len()) { return; }
+        }
+        let content = normalized.as_ref().map(|n|n.content.as_slice()).unwrap_or(content);
+        let mut inline_index = 0usize;
         let mut ctm = base;
         let mut stack: Vec<(Matrix, f64)> = Vec::new();
         let mut line_width = 1.0_f64;
         let mut path = layout::PathBuilder::default();
+        if self.strict_validation { path.detailed_min_length = Some(self.layout.rule_min_length_pt); }
         let mut font_size = 12.0;
         let mut font_unmapped = false;
         let mut text = TextState::default();
         for operation in Content::decode_iter(content) {
-            let Ok(operation) = operation else { break };
+            let Ok(operation) = operation else { stats.fail(4); break };
             stats.operations += 1;
             if stats.operations > MAX_OPERATIONS_PER_PAGE {
-                stats.exhausted = true;
+                stats.fail(8);
                 return;
             }
             let operands = &operation.operands;
@@ -1203,6 +1302,14 @@ impl<'a> Context<'a, '_> {
                         let (ux, uy) = (x * ctm[0] + y * ctm[2] + ctm[4], x * ctm[1] + y * ctm[3] + ctm[5]);
                         self.display.point(ux, uy)
                     };
+                    let points:Vec<_>=if operation.operator=="re" && values.len()==4 {
+                        let (x,y,w,h)=(values[0],values[1],values[2],values[3]);vec![shown(x,y),shown(x+w,y),shown(x+w,y+h),shown(x,y+h)]
+                    }else{values.chunks_exact(2).map(|xy|shown(xy[0],xy[1])).collect()};
+                    for (x,y) in points {
+                        if x.is_finite() && y.is_finite() {
+                            stats.vector_bounds=Some(match stats.vector_bounds {Some(b)=>[b[0].min(x),b[1].min(y),b[2].max(x),b[3].max(y)],None=>[x,y,x,y]});
+                        }else{stats.fail(2);}
+                    }
                     match (operation.operator.as_str(), values.as_slice()) {
                         ("m", [x, y]) => path.move_to(shown(*x, *y)),
                         ("l", [x, y]) => path.line_to(shown(*x, *y)),
@@ -1230,12 +1337,14 @@ impl<'a> Context<'a, '_> {
                             (width, height) = self.image_size(&image.dict, b"Width", b"Height");
                         }
                         let bilevel = self.bilevel(&image.dict, &[b"F", b"Filter"], &[b"BPC", b"BitsPerComponent"], &[b"IM", b"ImageMask"]);
-                        self.record_image(stats, None, &ctm, width, height, image.content.len(), bilevel);
+                        let stored = normalized.as_ref().and_then(|n|n.stored_lengths.get(inline_index)).copied().unwrap_or(image.content.len());
+                        self.record_image(stats, None, &ctm, width, height, stored, bilevel);
                     }
+                    inline_index += 1;
                 }
                 "Do" => {
                     let Some(Object::Name(name)) = operands.first() else { continue };
-                    let Some((id, Object::Stream(xobject))) = lookup_xobject(self.document, resources, name) else { continue };
+                    let Some((id, Object::Stream(xobject))) = lookup_xobject(self.document, resources, name) else { stats.fail(16); continue };
                     let subtype = xobject.dict.get(b"Subtype").ok().and_then(|object| deref(self.document, object)).map(|(_, value)| value);
                     match subtype {
                         Some(Object::Name(kind)) if kind == b"Image" => {
@@ -1246,7 +1355,7 @@ impl<'a> Context<'a, '_> {
                         Some(Object::Name(kind)) if kind == b"Form" && depth < MAX_FORM_DEPTH => {
                             stats.form_calls += 1;
                             if stats.form_calls > MAX_FORM_CALLS_PER_PAGE {
-                                stats.exhausted = true;
+                                stats.fail(32);
                                 return;
                             }
                             // A direct (unreferenced) form stream cannot be cached; it is decompressed per call,
@@ -1255,7 +1364,7 @@ impl<'a> Context<'a, '_> {
                                 Some(id) => self.forms.get(id, xobject),
                                 None => self.forms.decompress(xobject),
                             };
-                            let Some(form_content) = form_content else { continue };
+                            let Some(form_content) = form_content else { stats.fail(64); continue };
                             let matrix = xobject
                                 .dict
                                 .get(b"Matrix")
@@ -1273,21 +1382,124 @@ impl<'a> Context<'a, '_> {
                                 return;
                             }
                         }
+                        Some(Object::Name(kind)) if kind == b"Form" => { stats.fail(128); }
                         _ => {}
                     }
                 }
                 _ => {}
             }
         }
+        // Verify complete consumption without collecting a page's operations.
+        if self.strict_validation && !stats.exhausted {
+            let failure = strict_content_failure(content);
+            if failure != 0 && !(failure == 2 && normalized.is_some() && strict_inline_content_complete(content)) {
+                stats.fail(256 | (failure << 16));
+            }
+        }
     }
+}
+
+fn strict_content_failure(content:&[u8])->u64 {
+    use otf_pdf_syntax::{parser::Parser,lexer::Token,Limits,Strictness};
+    let limits=Limits{max_depth:32,max_object_size:MAX_STREAM_BYTES as u64,..Limits::default()};
+    let mut parser=Parser::new(content,0,&limits,Strictness::Strict);
+    let mut operands=0usize;
+    let mut compatibility=0usize;
+    for _ in 0..1_000_000 {
+        let at=parser.lexer().pos();
+        let token=match parser.lexer().next_token(){Ok(token)=>token,Err(_)=>return 1};
+        match token {
+            Token::Eof=>return if operands==0 && compatibility==0 {0} else {1},
+            // Inline binary data cannot be validated by the syntax lexer alone.
+            Token::Keyword(b"BI"|b"ID"|b"EI"|b"obj"|b"endobj"|b"stream"|b"endstream")=>return 2,
+            Token::Keyword(word) if !matches!(word,b"true"|b"false"|b"null")=>{
+                if word==b"BX"{compatibility+=1;if compatibility>256{return 1;}}
+                else if word==b"EX"{if compatibility==0{return 1;}compatibility-=1;}
+                else if compatibility==0 && !matches!(word,b"q"|b"Q"|b"cm"|b"w"|b"J"|b"j"|b"M"|b"d"|b"ri"|b"i"|b"gs"|b"m"|b"l"|b"c"|b"v"|b"y"|b"h"|b"re"|b"S"|b"s"|b"f"|b"F"|b"f*"|b"B"|b"B*"|b"b"|b"b*"|b"n"|b"W"|b"W*"|b"BT"|b"ET"|b"Tc"|b"Tw"|b"Tz"|b"TL"|b"Tf"|b"Tr"|b"Ts"|b"Td"|b"TD"|b"Tm"|b"T*"|b"Tj"|b"TJ"|b"'"|b"\""|b"d0"|b"d1"|b"CS"|b"cs"|b"SC"|b"SCN"|b"sc"|b"scn"|b"G"|b"g"|b"RG"|b"rg"|b"K"|b"k"|b"sh"|b"Do"|b"MP"|b"DP"|b"BMC"|b"BDC"|b"EMC"){return 3;}
+                operands=0;
+            }
+            _=>{parser.lexer().set_pos(at);if parser.parse_object().is_err(){return 1;}operands+=1;if operands>1024{return 1;}}
+        }
+    }
+    1
+}
+
+#[cfg(test)]
+fn strict_content_complete(content:&[u8])->bool {
+    let failure = strict_content_failure(content);
+    failure == 0
+}
+
+/// Use the existing public strict grammar for small inline-image streams, where
+/// a token-only verifier cannot skip binary payloads. Unsupported inline data
+/// yields a BI without a Stream in lopdf's recovery path: explicitly refuse it.
+/// Normalize only the non-image operations and verify their entire syntax too.
+fn strict_inline_content_complete(content: &[u8]) -> bool {
+    if content.len() > 256 * 1024 { return false; }
+    let Ok(mut decoded) = Content::decode_strict(content) else { return false; };
+    let mut saw_image = false;
+    for op in &decoded.operations {
+        if op.operator == "BI" {
+            if !matches!(op.operands.as_slice(), [Object::Stream(_)]) { return false; }
+            saw_image = true;
+        }
+    }
+    if !saw_image { return false; }
+    decoded.operations.retain(|op| op.operator != "BI");
+    let Ok(encoded) = decoded.encode() else { return false; };
+    encoded.len() <= MAX_STREAM_BYTES && strict_content_failure(&encoded) == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn estimated_word_boxes_follow_page_rotation_and_anisotropic_text_transforms() {
+        let reading=|rotate:i64,prefix:&str|{
+            let mut document=Document::with_version("1.7");
+            let content=document.add_object(lopdf::Stream::new(Dictionary::new(),format!("{prefix} BT 1 0 0 1 100 100 Tm (abcdef) Tj ET").into_bytes()));
+            let mut dict=Dictionary::new();dict.set("Type",Object::Name(b"Page".to_vec()));dict.set("MediaBox",Object::Array(vec![0.into(),0.into(),612.into(),792.into()]));dict.set("Rotate",rotate);dict.set("Contents",content);
+            let page=document.add_object(dict);classify_page_checked(&routing(),&document,page,&mut FormCache::default(),true).unwrap()
+        };
+        let normal=reading(0,"");let rotated=reading(90,"");let scaled=reading(0,"2 0 0 0.5 0 0 cm");
+        assert!((normal.words_at[0].width-36.0).abs()<1e-6);assert!((normal.words_at[0].height-12.0).abs()<1e-6);
+        assert!((rotated.words_at[0].width-12.0).abs()<1e-6);assert!((rotated.words_at[0].height-36.0).abs()<1e-6);
+        assert!((scaled.words_at[0].width-72.0).abs()<1e-6);assert!((scaled.words_at[0].height-6.0).abs()<1e-6);
+    }
+
+    #[test]
+    fn strict_streaming_verification_accepts_large_streams_and_refuses_malformed_tails() {
+        assert!(!strict_content_complete(b"q BI /W 2 /H 1 /BPC 8 /CS /G ID EI\nEI Q"));
+        assert!(!strict_content_complete(b"BI /W 0 /H 1 /BPC 8 /CS /G ID \nEI"));
+        assert!(!strict_content_complete(b"BI /W 1 /H 1 /BPC 0 /CS /G ID \nEI"));
+        assert!(!strict_content_complete(b"BI /W 1 /H 1 /BPC 8 /CS /G IDxEI Q"));
+        assert!(!strict_content_complete(b"BI /W 1 /Width 2 /H 1 /BPC 8 /CS /G ID x EI"));
+        assert!(!strict_content_complete(b"BI /W 2 /H 1 /BPC 8 /CS /G ID E"));
+        assert!(!strict_content_complete(b"BI /W 0 /H 1 /BPC 8 /CS /G ID x EI"));
+        assert!(!strict_content_complete(b"BI /W 1 /H 1 /BPC 8 /CS /G /F /Fl ID x EI"));
+        assert!(!strict_content_complete(b"BI /W 1 /H 1 /BPC 8 /CS /G ID x EI unknownOperator"));
+        assert!(strict_content_complete(&b"q Q\n".repeat(70000)));
+        assert!(!strict_content_complete(b"q Q (unterminated"));
+        assert!(!strict_content_complete(b"q Q unknownOperator"));
+        assert!(strict_content_complete(b"BX unknownOperator EX"));
+    }
+
     fn routing() -> PageRasterRouting {
         Rules::bundled().page_raster_routing.clone()
+    }
+
+    #[test]
+    fn lexical_presence_is_not_whitespace_word_count() {
+        let mut punctuation = WordCounter::default();
+        punctuation.show(b"---");
+        assert_eq!(punctuation.characters, 0.0);
+        let mut digit = WordCounter::default();
+        digit.show(b"7");
+        assert_eq!(digit.characters, 1.0);
+        let mut encoded = WordCounter::default();
+        encoded.show(&[0, 7, 0, 8]);
+        assert!(encoded.encoding_unknown);
     }
 
     #[test]
@@ -1338,10 +1550,14 @@ mod tests {
         let routing = routing();
         let id = |number: u32| (number, 0);
         let page = |ids: &[u32]| PageReading {
+            vector_bounds:None,
+            operations: 0,
             words: 0.0,
+            lexical: Some(false),
             path_operations: 0,
             images: ids.iter().map(|number| ImageUse::plain(Some(id(*number)), 0.9)).collect(),
             exhausted: false,
+            failure_bits: 0,
             unmapped_text: false,
             area: DEFAULT_PAGE_AREA,
             width: 612.0,

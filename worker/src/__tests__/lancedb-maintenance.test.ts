@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { connect } from "@lancedb/lancedb";
@@ -257,8 +257,10 @@ describe("LanceDB maintenance", () => {
     const args = { uri: dir, table: "chunks", documentIds: ["erased"], purgeHistory: true };
     await expect(deleteLanceDbDocumentRows(args)).rejects.toThrow(message);
     await expect(deleteLanceDbDocumentRows(args)).resolves.toBeUndefined();
-    expect(optimize).toHaveBeenCalledTimes(2);
+    // One failed pass, then the erasure's two: compact, then prune the version compacted from.
+    expect(optimize).toHaveBeenCalledTimes(3);
     expect(optimize.mock.calls[1]![0].cleanupOlderThan).toBeInstanceOf(Date);
+    expect(optimize.mock.calls[2]![0].cleanupOlderThan).toBeInstanceOf(Date);
     optimize.mockRejectedValueOnce(new Error(message));
     await expect(requestLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 100 })).resolves.toBeUndefined();
   });
@@ -275,6 +277,31 @@ describe("LanceDB maintenance", () => {
     await Promise.all([first, ordinary, strict]);
     expect(runs).toEqual(["ordinary", "strict"]);
     expect(coordinator.activeKeys()).toBe(0);
+  });
+
+  it("erasure removes a deleted document's text from every file under the table", async () => {
+    const secret = (index: number): VectorBackendRecord => ({ ...record("secret", index), text: `ERASEME-${index} confidential` });
+    await writeLanceDbRecords(dir, "chunks", [
+      ...Array.from({ length: 30 }, (_, i) => secret(i)),
+      ...Array.from({ length: 70 }, (_, i) => record("kept", 100 + i)),
+    ]);
+    const filesWithSecret = async () => {
+      const hits: string[] = [];
+      for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const file = path.join(entry.parentPath, entry.name);
+        if ((await readFile(file)).includes("ERASEME-")) hits.push(file);
+      }
+      return hits;
+    };
+    expect((await filesWithSecret()).length).toBeGreaterThan(0);
+    await withTable((table) => table.delete(`"documentId" IN ('secret')`));
+    // The delete only hides the rows.
+    expect((await filesWithSecret()).length).toBeGreaterThan(0);
+
+    const result = await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000, versionRetentionMs: 0 });
+    expect(result).toMatchObject({ ok: true, rows: 70 });
+    expect(await filesWithSecret()).toEqual([]);
   });
 
   it("optimizes, builds the vector index past the threshold, and keeps search working", async () => {
@@ -340,6 +367,31 @@ describe("LanceDB maintenance", () => {
       const hits = await table.vectorSearch(vector(103)).column("vector").limit(1).toArray();
       expect(hits[0]?.id).toBe("late3-103");
     });
+  });
+
+  it("adds a BTREE on documentId to large tables, including existing ones, once", async () => {
+    const rows = (doc: number) => Array.from({ length: 10 }, (_, i) => record(`doc${doc}`, i));
+    await writeLanceDbRecords(dir, "chunks", Array.from({ length: 120 }, (_, doc) => rows(doc)).flat());
+    // An existing table from before this change: it already has the id btree but no documentId index.
+    await withTable(async (table) => { await table.createIndex("id", { config: (await import("@lancedb/lancedb")).Index.btree() }); });
+    expect(await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000 })).toMatchObject({ ok: true, rows: 1_200 });
+    const documentIndexes = () => withTable(async (table) => (await table.listIndices()).filter((index) => index.columns.includes("documentId")));
+    const [created] = await documentIndexes();
+    expect(created?.indexType).toMatch(/btree/i);
+    // Idempotent: a second pass neither rebuilds nor duplicates it, and new rows are folded in.
+    await writeLanceDbRecords(dir, "chunks", rows(500));
+    expect(await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000 })).toMatchObject({ ok: true, rows: 1_210 });
+    expect((await documentIndexes()).map((index) => index.name)).toEqual([created?.name]);
+    await withTable(async (table) => {
+      expect(await table.countRows(`"documentId" = 'doc500'`)).toBe(10);
+      expect(await table.query().where(`"documentId" NOT IN ('doc0')`).limit(2_000).toArray()).toHaveLength(1_200);
+    });
+  });
+
+  it("leaves small tables without a documentId index", async () => {
+    await writeLanceDbRecords(dir, "chunks", Array.from({ length: 20 }, (_, i) => record("small", i)));
+    await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000 });
+    expect(await withTable(async (table) => (await table.listIndices()).some((index) => index.columns.includes("documentId")))).toBe(false);
   });
 
   it("swallows failures", async () => {

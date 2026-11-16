@@ -11,32 +11,32 @@ afterAll(async () => { await shutdownObservability(); vi.unstubAllEnvs(); });
 it("keeps streaming lazy and spans open until consumed, with request-chain correlation", async () => {
   let reads = 0;
   const http = vi.fn(async () => new Response(new ReadableStream({
-    pull(controller) { reads++; controller.enqueue(new TextEncoder().encode("answer")); controller.close(); },
+    pull(controller) { reads++; controller.enqueue(new TextEncoder().encode('"answer"')); controller.close(); },
   }, { highWaterMark: 0 }), { headers: { "x-request-id": "provider-id" } }));
   await withObservation({ name: "stream-root", metadata: { runId: "run-stream", projectId: "project-stream" } }, async () => {
     const response = await instrumentFetch("deepinfra", "embedding", http)("https://api.example.test/v1/inference?key=secret");
     expect(reads).toBe(0);
     expect(exporter.getFinishedSpans().some(span => span.name === "deepinfra.embedding")).toBe(false);
-    expect(await response.text()).toBe("answer");
+    expect(await response.text()).toBe('"answer"');
   });
   expect(http).toHaveBeenCalledTimes(1);
   const spans = exporter.getFinishedSpans();
   const child = spans.find(span => span.name === "deepinfra.embedding")!;
   const root = spans.find(span => span.name === "stream-root")!;
   expect(child.parentSpanContext?.spanId).toBe(root.spanContext().spanId);
-  expect(child.attributes).toMatchObject({ "server.address": "api.example.test", "http.response.body.size": 6,
+  expect(child.attributes).toMatchObject({ "server.address": "api.example.test", "http.response.body.size": 8,
     "docslurp.runId": "run-stream", "docslurp.projectId": "project-stream" });
   expect(JSON.stringify(child.attributes)).not.toContain("secret");
 });
 
-it("preserves transport and body errors without repeating requests", async () => {
+it("normalizes transport and body errors without repeating requests", async () => {
   const error = new Error("transport failure");
   const http = vi.fn(async () => { throw error; });
-  await expect(instrumentFetch("test", "failed", http)("https://example.test")).rejects.toBe(error);
+  await expect(instrumentFetch("test", "failed", http)("https://example.test")).rejects.toThrow(/Provider request failed|Invalid provider response/);
   expect(http).toHaveBeenCalledTimes(1);
   const brokenBody = new Response(new ReadableStream({ pull(controller) { controller.error(error); } }));
   const response = await instrumentFetch("test", "body-failed", async () => brokenBody)("https://example.test");
-  await expect(response.text()).rejects.toBe(error);
+  await expect(response.text()).rejects.toThrow(/Provider request failed|Invalid provider response/);
   for (const name of ["test.failed", "test.body-failed"]) expect(exporter.getFinishedSpans().find(span => span.name === name)?.status.code).toBe(2);
 });
 
@@ -78,6 +78,105 @@ it("records the routed model, upstream host, timing and usage of OpenRouter gene
   expect(exporter.getFinishedSpans().find((item) => item.name === "openrouter.json")!.attributes).toMatchObject({
     "docslurp.llm.upstream_provider": "Crusoe", "gen_ai.usage.output_tokens": 2 });
 
+  const cached = await instrumentFetch("openrouter", "cached", async () => Response.json({ id: "gen-c", provider: "Anthropic", model: "anthropic/claude-haiku-5.5",
+    choices: [], usage: { prompt_tokens: 3000, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 2048, cache_write_tokens: 900 } } }))("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body: "{}" });
+  await cached.json();
+  expect(exporter.getFinishedSpans().find((item) => item.name === "openrouter.cached")!.attributes).toMatchObject({
+    "gen_ai.usage.input_tokens": 3000, "gen_ai.usage.cache_read.input_tokens": 2048, "gen_ai.usage.cache_creation.input_tokens": 900 });
+
   await (await instrumentFetch("openrouter", "embed", async () => Response.json({ provider: "X" }))("https://openrouter.ai/api/v1/embeddings", { method: "POST", body })).json();
   expect(exporter.getFinishedSpans().find((item) => item.name === "openrouter.embed")!.attributes["docslurp.llm.upstream_provider"]).toBeUndefined();
+});
+
+ it("refuses redirect following even when callers request it", async () => {
+  const http = vi.fn(async (_input: unknown, init?: RequestInit) => {
+    expect(init?.redirect).toBe("error");
+    return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/private" } });
+  });
+  const response = await instrumentFetch("openai", "embedding", http)("https://api.openai.com/v1/embeddings", {
+    redirect: "follow", headers: { authorization: "Bearer sentinel-platform-key" },
+  });
+  expect(response.status).toBe(302);
+  await response.body?.cancel();
+  expect(http).toHaveBeenCalledTimes(1);
+});
+
+it("redacts provider response bodies before SDK errors can expose them", async () => {
+  const response = await instrumentFetch("openai", "embedding", async () => new Response("sentinel-platform-secret", { status: 401 }))("https://api.openai.com/v1/embeddings");
+  expect(response.status).toBe(401);
+  expect(await response.text()).not.toContain("sentinel-platform-secret");
+});
+
+it.each(["text/event-stream", "application/json"])("redacts HTTP 200 error envelopes (%s)", async (contentType) => {
+  const payload = JSON.stringify({ error: { message: "sentinel-platform-secret", code: 401 }, debug: "sentinel-platform-secret" });
+  const raw = contentType === "text/event-stream" ? `event: error\ndata: ${payload}\n\n` : payload;
+  for (const width of [1, 7, raw.length]) {
+    let offset = 0;
+    const response = await instrumentFetch("test", "failed-success", async () => new Response(new ReadableStream({
+      pull(controller) {
+        if (offset === raw.length) { controller.close(); return; }
+        controller.enqueue(new TextEncoder().encode(raw.slice(offset, offset += Math.min(width, raw.length - offset))));
+      },
+    }), { headers: { "content-type": contentType } }))("https://example.test");
+    const publicBody = await response.text();
+    expect(publicBody).not.toContain("sentinel-platform-secret");
+    expect(publicBody).toContain("Provider request failed");
+  }
+});
+
+it("preserves successful SSE content and refuses oversized or malformed events before exposure", async () => {
+  const frame = 'data: {"choices":[{"delta":{"content":"error is ordinary prose ☃"}}]}\r\n\r\ndata: [DONE]\r\n\r\n';
+  const response = await instrumentFetch("test", "ok", async () => new Response(frame, { headers: { "content-type": "text/event-stream" } }))("https://example.test");
+  expect(await response.text()).toBe(frame.replace(/\r\n/g, "\n"));
+  for (const frame of ['data: {broken sentinel-secret}\n\n', `data: ${"x".repeat(1024 * 1024 + 1)}`]) {
+    const response = await instrumentFetch("test", "invalid", async () => new Response(frame, { headers: { "content-type": "text/event-stream" } }))("https://example.test");
+    await expect(response.text()).rejects.toThrow(/Invalid provider response|exceeds limit/);
+  }
+});
+
+const secret = "sentinel-private-diagnostic";
+function chunked(raw: string, width: number, contentType = "text/event-stream") {
+  const bytes = new TextEncoder().encode(raw);
+  let offset = 0;
+  return new Response(new ReadableStream({ pull(c) {
+    if (offset >= bytes.length) { c.close(); return; }
+    c.enqueue(bytes.slice(offset, offset += width));
+  } }), {headers: {"content-type": contentType}});
+}
+it("normalizes JSON equivalents and strips SSE metadata diagnostics", async () => {
+  for (const envelope of [{type: "response.failed", response: {error: secret}}, {type: "response.error", error: secret}, {error: secret}]) {
+    const response = await instrumentFetch("test", "json", async () => chunked(JSON.stringify(envelope), 1, "application/json"))("https://example.test");
+    expect(await response.text()).toContain("Provider request failed");
+  }
+  const response = await instrumentFetch("test", "metadata", async () => chunked(`: ${secret}\nid: ${secret}\n\ndata: [DONE]\n\n`, 1))("https://example.test");
+  expect(await response.text()).not.toContain(secret);
+});
+it("refuses invalid UTF-8 without releasing diagnostic bytes", async () => {
+  const response = await instrumentFetch("test", "utf8", async () => new Response(new Uint8Array([0xc3, 0x28]), {headers: {"content-type": "text/event-stream"}}))("https://example.test");
+  await expect(response.text()).rejects.toThrow("Invalid provider response");
+});
+
+it("refuses oversized JSON envelopes and malformed trailing UTF-8", async () => {
+  const response = await instrumentFetch("test", "large-json", async () => new Response('"' + 'x'.repeat(16 * 1024 * 1024) + '"', {headers: {"content-type": "application/json"}}))("https://example.test");
+  await expect(response.text()).rejects.toThrow(/exceeds limit/);
+  const invalid = await instrumentFetch("test", "truncated", async () => new Response(new Uint8Array([0xc3]), {headers: {"content-type": "application/json"}}))("https://example.test");
+  await expect(invalid.text()).rejects.toThrow("Invalid provider response");
+});
+
+
+it("validates the explicitly selected password-range protocol independently of MIME", async () => {
+  const range = `${"A".repeat(35)}:42\r\n${"B".repeat(35)}:0\r\n`;
+  for (const contentType of ["text/plain", "application/json", "text/event-stream"]) {
+    const http: typeof fetch = async () => new Response(range, { headers: { "content-type": contentType } });
+    expect(await (await instrumentFetch("hibp", "password-range", http, "password-range")("https://example.test/range/ABCDE")).text()).toBe(range);
+  }
+  for (const invalid of ["", "sentinel-secret", `${"A".repeat(35)}:42\nsentinel-secret`, `data: {"error":"sentinel-secret"}\n\n`, `${"A".repeat(35)}:1234567890123`]) {
+    const http: typeof fetch = async () => new Response(invalid);
+    const response = await instrumentFetch("hibp", "password-range", http, "password-range")("https://example.test/range/ABCDE");
+    if (!invalid) expect(await response.text()).toBe("");
+    else await expect(response.text()).rejects.toThrow("Invalid provider response");
+  }
+  // A plaintext MIME cannot select this format for ordinary model responses.
+  const response = await instrumentFetch("openai", "chat", async () => new Response(range))("https://example.test");
+  await expect(response.text()).rejects.toThrow("Invalid provider response");
 });

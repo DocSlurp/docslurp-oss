@@ -274,7 +274,7 @@ describe("FallbackProviderRateStore", () => {
 });
 
 // The Lua scripts must match the memory store. Runs when a Redis is reachable.
-const redisUrl = process.env.AI_RATE_LIMIT_TEST_REDIS_URL;
+const redisUrl = process.env.TEST_REDIS_URL;
 describe.skipIf(!redisUrl)("RedisProviderRateStore (Lua) against Redis", () => {
   const client = createClient({ url: redisUrl });
   const prefix = `ai-rl-test-${process.pid}-${Date.now()}`;

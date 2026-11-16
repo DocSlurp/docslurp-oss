@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sqlMock = Object.assign(vi.fn(), { begin: vi.fn() });
 vi.mock("../db.js", () => ({ sql: sqlMock }));
+vi.mock("../services/usage-attribution.js", () => ({ attributedUsage: () => "usage_attribution" }));
 
 const {
   assertCanSpend,
@@ -95,8 +96,21 @@ describe("spend admission rule", () => {
 });
 
 describe("assertCanSpend", () => {
+  const tx = vi.fn();
+  const interactive = vi.fn();
   beforeEach(() => {
     sqlMock.mockReset();
+    interactive.mockReset();
+    tx.mockReset();
+    tx.mockImplementation((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.trimStart().startsWith("select coalesce")) return [{ org_id: "org-1" }];
+      if (query.includes("pg_advisory_xact_lock")) return [];
+      if (query.includes("admit_interactive_spend")) return interactive(strings, ...values);
+      return sqlMock(strings, ...values);
+    });
+    sqlMock.begin.mockReset();
+    sqlMock.begin.mockImplementation(async (fn: (client: unknown) => unknown) => await fn(tx));
   });
 
   const row = (overrides: Record<string, unknown> = {}) => ({
@@ -109,7 +123,8 @@ describe("assertCanSpend", () => {
     await expect(assertCanSpend(null, "ws-1")).resolves.toBeUndefined();
     const [strings, ...values] = sqlMock.mock.calls[0]!;
     expect((strings as string[]).join("?")).toContain("org_spend_status");
-    expect(values).toEqual([null, "ws-1", 0]);
+    expect(values).toContain("ws-1");
+    expect(tx.mock.calls[1]![0].join("?")).toContain("pg_advisory_xact_lock");
 
     sqlMock.mockResolvedValueOnce([row({ available: "-0.25" })]);
     await expect(assertCanSpend("org-1", "ws-1")).rejects.toMatchObject({ statusCode: 402, code: "credit_exhausted" });
@@ -120,33 +135,31 @@ describe("assertCanSpend", () => {
     await expect(assertCanSpend(null, "ws-unknown")).rejects.toMatchObject({ code: "plan_not_entitled" });
   });
 
-  it("passes interactive spend without a lock when comfortably above zero", async () => {
+  it("locks interactive spend before reading live budgets even comfortably above zero", async () => {
     sqlMock.mockResolvedValueOnce([row({ available: "106" })]);
     await expect(assertCanSpend(null, "ws-1", { kind: "interactive" })).resolves.toBeUndefined();
-    expect(sqlMock.begin).not.toHaveBeenCalled();
+    expect(sqlMock.begin).toHaveBeenCalled();
+    expect(tx.mock.calls[1]![0].join("?")).toContain("pg_advisory_xact_lock");
   });
 
   it("near zero, admits interactive spend through admit_interactive_spend with a hold", async () => {
-    sqlMock.begin.mockReset();
-    const tx = vi.fn();
-    sqlMock.begin.mockImplementation(async (fn: (client: unknown) => unknown) => await fn(tx));
     sqlMock.mockResolvedValueOnce([row({ available: "-10" })]);
-    tx.mockResolvedValueOnce([{ admitted: true, available: "-10", held: "5" }]);
+    interactive.mockResolvedValueOnce([{ admitted: true, available: "-10", held: "5" }]);
     await expect(assertCanSpend(null, "ws-1", { kind: "interactive" })).resolves.toBeUndefined();
-    const [strings, ...values] = tx.mock.calls[0]!;
+    const [strings, ...values] = interactive.mock.calls[0]!;
     expect((strings as string[]).join("?")).toContain("admit_interactive_spend");
     expect(values).toEqual(["org-1", "ws-1", 20, 5, 120]);
 
     // Refused once holds of concurrent chats use up the allowance.
     sqlMock.mockResolvedValueOnce([row({ available: "-10" })]);
-    tx.mockResolvedValueOnce([{ admitted: false, available: "-10", held: "15" }]);
+    interactive.mockResolvedValueOnce([{ admitted: false, available: "-10", held: "15" }]);
     await expect(assertCanSpend(null, "ws-1", { kind: "interactive" })).rejects.toMatchObject({ statusCode: 402, code: "credit_exhausted" });
 
     // A pre-check takes no hold.
     sqlMock.mockResolvedValueOnce([row({ available: "-10" })]);
-    tx.mockResolvedValueOnce([{ admitted: true, available: "-10", held: "0" }]);
+    interactive.mockResolvedValueOnce([{ admitted: true, available: "-10", held: "0" }]);
     await expect(assertCanSpend(null, "ws-1", { kind: "interactive", hold: false })).resolves.toBeUndefined();
-    expect(tx.mock.calls[2]!.slice(1)).toEqual(["org-1", "ws-1", 20, 0, 120]);
+    expect(interactive.mock.calls[2]!.slice(1)).toEqual(["org-1", "ws-1", 20, 0, 120]);
   });
 
   it("has a non-throwing form for paths that degrade", async () => {

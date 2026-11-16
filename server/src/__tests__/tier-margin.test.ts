@@ -7,9 +7,9 @@ const PAGE = { inputTokens: 1_500, outputTokens: 800 };
 const obs = (endpoint: string, input: number, output: number): EndpointObservation => ({
   model: "acme/ocr", endpoint, observedAt: NOW, inputUsdPerMTok: input, outputUsdPerMTok: output, uptime30m: 100, status: 0, latencyP50Ms: null,
 });
-const options = defineTierOptions([{ id: "ocr", capability: "page-ocr", pool: ["llm://openrouter/acme/ocr?_provider=parasail"], tiers: ["cheapest"], evalScore: null, evalRef: null }]);
-const select = (unitRevenueUsd: number) => selectTierRoute({ capability: "page-ocr", tier: "cheapest", options, observations: [obs("parasail", 0.25, 1.0)], unitRevenueUsd, unit: PAGE, now: NOW });
-const context = { tier: "cheapest", capability: "page-ocr", requestId: "req-1" };
+const options = defineTierOptions([{ id: "ocr", capability: "page-ocr", pool: ["llm://openrouter/acme/ocr?_provider=parasail"], tiers: ["balanced"], evalScore: null, evalRef: null }]);
+const select = (unitRevenueUsd: number) => selectTierRoute({ capability: "page-ocr", tier: "balanced", options, observations: [obs("parasail", 0.25, 1.0)], unitRevenueUsd, unit: PAGE, now: NOW });
+const context = { tier: "balanced", capability: "page-ocr", requestId: "req-1" };
 
 describe("tier margin warnings", () => {
   it("reads the policy from env with 20% / 10% defaults and refuses malformed values", () => {

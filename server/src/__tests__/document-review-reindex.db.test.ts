@@ -64,6 +64,47 @@ describe("human-correction reindex", () => {
       { page_number: 2, read_billed_run: "m1", read_text: null },
     ]);
   });
+  it("withdraws the document's summary tree with the corrected chunks and queues strict removal of its rows", async () => {
+    // d2 has a ready tree built from the text the correction replaces; d3 has none yet (its build has not started).
+    for (const id of ["d2", "d3"]) {
+      await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+        values (${id}, 'o', 'u', 'w', 'r', ${`${id}.pdf`}, 'application/pdf', ${`k-${id}`}, 'completed', 1)`;
+      await sql`insert into document_corrections (id, document_id, run_id, user_id, corrected_markdown)
+        values (${`c-${id}`}, ${id}, 'r', 'u', 'Corrected text.')`;
+    }
+    await sql`insert into document_summary_trees (document_id, org_id, project_id, run_id, status, embedding_model, dimension, node_count, root_node_id, built_at, build_owner)
+      values ('d2', 'o', 'w', 'r', 'ready', 'model/x', 4, 1, 'd2:L1:0-3', now(), null)`;
+    await sql`insert into document_summary_tree_nodes (id, document_id, org_id, project_id, run_id, node_hash, level, status, chunk_start, chunk_end)
+      values ('d2:L1:0-3', 'd2', 'o', 'w', 'r', 'h', 1, 'ready', 0, 3)`;
+    await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      values ('root-d2', 'd2', 'r', 'u', 'Root from withdrawn text')`;
+    // A correction that is saved but not reindexed changes no chunk and withdraws nothing.
+    expect(await sql`select status from document_summary_trees where document_id = 'd2'`).toEqual([{ status: "ready" }]);
+
+    await reindexDocumentCorrection({ docId: "d2", userId: "u" });
+    await reindexDocumentCorrection({ docId: "d3", userId: "u" });
+
+    expect(await sql`select 1 from document_summaries where document_id = 'd2'`).toHaveLength(0);
+    const trees = await sql`select document_id, status, skip_reason, built_at, root_node_id, node_count, embedding_model, dimension
+      from document_summary_trees where document_id in ('d2', 'd3') order by document_id`;
+    expect(trees).toEqual([
+      // The embedding space stays on the row: it is where the queued removal looks for the rows.
+      { document_id: "d2", status: "skipped", skip_reason: "corrected", built_at: null, root_node_id: null, node_count: 0, embedding_model: "model/x", dimension: 4 },
+      { document_id: "d3", status: "skipped", skip_reason: "corrected", built_at: null, root_node_id: null, node_count: 0, embedding_model: null, dimension: null },
+    ]);
+    expect(await sql`select 1 from document_summary_tree_nodes where document_id = 'd2'`).toHaveLength(0);
+    const queued = await sql`select kind, org_id, target, payload, reason, attempts, not_before <= now() as due
+      from storage_cleanup_queue where kind = 'summary_tree_document' and target in ('o|w|d2', 'o|w|d3') order by target`;
+    expect(queued).toEqual([
+      { kind: "summary_tree_document", org_id: "o", target: "o|w|d2", payload: { projectId: "w", documentId: "d2", generation: 0 }, reason: "document_corrected", attempts: 0, due: true },
+      { kind: "summary_tree_document", org_id: "o", target: "o|w|d3", payload: { projectId: "w", documentId: "d3", generation: 0 }, reason: "document_corrected", attempts: 0, due: true },
+    ]);
+    // A second reindex makes a removal that had been failing due again.
+    await sql`update storage_cleanup_queue set attempts = 10, last_error = 'x' where target = 'o|w|d2'`;
+    await reindexDocumentCorrection({ docId: "d2", userId: "u" });
+    expect(await sql`select attempts, last_error from storage_cleanup_queue where target = 'o|w|d2'`).toEqual([{ attempts: 0, last_error: null }]);
+  });
+
   it("refuses cross-user corrections and rolls back geo edits without spatial capability", async () => {
     const { saveDocumentCorrection } = await import("../services/document-review.js");
     await sql`insert into "user" (id,name,email) values('outsider','Other','other@example.com')`;

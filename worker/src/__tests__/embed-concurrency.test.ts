@@ -47,6 +47,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage, embedPreambleMode } from "../stages/embed.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 
 class MemoryStorage {
   readonly bucket = "t";
@@ -79,7 +80,7 @@ const markdown = Array.from({ length: PAGES }, (_, page) =>
 ).join("\n\f");
 
 async function embedOnce(env: Record<string, string>, documents = ["doc"], pipelineOverrides: Record<string, unknown> = {}, allowFailure = false, text = markdown, runner: Partial<CommandRunner> = {}) {
-  Object.assign(process.env, env);
+  for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
   Object.assign(calls, { embed: 0, inFlight: 0, peak: 0, preamble: 0, progress: 0, pages: [] });
   const storage = new MemoryStorage();
   const docs: Document[] = [];
@@ -91,7 +92,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
       parserArtifactUri: `s3://t/u1/run/parser/${id}.json`, sourceArtifactUri: `s3://t/u1/run/source/${id}.pdf` };
     await storage.putJson(key, canonical);
     artifacts[`${id}:canonical-document`] = storage.uri(key);
-    docs.push({ id, userId: "u1", runId: "run", filename: "manual.pdf", mimeType: "application/pdf", sourceKey: "unused", parseSourceDecision: "unscanned-allowed",
+    docs.push({ id, userId: "u1", runId: "run", filename: "manual.pdf", mimeType: "application/pdf", sourceKey: "unused", parseSourceDecision: "original", sourceSha256: createHash("sha256").update(text).digest("hex"),
       status: "processing", extractionMode: "hybrid", pageCount: PAGES, createdAt: new Date(), updatedAt: new Date() });
   }
   const run = {
@@ -120,14 +121,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   return { state, artifact, materialized, objects: storage.objects, error, calls: { ...calls, pages: calls.pages.map((pages) => [...pages]) } };
 }
 
-const ENV_KEYS = ["DOCSLURP_SERVICE_PROFILE", "EMBED_BATCH_CONCURRENCY", "EMBED_PREAMBLE_MODE", "EMBED_PROGRESS_INTERVAL_MS", "DOCSLURP_EMBED_MAX_WINDOW_CHUNKS"];
-const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
-afterEach(() => {
-  for (const key of ENV_KEYS) {
-    if (saved[key] === undefined) delete process.env[key];
-    else process.env[key] = saved[key];
-  }
-});
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe("EmbedStage concurrency", () => {
   it("gives in-run duplicates their own chunk ids and indexable artifact without changing the original", async () => {
@@ -215,7 +209,7 @@ describe("EmbedStage concurrency", () => {
     const runner = {
       run: vi.fn(async (plan: { args: string[] }) => {
         order.push(`vm:preamble-started=${calls.preamble}`);
-        const [, input, output] = plan.args;
+        const [, input, output] = plan.args.slice(GUEST_NODE_FLAGS.length);
         const batch = JSON.parse(await readFile(input!, "utf8")) as string[];
         await sleep(30);
         await writeFile(output!, JSON.stringify(batch.map(() => null)));
@@ -237,7 +231,7 @@ describe("EmbedStage concurrency", () => {
     const runner = {
       run: vi.fn(async (plan: { args: string[] }) => {
         order.push(`vm:preamble-started=${calls.preamble}`);
-        const [, input, output] = plan.args;
+        const [, input, output] = plan.args.slice(GUEST_NODE_FLAGS.length);
         const batch = JSON.parse(await readFile(input!, "utf8")) as string[];
         await writeFile(output!, JSON.stringify(batch.map(() => null)));
         return { exitCode: 0, stdout: "", stderr: "" };

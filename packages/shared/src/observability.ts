@@ -4,7 +4,7 @@ import { SpanStatusCode } from "@opentelemetry/api";
 import { performance } from "node:perf_hooks";
 import { isCancellation } from "./cancellation.js";
 import { initializeObservability, observationTelemetry, mapsObservationAiUsage, withDependencyScope } from "./telemetry.js";
-export { initializeObservability, flushObservability, shutdownObservability, installObservabilitySignalHandlers, emitTelemetryLog, exportsOtlpLogs, withHttpSpan, withBackgroundSpan, recordMediaTelemetry, recordUnrecordedUsageTelemetry, startTelemetrySpan, recordChatAgentTelemetry, evalBaggageAttributes, activeTraceparent, EVAL_BAGGAGE_KEYS, type TelemetrySpan } from "./telemetry.js";
+export { initializeObservability, flushObservability, shutdownObservability, installObservabilitySignalHandlers, emitTelemetryLog, exportsOtlpLogs, withHttpSpan, withBackgroundSpan, recordMediaTelemetry, recordUnrecordedUsageTelemetry, recordFigureTelemetry, startTelemetrySpan, recordChatAgentTelemetry, evalBaggageAttributes, activeTraceparent, EVAL_BAGGAGE_KEYS, type TelemetrySpan } from "./telemetry.js";
 import {
   LangfuseOtelSpanAttributes,
   startActiveObservation,
@@ -229,7 +229,7 @@ export function aiResultDetails(result: {
 
 export { instrumentPostgres, type PostgresQueryHooks } from "./dependency-postgres.js";
 export { isTracingActive, startDependencySpan, withDependencySpan, setActiveSpanAttributes } from "./telemetry.js";
-export { instrumentFetch } from "./dependency-fetch.js";
+export { instrumentFetch, InvalidProviderResponseError } from "./dependency-fetch.js";
 export { isRouteLevelProviderFailure, operationErrorAttributes, operationErrorSummary } from "./operation-error.js";
 export { instrumentS3Client } from "./dependency-s3.js";
 export { recordUsageReceipt, usageTraceContext } from "./dependency-usage.js";

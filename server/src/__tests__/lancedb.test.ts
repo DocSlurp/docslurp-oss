@@ -8,9 +8,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   filterLanceDbRowsByDocumentIds,
+  lanceDbFullTextSearch,
   lanceDbVectorSearch,
+  lanceScopePlan,
   resetLanceDbConnectionForTests,
 } from "../search/lancedb.js";
+import { collectSearchTimings } from "../search/timings.js";
 
 let lancedbDir: string | null = null;
 
@@ -233,5 +236,88 @@ describe("filterLanceDbRowsByDocumentIds", () => {
 
     expect(filterLanceDbRowsByDocumentIds(rows)).toBe(rows);
     expect(filterLanceDbRowsByDocumentIds(rows, [])).toEqual([]);
+  });
+});
+
+describe("lanceScopePlan", () => {
+  const ids = Array.from({ length: 10 }, (_, i) => `doc-${i}`);
+  it("keeps the IN list without a hint, for long exclusions and when the exclusion is the larger side", () => {
+    expect(lanceScopePlan({ documentIds: ids, limit: 20 })).toEqual({ mode: "in", fetchLimit: 20 });
+    expect(lanceScopePlan({ documentIds: ids, excludedDocumentIds: Array.from({ length: 10 }, (_, i) => `x-${i}`), limit: 20 }).mode).toBe("in");
+    expect(lanceScopePlan({ documentIds: ids, excludedDocumentIds: ["x"], limit: 20 }, { SEARCH_LANCE_SCOPE_EXCLUDE_MAX: "0" }).mode).toBe("in");
+    const many = Array.from({ length: 1_000 }, (_, i) => `doc-${i}`);
+    expect(lanceScopePlan({ documentIds: many, excludedDocumentIds: Array.from({ length: 257 }, (_, i) => `x-${i}`), limit: 20 }).mode).toBe("in");
+  });
+  it("filters NOT IN a short exclusion (nothing when empty) and over-fetches", () => {
+    expect(lanceScopePlan({ documentIds: ids, excludedDocumentIds: [], limit: 20 })).toEqual({ mode: "exclude", excluded: [], fetchLimit: 40 });
+    expect(lanceScopePlan({ documentIds: ids, excludedDocumentIds: ["x", "x"], limit: 200 })).toEqual({ mode: "exclude", excluded: ["x"], fetchLimit: 300 });
+  });
+});
+
+describe("scoped LanceDB search without an IN list", () => {
+  const vec = (i: number) => [Math.cos(i / 10), Math.sin(i / 10), 0, 0];
+  const inScope = Array.from({ length: 30 }, (_, i) => `doc-${i}`);
+
+  beforeEach(async () => {
+    lancedbDir = await mkdtemp(path.join(tmpdir(), "docslurp-lancedb-scope-"));
+    process.env.LANCEDB_URI = lancedbDir;
+    resetLanceDbConnectionForTests();
+  });
+  afterEach(async () => {
+    resetLanceDbConnectionForTests();
+    delete process.env.LANCEDB_URI;
+    delete process.env.SEARCH_LANCE_SCOPE_EXCLUDE_MAX;
+    if (lancedbDir) await rm(lancedbDir, { recursive: true, force: true });
+    lancedbDir = null;
+  });
+
+  /** In-scope rows, plus `foreign` rows of a document the caller never authorized, all nearest the query. */
+  async function plant(foreign: number) {
+    const { table, close } = await openProjectTable([
+      ...inScope.map((documentId, i) => ({ id: `chunk-${i}`, documentId, text: `alpha chunk ${i}`, vector: vec(i + 5) })),
+      ...Array.from({ length: foreign }, (_, i) => ({ id: `foreign-${i}`, documentId: i % 2 ? "doc-foreign" : "doc-deleted", text: "alpha alpha alpha", vector: vec(0) })),
+    ]);
+    await table.createIndex("text", { config: lancedb.Index.fts() });
+    close();
+  }
+
+  it("never returns a planted row outside the eligible set, and still fills the limit", async () => {
+    await plant(1);
+    const { value: hits, timings } = await collectSearchTimings(() => search({ queryVector: vec(0), documentIds: inScope, excludedDocumentIds: [], limit: 5 }));
+    expect(hits).toHaveLength(5);
+    expect(hits.every((hit) => inScope.includes(hit.documentId))).toBe(true);
+    expect(timings.lanceScopeExclude).toBe(1);
+    expect(timings.lanceScopeFallback).toBeUndefined();
+  });
+
+  it("falls back to the exact IN list when foreign rows starve the over-fetched top-k", async () => {
+    await plant(40);
+    const { value: hits, timings } = await collectSearchTimings(() => search({ queryVector: vec(0), documentIds: inScope, excludedDocumentIds: [], limit: 5 }));
+    expect(hits.map((hit) => hit.id)).toEqual(["chunk-0", "chunk-1", "chunk-2", "chunk-3", "chunk-4"]);
+    expect(timings.lanceScopeFallback).toBe(1);
+  });
+
+  it("guards against a wrong hint: a document left out of documentIds but not listed as excluded never returns", async () => {
+    await plant(0);
+    const scope = inScope.filter((id) => id !== "doc-0");
+    const hits = await search({ queryVector: vec(5), documentIds: scope, excludedDocumentIds: [], limit: 5 });
+    expect(hits).toHaveLength(5);
+    expect(hits.some((hit) => hit.documentId === "doc-0")).toBe(false);
+    // Listed exclusions are filtered before ranking, with quotes kept literal.
+    const listed = await search({ queryVector: vec(5), documentIds: scope, excludedDocumentIds: ["doc-0", "x' OR '1'='1"], limit: 5 });
+    expect(listed.map((hit) => hit.id)).toEqual(["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"]);
+  });
+
+  it("applies the same guard and fallback to native BM25", async () => {
+    await plant(40);
+    const fts = (excludedDocumentIds?: string[]) => collectSearchTimings(() => lanceDbFullTextSearch({ orgId: "org-a", projectId: "ws-a", embeddingModel: MODEL,
+      dimension: 4, query: "alpha", documentIds: inScope, excludedDocumentIds, limit: 5 }));
+    const exact = await fts();
+    const planned = await fts([]);
+    expect(planned.value.indexed).toBe(true);
+    expect(planned.value.hits).toHaveLength(5);
+    expect(planned.value.hits.every((hit) => inScope.includes(hit.documentId))).toBe(true);
+    expect(planned.value.hits.map((hit) => hit.id)).toEqual(exact.value.hits.map((hit) => hit.id));
+    expect(planned.timings.lanceScopeFallback).toBe(1);
   });
 });

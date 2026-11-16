@@ -51,8 +51,10 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('deadline-user', 'Deadline', 'deadline@example.test')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('deadline-org', 'Deadline', 'deadline-org', 'deadline-user', 10)`;
   await sql`insert into projects(id, org_id, user_id, name) values ('deadline-ws', 'deadline-org', 'deadline-user', 'Deadline')`;
-  await sql`insert into project_runs(id, org_id, project_id, user_id, kind, status, stage, pipeline, control_state, pause_reason)
-    values ('deadline-run', 'deadline-org', 'deadline-ws', 'deadline-user', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+  await sql`insert into project_runs(monthly_reservation_cents,id, org_id, project_id, user_id, kind, status, stage, pipeline, control_state, pause_reason)
+    values (100, 'deadline-run', 'deadline-org', 'deadline-ws', 'deadline-user', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+  await sql`insert into documents(id,org_id,project_id,user_id,run_id,filename,mime_type,source_key,status,file_size)
+    values('deadline-doc','deadline-org','deadline-ws','deadline-user','deadline-run','measured.txt','text/plain','raw/measured','processing',1000)`;
 }, 60000);
 
 afterAll(async () => {
@@ -60,9 +62,12 @@ afterAll(async () => {
   for (const session of sessions) session.destroy();
   await new Promise<void>(resolve => grpc.close(() => resolve()));
   await sql?.end(); await stop?.();
-  for (const [key, value] of [["WORKER_CREDIT_LEASES", previous.leases], ["CHAT_CREDIT_RESERVE_CREDITS", previous.funded], ["CHAT_CREDIT_RESERVE_STARTER_CREDITS", previous.starter]]) {
-    if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
-  }
+  if (previous.leases === undefined) delete process.env.WORKER_CREDIT_LEASES;
+  else process.env.WORKER_CREDIT_LEASES = previous.leases;
+  if (previous.funded === undefined) delete process.env.CHAT_CREDIT_RESERVE_CREDITS;
+  else process.env.CHAT_CREDIT_RESERVE_CREDITS = previous.funded;
+  if (previous.starter === undefined) delete process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS;
+  else process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS = previous.starter;
 });
 
 it("cancels a stalled resume RPC, releases SQL/credit locks and retries without a false resume", async () => {

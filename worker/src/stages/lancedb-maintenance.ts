@@ -1,3 +1,5 @@
+import { LANCEDB_SUMMARIES_TABLE } from "@docslurp/shared";
+import { vectorIndexConfig } from "./lancedb-vector-index.js";
 import { Index, type Connection, type Table } from "@lancedb/lancedb";
 import { performance } from "node:perf_hooks";
 import { connectLanceDb } from "./lancedb-connection.js";
@@ -391,13 +393,6 @@ export async function ensureChunkTextFtsIndex(
   return { rebuilt: true, ms: Math.round(performance.now() - started) };
 }
 
-/** Choose ANN parameters; L2 matches the app's default vectorSearch distance. */
-function vectorIndexConfig(rows: number): Index {
-  // HNSW_SQ needs no PQ training minimum (IVF_PQ requires >= 256 rows) and keeps 8-bit
-  // scalar codes, so recall stays high without a refine step at query time.
-  return Index.hnswSq({ distanceType: "l2", numPartitions: Math.max(1, Math.ceil(rows / 1_000_000)) });
-}
-
 export async function runLanceDbMaintenance(
   uri: string,
   tableName: string,
@@ -421,6 +416,15 @@ export async function runLanceDbMaintenance(
     // and folds newly written rows into any existing indices (as one new index segment).
     const optimizeStarted = performance.now();
     const stats = await table.optimize(optimizeOptions());
+    if (retentionMs !== undefined && retentionMs <= 0) {
+      // Erasure: the pass above keeps the version it compacted from (versions the call itself
+      // creates are newer than its cutoff), and that version still references the fragment
+      // holding the deleted rows. A second pass prunes it.
+      const pruned = await table.optimize(optimizeOptions());
+      stats.compaction.fragmentsRemoved += pruned.compaction.fragmentsRemoved;
+      stats.prune.oldVersionsRemoved += pruned.prune.oldVersionsRemoved;
+      stats.prune.bytesRemoved += pruned.prune.bytesRemoved;
+    }
     optimizedMs = Math.round(performance.now() - optimizeStarted);
     rows = await table.countRows();
     let indices = await table.listIndices();
@@ -447,6 +451,15 @@ export async function runLanceDbMaintenance(
     if (rows >= ID_INDEX_MIN_ROWS && !indices.some((index) => index.columns.includes("id"))) {
       // merge-insert joins on "id"; a btree lets it look keys up instead of scanning the table.
       await table.createIndex("id", { config: Index.btree(), replace: false });
+    }
+    // The summaries table is read only by documentId (every search prefilters on it), so it is indexed at any size.
+    const documentIdIndexMinRows = tableName === LANCEDB_SUMMARIES_TABLE ? 1 : ID_INDEX_MIN_ROWS;
+    if (rows >= documentIdIndexMinRows && !indices.some((index) => index.columns.includes("documentId"))) {
+      // Search scopes every query by documentId (an IN list, or NOT IN a few excluded documents)
+      // and purges delete by it. BTREE rather than BITMAP: a large project holds thousands of
+      // distinct documents, and LanceDB recommends BITMAP only below a few hundred distinct values.
+      // Rows written later are folded into it by optimize(), like the other indexes.
+      await table.createIndex("documentId", { config: Index.btree(), replace: false });
     }
     if (lanceDbFtsIndexEnabled() && rows > 0) {
       fts = await ensureChunkTextFtsIndex(table, indices, { key: lanceMaintenanceKey(uri, tableName) });

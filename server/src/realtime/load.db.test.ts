@@ -17,8 +17,8 @@ beforeAll(async()=>{
   await sql`insert into organizations(id,name,slug,created_by_user_id) values('load-org','Test','load','load-owner')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('load-org','load-owner','owner') on conflict do nothing`;
   await sql`insert into projects(id,org_id,user_id,name) values('load-w','load-org','load-owner','Test')`;
-  for(let n=0;n<10;n++) await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
-    values(${`load-${n}`},'load-org','load-owner','load-w','upload','processing','vision-extract')`;
+  for(let n=0;n<10;n++) await sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage)
+    values(100, ${`load-${n}`},'load-org','load-owner','load-w','upload','processing','vision-extract')`;
 },120000);
 afterAll(async()=>{await sql?.end();await stop?.();});
 
@@ -57,7 +57,7 @@ it("measures the frozen matched local workload without provider calls",async()=>
         const rejoin=scenario==="reconnect"&&second===8;
         if(rejoin&&arm==="broker") await subscribe();
         const tick=performance.now();
-        if(arm==="broker") await broker.tick();
+        if(arm==="broker") while(!await broker.tick()) await new Promise(done=>setTimeout(done,2)); // a subscribe's own first-snapshot sweep may still be running
         else if(second===0||rejoin||changed||second-refresh>=10){
           for(const resource of resources){const data=await measured.project("load-owner",resource);for(let n=0;n<10;n++)deliver(resource,data);}
           refresh=second;

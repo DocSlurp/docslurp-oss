@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -79,6 +79,111 @@ describe("range math", () => {
 });
 
 describe("serveCachedRequest", () => {
+  it("revalidates external deletions and revoked access, including after restart", async () => {
+    let now = 0;
+    const objects = { [KEY]: object };
+    const up = fakeUpstream(objects);
+    const cache = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: B, now: () => now });
+    expect(bytes(await get(cache, up, "bytes=0-9")).status).toBe(206);
+    delete (objects as Record<string, Buffer>)[KEY];
+    now = 29_999;
+    expect(bytes(await get(cache, up, "bytes=0-9")).outcome).toBe("hit");
+    now = 30_000;
+    expect(bytes(await get(cache, up, "bytes=0-9")).status).toBe(404);
+    expect(await cache.getMeta(DiskBlockCache.objectId("ns", "bkt", KEY))).toBeUndefined();
+    objects[KEY] = object;
+    await get(cache, up, "bytes=0-9");
+    const restarted = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: B });
+    const denied = { calls: [], fetchUpstream: async () => ({ status: 403, headers: {}, body: Buffer.alloc(0) }) };
+    const response = bytes(await get(restarted, denied, "bytes=0-9"));
+    expect(response.status).toBe(403);
+    expect(response.body.length).toBe(0);
+    expect(await restarted.getMeta(DiskBlockCache.objectId("ns", "bkt", KEY))).toBeUndefined();
+  });
+
+  it.each([403, 404, 503])("a missing-block origin refusal revokes every cached range immediately (%s)", async (status) => {
+    const cache = cacheOf();
+    await get(cache, fakeUpstream({ [KEY]: object }), "bytes=0-9");
+    const denied = { calls: [], fetchUpstream: async () => ({ status, headers: {}, body: Buffer.alloc(0) }) };
+    expect(bytes(await get(cache, denied, "bytes=16-25")).status).toBe(status);
+    expect(cache.entries).toBe(0);
+    expect(bytes(await get(cache, denied, "bytes=0-9")).status).toBe(status);
+  });
+
+  it("a failed missing-block origin connection invalidates previously cached ranges", async () => {
+    const cache = cacheOf();
+    await get(cache, fakeUpstream({ [KEY]: object }), "bytes=0-9");
+    await expect(get(cache, { calls: [], fetchUpstream: async () => { throw new Error("offline"); } }, "bytes=16-25")).rejects.toThrow("offline");
+    expect(cache.entries).toBe(0);
+  });
+
+  it.each([{ refusal: 403, viaHead: true }, { refusal: 404, viaHead: true }, { refusal: 403, viaHead: false }, { refusal: 404, viaHead: false }])("never lets a pre-refusal fill resurrect bytes or renew an invalidated authorization lease (%j)", async ({ refusal, viaHead }) => {
+    let now = 0;
+    const cache = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: B, now: () => now });
+    const up = fakeUpstream({ [KEY]: object });
+    await get(cache, up, "bytes=0-9");
+    let release!: () => void;
+    let started!: () => void;
+    const fetching = new Promise<void>((r) => { started = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    now = 29_999;
+    const delayed = get(cache, { calls: [], fetchUpstream: async (method, range) => {
+      started(); await gate; return up.fetchUpstream(method, range);
+    } }, "bytes=16-25");
+    await fetching;
+    now = viaHead ? 30_000 : 29_999;
+    const denied = { calls: [], fetchUpstream: async () => ({ status: refusal, headers: {}, body: Buffer.alloc(0) }) };
+    expect(bytes(await get(cache, denied, viaHead ? "bytes=0-9" : "bytes=32-41")).status).toBe(refusal);
+    release();
+    expect(await delayed).toMatchObject({ kind: "bypass", reason: "object-invalidated" });
+    expect(bytes(await get(cache, denied, "bytes=16-25")).status).toBe(refusal);
+    expect(cache.entries).toBe(0);
+  });
+
+  it("expires orphan blocks whose metadata was evicted separately", async () => {
+    let now = 0;
+    const cache = new DiskBlockCache({ dir, maxBytes: 80, blockBytes: B, now: () => now });
+    await cache.ready;
+    const id = DiskBlockCache.objectId("ns", "bkt", KEY);
+    await cache.setMeta(id, { size: 100, bucket: "bkt", key: KEY, etag: '"e"' });
+    await cache.writeBlock(id, 0, Buffer.alloc(16));
+    expect(cache.entries).toBe(1);
+    expect(await cache.getMeta(id)).toBeUndefined();
+    now = 10 * 60_000;
+    await cache.expireIdleObjects();
+    expect(cache.entries).toBe(0);
+  });
+
+  it("purges idle deleted bytes without waiting for another read or size eviction", async () => {
+    let now = Date.now();
+    const cache = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: B, now: () => now });
+    await get(cache, fakeUpstream({ [KEY]: object }), "bytes=0-9");
+    expect(cache.entries).toBeGreaterThan(0);
+    now += 5 * 60_000;
+    await cache.expireIdleObjects();
+    expect(cache.entries).toBe(0);
+    const disk = await readdir(dir, { recursive: true });
+    expect(disk.filter((name) => name.endsWith("meta.json") || /\/\d+$/.test(name))).toEqual([]);
+  });
+
+  it("replaces bytes when origin ETag changes and never serves stale bytes during an outage", async () => {
+    let now = 0;
+    const cache = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: B, now: () => now });
+    await get(cache, fakeUpstream({ [KEY]: object }), "bytes=0-9");
+    now = 30_000;
+    const replacement = Buffer.alloc(100, 7);
+    const replacementUpstream = fakeUpstream({ [KEY]: replacement }, '"e2"');
+    // A replacement invalidates in-flight generations. The proxy forwards this request
+    // to origin, while a subsequent request may fill the newly validated object.
+    expect(await get(cache, replacementUpstream, "bytes=0-9")).toMatchObject({ kind: "bypass", reason: "object-changed" });
+    const fresh = bytes(await get(cache, replacementUpstream, "bytes=0-9"));
+    expect(fresh.body.equals(replacement.subarray(0, 10))).toBe(true);
+    now = 60_000;
+    const offline = { calls: [], fetchUpstream: async () => ({ status: 503, headers: {}, body: Buffer.alloc(0) }) };
+    expect(bytes(await get(cache, offline, "bytes=0-9")).status).toBe(503);
+    expect(cache.entries).toBe(0);
+  });
+
   it("serves exact bytes with correct headers and answers overlapping ranges from cache", async () => {
     const cache = cacheOf(); const up = fakeUpstream({ [KEY]: object });
     const a = bytes(await get(cache, up, "bytes=10-40"));
@@ -259,7 +364,7 @@ describe("DiskBlockCache", () => {
     expect((await readdir(join(dir, id.slice(0, 2), id))).some((f) => f.includes(".tmp-"))).toBe(false);
     up.calls.length = 0;
     expect(bytes(await get(second, up, "bytes=20-70")).outcome).toBe("hit");
-    expect(up.calls).toEqual([]);
+    expect(up.calls).toEqual(["HEAD "]); // restart revalidates persisted bytes
     const small = new DiskBlockCache({ dir, maxBytes: 64, blockBytes: B, log: () => undefined });
     await small.ready;
     expect(small.sizeBytes).toBeLessThanOrEqual(64);
@@ -274,5 +379,72 @@ describe("DiskBlockCache", () => {
     expect(line).toContain("cache_bytes_served=16");
     expect(cache.summaryFragment()).toContain("cache_hits=0 cache_misses=0");
     expect(cache.cumulative.hits).toBe(1);
+  });
+});
+
+describe("cache directory ownership", () => {
+  const upstreamOf = (body: Buffer) => fakeUpstream({ [KEY]: body });
+  const read = (cache: DiskBlockCache, fetchUpstream: ReturnType<typeof fakeUpstream>["fetchUpstream"]) =>
+    serveCachedRequest({ cache, namespace: "h:", method: "GET", bucket: "b", key: KEY, headers: { range: "bytes=0-9" }, fetchUpstream });
+
+  it("keeps the directory and every file private to this user", async () => {
+    await chmod(dir, 0o755);
+    const cache = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B });
+    await cache.ready;
+    await read(cache, upstreamOf(Buffer.alloc(40, 7)).fetchUpstream);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    const modes: number[] = [];
+    const walk = async (path: string): Promise<void> => {
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        const child = join(path, entry.name);
+        modes.push((await stat(child)).mode & 0o077);
+        if (entry.isDirectory()) await walk(child);
+      }
+    };
+    await walk(dir);
+    expect(modes.length).toBeGreaterThan(3);
+    expect(modes.every((mode) => mode === 0)).toBe(true);
+  });
+
+  it("refuses a directory that group or others can write", async () => {
+    await chmod(dir, 0o777);
+    const cache = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B });
+    await expect(cache.ready).rejects.toThrow(/writable by group or others/);
+  });
+
+  it("refuses a symbolic link, and a parent others can rename entries in", async () => {
+    const real = join(dir, "real");
+    await mkdir(join(real, "ab"), { recursive: true });
+    await writeFile(join(real, "ab", "victim"), "keep");
+    await symlink(real, join(dir, "link"));
+    await expect(new DiskBlockCache({ dir: join(dir, "link"), maxBytes: 1 << 20, blockBytes: B }).ready).rejects.toThrow(/symbolic link/);
+    expect(await readFile(join(real, "ab", "victim"), "utf8")).toBe("keep");
+    await chmod(dir, 0o777);
+    await expect(new DiskBlockCache({ dir: join(dir, "cache"), maxBytes: 1 << 20, blockBytes: B }).ready).rejects.toThrow(/sticky bit/);
+    await chmod(dir, 0o1777);
+    await new DiskBlockCache({ dir: join(dir, "cache"), maxBytes: 1 << 20, blockBytes: B }).ready;
+    await chmod(dir, 0o700);
+  });
+
+  it("empties its own shards when the block size changed, and leaves other files alone", async () => {
+    const first = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B });
+    await first.ready;
+    await read(first, upstreamOf(Buffer.alloc(40, 7)).fetchUpstream);
+    expect(first.sizeBytes).toBeGreaterThan(0);
+    await mkdir(join(dir, "not-ours"));
+    await writeFile(join(dir, "not-ours", "keep.txt"), "keep");
+    const second = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B * 2 });
+    await second.ready;
+    expect((await readdir(dir)).filter((name) => /^[0-9a-f]{2}$/.test(name))).toEqual([]);
+    expect(await readFile(join(dir, "not-ours", "keep.txt"), "utf8")).toBe("keep");
+    expect(JSON.parse(await readFile(join(dir, "layout.json"), "utf8"))).toEqual({ blockBytes: B * 2 });
+    // Same block size again: the cache is kept.
+    const upstream = upstreamOf(Buffer.alloc(40, 7));
+    await read(second, upstream.fetchUpstream);
+    const third = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B * 2 });
+    await third.ready;
+    const again = upstreamOf(Buffer.alloc(40, 7));
+    await read(third, again.fetchUpstream);
+    expect(again.calls.filter((call) => call.startsWith("GET"))).toEqual([]);
   });
 });

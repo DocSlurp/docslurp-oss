@@ -19,9 +19,9 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x'), ('u2', 'B', 'b@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1'), ('o2', 'Other', 'other', 'u2');
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u2', 'W2');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values ('run-1', 'o1', 'u1', 'w1', 'upload', 'processing', 'render-images', '{}', 3),
-             ('run-2', 'o2', 'u2', 'w2', 'upload', 'processing', 'render-images', '{}', 1);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'run-1', 'o1', 'u1', 'w1', 'upload', 'processing', 'render-images', '{}', 3),
+             (100, 'run-2', 'o2', 'u2', 'w2', 'upload', 'processing', 'render-images', '{}', 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, source_sha256)
       values ('hostile', 'o1', 'u1', 'w1', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 1, 'aaaa'),
              ('same-bytes-other-org', 'o2', 'u2', 'w2', 'run-2', 'b.pdf', 'application/pdf', 'k2', 'processing', 1, 'aaaa'),

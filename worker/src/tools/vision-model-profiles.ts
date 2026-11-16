@@ -4,7 +4,7 @@ import { nitroBaseModel } from "@docslurp/shared";
  * OpenRouter model id. Models without an entry keep the generic defaults.
  */
 
-import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/shared";
+import { openRouterReasoningParams, type OpenRouterReasoning, type VisionRequestProfile } from "@docslurp/shared";
 
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
@@ -68,7 +68,7 @@ export interface OpenRouterProviderPreferences {
  */
 export type OpenRouterRoute =
   | OpenRouterProviderPreferences
-  | { only: string[]; sort: "price" | "latency"; allow_fallbacks: boolean };
+  | { only: string[]; sort: "price" | "latency"; allow_fallbacks: boolean; ignore?: string[] };
 
 export interface VisionModelProfile {
   /** Prompt template key used in place of the generic `<OCR>` default. Explicit other keys are kept. */
@@ -99,6 +99,8 @@ export interface VisionModelProfile {
   contentFilterRetryProvider?: OpenRouterProviderPreferences;
   /** Repair applied to the model's transcription text. */
   postProcess?: (text: string) => string;
+  /** Request shape for this hosted model (prompt mode, sampling, output cap, page long edge); see vision-request-profile.ts. */
+  request?: VisionRequestProfile;
 }
 
 /** Add a model with one entry; add a template to `visionPromptTemplates` only if it needs a new prompt. */
@@ -140,15 +142,24 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   // detail "high" caps image tokens ~7% below the default. Downscaling to a 1,600 px long side saved another ~13%
   // but blurred dense non-Latin script (Hebrew content F1 0.99 -> 0.95), so pages go at full size.
   // Probes: effort none, minimal and `{ enabled: false }` all return 200; unset spends ~240 reasoning tokens on a page.
+  // The default vision model since 2026-11-13. One 180°-rotated table page ran to the 16k shared cap on the 2026-10-21
+  // holdout (168 s); the 8k ceiling the previous default had bounds such loops and can only lower a smaller shared cap.
   "openai/gpt-6-luna": {
     defaultPrompt: "page-markdown-latex",
+    maxOutputTokens: 8_192,
+    maxOutputTokensMode: "ceiling",
     imageDetail: "high",
     reasoning: { effort: "none" },
     // Rare: some models wrap the whole page in a ```markdown fence.
     postProcess: unwrapWholeMarkdownFence,
     // OpenAI's output filter deterministically stops some ordinary published pages (corporate filings,
-    // government guidance) mid-page; Bedrock and Azure US transcribed them. Bedrock lists $0.11/$0.55 per M.
+    // government guidance) mid-page; Bedrock and Azure US transcribed them. Both list $0.11/$0.55 per M, so the catalog
+    // prices Luna as this pinned route at that price: the request's max_price must admit the retry hosts (at $0.10/$0.50
+    // they answered 404, live 2026-11-13).
     contentFilterRetryProvider: { order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false },
+    // OpenAI first (cheapest allowed), the retry hosts as fallbacks. OpenAI's Flex tier is cheaper but queues requests
+    // (Flex latency); page reads must not land there.
+    openRouterProvider: { only: ["openai", "amazon-bedrock/us-east-1", "azure/us"], ignore: ["openai/flex"], sort: "price", allow_fallbacks: true },
   },
   // 2026-10-21 tune split (68 pages): with `<OCR>` GLM writes math as Unicode prose and matrices as
   // box-drawing art, and describes figures ("[Figure: plot of …]"); the template lifts content F1 0.922 -> 0.963,
@@ -191,7 +202,7 @@ export function openRouterProviderParams(model: string | undefined): { provider?
   const provider = visionModelProfile(model)?.openRouterProvider;
   if (!provider) return {};
   return "only" in provider
-    ? { provider: { only: [...provider.only], sort: provider.sort, allow_fallbacks: provider.allow_fallbacks } }
+    ? { provider: { only: [...provider.only], sort: provider.sort, allow_fallbacks: provider.allow_fallbacks, ...(provider.ignore ? { ignore: [...provider.ignore] } : {}) } }
     : { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } };
 }
 

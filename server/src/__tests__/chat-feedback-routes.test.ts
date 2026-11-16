@@ -2,10 +2,10 @@ import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // DB-backed cases run only when a migrated database is provided, e.g.
-// CHAT_FEEDBACK_TEST_DATABASE_URL=postgres://docslurp:docslurp@127.0.0.1:55432/docslurp_test
+// TEST_DATABASE_URL=postgres://docslurp:docslurp@127.0.0.1:55432/docslurp_test
 // They seed (and remove) their own user, organization and project unless
 // CHAT_FEEDBACK_TEST_USER_ID and CHAT_FEEDBACK_TEST_PROJECT_ID name existing rows.
-const testDatabaseUrl = process.env.CHAT_FEEDBACK_TEST_DATABASE_URL?.trim();
+const testDatabaseUrl = process.env.TEST_DATABASE_URL?.trim();
 if (testDatabaseUrl) {
   process.env.DATABASE_URL = testDatabaseUrl;
 }

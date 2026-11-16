@@ -3,6 +3,7 @@
 // WebAssembly module with a plain JSON ABI (src/abi.rs); this file loads it in browsers, Node, Deno and edge runtimes.
 
 import { blobSource, eventStream, runEstimate } from "./run.mjs";
+import { blobRangeSource, driveRangeJsonl } from "./range.mjs";
 
 export { yieldToEventLoop } from "./run.mjs";
 
@@ -45,8 +46,10 @@ export async function createEstimator(options = {}) {
   const instantiate = () => new WebAssembly.Instance(module, { env: { memory } });
   let instance = instantiate();
   const health = { calls: 0, crashes: 0, resets: 0 };
+  let detailActive = null;
 
   function call(name, ...inputs) {
+    if (detailActive && name === "ds_probe") throw new EstimatorError("invalid_request", "close the detailed profile before a legacy probe");
     const exports = instance.exports;
     let packed;
     health.calls += 1;
@@ -70,6 +73,7 @@ export async function createEstimator(options = {}) {
         // A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
         // inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
         health.crashes += 1;
+        detailActive = null;
         new Uint8Array(memory.buffer).fill(0);
         instance = instantiate();
         health.resets += 1;
@@ -114,13 +118,39 @@ export async function createEstimator(options = {}) {
       const tail = plan.tail > 0 ? new Uint8Array(await blob.slice(blob.size - plan.tail).arrayBuffer()) : undefined;
       return estimator.profile(file, head, tail);
     },
+    /** Incrementally profile an immutable Blob through bounded range reads. */
+    async *profileJsonl(blob, options = {}) {
+      yield* estimator.profileSourceJsonl(blobRangeSource(blob), options);
+    },
+    /** Local range source: only requested bounded byte slices enter WASM. */
+    async *profileSourceJsonl(source, options = {}) {
+      if (detailActive) {
+        await source.close?.();
+        throw new EstimatorError("invalid_request", "a detailed profile is already active");
+      }
+      const { signal, ...config } = options;
+      const token = {};
+      detailActive = token;
+      const ownedCall = (name, ...inputs) => {
+        if (detailActive !== token) {
+          if (name === "ds_range_close") return true;
+          throw new EstimatorError("crashed", "detailed profile session was reset");
+        }
+        return call(name, ...inputs);
+      };
+      try {
+        yield* driveRangeJsonl(ownedCall, null, source, config, signal);
+      } finally {
+        if (detailActive === token) detailActive = null;
+      }
+    },
     /** Profile files with progress events, cancellation and per-file fallbacks; see `estimateFiles`. */
     estimateFiles(blobs, options) {
       return estimateFiles(estimator, blobs, options);
     },
     /** Calls into the module, and how many trapped and were recovered by a fresh instance. */
     health() {
-      return { ...health };
+      return { ...health, memoryBytes: memory.buffer.byteLength };
     },
   };
   return estimator;

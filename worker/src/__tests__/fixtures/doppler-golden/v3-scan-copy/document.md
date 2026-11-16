@@ -1,0 +1,5 @@
+![page 1 scan](images/page-0001/image-001.jpg)This is a benign paragraph line number 0 used to give the page some body text. This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.
+
+![image](images/page-0003/image-001.webp)
+
+This is a benign paragraph line number 0 used to give the page some body text. This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.

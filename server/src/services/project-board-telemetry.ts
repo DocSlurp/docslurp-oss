@@ -108,10 +108,6 @@ export async function listProjectBoardSummaries(
   const rows = await sql<ProjectBoardSummaryRow[]>`
     with requested_projects as (
       select jsonb_array_elements_text(${sql.json(projectIds)}::jsonb) as id
-    ), normalized_search_sessions as (
-      select id, result_count, case when jsonb_typeof(metadata) = 'string'
-        then (metadata #>> '{}')::jsonb else metadata end as metadata
-      from search_sessions
     ), document_summary as (
       -- Current corpus (completed, not superseded) from trigger-maintained counters.
       select
@@ -164,15 +160,19 @@ export async function listProjectBoardSummaries(
       group by docs.project_id
     ),
     search_summary as (
+      -- Trigger-maintained counters (0165), never the sessions themselves. The duration sum is exact numeric,
+      -- so sum / count is the same double avg() returned for the integer milliseconds searches record.
       select
-        s.metadata ->> 'projectId' as project_id,
-        count(*)::int as search_sessions,
-        coalesce(sum(s.result_count), 0)::int as search_result_count,
-        count(*) filter (where s.result_count = 0)::int as zero_result_searches,
-        avg((s.metadata ->> 'durationMs')::double precision) as average_search_ms
-      from normalized_search_sessions s
-      where s.metadata ->> 'projectId' in (select id from requested_projects)
-      group by s.metadata ->> 'projectId'
+        a.project_id,
+        sum(a.search_sessions)::int as search_sessions,
+        sum(a.search_result_count)::int as search_result_count,
+        sum(a.zero_result_searches)::int as zero_result_searches,
+        case when sum(a.search_duration_count) > 0
+          then sum(a.search_duration_ms)::double precision / sum(a.search_duration_count)::double precision
+        end as average_search_ms
+      from project_activity_stats a
+      where a.project_id in (select id from requested_projects)
+      group by a.project_id
     ),
     usage_project_scope as (
       select

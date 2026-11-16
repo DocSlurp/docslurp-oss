@@ -2,7 +2,7 @@ import { GeoSearchError } from "./geo-scope.js";
 import { boundedSearchQuery, isSearchBoundError } from "./query-bounds.js";
 import { retrievalScope } from "./retrieval-scope.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
-import { qualifyCommunitySummary } from "./community-context.js";
+import { qualifyCommunityResults, searchChunkToResult } from "./search-result.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import type { SearchResult } from "@docslurp/shared";
 
@@ -11,7 +11,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
-import { recordSearchPhase, timePhase } from "./timings.js";
+import { countSearchEvent, emitSearchPhase, recordSearchPhase, timePhase } from "./timings.js";
 import { mmrSelectWithDiagnostics } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankHosted } from "./hosted-rerank.js";
@@ -38,6 +38,9 @@ import {
   recordZeroResultDiagnostics,
 } from "../services/search-controls.js";
 import { leanSearchHistory } from "./lean-logging.js";
+import { capIncludedSummaries, placeGuidedChunks, summaryTreeOutcome, type SummaryTreeLegResult, type SummaryTreeSearchPlan } from "./summary-tree.js";
+
+export { searchChunkToResult };
 
 export interface SearchSessionExecutionInput {
   query: string;
@@ -84,41 +87,11 @@ export interface SearchSessionRetrievalInput
   rerankScope?: { orgId: string; projectId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
-}
-
-export function searchChunkToResult(chunk: SearchChunk): SearchResult {
-  const stage = chunk.deferredLocator ?? (chunk.retrievalStage === "page-index" ? "page-text" : "chunk");
-  return {
-    text: chunk.text,
-    score: chunk.score,
-    ...(chunk.relevance === undefined ? {} : { relevance: chunk.relevance }),
-    citation: {
-      source: chunk.source,
-      documentId: chunk.documentId,
-      filename: chunk.filename,
-      pageNumber: chunk.pageNumber,
-      pageNumbers: chunk.pageNumbers,
-      headingPath: chunk.headingPath,
-      chunkIndex: chunk.chunkIndex,
-      blockIds: chunk.blockIds,
-      blockTypes: chunk.blockTypes,
-      evidenceType: chunk.evidenceType,
-      canonicalDocumentUri: chunk.canonicalDocumentUri,
-      tableGranularity: chunk.tableGranularity,
-      tableRowIndex: chunk.tableRowIndex,
-      tableRowCount: chunk.tableRowCount,
-      tableColumnNames: chunk.tableColumnNames,
-      tableColumnTypes: chunk.tableColumnTypes,
-      tableCells: chunk.tableCells,
-      tableCell: chunk.tableCell,
-      regionBoxes: chunk.regionBoxes,
-      regions: chunk.regions,
-      regionCoordinateSpace: chunk.regionCoordinateSpace,
-      sourceTrace: chunk.sourceTrace ?? undefined,
-      locator: chunk.locator ?? null,
-    },
-    ...(stage === "chunk" ? {} : { retrieval: { stage } }),
-  };
+  /**
+   * The summary-tree leg of this search (search/summary-tree.ts). `result()` is read after `retrieveCandidateLists`
+   * settles; null means the leg did not run.
+   */
+  summaryTree?: { plan: SummaryTreeSearchPlan; result(): SummaryTreeLegResult | null };
 }
 
 export function searchResultsToChunks(results: SearchResult[]): SearchChunk[] {
@@ -202,12 +175,14 @@ export async function applySearchPostRetrievalProcessing(
   }));
 
   if (input.options.useRerank) {
+    const rerankStarted = performance.now();
     const reranked = input.options.rerankProvider === "deepinfra"
       ? await rerankHosted({ query: input.query, chunks: ranked, model: input.options.rerankModel,
           apiKey: input.rerankApiKey, scope: input.rerankScope,
           privacyMode: input.privacyMode, session: input.session })
       : rerankBM25(input.query, ranked);
     ranked = fuseWithRerank(ranked, reranked);
+    emitSearchPhase("rerank", performance.now() - rerankStarted);
   }
 
   if (input.options.useContextualCompression) {
@@ -316,7 +291,7 @@ export async function executeSearchSessionRetrieval(
       input.options.useMmr ||
       input.options.useContextualCompression ||
       input.options.resultOrder === "prompt");
-  const chunks = shouldPostProcess
+  const rankedChunks = shouldPostProcess
     ? await applySearchPostRetrievalProcessing({
         query: input.retrievalQuery ?? input.query,
         chunks: fused,
@@ -332,8 +307,40 @@ export async function executeSearchSessionRetrieval(
         .slice(0, input.limit)
         .map((chunk, index) => ({ ...chunk, score: 1 / (1 + index) }));
 
+  // The tree leg's chunks are placed last, after a protected prefix of the list above (placeGuidedChunks): they are
+  // never a fusion list, so they cannot outrank or push out what the chunk legs ranked first.
+  const tree = input.summaryTree?.result() ?? null;
+  let chunks = rankedChunks;
+  if (input.summaryTree) {
+    // A leg that never started (this search's mode cannot run it) is a skip too; one that ran counted its own.
+    if (!tree) countSearchEvent("summaryTreeSkipped");
+    let placed = 0;
+    let protectedPrefix = rankedChunks.length;
+    if (tree && tree.applied !== "off" && tree.guided.length > 0) {
+      const placement = placeGuidedChunks({
+        base: rankedChunks,
+        guided: tree.guided,
+        limit: input.limit,
+        // One result per file (search-controls.ts) runs in finalize: a guided chunk it would remove is not placed.
+        dedupeKey: input.projectSettings?.dedupeByFilename ? (chunk) => chunk.filename || chunk.documentId : undefined,
+      });
+      placed = placement.placed;
+      protectedPrefix = placement.protectedPrefix;
+      if (placed > 0) chunks = placement.results.map((chunk, index) => ({ ...chunk, score: 1 / (1 + index) }));
+    }
+    input.session.recordDiagnostic("summaryTree", {
+      requested: input.summaryTree.plan.requested,
+      applied: tree?.applied ?? "off",
+      skipped: tree ? tree.skipped ?? null : "mode",
+      ...(tree ? tree.stats : {}),
+      guided: tree?.guided.length ?? 0,
+      placed,
+      protectedPrefix,
+    });
+  }
+
   recordSearchPhase("fuse", performance.now() - fuseStarted);
-  return timePhase("finalize", () => finalizeSearchSessionExecution({
+  const response = await timePhase("finalize", () => finalizeSearchSessionExecution({
     query: input.query,
     retrievalQuery: input.retrievalQuery,
     userId: input.userId,
@@ -351,6 +358,13 @@ export async function executeSearchSessionRetrieval(
     wholeCorpusFallback: input.wholeCorpusFallback,
     relevanceFloor: { minScore: floor.minScore, dropped: floor.dropped },
   }));
+  if (!input.summaryTree) return response;
+  return {
+    ...response,
+    summaryTree: summaryTreeOutcome(input.summaryTree.plan, tree),
+    // `include`: summaries ride beside the results in their own labelled list, never inside it.
+    ...(tree?.applied === "include" ? { summaries: capIncludedSummaries(tree.summaries, response.results.map((result) => result.text)) } : {}),
+  };
 }
 
 /**
@@ -389,9 +403,7 @@ export async function finalizeSearchSessionExecution(
   }
 
   // Compression may rewrite the text; restore the scope qualification afterward.
-  results = results.map((result) => result.citation.source === "community_summary"
-    ? { ...result, text: qualifyCommunitySummary(result.text, { ...input.filters, ...(input.options.runId ? { runId: input.options.runId } : {}) }) }
-    : result);
+  results = qualifyCommunityResults(results, input.filters, input.options.runId);
 
   if (input.options.parentRetrieval) {
     await attachParentText(results, input);

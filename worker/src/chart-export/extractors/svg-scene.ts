@@ -1,4 +1,4 @@
-import { CHART_EXTRACT_LIMITS, ExtractLimitError } from "./limits.js";
+import { CHART_EXTRACT_LIMITS, ExtractLimitError, pastGuestDeadline } from "./limits.js";
 import { IDENTITY, apply, multiply, newPathBudget, parsePathData, parseTransform, type Matrix } from "./svg-path.js";
 import { cleanLabel, normalizeColor } from "./text.js";
 import { elementChildren, textContent, type XmlElement } from "./xml.js";
@@ -54,7 +54,8 @@ function length(raw: string | undefined | null, font = 10): number | null {
 
 function firstNum(raw: string | undefined): number | null {
   if (!raw) return null;
-  return length(raw.trim().split(/[\s,]+/)[0]);
+  // The first token, without splitting the whole attribute (same result as split(/[\s,]+/)[0] on the trimmed value).
+  return length(/^[^\s,]*/.exec(raw.trim())![0]);
 }
 
 function deriveStyle(el: XmlElement, parent: Style): Style {
@@ -80,7 +81,10 @@ function deriveStyle(el: XmlElement, parent: Style): Style {
 
 const scaleOf = (m: Matrix) => Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
 
-export function buildScene(root: XmlElement): Scene {
+/** What the density gate counted while building a scene (the measurement and the gate use the same counters). */
+export interface SceneGateCounts { useExpansions: number; primitives: number; segments: number; walked: number; touched: number }
+
+export function buildScene(root: XmlElement, counts?: SceneGateCounts): Scene {
   const scene: Scene = { texts: [], rects: [], lines: [], points: [], signatures: "", width: null, height: null };
   const svg = root.local === "svg" ? root : elementChildren(root).find((c) => c.local === "svg") ?? null;
   if (!svg) throw new ExtractLimitError("svg-no-root");
@@ -107,12 +111,37 @@ export function buildScene(root: XmlElement): Scene {
   const budget = newPathBudget();
   let order = 0;
   let expansions = 0;
+  let segments = 0;
+  // Every frame the walk pops, skipped, hidden and ill-transformed ones and every <use> re-walk included: the walk's
+  // real cost (a <use> of a group of 34k hidden children costs 34k pops whatever the other counters say).
+  let walked = 0;
+  // Attribute and text bytes every walked frame reads, re-walks included: per-frame work is O(those bytes), so this
+  // bounds the walk's total work, whatever a <use> repeats (council r6 H1).
+  let touched = 0;
+  const frameBytes = new WeakMap<XmlElement, number>();
+  const bytesOf = (el: XmlElement) => {
+    let n = frameBytes.get(el);
+    if (n === undefined) {
+      n = 0;
+      for (const k in el.attrs) n += k.length + el.attrs[k]!.length;
+      // Every child costs at least 1, so empty comments iterated on each re-walk are paid for (council r7 L2).
+      for (const c of el.children) n += 1 + (c.type === "element" ? 0 : c.value.length);
+      frameBytes.set(el, n);
+    }
+    return n;
+  };
   const base: Style = { fill: "#000000", stroke: null, fontSize: 10, anchor: "start", baseline: "", hidden: false };
 
   type Frame = { el: XmlElement; m: Matrix; style: Style; groups: string; useDepth: number };
   const stack: Frame[] = [{ el: svg, m: IDENTITY, style: base, groups: "", useDepth: 0 }];
   while (stack.length) {
     const { el, m: parentM, style: parentStyle, groups: parentGroups, useDepth } = stack.pop()!;
+    // Density gate, walk: counted before anything can skip the frame.
+    if (++walked > CHART_EXTRACT_LIMITS.maxSvgWalkedElements) throw new ExtractLimitError(useDepth > 0 ? "svg-use-bomb" : "svg-too-dense");
+    touched += bytesOf(el);
+    if (touched > CHART_EXTRACT_LIMITS.maxSvgTouchedBytes) throw new ExtractLimitError(useDepth > 0 ? "svg-use-bomb" : "svg-too-dense");
+    // Guest deadline backstop: checked every 256 frames (see `setGuestDeadline`).
+    if ((walked & 255) === 0 && pastGuestDeadline()) throw new ExtractLimitError("svg-too-slow");
     if (SKIP.has(el.local)) continue;
     const t = parseTransform(el.attrs.transform);
     if (!t) continue;
@@ -120,8 +149,13 @@ export function buildScene(root: XmlElement): Scene {
     const style = deriveStyle(el, parentStyle);
     if (style.hidden) continue;
     const tag = [el.attrs.id, el.attrs.class, el.attrs.role, el.attrs["aria-roledescription"]].filter(Boolean).join(" ").slice(0, 200);
-    const groups = tag ? `${parentGroups} ${tag}` : parentGroups;
+    // The nearest ancestors' tags are what geometry matches on; keeping the last 512 characters bounds the string
+    // (it grew by up to 200 characters per nesting level).
+    const groups = tag ? `${parentGroups} ${tag}`.slice(-512) : parentGroups;
     if (order >= CHART_EXTRACT_LIMITS.maxXmlNodes) throw new ExtractLimitError("svg-work-limit");
+    // Density gate: expanded primitives and path segments so far (checked before each element adds more).
+    if (scene.rects.length + scene.points.length + scene.texts.length + scene.lines.length > CHART_EXTRACT_LIMITS.maxSvgPrimitives) throw new ExtractLimitError("svg-too-dense");
+    if (segments > CHART_EXTRACT_LIMITS.maxSvgPathSegments) throw new ExtractLimitError("svg-too-dense");
     const common = { groups, order: order++ };
     switch (el.local) {
       case "svg": case "g": case "a": case "switch": {
@@ -151,6 +185,8 @@ export function buildScene(root: XmlElement): Scene {
         const href = el.attrs.href ?? el.attrs["xlink:href"] ?? "";
         const target = href.startsWith("#") ? ids.get(href.slice(1)) : undefined;
         if (!target || target === el || useDepth >= CHART_EXTRACT_LIMITS.maxUseDepth) break;
+        // Density gate: a "billion laughs" of <use> stops at the first expansion past the cap, never materialised.
+        if (expansions + 1 > CHART_EXTRACT_LIMITS.maxSvgUseExpansions) throw new ExtractLimitError("svg-use-bomb");
         if (++expansions > CHART_EXTRACT_LIMITS.maxUseExpansions) throw new ExtractLimitError("svg-use-limit");
         const x = length(el.attrs.x) ?? 0, y = length(el.attrs.y) ?? 0;
         const um = multiply(m, [1, 0, 0, 1, x, y]);
@@ -172,7 +208,11 @@ export function buildScene(root: XmlElement): Scene {
           y ??= firstNum(tspans[0].attrs.y);
           dy += length(tspans[0].attrs.dy, fontSize) ?? 0;
         }
-        const text = cleanLabel(textContent(el));
+        const raw = textContent(el);
+        // tspan text is not in this frame's own bytes: charge it too.
+        touched += raw.length;
+        if (touched > CHART_EXTRACT_LIMITS.maxSvgTouchedBytes) throw new ExtractLimitError(useDepth > 0 ? "svg-use-bomb" : "svg-too-dense");
+        const text = cleanLabel(raw);
         if (!text) break;
         const b = style.baseline;
         const shift = /middle|central/.test(b) ? 0 : /hanging|text-before|before-edge/.test(b) ? 0.7 * fontSize : -0.35 * fontSize;
@@ -200,11 +240,13 @@ export function buildScene(root: XmlElement): Scene {
         if (budget.commands > CHART_EXTRACT_LIMITS.maxPathCommands * 7) throw new ExtractLimitError("svg-path-command-limit");
         const pts: Array<[number, number]> = [];
         for (let k = 0; k + 1 < nums.length && pts.length < CHART_EXTRACT_LIMITS.maxPathVertices; k += 2) pts.push([Number(nums[k]), Number(nums[k + 1])]);
+        segments += pts.length;
         if (pts.length >= 2) pushPolygon(scene, common, m, pts, el.local === "polygon", 0, style);
         break;
       }
       case "path": {
         const subs = parsePathData(el.attrs.d ?? "", budget);
+        for (const sp of subs) segments += sp.points.length;
         for (const sp of subs) if (sp.points.length >= 1) pushPolygon(scene, common, m, sp.points, sp.closed, sp.curves, style);
         break;
       }
@@ -219,6 +261,9 @@ export function buildScene(root: XmlElement): Scene {
         break;
     }
   }
+  if (counts) Object.assign(counts, { useExpansions: expansions, primitives: scene.rects.length + scene.points.length + scene.texts.length + scene.lines.length, segments, walked, touched });
+  if (scene.rects.length + scene.points.length + scene.texts.length + scene.lines.length > CHART_EXTRACT_LIMITS.maxSvgPrimitives) throw new ExtractLimitError("svg-too-dense");
+  if (segments > CHART_EXTRACT_LIMITS.maxSvgPathSegments) throw new ExtractLimitError("svg-too-dense");
   return scene;
 }
 

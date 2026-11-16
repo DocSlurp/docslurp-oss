@@ -56,8 +56,8 @@ async function seedOrg(client: Sql, orgId: string, credits: number) {
 async function seedRuns(client: Sql, orgId: string, count: number, prefix = orgId): Promise<string[]> {
   const ids = Array.from({ length: count }, (_, index) => `${prefix}-run-${index}`);
   for (const id of ids) {
-    await client`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-      values (${id}, ${orgId}, 'u1', ${`ws-${orgId}`}, 'bulk-upload', 'processing', 'vision-extract', '{}')`;
+    await client`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, ${id}, ${orgId}, 'u1', ${`ws-${orgId}`}, 'bulk-upload', 'processing', 'vision-extract', '{}')`;
   }
   return ids;
 }
@@ -489,10 +489,10 @@ describe("worker checkpoints", () => {
 
 /**
  * True concurrency against a real Postgres (PGlite serves one connection at a
- * time). Opt-in: CREDIT_LEASE_TEST_DATABASE_URL=postgres://… (a throwaway,
+ * time). Opt-in: TEST_DATABASE_URL=postgres://… (a throwaway,
  * migrated database; rows are seeded and wiped).
  */
-const realUrl = process.env.CREDIT_LEASE_TEST_DATABASE_URL;
+const realUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(!realUrl)("credit leases under real concurrency", () => {
   let pg: Sql;
 

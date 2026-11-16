@@ -36,6 +36,8 @@ const estimator = await createEstimator({ module: wasm });
 
 ## What a profile holds
 
+For optional dense per-page evidence, `estimator.profileJsonl(file, options)` yields local-only JSONL through bounded range reads, supports PDFs up to 2 GiB, inventories every page and deeply inspects up to 1,000. Numeric sections include image/vector facts, ruled/unruled table and caption/vector-figure candidates, exclusive text-byte composition, compact chunk summaries and optional top-page rankings. Node paths use `profilePathJsonl` from the `/node` export; Python exposes `Estimator.profile_jsonl(path)`. This is separate from the small quote profile below. See [the JSONL contract and limits](../../docs/offline-page-profile-jsonl.md).
+
 Aggregates only, never file content, never per-page arrays, at most 4 KiB (`fileProfileSchema` in
 `@docslurp/shared`; profile schema 1):
 
@@ -85,6 +87,7 @@ PDF facts (counts are over the sampled pages):
 | `scanBesideTextPages` | Pages the page router reads for a scan beside native text (`mixedScanImage`, docs/page-layout-facts.md): a page with at least the sparse-page word count that places a non-repeated, scan-like image (CCITT, JBIG2, 1 bit per component, or at most 0.15 stream bytes per pixel) covering 20% or more of the visible page, at least 200 px on its short side and 50 ppi on both axes, with at most two text-layer words whose box centre lies inside it |
 | `scanBesideTextUnknownPages` | Pages where that rule could not be decided: the page was not read to the end, or it had more words than the walker keeps. Unknown never reads |
 | `ruledTablePages` | Pages table-heavy from ruled grids alone: rules (stroked horizontal and vertical lines and rectangle edges, thin filled rectangles; at most 3 pt thick, at least 8 pt long, meeting within 2.5 pt) form a grid of at least 2 horizontals and 3 verticals; a grid of 5 or more rows, or grids covering 40% of the page on a 200 × 200 raster. Tables only the extractor finds are not seen |
+| `routePages` | Sampled pages per cost route, as production routes them (`pageCostRoute` in `@docslurp/shared`): `ocr-read` (no text-layer word, something drawn: scan-fill OCR reads it), `ocr-blank` (nothing to read), `table` (ruled grids unknown or table-heavy: the table path), `text`, `unknown` |
 | `sampledTextEquivalents`, `sampledAreaEquivalents`, `sampledPageEquivalents`, `maxPageEquivalents` | Page equivalents of the sampled pages by the rule billing measures with (`page-equivalents.ts`): a page counts as the larger of 1, its text pages (60 lines or 3,500 characters a page) and its area in Letter pages (capped at 8). A page packed with tiny, invisible or off-page text, or an oversized page, counts as the pages it holds |
 
 The thresholds (significant image size, the raster rule, repeated-image detection, the text page rule) come from

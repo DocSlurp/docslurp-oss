@@ -50,6 +50,7 @@ beforeEach(async () => {
   await sql`delete from storage_cleanup_queue`;
   await sql`delete from upload_cleanup_owners`;
   await sql`delete from vector_index_outbox`;
+  await sql`delete from vector_index_tables`;
   await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('keep', 'o1', 'u1', 'Keep')`;
 });
 
@@ -60,8 +61,8 @@ const KEEP_TABLE_URI = "/tmp/lance/o1/keep/vectors-model%2Fx-4";
 
 async function seedRun(id: string, projectId = "w", status = "completed") {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline, artifacts)
-    values (${id}, 'o1', 'u1', ${projectId}, 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb,
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline, artifacts)
+    values (100, ${id}, 'o1', 'u1', ${projectId}, 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb,
       ${sql.json({ "knowledge-graph": `s3://b/u1/${id}/graph/project-graph.json` })})
   `;
 }
@@ -311,12 +312,24 @@ describe("run retention", () => {
     await seedDocument("d-old", "old");
     await sql`update projects set artifact_retention_days = 1 where id = 'w'`;
     await sql`update project_runs set created_at = now() - interval '3 days' where id = 'old'`;
+    // The document's summary tree is derived from the run's chunks: its registry rows go with them.
+    await sql`insert into document_summary_trees (document_id, org_id, project_id, run_id, status, embedding_model, dimension)
+      values ('d-old', 'o1', 'w', 'old', 'ready', ${MODEL.embeddingModel}, ${MODEL.dimension})`;
+    await sql`insert into document_summary_tree_nodes (id, document_id, org_id, project_id, run_id, node_hash, level, status, chunk_start, chunk_end)
+      values ('d-old:n1', 'd-old', 'o1', 'w', 'old', 'h1', 1, 'ready', 0, 0)`;
 
     await retention().purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} } as unknown as ArtifactStore, 10);
 
     expect(await sql`select document_id, delete_source, vector_targets from document_cleanup_queue`)
       .toEqual([{ document_id: "d-old", delete_source: false, vector_targets: [MODEL] }]);
     expect(await sql`select count(*)::int as count from documents where id = 'd-old'`).toEqual([{ count: 1 }]);
+    expect(await sql`select document_id from document_summary_trees`).toEqual([]);
+    expect(await sql`select id from document_summary_tree_nodes`).toEqual([]);
+    // The sweep then removes the document's rows from both of the project's tables.
+    const stores = fakeExternalStores([], { [`${TABLE_URI}#chunks`]: ["d-old"], [`${TABLE_URI}#summaries`]: ["d-old"] });
+    await drainAll(stores);
+    expect([...stores.tables.get(`${TABLE_URI}#chunks`)!]).toEqual([]);
+    expect([...stores.tables.get(`${TABLE_URI}#summaries`)!]).toEqual([]);
   });
 });
 
@@ -343,7 +356,11 @@ describe("cleanup sweep", () => {
     expect([...stores.objects].sort()).toEqual(["u1/rk/markdown/dk.md", "u1/up-dk/raw/dk.pdf"]);
     expect([...stores.tables.get(`${TABLE_URI}#chunks`)!]).toEqual([]);
     expect([...stores.tables.get(`${KEEP_TABLE_URI}#chunks`)!]).toEqual(["dk"]);
-    expect(stores.vectorDeleteCalls).toEqual([{ table: `${TABLE_URI}#chunks`, documentIds: ["d1", "d2", "d3"] }]);
+    // One delete per table: the chunks, then the summary tree's table beside them.
+    expect(stores.vectorDeleteCalls).toEqual([
+      { table: `${TABLE_URI}#chunks`, documentIds: ["d1", "d2", "d3"] },
+      { table: `${TABLE_URI}#summaries`, documentIds: ["d1", "d2", "d3"] },
+    ]);
     expect(await sql`select count(*)::int as count from document_cleanup_queue`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from storage_cleanup_queue`).toEqual([{ count: 0 }]);
   });
@@ -380,14 +397,21 @@ describe("cleanup sweep", () => {
     await seedDocument("dk", "rk", "keep");
     await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
       values ('vector_table', 'o1', 'o1|w|model/x|4', ${sql.json({ projectId: "w", embeddingModel: "model/x", dimension: 4 })}, 'project_deleted')`;
-    await sql`insert into vector_index_tables (table_key) values (${`${TABLE_URI}#chunks`})`;
-    const stores = fakeExternalStores([], { [`${TABLE_URI}#chunks`]: ["d1"], [`${KEEP_TABLE_URI}#chunks`]: ["dk"] });
+    // Project deletion queues the summary tree's table by name too (server data-deletion.ts).
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
+      values ('vector_table', 'o1', 'o1|w|model/x|4|summaries', ${sql.json({ projectId: "w", embeddingModel: "model/x", dimension: 4, table: "summaries" })}, 'project_deleted')`;
+    await sql`insert into vector_index_tables (table_key) values (${`${TABLE_URI}#chunks`}), (${`${TABLE_URI}#summaries`})`;
+    const stores = fakeExternalStores([], {
+      [`${TABLE_URI}#chunks`]: ["d1"], [`${TABLE_URI}#summaries`]: ["d1"], [`${KEEP_TABLE_URI}#chunks`]: ["dk"], [`${KEEP_TABLE_URI}#summaries`]: ["dk"],
+    });
 
     await sql`delete from projects where id = 'w'`;
     await drainAll(stores);
 
     expect(stores.vectorDeleteCalls).toEqual([]);
-    expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`]);
+    // Both of the deleted project's tables are gone; the other project's are untouched.
+    expect([...stores.tables.keys()]).toEqual([`${KEEP_TABLE_URI}#chunks`, `${KEEP_TABLE_URI}#summaries`]);
+    expect([...stores.tables.get(`${KEEP_TABLE_URI}#summaries`)!]).toEqual(["dk"]);
     expect(await sql`select table_key from vector_index_tables`).toEqual([]);
   });
 

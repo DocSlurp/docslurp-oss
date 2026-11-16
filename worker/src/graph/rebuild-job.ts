@@ -4,7 +4,7 @@ import {
   calculateAiUsageCostCents,
   graphConfigSchema,
   normalizeStoredPipelineFeatures,
-  resolvePipelineTextModel,
+  resolveAllowedPipelineTextModel,
   type GraphConfig,
   type PipelineFeatures,
 } from "@docslurp/shared";
@@ -284,7 +284,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
   }
 
   if (pipeline.graphRag || pipeline.graphCommunitySummaries) {
-    const communityModel = resolvePipelineTextModel(pipeline, "community-summary", config.textGenerationModel);
+    const communityModel = resolveAllowedPipelineTextModel(pipeline, "community-summary", config.textGenerationModel);
     const usage: WorkerAiUsageInput[] = [];
     const communityApiKey = textModelApiKey(config.openRouterApiKey, communityModel) && await allowHostedCallForProject(sql, {
       privacyMode: pipeline.privacyMode,

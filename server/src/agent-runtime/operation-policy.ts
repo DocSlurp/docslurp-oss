@@ -17,7 +17,7 @@ export function createNativeOperationPolicy(resolveActor: () => Promise<RequestA
       from chat_operations c join chat_operations root on root.id=c.root_id and root.user_id=c.user_id and root.org_id=c.org_id
       where c.id=${id} and c.user_id=${actor.userId} and c.expires_at>clock_timestamp()`;
     if (!row) throw new Error("operation_forbidden");
-    const project=await loadActorScopedProject(row.project_id,actor,{refineNames:false});
+    const project=await loadActorScopedProject(row.project_id,actor);
     if (!project || project.orgId!==row.org_id)throw new Error("operation_forbidden");
     return {id:row.id,rootId:row.root_id,parentId:row.parent_id,userId:row.user_id,orgId:row.org_id,projectId:row.project_id,deadline:row.deadline,outputBytes:row.output_bytes,cancelRequested:row.cancel_requested,treeCancelled:row.tree_cancel_requested,authSessionId:actor.sessionId};
   };

@@ -176,8 +176,9 @@ jobs:
           node scripts/check-package-imports.mjs
 
   # Real-Postgres and Redis tests (locks, concurrency, billing, OAuth) skip without
-  # their URLs, so run them here against service containers, one fresh copy of a
-  # migrated template database per file. The runner fails on skipped tests too.
+  # TEST_DATABASE_URL / TEST_REDIS_URL, so run them here against service containers;
+  # the runner sets those per file, one fresh copy of a migrated template database
+  # each, and fails on skipped tests too.
   database:
     name: database integration
     timeout-minutes: 20
@@ -199,9 +200,9 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
     env:
-      DATABASE_TEST_ADMIN_URL: postgres://docslurp:ci-only-password@127.0.0.1:5432
-      DATABASE_TEST_TEMPLATE: tmpl
-      REDIS_TEST_URL: redis://127.0.0.1:6379
+      TEST_DATABASE_ADMIN_URL: postgres://docslurp:ci-only-password@127.0.0.1:5432
+      TEST_DATABASE_TEMPLATE: tmpl
+      TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -229,7 +230,7 @@ jobs:
           done
           test "$ready" = 1
       - name: Migrate the template database
-        run: DATABASE_URL="${DATABASE_TEST_ADMIN_URL}/${DATABASE_TEST_TEMPLATE}" node server/db/migrate.mjs
+        run: DATABASE_URL="${TEST_DATABASE_ADMIN_URL}/${TEST_DATABASE_TEMPLATE}" node server/db/migrate.mjs
       - name: Run gated database and Redis tests
         run: node scripts/run-database-tests.mjs
 
@@ -298,6 +299,8 @@ jobs:
       - run: pnpm --filter @docslurp/shared build
       - name: Build the wasm module and run its JS tests
         run: pnpm --filter @docslurp/estimate test:wasm
+      - name: Compare built estimator output with production routing (synthetic files only)
+        run: pnpm --filter @docslurp/worker exec vitest run ../packages/estimate/test/production-parity.test.ts
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: '0.13.0'

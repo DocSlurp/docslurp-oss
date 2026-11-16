@@ -1,8 +1,18 @@
+import { CHAT_TIERS } from "./project-chat-models.js";
 import { geoPredicateSchema } from "./geo.js";
+import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema } from "./chart-export.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
 import { indexingModeSchema } from "./deferred-indexing.js";
+import {
+  defaultSummaryTreePipelineConfig,
+  SUMMARY_TREE_SUMMARIZE_LOCKED_CODE,
+  SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE,
+  SummaryTreeConfigError,
+  summaryTreeEnabled,
+  summaryTreeSearchModeSchema,
+} from "./summary-tree.js";
 import {
   defaultPipelineFeatures,
   mergePipelineFeatures,
@@ -63,6 +73,14 @@ export function isDefaultProjectAlias(projectId: string | null | undefined): boo
 
 export const projectSchema = z.object({
   id: z.string(),
+  /**
+   * Whether this caller may change the project or its documents: reprocess, retry, re-index, full index, settings,
+   * deletes and tags. The same rule as a document's `canReprocess` (an editor or admin; a server key also needs
+   * `ingest`). Present on project reads (list, detail, dashboard bootstrap); clients hide change actions without it.
+   */
+  canEdit: z.boolean().optional(),
+  /** Whether this caller may manage the project (archive, delete, members): an org owner or admin, the project's owner or admin. */
+  canManage: z.boolean().optional(),
   /** Readable URL identifier (e.g. amber-falcon-ridge); prefer it over the UUID in links. */
   slug: z.string(),
   userId: z.string(),
@@ -99,6 +117,21 @@ export const projectSchema = z.object({
   deferredIndexingAvailable: z.boolean().optional(),
   /** False on deployments that do not bill (self-hosted without Stripe): estimates are not prices. */
   billingEnforced: z.boolean().optional(),
+  /**
+   * This deployment's chart export defaults for a project with no tier: `app` (DocSlurp app uploads) and `machine`
+   * (API, MCP, SDK, CLI), after the kill switch; whether the billed `models` tier is offered (`DOCSLURP_CHART_EXPORT=on`);
+   * whether `free` may be chosen explicitly (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`, or unset with
+   * `DOCSLURP_CHART_EXPORT_INLINE=1`); and the switch itself. Clients
+   * label the default and classify changes from these, never from a code default. Absent (an older server): treat as
+   * `CONSERVATIVE_CHART_EXPORT_DEFAULTS` and hide tier controls.
+   */
+  chartExportDefaults: z.object({
+    app: chartExportTierSchema,
+    machine: chartExportTierSchema,
+    modelsAvailable: z.boolean(),
+    freeAvailable: z.boolean(),
+    ceiling: z.enum(CHART_EXPORT_SWITCH_VALUES),
+  }).optional(),
   /** Retained versions per document for this project; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   /**
@@ -117,6 +150,12 @@ export const projectSchema = z.object({
   archivedAt: z.string().nullable().default(null),
   /** The organization's default project receives requests that omit a projectId. */
   isDefault: z.boolean().default(false),
+  /**
+   * Chat tiers whose model has a fast route under this project's mapping: where Speed boost speeds up answers. The
+   * server always sends it; optional in the type so a client-built record need not (read a missing list as the
+   * defaults, SPEED_BOOST_CHAT_TIERS).
+   */
+  chatSpeedBoostTiers: z.array(z.enum(CHAT_TIERS)).optional(),
   lastActivityAt: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -521,7 +560,14 @@ export const projectSearchRetrievalDefaultsSchema = z.object({
   queryDecompose: z.boolean().default(false),
   stepback: z.boolean().default(false),
   parentRetrieval: z.boolean().default(true),
+  /** Seeds retrieval from per-document score sums over chunks. It does not read the summary tree (see `summaryTree`). */
   summarySeed: z.boolean().default(false),
+  /**
+   * How search uses the project's summary tree (summary-tree.ts): `off`, `guide` (summary hits select chunk ranges;
+   * evidence is chunks only) or `include` (summary text is also returned, labelled). It runs only when the project's
+   * pipeline has the tree enabled and the deployment serves it: see `effectiveSummaryTreeSearchMode`.
+   */
+  summaryTree: summaryTreeSearchModeSchema.default("off"),
   selfQuery: z.boolean().default(false),
   iterativeMultiHop: z.boolean().default(false),
   // Graph controls stay unset unless the project chooses them, so retrieval
@@ -561,6 +607,8 @@ export const chatRetrievalOverridesSchema = z.object({
   graphHops: z.number().int().min(1).max(3).optional(),
   /** false: cite matched chunks only, without attaching each hit's whole parent page text. Smaller prompts and faster retrieval. */
   parentRetrieval: z.boolean().optional(),
+  /** How this thread's retrieval uses the project's summary tree; it stays off unless the project builds one. */
+  summaryTree: summaryTreeSearchModeSchema.optional(),
 }).strict();
 export type ChatRetrievalOverrides = z.infer<typeof chatRetrievalOverridesSchema>;
 
@@ -641,6 +689,7 @@ export const updateProjectSearchRetrievalDefaultsSchema = z.object({
   stepback: z.boolean().optional(),
   parentRetrieval: z.boolean().optional(),
   summarySeed: z.boolean().optional(),
+  summaryTree: summaryTreeSearchModeSchema.optional(),
   selfQuery: z.boolean().optional(),
   iterativeMultiHop: z.boolean().optional(),
   // null clears an explicit choice so retrieval derives it from the pipeline again.
@@ -691,6 +740,7 @@ export const projectSearchSettingsSchema = z.object({
     stepback: false,
     parentRetrieval: true,
     summarySeed: false,
+    summaryTree: "off",
     selfQuery: false,
     iterativeMultiHop: false,
   }),
@@ -747,6 +797,35 @@ export const updateProjectSearchSettingsSchema = z.object({
 export type UpdateProjectSearchSettingsInput = z.infer<
   typeof updateProjectSearchSettingsSchema
 >;
+
+/**
+ * The reranker as customers choose it: `keyword` (local BM25) or `model` (the managed hosted reranker). The provider
+ * and model behind `model` are managed; public requests never name them.
+ */
+export const RERANKERS = ["keyword", "model"] as const;
+export type Reranker = (typeof RERANKERS)[number];
+
+/** Public search-settings updates: `retrievalDefaults.reranker` in place of a rerank provider and model. */
+export const publicUpdateProjectSearchSettingsSchema = updateProjectSearchSettingsSchema.extend({
+  retrievalDefaults: updateProjectSearchRetrievalDefaultsSchema.omit({ rerankProvider: true, rerankModel: true })
+    .extend({ reranker: z.enum(RERANKERS).optional() }).strict().optional(),
+}).transform(({ retrievalDefaults, ...rest }): UpdateProjectSearchSettingsInput => {
+  if (!retrievalDefaults) return rest;
+  const { reranker, ...defaults } = retrievalDefaults;
+  return {
+    ...rest,
+    retrievalDefaults: reranker === "model"
+      ? { ...defaults, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B" }
+      : reranker === "keyword" ? { ...defaults, rerankProvider: "bm25" } : defaults,
+  };
+});
+
+/** Search settings as customers read them: `reranker` instead of the managed rerank provider and model. */
+export function customerSearchSettingsView<T extends { retrievalDefaults?: { rerankProvider?: string; rerankModel?: string } }>(settings: T): T {
+  if (!settings.retrievalDefaults) return settings;
+  const { rerankProvider, rerankModel: _model, ...defaults } = settings.retrievalDefaults;
+  return { ...settings, retrievalDefaults: { ...defaults, reranker: rerankProvider === "deepinfra" ? "model" : "keyword" } };
+}
 
 export const createOrganizationSchema = z.object({
   userId: z.string().default("demo-user"),
@@ -824,9 +903,27 @@ export type UploadRequest = z.infer<typeof uploadRequestSchema>;
  * again; `stageFrom` runs the stages from that one onward and `stages` runs
  * exactly those, reusing the other stages' outputs from the source documents.
  */
+/**
+ * Per-request chart export override (upload, URL ingest, reprocess, estimates): wins over the project's tier and the
+ * origin default; the deploy switch stays the ceiling. `models` (reading charts with AI) is billed per chart read.
+ */
+export const chartExportOverrideSchema = z.object({ tier: chartExportTierSchema }).strict();
+export type ChartExportOverride = z.infer<typeof chartExportOverrideSchema>;
+
+/** One description for the override on every machine surface (MCP tools, SDK and CLI docs). */
+export const CHART_EXPORT_OVERRIDE_DESCRIPTION =
+  "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting uses the deployment's default for the caller (see the project record's chartExportDefaults; API, MCP, SDK and CLI calls default to off). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge; models also reads other charts with AI, billed per chart read. Each tier is available only where the deployment turns it on: a tier it does not offer is refused with 400 chart_export_tier_unavailable, never silently lowered. models on a project whose tier is not models (unset included) needs project editor rights (or an API key with the pipeline:billed-features scope).";
+
+/** The chart export override description with the deployment's actual defaults, for tool and prompt text built at runtime. */
+export function chartExportOverrideDescriptionFor(defaults: { app: string; machine: string; modelsAvailable: boolean; freeAvailable: boolean }): string {
+  const offered = ["off", ...(defaults.freeAvailable ? ["free"] : []), ...(defaults.modelsAvailable ? ["models"] : [])].join(", ");
+  return `${CHART_EXPORT_OVERRIDE_DESCRIPTION} On this deployment: API, MCP, SDK and CLI calls default to ${defaults.machine}; DocSlurp app uploads default to ${defaults.app}; tiers a request may choose: ${offered}.`;
+}
+
 export const reprocessRunSchema = z
   .object({
     speedBoost: z.boolean().optional(),
+    chartExport: chartExportOverrideSchema.optional(),
     stages: z.array(pipelineRunStageSchema).min(1).optional(),
     stageFrom: pipelineRunStageSchema.optional(),
   })
@@ -895,7 +992,8 @@ export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 
 type TemplatePipelineOverrides = Omit<
   Partial<import("./pipeline.js").PipelineFeatures>,
-  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "graph"
+  // summaryTree: never part of a template (summary-tree.ts); a project turns it on through its own endpoint.
+  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "graph" | "summaryTree"
 > & {
   graph?: Partial<import("./pipeline.js").PipelineFeatures["graph"]>;
   vision?: Partial<import("./pipeline.js").PipelineFeatures["vision"]>;
@@ -907,7 +1005,8 @@ type TemplatePipelineOverrides = Omit<
 function buildTemplatePipeline(
   overrides: TemplatePipelineOverrides,
 ): import("./pipeline.js").PipelineFeatures {
-  return normalizePipelineFeatures(overrides);
+  // The type keeps the key out; this keeps it out of a template written with a cast, too.
+  return normalizePipelineFeatures({ ...overrides, summaryTree: defaultSummaryTreePipelineConfig });
 }
 
 const projectTemplateLockedSettingPaths: Record<
@@ -988,6 +1087,15 @@ export function applyProjectTemplateLocks(
       : templateOrKey;
   if (!template || template.lockedSettings.length === 0) {
     return pipelineFeaturesSchema.parse(pipeline);
+  }
+  // The tree needs document summaries. A template that pins them off cannot hold the tree: refuse loudly instead of
+  // unlocking the template or storing a tree that can never build its root.
+  if (
+    summaryTreeEnabled(pipeline) &&
+    template.lockedSettings.includes("summarize") &&
+    readNestedValue(template.pipeline, projectTemplateLockedSettingPaths.summarize) === false
+  ) {
+    throw new SummaryTreeConfigError(SUMMARY_TREE_SUMMARIZE_LOCKED_CODE, SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE, 409);
   }
 
   const nextPipeline = JSON.parse(JSON.stringify(pipeline)) as Record<

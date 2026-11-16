@@ -10,7 +10,10 @@ mod media;
 mod office;
 pub mod layout;
 mod pdf;
+pub mod cost_route;
 pub use pdf::{layout_pages, LayoutImage, LayoutPage};
+pub use pdf::detail::{Options as DetailOptions, Session as DetailSession};
+pub use pdf::range::{RangeSession,Request as RangeRequest};
 
 use serde::{Deserialize, Serialize};
 
@@ -135,6 +138,20 @@ pub struct PdfProfile {
     /// Sampled pages table-heavy from their ruled grids alone (a grid of 5+ rows, or grids covering 40% of the page). The
     /// extractor's own tables can make more pages table-heavy; the profiler cannot see them.
     pub ruled_table_pages: u32,
+    /// Sampled pages per cost route (`pageCostRoute`, in `PAGE_COST_ROUTES` order: ocr-read, ocr-blank, table, text,
+    /// unknown): a page with no text-layer word is OCR'd (billed when something is drawn on it), a page whose ruled grids
+    /// are unknown or make it table-heavy takes the table path, the rest keep their text layer.
+    pub route_pages: [u32; cost_route::PAGE_COST_ROUTES],
+    /// Bounded sampled observations, independent of export settings. Semantic charts are not observable.
+    pub observed_vector_paths: u64,
+    pub observed_image_placements: u32,
+    pub lexical_pages: [u32; 3],
+    pub chart_candidate_unknown_pages: u32,
+    /// Raw sampled region observations, before semantic nomination. Size bins: <.0625, <.25, <1, <4, >=4 MP.
+    pub image_region_sizes: [u32; 5],
+    /// Structural classes: decorative, picture, scan-like, unknown.
+    pub image_region_classes: [u32; 4],
+    pub repeated_image_placements: u32,
 }
 
 /// Facts about an Office or EPUB package.

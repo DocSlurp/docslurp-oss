@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { RunOrigin } from "@docslurp/shared";
 import type { PipelineFeatureOverrides, ProjectTemplateKey } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -41,6 +42,8 @@ export interface DirectUploadSessionFileInput {
   mimeType: string;
   sizeBytes?: number;
   sha256?: string;
+  /** Client-claimed identity for re-selection, not a storage-verified checksum. */
+  identity?: { algorithm: "sha256"; digest: string };
   canonicalId?: string | null;
   /** Request one signed PUT instead of multipart (maximum 5 GiB). */
   singlePart?: boolean;
@@ -49,6 +52,8 @@ export interface DirectUploadSessionFileInput {
 
 export interface CreateDirectUploadSessionInput {
   apiKeyId?: string | null;
+  /** Where the run will come from, derived from the authenticated principal at session creation. Unset: machine. */
+  origin?: RunOrigin;
   allowedProjectIds?: readonly string[] | null;
   tags?: string[];
   userId: string;
@@ -73,9 +78,11 @@ export interface CompleteDirectUploadFileInput {
 }
 
 export type UploadSessionRow = {
+  expires_at?: Date | string;
   result?: unknown;
   last_error?: string | null;
   api_key_id?: string | null;
+  origin?: RunOrigin | null;
   allowed_project_ids?: string[] | null;
   tags?: string[];
   extract_id?: string | null;
@@ -107,6 +114,7 @@ export type UploadSessionFileRow = {
   /** Position of the file in the create request. */
   request_index?: number | null;
   client_id?: string | null;
+  content_identity?: { algorithm: "sha256"; digest: string } | null;
 };
 
 export interface LoadedDirectUploadSession {
@@ -131,7 +139,7 @@ export async function loadDirectUploadSession(
   userId: string,
 ): Promise<LoadedDirectUploadSession | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, allowed_project_ids, extract_id
+    select expires_at, id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, origin, allowed_project_ids, extract_id
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -161,7 +169,8 @@ export async function loadDirectUploadSession(
       source_path,
       unknown_size,
       request_index,
-      client_id
+      client_id,
+      content_identity
     from upload_session_files
     where session_id = ${sessionId}
     order by request_index asc nulls last, created_at asc
@@ -178,24 +187,25 @@ export async function loadDirectUploadSession(
 }
 
 /** How a client matches a session file to the file it sent: its position in the request and its own id. */
-function fileRef(file: UploadSessionFileRow): { index: number | null; clientId: string | null } {
-  return { index: file.request_index ?? null, clientId: file.client_id ?? null };
+function fileRef(file: UploadSessionFileRow) {
+  return { identity: file.content_identity ?? null, index: file.request_index ?? null, clientId: file.client_id ?? null };
 }
 
 async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: number, partCount: number): Promise<Array<{ partNumber: number; etag: string }>> {
   if (file.status !== "pending" || !file.upload_id) return [];
-  try {
-    const parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id });
-    return parts.filter((part) => part.partNumber <= partCount
-      && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
-  } catch {
-    // The upload closed (completed or aborted) or storage is unreachable: report what the database already knows.
-    return [];
+  let parts: Awaited<ReturnType<typeof listMultipartUploadParts>>;
+  try { parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id }); }
+  catch (error) {
+    if (storageErrorName(error) === "NoSuchUpload") throw new ProjectIntakeError("Upload transfer no longer exists; reconciliation is required", 409, undefined, "intake_reconciliation_required");
+    throw error;
   }
+  return parts.filter((part) => part.partNumber <= partCount
+    && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
 }
 
-export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow) {
-  if (file.status === "completed" || file.status === "aborted") return { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
+export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow, ttl = SIGNED_UPLOAD_TTL_SECONDS, expiresAt?: Date | string) {
+  const remainingTtl = () => expiresAt ? assertUploadSessionActive({ status: "pending", expires_at: expiresAt } as UploadSessionRow) : ttl;
+  if (file.status === "completed" || file.status === "aborted") return { transferState: file.status === "completed" ? "complete" as const : "unavailable" as const, verifiedBytes: file.status === "completed" ? file.size_bytes : null, ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
   if (file.upload_mode === "single") {
     return {
       ...fileRef(file),
@@ -203,15 +213,17 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
       filename: file.filename,
       mimeType: file.mime_type,
       sizeBytes: file.size_bytes,
+      transferState: "missing" as const,
+      verifiedBytes: 0,
       mode: "single" as const,
       status: file.status,
       method: "PUT" as const,
       headers: { "Content-Type": file.mime_type },
-      expiresInSeconds: SIGNED_UPLOAD_TTL_SECONDS,
+      expiresInSeconds: remainingTtl(),
       putUrl: await signSingleUploadPut({
         key: file.source_key,
         contentType: file.mime_type,
-        expiresInSeconds: SIGNED_UPLOAD_TTL_SECONDS,
+        expiresInSeconds: remainingTtl(),
       }),
     };
   }
@@ -224,10 +236,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   // Storage is authoritative for which parts arrived: a client that lost a connection resumes from these pendingParts
   // instead of re-sending the whole file. A part counts only at its exact expected size.
   const stored = file.unknown_size ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
-  const completed = new Set([
-    ...(file.completed_parts ?? []).map((part) => part.partNumber),
-    ...stored.map((part) => part.partNumber),
-  ]);
+  const completed = new Set(stored.map((part) => part.partNumber));
   const pendingParts: Array<{
     partNumber: number;
     sizeBytes: number;
@@ -248,6 +257,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
         key: file.source_key,
         uploadId: file.upload_id,
         partNumber,
+        expiresInSeconds: remainingTtl(),
       }),
     });
   }
@@ -265,7 +275,9 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     partCount,
     unknownSize: Boolean(file.unknown_size),
     pendingParts,
-    completedParts: file.completed_parts?.length ? file.completed_parts : stored,
+    completedParts: stored,
+    transferState: file.unknown_size || stored.length ? "incomplete" as const : "missing" as const,
+    verifiedBytes: file.unknown_size ? null : stored.reduce((sum, part) => sum + Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize), 0),
   };
 }
 
@@ -316,6 +328,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       pipeline,
       tags,
       api_key_id,
+      origin,
       allowed_project_ids,
       extract_id,
       status
@@ -330,6 +343,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${sql.json(JSON.parse(JSON.stringify(input.pipeline)))},
       ${sql.array(input.tags ?? [])},
       ${input.apiKeyId ?? null},
+      ${input.origin ?? "machine"},
       ${input.allowedProjectIds ? sql.array([...input.allowedProjectIds]) : null},
       ${input.extract?.id ?? null},
       'initializing'
@@ -362,7 +376,8 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         source_path,
         unknown_size,
         request_index,
-        client_id
+        client_id,
+        content_identity
       )
       values (
         ${fileId},
@@ -380,7 +395,8 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         ${normalizeUploadPath(file.path)},
         ${file.unknownSize},
         ${file.index},
-        ${file.clientId ?? null}
+        ${file.clientId ?? null},
+        ${file.identity ? sql.json(file.identity) : null}
       )
     `;
   }
@@ -397,10 +413,12 @@ export async function describeDirectUploadSession(
   loaded: LoadedDirectUploadSession,
   statusOnly = false,
 ) {
+  const ttl = statusOnly || ["confirmed", "failed", "aborted", "expired"].includes(loaded.session.status) ? SIGNED_UPLOAD_TTL_SECONDS : assertUploadSessionActive(loaded.session);
   const files = await Promise.all(
-    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file)),
+    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file, ttl, loaded.session.expires_at)),
   );
   return {
+    expiresAt: loaded.session.expires_at ? new Date(loaded.session.expires_at).toISOString() : null,
     sessionId: loaded.session.id,
     status: loaded.session.status,
     result: (loaded.session.result as { payload?: unknown } | null)?.payload ?? null,
@@ -410,9 +428,9 @@ export async function describeDirectUploadSession(
 }
 
 /** A native key may only operate on sessions created in its organization. */
-export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string, allowedProjectIds?: readonly string[] | null): Promise<boolean> {
+export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string, allowedProjectIds?: readonly string[] | null, apiKeyId?: string): Promise<boolean> {
   const loaded = await loadDirectUploadSession(sessionId, userId);
-  return loaded?.session.org_id === orgId && (!allowedProjectIds?.length || Boolean(loaded.session.project_id && allowedProjectIds.includes(loaded.session.project_id)));
+  return Boolean(apiKeyId) && loaded?.session.org_id === orgId && loaded.session.api_key_id === apiKeyId && (!allowedProjectIds?.length || Boolean(loaded.session.project_id && allowedProjectIds.includes(loaded.session.project_id)));
 }
 
 export async function getDirectUploadSessionDescription(
@@ -420,8 +438,41 @@ export async function getDirectUploadSessionDescription(
   userId: string,
   statusOnly = false,
 ) {
-  const loaded = await loadDirectUploadSession(sessionId, userId);
-  return loaded ? await describeDirectUploadSession(loaded, statusOnly) : null;
+  if (statusOnly) {
+    const loaded = await loadDirectUploadSession(sessionId, userId);
+    return loaded ? describeDirectUploadSession(loaded, true) : null;
+  }
+  return withDirectUploadLock(sessionId, async () => {
+    let loaded = await loadDirectUploadSession(sessionId, userId);
+    if (!loaded) return null;
+    if (loaded.session.status === "confirmed") return describeDirectUploadSession(loaded, true);
+    assertUploadSessionActive(loaded.session);
+    const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
+    await assertSessionProjectStillContributable(loaded.session, userId);
+    // Inspect all final objects before authorizing any retry. An outage is not absence.
+    try {
+      for (const file of loaded.files) {
+        if (file.status !== "pending" || file.unknown_size) continue;
+        let exists = false;
+        try { await getUploadedObjectMetadata(file.source_key); exists = true; }
+        catch (error) { if (!isStorageNotFound(error)) throw error; }
+        if (exists) await finalizeDirectUploadFile(file);
+      }
+      loaded = (await loadDirectUploadSession(sessionId, userId))!;
+      return await describeDirectUploadSession(loaded);
+    } catch (error) {
+      if (error instanceof ProjectIntakeError && error.code === "intake_reconciliation_required") throw error;
+      throw new ProjectIntakeError("Upload storage evidence is unavailable; retry status later", 503, undefined, "upload_storage_unavailable");
+    }
+  });
+}
+
+/** Confirmed results remain readable after the transfer deadline. */
+export function assertUploadSessionActive(session: UploadSessionRow): number {
+  if (["confirmed", "failed", "aborted", "expired"].includes(session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
+  const remaining = session.expires_at ? Math.floor((new Date(session.expires_at).getTime() - Date.now()) / 1000) : 0;
+  if (!Number.isFinite(remaining) || remaining < 1) throw new ProjectIntakeError("Upload session has expired", 409);
+  return Math.min(SIGNED_UPLOAD_TTL_SECONDS, remaining);
 }
 
 /** Cross-process serialization: the dedicated connection owns the lock until release. */
@@ -529,7 +580,10 @@ export async function completeDirectUploadFile(input: CompleteDirectUploadFileIn
   await withDirectUploadLock(input.sessionId, async () => {
     const loaded = await loadDirectUploadSession(input.sessionId, input.userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
+    assertUploadSessionActive(loaded.session);
     if (["aborted", "failed"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
+    const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
+    await assertSessionProjectStillContributable(loaded.session, input.userId);
     const file = loaded.files.find(item => item.id === input.fileId);
     if (!file) throw new ProjectIntakeError("Upload file not found", 404);
     if (!await finalizeDirectUploadFile(file, input.sizeBytes)) throw new ProjectIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
@@ -538,15 +592,32 @@ export async function completeDirectUploadFile(input: CompleteDirectUploadFileIn
 }
 
 export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[]) {
+  return withDirectUploadLock(sessionId, async () => {
   const loaded = await loadDirectUploadSession(sessionId, userId);
   if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
+  const ttl = assertUploadSessionActive(loaded.session);
+  const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
+  await assertSessionProjectStillContributable(loaded.session, userId);
   if (!["pending", "uploading"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
   const file = loaded.files.find(item => item.id === fileId);
   if (!file || file.status !== "pending" || !file.upload_id) throw new ProjectIntakeError("Open multipart file not found", 404);
+  try {
+    await getUploadedObjectMetadata(file.source_key);
+    // A completed object closes the transfer; completion will seal it without another PUT.
+    throw new ProjectIntakeError("Upload object already exists; refresh session", 409);
+  } catch (error) {
+    if (!isStorageNotFound(error)) {
+      if (error instanceof ProjectIntakeError) throw error;
+      throw new ProjectIntakeError("Upload storage evidence is unavailable", 503);
+    }
+  }
+  try { await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id }); }
+  catch { throw new ProjectIntakeError("Upload storage evidence is unavailable", 503); }
   return { parts: await Promise.all(partNumbers.map(async partNumber => {
     if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
-    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber }) };
+    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(loaded.session) }) };
   })) };
+  });
 }
 
 async function abortDirectUploadSessionUnlocked(
@@ -600,6 +671,7 @@ export function assertDirectUploadSessionReadyForIntake(
     throw new ProjectIntakeError("Upload session has been aborted", 409);
   }
 
+  assertUploadSessionActive(loaded.session);
   if (loaded.files.length === 0) {
     throw new ProjectIntakeError("Upload session has no files", 400);
   }
@@ -700,7 +772,7 @@ function storageErrorName(error: unknown): string {
 
 function isStorageNotFound(error: unknown): boolean {
   const name = storageErrorName(error);
-  return name === "NotFound" || name === "NoSuchKey" || (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 404;
+  return name === "NotFound" || name === "NoSuchKey";
 }
 
 /** Maps S3 CompleteMultipartUpload failures to a specific, secret-free 400. Unknown errors rethrow. */

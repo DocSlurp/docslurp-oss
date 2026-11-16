@@ -6,7 +6,9 @@ const hybridSearch = vi.fn();
 const chatProject = vi.fn();
 const projectChatDisabledBody = vi.fn(async (_projectId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
 const aggregateProjectRagSearch = vi.fn();
-const sqlMock = vi.fn();
+const sqlMock = Object.assign(vi.fn(), {
+  begin: vi.fn(async <T>(work: (client: ReturnType<typeof vi.fn>) => Promise<T>): Promise<T> => work(sqlMock)),
+});
 const enforceActorCategoryRateLimit = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
 
 vi.mock("../middleware/rate-limit.js", async (importOriginal) => ({
@@ -36,8 +38,10 @@ vi.mock("../services/aggregate-rag.js", () => ({
 
 const getProject = vi.fn();
 const ensureDefaultProject = vi.fn(async () => ({ id: "ws-default" }));
+const resolveDefaultProjectId = vi.fn(async () => "ws-default");
 vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   ensureDefaultProject,
+  resolveDefaultProjectId,
   getProject,
 }));
 
@@ -50,9 +54,14 @@ vi.mock("../services/organizations.js", async (importOriginal) => ({
     const project = await (await import("../services/projects.js")).getProject(id, userId) as { id: string; orgId: string } | null;
     return project ? { projectId: project.id, orgId: project.orgId, projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null } : null;
   }),
-  getProjectAccessWithPipeline: vi.fn(async (projectId: string) => ({
-    projectId, orgId: "org-1", pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
-  })),
+  // The route's one access read (lib/search-access.ts) and the cache's: from the getProject mock when a test arranges
+  // one (null: no access), otherwise an org-1 project.
+  getProjectAccessWithPipeline: vi.fn(async (projectId: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(projectId, userId) as { id: string; orgId: string } | null | undefined;
+    if (project === null) return null;
+    return { projectId, orgId: project?.orgId ?? "org-1", projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null,
+      pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {} };
+  }),
 }));
 
 const traceparent = vi.hoisted(() => ({ value: null as string | null }));
@@ -85,6 +94,7 @@ describe("searchRoutes", () => {
   let app: Hono;
 
   beforeEach(() => {
+    sqlMock.begin.mockClear();
     app = buildApp();
     hybridSearch.mockReset();
     chatProject.mockReset();
@@ -142,7 +152,7 @@ describe("searchRoutes", () => {
         filters: expect.objectContaining({
           projectId: "ws-1",
         }),
-      })
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
   });
 
@@ -161,10 +171,10 @@ describe("searchRoutes", () => {
     const response = await app.request("/search?q=test");
 
     expect(response.status).toBe(200);
-    expect(ensureDefaultProject).toHaveBeenCalledWith({ userId: "user-1", orgId: undefined });
+    expect(resolveDefaultProjectId).toHaveBeenCalledWith({ userId: "user-1", orgId: undefined });
     expect(hybridSearch).toHaveBeenCalledWith("test", "user-1", expect.objectContaining({
       filters: expect.objectContaining({ projectId: "ws-default" }),
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 
   it("passes project through as a search filter on POST /search", async () => {
@@ -224,7 +234,7 @@ describe("searchRoutes", () => {
         filters: expect.objectContaining({
           projectId: "ws-2",
         }),
-      })
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
   });
 
@@ -251,7 +261,7 @@ describe("searchRoutes", () => {
       // The key is the query as sent: different whitespace is a different search.
       await search("  rate   limits ");
       expect(hybridSearch).toHaveBeenCalledTimes(3);
-      expect(hybridSearch).toHaveBeenLastCalledWith("rate   limits", "user-1", expect.anything());
+      expect(hybridSearch).toHaveBeenLastCalledWith("rate   limits", "user-1", expect.anything(), expect.objectContaining({ orgId: expect.any(String) }));
       // Strict-privacy: never cached, so both identical requests run retrieval.
       await search("rate limits", "ws-strict");
       const strictReplay = await search("rate limits", "ws-strict");
@@ -275,7 +285,7 @@ describe("searchRoutes", () => {
         expect(response.status).toBe(200);
       }
       expect(hybridSearch).toHaveBeenCalledTimes(2);
-      expect(hybridSearch).toHaveBeenLastCalledWith("road", "user-1", expect.objectContaining({filters: expect.objectContaining({geo})}));
+      expect(hybridSearch).toHaveBeenLastCalledWith("road", "user-1", expect.objectContaining({filters: expect.objectContaining({geo})}), expect.objectContaining({ orgId: expect.any(String) }));
     } finally { delete process.env.SEARCH_RESPONSE_CACHE_TTL_MS; clearSearchResponseCacheForTests(); }
   });
 
@@ -303,7 +313,7 @@ describe("searchRoutes", () => {
     expect(response.status).toBe(200);
     expect(hybridSearch).toHaveBeenCalledWith("test", "user-1", expect.objectContaining({
       filters: expect.objectContaining({ projectId: "ws-default" }),
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 
   it("runs aggregate RAG search without requiring a single project scope", async () => {
@@ -531,6 +541,7 @@ describe("searchRoutes", () => {
       expect(refused.status).toBe(403);
       expect(await refused.json()).toMatchObject({ error: { code: "chat_session_forbidden" } });
       expect(chatProject).not.toHaveBeenCalled();
+      expect(sqlMock.begin).not.toHaveBeenCalled();
       // A funded organization for the stream's spend pre-check.
       sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, project_budget_paused: false, org_budget_paused: false, project_in_org: true, has_credit_grants: true }]);
       chatProject.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });
@@ -687,6 +698,8 @@ describe("searchRoutes", () => {
     expect(chatProject).toHaveBeenCalledWith({
       projectId: "ws-chat",
       userId: "user-1",
+      // The explicit search scope from the route's one access read.
+      scope: { orgId: expect.any(String), projectIds: "org", modeCeiling: null, actor: { type: "session" } },
       query: "test",
       sessionId: undefined,
       model: undefined,
@@ -734,6 +747,24 @@ describe("searchRoutes", () => {
     const stream = await app.request("/chat/stream?q=test&project=ws-chat&model=liquid/lfm-2.5-24b-a2b", { headers: { "Sec-Fetch-Site": "same-origin" } });
     expect(stream.status).toBe(400);
     expect(await stream.json()).toMatchObject({ error: { code: "model_not_allowed" } });
+    expect(chatProject).not.toHaveBeenCalled();
+  });
+
+  it("forwards the chat tier and refuses catalog model ids from non-eval callers before the stream opens", async () => {
+    chatProject.mockResolvedValueOnce({ answer: "Supported" });
+    const post = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat", tier: "balanced", reasoning: "low" }) });
+    expect(post.status).toBe(200);
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ tier: "balanced", reasoning: "low" }));
+    chatProject.mockClear();
+    for (const model of ["z-ai/glm-5.3-flash", "llm://openrouter/openai/gpt-6.1-sol"]) {
+      const stream = await app.request(`/chat/stream?q=test&project=ws-chat&model=${encodeURIComponent(model)}`, { headers: { "Sec-Fetch-Site": "same-origin" } });
+      expect(stream.status, model).toBe(400);
+      const body = await stream.json();
+      expect(body).toMatchObject({ error: { code: "model_not_allowed" } });
+      expect(body.error.message).toContain("fastest, balanced, smart");
+    }
+    const badTier = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat", tier: "anthropic/claude-haiku-5.5" }) });
+    expect(badTier.status).toBe(400);
     expect(chatProject).not.toHaveBeenCalled();
   });
 
@@ -868,6 +899,6 @@ describe("explicit ranking control transport", () => {
       ? await app.request("/search?" + new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, String(v)])))
       : await app.request("/search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fields) });
     expect(response.status).toBe(200);
-    expect(hybridSearch).toHaveBeenLastCalledWith("pump maintenance", "user-1", expect.objectContaining({ candidateDepth: 50, resultOrder: "relevance", useRerank: false }));
+    expect(hybridSearch).toHaveBeenLastCalledWith("pump maintenance", "user-1", expect.objectContaining({ candidateDepth: 50, resultOrder: "relevance", useRerank: false }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 });

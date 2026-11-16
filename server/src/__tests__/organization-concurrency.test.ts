@@ -2,10 +2,10 @@ import postgres from "postgres";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-// ORG_TEST_DATABASE_URL must point at a disposable database built by applying
+// TEST_DATABASE_URL must point at a disposable database built by applying
 // server/db/migrations (pnpm db:migrate). The test runs against that real
 // schema and isolates itself with run-unique ids instead of a private schema.
-const database = vi.hoisted(() => ({ url: process.env.ORG_TEST_DATABASE_URL, run: `${process.pid}-${Date.now()}` }));
+const database = vi.hoisted(() => ({ url: process.env.TEST_DATABASE_URL, run: `${process.pid}-${Date.now()}` }));
 vi.mock("../db.js", async () => {
   const { default: postgres } = await import("postgres");
   const { numericType } = await import("../lib/api-pool.js");

@@ -1,6 +1,9 @@
 import { defaultProjectSearchSettings, normalizePipelineFeatures } from "@docslurp/shared";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "org-kw", projectIds: "org", modeCeiling: null } as const;
+
 
 const mocks = vi.hoisted(() => ({
   sql: vi.fn(),
@@ -203,7 +206,7 @@ describe("search setup and plan by mode", () => {
 
   it.each([["search:keyword", "keyword"], ["search:hybrid", "hybrid"]] as const)("a %s key gets no model keys even when the project turns HyDE and the hosted reranker on", async (scope, mode) => {
     hydeProject();
-    const setup = await inRequestAs(keyActor([scope]), () => resolveSearchSetup("user-1", { filters: { projectId: "ws-kw" }, ...everythingOn }));
+    const setup = await inRequestAs(keyActor([scope]), () => resolveSearchSetup("user-1", { filters: { projectId: "ws-kw" }, ...everythingOn }, TEST_SEARCH_SCOPE));
     expect(setup.resolvedOptions).toMatchObject({ searchMode: mode, useHyDE: false, queryRewrite: false, rerankProvider: "bm25" });
     expect(setup.openRouterApiKey).toBeUndefined();
     expect(setup.rerankApiKey).toBeUndefined();
@@ -213,7 +216,7 @@ describe("search setup and plan by mode", () => {
 
   it("a deep key keeps the project's strategies", async () => {
     hydeProject();
-    const full = await inRequestAs(keyActor(["search:deep"]), () => resolveSearchSetup("user-1", { filters: { projectId: "ws-kw" }, useHyDE: true }));
+    const full = await inRequestAs(keyActor(["search:deep"]), () => resolveSearchSetup("user-1", { filters: { projectId: "ws-kw" }, useHyDE: true }, TEST_SEARCH_SCOPE));
     expect(full.resolvedOptions.searchMode).toBe("deep");
     expect(full.openRouterApiKey).toBe("openrouter-test-key");
   });
@@ -247,14 +250,14 @@ describe("search setup and plan by mode", () => {
   });
 
   it("skips the batch embedding prefetch for a mode the key limits, so a key past its limit spends nothing", async () => {
-    const items = ["pump seals", "valve torque", "bearing wear"].map((query) => ({ query, projectId: "ws-kw", options: {} }));
+    const items = ["pump seals", "valve torque", "bearing wear"].map((query) => ({ query, projectId: "ws-kw", scope: TEST_SEARCH_SCOPE, options: {} }));
     const limited = keyActor(["search:hybrid"], "server", [{ metric: "searches", mode: "hybrid", limit: 1, windowSeconds: 60 }], "prefetch-limited");
     expect(await inRequestAs(limited, () => prefetchBatchQueryEmbeddings(items, "user-1"))).toEqual({ prefetched: 0, calls: 0 });
     expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
   });
 
   it("skips the batch embedding prefetch for keyword searches", async () => {
-    const items = ["pump seals", "valve torque", "bearing wear"].map((query) => ({ query, projectId: "ws-kw", options: {} }));
+    const items = ["pump seals", "valve torque", "bearing wear"].map((query) => ({ query, projectId: "ws-kw", scope: TEST_SEARCH_SCOPE, options: {} }));
     expect(await inRequestAs(keyActor(["search:keyword"], "server"), () => prefetchBatchQueryEmbeddings(items, "user-1"))).toEqual({ prefetched: 0, calls: 0 });
     expect(await prefetchBatchQueryEmbeddings(items.map((item) => ({ ...item, options: { searchMode: "keyword" as const } })), "user-1")).toEqual({ prefetched: 0, calls: 0 });
     expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
@@ -276,6 +279,24 @@ describe("per-mode search limits", () => {
     expect(response.status).toBe(429);
     expect(Number(response.headers.get("Retry-After"))).toBeGreaterThan(0);
     await expect(response.json()).resolves.toMatchObject({ error: { code: "search_limit_exceeded", details: { mode: "deep", limit: 2 } } });
+  });
+
+  it("counts a keyword fan-out's queries all or none, across every window", async () => {
+    const rules = [
+      { metric: "searches", mode: "keyword", limit: 10, windowSeconds: 3_600 },
+      { metric: "searches", mode: "keyword", limit: 5, windowSeconds: 60 },
+    ];
+    await inRequestAs(keyActor(["search:keyword"], "server", rules, "limit-fanout"), async () => {
+      await consumeSearchModeLimit("keyword", 3);
+      // 3 more would pass the hour (6 of 10) but not the minute (6 of 5): refused, and neither window counts them.
+      const refused = await consumeSearchModeLimit("keyword", 3).then(() => null, (caught: unknown) => caught);
+      expect(refused).toBeInstanceOf(SearchModeLimitError);
+      expect((refused as InstanceType<typeof SearchModeLimitError>).rule.windowSeconds).toBe(60);
+      await consumeSearchModeLimit("keyword", 2);
+      await expect(consumeSearchModeLimit("keyword")).rejects.toBeInstanceOf(SearchModeLimitError);
+      // A fan-out larger than the limit itself can never be admitted.
+      await expect(consumeSearchModeLimit("keyword", 11)).rejects.toBeInstanceOf(SearchModeLimitError);
+    });
   });
 
   it("counts only its own mode, so a cheaper mode keeps working", async () => {
@@ -302,14 +323,14 @@ describe("per-mode search limits", () => {
     const { hybridSearch } = await import("../services/search.js");
     const refusal = (run: () => Promise<unknown>) => run().then(() => null, (error: unknown) => error);
     await inRequestAs(keyActor(["search:deep"], "server", [{ metric: "searches", mode: "deep", limit: 1, windowSeconds: 60 }], "limit-hybrid"), async () => {
-      const first = await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" } }));
+      const first = await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" } }, TEST_SEARCH_SCOPE));
       expect(first).not.toBeInstanceOf(SearchModeLimitError);
       mocks.sql.mockClear();
-      expect(await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" } }))).toBeInstanceOf(SearchModeLimitError);
+      expect(await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" } }, TEST_SEARCH_SCOPE))).toBeInstanceOf(SearchModeLimitError);
       // Refused before setup: no database work for the refused search.
       expect(mocks.sql).not.toHaveBeenCalled();
       // A cheaper mode is counted separately.
-      expect(await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" }, searchMode: "keyword" }))).not.toBeInstanceOf(SearchModeLimitError);
+      expect(await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" }, searchMode: "keyword" }, TEST_SEARCH_SCOPE))).not.toBeInstanceOf(SearchModeLimitError);
     });
   });
 
@@ -319,5 +340,38 @@ describe("per-mode search limits", () => {
     expect(apiKeyRateLimitRulesSchema.safeParse([{ metric: "requests", mode: "deep", limit: 100, windowSeconds: 60 }]).success).toBe(false);
     expect(apiKeyRateLimitRulesSchema.safeParse([{ metric: "searches", mode: "deep", limit: 1, windowSeconds: 60 }, { metric: "searches", mode: "deep", limit: 2, windowSeconds: 60 }]).success).toBe(false);
     expect(apiKeyRateLimitRulesSchema.safeParse([{ metric: "searches", mode: "everything", limit: 1, windowSeconds: 60 }]).success).toBe(false);
+  });
+});
+
+describe("fast lane: a search with nothing to retrieve", () => {
+  const empty = { searchable_documents: 0, indexed_documents: 0, keyword_only_documents: 0, page_only_documents: 0 };
+  const setupOf = (resolvedOptions: Record<string, unknown>, availabilityRow: Record<string, unknown> | undefined = empty) =>
+    ({ availabilityRow, resolvedOptions }) as never;
+
+  it("is a keyword or hybrid search over a whole project with no documents to serve", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword" }))).toBe(true);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "hybrid" }))).toBe(true);
+  });
+
+  it("never covers deep mode, where model strategies and sub-searches can run", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "deep" }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({}))).toBe(false);
+  });
+
+  it("never covers a run or document filter, which a caller could invent on a populated project", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", runId: "run-1" }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", filters: { runId: "run-1" } }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", filters: { documentId: "doc-1" } }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", filters: { documentIds: ["doc-1"] } }))).toBe(false);
+  });
+
+  it("takes a main slot when anything is searchable or availability is unknown", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword" }, { ...empty, page_only_documents: 1 }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword" }, { ...empty, keyword_only_documents: 2 }))).toBe(false);
+    expect(hasNothingToRetrieve({ availabilityRow: undefined, resolvedOptions: { searchMode: "keyword" } } as never)).toBe(false);
   });
 });

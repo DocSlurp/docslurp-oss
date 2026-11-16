@@ -3,6 +3,14 @@ import { describe, expect, it } from "vitest";
 import { assessClamDatabaseHealth, resolveMalwareScanPolicy } from "../tools/runner.js";
 
 describe("malware scan policy", () => {
+  it.each(["production", "staging", "preview", "prodution"])("caps signature age even when startup was skipped in %s", (NODE_ENV) => {
+    const policy = resolveMalwareScanPolicy({ NODE_ENV, DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "999999" });
+    expect(policy.maxSignatureAgeHours).toBe(24);
+  });
+  it("retains stricter deployed ages and development controls", () => {
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "staging", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "12" }).maxSignatureAgeHours).toBe(12);
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "development", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "72" }).maxSignatureAgeHours).toBe(72);
+  });
   it("uses VM-local scanning and fails closed on stale definitions in production by default", () => {
     const policy = resolveMalwareScanPolicy({ NODE_ENV: "production" });
 
@@ -11,11 +19,20 @@ describe("malware scan policy", () => {
     expect(policy.maxSignatureAgeHours).toBe(24);
   });
 
-  it("keeps stale-definition warnings non-blocking in local development by default", () => {
+  // #398: stale definitions block scanning by default everywhere; only an explicit development opt-in warns.
+  it("fails closed on stale definitions in local development by default", () => {
     const policy = resolveMalwareScanPolicy({ NODE_ENV: "development" });
 
     expect(policy.requireDaemon).toBe(false);
-    expect(policy.failOpenOnStaleDefinitions).toBe(true);
+    expect(policy.failOpenOnStaleDefinitions).toBe(false);
+  });
+
+  it.each(["development", "test"])("honours an explicit stale-definition opt-in in %s", (nodeEnv) => {
+    expect(resolveMalwareScanPolicy({ NODE_ENV: nodeEnv, DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB: "true" }).failOpenOnStaleDefinitions).toBe(true);
+  });
+
+  it.each(["production", "staging"])("never fails open on stale definitions in %s, even when asked", (nodeEnv) => {
+    expect(resolveMalwareScanPolicy({ NODE_ENV: nodeEnv, DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB: "true" }).failOpenOnStaleDefinitions).toBe(false);
   });
 });
 

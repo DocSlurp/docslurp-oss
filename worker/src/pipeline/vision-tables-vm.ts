@@ -58,6 +58,7 @@ import {
   type VisionTableRawReason,
   type VisionTableRow,
 } from "./vision-tables-guest.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 
 export const MAX_COLUMNS = 100;
 /** The app's chat/inspector/embed table renderer refuses a table above either bound (chat-html-tables.ts). */
@@ -307,7 +308,7 @@ async function runGuest(pages: string[], runner: Pick<CommandRunner, "run">, sig
   try {
     const input = path.join(dir, "pages.json"), output = path.join(dir, "tables.json");
     await writeFile(input, JSON.stringify(pages), { mode: 0o600 });
-    await runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "vision-tables.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
+    await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "vision-tables.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
     if ((await stat(output)).size > MAX_RESULT_BYTES) throw new Error("vision table result exceeds limit");
     const parsed = JSON.parse(await readFile(output, "utf8")) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== pages.length) throw new Error("invalid vision table result");

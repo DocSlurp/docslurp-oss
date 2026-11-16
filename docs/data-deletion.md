@@ -40,6 +40,75 @@ is removed directly; an object-storage root must live in the artifact bucket,
 otherwise only the known tables are dropped and the sweep logs a warning. While documents are
 still in flight the drop waits out the same 15-minute grace as their cleanup.
 
+### The summary tree's table
+
+A project that builds a summary tree (`pipeline.summaryTree`, see
+`packages/shared/src/summary-tree.ts`) has a second table, `summaries`, beside
+`chunks` in the same database. It holds the summary text and vector of each
+node; Postgres holds only build state and a node registry without text
+(`document_summary_trees`, `document_summary_tree_nodes`). Every path that
+removes a document removes its part of the tree:
+
+| What | How it goes |
+| --- | --- |
+| Rows in `summaries` | With the document's chunk rows: document delete and artifact retention (the cleanup queue), supersede and archive (the sweep). The table is looked up beside every chunks table the document is indexed in, and in the embedding space its tree state names, so no flag has to be right for the rows to be found. |
+| The `summaries` table | Project and organization deletion queue a `vector_table` entry naming it (`"table": "summaries"`), so it is dropped even where the prefix purge cannot reach the LanceDB root. |
+| Registry rows | Foreign-key cascade from `documents`; the sweep deletes them when a superseded version is archived or purged, and artifact retention deletes them with the run's chunks. |
+| One document's tree while the document stays | A `summary_tree_document` entry in `storage_cleanup_queue`: the document's rows are deleted strictly from the `summaries` table of every embedding space it was written in, every object under its `<run root>/summary-tree/<documentId>/` folders is removed, and its registry rows go. Queued by a correction reindex (in the transaction that replaces the chunks; the tree state becomes `skipped` / `corrected` in the same transaction) and by a build that finds its document gone or corrected and could not remove what it wrote. The sweep locks the document's row first, so a summary row write in flight finishes before it and none starts behind it. |
+
+Summary rows always use the strict delete (`purgeHistory`, below): the table is
+compacted and its older versions pruned in the same call, and the cleanup stays
+queued until that succeeds. Unlike chunk rows they are never shared with a
+dedup copy, so they go even when the chunk rows stay for a live copy. A summary
+row can only be written for a live document of that organization and project
+that is indexed in that embedding space and has a tree state row
+(`worker/src/stages/lancedb-summaries.ts`), so a row cannot exist where these
+paths would not find it.
+
+**What stops serving a tree without removing it.** Search reads a document's
+summaries only while its tree state is `ready` for the document's current run,
+the document is completed, current and uncorrected, the project has the tree
+turned on and the deployment serves it. Each of the following stops serving at
+once; what happens to the stored rows differs:
+
+| Event | Summary rows and artifact |
+| --- | --- |
+| The project turns the summary tree off, or the deployment's serve or build switch goes off | Kept. Nothing reads them, and no build or backfill adds to them. They go when each document is deleted, superseded and purged, or archived, or when the project is deleted. Turning the tree back on serves them again. |
+| A document is blocked or redacted by the PII policy and already has a tree (a rescan, a retry in place) | The tree state leaves `ready` in the PII stage itself (`partial`, `pii-withheld`) and strict removal is queued (`summary_tree_document`). A blocked document then gets no tree (`skipped`, `pii`); a redacted one is rebuilt from the redacted text. |
+| A document blocked by the PII policy on its first ingestion | It never had a tree: the stage records `skipped` / `pii` and writes nothing. |
+| A correction reindex | Removed: strict removal is queued in the correction's own transaction (the `summary_tree_document` row of the table above). |
+| A build that ends `partial`, or is taken over | Kept for the build that resumes it; never served while not `ready`. |
+
+So turning the feature off is not an erasure. To remove a project's summaries
+while keeping its documents, delete and re-upload the documents, or delete the
+project; there is no "drop the tree" operation yet (`TODO.md`).
+
+**A cleanup entry that keeps failing.** A queue row (`document_cleanup_queue`,
+`storage_cleanup_queue`) is tried `CLEANUP_ATTEMPT_LIMIT` (10) times and then
+left in place, unclaimed. For a strict summaries delete that means a deleted
+document's summary text is still in the table. The sweep logs one line at error
+level when a row reaches the limit:
+`[cleanup] status=attempt-limit-reached queue=<queue> id=<id> ... action=manual-reconciliation-required`.
+After fixing the cause, reset the row's `attempts` to 0 and the next sweep
+retries it. Alerting on that line is not wired yet (`TODO.md`).
+
+**A document deleted while its tree is being built.** The cleanup of a completed
+document is due the moment it is deleted, so the sweep can finish while a model
+call or a write of the build is still in flight. Two things keep a late write
+from staying behind:
+
+- The row writer checks the document and writes the table under a lock on the
+  document's row (`for key share`). A delete, a purge or archive of a replaced
+  version and a correction reindex wait for a write in flight, and a write that
+  starts after them is refused.
+- The build asks whether it may still write after every model call (before the
+  text part is written) and again once a window's parts and its summary rows
+  have landed. On a refusal it removes everything it wrote for the document: its
+  summary rows (strict) and every object under
+  `<run root>/summary-tree/<documentId>/`. A `summary_tree_document` entry is
+  queued before that removal starts, so a crash or a failed delete still ends
+  with the data gone.
+
 Org-level tables from before per-project databases are deleted by the
 relocation CLI's `--drop-legacy` step (see [operations](self-host/operations.md#moving-to-per-project-lancedb-databases-migration-0082));
 cleanup rows queued for them before migration 0082 drop them by their legacy
@@ -64,6 +133,83 @@ The worker leader runs the sweep every 30 s (`purgeSupersededDocuments` in
 3. `storage_cleanup_queue`: it lists and deletes every key under each run
    prefix and drops queued LanceDB tables. A prefix must have exactly two
    segments (`user/run/`). Wider prefixes are refused.
+
+### What a LanceDB delete removes, and when
+
+A LanceDB delete hides rows at once (a deletion vector), but their bytes stay
+in the table's files until maintenance rewrites them:
+
+1. After each cleanup transaction the sweep sets
+   `vector_index_tables.history_prune_due_at` for every table it deleted rows
+   from, to the version-retention window (10 minutes by default) plus one
+   minute. The maintenance sweep then runs a pass on that table even if nobody
+   writes to it again. Before migration 0162 a table with no later writes kept
+   deleted rows in its older versions indefinitely. A table the write queue
+   never registered (direct writes) is registered by the delete.
+2. That pass prunes the versions from before the delete. While a table is
+   marked, any pass that compacted, due or write-triggered, re-arms the prune:
+   the fragments it replaced are still referenced by the version it compacted
+   from, and a later pass after retention removes them. A pass that compacted
+   nothing settles the prune if it started after the due time. A table that no
+   longer exists drops its mark.
+3. An expired extract, and every delete from a summary tree's table, uses the strict path instead (`purgeHistory`): two
+   passes with zero retention, in the cleanup itself, and the cleanup row
+   stays queued until they succeed.
+
+The scheduled pass also runs in inline maintenance mode and with direct
+writes, where maintenance otherwise only follows writes. It does not run when
+maintenance is switched off (`maintenance=off`).
+
+**Known limits.**
+
+- Compaction rewrites a fragment only when more than 10% of its rows are
+  deleted, and `@lancedb/lancedb` 0.41 does not expose that threshold. When a
+  deleted document is a small share of a large fragment, its rows stay in that
+  fragment's file, hidden from every query, until later deletes or a table
+  rebuild cross the threshold. This applies to the strict path too. A verified
+  erasure request that cannot wait needs the table rebuilt (reindex the
+  project) or dropped.
+- The mark is written after the cleanup transaction, from process memory. A
+  worker that dies between the commit and that write loses it, and the table
+  is then pruned by its next write's maintenance.
+- Row deletes outside document cleanup (a re-embed replacing stale chunk
+  vectors, a page-vector rollback) do not schedule a prune. They are followed
+  by writes, so ordinary maintenance prunes them, and any pass that compacts
+  re-arms the prune.
+
+With the [local disk cache](self-host/operations.md#local-disk-cache-for-lancedb) on, each
+API machine also keeps a copy of the index and data files it has read. Files that cleanup or
+compaction later remove from the bucket are revalidated on their next cached read, at most
+30 seconds after the previous origin check. A missing object or access refusal discards the
+cached copy; an older in-flight fill cannot restore its authorization lease. Objects nobody
+reads again, including orphan blocks, are purged after five idle minutes plus the proxy's
+30-second sweep interval. These are disk-cache limits, separate from native memory caches.
+Delete the cache directory to remove disk copies at once.
+
+### Community summaries
+
+A graph community summary is written from its member entities and the
+relations between them. Three rules keep one from outliving a removed
+document:
+
+- When cleanup removes a document's graph contributions, every community that
+  lost a member entity or an internal relation is deleted with its summary. A
+  community whose members and relations are all still supported by other
+  documents is kept.
+- A refresh reuses an earlier summary only when its entities (id, name, type)
+  and internal relations are exactly the same (`metadata.inputHash`), not just
+  the same member ids.
+- A refresh re-reads the graph under the project graph lock before publishing
+  and drops any community whose inputs changed while it was being summarized.
+
+Nothing schedules a refresh after a delete. Deleted communities are rebuilt by
+the project's next graph-enabled run or graph rebuild job; until then
+community search has no entry for those entities. Chunk, graph and lexical
+search are unaffected.
+
+Community search can still return the old summary until the cleanup sweep
+runs: 30 s after a delete, 60 s grace plus a sweep for a superseded version,
+15 minutes for a document deleted while still processing.
 
 When a batch fails, the sweep retries it row by row so that one bad row cannot
 block the others. A failed row is retried on later sweeps, up to 10 attempts,
@@ -177,6 +323,8 @@ ledger entries, so it can no longer cascade into shared data.
 | --- | --- |
 | Rows removed and content no longer searchable or listable | Immediate (the request returns after commit) |
 | LanceDB rows and storage artifacts deleted | Within 5 minutes; within 20 minutes for work that was in flight (15 min grace plus a sweep) |
+| Community summaries that drew on the document deleted | With the row above |
+| Deleted rows pruned from LanceDB table history | About 11 minutes after the delete, or about 22 when the pass compacted; see the known limits above for small deletes |
 | Interrupted org deletion completed | Within 10 minutes (resumed by the maintenance sweep) |
 | Backups and snapshots age out | Within 35 days: Neon history window (≤ 30 days), Tigris snapshots and the backup bucket's 35-day lifecycle (`docs/disaster-recovery.md`). For a verified erasure request that cannot wait, delete the specific object `versionId`s. |
 

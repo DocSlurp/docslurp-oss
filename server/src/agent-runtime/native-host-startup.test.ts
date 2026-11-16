@@ -29,7 +29,7 @@ vi.mock("@mastra/redis", () => ({ RedisServerCache: class {}, nodeRedisPreset: {
 vi.mock("@mastra/redis-streams", () => ({ RedisStreamsPubSub: class { async close() {} } }));
 vi.mock("./recovery.js", () => ({ startNativeRecovery: state.recover }));
 vi.mock("@mastra/core/mastra", () => ({ Mastra: class {
-  backgroundTaskManager = { init: state.init };
+  backgroundTaskManager = { init: state.init, registerStaticExecutor: vi.fn() };
   shutdown = state.shutdown;
   constructor(options: { pubsub: unknown }) {
     // Installed Mastra starts initialization and logs/catches its rejection.

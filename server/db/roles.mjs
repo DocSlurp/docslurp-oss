@@ -36,6 +36,8 @@ export const WORKER_TABLES = Object.freeze({
   api_key_usage: { privileges: DML, evidence: "worker/src/db/store.ts recordApiKeyPageUsage (upsert) and pruneOperationalLogs (delete); metering counters, no key material" },
   audit_log: { privileges: ["insert"], evidence: "worker/src/db/store.ts insert into audit_log" },
   billing_runtime: { privileges: ["select"], evidence: "worker/src/db/store.ts meteringEnforced" },
+  chart_export_free_vm_grants: { privileges: ["select", "insert"], evidence: "worker/src/db/chart-export-free-vm-cap.ts per-document grants of the per-org free VM cap" },
+  chart_export_free_vm_hours: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/chart-export-free-vm-cap.ts per-org hourly free chart-export VM cap" },
   chunk_entities: { privileges: DML, evidence: "worker/src/db/store.ts graph writes; superseded-purge.ts" },
   credit_debits_pending: { privileges: DML, evidence: "worker/src/db/usage-event-store.ts enqueue_org_credit_debit / apply_pending_org_debits" },
   credit_leases: { privileges: DML, evidence: "worker/src/db/credit-lease.ts; grant_credit_lease(); project_runs lease triggers" },
@@ -55,6 +57,8 @@ export const WORKER_TABLES = Object.freeze({
   document_propositions: { privileges: DML, evidence: "worker/src/db/store.ts propositions" },
   document_run_stage_states: { privileges: DML, evidence: "worker/src/db/store.ts stage state" },
   document_summaries: { privileges: DML, evidence: "worker/src/db/store.ts summaries" },
+  document_summary_tree_nodes: { privileges: DML, evidence: "worker/src/summary-tree/state-store.ts node registry; superseded-purge.ts" },
+  document_summary_trees: { privileges: DML, evidence: "worker/src/summary-tree/state-store.ts per-document tree state; backfill-job.ts; superseded-purge.ts" },
   documents: { privileges: DML, evidence: "worker/src/db/store.ts and most stages" },
   embedding_reuse_refs: { privileges: DML, evidence: "worker/src/db/store.ts embedding reuse" },
   graph_jobs: { privileges: DML, evidence: "worker/src/graph/rebuild-job.ts" },
@@ -85,6 +89,7 @@ export const WORKER_TABLES = Object.freeze({
   run_fast_page_image_grants: { privileges: ["select", "insert"], evidence: "worker/src/db/fast-page-image-budget.ts per-document Fast render grants" },
   search_index_staleness: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts DERIVED_TABLES" },
   upload_cleanup_owners: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts original-upload ownership verification" },
+  summary_tree_jobs: { privileges: DML, evidence: "worker/src/summary-tree/backfill-job.ts" },
   storage_cleanup_queue: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts drainStorageCleanupQueue; project_runs trigger" },
   upload_session_files: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts retained source keys" },
   upload_sessions: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts" },
@@ -92,12 +97,15 @@ export const WORKER_TABLES = Object.freeze({
   usage_events: { privileges: ["select", "insert"], evidence: "worker/src/db/usage-event-store.ts (insert ... on conflict do nothing returning id, cost_cents)" },
   user: { privileges: [], columns: { select: ["id", "email"] }, evidence: "worker/src/db/store.ts notification emails (owner email only)" },
   vector_index_outbox: { privileges: DML, evidence: "worker/src/stages/lancedb-write-queue.ts" },
+  figure_resume_org_days: { privileges: DML, evidence: "worker/src/figures/resume-runner.ts: per-org daily resume VM budget (select, upsert, prune); counters only" },
   geo_accepted_sources: { privileges: DML, evidence: "structured-extract accepted-source checkpoint" },
   geo_projection_generations: { optional: true, privileges: DML, evidence: "optional PostGIS accepted-source publisher" },
   geo_projection_features: { optional: true, privileges: DML, evidence: "optional PostGIS accepted-source publisher" },
   // Escalation reads are written once per call (insert ... on conflict do nothing) and read back on retry; never updated or
   // deleted by the worker: rows go with their run (ON DELETE CASCADE, as the table owner).
   ocr_escalation_reads: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts ocrEscalationReads / recordOcrEscalationRead (worker/src/ocr/hosted-reader.ts)" },
+  // Page reader org daily spend: admit inserts a ticket, settle updates it, admit purges days older than yesterday.
+  ocr_page_reader_org_spend: { privileges: DML, evidence: "worker/src/ocr/page-reader-budget.ts PostgresPageReaderOrgBudget (admit, settle, purge)" },
   ready_geo_projection_generations: { optional: true, privileges: ["select"], evidence: "optional PostGIS readiness" },
   vector_index_tables: { privileges: DML, evidence: "worker/src/stages LanceDB tables; superseded-purge.ts" },
   vector_indexes: { privileges: DML, evidence: "worker/src/db/store.ts vector index rows" },
@@ -123,6 +131,8 @@ export const WORKER_TABLES = Object.freeze({
   // Route tiers (0136): the worker reads current observations to rank vision hosts and records served latency.
   provider_endpoint_observations: { privileges: ["select", "insert"], evidence: "server/src/services/provider-observations.ts recordServedLatency (traffic rows); tier selection" },
   provider_endpoint_current: { privileges: ["select"], evidence: "server/src/services/provider-observations.ts readProviderObservations (view)" },
+  compute_price_observations: { privileges: ["select"], evidence: "operator-owned compute prices; runtime lookup only" },
+  compute_calibration_observations: { privileges: ["select", "insert"], evidence: "append-only operational compute measurements" },
 });
 
 /** Relations the worker must not touch, and why. */
@@ -141,14 +151,18 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   chat_run_dependencies: "authorized chat task discovery links (API only); ingestion publishes through document_page_states",
   realtime_revision_counters: "private numeric publication storage; only validated triggers may write",
   realtime_revisions: "aggregate dashboard revision view (API only); ingestion triggers use realtime_revision_counters",
+  realtime_scope_revisions: "per-project/run dashboard revision view (API only, 0153); ingestion triggers use realtime_revision_counters",
   extracts: "extract retention, charges and deletion (API maintenance sweep only); the worker reads runs' storage_prefix",
   chat_turns: "chat (API only)",
   connector_sync_log: "connector administration (API only)",
   credit_grants: "billing: purchased and promotional credit",
   document_corrections: "API-managed review corrections",
   document_tags: "API-managed tags",
+  figure_resume_proposal_uses: "single-use chat figure resume proposal tokens (API apply path only)",
   feedback_reports: "support reports filed by users (API only)",
   idempotency_cache: "API request replay cache",
+  intake_request_receipts: "durable API intake replay identity and response (API only)",
+  pending_monthly_capacity: "API admission capacity view (API only)",
   interactive_spend_holds: "API interactive spend admission",
   mcp_oauth_clients: "MCP OAuth credentials",
   mcp_oauth_device_attempts: "MCP OAuth credentials",
@@ -194,6 +208,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   project_connectors: "connector credentials",
   project_invites: "membership invitations",
   project_members: "membership and roles",
+  project_activity_stats: "search and chat counters (API only): written by triggers on search_sessions, chat_turns and chat_sessions, and removed by a delete trigger on projects, none of which the worker can write or delete",
   project_search_settings: "search (API only)",
   project_slugs: "slug history (API only)",
   user_client_surfaces: "admin user directory analytics (API only)",
@@ -207,10 +222,14 @@ export const WORKER_DENIED_TABLES = Object.freeze({
  * revokes EXECUTE on every other owner definer function, and the runtime identity rule refuses one a runtime role reaches.
  */
 export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
+  "public.authorize_compute_cohort(pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text)",
   "public.realtime_changed()",
+  "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
   "public.realtime_materialization_changed()",
-  "public.realtime_compact_revisions(text)",
+  "public.realtime_compact_revisions(pg_catalog.text)",
+  // Trigger-only deploy fence: EXECUTE and its private schema remain revoked from runtime roles.
+  "docslurp_deploy.check_ingest_admission()",
 ]);
 
 export function quoteIdent(name) {
@@ -243,6 +262,13 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       `alter default privileges for role ${ownerIdent} in schema public grant usage, select, update on sequences to ${app}`,
       `alter default privileges for role ${ownerIdent} in schema public grant execute on functions to ${app}`,
     );
+    // Compute prices are operator-owned; measurements are append-only even after schema-wide reconciliation.
+    for (const table of ["compute_price_observations", "compute_calibration_observations"]) {
+      if (!relations.includes(table)) continue;
+      const target = `public.${quoteIdent(table)}`;
+      statements.push(`revoke all on ${target} from ${app}`, `grant select on ${target} to ${app}`);
+      if (table === "compute_calibration_observations") statements.push(`grant insert on ${target} to ${app}`);
+    }
   }
   if (has(roles.worker)) {
     const worker = quoteIdent(roles.worker);
@@ -280,16 +306,26 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       );
     }
   }
+  if (existingColumns?.project_runs?.includes("compute_input_manifest_hash")) {
+    const signature = "public.authorize_compute_cohort(text,text,text,text,text)";
+    statements.push(`revoke all on function ${signature} from public`);
+    if (has(roles.app)) statements.push(`revoke all on function ${signature} from ${quoteIdent(roles.app)}`);
+    if (has(roles.worker)) statements.push(`grant execute on function ${signature} to ${quoteIdent(roles.worker)}`);
+  }
   if (relations.includes("realtime_revision_counters")) {
     // Schema-wide application grants must never expose publication internals.
-    const functions = "public.realtime_changed(),public.realtime_search_session_changed(),public.realtime_materialization_changed(),public.realtime_record_change(text),public.realtime_fold_committed(text),public.realtime_compact_revisions(text)";
+    // realtime_scope_revisions and realtime_statement_changed() both arrive with 0153: the view is read like
+    // realtime_revisions, the function is revoked like the other triggers; both are absent before 0153.
+    const scoped = relations.includes("realtime_scope_revisions");
+    const functions = `public.realtime_changed(),${scoped ? "public.realtime_statement_changed()," : ""}public.realtime_search_session_changed(),public.realtime_materialization_changed(),public.realtime_record_change(text),public.realtime_fold_committed(text),public.realtime_compact_revisions(text)`;
+    const views = scoped ? "public.realtime_revisions,public.realtime_scope_revisions" : "public.realtime_revisions";
     statements.push(`revoke all on function ${functions} from public`,
-      "revoke all on public.realtime_revision_counters,public.realtime_revisions from public");
+      `revoke all on public.realtime_revision_counters,${views} from public`);
     for (const role of [roles.app, roles.worker].filter(has)) {
-      statements.push(`revoke all on public.realtime_revision_counters,public.realtime_revisions from ${quoteIdent(role)}`,
+      statements.push(`revoke all on public.realtime_revision_counters,${views} from ${quoteIdent(role)}`,
         `revoke all on function ${functions} from ${quoteIdent(role)}`);
     }
-    if (has(roles.app)) statements.push(`grant select on public.realtime_revisions to ${quoteIdent(roles.app)}`,
+    if (has(roles.app)) statements.push(`grant select on ${views} to ${quoteIdent(roles.app)}`,
       `grant execute on function public.realtime_compact_revisions(text) to ${quoteIdent(roles.app)}`);
   }
   if (relations.includes("pricing_provider_state")) {

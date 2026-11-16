@@ -5,8 +5,10 @@ import { splitTextIntoPages as splitDocumentPages } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
-import { listAccessibleProjectIds } from "./organizations.js";
+import { canEditProject, getProjectAccess, listAccessibleProjectIds } from "./organizations.js";
+import { EditorRequiredError } from "../lib/editor-required.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
+import { withdrawSummaryTreeForCorrection } from "./summary-tree-withdrawal.js";
 
 type ReviewDocumentRow = {
   id: string;
@@ -430,6 +432,16 @@ export function calculateReviewSeverity(input: {
   );
 }
 
+/** A visible document the caller may not correct (403; one they cannot see is a 404). */
+export class CorrectionForbiddenError extends EditorRequiredError {
+  constructor() { super(); this.name = "CorrectionForbiddenError"; }
+}
+
+async function assertCanEditCorrection(projectId: string, orgId: string, userId: string): Promise<void> {
+  const access = await getProjectAccess(projectId, userId);
+  if (!access || access.orgId !== orgId || !canEditProject(access, userId)) throw new CorrectionForbiddenError();
+}
+
 async function getAccessibleDocument(docId: string, userId: string): Promise<ReviewDocumentRow | null> {
   const projectIds = await listAccessibleProjectIds(userId);
   if (projectIds.length === 0) {
@@ -792,6 +804,8 @@ export async function saveDocumentCorrection(args: {
   if (!document) {
     return null;
   }
+  // Corrected text is published to search (and a re-index re-embeds it): editors only (council L3 M2).
+  await assertCanEditCorrection(document.project_id, document.org_id, args.userId);
 
   if (args.tags) {
     await setDocumentTags(args.docId, args.userId, args.tags);
@@ -854,6 +868,8 @@ export async function reindexDocumentCorrection(args: {
   if (!document || !document.run_id) {
     return null;
   }
+  // Corrected text is published to search (and a re-index re-embeds it): editors only (council L3 M2).
+  await assertCanEditCorrection(document.project_id, document.org_id, args.userId);
 
   const [correction, reviewSignal] = await Promise.all([
     getCorrectionRow(args.docId),
@@ -931,6 +947,10 @@ export async function reindexDocumentCorrection(args: {
   await sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
 
+    // The document's row, held for the whole replacement: a worker writing derived rows for this document under its
+    // own key-share lock (summary rows, lancedb-summaries.ts) finishes first, and the next one sees this commit.
+    await transaction`select id from documents where id = ${args.docId} for update`;
+
     await transaction`
       update document_corrections
       set reindex_requested_at = coalesce(reindex_requested_at, now()),
@@ -938,6 +958,9 @@ export async function reindexDocumentCorrection(args: {
           updated_at = now()
       where document_id = ${args.docId}
     `;
+    // The summary tree was built from the text this correction replaces: it is withdrawn in the same transaction
+    // and its rows and artifact are queued for strict removal.
+    await withdrawSummaryTreeForCorrection(transaction, args.docId);
 
     // Human-corrected content supersedes source-derived materialization. Fence
     // every in-flight reader under the document lock before replacing rows.

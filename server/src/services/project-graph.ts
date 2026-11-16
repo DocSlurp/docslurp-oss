@@ -1,3 +1,4 @@
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -9,7 +10,7 @@ import {
   graphFallbackScope,
   isGraphJobActive,
   normalizePipelineFeatures,
-  resolvePipelineTextModel,
+  resolveAllowedPipelineTextModel,
   type GraphBuildCalibration,
   type GraphBuildEstimate,
   type GraphConfig,
@@ -42,6 +43,7 @@ export class ProjectGraphError extends Error {
     message: string,
     readonly status: 400 | 403 | 404 | 409,
     readonly activeJob?: GraphJob,
+    readonly code?: typeof EDITOR_REQUIRED_CODE,
   ) {
     super(message);
   }
@@ -78,7 +80,7 @@ function graphEnabled(pipeline: PipelineFeatures): boolean {
 }
 
 function graphModel(pipeline: PipelineFeatures): string {
-  return resolvePipelineTextModel(pipeline, "graph-extraction", (process.env.DOCSLURP_TEXT_MODEL?.trim() ? normalizeHostedModelRef(process.env.DOCSLURP_TEXT_MODEL) : undefined));
+  return resolveAllowedPipelineTextModel(pipeline, "graph-extraction", (process.env.DOCSLURP_TEXT_MODEL?.trim() ? normalizeHostedModelRef(process.env.DOCSLURP_TEXT_MODEL) : undefined));
 }
 
 function workerConcurrency(): number {
@@ -146,7 +148,7 @@ async function requireProject(projectRef: string, userId: string, edit: boolean)
   if (edit) {
     const access = await getProjectAccess(project.id, userId);
     if (!access || !canEditProject(access, userId)) {
-      throw new ProjectGraphError("You cannot change this project", 403);
+      throw new ProjectGraphError(EDITOR_REQUIRED_MESSAGE, 403, undefined, EDITOR_REQUIRED_CODE);
     }
   }
   return project;

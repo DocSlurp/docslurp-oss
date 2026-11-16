@@ -8,13 +8,13 @@ import { createRunStartRecovery } from "../services/run-start-recovery.js";
 import type { SqlClient } from "../db.js";
 
 // Real-Postgres check of run-start recovery (claiming, backoff, SKIP LOCKED).
-// RUN_LIFECYCLE_DATABASE_URL must point at a disposable local database built by
+// TEST_DATABASE_URL must point at a disposable local database built by
 // applying server/db/migrations (pnpm db:migrate); server/db/migrations is the
 // only schema source. Each test seeds its own user, organization and project
 // with unique ids and deletes them afterwards. Recovery sweeps every due Run in
-// the database, so do not point this at a database other processes are using.
-//   RUN_LIFECYCLE_DATABASE_URL=$DATABASE_URL npx vitest run --project api run-start-recovery.db
-const databaseUrl = process.env.RUN_LIFECYCLE_DATABASE_URL ?? "";
+// the database, so do not point this at a database other processes are using: run it with
+// scripts/run-database-tests.mjs, which gives each file a fresh disposable database.
+const databaseUrl = process.env.TEST_DATABASE_URL ?? "";
 const isLocal =
   databaseUrl !== "" && ["localhost", "127.0.0.1"].includes(new URL(databaseUrl).hostname);
 
@@ -80,8 +80,8 @@ function recovery(sql: SqlClient, temporal: ReturnType<typeof fakeTemporal>) {
 
 async function insertRun(sql: SqlClient, tenant: Tenant, name: string, values: { ageMs?: number; status?: string; controlState?: string; started?: boolean } = {}) {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, control_state, created_at, workflow_started_at, creation_ready_at)
-    values (
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, control_state, created_at, workflow_started_at, creation_ready_at)
+    values (100,
       ${tenant.runId(name)}, ${tenant.orgId}, ${tenant.userId}, ${tenant.projectId}, 'bulk-upload',
       ${values.status ?? "queued"}, 'queued', ${values.controlState ?? null},
       now() - (${values.ageMs ?? 0} * interval '1 millisecond'),

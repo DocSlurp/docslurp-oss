@@ -17,7 +17,8 @@ function guardFetch(content: string) {
   return vi.fn(async (_url: string, init: RequestInit) => {
     const body = JSON.parse(String(init.body));
     expect(body.model).toBe(LLAMA_GUARD_MODEL);
-    expect(body.provider).toEqual({ only: ["deepinfra"], allow_fallbacks: false, data_collection: "deny" });
+    // Every OpenRouter call carries the platform output-price ceiling (openrouter-routing.ts).
+    expect(body.provider).toEqual({ only: ["deepinfra"], allow_fallbacks: false, data_collection: "deny", max_price: { completion: 49.99 } });
     return new Response(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 800, completion_tokens: 5 } }), { status: 200 });
   });
 }

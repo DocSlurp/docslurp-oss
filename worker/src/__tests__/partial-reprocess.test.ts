@@ -74,8 +74,8 @@ async function seedSourceRun(pipeline: PipelineFeatures) {
     "other:markdown": "s3://b/u1/run-src/markdown/other.md",
   };
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
-    values ('run-src', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as unknown as postgres.JSONValue)},
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
+    values (100, 'run-src', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as unknown as postgres.JSONValue)},
       ${sql.json(artifacts)}, 1, 2)
   `;
   await sql`
@@ -101,8 +101,8 @@ async function seedSourceRun(pipeline: PipelineFeatures) {
 
 async function seedPartialRun(pipeline: PipelineFeatures, reusedFrom: string | null = "src") {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-    values ('run-re', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as unknown as postgres.JSONValue)}, 1, 2)
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+    values (100, 'run-re', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as unknown as postgres.JSONValue)}, 1, 2)
   `;
   await sql`update project_runs set execution_generation = 'test-generation' where id = 'run-re'`;
   await sql`
@@ -209,6 +209,13 @@ describe("partial reprocess", () => {
 
     const [run] = await sql<{ status: string }[]>`select status from project_runs where id = 'run-re'`;
     expect(run?.status).toBe("completed");
+    // A reindex reused the source's extraction, so the new version keeps the source's ingest version (an old source
+    // here: 0), plus the parse decision its own quarantine recorded; the run is not stamped as current output.
+    const [stamp] = await sql<{ ingest_version: number; ingest_capabilities: string[] }[]>`
+      select ingest_version, ingest_capabilities from documents where id = 're'`;
+    expect(stamp).toEqual({ ingest_version: 0, ingest_capabilities: ["parseSourceDecision"] });
+    const [runStamp] = await sql<{ ingest_version: number }[]>`select ingest_version from project_runs where id = 'run-re'`;
+    expect(runStamp?.ingest_version).toBe(0);
     // The run start pinned evidence routing (v3) in the persisted run artifacts.
     expect(artifacts["run:vision-routing-version"]).toBe("v3");
     const [pinned] = await sql<{ version: string | null }[]>`

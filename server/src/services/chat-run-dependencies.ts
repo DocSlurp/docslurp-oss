@@ -21,7 +21,7 @@ export async function acceptChatRunDependency<T>(scope: {
   userId: string; orgId: string; projectId: string; documentId: string; pages: number[];
 }, allocate: (tx: postgres.Sql | postgres.TransactionSql) => Promise<{ runId: string; value: T }>): Promise<T> {
   const task = owner.getStore();
-  if (!task) return (await allocate(sql)).value;
+  if (!task) return await sql.begin(async tx => (await allocate(tx)).value) as T;
   return sql.begin(async tx => {
     if (task) {
       if (task.user_id !== scope.userId || task.org_id !== scope.orgId) throw new Error("dependency_forbidden");

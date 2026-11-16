@@ -66,8 +66,8 @@ beforeEach(async () => {
 async function seedDocument(id: string, text: string) {
   const run = `run-${id}`;
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
-    values (${run}, 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
+    values (100, ${run}, 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
   `;
   await sql`
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
@@ -327,6 +327,60 @@ describe("project knowledge graph persistence", () => {
 
     const second = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context });
     expect(second).toMatchObject({ communities: 2, summarized: 0, reused: 2 });
+  });
+
+  it("does not reuse a summary once a relation or entity name it was written from has changed", async () => {
+    await seedDocument("d1", "Acme supplies Globex and Hooli");
+    await seedDocument("d2", "Umbrella supplies Initech and Wonka");
+    await write("d1", documentGraph("d1", "Acme", ["Globex", "Hooli"]));
+    await write("d2", documentGraph("d2", "Umbrella", ["Initech", "Wonka"]));
+    const context = { scope: "Supply chain", model: "test-model", privacyMode: "standard" as const, apiKey: "mock-only" };
+    vi.mocked(generateOpenRouterText).mockResolvedValue({
+      text: "Acme supplies Globex.", finishReason: "stop", usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    expect(await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context }))
+      .toMatchObject({ communities: 2, summarized: 2, reused: 0 });
+
+    // The member set (and so member_hash) is unchanged; only a relation between members is gone.
+    await sql`
+      delete from kg_edges where id in (
+        select e.id from kg_edges e join kg_nodes n on n.id = e.target_node_id where n.canonical_name = 'Globex'
+      )`;
+    expect(await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context }))
+      .toMatchObject({ communities: 2, summarized: 1, reused: 1 });
+
+    await sql`update kg_nodes set canonical_name = 'Wonka Industries' where canonical_name = 'Wonka'`;
+    expect(await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context }))
+      .toMatchObject({ communities: 2, summarized: 1, reused: 1 });
+  });
+
+  it("never publishes a summary whose entities or relations were removed while it was being written", async () => {
+    await seedDocument("d1", "Acme supplies Globex and Hooli");
+    await seedDocument("d2", "Umbrella supplies Initech and Wonka");
+    await write("d1", documentGraph("d1", "Acme", ["Globex", "Hooli"]));
+    await write("d2", documentGraph("d2", "Umbrella", ["Initech", "Wonka"]));
+    const context = { scope: "Supply chain", model: "test-model", privacyMode: "standard" as const, apiKey: "mock-only" };
+    let removed = false;
+    // A document delete lands after the graph was read and before the communities are swapped in.
+    vi.mocked(generateOpenRouterText).mockImplementation(async () => {
+      if (!removed) {
+        removed = true;
+        await sql`
+          delete from kg_edges where id in (
+            select e.id from kg_edges e join kg_nodes n on n.id = e.target_node_id where n.canonical_name = 'Globex'
+          )`;
+      }
+      return { text: "Acme secretly supplies Globex.", finishReason: "stop", usage: { inputTokens: 10, outputTokens: 5 } };
+    });
+    const raced = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context });
+    expect(raced.communities).toBe(1);
+    const labels = await sql<{ label: string }[]>`select label from kg_communities`;
+    expect(labels).toHaveLength(1);
+    expect(labels[0]!.label).toContain("Umbrella");
+
+    // The next refresh rebuilds the dropped community from what is left.
+    expect(await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context }))
+      .toMatchObject({ communities: 2, summarized: 1, reused: 1 });
   });
 
   it("summarizes heuristic stand-ins again once the model answers, then reuses them", async () => {

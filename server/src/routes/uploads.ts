@@ -1,4 +1,9 @@
+import { uploadContentIdentitySchema } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, chartExportOverrideSchema } from "@docslurp/shared";
+import { chartExportOverrideError } from "../services/chart-export-availability.js";
+import { runOriginOf } from "../lib/run-origin.js";
+import { withPayloadCanEdit } from "../lib/reprocess-access.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
@@ -6,6 +11,7 @@ import {
   documentTagsSchema,
   isBillingExemptOrg,
   pipelineFeatureOverridesSchema,
+  publicPipelineFeatureOverridesSchema,
   PROJECT_INPUT_MAX_LENGTH,
   projectTemplateKeySchema,
   indexingModeSchema,
@@ -29,13 +35,12 @@ import {
   abortDirectUploadSession,
   completeDirectUploadFile,
   createDirectUploadSession,
-  describeDirectUploadSession,
   getDirectUploadSessionDescription,
   loadDirectUploadSession,
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
-import { assertSessionReplayable, assertSessionProjectStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { assertSessionReplayable, assertSessionProjectStillReadable, assertSessionProjectStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
 import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
@@ -47,6 +52,7 @@ import {
   parseFormProjectIntakePipeline,
   parseFormDocumentTags,
   parseProjectIntakePipeline,
+  assertIntakeChartExportTier,
   parseProjectIntakeTemplateKey,
 } from "../services/project-intake-actions.js";
 import {
@@ -104,7 +110,7 @@ const ingestUrlSchema = z.object({
     z.string().url(),
     z.object({ url: z.string().url(), canonicalId: canonicalIdSchema.optional() }),
   ])).min(1),
-  pipeline: pipelineFeatureOverridesSchema.optional(),
+  pipeline: publicPipelineFeatureOverridesSchema.optional(),
 });
 
 export const directUploadFileSchema = z.object({
@@ -114,6 +120,7 @@ export const directUploadFileSchema = z.object({
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
   sizeBytes: z.number().int().nonnegative().optional(),
+  identity: uploadContentIdentitySchema.optional(),
   sha256: z.string().min(16).max(128).optional(),
   canonicalId: canonicalIdSchema.optional(),
   /** Folder path inside the upload; with the filename it is the version key. */
@@ -128,7 +135,7 @@ const createDirectSessionSchema = z.object({
   project: projectInputSchema.optional(),
   newProject: z.boolean().optional(),
   templateKey: projectTemplateKeySchema.optional(),
-  pipeline: pipelineFeatureOverridesSchema.optional(),
+  pipeline: publicPipelineFeatureOverridesSchema.optional(),
   files: z.array(directUploadFileSchema).min(1).max(1000),
 });
 
@@ -248,7 +255,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     }
     if (actor.type === "apiKey") {
       if (!actor.apiKey.orgId) return apiStatusError(c, 403, "Forbidden");
-      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedProjectIds(actor))) {
+      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedProjectIds(actor), actor.apiKey.keyId)) {
         return apiStatusError(c, 404, "Upload session not found");
       }
       if (c.req.method === "POST" && /\/(bulk|url|direct\/sessions)\/?$/.test(c.req.path)) {
@@ -265,6 +272,16 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           return apiStatusError(c, 403, "Forbidden");
         }
         // The `project` value itself is resolved inside the key's org and allowlist by intake.
+      }
+    }
+    if (sessionMatch && c.req.method === "GET" && c.req.query("statusOnly") === "true") {
+      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
+      if (loaded) {
+        try {
+          await assertSessionProjectStillReadable(loaded.session, actor.userId);
+        } catch (error) {
+          return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
+        }
       }
     }
     // Every route that mints signed upload URLs for an existing session, or ingests it, re-checks that this user may still
@@ -308,6 +325,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             orgId,
             apiKeyId: c.get("apiKey")?.keyId ?? null,
             allowedProjectIds: actorAllowedProjectIds(actor),
+            origin: runOriginOf(c),
             projectId: target.projectId,
             projectName: target.projectName,
             templateKey: input.templateKey ?? null,
@@ -322,11 +340,11 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedProjectIds: actorAllowedProjectIds(actor) });
             // ... and the user may still contribute to that project (a share revoked since gets no URLs).
             await assertSessionProjectStillContributable(loaded.session, userId);
-            return await describeDirectUploadSession(loaded);
+            return await getDirectUploadSessionDescription(sessionId, userId);
           },
         });
         if (replayed) c.header("Idempotency-Replayed", "true");
-        return c.json(session, status);
+        return c.json(await withPayloadCanEdit(c, session), status);
       } catch (error) {
         const response = projectIntakeErrorResponse(c, error);
         if (response) return response;
@@ -337,11 +355,13 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
   .get("/direct/sessions/:sessionId", async (c) => {
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
+    try {
     const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true");
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
-    return c.json(session);
+    return c.json(await withPayloadCanEdit(c, session));
+    } catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
   })
   .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
@@ -411,7 +431,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       c.header("X-Temporal-Deferred", "true");
     }
 
-    return c.json(result.payload, result.status);
+    return c.json(await withPayloadCanEdit(c, result.payload), result.status);
   })
   .post("/bulk", async (c) => {
     const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
@@ -449,6 +469,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         newProject: requestedNewProject,
         templateKey: requestedTemplateKey,
         allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
+        origin: runOriginOf(c),
+        apiKeyId: c.get("apiKey")?.keyId ?? null,
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
         speedBoost,
@@ -477,7 +499,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       c.header("X-Temporal-Deferred", "true");
     }
 
-    return c.json(result.payload, result.status);
+    return c.json(await withPayloadCanEdit(c, result.payload), result.status);
   })
   .post(
     "/url",
@@ -491,6 +513,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       }
       let result;
       try {
+        // The same refusal as file uploads (400 chart_export_tier_unavailable), never a silent downgrade.
+        assertIntakeChartExportTier(body.pipeline?.chartExport?.tier, "url ingest");
         result = await createRemoteUrlProjectIntake({
           userId,
           orgId: c.get("apiKey")?.orgId ?? body.orgId,
@@ -498,6 +522,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           newProject: body.newProject,
           templateKey: body.templateKey,
           allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
+          origin: runOriginOf(c),
+          apiKeyId: c.get("apiKey")?.keyId ?? null,
           indexingMode: body.indexingMode,
           pipeline: body.pipeline,
           speedBoost: body.speedBoost === true,
@@ -524,7 +550,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         c.header("X-Temporal-Deferred", "true");
       }
 
-      return c.json(result.payload, result.status);
+      return c.json(await withPayloadCanEdit(c, result.payload), result.status);
     },
   ));
 
@@ -568,6 +594,8 @@ const uploadEstimateSchema = z.object({
   files: z.array(quoteFileSchema).min(1).max(1000),
   /** Knobs to quote with instead of the project's own (the same as `POST /v1/estimate`). */
   settings: quoteSettingsSchema.partial().optional(),
+  /** The same per-request chart export override the upload takes; priced only for `models`. */
+  chartExport: chartExportOverrideSchema.optional(),
   project: projectInputSchema.optional(),
   orgId: z.string().optional(),
 });
@@ -600,7 +628,13 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
-    const { estimate, media, profile, quote } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings });
+    // After the scope and project checks: a caller that may not upload here never learns what the deployment offers.
+    const refusedTier = chartExportOverrideError(body.chartExport?.tier, "upload estimate");
+    if (refusedTier) return apiStatusError(c, 400, refusedTier, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    const { estimate, media, profile, quote, chartExport } = await estimateUpload({
+      files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings,
+      chartExportTier: body.chartExport?.tier ?? null, origin: runOriginOf(c),
+    });
     // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
     // project's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.
     return c.json({
@@ -611,6 +645,8 @@ export const uploadEstimateRoutes = new Hono().post(
       pricingVersion: pricingVersion(),
       // The full estimate (ingest, monthly hosting and usage, lines) for the project's settings and any overrides.
       quote,
+      // The chart export tier the upload would run with (request, project or the caller's default) and its credits.
+      chartExport,
       billing: billingState(),
       orgId: project.orgId,
       billingExempt: isBillingExemptOrg(project.orgId),

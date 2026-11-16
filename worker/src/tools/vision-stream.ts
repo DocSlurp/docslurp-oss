@@ -8,7 +8,7 @@
  * `[ai-usage]` line) and summed into the returned totals, so a discarded attempt
  * is still billed honestly; the caller logs the single `[ai-usage]` total.
  */
-import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readProviderCharge, resolveOpenRouterUsage } from "@docslurp/shared";
+import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readPromptCacheTokens, readProviderCharge, resolveOpenRouterUsage } from "@docslurp/shared";
 
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
@@ -161,9 +161,9 @@ export function classifyAttempt(attempt: VisionAttempt): { kind: RetryableOutcom
   const refusal = attempt.finishReason === "content_filter"
     || attempt.error?.metadata?.error_type === "refusal"
     || /content[ -]?filter|blocked|refus/i.test(message);
-  if (refusal) return { kind: "refusal", detail: message || attempt.finishReason || "content filtered" };
+  if (refusal) return { kind: "refusal", detail: "provider content filtered" };
   if (attempt.finishReason === "error" || attempt.error) {
-    return { kind: "provider-error", detail: message || "provider returned an error body" };
+    return { kind: "provider-error", detail: "provider returned an error body" };
   }
   if (attempt.finishReason === "length") return { kind: "length", detail: "finish_reason=length" };
   return null;
@@ -211,8 +211,9 @@ export function alternateRouteBody(
   if (kind === "refusal" && preferred) {
     const order = preferred.order.filter((p) => !sameProvider(p, failingProvider));
     if (order.length > 0) {
-      // The retry route replaces failure-based ignores, but an org's China-provider restriction stays.
-      const { ignore, ...rest } = existing;
+      // The retry route replaces the first attempt's routing (its allowlist, sort and failure-based ignores); an org's
+      // China-provider restriction and the price ceiling stay.
+      const { ignore, only: _only, sort: _sort, ...rest } = existing;
       const kept = Array.isArray(ignore) ? ignore.filter((p) => (CHINA_PROVIDER_SLUGS as readonly unknown[]).includes(p)) : [];
       return { ...body, provider: { ...rest, order, allow_fallbacks: preferred.allow_fallbacks, ...(kept.length ? { ignore: kept } : {}) } };
     }
@@ -291,6 +292,9 @@ export function findVisionBilledUsage(error: unknown): VisionBilledUsage | null 
 
 export interface AttemptSummary {
   generationId?: string | null;
+  /** Prompt tokens of this attempt served from / written to the provider's prompt cache (included in inputTokens). */
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
   costMetadata?: Record<string, unknown>;
   attempt: number;
   provider: string | null;
@@ -479,6 +483,13 @@ export interface GuardedCompletionArgs {
    * retries, the streaming fallback, the alternate-route retry); null only outside a run (benchmarks).
    */
   gate: VisionRequestGate | null;
+  /**
+   * One attempt only, and an answer cut off at its output cap (`finish_reason=length`) is returned, not retried or
+   * rejected: the caller decides what a cut-off means (chart export retries once at a larger cap). Any other rejected
+   * outcome (refusal, degenerate, provider error) throws after that one attempt. The caller sends no streaming body
+   * (no streaming fallback attempt), so the call is exactly one billed request.
+   */
+  singleAttempt?: boolean;
 }
 
 export interface GuardedCompletion {
@@ -523,6 +534,7 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
   try {
     const response = await fetchWithProviderRetry(args.url, {
       method: "POST",
+      redirect: "error",
       headers: args.headers,
       body: JSON.stringify(streaming ? { ...body, stream: true, stream_options: { include_usage: true } } : body),
     }, {
@@ -545,14 +557,14 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       ...(args.gate ? { gate: args.gate } : {}),
     });
     if (!response.ok) {
-      const text = await response.text();
+      void response.body?.cancel().catch(() => {});
       if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {
         // Refused before acceptance: no page admission, no breaker failure, no org count.
         await args.gate?.unbilled("unsupported", { provider: args.providerLabel, status: response.status });
-        throw new StreamUnsupportedError(`${response.status} ${text.slice(0, 200)}`, response.status);
+        throw new StreamUnsupportedError(`vision stream unsupported: ${response.status}`, response.status);
       }
       args.gate?.failed();
-      throw new Error(`vision request failed: ${response.status} ${text}`);
+      throw new Error(`vision request failed: ${response.status}`);
     }
     const isSse = streaming && (response.headers.get("content-type") ?? "").includes("text/event-stream");
     try {
@@ -646,6 +658,7 @@ function summarize(args: GuardedCompletionArgs, attempt: VisionAttempt, index: n
     generationId: attempt.id, costMetadata: { ...attempt.receiptMetadata, ...charge.metadata },
     attempt: index, provider: attempt.provider, model: attempt.model, streamed: attempt.streamed, outcome: outcome ?? "ok",
     finishReason: attempt.finishReason, inputTokens, outputTokens, costCents, usageSource: hasUsage ? "provider" : "estimated", charge,
+    ...readPromptCacheTokens(attempt.usage),
   };
 }
 
@@ -679,7 +692,8 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     );
   };
 
-  for (let index = 1; index <= 2; index++) {
+  const maxAttempts = args.singleAttempt ? 1 : 2;
+  for (let index = 1; index <= maxAttempts; index++) {
     let attempt: VisionAttempt;
     try {
       try {
@@ -741,9 +755,11 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     log.push(summary);
     logAttempt(summary, args.model);
     if (!verdict) break;
+    // A single-attempt caller takes a cut-off answer as it is (its own tokens and finish reason).
+    if (args.singleAttempt && verdict.kind === "length") break;
     args.gate?.failed();
     console.warn(`[vision-stream] attempt ${index} rejected: ${verdict.kind} (${verdict.detail}) provider=${attempt.provider ?? "unknown"}`);
-    if (index === 2) throw rejected(index, verdict);
+    if (index === maxAttempts) throw rejected(index, verdict);
     if (args.openRouter) {
       const next = alternateRouteBody(args.body, attempt.provider, verdict.kind, args.preferredRetryRoute);
       if (!next) {
@@ -790,11 +806,16 @@ function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedComplet
     ? { inputTokens: charged.reduce((n, s) => n + s.inputTokens, 0), outputTokens: charged.reduce((n, s) => n + s.outputTokens, 0) }
     : undefined;
   const usageSource: "provider" | "estimated" = log.every((s) => s.usageSource === "provider") ? "provider" : "estimated";
+  // Summed over every attempt, like the tokens; the usage ledger reads them from the top level of the metadata.
+  const cachedInputTokens = log.reduce((n, s) => n + (s.cachedInputTokens ?? 0), 0);
+  const cacheWriteInputTokens = log.reduce((n, s) => n + (s.cacheWriteInputTokens ?? 0), 0);
+  const cache = { ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}), ...(cacheWriteInputTokens > 0 ? { cacheWriteInputTokens } : {}) };
   const costMetadata = anyCharge ? {
+    ...cache,
     costSource: charged.length === log.length ? "provider" : "mixed",
     reconciliationRequired: charged.length !== log.length,
     providerCostUsd: log.reduce((n, s) => n + (s.charge.costCents ?? 0), 0) / 100,
     visionAttempts: log.map(stripCharge),
-  } : { costSource: "estimate", reconciliationRequired: true, visionAttempts: log.map(stripCharge) };
+  } : { costSource: "estimate", reconciliationRequired: true, ...cache, visionAttempts: log.map(stripCharge) };
   return { inputTokens, outputTokens, usageSource, costCents, ...(chargedTokens ? { chargedTokens } : {}), costMetadata };
 }

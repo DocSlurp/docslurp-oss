@@ -62,7 +62,7 @@ Which hosts render it: hosts that implement the MCP Apps extension (`io.modelcon
 
 What it does:
 
-- `openUploader` is read-only. It resolves an existing project (default if omitted), lists up to 50 projects the caller may upload to and returns the limits (10 files per batch, 5 GiB per file). It never creates a project and never returns upload URLs. An unknown project name fails with `Project not found`.
+- `openUploader` is read-only. It resolves an existing project (default if omitted), lists up to 50 projects the caller may upload to and returns the limits (10 files per batch; `maxFileBytes` is the server's `MAX_UPLOAD_BYTES`, 500 MB by default). It never creates a project and never returns upload URLs. An unknown project name fails with `Project not found`.
 - The project list and the resolved project follow the same rule as the upload route: members who can write to a project, and viewers of the default project, may upload. Viewers of other read-only shares may not, and those projects are not listed.
 - The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. The widget requests single-part uploads (`singlePart: true`), so every file is one PUT and the 32 MiB multipart threshold does not apply. The server rejects a single-part file over 5 GiB, so larger files fail at `upload`; use the CLI or SDK for those.
 - Presigned URLs live 15 minutes (900 s). The widget does not send file bytes through DocSlurp or the MCP endpoint.
@@ -308,4 +308,4 @@ References: [MCP tools](https://modelcontextprotocol.io/specification/2026-07-28
 
 ### One search surface
 
-Use `search({ q: "notice period" })` for one query or `search({ queries: [{ q: "notice period" }, { q: "eligibility" }], concurrency: 2 })` for a batch. Batches accept 1–20 queries, preserve input order, and return `{ results: [{ ok, data?, error? }] }`. Put project and filters inside each query. The SDK and `POST /v1/search` accept the same two forms.
+Use `search({ q: "notice period" })` for one query or `search({ queries: [{ q: "notice period" }, { q: "eligibility" }], concurrency: 2 })` for a batch. Batches accept 1–20 queries, preserve input order, and return `{ results: [{ ok, data?, error? }] }`. For many keyword queries at once, send `q` as an array of up to 100 strings: one keyword-mode search whose fused results list the matched queries in `matchedQueries` (see [keyword fan-out](search-api.md#keyword-fan-out)). Put project and filters inside each query. The SDK and `POST /v1/search` accept the same two forms.

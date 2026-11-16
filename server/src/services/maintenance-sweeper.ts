@@ -7,12 +7,17 @@ import { sweepDocumentExports } from "./document-exports.js";
 import { sweepFeedbackReports } from "./feedback-reports.js";
 import { sweepExtracts } from "./extracts.js";
 import { sweepExpiredSearchSessions } from "./search-history-expiry.js";
+import { sweepSearchSessionProjectBackfill } from "./search-session-project-backfill.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
 import { sweepProviderObservations } from "./provider-observations.js";
 import { resumeOrganizationDeletions } from "./tenant-offboarding.js";
 import { requestWebhookOutboxDrain } from "./webhooks.js";
+import { sweepFigureResumeQueue } from "./figure-resume.js";
+import { sweepProjectAutoTitles } from "./project-naming.js";
+import { sweepCorrectedSummaryTrees } from "./summary-tree-withdrawal.js";
+import { sweepProjectActivityStatsDrift } from "./project-activity-stats-drift.js";
 
 /**
  * Periodic in-process recovery for work that can otherwise get stuck: queued
@@ -57,6 +62,17 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["provider-observations", () => sweepProviderObservations()],
   // Expired API-key search history (lean-logging.ts); result rows and diagnostics cascade.
   ["search-history-expiry", () => sweepExpiredSearchSessions()],
+  // Figure resumes the commit-time enqueue missed (auto projects; every 10 min at most). The worker's runner claims them.
+  ["figure-resume-enqueue", () => sweepFigureResumeQueue()],
+  // search_sessions.project_id for sessions older than migration 0152, in short batches; stops when none are left.
+  ["search-session-project-backfill", () => sweepSearchSessionProjectBackfill()],
+  // Automatic project titles from ingested content; project reads never rename (project-naming.ts).
+  ["project-auto-titles", () => sweepProjectAutoTitles()],
+  // Corrected documents whose correction was completed by an instance that did not mark their summary tree (a rolling
+  // deploy): marked and withdrawn here. The first sweep after start runs it; then every ten minutes while idle.
+  ["summary-tree-corrected-reconcile", () => sweepCorrectedSummaryTrees()],
+  // project_activity_stats counters against history for a few projects (every 10 min at most); logs any difference.
+  ["project-activity-stats-drift", () => sweepProjectActivityStatsDrift()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;

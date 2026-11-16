@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
 import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } from "./search-input.js";
 import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 import { chatRetrievalOverridesSchema, searchResultSchema, projectChatResponseSchema } from "@docslurp/shared";
@@ -95,6 +96,31 @@ export const simpleServiceSchemas = {
       relevanceFloor: { type: "object", description: "The relevance floor applied to this search. Each result's relevance (0..1) is a raw match strength that does not depend on the other hits.", properties: {
         minScore: { type: "number", minimum: 0, maximum: 1, description: "Floor applied; 0 means disabled." }, dropped: { type: "integer", minimum: 0, description: "Retrieved candidates removed for being below the floor." },
       } },
+      summaryTree: ref("SummaryTreeSearchOutcome"),
+      summaries: { type: "array", description: "summaryTree include only: section summaries that matched the query, best first, taking at most a quarter of the returned context. They are model-written text, not passages: they are never in results and carry no citation.", items: ref("SearchSummary") },
+    },
+  },
+  SummaryTreeSearchOutcome: {
+    type: "object", required: ["requested", "applied", "ms"],
+    description: "What the project's summary tree did for this search. Present when the request asked for guide or include, or the project's retrieval default did and this search could run it. A request that does not ask, on a project whose default cannot run (keyword mode, a project without a tree), gets no field.",
+    properties: {
+      requested: { enum: ["off", "guide", "include"], description: "The mode asked for: the request's summaryTree, else the project's retrieval default." },
+      applied: { enum: ["off", "guide", "include"], description: "The mode that shaped this response; off when the tree was skipped. A search that ran as sub-searches (decomposition, stepback, multi-hop) applies guide at most." },
+      skipped: { enum: ["deadline", "not-ready", "mode", "error"], description: "Why the tree contributed nothing. deadline: it had not finished in time beside the vector search. not-ready: no document in scope has a finished tree. mode: this search cannot use the tree (keyword mode, a spatial or chunk-level filter, or a project that does not build or serve one). error: it failed and the search answered without it." },
+      ms: { type: "number", minimum: 0, description: "Wall time of the tree's part of retrieval, in milliseconds." },
+    },
+  },
+  SearchSummary: {
+    type: "object", required: ["kind", "id", "documentId", "filename", "level", "summary", "headingPath", "pageStart", "pageEnd", "chunkStart", "chunkEnd", "relevance"],
+    description: "A section summary from the project's summary tree. Model-written text about a range of one document; never show it as a quote or cite it. Cite the chunks in results.",
+    properties: {
+      kind: { const: "summary" }, id: { type: "string" }, documentId: { type: "string" }, filename: { type: "string" },
+      level: { type: "integer", minimum: 1, description: "1 is a section of the document; higher levels summarize the levels below." },
+      summary: { type: "string", description: "The model-written summary. Not source text." },
+      headingPath: { type: "array", items: { type: "string" } },
+      pageStart: { type: ["integer", "null"] }, pageEnd: { type: ["integer", "null"] },
+      chunkStart: { type: "integer", minimum: 0 }, chunkEnd: { type: "integer", minimum: 0 },
+      relevance: { type: "number", minimum: 0, maximum: 1 },
     },
   },
   BatchSearchResponse: {
@@ -113,7 +139,7 @@ export const simpleServiceSchemas = {
     type: "object", additionalProperties: false, required: ["model", "messages"],
     description: "Text-only project chat. Include history; end with a nonempty user message. Unsupported controls are rejected.",
     properties: {
-      model: { type: "string", pattern: "^project:(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)$", description: "The project to answer from, not an inference model: project:default for the organization default project, project:<slug>, or project:<uuid> from GET /v1/models. Choose the inference model with docslurp.model." },
+      model: { type: "string", pattern: "^project:(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)$", description: "The project to answer from, not an inference model: project:default for the organization default project, project:<slug>, or project:<uuid> from GET /v1/models. Choose the chat tier with docslurp.tier; backend models are managed by DocSlurp." },
       messages: { type: "array", minItems: 1, maxItems: 64, items: { type: "object", additionalProperties: false, required: ["role", "content"], properties: {
         role: { enum: ["system", "developer", "user", "assistant"] },
         content: { oneOf: [{ type: "string", maxLength: 64000 }, { type: "array", minItems: 1, maxItems: 16, items: { type: "object", additionalProperties: false, required: ["type", "text"], properties: { type: { const: "text" }, text: { type: "string", maxLength: 64000 } } } }] },
@@ -125,8 +151,9 @@ export const simpleServiceSchemas = {
       n: { const: 1 }, user: { type: "string", maxLength: 256 },
       tool_choice: { enum: ["auto", "none"], default: "auto", description: "auto: the project agent may call its own search, web and settings tools before answering. none: a direct grounded answer from one retrieval and one model call (lower latency and fewer tokens; still streams). Client-defined tools are not supported, so `tools` and other tool_choice forms are rejected with 400." },
       docslurp: { type: "object", additionalProperties: false, description: "DocSlurp extension (extra_body in OpenAI SDKs).", properties: {
-        model: { type: "string", maxLength: 256, examples: ["llm://openrouter/anthropic/claude-haiku-5.5"], description: "Inference model for this request, as model on POST /v1/chat: an llm://openrouter/<vendor>/<model> URI (or the bare OpenRouter id) from the chat model catalog. Omitted: the default. A model you may not use is refused with 400 model_not_allowed, never swapped for the default." },
-        speedBoost: { type: "boolean", default: false, description: "Opt in to Nitro throughput routing for this request." },
+        tier: { enum: [...CHAT_TIERS], description: "Chat tier for this request, as tier on POST /v1/chat: fastest, balanced or smart. Omitted: the project default. DocSlurp manages the model behind each tier; backend model ids are refused with 400 model_not_allowed." },
+        reasoning: { enum: [...CHAT_REASONING_LEVELS], default: "none", description: "How much the answering model reasons, as reasoning on POST /v1/chat." },
+        speedBoost: { type: "boolean", default: false, description: "Opt in to faster, speed-boosted routing for this request, billed at the speed-boost rate." },
         retrieval: { ...nestedSchema(chatRetrievalOverridesSchema), description: "Retrieval overrides for this request only, as retrieval on POST /v1/chat. Example: { \"parentRetrieval\": false } cites matched chunks without whole parent pages." },
       } },
     },
@@ -179,6 +206,7 @@ const canonicalServicePaths = {
     get: { tags: ["search"], summary: "Search a project", security: serviceSecurity, parameters: [
       { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "project", description: projectRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
       { in: "query", name: "minScore", description: minScoreDescription, schema: { type: "number", minimum: 0, maximum: 1 } },
+      { in: "query", name: "summaryTree", description: "How this search uses the project's summary tree: off, guide (section summaries pick extra chunks; results stay real chunks) or include (the matching summaries are also returned in summaries). Omitted: the project's retrieval default, which is also the most a request may ask for unless the caller may edit the project (or is a server key with projects:manage); a request above it runs at the default. Hybrid and deep mode only, for a project that builds the tree. The unrelated summarySeed flag narrows retrieval to the best-matching documents by their chunks and reads no summaries.", schema: { enum: ["off", "guide", "include"] } },
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
     post: { tags: ["search"], summary: "Search a project", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
   },

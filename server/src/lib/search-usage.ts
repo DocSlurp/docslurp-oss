@@ -15,9 +15,13 @@ export function publicSearchResponse(response: SearchResponse) {
     availability: response.availability,
     noMatch: response.relevanceFloor?.noMatch ?? false,
     ...(response.searchMode ? { mode: response.searchMode } : {}),
+    ...(response.keywordQueries ? { keywordQueries: response.keywordQueries } : {}),
     ...(response.relevanceFloor ? { relevanceFloor: { minScore: response.relevanceFloor.minScore, dropped: response.relevanceFloor.dropped } } : {}),
     ...(response.timings ? { timings: response.timings } : {}),
     ...(response.deferred ? { deferred: response.deferred } : {}),
+    // Present only when the summary tree was asked for (search/summary-tree.ts planSummaryTreeSearch).
+    ...(response.summaryTree ? { summaryTree: response.summaryTree } : {}),
+    ...(response.summaries ? { summaries: response.summaries } : {}),
     usage: {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
       costCents: events.reduce((sum, event) => sum + event.costCents, 0),

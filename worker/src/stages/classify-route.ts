@@ -172,6 +172,8 @@ export class ClassifyRouteStage implements Stage {
               nonStraightforwardPages: surface.pages.filter((page) => page.route !== "straightforward-text").length,
               // Ingest report: tables observed (heuristic, from the extracted text).
               tablePages: surface.pages.filter((page) => page.route === "table-heavy").length,
+              // Of those, pages routed as tables because neither the walker nor the page facts knew their grids (#409).
+              gridsUnknownPages: surface.pages.filter((page) => page.signals.includes("grids-unknown")).length,
               // What the routing decided, per document, so operators can see it in stage stats and SigNoz.
               ...decisions,
             }
@@ -1180,6 +1182,13 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
+  } else if (options.layout?.gridsUnknown === true) {
+    // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
+    // path, never a guessed "no table" a document could steer its own pages into.
+    route = "table-heavy";
+    extractorHint = "layout-aware";
+    confidence = 0.6;
+    signals.push("grids-unknown");
   } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
     route = "table-heavy";
     extractorHint = "layout-aware";

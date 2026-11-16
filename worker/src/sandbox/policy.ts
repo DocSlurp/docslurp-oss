@@ -1,5 +1,6 @@
 import { SandboxPolicyError, type SandboxIsolation } from "./types.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { unsafeOverrideEnabled, unsafeOverridesAllowed } from "../lib/unsafe-overrides.js";
 
 const UNISOLATED_WARNING = "[parser-sandbox] status=unisolated";
 
@@ -7,6 +8,9 @@ const UNISOLATED_WARNING = "[parser-sandbox] status=unisolated";
  * Every environment requires process teardown (a PID namespace, so a parser's descendants die with
  * it); only `none` with the explicit unisolated override may run without it. Production requires the audited remote VM provider, full network isolation and filesystem isolation.
  * Local namespace providers and the unisolated development override never qualify in production.
+ * Provider `none` (no filesystem or network isolation at all) is development and test only (#398): any other
+ * environment, staging or preview included, is refused, whether `none` was chosen explicitly or by the platform default.
+ * bubblewrap and landlock qualify only in development; namespaces never replace the VM boundary elsewhere.
  */
 export function assertSandboxPolicy(args: {
   providerId: string;
@@ -14,8 +18,17 @@ export function assertSandboxPolicy(args: {
   env: NodeJS.ProcessEnv;
 }): { warnings: string[] } {
   const { providerId, isolation, env } = args;
-  const allowUnisolated = env.DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED === "true";
+  // Development and test only (lib/unsafe-overrides.ts); worker startup refuses it anywhere else.
+  const allowUnisolated = unsafeOverrideEnabled("DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED", env);
   const warnings: string[] = [];
+
+  if (providerId === "none" && !unsafeOverridesAllowed(env)) {
+    throw new SandboxPolicyError(
+      "parser sandbox provider 'none' runs parsers on the host with no filesystem or network isolation and is allowed " +
+        "only in development or test (NODE_ENV development, test or unset, without the service profile); " +
+        "configure DOCSLURP_PARSER_SANDBOX=bubblewrap, landlock or modal",
+    );
+  }
 
   if (providerId === "none" && allowUnisolated) warnings.push(UNISOLATED_WARNING);
 
@@ -23,7 +36,7 @@ export function assertSandboxPolicy(args: {
     throw new SandboxPolicyError(
       `parser sandbox provider '${providerId}' cannot guarantee that a parser's processes die with it ` +
         "(no PID namespace: unprivileged user namespaces or util-linux unshare unavailable); refusing untrusted " +
-        "parser work. With provider 'none', DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true runs parsers unisolated",
+        "parser work. In development, provider 'none' with DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true runs parsers unisolated",
     );
   }
 

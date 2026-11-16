@@ -155,9 +155,10 @@ describe("authorizePrivateModelCall", () => {
       modelId: "private/gpu1/Qwen/Qwen3-Embedding-0.6B", endpoint: "private:gpu1:worker.embedding", privacyMode: "strict-privacy",
     }]);
     expect(call.model).toBe("Qwen/Qwen3-Embedding-0.6B");
-    await call.fetch("https://gpu1.example.com/v1/embeddings", { method: "POST", headers: { authorization: "Bearer placeholder" } });
+    await call.fetch("https://gpu1.example.com/v1/embeddings", { method: "POST", redirect: "follow", headers: { authorization: "Bearer placeholder" } });
     const headers = new Headers((baseFetch.mock.calls[0] as unknown as [string, RequestInit])[1].headers);
     expect(headers.get("authorization")).toBe("Bearer secret-token");
+    expect((baseFetch.mock.calls[0] as unknown as [string, RequestInit])[1].redirect).toBe("error");
     await expect(call.fetch("https://evil.example.com/v1/embeddings")).rejects.toThrow();
   });
 

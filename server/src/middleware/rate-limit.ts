@@ -99,6 +99,11 @@ export type RateLimitConsumeInput = {
   now: number;
   /** Count denied requests too, so sustained floods stay limited. */
   countDenied: boolean;
+  /**
+   * Units this operation counts (default 1): admitted only when every counter has room for all of them, and then
+   * counted in full, so a multi-unit operation never consumes part of a limit.
+   */
+  weight?: number;
 };
 
 export type RateLimitConsumeResult = {
@@ -186,13 +191,14 @@ const SPEND_CACHE_TTL_MS = 10_000;
 const SPEND_LOOKUP_RETRY_SECONDS = 5;
 
 // KEYS[1] = penalty-box key (holds the block's expiry in ms), KEYS[2..] = counter bases.
-// ARGV = now, countDenied, then (limit, windowMs, penaltyMs) per counter.
+// ARGV = now, countDenied, then (limit, windowMs, penaltyMs) per counter, then weight (units, all or none).
 // Returns { blockedMs, deniedIndex (1-based, 0 = allowed), counted, prev1, curr1, prev2, curr2, ... }.
 const SLIDING_WINDOW_SCRIPT = `
 local now = tonumber(ARGV[1])
 local blockedUntil = tonumber(redis.call('GET', KEYS[1]) or '0')
 if blockedUntil > now then return { blockedUntil - now, 0, 0 } end
 local countDenied = ARGV[2] == '1'
+local weight = tonumber(ARGV[3 + (#KEYS - 1) * 3] or '1') or 1
 local out = { 0, 0, 0 }
 local current = {}
 local denied = 0
@@ -205,14 +211,14 @@ for i = 2, #KEYS do
   local curr = tonumber(redis.call('GET', currKey) or '0')
   local prev = tonumber(redis.call('GET', KEYS[i] .. ':' .. (bucket - 1)) or '0')
   local overlap = 1 - (now - bucket * window) / window
-  if denied == 0 and prev * overlap + curr + 1 > limit then denied = i - 1 end
+  if denied == 0 and prev * overlap + curr + weight > limit then denied = i - 1 end
   current[i] = currKey
   out[#out + 1] = prev
   out[#out + 1] = curr
 end
 if denied == 0 or countDenied then
   for i = 2, #KEYS do
-    redis.call('INCR', current[i])
+    redis.call('INCRBY', current[i], weight)
     redis.call('PEXPIRE', current[i], tonumber(ARGV[3 + (i - 2) * 3 + 1]) * 2)
   end
   out[3] = 1
@@ -233,8 +239,15 @@ function scriptArgs(input: RateLimitConsumeInput): { keys: string[]; args: strin
       String(input.now),
       input.countDenied ? "1" : "0",
       ...input.counters.flatMap((counter) => [String(counter.limit), String(counter.windowMs), String(counter.penaltyMs ?? 0)]),
+      String(consumeWeight(input)),
     ],
   };
+}
+
+/** Units one consume counts: a positive integer, 1 when unset. */
+function consumeWeight(input: RateLimitConsumeInput): number {
+  const weight = Math.floor(input.weight ?? 1);
+  return Number.isSafeInteger(weight) && weight > 0 ? weight : 1;
 }
 
 function parseScriptResult(result: unknown, counterCount: number): RateLimitConsumeResult {
@@ -319,11 +332,12 @@ class InMemorySlidingWindowStore implements RateLimitStore {
     }
 
     let denied = -1;
+    const weight = consumeWeight(input);
     const windows = input.counters.map((counter, index) => {
       const bucket = Math.floor(now / counter.windowMs);
       const { previous, current } = this.read(counter.key, bucket, now);
       const overlap = 1 - (now - bucket * counter.windowMs) / counter.windowMs;
-      if (denied < 0 && previous * overlap + current + 1 > counter.limit) denied = index;
+      if (denied < 0 && previous * overlap + current + weight > counter.limit) denied = index;
       return { previous, current };
     });
 
@@ -332,7 +346,7 @@ class InMemorySlidingWindowStore implements RateLimitStore {
       input.counters.forEach((counter, index) => {
         const bucket = Math.floor(now / counter.windowMs);
         const window = windows[index]!;
-        this.write(counter.key, { bucket, previous: window.previous, current: window.current + 1, expiresAt: (bucket + 2) * counter.windowMs, prefixes: counter.prefixes });
+        this.write(counter.key, { bucket, previous: window.previous, current: window.current + weight, expiresAt: (bucket + 2) * counter.windowMs, prefixes: counter.prefixes });
       });
     }
     const penaltyMs = denied >= 0 ? input.counters[denied]?.penaltyMs ?? 0 : 0;
@@ -1077,31 +1091,64 @@ export async function consumeFeatureRateLimit(args: {
   requireShared?: boolean;
   store?: RateLimitStore;
   now?: number;
+  /** Units to count (default 1), all or none. */
+  weight?: number;
 }): Promise<number | null> {
+  const result = await consumeFeatureRateLimits({ ...args, windows: [{ feature: args.feature, limit: args.limit, windowMs: args.windowMs }] });
+  return result?.retryAfterSeconds ?? null;
+}
+
+/**
+ * Counts `weight` units against several feature windows of one subject in a single atomic store call: either every
+ * window has room and all of them count the full weight, or none counts anything. Returns null when admitted, or the
+ * first refusing window's index and Retry-After. Per-window keys match {@link consumeFeatureRateLimit}, so both share
+ * counters.
+ */
+export async function consumeFeatureRateLimits(args: {
+  subject: string;
+  windows: Array<{ feature: string; limit: number; windowMs: number }>;
+  requireShared?: boolean;
+  store?: RateLimitStore;
+  now?: number;
+  weight?: number;
+}): Promise<{ index: number; retryAfterSeconds: number } | null> {
+  if (args.windows.length === 0) return null;
   const now = args.now ?? Date.now();
-  const retry = Math.max(1, Math.ceil((args.windowMs - (now % args.windowMs)) / 1000));
-  if (args.limit <= 0) return retry;
+  const retryFor = (index: number) => {
+    const windowMs = args.windows[index]!.windowMs;
+    return { index, retryAfterSeconds: Math.max(1, Math.ceil((windowMs - (now % windowMs)) / 1000)) };
+  };
+  const rawWeight = Math.floor(args.weight ?? 1);
+  // Non-finite or non-positive weights count as 1 (as the store does); NaN must not skip the size check below.
+  const weight = Number.isFinite(rawWeight) ? Math.max(1, rawWeight) : 1;
+  const tooSmall = args.windows.findIndex((window) => window.limit <= 0 || window.limit < weight);
+  if (tooSmall >= 0) return retryFor(tooSmall);
   // API_RATE_LIMIT_ENABLED=false turns off request limits, not this floor:
   // feature limits guard paid calls, so they fall back to the per-process store.
   const store = args.store ?? getDefaultStore();
-  const base = `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:feature:${safeIdentityPart(args.feature)}:{${safeIdentityPart(args.subject)}}`;
+  const prefix = process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api";
+  const subject = safeIdentityPart(args.subject);
+  const base = (feature: string) => `${prefix}:feature:${safeIdentityPart(feature)}:{${subject}}`;
   try {
     const result = await store.consume({
-      blockKey: `${base}:block`,
-      counters: [{ key: `${base}:${args.windowMs}`, limit: args.limit, windowMs: args.windowMs }],
+      blockKey: `${base(args.windows[0]!.feature)}:block`,
+      counters: args.windows.map((window) => ({ key: `${base(window.feature)}:${window.windowMs}`, limit: window.limit, windowMs: window.windowMs })),
       now,
       countDenied: false,
+      weight,
     });
     if (args.requireShared && sharedStoreConfigured() && result.shared !== true) {
-      console.error(`[rate-limit] feature=${args.feature} refused: Redis is configured but unavailable (per-process fallback answered)`);
-      return retry;
+      console.error(`[rate-limit] feature=${args.windows[0]!.feature} refused: Redis is configured but unavailable (per-process fallback answered)`);
+      return retryFor(0);
     }
-    if (result.blockedMs > 0) return Math.max(1, Math.ceil(result.blockedMs / 1000));
+    if (result.blockedMs > 0) return { index: 0, retryAfterSeconds: Math.max(1, Math.ceil(result.blockedMs / 1000)) };
+    if (result.full) return retryFor(0);
     if (result.denied < 0) return null;
+    return retryFor(result.denied);
   } catch (error) {
     console.error("[rate-limit] feature limit unavailable:", error instanceof Error ? error.message : String(error));
   }
-  return retry;
+  return retryFor(0);
 }
 
 /** Whether a shared (Redis or Upstash) limiter is configured; without one, per-process limits are expected. */

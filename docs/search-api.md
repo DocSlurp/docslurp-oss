@@ -76,6 +76,29 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 - Spend limits are checked before the model call, and the call is recorded as an `aggregate-rag-answer` usage event.
 - If chat is turned off in any answered project, or no project is accessible, the request still succeeds (200) with `answer: null`, the citations and a warning. No model is called.
 
+## Keyword fan-out
+
+`q` may be an array of keyword queries instead of one string. The search runs in keyword mode: one BM25 query per item, in parallel, under one search's scope, filters and admission slot. The lists are fused by reciprocal rank into one ranked `results` list, capped at `limit`:
+
+```json
+{
+  "q": ["quarterly revenue", "earnings beat", "guidance raised", "\"record bookings\""],
+  "project": "board-materials",
+  "limit": 20
+}
+```
+
+- **Up to 100 queries**, each 1–1,000 characters and 16,000 characters in total. At most 8 may use "quoted phrases" or `-negation`: those run as full-text queries on the Postgres keyword path instead of the BM25 index.
+- **Mode:** `mode` must be `keyword` or omitted. Any other mode returns 400.
+- **Ranking:** each chunk is scored for the relevance floor against the queries that found it, not the joined text. Rerank and MMR are off for a fan-out, so the fused order stands. Each query fetches a share of the candidates (about 1,000 in all; at least 10 per query). Documents still being indexed are searched per query too.
+- **Batches:** a batch may hold at most 100 fan-out queries across all its items.
+- **Chat:** the chat agent's search tool sends an array `q` as one query with the items joined, so a chat turn stays one search per query.
+- **Results:** each result carries `matchedQueries`, the indexes into `q` of the queries it matched. The response also adds `keywordQueries`: each query as sent and how many chunks it matched before fusion. Duplicate queries run once and count under every index they appear at.
+- **Cost and limits:** each query counts as one keyword search, for billing and for the key's keyword search limit. The limit counts the whole fan-out at once: a request with 50 queries is admitted only when every window of the key's keyword limit has room for all 50, and a refused request counts nothing.
+- **Speed:** the scope, eligibility and project settings resolve once per search. A warm fan-out of 100 queries issues the same single SQL read as one keyword search, and up to `SEARCH_KEYWORD_FANOUT_CONCURRENCY` (default 16) BM25 queries run at once. Queries that run on Postgres instead (phrases, negation, fallbacks) share `SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY` (default 4) slots across the whole process.
+
+The array form also works inside a batch item (`queries: [{ q: [...] }]`).
+
 ## Batch retrieval
 
 `POST /v1/search` accepts either a single `{ q, ...filters }` input or a batch of search input objects. Supply exactly one form; batch project and filter options belong inside each query:
@@ -94,6 +117,60 @@ The batch contains 1–20 queries; concurrency is an integer from 1 to 8, defaul
 
 Every item independently checks the API key's search scope and organization/project access. Item error codes include `FORBIDDEN` (403), `PROJECT_NOT_FOUND` (404), `SEARCH_LIMIT_EXCEEDED` (429, the key's limit for the item's mode), `INVALID_SEARCH_SCOPE` (400), `INVALID_RETRIEVAL_QUERY` (400), `SEARCH_FAILED` (500), and `SEARCH_UNAVAILABLE` (503, the process-wide search limit is full; retry shortly). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
 
+## Streaming search
+
+`POST /v1/search/stream` (or `GET /v1/search/stream` with query parameters) runs the same search as `POST /v1/search` and reports it as Server-Sent Events. Each retrieval leg's hits are sent the moment the leg finishes, so a client can show passages while slower legs, fusion and reranking are still running. It takes the fields of a single `POST /v1/search` request (no `queries` batch) plus `stats`. It needs the same key scopes as `/v1/search`, and the search is billed the same.
+
+Each event has an SSE `event:` name equal to its `type`, an `id:` equal to `seq`, and a JSON `data:` body. Every body also carries `searchId` (the same on all events of one stream), `seq` (0-based, increasing) and `elapsedMs` (since the server accepted the request).
+
+| Event | Meaning |
+| --- | --- |
+| `search.started` | First event: `protocol`, `projectId`, and `cached` (a recent identical answer was reused; `search.results` follows at once with no hits). |
+| `search.phase` | Sent only when the request sets `stats`. A step that is not a retrieval leg took `stats.ms`: `queue`, `setup`, `plan`, `prepare`, `embed`, `retrieve`, `fuse`, `rerank` or `finalize`. `subSearch` is set for a sub-search of decomposition, step-back or multi-hop. |
+| `search.hits` | One leg landed: `leg` (`lexical`, `vector`, `graph`, `community`, `progressive-page`, `completed-page` or `deferred`), its `hits` best first (each `{id, legRank, result?}`), `truncated` when the leg found more than `limit` or the stream reached its cap on hit bodies, and `stats` when requested. |
+| `search.results` | The answer: `ids` in final rank order and `response`, exactly the body `POST /v1/search` returns. |
+| `search.error` | The search failed after the stream opened: `error: {code, message, status}`. Nothing follows it. |
+| `search.done` | Last event: `sessionId`, `resultCount`, and `timings` (phase times of the whole search) when `stats` is set. |
+
+Ordering and content guarantees:
+
+- `search.started` is first. `search.phase` and `search.hits` follow in completion order, which is not rank order: a fast keyword leg can land before the vector leg, and a leg that finds nothing sends an empty `hits`.
+- A hit body (`result`) is sent the first time its `id` appears on the stream. When a later leg or sub-search finds the same passage, its hit carries only `id` and `legRank`; keep the earlier body and add the leg. A stream sends at most three times `limit` distinct hit bodies.
+- `id` is stable across legs and equals the matching entry of `search.results.ids`. It includes the retrieval stage for page-level results (page text, map nodes, page images), so a page hit and a chunk hit of the same document never share an id.
+- Hits are provisional. A hit's `score` is the leg's own score, not the final one, and provisional hits can include rows that the final ranking drops or merges. The final list can also add or reorder passages. Only `search.results` is the answer.
+- `search.results` comes before `search.done`. A request that is refused before the stream opens (authentication, scope, validation, rate limit) gets an ordinary JSON error response with its HTTP status, not an event stream.
+- Unknown event types and fields may be added; ignore what you don't recognize.
+- While a search is quiet the server sends `: keepalive` comment lines. They carry no event; ignore them. The final frame carries a `retry:` field.
+- `availability` in the final body reports indexing coverage. The stream does not wait for indexing to finish; re-run the search to refresh results while documents are still being indexed.
+
+Set `stats: true` for `search.phase` events, per-leg milliseconds and candidate counts, timeout flags and `timings` on `search.done`. Without it those are omitted. Every event carries `elapsedMs`, milliseconds since the server accepted the request.
+
+A search is billed once it has produced hits, even if the client disconnects or the search then fails: passages already sent are billed once, at the rate of the search mode (a failed search is charged without its LLM query-strategy surcharge, which cannot be known). A search that fails before the first hits event is not billed and answers with the same HTTP error as `POST /v1/search`, with or without `stats`. `search.results` carries the whole response in one frame, which can be large: SDK and CLI accept frames up to 32 MiB on this stream, so a hand-written parser should not cap frames at 1 MiB. So fall back to `POST /v1/search` (it returns the same final body) only when the stream never started: HTTP 404, 405, 406 or 501, a 2xx response that is not `text/event-stream`, or a connection failure before any response. After the first event has arrived, a dropped connection or a stream that ends without `search.results` is an error: do not run a second search, show the failure and let the user retry. A drop after `search.results` still leaves you with the answer. The [SDK](https://docslurp.io/docs/packages/sdk) and [CLI](https://docslurp.io/docs/packages/cli) follow this rule.
+
+`GET /v1/search/stream` exists for clients that can only open an `EventSource`. After `search.done` or `search.error` the server closes the stream, and an `EventSource` that is not closed reconnects and runs the search again, billed again. Call `close()` on those two events. A request that carries a `Last-Event-ID` header is such a reconnect: the server cannot resume a finished or broken stream and re-running would bill again, so it answers `204 No Content` (which makes `EventSource` stop reconnecting) before doing any search work. Send no `Last-Event-ID` on a first request; the SDK, CLI and dashboard never do. A GET with a signed-in cookie session (not an API key) must be same-origin; the browser has to send `Sec-Fetch-Site: same-origin` or an `Origin` of the app itself, otherwise the request is refused.
+
+```bash
+curl -N https://docslurp.io/v1/search/stream \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"q": "Which regions drove the Q3 earnings beat?", "stats": true}'
+```
+
+```ts
+import { createDocSlurpClient, mergeSearchStream, emptySearchStreamView } from "@docslurp/sdk";
+
+const client = createDocSlurpClient();
+const stream = client.searchStream({ q: "Which regions drove the Q3 earnings beat?", stats: true });
+
+let view = emptySearchStreamView();
+for await (const event of stream) {
+  view = mergeSearchStream(view, event); // provisional hits, deduplicated across legs
+  render(view.hits, { final: view.final });
+}
+const response = await stream.response; // the POST /v1/search body
+```
+
 ## Errors
 
 Every error from the native JSON API (`/v1/*`, including authentication, rate limits, CORS and request-size rejections) answers with one envelope:
@@ -104,12 +181,12 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 
 `code` is a closed set you can branch on:
 
-- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `project_not_found`, `conflict`, `payload_too_large`, `session_required`, `mfa_required`, `REAUTH_REQUIRED` (a sensitive account action needs you to sign in again), `api_key_ip_not_allowed`, `client_key_projects_required`, `client_key_origin_not_allowed`, `invalid_search_scope`, `chat_disabled`, `chat_session_forbidden`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
-- Limits: `rate_limited`, `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `project_not_found`, `conflict`, `payload_too_large`, `session_required`, `mfa_required`, `REAUTH_REQUIRED` (a sensitive account action needs you to sign in again), `api_key_ip_not_allowed`, `client_key_projects_required`, `client_key_origin_not_allowed`, `invalid_search_scope`, `chat_disabled`, `chat_session_forbidden`, `model_not_allowed`, `speed_boost_unavailable`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
+- Limits: `rate_limited`, `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`, `chat_capacity_unavailable` (HTTP 503: chat turns in progress couldn't be counted, so the turn was refused; retry after `Retry-After`).
 - Billing: `payment_required`, `credit_exhausted`, `project_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads and extracts: `unsupported_type`, `remote_format_disabled`, `file_too_large`, `unreadable_source`, `extract_not_found`, `extract_expired`, `retention_exceeds_cap`, `download_not_ready`, `download_failed`.
 - Web tools and privacy: `web_disabled`, `web_scope_required`, `url_blocked`, `privacy_mode_blocked`.
-- Projects and runs: `project_forbidden`, `project_scope_forbidden` (a key limited to specific projects tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy).
+- Projects and runs: `project_forbidden`, `project_scope_forbidden` (a key limited to specific projects tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy), `summary_tree_unavailable`, `summary_tree_unpriced`, `summary_tree_requires_vectors` and `summary_tree_summarize_locked` (the project's summary tree can't be turned on: the deployment doesn't build trees, it charges for work but has no price for the tree, the project doesn't index vectors, or its template keeps document summaries off), `summary_tree_backfill_cap_too_high` (a backfill's `maxCostCents` is above the deployment's limit for one job).
 - Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
 - Admin billing: `credit_request_rejected`, `credit_reconciliation_required`, `idempotency_conflict`.
 - Anything else: `unavailable` and `internal`.
@@ -120,28 +197,31 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical project chat endpoint. Send `{q, project?, sessionId?, sessionToken?, model?, speedBoost?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations); `speedBoost`: see [speed boost](openrouter-nitro.md)); an omitted `project` means your organization's default project (`project` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; unknown fields are rejected, and all fields are checked before model calls. The response is `{id, sessionId, sessionToken?, searchSessionId, answer, finishReason?, citations, evidenceSpans, availability, usage, runtime, debug}`.
+`POST /v1/chat` is the canonical project chat endpoint. Send `{q, project?, sessionId?, sessionToken?, tier?, reasoning?, speedBoost?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations); `speedBoost`: see [speed boost](openrouter-nitro.md)); an omitted `project` means your organization's default project (`project` takes an ID, slug or name). `sessionId` is a nonempty string of at most 256 characters; unknown fields are rejected, and all fields are checked before model calls. The response is `{id, sessionId, sessionToken?, searchSessionId, answer, finishReason?, citations, evidenceSpans, availability, usage, runtime, debug}`.
 
 `filters` narrows retrieval: `documentIds` (up to 50), `mimeTypes` (up to 24), `tags`, `dateFrom`/`dateTo` (`YYYY-MM-DD`, indexed on or after / on or before that UTC day) and `geo`. Any filter sends the turn down the [direct-answer](#direct-answers) path so the filter is guaranteed to apply.
 
-**Streaming.** `GET /v1/chat/stream` takes `q`, `project`, `sessionId`, `model`, `speedBoost` and `filters` (URL-encoded JSON, up to 16,384 characters) as query parameters and answers with server-sent events: `status` (`{stage, message}`), then `message` (the full `/v1/chat` response), then `done` (`{id, sessionId, sessionToken?, searchSessionId}`). It does not stream answer tokens and does not take `retrieval` or `agent`. The SDK's `chatStream` reads it. For token-by-token deltas, use `/v1/chat/completions` with `stream: true`. `POST /v1/chat` is the non-streaming fallback for both.
+**Streaming.** `POST /v1/chat/stream` takes the same JSON body as `POST /v1/chat` (so the question never sits in a URL); `GET /v1/chat/stream` takes `q`, `project`, `sessionId`, `tier`, `reasoning`, `speedBoost` and `filters` (URL-encoded JSON, up to 16,384 characters) as query parameters for clients that can only open an `EventSource`. Both answer with server-sent events: `status` (`{stage, message}`), then `delta` events (`{text}`, the answer as the model writes it; concatenated in order they are the answer), then `message` (the full `/v1/chat` response, whose `answer` is authoritative), then `done` (`{id, sessionId, sessionToken?, searchSessionId}`). A client that ignores `delta` still gets the whole answer in `message`. If generation fails after a `delta` was sent, the stream ends without `message` or `done` (the SDK's `chatStream` throws): the server never switches to another model or a fallback answer mid-stream, so deltas are never a mix of two answers. Discard the partial text and retry. A failure before the first `delta` can still be answered by a fallback model. When output moderation applies (browser keys with `CHAT_OUTPUT_MODERATION` set), the moderated answer arrives as one `delta` after the check. The stream does not take `retrieval` or `agent`. The SDK's `chatStream` reads it. `POST /v1/chat` is the non-streaming fallback.
 
-### Model
+### Tier
 
-Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any project chat catalog model (`z-ai/glm-5.3-flash`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6.1-sol`, `openai/gpt-6-luna`) is accepted from anyone. The `:nitro` variants of `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4.1-flash` and `openai/gpt-6-luna` need `speedBoost: true` ([speed boost](openrouter-nitro.md)). Any other value returns HTTP 400 with code `model_not_allowed`; the server never substitutes the default for a model you named. The same check applies to the streaming chat route (before the stream opens) and the dashboard chat routes.
+Callers choose a chat **tier**, never a backend model or provider. DocSlurp manages the model behind each tier and may change it as models and prices move; usage events, traces and logs record the model that answered.
 
-Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose project is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The project's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
+| `tier` | Use it for |
+| --- | --- |
+| `fastest` (default) | Quick, short answers for everyday questions (the quickest tier). |
+| `balanced` | Fast, thorough answers for analysis and comparisons. |
+| `smart` | Complex reasoning and detailed answers (the slowest and most expensive tier). |
+
+Omit `tier` for the project default (`fastest`). Responses report the tier that answered in `debug.model` (`"fastest"`, `"balanced"` or `"smart"`; if the answering model failed over, the tier of the model that answered), never a backend model id. A request that names a backend model (`model`, a vendor id, an `llm://` URI) gets HTTP 400 `model_not_allowed` with a message naming the tiers; the value is not echoed. The same check applies to `/v1/chat/stream` (before the stream opens), the dashboard chat routes, MCP `chat` and `/v1/chat/completions` (`docslurp.tier`). A project's tier mapping can only be changed by DocSlurp operators.
+
+`speedBoost: true` runs the tier on faster, speed-boosted routing at the speed-boost rate ([speed boost](openrouter-nitro.md)). Only `balanced` has a fast route today; Speed boost on another tier answers HTTP 400 `speed_boost_unavailable` naming the tiers that support it.
+
+Operator evaluations (self-hosted deployments): `DOCSLURP_CHAT_EVAL_MODELS` lists extra OpenRouter ids (comma-separated; `:free` suffixes allowed). Only platform admins may name a backend `model` on a chat request, catalog or eval, and only from a browser session whose verified email is in `ADMIN_EMAILS`: an admin's API key chooses tiers like any programmatic caller. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS`: a turn whose project is owned by a listed organization may then name models and use the full `agent` limit range, from a session or a server API key (never a client key). The project's owning organization decides, not the caller's memberships. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts`, and ids whose output price is $50 per million tokens or more. An eval model answers on its own and keeps raw `debug` model fields; it never fails over. Platform admins set a project's tier mapping with `PUT /v1/admin/projects/:projectId/managed-models` (`{"chat": {"smart": "<catalog id>"}}`) from a browser session; API keys are refused.
 
 ### Reasoning
 
-Chat answers with reasoning off by default: each model runs at its lowest verified reasoning setting, the fastest answer (2026-11-10, DeepSeek V4.1 Flash on one host: 0.56 s a call with reasoning off against 1.18 s at the provider default). For long, multi-part questions you can ask for more by adding a `reasoning` option to the model reference:
-
-```text
-llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high
-z-ai/glm-5.3-flash?reasoning=low
-```
-
-Levels use OpenRouter's native effort names: `none` (the default; `off` is accepted), `minimal`, `low`, `medium` and `high`. The native keys `reasoning_effort` and `effort` work too. More reasoning adds latency and output tokens; a chat answer counts once more per 100,000 total tokens. The option applies to the answering model only: query rewrites, HyDE and other search helpers always run at the floor. Any other option, an unknown level, or conflicting levels returns HTTP 400 `model_not_allowed`. On `POST /v1/chat/completions` put it on `docslurp.model`.
+Chat answers with reasoning off by default: each model runs at its lowest verified reasoning setting, the fastest answer. For long, multi-part questions you can ask for more with `reasoning`: `none` (default), `minimal`, `low`, `medium` or `high`. More reasoning adds latency and output tokens; a chat answer counts once more per 100,000 total tokens. It applies to the answering model only: query rewrites, HyDE and other search helpers always run at the floor. On `POST /v1/chat/completions` send it as `docslurp.reasoning`.
 
 ### Direct answers
 
@@ -241,23 +321,21 @@ Any failed tool (including an HTTP-200 batch with failed items), invalid tool ca
 
 ```bash
 curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
-  -d '{"q": "How far above our margin target are we?", "model": "anthropic/claude-haiku-5.5", "agent": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2}}'
+  -d '{"q": "How far above our margin target are we?", "tier": "balanced", "agent": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2}}'
 ```
 
 ```json
 {
   "answer": "Operating margin is projected at 24%, 4 points above the 20% target [1].",
   "debug": {
-    "model": "anthropic/claude-haiku-5.5",
-    "requestedModel": "anthropic/claude-haiku-5.5",
-    "resolvedModel": "anthropic/claude-haiku-5.5",
-    "resolvedProvider": "Anthropic",
+    "model": "balanced",
+    "requestedModel": "balanced",
     "steps": 2, "toolCallCount": 1, "toolCallsRefused": 0,
     "searchCallCount": 1, "searchQueryCount": 2, "zeroHitSearchCount": 0,
     "stopReason": "answered",
     "stepUsage": [
-      {"step": 0, "model": "anthropic/claude-haiku-5.5", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
-      {"step": 1, "model": "anthropic/claude-haiku-5.5", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
+      {"step": 0, "model": "balanced", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
+      {"step": 1, "model": "balanced", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
     ],
     "limits": {"maxSteps": 4, "baseSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
   }
@@ -361,6 +439,7 @@ In-process caches cut repeated-query latency. Each is per server process and nev
   - **Privacy.** Searches of a `strict-privacy` project (including the default project when the request names none) are never cached or served from the cache. The project's access and privacy mode are read again on every request, and once more just before a response is stored, so a project switched to strict-privacy while a search runs gets no entry. A lookup that fails or takes longer than `SEARCH_RESPONSE_CACHE_LOOKUP_TIMEOUT_MS` (default 250) skips the cache.
   - **Authorization.** Authentication, key scopes, the key's project allowlist and project access are checked on every request before the cache is read, so a revoked or narrowed key, or a user removed from the project, is refused rather than served a cached answer. Entries are keyed on a hash of the organization, user, API key, resolved project and the request.
   - **Staleness.** A cached answer can be up to one TTL (30 seconds by default) old. Document deletes and moves, project setting, pipeline and privacy changes, and search-setting changes drop the project's entries in every API process through the `search_eligibility` and run-event hints, but those hints are best effort, so the TTL is the bound. Set `SEARCH_RESPONSE_CACHE_TTL_MS=0` where that is too stale.
+  - **Summary tree.** A response is stored only when its `summaryTree.applied` equals `summaryTree.requested` (or it has no `summaryTree` field). One whose tree leg was skipped is never replayed, so the next identical request tries the tree again. A response that carries `summaries` (`include`) is never stored at all: a summary is re-validated against Postgres on every search, and a replayed one could outlive its document's deletion or correction for the cache's lifetime. `guide` responses, whose results are chunks only, are stored as before. A document's tree becoming ready, or ceasing to be, drops the project's entries through the same `search_eligibility` hint.
   - **Memory.** Entries are partitioned by organization (at most 100 entries and 8 MB each, 500 entries and 32 MB in total); a response over 1 MB is not kept, and global pressure evicts from the largest organization first, so one tenant cannot push out another's entries.
 
 - **Query-embedding cache** (on by default). Keyed by organization, provider, runtime, endpoint, model, dimensions, normalization and the query text after trimming and collapsing whitespace (case is preserved). The cache stores only a hash of that key. A hit skips the provider call and records no usage event, so `usage` and `usage_events` still count only provider calls actually made. Projects in `strict-privacy` mode always call through, because that mode writes an audit row for every private embedding call; `standard` and `local-only` use the cache. Set `SEARCH_EMBEDDING_CACHE_MAX_ENTRIES` (default 1000, `0` disables) and `SEARCH_EMBEDDING_CACHE_TTL_SECONDS` (default 3600).
@@ -368,6 +447,74 @@ In-process caches cut repeated-query latency. Each is per server process and nev
 - **Privacy and tracing.** `strict-privacy` never reads or writes the embedding or vector-result cache. The `embed.cache` and `lancedb.result_cache` spans carry `docslurp.privacy.mode`, `docslurp.cache.hit`, `docslurp.cache.bypassed` and `docslurp.cache.bypass_reason` (`strict-privacy`, or `no-org` for the embedding cache), and search timings count `embedCacheBypass` / `resultCacheBypass`.
 
 Hits and misses appear as `embedCacheHit`/`embedCacheMiss` and `resultCacheHit`/`resultCacheMiss` counters in search timings, in the session diagnostics (`embeddingCache`), as `[search-cache]` log lines, and as `embed.cache` and `lancedb.result_cache` spans (`docslurp.cache.hit`).
+
+## Summary tree: `guide` and `include`
+
+A project that builds a summary tree (`pipeline.summaryTree`, off by default) has model-written summaries of the
+sections of each long document. Search can use them to reach passages the chunk search ranks low: a broad question
+matches a section's summary better than any single chunk of it.
+
+| `summaryTree` | What search does |
+| --- | --- |
+| `off` (default) | Never reads the summaries. |
+| `guide` | The best-matching summaries pick chunks from the sections they cover. `results` hold real chunks only. |
+| `include` | `guide`, and the matching summaries are also returned in `summaries`. |
+
+Send it per request (`"summaryTree": "guide"` on `POST /v1/search` and the stream, `?summaryTree=guide` on `GET`,
+`retrieval.summaryTree` on `/v1/chat`), or store it as the project's retrieval default. The request wins. It never
+turns itself on: a project that builds a tree still searches without it until a request or the default asks.
+
+**The stored default is a ceiling** (`off` < `guide` < `include`). Any caller may ask for less than the project's
+retrieval default. Asking for more decides what the project's readers are shown, so it is allowed only to a caller
+who may change the project's settings: a signed-in user with edit rights on the project, or a server API key with
+the `projects:manage` scope. For everyone else (a member or viewer without edit rights, a browser key whatever its
+scopes, a search- or chat-scoped server key, an OAuth token) a request above the default runs at the default:
+`include` against a default of `guide` returns `"requested": "include", "applied": "guide"` and no `summaries`;
+anything against a default of `off` returns `"applied": "off", "skipped": "mode"` and reads nothing of the tree. A
+request made with an API key is judged by the key, never by its owner's rights. To give readers `include`, an editor
+stores it as the project's retrieval default.
+
+- **Where it runs.** Hybrid and deep mode. Not in keyword mode, not with a spatial (`geo`) filter or a chunk-level
+  filter (page range, heading, language, date), and never on the Algolia, Meilisearch, Typesense and Pagefind
+  compatible routes.
+- **No model call.** The leg reuses the query vector of the chunk search. It runs beside the other legs and has a
+  deadline relative to the vector leg; past it, the search answers without the tree.
+- **`results` are never summaries.** Guided chunks take at most the last 30% of the result positions. The first 70%
+  are exactly what the search returns without the tree, in the same order, so a top result is never removed or
+  demoted. When the search returns fewer results than `limit`, guided chunks are appended and nothing is displaced.
+- **`summaries`** (`include` only) is a separate list. Each entry has `kind: "summary"`, the `summary` text, the
+  document, heading path, page range and chunk range it covers, and a `relevance`. It has no `text` and no
+  `citation`: show it as a summary, and cite the chunks in `results`. Summaries take at most a quarter of the returned
+  context (their tokens against the result text plus theirs), best first.
+- **Chat uses `guide` at most.** `/v1/chat`, `/v1/chat/completions` and the chat tools never ask for `include`: a
+  thread, request or project setting of `include` runs as `guide` for a chat turn, and the model's own `summaryTree`
+  argument is ignored. Summaries are model-written text over document text with a verbatim heading trail; a chat
+  turn has no isolated, citable place for them, so only passages reach the model. A `summaries` list in a tool
+  result is withheld from the model whatever produced it, and the tool result says so (`summaryTreeNotice`).
+- **One result per file.** A project's `dedupeByFilename` control (on by default) keeps one result per file once
+  results span more than one file. The tree never changes what that control does to the chunk search's results: when
+  they all come from one file, only guided chunks of that file are added; when they span files, a guided chunk is
+  added only for a file the top results do not already cover, one per file. Turn the control off to get several
+  passages of one long document.
+- **Only finished trees.** A document's summaries are used only while its tree is `ready` for the document's current
+  version. A deleted, replaced or corrected document's summaries stop being used at once, before any cleanup runs.
+
+The response says what happened:
+
+```json
+"summaryTree": { "requested": "guide", "applied": "guide", "ms": 31 }
+```
+
+`applied` is `off` with a `skipped` reason when the tree contributed nothing: `deadline` (it was not done in time),
+`not-ready` (no document in scope has a finished tree), `mode` (this search cannot use it: keyword mode, an
+unsupported filter, or a project that does not build or serve a tree) or `error` (it failed; the search still
+answered). A search split into sub-searches (decomposition, stepback, multi-hop) applies `guide` at most. The field
+is absent when the request did not ask and the project default is off or cannot run for this search, so such a
+response is the same as before the tree existed. `timings.summaryTreeMs` and the `summaryTreeSkipped` counter carry
+the same information for logs.
+
+`summarySeed` is unrelated: it narrows retrieval to the five documents whose chunks score highest for the query and
+reads no summaries.
 
 ## Candidate depth and result order
 
@@ -425,28 +572,30 @@ stem: Russian, German and French inflections match only their exact forms.
 
 ### Optional hosted learned reranking
 
-Project search settings can explicitly select DeepInfra's pointwise
-`Qwen/Qwen3-Reranker-0.6B`. Omitted provider settings continue to use local BM25.
-With the operator's `DEEPINFRA_API_KEY` configured, an authorized project owner
-can opt in through `PATCH /v1/projects/:projectId/search-settings` from a
-signed-in session or a server key with `projects:manage`:
+Project search settings can opt in to the managed hosted reranker (a learned
+pointwise model) with `retrievalDefaults.reranker`: `"keyword"` (the default,
+local BM25) or `"model"`. The provider and model behind `"model"` are managed by
+DocSlurp; requests that name `rerankProvider` or `rerankModel` get HTTP 400
+`model_not_allowed`. Self-hosted deployments need the operator's
+`DEEPINFRA_API_KEY`. An authorized project owner opts in through
+`PATCH /v1/projects/:projectId/search-settings` from a signed-in session or a
+server key with `projects:manage`:
 
 ```json
 {
   "retrievalDefaults": {
     "useRerank": true,
-    "rerankProvider": "deepinfra",
-    "rerankModel": "Qwen/Qwen3-Reranker-0.6B",
+    "reranker": "model",
     "candidateDepth": 100,
     "resultOrder": "relevance"
   }
 }
 ```
 
-Set `rerankProvider` to `"bm25"` to restore local ranking; a request with
-`rerank:false` makes no reranker call. Provider/model selection is a project
-setting, not an arbitrary per-request URL or credential. Search and project
-chat share the post-retrieval implementation. Existing output-score and citation
+Set `reranker` to `"keyword"` to restore local ranking; a request with
+`rerank:false` makes no reranker call. Settings read back with `reranker`, never
+the provider or model. Search and project chat share the post-retrieval
+implementation. Existing output-score and citation
 contracts are retained; provider scores only choose candidate ordering, fused with the
 hybrid order as above.
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { CreateBucketCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { connect } from "@lancedb/lancedb";
 import { DiskBlockCache } from "@docslurp/shared/lancedb-s3-cache";
-import { LanceS3Stats, startLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
+import { LanceS3Stats, lanceS3ProxyStorageOptions, startLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 // Needs MinIO (`pnpm db:up`); skipped when unreachable. Override with LANCEDB_S3_TRACE_TEST_ENDPOINT.
@@ -30,8 +30,9 @@ async function startProxy(maxBytes = 50 * 1024 * 1024) {
   proxies.push(proxy);
   return { proxy, cache };
 }
+const proxyFetch = (proxy: LanceS3Proxy, url: string, init: RequestInit = {}) => fetch(url, { ...init, headers: { "x-amz-security-token": proxy.credentials.sessionToken!, ...init.headers } });
 const getRange = async (proxy: LanceS3Proxy, key: string, range?: string) => {
-  const res = await fetch(`${proxy.endpoint}/${bucket}/${key}`, { headers: range ? { range } : {} });
+  const res = await proxyFetch(proxy, `${proxy.endpoint}/${bucket}/${key}`, { headers: range ? { range } : {} });
   return { res, bytes: Buffer.from(await res.arrayBuffer()) };
 };
 
@@ -70,7 +71,7 @@ it.skipIf(!reachable)("returns correct bytes and headers for overlapping ranges,
   const settled = cache.cumulative.fillRequests;
   expect((await getRange(proxy, DATA_KEY)).res.headers.get("x-docslurp-cache")).toBe("hit");
   expect(cache.cumulative.fillRequests).toBe(settled);
-  const head = await fetch(`${proxy.endpoint}/${bucket}/${DATA_KEY}`, { method: "HEAD" });
+  const head = await proxyFetch(proxy, `${proxy.endpoint}/${bucket}/${DATA_KEY}`, { method: "HEAD" });
   expect(head.headers.get("content-length")).toBe(String(body.length));
 
   // Mutable paths are never cached: an overwrite is visible immediately.
@@ -84,7 +85,7 @@ it.skipIf(!reachable)("returns correct bytes and headers for overlapping ranges,
   expect(missing.res.status).toBe(404);
   expect(cache.entries).toBe(entries);
   // A write through the proxy drops the stale copy.
-  const put = await fetch(`${proxy.endpoint}/${bucket}/${DATA_KEY}`, { method: "PUT", body });
+  const put = await proxyFetch(proxy, `${proxy.endpoint}/${bucket}/${DATA_KEY}`, { method: "PUT", body });
   expect(put.status).toBe(200);
   expect(cache.entries).toBeLessThan(entries);
 });
@@ -110,7 +111,7 @@ it.skipIf(!reachable)("a real Lance table queried through the cache returns the 
   const direct = await startLanceS3Proxy({ endpoint, region: "us-east-1", credentials, logIntervalMs: 0, stats: new LanceS3Stats() });
   proxies.push(direct);
   const { proxy: cached, cache } = await startProxy();
-  const options = (via: LanceS3Proxy) => ({ region: "us-east-1", aws_access_key_id: credentials.accessKeyId, aws_secret_access_key: credentials.secretAccessKey, endpoint: via.endpoint, allow_http: "true", virtual_hosted_style_request: "false" });
+  const options = (via: LanceS3Proxy) => lanceS3ProxyStorageOptions({ region: "us-east-1", aws_access_key_id: credentials.accessKeyId, aws_secret_access_key: credentials.secretAccessKey }, via.endpoint, via.credentials);
   const dim = 32;
   const rows = Array.from({ length: 3000 }, (_, id) => ({ id, vector: Array.from({ length: dim }, (_, d) => Math.sin((id + 1) * (d + 1))) }));
   const writer = await connect(`s3://${lanceBucket}/idx`, { storageOptions: options(direct) });

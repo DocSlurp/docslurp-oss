@@ -199,6 +199,8 @@ export const projectCorpusStats = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    /** The updated_at the automatic-title sweep last examined (0154); the project is pending while they differ. */
+    autoTitleCheckedAt: timestamp("auto_title_checked_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
     foreignKey({
@@ -206,6 +208,30 @@ export const projectCorpusStats = pgTable(
       foreignColumns: [projects.id],
       name: "project_corpus_stats_project_id_fkey",
     }).onDelete("cascade"),
+  ],
+);
+
+/**
+ * Search-session and chat-turn counters per project (0163), maintained by triggers on search_sessions, chat_turns
+ * and chat_sessions. A project's totals are the sum of its rows: a writing transaction takes a free slot and writes
+ * only that slot's rows, so it never waits for another writer. No foreign key to projects (a write must not wait
+ * for a project row either); a trigger on projects removes the rows with their project.
+ */
+export const projectActivityStats = pgTable(
+  "project_activity_stats",
+  {
+    projectId: text("project_id").notNull(),
+    slot: smallint().notNull(),
+    searchSessions: bigint("search_sessions", { mode: "number" }).default(0).notNull(),
+    searchResultCount: bigint("search_result_count", { mode: "number" }).default(0).notNull(),
+    zeroResultSearches: bigint("zero_result_searches", { mode: "number" }).default(0).notNull(),
+    searchDurationCount: bigint("search_duration_count", { mode: "number" }).default(0).notNull(),
+    searchDurationMs: numeric("search_duration_ms").default("0").notNull(),
+    chatTurns: bigint("chat_turns", { mode: "number" }).default(0).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.slot], name: "project_activity_stats_pkey" }),
+    check("project_activity_stats_slot_check", sql`slot >= 0 AND slot < 1024`),
   ],
 );
 
@@ -369,6 +395,10 @@ export const documents = pgTable(
     dedupedFromDocumentId: text("deduped_from_document_id"),
     reusedFromDocumentId: text("reused_from_document_id"),
     dedupScope: text("dedup_scope"),
+    /** Ingest version of the pipeline that produced the document; 0 = unknown (migration 0160, ingest-version.ts). */
+    ingestVersion: integer("ingest_version").default(0).notNull(),
+    /** Capabilities measured from what the producing run stored, or the reused/deduplicated source's (migration 0160). */
+    ingestCapabilities: text("ingest_capabilities").array().default(sql`'{}'::text[]`).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     fileSize: bigint("file_size", { mode: "number" }).default(0).notNull(),
     metadata: jsonb().default({}).notNull(),
@@ -1067,6 +1097,12 @@ export const documentChunks = pgTable(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
+    // Chunk ranges of one document (summary-tree guide mode), migration 0165.
+    index("document_chunks_document_chunk_index_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.chunkIndex.asc().nullsLast().op("int4_ops"),
+    ),
     index("document_chunks_user_id_run_id_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -1388,9 +1424,12 @@ export const searchSessions = pgTable(
       .notNull(),
     /** API-key keyword and hybrid searches only (0139); the maintenance sweep deletes the session after it. */
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
+    /** The searched project (0141). Project reads filter and date sessions by it, never by metadata. */
+    projectId: text("project_id"),
   },
   (table) => [
     index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
+    index("search_sessions_project_id_created_at_idx").using("btree", table.projectId, table.createdAt, table.id),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -1405,6 +1444,11 @@ export const searchSessions = pgTable(
       columns: [table.userId],
       foreignColumns: [user.id],
       name: "search_sessions_user_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "search_sessions_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -1910,6 +1954,8 @@ export const projects = pgTable(
     artifactRetentionDays: integer("artifact_retention_days"),
     runRetentionDays: integer("run_retention_days").default(30),
     pipeline: jsonb().default({}).notNull(),
+    /** Platform-admin-only model mapping per category (migration 0141); never returned to customers. */
+    managedModels: jsonb("managed_models").default({}).notNull(),
     systemPrompt: text("system_prompt"),
     budgetPaused: boolean("budget_paused").default(false).notNull(),
     archivedAt: timestamp("archived_at", {
@@ -2218,6 +2264,8 @@ export const uploadSessions = pgTable(
     projectName: text("project_name"),
     templateKey: text("template_key"),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     status: text().default("pending").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
@@ -2273,6 +2321,7 @@ export const uploadSessionFiles = pgTable(
     etag: text(),
     completedParts: jsonb("completed_parts").default([]).notNull(),
     sha256: text(),
+    contentIdentity: jsonb("content_identity").$type<{ algorithm: "sha256"; digest: string }>(),
     canonicalId: text("canonical_id"),
     sourcePath: text("source_path").default("").notNull(),
     requestIndex: integer("request_index"),
@@ -2305,6 +2354,7 @@ export const uploadSessionFiles = pgTable(
 export const projectRuns = pgTable(
   "project_runs",
   {
+    computeInputManifestHash: text("compute_input_manifest_hash"),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     projectId: text("project_id").notNull(),
@@ -2327,8 +2377,14 @@ export const projectRuns = pgTable(
      */
     spentCents: numeric("spent_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
     artifacts: jsonb().default({}).notNull(),
+    /** Ingest version of the build that completed the run with extraction; 0 = unknown or reused extraction (migration 0160). */
+    ingestVersion: integer("ingest_version").default(0).notNull(),
+    /** What that build's pipeline supports (migration 0160). */
+    ingestCapabilities: text("ingest_capabilities").array().default(sql`'{}'::text[]`).notNull(),
     runId: text("run_id"),
     leaseExpiresAt: timestamp("lease_expires_at", {
       withTimezone: true,
@@ -2364,6 +2420,7 @@ export const projectRuns = pgTable(
     deadLetterReason: text("dead_letter_reason"),
     // Creation publishes this only after every Document is durable.
     creationSourceKeys: text("creation_source_keys").array().default([]).notNull(),
+    monthlyReservationCents: numeric("monthly_reservation_cents", { mode: "number" }).default(0).notNull(),
     creationReadyAt: timestamp("creation_ready_at", { withTimezone: true, mode: "string" }),
     creationExpiresAt: timestamp("creation_expires_at", { withTimezone: true, mode: "string" })
       .default(sql`now() + interval '5 minutes'`),
@@ -3169,6 +3226,7 @@ export const documentRunStageStates = pgTable(
     artifactUri: text("artifact_uri"),
     stats: jsonb().default({}).notNull(),
     error: text(),
+    failure: jsonb(),
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
     completedAt: timestamp("completed_at", {
       withTimezone: true,
@@ -3328,6 +3386,8 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0155).
+    measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
@@ -3593,6 +3653,8 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
+  // Migration 0156: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
   bbox: doublePrecision().array(),
@@ -3613,6 +3675,7 @@ export const documentAssets = pgTable("document_assets", {
     name: "document_assets_run_scope_fkey",
   }),
   index("document_assets_org_document_idx").on(table.orgId, table.documentId, table.pageNumber, table.assetId),
+  index("document_assets_storage_key_idx").on(table.documentId, table.storageKey).where(sql`storage_key IS NOT NULL`),
   index("document_assets_resumable_idx").on(table.orgId, table.documentId).where(sql`resumable`),
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
@@ -3644,6 +3707,28 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
+  // Migration 0156: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
+  assetsCurrent: boolean("assets_current").default(true).notNull(),
+  // Migration 0156: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
+  assetsPending: integer("assets_pending").default(0).notNull(),
+  folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
+
+  // Migration 0159: the resume runner's queue and lease (one per document).
+  resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
+  resumeLeaseUntil: timestamp("resume_lease_until", { withTimezone: true, mode: "string" }),
+  resumeLeaseOwner: text("resume_lease_owner"),
+  resumeBlocked: text("resume_blocked"),
+  resumeFailures: integer("resume_failures").default(0).notNull(),
+  // Lifetime resume VM launches (reset only by a new run) and the audit cursor.
+  resumeVmLaunches: integer("resume_vm_launches").default(0).notNull(),
+  resumeUnitFailures: jsonb("resume_unit_failures").default({}).notNull(),
+  // Migration 0161: measured resume VM time, resumes in a row without progress, request grants, and when the block was set.
+  resumeVmMs: bigint("resume_vm_ms", { mode: "number" }).default(0).notNull(),
+  resumeStalls: integer("resume_stalls").default(0).notNull(),
+  resumeGrants: integer("resume_grants").default(0).notNull(),
+  resumeBlockedAt: timestamp("resume_blocked_at", { withTimezone: true, mode: "string" }),
+  resumeUnitStalls: jsonb("resume_unit_stalls").default({}).notNull(),
+  auditedAt: timestamp("audited_at", { withTimezone: true, mode: "string" }),
   gaps: jsonb(),
   shards: integer().default(0).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
@@ -3663,6 +3748,22 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   index("document_extraction_levels_org_idx").on(table.orgId, table.projectId),
   index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
+
+/** Migration 0159: resume VM time per organization per UTC day (the runner's daily budget). */
+export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
+  orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  day: date().notNull(),
+  launches: integer().default(0).notNull(),
+  vmMs: bigint("vm_ms", { mode: "number" }).default(0).notNull(),
+  reservedMs: bigint("reserved_ms", { mode: "number" }).default(0).notNull(),
+}, (table) => [primaryKey({ columns: [table.orgId, table.day], name: "figure_resume_org_days_pkey" })]);
+
+/** Migration 0159: applied figure resume proposals (single-use chat tokens). */
+export const figureResumeProposalUses = pgTable("figure_resume_proposal_uses", {
+  jti: text().primaryKey().notNull(),
+  orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  usedAt: timestamp("used_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [index("figure_resume_proposal_uses_used_idx").on(table.usedAt)]);
 
 /** Migration 0141: one row per shard manifest of a sharded document (resume runs per shard). */
 export const documentExtractionShards = pgTable("document_extraction_shards", {
@@ -3724,6 +3825,138 @@ export const documentMaps = pgTable(
   ],
 );
 
+/** Summary tree build state, one row per document (migration 0164; packages/shared/src/summary-tree.ts). No text. */
+export const documentSummaryTrees = pgTable(
+  "document_summary_trees",
+  {
+    documentId: text("document_id").primaryKey().notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    runId: text("run_id"),
+    status: text().default("pending").notNull(),
+    skipReason: text("skip_reason"),
+    treeKeyVersion: integer("tree_key_version").default(1).notNull(),
+    configHash: text("config_hash"),
+    embeddingModel: text("embedding_model"),
+    dimension: integer(),
+    leafCount: integer("leaf_count").default(0).notNull(),
+    nodeCount: integer("node_count").default(0).notNull(),
+    levelCount: integer("level_count").default(0).notNull(),
+    rootNodeId: text("root_node_id"),
+    error: text(),
+    /** Who holds a `building` row (migration 0166). */
+    buildOwner: text("build_owner"),
+    /** Builds that took the document (migration 0169); a queued removal carries the value it was asked at. */
+    buildGeneration: bigint("build_generation", { mode: "number" }).default(0).notNull(),
+    builtAt: timestamp("built_at", { withTimezone: true, mode: "string" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_summary_trees_project_status_idx").using(
+      "btree",
+      table.projectId.asc().nullsLast().op("text_ops"),
+      table.status.asc().nullsLast().op("text_ops"),
+    ),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_summary_trees_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+/** Summary tree node registry (migration 0164): hash, level, parent, status and chunk range. No summary text. */
+export const documentSummaryTreeNodes = pgTable(
+  "document_summary_tree_nodes",
+  {
+    id: text().primaryKey().notNull(),
+    documentId: text("document_id").notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    runId: text("run_id"),
+    nodeHash: text("node_hash").notNull(),
+    level: integer().notNull(),
+    parentId: text("parent_id"),
+    ordinal: integer().default(0).notNull(),
+    status: text().default("pending").notNull(),
+    chunkStart: integer("chunk_start").notNull(),
+    chunkEnd: integer("chunk_end").notNull(),
+    pageStart: integer("page_start"),
+    pageEnd: integer("page_end"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_summary_tree_nodes_document_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.level.asc().nullsLast().op("int4_ops"),
+      table.ordinal.asc().nullsLast().op("int4_ops"),
+    ),
+    index("document_summary_tree_nodes_hash_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.nodeHash.asc().nullsLast().op("text_ops"),
+    ),
+    index("document_summary_tree_nodes_parent_idx").using("btree", table.parentId.asc().nullsLast().op("text_ops")).where(sql`parent_id IS NOT NULL`),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_summary_tree_nodes_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+/** Summary tree backfill jobs (migration 0166; worker/src/summary-tree/backfill-job.ts). Counters and settings only. */
+export const summaryTreeJobs = pgTable(
+  "summary_tree_jobs",
+  {
+    id: text().primaryKey().notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    userId: text("user_id").notNull(),
+    status: text().default("queued").notNull(),
+    blockedReason: text("blocked_reason"),
+    resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
+    estimate: jsonb().default({}).notNull(),
+    maxCostCents: numeric("max_cost_cents", { precision: 12, scale: 4, mode: "number" }).notNull(),
+    documentsTotal: integer("documents_total").default(0).notNull(),
+    documentsReady: integer("documents_ready").default(0).notNull(),
+    documentsSkipped: integer("documents_skipped").default(0).notNull(),
+    documentsPartial: integer("documents_partial").default(0).notNull(),
+    nodesBuilt: integer("nodes_built").default(0).notNull(),
+    modelCalls: integer("model_calls").default(0).notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).default(0).notNull(),
+    outputTokens: bigint("output_tokens", { mode: "number" }).default(0).notNull(),
+    costCents: numeric("cost_cents", { precision: 12, scale: 4, mode: "number" }).default(0).notNull(),
+    cursor: text(),
+    error: text(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true, mode: "string" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    outstandingCalls: integer("outstanding_calls").default(0).notNull(),
+    // Fair claiming and parking (migration 0168).
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true, mode: "string" }),
+    parkCount: integer("park_count").default(0).notNull(),
+    parkedSince: timestamp("parked_since", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    check("summary_tree_jobs_outstanding_calls_nonnegative", sql`${table.outstandingCalls} >= 0`),
+    index("summary_tree_jobs_org_attempt_idx").using("btree", table.orgId.asc().nullsLast().op("text_ops"), table.lastAttemptAt.asc().nullsLast().op("timestamptz_ops")),
+    uniqueIndex("summary_tree_jobs_one_active_per_project").using("btree", table.projectId.asc().nullsLast().op("text_ops")).where(sql`status IN ('queued', 'running', 'blocked')`),
+    index("summary_tree_jobs_claim_idx").using("btree", table.status.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+    index("summary_tree_jobs_project_idx").using("btree", table.projectId.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+    foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "summary_tree_jobs_org_id_fkey" }).onDelete("cascade"),
+    foreignKey({ columns: [table.projectId], foreignColumns: [projects.id], name: "summary_tree_jobs_project_id_fkey" }).onDelete("cascade"),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "summary_tree_jobs_user_id_fkey" }).onDelete("cascade"),
+  ],
+);
+
 export const documentPageVectors = pgTable(
   "document_page_vectors",
   {
@@ -3752,3 +3985,45 @@ export const documentPageVectors = pgTable(
     }).onDelete("cascade"),
   ],
 );
+
+/** Durable intake identity; response cache expiry never authorizes new work. */
+export const intakeRequestReceipts = pgTable("intake_request_receipts", {
+  idempotencyKey: text("idempotency_key").notNull(),
+  routeKey: text("route_key").notNull(),
+  requestHash: text("request_hash").notNull(),
+  stableResult: jsonb("stable_result"),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  runId: text("run_id").unique().references(() => projectRuns.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, table => [primaryKey({ columns: [table.idempotencyKey, table.routeKey] })]);
+
+
+/** Global operational records contain no customer content or tenant identifiers. */
+export const computePriceObservations = pgTable("compute_price_observations", {
+  id: text().primaryKey().notNull(), offerId: text("offer_id").notNull(),
+  provider: text().notNull(), sku: text().notNull(), region: text().notNull(), market: text().notNull(),
+  observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  validUntil: timestamp("valid_until", { withTimezone: true, mode: "string" }).notNull(),
+  sourceUrl: text("source_url").notNull(), sourceHash: text("source_hash").notNull(),
+  nativeCurrency: text("native_currency").notNull(), nativePerHour: numeric("native_per_hour").notNull(),
+  usdPerNative: numeric("usd_per_native").notNull(),
+  fxObservedAt: timestamp("fx_observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  fxSourceUrl: text("fx_source_url").notNull(), usdPerHour: numeric("usd_per_hour").notNull(),
+  egressUsdPerGiB: numeric("egress_usd_per_gib").notNull(),
+  billingMinimumSeconds: integer("billing_minimum_seconds").notNull(),
+  billingQuantumSeconds: integer("billing_quantum_seconds").notNull(),
+}, (table) => [unique("compute_price_id_offer_unique").on(table.id, table.offerId)]);
+
+export const computeCalibrationObservations = pgTable("compute_calibration_observations", {
+  id: text().primaryKey().notNull(), profileId: text("profile_id").notNull(),
+  priceId: text("price_id").notNull(),
+  offerId: text("offer_id").notNull(),
+  imageHash: text("image_hash").notNull(), isolationPolicy: text("isolation_policy").notNull(),
+  engine: text().notNull(), workload: text().notNull(),
+  observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  validUntil: timestamp("valid_until", { withTimezone: true, mode: "string" }).notNull(),
+  attempted: integer().notNull(), succeeded: integer().notNull(), failed: integer().notNull(), slots: integer().notNull(),
+  startupP95Ms: integer("startup_p95_ms").notNull(), serviceP95MsPerPage: integer("service_p95_ms_per_page").notNull(),
+  transferMsPerMiB: numeric("transfer_ms_per_mib").notNull(), idleTailMs: integer("idle_tail_ms").notNull(),
+  allocatedMs: bigint("allocated_ms", { mode: "number" }).notNull(), sourceHash: text("source_hash").notNull(),
+}, (table) => [foreignKey({ columns: [table.priceId, table.offerId], foreignColumns: [computePriceObservations.id, computePriceObservations.offerId] })]);

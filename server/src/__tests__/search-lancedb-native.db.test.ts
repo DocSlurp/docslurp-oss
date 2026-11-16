@@ -8,6 +8,9 @@ import { encodeLanceChunkHydration, LANCE_HYDRATION_COLUMN_SPECS } from "@docslu
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null } as const;
+
 
 /**
  * SEARCH_LANCEDB_NATIVE against migrated Postgres and a real local LanceDB
@@ -152,7 +155,7 @@ function near(id: string): number[] {
 
 async function run(native: boolean, query: string, options: Record<string, unknown>) {
   vi.stubEnv("SEARCH_LANCEDB_NATIVE", native ? "1" : "0");
-  const response = await search.hybridSearch(query, "u", { ...baseOptions, ...options, filters: { projectId: "w", ...(options.filters as object ?? {}) } });
+  const response = await search.hybridSearch(query, "u", { ...baseOptions, ...options, filters: { projectId: "w", ...(options.filters as object ?? {}) } }, TEST_SEARCH_SCOPE);
   await session.drainSearchSessionWrites();
   return response;
 }
@@ -215,24 +218,66 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(native.timings?.nativeLexicalUnindexed).toBeUndefined();
   });
 
-  it("answers a warm search with one SQL read plus chunk-id checks", async () => {
+  it("runs an array of keyword queries as one BM25 fan-out with per-query matches", async () => {
+    const keywordQueries = ["cavitation", "torque bearing", "qqqzzznomatch", "cavitation"];
+    const response = await run(true, keywordQueries.join(" "), { searchMode: "keyword", keywordQueries, limit: 20 });
+    expect(response.searchMode).toBe("keyword");
+    expect(response.timings?.["keywordFanout:text"]).toBe(1);
+    expect(response.keywordQueries?.map((item) => item.q)).toEqual(keywordQueries);
+    expect(response.keywordQueries?.[2]!.hits).toBe(0);
+    expect(response.keywordQueries?.[0]!.hits).toBeGreaterThan(0);
+    const planted = response.results.find((result) => result.citation.documentId === "doc4" && result.citation.chunkIndex === 9);
+    expect(planted?.matchedQueries).toEqual(expect.arrayContaining([0, 3]));
+    expect(response.results.every((result) => !result.matchedQueries || result.matchedQueries.every((index) => index !== 2))).toBe(true);
+  });
+
+  it("keeps a warm keyword fan-out of up to 100 queries to about the SQL of one keyword search", { timeout: 30_000 }, async () => {
+    const filters = { documentIds: ["doc1", "doc2", "doc3", "doc4", "doc5", "doc6"] };
+    const reads = async (keywordQueries: string[]) => {
+      await run(true, keywordQueries.join(" "), { searchMode: "keyword", keywordQueries, filters });
+      vi.stubEnv("SEARCH_LANCEDB_NATIVE", "1");
+      statements.length = 0;
+      const started = performance.now();
+      const response = await search.hybridSearch(keywordQueries.join(" "), "u", { ...baseOptions, searchMode: "keyword", keywordQueries, filters: { projectId: "w", ...filters } }, TEST_SEARCH_SCOPE);
+      const ms = performance.now() - started;
+      const count = statements.filter((statement) => !/^\s*(begin|commit|insert|delete|update|with recorded|savepoint|release)/i.test(statement)).length;
+      await session.drainSearchSessionWrites();
+      return { count, ms, results: response.results.length };
+    };
+    const terms = (size: number) => Array.from({ length: size }, (_, i) => `${WORDS[i % WORDS.length]} ${WORDS[(i * 7 + 3) % WORDS.length]} q${i}`);
+    const one = await reads(["torque"]);
+    const sizes = [20, 25, 50, 100];
+    const fanouts: Array<Awaited<ReturnType<typeof reads>>> = [];
+    for (const size of sizes) fanouts.push(await reads(terms(size)));
+    console.info(`[keyword-fanout] warm reads/ms one=${one.count}/${one.ms.toFixed(1)} ${sizes.map((size, i) => `${size}=${fanouts[i]!.count}/${fanouts[i]!.ms.toFixed(1)}`).join(" ")}`);
+    for (const fanout of fanouts) {
+      expect(fanout.results).toBeGreaterThan(0);
+      // Scope, eligibility and settings resolve once per search; BM25 and hydration come from LanceDB.
+      expect(fanout.count).toBeLessThanOrEqual(one.count + 5);
+    }
+  });
+
+  it("answers a warm search with one SQL read plus chunk-id checks", { timeout: 30_000 }, async () => {
     const queryVector = near("doc5-2");
     // Original documents only: hits serving a dedup copy are hydrated from Postgres by design.
     const filters = { documentIds: ["doc1", "doc2", "doc3", "doc4", "doc5", "doc6"] };
     await run(true, "torque bearing", { queryVector, filters });
     vi.stubEnv("SEARCH_LANCEDB_NATIVE", "1");
     statements.length = 0;
-    const response = await search.hybridSearch("torque bearing", "u", { ...baseOptions, queryVector, filters: { projectId: "w", ...filters } });
+    const response = await search.hybridSearch("torque bearing", "u", { ...baseOptions, queryVector, filters: { projectId: "w", ...filters } }, TEST_SEARCH_SCOPE);
     // Write-behind session and usage writes may already have started; they are not on the answer's path.
     const reads = statements.filter((statement) => !/^\s*(begin|commit|insert|delete|update|with recorded|savepoint|release)/i.test(statement));
     await session.drainSearchSessionWrites();
     expect(response.results.length).toBeGreaterThan(0);
     // The one: access, settings and pipeline (never cached).
     // Plus, per retrieval branch (vector, keyword; run in parallel), one primary-key check that the
-    // LanceDB-hydrated hits' chunks still exist.
-    expect(reads.length).toBeLessThanOrEqual(3);
+    // LanceDB-hydrated hits' chunks still exist, and one primary-key read of the hit documents' PII withholding
+    // (page-scoped PII: hits on withheld pages are dropped whichever index served them).
+    expect(reads.length).toBeLessThanOrEqual(4);
     expect(reads[0]).toMatch(/from projects w/);
-    for (const read of reads.slice(1)) expect(read).toMatch(/select id from document_chunks where id in/);
+    const pii = reads.filter((read) => /d\.metadata->'pii' as pii from documents d where d\.id = any/.test(read));
+    expect(pii).toHaveLength(1);
+    for (const read of reads.slice(1).filter((read) => !pii.includes(read))) expect(read).toMatch(/select id from document_chunks where id in/);
     expect(statements.some((statement) => /insert into search_sessions/.test(statement))).toBe(true);
   });
 
@@ -268,7 +313,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       const queryVector = near("doc4-9");
       const legacy = await run(false, "cavitation erosion", { queryVector });
       vi.stubEnv("SEARCH_LANCEDB_NATIVE", undefined);
-      const native = await search.hybridSearch("cavitation erosion", "u", { ...baseOptions, queryVector, filters: { projectId: "w" } });
+      const native = await search.hybridSearch("cavitation erosion", "u", { ...baseOptions, queryVector, filters: { projectId: "w" } }, TEST_SEARCH_SCOPE);
       await session.drainSearchSessionWrites();
       expect(native.timings?.nativeLexicalUnindexed).toBe(1);
       expect(native.timings?.nativeHydrationPostgres).toBe(1);
@@ -373,17 +418,51 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(fresh.documents.map((document) => document.id)).not.toContain("gone");
   });
 
-  it("drops cached eligibility when a run_events hint names the project's run", async () => {
-    const set = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
-    expect(set.documents.filter((document) => document.vectorReady)).toHaveLength(DOCS + 1);
-    await sql`update documents set superseded_at = now() where id = 'doc6'`;
+  it("drops cached eligibility when a run_events hint names the project's run (debounced)", async () => {
+    // A window far longer than the test, so "inside the window" never depends on how fast the queries ran;
+    // its end is reached by advancing the debounce timer, not by sleeping.
+    const WINDOW_MS = 600_000;
+    vi.stubEnv("SEARCH_ELIGIBLE_DEBOUNCE_MS", String(WINDOW_MS));
+    // Nor may the cache's own TTL expire an entry on a slow machine (read when the caches are rebuilt below).
+    vi.stubEnv("SEARCH_ELIGIBLE_CACHE_TTL_MS", String(WINDOW_MS));
+    const load = () => eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
+    const filename = (set: Awaited<ReturnType<typeof load>>) => set.documents.find((document) => document.id === "doc6")?.filename;
     try {
-      expect(await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM })).toBe(set);
+      // Forget drops made by earlier tests: this project starts outside any window.
+      eligible.resetEligibleDocumentCachesForTests();
+      const set = await load();
+      expect(set.documents.filter((document) => document.vectorReady)).toHaveLength(DOCS + 1);
+      // A change that sends no withdrawal hint of its own, visible in the cached set.
+      await sql`update documents set filename = 'first.pdf' where id = 'doc6'`;
+      expect(await load()).toBe(set);
+      // The first hint drops the set at once.
       await eligible.invalidateSearchRuns(["run1"]);
-      const fresh = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
-      expect(fresh.documents.map((document) => document.id)).not.toContain("doc6");
+      const fresh = await load();
+      expect(fresh).not.toBe(set);
+      expect(filename(fresh)).toBe("first.pdf");
+      // Later hints inside the window drop nothing; one drop is scheduled for its end. Only the debounce timer is
+      // faked, and nothing below touches the database until real timers are back.
+      await sql`update documents set filename = 'second.pdf' where id = 'doc6'`;
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        await eligible.invalidateSearchRuns(["run1"]);
+        await eligible.invalidateSearchRuns(["run1"]);
+        expect(vi.getTimerCount()).toBe(1);
+        vi.advanceTimersByTime(WINDOW_MS - 1_000);
+        expect(await load()).toBe(fresh);
+        vi.advanceTimersByTime(WINDOW_MS);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+      const later = await load();
+      expect(later).not.toBe(fresh);
+      expect(filename(later)).toBe("second.pdf");
     } finally {
-      await sql`update documents set superseded_at = null where id = 'doc6'`;
+      await sql`update documents set filename = 'doc6.pdf' where id = 'doc6'`;
+      vi.unstubAllEnvs();
+      eligible.resetEligibleDocumentCachesForTests();
     }
   });
+
 });

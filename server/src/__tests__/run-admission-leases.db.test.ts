@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 // Only point this at a disposable database built with server/db/migrate.mjs.
-const databaseUrl = process.env.RUN_ADMISSION_TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL;
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let guard: typeof import("../services/billing/spend-guard.js");
@@ -20,6 +20,8 @@ beforeAll(async () => {
     listAccessibleProjectIds: async () => ["admission-w1", "admission-w2"],
     getProjectAccess: async () => ({}),
     canContributeToProject: () => true,
+    // Retry spends credits and needs edit access (council L3); this suite tests admission, not who may retry.
+    canEditProject: () => true,
   }));
   vi.doMock("../services/worker-fleet.js", () => ({ fleetSupportsNow: () => true, taskQueueForOrgKey: () => ({ taskQueue: "test" }) }));
   vi.doMock("../services/billing/credit-leases.js", async () => {
@@ -55,11 +57,15 @@ beforeEach(async () => {
 });
 
 function admit(runId: string, speedBoost = true, projectId = "admission-w1") {
-  return guard.admitRunSpend("admission-org", projectId, tx => tx`
-    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values (${runId}, 'admission-org', 'admission-user', ${projectId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
-    returning id
-  `, { leaseRunId: runId, speedBoost });
+  return guard.admitRunSpend("admission-org", projectId, async tx => {
+    const rows = await tx`
+      insert into project_runs(monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, ${runId}, 'admission-org', 'admission-user', ${projectId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
+      returning id`;
+    await tx`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,file_size)
+      values(${runId},'admission-org','admission-user',${projectId},${runId},'fixture.txt','text/plain','synthetic','queued',1000)`;
+    return rows;
+  }, { leaseRunId: runId, speedBoost });
 }
 
 // Admission mechanics below are sized for a $1 starter chat reserve (the default is lower).

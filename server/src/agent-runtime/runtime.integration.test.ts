@@ -11,10 +11,12 @@ import type { RequestActor } from "../lib/request-actor.js";
 import { StrictCachingPubSub } from "./strict-pubsub.js";
 import { operationOutputTopic } from "./operation-delivery.js";
 const state=vi.hoisted(()=>({chat:vi.fn()}));
-const url=process.env.NATIVE_CHAT_TEST_DATABASE_URL;
-const redis=process.env.NATIVE_CHAT_TEST_REDIS_URL;
+const url=process.env.TEST_DATABASE_URL;
+const redis=process.env.TEST_REDIS_URL;
 const enabled=!!url&&!!redis;
 let sql:postgres.Sql;
+/** Every statement the application's postgres.js client sends (native Mastra storage uses its own pg pool). */
+let statements=0;
 let authPool:Pool;
 const authSecret="native-local-auth-fixture-".padEnd(48,"x");
 const origin="http://localhost:4321";
@@ -33,7 +35,7 @@ async function restoreSession() {
 beforeAll(async()=>{
   if(!enabled)return;
   if(new URL(url!).hostname!=="127.0.0.1"||new URL(redis!).hostname!=="127.0.0.1")throw new Error("isolated loopback services required");
-  sql=postgres(url!,{max:5,prepare:false,onnotice(){}});
+  sql=postgres(url!,{max:5,prepare:false,onnotice(){},debug:()=>{statements++;}});
   vi.doMock("../db.js",()=>({sql}));
   vi.doMock("../config.js",async original=>({env:{...(await original<typeof import("../config.js")>()).env,databaseUrl:url,publicChatAgentEnabled:true}}));
   vi.stubEnv("NODE_ENV","test");vi.stubEnv("DATABASE_URL",url!);vi.stubEnv("BETTER_AUTH_URL",origin);
@@ -52,7 +54,7 @@ beforeAll(async()=>{
   await sql`insert into "user"(id,name,email) values('native-api-owner','Native','native-api@example.test')`;
   await sql`insert into session(id,token,"userId","expiresAt","createdAt","updatedAt")
     values('native-api-session','native-api-test-token','native-api-owner',now()+interval '1 day',now(),now())`;
-  await sql`insert into organizations(id,name,slug,created_by_user_id) values('native-api-org','Native','native-api-org','native-api-owner')`;
+  await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents) values('native-api-org','Native','native-api-org','native-api-owner',1000)`;
   await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org','native-api-owner','owner') on conflict do nothing`;
   await sql`insert into projects(id,org_id,user_id,name) values(${project},'native-api-org','native-api-owner','Native')`;
   runtime=await import("./runtime.js");
@@ -394,6 +396,154 @@ it.runIf(enabled)("keeps quota charged when retained output succeeds but its pub
   }finally{release();spy.mockRestore();}
 },30000);
 
+const tick=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+/** Waits on native storage (its own pg pool), so polling adds no application statements. */
+async function settled(id:string) {
+  const host=await runtime.nativeChatRuntime();
+  let status:string|undefined;
+  await vi.waitFor(async()=>{
+    status=(await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).tasks[0]?.status;
+    expect(["completed","failed","cancelled","timed_out"]).toContain(status);
+  },{timeout:20000,interval:20});
+  return status;
+}
+const textOf=(events:Array<{kind:string;payload:{text?:string}}>)=>events.filter(e=>e.kind==="text").map(e=>e.payload.text).join("");
+
+it.runIf(enabled)("coalesces a streamed answer into few fenced appends, in emission order, within a statement budget",async()=>{
+  await restoreSession();
+  const deltas=Array.from({length:200},(_,i)=>`w${i} `);
+  let started=0;let emitted=0;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    started=statements;
+    for(const [i,delta] of deltas.entries()) {
+      await args.onTextDelta(delta);emitted++;
+      if(i===99)args.onToolActivity({tool:"search",status:"done"});
+      if(i===149)args.onEvidence([{documentId:"order-doc",page:1}]);
+      await tick(3);
+    }
+    return {answer:deltas.join(""),citations:[{documentId:"order-doc",page:1}]};
+  });
+  const app=requestApp();
+  const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"coalesced_statement_budget"},body:JSON.stringify({q:"statement budget",project})});
+  expect(response.status).toBe(202);const id=(await response.json()).operationId;
+  const status=await settled(id);
+  const used=statements-started;
+  process.stderr.write(`${JSON.stringify({streamedAnswer:{status,deltasEmitted:emitted,statements:used}})}\n`);
+  expect(status).toBe("completed");
+  const body=await (await app.request(`/v1/chat/operations/${id}?after=0`)).json();
+  const events=body.events as Array<{kind:string;payload:{text?:string}}>;
+  const kinds=events.map(e=>e.kind);
+  // Adjacent text merges; text never crosses a tool or evidence event and every delta arrives once, in order.
+  expect(kinds.filter((kind,i)=>kind!=="text"||kinds[i-1]!=="text")).toEqual(["text","tool","text","evidence","text","result"]);
+  const tool=kinds.indexOf("tool"),evidence=kinds.indexOf("evidence");
+  expect(textOf(events.slice(0,tool))).toBe(deltas.slice(0,100).join(""));
+  expect(textOf(events.slice(tool,evidence))).toBe(deltas.slice(100,150).join(""));
+  expect(textOf(events.slice(evidence))).toBe(deltas.slice(150).join(""));
+  expect(body.operation.snapshot.answer).toBe(deltas.join(""));
+  const textEvents=kinds.filter(kind=>kind==="text").length;
+  process.stderr.write(`${JSON.stringify({coalescedAnswer:{deltas:deltas.length,textEvents,statements:used}})}\n`);
+  expect(textEvents).toBeLessThan(40);
+  // Each append re-reads authorization (session, project access, lease) on top of its two fenced
+  // transactions: about 13 statements. One append per delta cost about 2,900 for these 200 deltas.
+  expect(used).toBeLessThan((textEvents+3)*16);
+  expect(used).toBeLessThan(600);
+},40000);
+
+it.runIf(enabled).each(["cancel route","database fence"] as const)("publishes no buffered text after a cancel between flushes (%s)",async(mode)=>{
+  await restoreSession();
+  vi.stubEnv("DOCSLURP_CHAT_OUTPUT_FLUSH_MS","1500");
+  let buffered!:()=>void;const ready=new Promise<void>(resolve=>{buffered=resolve;});
+  let aborted=false;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    await args.onTextDelta("flushed before cancel");
+    args.onToolActivity({tool:"search",status:"done"}); // Flushes the text ahead of the tool event.
+    await args.onTextDelta(" buffered after cancel");
+    buffered();
+    await new Promise<void>((resolve,reject)=>{
+      const stop=()=>{aborted=true;reject(new Error("cancelled"));};
+      if(args.signal.aborted)stop();else args.signal.addEventListener("abort",stop,{once:true});
+    });
+    return {answer:"unreachable"};
+  });
+  const app=requestApp();
+  try {
+    const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":`buffered_cancel_${mode.replace(" ","_")}`},body:JSON.stringify({q:`buffered cancel ${mode}`,project})});
+    expect(response.status).toBe(202);const id=(await response.json()).operationId;
+    await ready;
+    await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${id}`)).json()).operation.snapshot.text).toBe("flushed before cancel"),{timeout:1000,interval:10});
+    if(mode==="cancel route")expect((await app.request(`/v1/chat/operations/${id}/cancel`,{method:"POST",headers:{"content-type":"application/json"},body:'{"scope":"task"}'})).status).toBe(200);
+    // Cancellation recorded only in the database: no native abort reaches the executor, so the fence must refuse.
+    else await sql`update chat_operations set tree_cancel_requested=true where id=${id}`;
+    await vi.waitFor(()=>expect(aborted).toBe(true),{timeout:6000});
+    await settled(id);await tick(1700);
+    const body=await (await app.request(`/v1/chat/operations/${id}?after=0`)).json();
+    expect(JSON.stringify(body)).not.toContain("buffered after cancel");
+    expect(body.operation.snapshot.text).toBe("flushed before cancel");
+    expect(["cancelled","failed"]).toContain(body.operation.status);
+  } finally {vi.stubEnv("DOCSLURP_CHAT_OUTPUT_FLUSH_MS","");}
+},30000);
+
+it.runIf(enabled)("publishes nothing after the session is revoked between a successful check and the next flush",async()=>{
+  await restoreSession();
+  vi.stubEnv("DOCSLURP_CHAT_OUTPUT_FLUSH_MS","1500");
+  let published!:()=>void;const ready=new Promise<void>(resolve=>{published=resolve;});
+  let revoke!:()=>void;const revoked=new Promise<void>(resolve=>{revoke=resolve;});
+  let aborted=false;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    await args.onTextDelta("published before revoke");
+    args.onToolActivity({tool:"search",status:"done"}); // Publishes the text and this event on a fresh, successful check.
+    published();
+    await revoked;
+    await args.onTextDelta(" buffered after revoke");
+    // Flushes at once, well inside the two-second timer's window: only the per-append check can refuse it.
+    args.onToolActivity({tool:"search",status:"after-revoke"});
+    await new Promise<void>((resolve,reject)=>{
+      const stop=()=>{aborted=true;reject(new Error("revoked"));};
+      if(args.signal.aborted)stop();else args.signal.addEventListener("abort",stop,{once:true});
+    });
+    return {answer:"unreachable"};
+  });
+  const app=requestApp();
+  try {
+    const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"revoked_between_flushes"},body:JSON.stringify({q:"revoked between flushes",project})});
+    expect(response.status).toBe(202);const id=(await response.json()).operationId;
+    await ready;
+    await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${id}?after=0`)).json()).events.map((e:{kind:string})=>e.kind)).toEqual(["text","tool"]),{timeout:5000,interval:10});
+    await sql`update session set "expiresAt"=now()-interval '1 second' where id='native-api-session'`;
+    revoke();
+    await vi.waitFor(()=>expect(aborted).toBe(true),{timeout:6000});
+    await settled(id);await tick(1700);
+    await restoreSession();
+    const body=await (await app.request(`/v1/chat/operations/${id}?after=0`)).json();
+    expect(JSON.stringify(body)).not.toContain("buffered after revoke");
+    expect(JSON.stringify(body)).not.toContain("after-revoke");
+    expect(body.events.map((e:{kind:string})=>e.kind)).toEqual(["text","tool"]);
+    expect(body.operation.snapshot.text).toBe("published before revoke");
+    expect(["cancelled","failed"]).toContain(body.operation.status);
+  } finally {vi.stubEnv("DOCSLURP_CHAT_OUTPUT_FLUSH_MS","");await restoreSession();}
+},30000);
+
+it.runIf(enabled)("enforces the per-operation output quota on coalesced small deltas",async()=>{
+  await restoreSession();
+  const chunk="q".repeat(1000);
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    for(let i=0;i<400;i++){await args.onTextDelta(chunk);args.signal.throwIfAborted();}
+    return {answer:"unreachable",citations:[]};
+  });
+  const app=requestApp();
+  const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"coalesced_quota"},body:JSON.stringify({q:"coalesced quota",project})});
+  expect(response.status).toBe(202);const id=(await response.json()).operationId;
+  expect(await settled(id)).toBe("failed");
+  const [row]=await sql`select output_bytes from chat_operations where id=${id}`;
+  expect(Number(row!.output_bytes)).toBeLessThanOrEqual(262144);
+  expect(Number(row!.output_bytes)).toBeGreaterThan(200000);
+  // The page itself resyncs at this size; the snapshot is the published text.
+  const body=await (await app.request(`/v1/chat/operations/${id}`)).json();
+  expect(body.operation.snapshot.answer).toBeUndefined();
+  const published=Buffer.byteLength(body.operation.snapshot.text);
+  expect(published).toBeGreaterThan(200000);expect(published).toBeLessThanOrEqual(Number(row!.output_bytes));
+},30000);
+
 it.runIf(enabled)("launches parallel and nested native children after the parent answer, recovering their true tree from another host", async () => {
   await restoreSession();
   let release!:()=>void;
@@ -613,14 +763,14 @@ it.runIf(enabled)("permits explicit new child work after native parent failure w
 },20000);
 
 it.runIf(enabled)("keeps shared materialization visible after the native parent answer completes and tree cancellation",async()=>{
-  await sql`insert into documents(id,user_id,org_id,project_id,filename,mime_type,source_key,status)
-    values('native-linked-document','native-api-owner','native-api-org',${project},'fixture.txt','text/plain','synthetic','completed')
+  await sql`insert into documents(id,user_id,org_id,project_id,filename,mime_type,source_key,status,page_count,billing_pages,page_count_source)
+    values('native-linked-document','native-api-owner','native-api-org',${project},'fixture.txt','text/plain','synthetic','completed',1,1,'counted')
     on conflict do nothing`;
   const {defaultMaterializeDeps}=await import("../search/deferred/materialize-client.js");
   let runId="";
   state.chat.mockImplementation(async(args)=>{
     runId=await defaultMaterializeDeps.createRun({userId:actor.userId,orgId:"native-api-org",
-      projectId:project,documentId:"native-linked-document",documents:1,pages:1,pageNumbers:[1]});
+      projectId:project,documentId:"native-linked-document",documents:1,pages:1,maxCredits:1,pageNumbers:[1]});
     await args.onTextDelta("parent answer");
     return {answer:"parent answer",citations:[]};
   });

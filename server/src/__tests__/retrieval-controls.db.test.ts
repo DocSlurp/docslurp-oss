@@ -6,6 +6,9 @@ import postgres from "postgres";
 import * as lancedb from "@lancedb/lancedb";
 import { normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "rank-org", projectIds: "org", modeCeiling: null } as const;
+
 
 // Bind only the database connection; execute actual SQL, access checks, lexical
 // acquisition, LanceDB acquisition, fusion, ranking, packing and session writes.
@@ -83,8 +86,8 @@ describe("actual hybrid retrieval with isolated SQL and LanceDB", () => {
           limit: 10, minScore: 0, useMmr: false, parentRetrieval: false, summarySeed: false,
           queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false,
           useHyDE: false, useContextualCompression: false, enableGraphExpansion: false, enableCommunityExpansion: false };
-        const relevance = await hybridSearch('pump maintenance', 'rank-user', { ...options, resultOrder: 'relevance' });
-        const prompt = await hybridSearch('pump maintenance', 'rank-user', { ...options, resultOrder: 'prompt' });
+        const relevance = await hybridSearch('pump maintenance', 'rank-user', { ...options, resultOrder: 'relevance' }, TEST_SEARCH_SCOPE);
+        const prompt = await hybridSearch('pump maintenance', 'rank-user', { ...options, resultOrder: 'prompt' }, TEST_SEARCH_SCOPE);
         expect(relevance.results).toHaveLength(10);
         expect(prompt.results.map(r => r.citation.chunkIndex).sort((a, b) => (a ?? 0) - (b ?? 0)))
           .toEqual(relevance.results.map(r => r.citation.chunkIndex).sort((a, b) => (a ?? 0) - (b ?? 0)));

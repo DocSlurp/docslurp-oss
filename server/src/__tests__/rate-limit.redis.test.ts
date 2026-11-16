@@ -9,8 +9,8 @@ import {
 } from "../middleware/rate-limit.js";
 
 // Runs the Lua sliding-window script against a real Redis and checks it agrees
-// with the in-process store step for step. Skipped without RATE_LIMIT_TEST_REDIS_URL.
-const redisUrl = process.env.RATE_LIMIT_TEST_REDIS_URL ?? "";
+// with the in-process store step for step. Skipped without TEST_REDIS_URL.
+const redisUrl = process.env.TEST_REDIS_URL ?? "";
 
 /** A store that throws instead of silently falling back, so script errors fail the test. */
 const failingFallback: RateLimitStore = {
@@ -72,6 +72,21 @@ describe.skipIf(!redisUrl)("Redis sliding-window rate limit store", () => {
       if (fromRedis.denied >= 0) denials += 1;
     }
     expect(denials).toBeGreaterThan(3);
+  });
+
+  it("matches the in-memory store for multi-unit (weighted) consumes, all or none", async () => {
+    const redis = createRedisRateLimitStore(redisUrl, failingFallback);
+    const memory = createMemoryRateLimitStore();
+    const base = `rl-test:{${randomUUID()}}`;
+    const start = Math.ceil(Date.now() / 1_000) * 1_000 + 1_000;
+    for (const [offset, weight] of [[0, 3], [10, 3], [20, 2], [30, 1], [40, 4]] as const) {
+      const input: RateLimitConsumeInput = {
+        blockKey: `${base}:block`, now: start + offset, countDenied: false, weight,
+        counters: [{ key: `${base}:w:60000`, limit: 5, windowMs: 60_000 }],
+      };
+      const fromRedis = await redis.consume(input);
+      expect(fromRedis, `step +${offset}ms`).toEqual({ ...(await memory.consume(input)), shared: true });
+    }
   });
 
   it("re-loads the script after SCRIPT FLUSH", async () => {

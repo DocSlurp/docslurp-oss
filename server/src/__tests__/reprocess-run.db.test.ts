@@ -12,6 +12,7 @@ let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let reprocessRun: typeof import("../services/runs.js").reprocessRun;
 let isReprocessRejectedError: typeof import("../services/runs.js").isReprocessRejectedError;
+let retryRun: typeof import("../services/runs.js").retryRun;
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
@@ -32,7 +33,7 @@ beforeAll(async () => {
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 1000)`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
   await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
-  ({ reprocessRun, isReprocessRejectedError } = await import("../services/runs.js"));
+  ({ reprocessRun, isReprocessRejectedError, retryRun } = await import("../services/runs.js"));
 }, 120_000);
 
 afterAll(async () => {
@@ -60,9 +61,9 @@ async function seedSource(args: { artifacts?: Record<string, string>; docStatus?
   `;
   await sql`
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
-      page_count, source_sha256)
+      file_size, page_count, source_sha256)
     values ('src', 'o1', 'u1', 'w', 'run-src', 'a.pdf', 'application/pdf', 'raw/a.pdf', ${args.docStatus ?? "completed"},
-      2, 'sha-a')
+      1000, 2, 'sha-a')
   `;
 }
 
@@ -84,8 +85,8 @@ describe("reprocess keeps the deferred indexing mode", () => {
           ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
       `;
       await sql`
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
-        values ('src-map', 'o1', 'u1', 'w', 'run-map', 'm.pdf', 'application/pdf', 'raw/m.pdf', 'completed', 2, 'map')
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, indexing_mode)
+        values ('src-map', 'o1', 'u1', 'w', 'run-map', 'm.pdf', 'application/pdf', 'raw/m.pdf', 'completed', 1000, 2, 'map')
       `;
       const created = await reprocessRun("run-map", "u1");
       const [doc] = await sql<{ indexing_mode: string }[]>`select indexing_mode from documents where run_id = ${created!.run.id}`;
@@ -112,8 +113,8 @@ describe("reprocess after a mode-switch backfill adopted the source", () => {
           ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
       `;
       await sql`
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
-        values ('src-adopted', 'o1', 'u1', 'w', 'run-old', 'v.pdf', 'application/pdf', 'raw/v.pdf', 'completed', 2, 'visual')
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, indexing_mode)
+        values ('src-adopted', 'o1', 'u1', 'w', 'run-old', 'v.pdf', 'application/pdf', 'raw/v.pdf', 'completed', 1000, 2, 'visual')
       `;
       const created = await reprocessRun("run-old", "u1");
       expect(created?.run.pipeline.indexingMode).toBe("visual");
@@ -192,5 +193,101 @@ describe("reprocessRun", () => {
     await seedSource({ artifacts: {} });
     const run = (await reprocessRun("run-src", "u1", { stageFrom: "extract-markdown" }))?.run;
     expect(run?.pipeline.restartFromStage).toBe("extract-markdown");
+  });
+});
+
+describe("reprocess never replays a run snapshot's model values", () => {
+  it("drops raw text models and the former DeepSeek vision default, and applies the project's explicit overrides", async () => {
+    const legacy = {
+      ...defaultPipelineFeatures,
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted", remoteFallbackModelUri: null },
+      textGeneration: { model: "z-ai/glm-5.3-flash", models: { "document-summary": "qwen/qwen3.5-flash-02-23" } },
+      structuredExtraction: { model: "openai/gpt-6.1-sol", supportingPrompt: null, maxOutputTokens: 4096 },
+    };
+    await seedSource();
+    await sql`update project_runs set pipeline = ${sql.json(legacy as unknown as postgres.JSONValue)} where id = 'run-src'`;
+    await sql`update projects set managed_models = ${sql.json({ pipeline: { textGeneration: { model: "llm://private/gpu1/acme/text" } } })} where id = 'w'`;
+    try {
+      const run = (await reprocessRun("run-src", "u1"))?.run;
+      const [stored] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = ${run!.id}`;
+      expect(stored!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+      expect(stored!.pipeline.textGeneration).toMatchObject({ model: "llm://private/gpu1/acme/text", models: {} });
+      expect(stored!.pipeline.structuredExtraction!.model).toBeNull();
+    } finally {
+      await sql`update projects set managed_models = '{}'::jsonb where id = 'w'`;
+    }
+  });
+});
+
+describe("retrying a run from before managed models", () => {
+  it("re-resolves its stored model values instead of replaying the former DeepSeek vision route", async () => {
+    const legacy = {
+      ...defaultPipelineFeatures,
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted", remoteFallbackModelUri: null },
+      textGeneration: { model: "z-ai/glm-5.3-flash", models: {} },
+    };
+    await seedSource({ docStatus: "failed" });
+    await sql`update project_runs set status = 'failed', stage = 'vision-extract', pipeline = ${sql.json(legacy as unknown as postgres.JSONValue)} where id = 'run-src'`;
+    const result = await retryRun("run-src", "u1");
+    expect(result?.outcome.status).not.toBe("not-retryable");
+    const [stored] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = 'run-src'`;
+    expect(stored!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+    expect(stored!.pipeline.textGeneration).toMatchObject({ model: null });
+  });
+});
+
+describe("the summary tree follows the project's stored setting, not a run snapshot", () => {
+  const TREE_ON = { ...defaultPipelineFeatures, summarize: true, embed: true, indexVectors: true, summaryTree: { enabled: true } };
+  const storedTree = async (runId: string) =>
+    (await sql<{ tree: unknown }[]>`select pipeline -> 'summaryTree' as tree from project_runs where id = ${runId}`)[0]?.tree;
+  const setProject = (tree: unknown) => sql`update projects set pipeline = ${sql.json({ ...TREE_ON, summaryTree: tree } as unknown as postgres.JSONValue)} where id = 'w'`;
+
+  async function seedTreeRun(status: "completed" | "failed" = "completed") {
+    await seedSource({ docStatus: status });
+    await sql`update project_runs set pipeline = ${sql.json(TREE_ON as unknown as postgres.JSONValue)},
+      status = ${status}, stage = ${status === "failed" ? "embed" : "completed"} where id = 'run-src'`;
+  }
+
+  it("reprocess and bulk reprocess of a run created while the tree was on build no tree once the project turned it off", async () => {
+    await seedTreeRun();
+    await setProject({ enabled: false });
+    try {
+      const run = (await reprocessRun("run-src", "u1"))!.run;
+      expect(await storedTree(run.id)).toEqual({ enabled: false });
+      expect(run.pipeline.summaryTree).toEqual({ enabled: false });
+      const { bulkReprocessDocuments } = await import("../services/documents.js");
+      const [bulk] = (await bulkReprocessDocuments(["src"], "u1")).runs;
+      expect(await storedTree(bulk!.id)).toEqual({ enabled: false });
+      // A project that never stored the setting is off too.
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+      expect(await storedTree((await reprocessRun("run-src", "u1"))!.run.id)).toEqual({ enabled: false });
+    } finally {
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+    }
+  });
+
+  it("retry in place rewrites the run's snapshot with the project's current setting", async () => {
+    await seedTreeRun("failed");
+    await setProject({ enabled: false });
+    try {
+      const result = await retryRun("run-src", "u1");
+      expect(result?.outcome.status).not.toBe("not-retryable");
+      expect(await storedTree("run-src")).toEqual({ enabled: false });
+    } finally {
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+    }
+  });
+
+  it("a replayed snapshot that says off does not hide a tree the project has since turned on, and nothing else turns it on", async () => {
+    await seedSource();
+    await setProject({ enabled: true });
+    try {
+      expect(await storedTree((await reprocessRun("run-src", "u1"))!.run.id)).toEqual({ enabled: true });
+      // Anything but an explicit stored `true` is off.
+      await setProject({ enabled: "true" });
+      expect(await storedTree((await reprocessRun("run-src", "u1"))!.run.id)).toEqual({ enabled: false });
+    } finally {
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+    }
   });
 });

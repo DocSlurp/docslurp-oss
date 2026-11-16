@@ -20,3 +20,6 @@ Issues = "https://github.com/DocSlurp/docslurp-oss/issues"
 packages = ["src/docslurp_estimate"]
 # The module is built by `node ../scripts/build-wasm.mjs` and copied in by `scripts/build-python.mjs`.
 artifacts = ["src/docslurp_estimate/docslurp_estimate.wasm"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"../third-party" = "docslurp_estimate/third_party"

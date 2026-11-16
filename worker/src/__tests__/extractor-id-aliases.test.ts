@@ -74,8 +74,8 @@ describe("a run created with the legacy id before the deploy", () => {
       insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
       insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
     `);
-    await db.query(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract-markdown', $1::jsonb, 1)`, [JSON.stringify(legacyPipeline)]);
+    await db.query(`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract-markdown', $1::jsonb, 1)`, [JSON.stringify(legacyPipeline)]);
     const served = await serveOnRandomPort(db);
     server = served.server;
     store = new Store(`postgres://postgres@127.0.0.1:${served.port}/postgres`, 60_000, { poolMax: 1, workerSlots: { ttlMs: 60_000, globalCap: 0, defaultOrgSlots: 2 } });

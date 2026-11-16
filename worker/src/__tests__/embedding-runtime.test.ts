@@ -62,6 +62,7 @@ const originalDtype = process.env.DOCSLURP_LOCAL_TRANSFORMERSJS_DTYPE;
 
 describe("embedTextChunks", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     transformersMock.pipeline.mockClear();
     aiMock.embedMany.mockClear();
     openAiMock.createOpenAI.mockClear();
@@ -370,6 +371,14 @@ describe("embedTextChunks", () => {
       lateChunkingWindow: 2,
     };
 
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "false");
+    await expect(embedTextChunks({ privacyMode: "standard",
+      chunks: ["local service"], profile, config: fromEnv(),
+    })).rejects.toThrow("Tenant-selected local model endpoints are disabled");
+    expect(openAiMock.createOpenAI).not.toHaveBeenCalled();
+    expect(aiMock.embedMany).not.toHaveBeenCalled();
+
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     await embedTextChunks({ privacyMode: "standard",
       chunks: ["local service"],
       profile,
@@ -405,6 +414,7 @@ describe("embedTextChunks", () => {
       supportsCustomDimensions: true,
     };
 
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     // The mock server ignores `dimensions` and returns 8 values, forcing a client-side cut.
     const result = await embedTextChunks({ privacyMode: "standard", chunks: ["matryoshka"], profile, config: fromEnv() });
 

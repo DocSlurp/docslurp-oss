@@ -23,11 +23,11 @@ beforeAll(async () => {
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, stats)
       values ('run-c', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 3, 3, '{"failedDocuments":1,"failedDocumentStages":1,"keep":true}'),
              ('run-d', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 1, 1, '{}');
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
-      values ('a', 'o1', 'u1', 'w', 'run-c', 'a.pdf', 'application/pdf', 'k1', 'completed', 1),
-             ('b', 'o1', 'u1', 'w', 'run-c', 'b.pdf', 'application/pdf', 'k2', 'completed', 1),
-             ('x', 'o1', 'u1', 'w', 'run-c', 'x.pdf', 'application/pdf', 'k3', 'failed', 1),
-             ('d', 'o1', 'u1', 'w', 'run-d', 'd.pdf', 'application/pdf', 'k4', 'completed', 1);
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
+      values ('a', 'o1', 'u1', 'w', 'run-c', 'a.pdf', 'application/pdf', 'k1', 'completed', 1000, 1),
+             ('b', 'o1', 'u1', 'w', 'run-c', 'b.pdf', 'application/pdf', 'k2', 'completed', 1000, 1),
+             ('x', 'o1', 'u1', 'w', 'run-c', 'x.pdf', 'application/pdf', 'k3', 'failed', 1000, 1),
+             ('d', 'o1', 'u1', 'w', 'run-d', 'd.pdf', 'application/pdf', 'k4', 'completed', 1000, 1);
     insert into document_run_stage_states (run_id, document_id, stage_name, status) values
       ('run-c', 'a', 'extract-markdown', 'completed'), ('run-c', 'a', 'embed', 'completed'),
       ('run-c', 'b', 'extract-markdown', 'completed'), ('run-c', 'b', 'embed', 'completed'),

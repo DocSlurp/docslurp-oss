@@ -1,7 +1,8 @@
+import { authorizeComputeCohort } from "../extractors/plugins.js";
 import { serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
-  acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
+  acceptSandboxedPdfResult, noteSalvagedFigures, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
 import { dopplerConverterPath } from "./doppler.js";
@@ -17,7 +18,7 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
-import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
+import { isDevelopmentEnvironment, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -65,6 +66,7 @@ import {
   resolveWorkerDeploymentProfile,
 } from "../pipeline/local-compute-cost.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { requestedUnsafeOverrides, unsafeOverrideEnabled } from "../lib/unsafe-overrides.js";
 import { CLAM_SCAN_COMMAND_TIMEOUT_MS, clamscanLimitArgs, isClamEncryptedAlert } from "./clam-limits.js";
 import { ClamdPolicyCache, type ClamdPolicyVerdict, type ClamdProbeResult } from "./clamd-policy.js";
 
@@ -1865,7 +1867,16 @@ export class CommandRunner {
     if (plan.sandboxedOcr) {
       const provider = requireSandboxedOcrProvider();
       const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
-      return { remote: provider.run(plan.sandboxedOcr, signal), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
+      // Ownership hints come from trusted run state; neither authorizes sharing a VM across jobs.
+      const context = currentPerfContext();
+      const scope = context?.orgId && context.projectId && context.documentId && context.executionGeneration !== undefined
+        ? { orgId: context.orgId, projectId: context.projectId, runId: context.runId, documentId: context.documentId, executionGeneration: context.executionGeneration }
+        : null;
+      const ocrContext = {
+        ...(context?.orgId ? { tenantKey: context.orgId } : {}), ...(context?.documentId ? { affinityKey: context.documentId } : {}),
+        ...(scope ? { authorizeCohort: () => authorizeComputeCohort(scope) } : {}),
+      };
+      return { remote: provider.run(plan.sandboxedOcr, signal, ocrContext), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
     }
     if (plan.sandboxedPdf) {
       const provider = requireSandboxedPdfProvider();
@@ -1878,7 +1889,11 @@ export class CommandRunner {
       // The provider shards long documents itself and notes progress as shards finish.
       return {
         remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)
-          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages)),
+          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages), (error: unknown) => {
+            // A failed job may still hand back the shards that finished (`error.figures`): kept for the stage to store.
+            noteSalvagedFigures(plan.sandboxedPdf!, error, pages);
+            throw error;
+          }),
         timeoutMs: provider.timeoutMs(pages),
         release: async () => {},
       };
@@ -2369,9 +2384,9 @@ function commandFailure(error: unknown, stopping: Error | null): Error {
   return stopping ?? (error as Error);
 }
 
-/** Only provider none, with the explicit override, may run parser work without a PID namespace. */
+/** Only provider none, with the explicit development override, may run parser work without a PID namespace. */
 function allowsUnisolated(session: SandboxSession): boolean {
-  return session.providerId === "none" && process.env.DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED === "true";
+  return session.providerId === "none" && unsafeOverrideEnabled("DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED");
 }
 
 /**
@@ -2466,17 +2481,16 @@ let warnedUnfilteredSockets = false;
 /**
  * A local provider that cannot enforce the AF_UNIX filter (landlock, none) must not run a command
  * that asks for it: two such commands could meet on a socket and trip the teardown breaker, or
- * worse. bubblewrap filters with seccomp, landlock with landrun's socket scoping (>= 0.1.17). DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway for local development; it is
- * refused when NODE_ENV=production. Remote providers are exempt: their commands run in the
+ * worse. bubblewrap filters with seccomp, landlock with landrun's socket scoping (>= 0.1.17). DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway in development and
+ * tests; anywhere else the worker refuses to start with it set (lib/unsafe-overrides.ts), and it has no effect here. Remote providers are exempt: their commands run in the
  * session's own VM, terminated with the activity, and never hold a worker-side teardown.
  */
 export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId" | "filtersUnixSockets">, command: Pick<SandboxCommand, "binary" | "denyUnixSockets">): void {
   if (session.filtersUnixSockets) return;
   // Landlock must scope even parsers that need sockets to their own domain.
   if (session.providerId !== "landlock" && !command.denyUnixSockets) return;
-  const optIn = ["1", "true"].includes(process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS?.trim().toLowerCase() ?? "");
-  const production = vmOnlyParsing();
-  if (optIn && !production) {
+  const requested = requestedUnsafeOverrides().includes("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS");
+  if (unsafeOverrideEnabled("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS")) {
     if (!warnedUnfilteredSockets) {
       warnedUnfilteredSockets = true;
       console.warn(
@@ -2488,7 +2502,7 @@ export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId
   }
   console.error(
     `[parser-sandbox] status=refused provider=${session.providerId} reason=no-unix-socket-filter ` +
-      `binary=${path.basename(command.binary)}${optIn ? " detail=opt-in ignored under NODE_ENV=production" : ""}`,
+      `binary=${path.basename(command.binary)}${requested ? " detail=opt-in refused outside development" : ""}`,
   );
   throw new SandboxPolicyError(
     `parser sandbox provider '${session.providerId}' cannot stop '${path.basename(command.binary)}' from creating UNIX sockets; ` +
@@ -2599,7 +2613,7 @@ export function buildCommandEnv(args: {
   isVectorBackend: boolean;
   env?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
-  return buildAllowlistedEnv({
+  const env = buildAllowlistedEnv({
     defaultAllowlist: args.isVectorBackend
       ? [...defaultParserEnvAllowlist, ...vectorBackendEnvAllowlist]
       : defaultParserEnvAllowlist,
@@ -2611,6 +2625,20 @@ export function buildCommandEnv(args: {
     },
     sourceEnv: args.env,
   });
+  if (!args.isVectorBackend) stripNodeRuntimeEnv(env);
+  return env;
+}
+
+/**
+ * Parser commands (every guest that reads customer bytes) never get a `NODE_*` variable, whatever
+ * `DOCSLURP_PARSER_ENV_ALLOWLIST` or a plan says (council r11 I2). Node acts on several of them before any guest code
+ * runs: `NODE_OPTIONS` (`--require`, `--import`), `NODE_COMPILE_CACHE` (loads compiled code from a directory),
+ * `NODE_PATH`. A guest can only refuse them after they have taken effect, so the host removes them. Parser commands run
+ * without network, so `NODE_EXTRA_CA_CERTS` goes too.
+ */
+export function stripNodeRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const key of Object.keys(env)) if (key.toUpperCase().startsWith("NODE_")) delete env[key];
+  return env;
 }
 
 /** Provider-neutral description of a parser command: allowlisted env plus the paths it may read and write. */
@@ -2927,18 +2955,17 @@ export async function readClamDefinitionsHeader(files: readonly string[]): Promi
 export function resolveMalwareScanPolicy(
   env: NodeJS.ProcessEnv = process.env,
 ): MalwareScanPolicy {
-  const production = (env.NODE_ENV ?? "").trim().toLowerCase() === "production";
   return {
     requireDaemon: readBooleanFlag(
       env.DOCSLURP_CLAMAV_REQUIRE_DAEMON,
       false,
     ),
-    failOpenOnStaleDefinitions: readBooleanFlag(
-      env.DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB,
-      !production,
-    ),
+    // Fails closed by default everywhere; only an explicit development opt-in warns instead (#398).
+    failOpenOnStaleDefinitions: unsafeOverrideEnabled("DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB", env),
     maxSignatureAgeHours:
-      readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24,
+      isDevelopmentEnvironment(env)
+        ? readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24
+        : Math.min(readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24, 24),
     databaseDirectory: env.DOCSLURP_CLAMAV_DB_DIR?.trim() || "/var/lib/clamav",
   };
 }

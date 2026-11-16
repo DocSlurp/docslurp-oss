@@ -1,3 +1,5 @@
+import { cleanOcrCheckpoint } from "../ocr/checkpoint.js";
+import { trustedDocumentFailure } from "../lib/trusted-document-failure.js";
 import { disposePendingAssetLedger } from "../db/document-asset-ledger.js";
 import type { GeoFinalSource } from "../db/geo-final-source.js";
 import { recordExtractorFallback } from "../lib/extractor-fallback.js";
@@ -339,6 +341,7 @@ export async function runDocumentStage(
       if (stageName !== "quarantine") assertParseSourceDecided(document);
       const watched = await watchSandboxInfrastructure(() => runWithPerfContext({
         runId: state.run.id,
+        executionGeneration: state.executionGeneration,
         documentId: document.id,
         orgId: state.run.orgId,
         ...(state.run.projectId ? { projectId: state.run.projectId } : {}),
@@ -435,6 +438,9 @@ export async function runDocumentStage(
           }),
         );
       }
+      await cleanOcrCheckpoint(state, document.id, stageName).catch(error => {
+        console.error(`[ocr] checkpoint-cleanup-failed document=${document.id} stage=${stageName} error=${String(error)}`);
+      });
       return;
     } catch (caught) {
       // A teardown failure (thrown or latched) is the worker's, not the Document's: never retried
@@ -526,7 +532,8 @@ export async function runDocumentStage(
       stageName,
       finalMessage,
       finalArtifactUri,
-      finalStats
+      finalStats,
+      trustedDocumentFailure(cause)
     );
     await state.store.updateProgress(state);
     await state.store.appendEvent(

@@ -7,7 +7,7 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let svc: typeof import("../services/project-indexing-mode.js");
 let failGrant = false;
-const external = process.env.FULL_INDEX_TEST_DATABASE_URL;
+const external = process.env.TEST_DATABASE_URL;
 const actor = { type: "session", userId: "fx-user", sessionId: "fx-session", user: { id: "fx-user", email: "fx@example.test", name: "FX" } } as const;
 const policy = { maxPagesPerQuery: 40, maxCreditsPerQuery: 25, deadlineMs: 20000, allowFullIndexRequest: true, allowAgentDiscovery: true, mapRouter: "always" as const };
 beforeAll(async () => {
@@ -90,4 +90,49 @@ it("prices a full index of a measured DOCX on its 300 billed pages and carries t
   await svc.commitIndexJobs(prepared, 'fx-user');
   const [copy] = await sql`select page_count, billing_pages, billing_pages_method, page_count_source, file_facts from documents where previous_version_id = 'fx-docx'`;
   expect(copy).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: 'pdf-conversion', page_count_source: 'assumed', file_facts: facts });
+});
+it("a full-index run drops model values from the stored pipeline it copies (managed models, round 3)", async () => {
+  await sql`update organizations set credit_balance_cents = 1000 where id = 'fx-org'`;
+  const stale = { ...defaultPipelineFeatures, indexingMode: 'map', embedding: { ...defaultPipelineFeatures.embedding, modelUri: 'llm://transformers.js/Xenova/bge-m3' }, pageRouter: { ...(defaultPipelineFeatures as { pageRouter?: object }).pageRouter, decisionModel: 'acme/stale-decider' } };
+  await sql`insert into projects(id,org_id,user_id,name,pipeline) values ('fx-a','fx-org','fx-user','fx-a',${sql.json(JSON.parse(JSON.stringify(stale)))})`;
+  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents,pages_total) values ('run-stale','fx-org','fx-user','fx-a','bulk-upload','completed','completed',${sql.json(JSON.parse(JSON.stringify(stale)))},1,3)`;
+  await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count,indexing_mode) values ('fx-stale','fx-org','fx-user','fx-a','run-stale','doc.pdf','application/pdf','raw/fx.pdf','completed',3,'map')`;
+  const prepared = await svc.prepareFullIndex({ orgId: 'fx-org', projectId: 'fx-a', actor, policy });
+  const { runIds } = await svc.commitIndexJobs(prepared, 'fx-user');
+  expect(runIds.length).toBe(1);
+  const [run] = await sql<{ pipeline: unknown }[]>`select pipeline from project_runs where id = ${runIds[0]!}`;
+  expect(JSON.stringify(run!.pipeline)).not.toMatch(/bge-m3|stale-decider/);
+});
+
+it.each(["organization", "project"])("refuses full index with measured pages beyond %s monthly capacity", async scope => {
+  const prepared = await seed('fx-a');
+  for (const batch of prepared.batches) for (const doc of batch.docs) { doc.page_count=300; doc.billing_pages=300; }
+  await sql`update organizations set credit_balance_cents=100000 where id='fx-org'`;
+  if (scope === 'organization') await sql`update organizations set monthly_budget_cents=1 where id='fx-org'`;
+  else await sql`update projects set monthly_budget_cents=1 where id='fx-a'`;
+  await expect(svc.commitIndexJobs(prepared,'fx-user')).rejects.toThrow();
+  expect(await queued()).toBe(0);
+});
+
+it("refuses unspecified reservations on insertion and terminal-run readmission", async () => {
+  await seed('fx-a');
+  await expect(sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,pages_total)
+    values('missing-reservation','fx-org','fx-user','fx-a','full-index','queued','queued','{}',300)`)
+    .rejects.toThrow('Invalid monthly capacity');
+  await expect(sql`update project_runs set status='queued' where id='run-fx-a-0'`)
+    .rejects.toThrow('Invalid monthly capacity');
+});
+
+it.each([true, false])("uses current summary-tree setting %s in forecast and persisted pipeline", async enabled => {
+  const prepared = await seed('fx-a');
+  await sql`update organizations set credit_balance_cents=1000 where id='fx-org'`;
+  prepared.batches = prepared.batches.map(batch => ({ ...batch, pipeline: { ...batch.pipeline, summaryTree: { enabled: !enabled } } }));
+  await sql`update projects set pipeline=jsonb_set(pipeline, '{summaryTree}', ${sql.json({ enabled })}) where id='fx-a'`;
+  const { runIds, pipelines } = await svc.commitIndexJobs(prepared, 'fx-user');
+  const [run] = await sql`select pipeline, monthly_reservation_cents from project_runs where id=${runIds[0]!}`;
+  expect(run!.pipeline.summaryTree).toEqual({ enabled });
+  expect(pipelines.get(runIds[0]!)).toEqual(run!.pipeline);
+  const { buildRunProcessingPreview } = await import('../services/run-processing-preview.js');
+  const expected = buildRunProcessingPreview({ request: { project: 'fx-a', pipeline: run!.pipeline, speedBoost: run!.pipeline.speedBoost === true, urls: [], files: prepared.batches[0]!.docs.map(doc => ({ filename: doc.filename, mimeType: doc.mime_type, sizeBytes: 0, pages: doc.billing_pages ?? doc.page_count })) } }).current.estimatedCost.maxCents;
+  expect(Number(run!.monthly_reservation_cents)).toBe(Math.max(1, expected));
 });

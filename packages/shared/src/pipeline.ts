@@ -28,7 +28,13 @@ import {
 } from "./deferred-indexing.js";
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
-import { chartExportConfigSchema, defaultChartExportConfig } from "./chart-export.js";
+import { chartExportConfigSchema, defaultChartExportConfig, upgradeStoredPipelineChartExport } from "./chart-export.js";
+import {
+  defaultSummaryTreePipelineConfig,
+  summaryTreeEnabled,
+  summaryTreePipelineConfigSchema,
+  summaryTreeVectorProblem,
+} from "./summary-tree.js";
 
 export const organizationRoleSchema = z.enum([
   "owner",
@@ -90,6 +96,8 @@ export const runStageSchema = z.enum([
   "proposition-index",
   "document-map",
   "page-embed",
+  /** Section summaries of long documents (summary-tree.ts). After `index`: it never delays a document becoming searchable. */
+  "summary-tree",
   "completed",
 ]);
 export type RunStage = z.infer<typeof runStageSchema>;
@@ -226,6 +234,8 @@ export const DEFAULT_PIPELINE_TEXT_MODEL = "qwen/qwen3.5-flash-02-23";
 export const pipelineTextOperationSchema = z.enum([
   "document-summary", "document-map", "proposition-extraction", "structured-extraction",
   "graph-extraction", "community-summary", "contextual-chunk-preamble",
+  // Section summaries of the summary tree (summary-tree.ts). Its prompt and reasoning effort are fixed by the worker.
+  "summary-tree",
 ]);
 export type PipelineTextOperation = z.infer<typeof pipelineTextOperationSchema>;
 // `llm://openrouter/<id>` (stored as the bare OpenRouter id, which is also
@@ -488,6 +498,11 @@ export const pipelineFeaturesSchema = z
     firstPass: z.enum(["auto", "on", "off"]).default("auto"),
     /** After the first pass: `auto` runs the project's pipeline for what it did not finish; `none` stops when it finished everything. */
     afterFirstPass: z.enum(["auto", "none"]).default("auto"),
+    /**
+     * Finishing figures a pass left resumable (figure-resume.ts): `auto` queues a resume when a partial level commits,
+     * `manual` only on request (API, SDK, chat), `off` never. The deploy flag DOCSLURP_FIGURE_RESUME is the ceiling.
+     */
+    figureResume: z.enum(["auto", "manual", "off"]).default("auto"),
     indexingMode: indexingModeSchema.default("full"),
     materialization: materializationPolicyOverridesSchema.default({}),
     visualPages: z
@@ -602,11 +617,29 @@ export const pipelineFeaturesSchema = z
     }).default({ enabled: true }),
     /**
      * Chart and diagram export: re-express detected charts/diagrams as description, Mermaid, Vega-Lite,
-     * matplotlib and CSV. Off by default; enabling it or adding formats recommends a reindex.
+     * matplotlib and CSV. `tier` unset means the run origin's default (app uploads: `free`; API, MCP, SDK, CLI:
+     * `off`, see `resolveChartExportTier`); the server stamps the resolved tier on each run.
      */
     chartExport: chartExportConfigSchema.default(defaultChartExportConfig),
+    /**
+     * Figure extraction from PDFs (the sandboxed figure pass): on by default. Off skips the pass for this project's
+     * new runs; existing figures stay until the documents are reprocessed. The deployment ceiling
+     * (`DOCSLURP_DOPPLER_IMAGE_EXTRACT`) still decides whether the pass exists at all.
+     */
+    figures: z.boolean().default(true),
+    /**
+     * Summary tree (summary-tree.ts): model-written section summaries inside each long document, searched beside the
+     * chunks. Off unless the project turns it on through its own endpoint (`PATCH /v1/projects/:projectId/summary-tree`):
+     * no template, default, upload override or general settings save can enable it. It needs `embed` and
+     * `indexVectors`, and turns `summarize` on.
+     */
+    summaryTree: summaryTreePipelineConfigSchema.default(defaultSummaryTreePipelineConfig),
   })
   .superRefine((value, ctx) => {
+    const summaryTreeProblem = summaryTreeVectorProblem(value);
+    if (summaryTreeProblem) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["summaryTree", "enabled"], message: summaryTreeProblem });
+    }
     if (value.afterFirstPass === "none" && value.firstPass === "off") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["afterFirstPass"], message: "afterFirstPass 'none' needs the first pass (firstPass is 'off')" });
     }
@@ -705,6 +738,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   speedBoost: false,
   firstPass: "auto",
   afterFirstPass: "auto",
+  figureResume: "auto",
   indexingMode: "full",
   materialization: {},
   visualPages: { route: "auto", coarseFallback: false },
@@ -757,6 +791,8 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   pageRouter: defaultPageRouterConfig,
   mediaVideo: { enabled: true },
   chartExport: defaultChartExportConfig,
+  figures: true,
+  summaryTree: defaultSummaryTreePipelineConfig,
 };
 
 const alwaysEnabled = () => true;
@@ -872,8 +908,10 @@ const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
     label: "Vision",
     phase: "extract",
     phaseLabel: "Extract",
-    // Chart export runs here too, with or without general vision fallback.
-    isEnabled: (features) => features.visionFallback || features.chartExport?.enabled === true,
+    // Chart export runs here too, with or without general vision fallback; the free tier (the default) included. The
+    // free tier only reads charts that carry their own data: no page is re-read and no model is called.
+    // An unset tier resolves per run (the server stamps it at run creation), so only an explicit `off` drops the stage.
+    isEnabled: (features) => features.visionFallback || features.chartExport?.tier !== "off",
   },
   {
     stage: "pii-detect",
@@ -933,6 +971,15 @@ const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
     phase: "index",
     phaseLabel: "Index",
     isEnabled: (features) => features.indexVectors,
+  },
+  {
+    // Last, after `index`: the document is searchable before its tree is built. The stage itself also needs the
+    // deployment's build switch (summaryTreeBuildActive) and makes no model call without it.
+    stage: "summary-tree",
+    label: "Summary tree",
+    phase: "index",
+    phaseLabel: "Index",
+    isEnabled: (features) => summaryTreeEnabled(features) && features.embed && features.indexVectors,
   },
 ];
 
@@ -1074,6 +1121,12 @@ export function normalizePipelineFeatures(
       ...defaultProjectWebhookSettings,
       ...(source?.webhooks ?? {}),
     },
+    summaryTree: {
+      ...defaultSummaryTreePipelineConfig,
+      ...(source?.summaryTree ?? {}),
+    },
+    // The tree's root is the document summary, so the tree turns summaries on; `summarize` never implies the tree.
+    ...(summaryTreeEnabled(source) ? { summarize: true } : {}),
     // Good means a vision model reads every page, so it turns vision on: `{ quality: "good", visionFallback: false }`
     // would otherwise bill as Good while skipping vision. A run cost cap (maxCostCents) can still stop vision early.
     ...(source?.quality === "good" ? { visionFallback: true } : {}),
@@ -1109,7 +1162,8 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   if (!isPlainRecord(stored)) return stored;
   // Canonical ids drop retired extractors silently; a stored read reports what they named.
   const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
-  let next: Record<string, unknown> = withCanonicalExtractorIds(stored);
+  // Legacy chart export keys (rows from before migration 0151 or from an older API during a deploy): mapped, not dropped.
+  let next: Record<string, unknown> = upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored));
   const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
   if (isPlainRecord(next.documentExtraction)) {
     const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
@@ -1163,10 +1217,27 @@ export function mergePipelineFeatures(
 ): PipelineFeatures {
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
   overrides = migrateLegacyQualitySettings(overrides);
+  // The summary tree is never an override: the base's stored value always wins (summary-tree.ts). An upload, a chat
+  // proposal or a report recommendation that names it changes nothing.
+  if (overrides && "summaryTree" in overrides) {
+    const { summaryTree: _summaryTree, ...rest } = overrides;
+    overrides = rest;
+  }
   if (!overrides || Object.keys(overrides).length === 0) return normalizedBase;
+  // A profile override changes the model: the base's model URI and target (its old profile's, or an admin override of
+  // it) go, so the new profile's default applies, unless the override names its own.
+  const baseRecord = { ...(normalizedBase as unknown as Record<string, unknown>) };
+  for (const section of ["embedding", "vision"] as const) {
+    const override = (overrides as Record<string, unknown>)[section] as Record<string, unknown> | undefined;
+    const current = baseRecord[section] as Record<string, unknown> | undefined;
+    if (override && typeof override.profile === "string" && current && override.profile !== current.profile && override.modelUri === undefined) {
+      const { modelUri: _modelUri, target: _target, ...rest } = current;
+      baseRecord[section] = rest;
+    }
+  }
   return normalizePipelineFeatures(
     mergeOverrideRecord(
-      normalizedBase as unknown as Record<string, unknown>,
+      baseRecord,
       overrides as Record<string, unknown>,
       0,
     ) as PipelineFeatureOverrides,
@@ -1379,6 +1450,13 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
     produces: ["vectors"],
     alwaysRerun: "vector rows are keyed to the new document",
   },
+  "summary-tree": {
+    consumes: ["embeddings", "vectors"],
+    sameRun: ["embeddings"],
+    produces: ["summary-tree"],
+    // Never copied from a source document: unchanged sections reuse the replaced version's summary text by hash instead.
+    alwaysRerun: "summary rows are keyed to the new document",
+  },
 };
 
 export function stageOutputs(stage: PipelineRunStage, features: PipelineFeatures): readonly string[] {
@@ -1441,20 +1519,23 @@ export function withoutStageSelection<T extends { restartFromStage?: unknown; st
  * Pipeline features for version hashes: drops stage selection plus
  * `indexingMode`/`materialization`/`visualPages`, so switching modes (or the
  * new `visualPages` default appearing on stored pipelines) never marks chunks stale.
+ * `summaryTree` is dropped too: the tree is a separate index built from the chunks, so
+ * turning it on or off (or the key appearing on stored pipelines) changes no chunk.
  * The stored pipeline keeps those fields (use `withoutStageSelection` there).
  */
 export function pipelineVersionFeatures<T extends object>(
   features: T,
-): Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages"> {
+): Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree"> {
   const {
     restartFromStage: _restart,
     stageSubset: _subset,
     indexingMode: _mode,
     materialization: _materialization,
     visualPages: _visualPages,
+    summaryTree: _summaryTree,
     ...rest
   } = features as T & Record<string, unknown>;
-  return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages">;
+  return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree">;
 }
 
 function selectStages(
@@ -1611,6 +1692,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   speedBoost: [],
   firstPass: [],
   afterFirstPass: [],
+  figureResume: [],
   indexingMode: [],
   materialization: [],
   visualPages: [],
@@ -1652,6 +1734,9 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   mediaVideo: ["extract-markdown"],
   // Routed visual extraction (chart-data / diagram assignments) runs in vision-extract; exports attach there.
   chartExport: ["vision-extract"],
+  figures: ["extract-markdown"],
+  // No seed stage: saving the setting never queues a build. Existing documents get a tree only from its own job.
+  summaryTree: [],
 };
 
 /**

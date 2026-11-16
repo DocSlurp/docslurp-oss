@@ -995,6 +995,209 @@
       "when": 1794500000000,
       "tag": "0141_document_asset_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 142,
+      "version": "7",
+      "when": 1794600000000,
+      "tag": "0142_vision_default_off_deepseek",
+      "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1796000000000,
+      "tag": "0150_doppler_scan_not_copyable",
+      "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1796100000000,
+      "tag": "0151_chart_export_tier",
+      "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1796200000000,
+      "tag": "0152_search_sessions_project_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 146,
+      "version": "7",
+      "when": 1796300000000,
+      "tag": "0153_search_withdrawal_hints_realtime_scopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1796400000000,
+      "tag": "0154_project_auto_title_checked_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 148,
+      "version": "7",
+      "when": 1796500000000,
+      "tag": "0155_figure_storage_billing",
+      "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1796600000000,
+      "tag": "0156_figure_storage_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 150,
+      "version": "7",
+      "when": 1796800000000,
+      "tag": "0158_managed_models",
+      "breakpoints": true
+    },
+    {
+      "idx": 151,
+      "version": "7",
+      "when": 1796900000000,
+      "tag": "0159_figure_resume_runner",
+      "breakpoints": true
+    },
+    {
+      "idx": 152,
+      "version": "7",
+      "when": 1797000000000,
+      "tag": "0160_ingest_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1797100000000,
+      "tag": "0161_figure_resume_budgets",
+      "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1797200000000,
+      "tag": "0162_vector_history_prune_due",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1797300000000,
+      "tag": "0163_ocr_page_reader_org_spend",
+      "breakpoints": true
+    },
+    {
+      "idx": 156,
+      "version": "7",
+      "when": 1797400000000,
+      "tag": "0164_asset_unlinked_repeat",
+      "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1797500000000,
+      "tag": "0165_project_activity_stats",
+      "breakpoints": true
+    },
+    {
+      "idx": 158,
+      "version": "7",
+      "when": 1797600000000,
+      "tag": "0166_summary_tree_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 159,
+      "version": "7",
+      "when": 1797700000000,
+      "tag": "0167_summary_tree_retrieval",
+      "breakpoints": true
+    },
+    {
+      "idx": 160,
+      "version": "7",
+      "when": 1797800000000,
+      "tag": "0168_summary_tree_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 161,
+      "version": "7",
+      "when": 1797900000000,
+      "tag": "0169_summary_tree_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 162,
+      "version": "7",
+      "when": 1798000000000,
+      "tag": "0170_summary_tree_job_fairness",
+      "breakpoints": true
+    },
+    {
+      "idx": 163,
+      "version": "7",
+      "when": 1798100000000,
+      "tag": "0171_summary_tree_build_generation",
+      "breakpoints": true
+    },
+    {
+      "idx": 164,
+      "version": "7",
+      "when": 1798200000000,
+      "tag": "0172_summary_tree_call_reservations",
+      "breakpoints": true
+    },
+    {
+      "idx": 165,
+      "version": "7",
+      "when": 1798300000000,
+      "tag": "0173_ingest_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 166,
+      "version": "7",
+      "when": 1798400000000,
+      "tag": "0174_document_failure_contract",
+      "breakpoints": true
+    },
+    {
+      "idx": 167,
+      "version": "7",
+      "when": 1798500000000,
+      "tag": "0175_monthly_admission_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 168,
+      "version": "7",
+      "when": 1798600000000,
+      "tag": "0176_upload_content_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 169,
+      "version": "7",
+      "when": 1798600000001,
+      "tag": "0177_compute_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1798600000002,
+      "tag": "0178_compute_cohorts",
+      "breakpoints": true
     }
   ]
 }

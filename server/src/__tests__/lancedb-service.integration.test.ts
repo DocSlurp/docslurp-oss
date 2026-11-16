@@ -5,6 +5,9 @@ import * as lance from "@lancedb/lancedb";
 import { VectorNamespaceManager } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "refine-org", projectIds: "org", modeCeiling: null } as const;
+
 
 // This suite passes explicit user IDs and tests real SQL tenant authorization,
 // not cookie sessions. Avoid an unrelated eager Better Auth schema-validation
@@ -74,16 +77,16 @@ it("hydrates authoritative SQL content/citations and rejects stale or out-of-sco
   expect(resolveEmbeddingRoute((await loadProjectPipeline("refine-ws")).embedding).model).toBe("text-embedding-3-small");
   const adapter = await import("../search/lancedb.js");
   expect(await adapter.lanceDbVectorSearch({ orgId: "refine-org", projectId: "refine-ws", embeddingModel: "text-embedding-3-small", queryVector: vector, documentIds: ["refine-doc"], limit: 10 })).not.toHaveLength(0);
-  const response = await search("zzmissinglexicalterm", "refine-user", options);
+  const response = await search("zzmissinglexicalterm", "refine-user", options, TEST_SEARCH_SCOPE);
   expect(response.results).toHaveLength(1);
   expect(response.results[0]?.text).toBe("Authoritative hydrated content");
   expect(response.results[0]?.citation).toMatchObject({ documentId: "refine-doc", pageNumber: 1, filename: "local.txt" });
 });
 
 it("enforces project access and invalid document filters with the real adapter", async () => {
-  await expect(search("zzmissinglexicalterm", "refine-outsider", options)).rejects.toThrow("Project not found");
-  await expect(search("zzmissinglexicalterm", "refine-user", { ...options, filters: { projectId: "missing-project" } })).rejects.toThrow("Project not found");
-  const missing = await search("zzmissinglexicalterm", "refine-user", { ...options, filters: { projectId: "refine-ws", documentIds: ["foreign-document"] } });
+  await expect(search("zzmissinglexicalterm", "refine-outsider", options, TEST_SEARCH_SCOPE)).rejects.toThrow("Project not found");
+  await expect(search("zzmissinglexicalterm", "refine-user", { ...options, filters: { projectId: "missing-project" } }, TEST_SEARCH_SCOPE)).rejects.toThrow("Project not found");
+  const missing = await search("zzmissinglexicalterm", "refine-user", { ...options, filters: { projectId: "refine-ws", documentIds: ["foreign-document"] } }, TEST_SEARCH_SCOPE);
   expect(missing.results).toHaveLength(0);
 });
 
@@ -91,7 +94,7 @@ it("hydrates a fresh unindexed tail after the reader is reopened", async () => {
   await sql`insert into document_chunks(id,document_id,run_id,user_id,chunk_index,text,page_number) values('refine-fresh','refine-doc','refine-run','refine-user',1,'Fresh authoritative content',2)`;
   await table.add([{ id: "refine-fresh", documentId: "refine-doc", chunkIndex: 1, vector }]);
   reset(); // This test measures tail inclusion, not the cached 10-second consistency window.
-  const response = await search("zzmissinglexicalterm", "refine-user", options);
+  const response = await search("zzmissinglexicalterm", "refine-user", options, TEST_SEARCH_SCOPE);
   expect(response.results.map(r => r.text)).toContain("Fresh authoritative content");
   expect(response.results.find(r => r.text === "Fresh authoritative content")?.citation.pageNumber).toBe(2);
 });

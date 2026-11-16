@@ -19,8 +19,8 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots) values ('o1', 'Org', 'org', 'u1', 8);
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'extract-markdown', '${JSON.stringify(defaultPipelineFeatures)}', 0, 0);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'extract-markdown', '${JSON.stringify(defaultPipelineFeatures)}', 0, 0);
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;

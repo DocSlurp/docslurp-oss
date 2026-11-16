@@ -1,4 +1,6 @@
 import "./env.js";
+import { warnChartExportSwitch } from "./chart-export/config.js";
+import { summaryTreeSwitchWarnings } from "@docslurp/shared";
 
 import { existsSync } from "node:fs";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "./concurrency.js";
@@ -14,6 +16,7 @@ import {
 import { assertSupportedVectorBackends, resolveLanceDbConfig, resolveObjectStorageConfig, type LanceDbConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { lanceDbMaintenanceSettings } from "./stages/lancedb-maintenance.js";
 import { quarantineRequired } from "./lib/parse-source.js";
+import { unsafeOverrideEnabled } from "./lib/unsafe-overrides.js";
 
 const defaultDatabaseUrl =
   "postgres://docslurp:docslurp@localhost:5432/docslurp";
@@ -31,10 +34,6 @@ function readEnv(value: string | undefined): string | undefined {
 export function readPageRouterMode(value: string | undefined): PageRouterMode {
   const parsed = pageRouterModeSchema.safeParse(readEnv(value)?.toLowerCase());
   return parsed.success ? parsed.data : "off";
-}
-
-function isProductionEnvironment(): boolean {
-  return (readEnv(process.env.NODE_ENV) ?? "").toLowerCase() === "production";
 }
 
 function rewriteDockerHostname(
@@ -129,6 +128,10 @@ export interface Config {
   graphJobPollIntervalMs?: number;
   /** Documents a graph rebuild extracts at once. */
   graphJobConcurrency?: number;
+  /** How often the maintenance leader looks for summary tree backfill jobs; 0 disables. */
+  summaryTreeJobPollIntervalMs?: number;
+  /** Documents a summary tree backfill job builds at once (their model calls share `WORKER_SUMMARY_TREE_CONCURRENCY`). */
+  summaryTreeJobDocumentConcurrency?: number;
   retentionSweepBatchSize: number;
   apiKeyUsageRetentionDays: number;
   perfLogRetentionDays: number;
@@ -254,7 +257,20 @@ function parseDurationMs(value: string | undefined, fallback: number): number {
   return Number.isFinite(total) && total > 0 ? total : fallback;
 }
 
+let summaryTreeSwitchesWarned = false;
+function warnSummaryTreeSwitches(env: Readonly<Record<string, string | undefined>>): void {
+  if (summaryTreeSwitchesWarned) return;
+  const warnings = summaryTreeSwitchWarnings(env);
+  if (warnings.length === 0) return;
+  summaryTreeSwitchesWarned = true;
+  for (const warning of warnings) console.warn(warning);
+}
+
 export function fromEnv(): Config {
+  // An unknown DOCSLURP_CHART_EXPORT value is off (fail closed); say so once per process.
+  warnChartExportSwitch(process.env);
+  // The same for the summary tree build switch (DOCSLURP_SUMMARY_TREE_BUILD): unknown is off.
+  warnSummaryTreeSwitches(process.env);
   const storage = resolveObjectStorageConfig();
   const lancedb = resolveLanceDbConfig(process.env, storage);
   const maintenance = lanceDbMaintenanceSettings(lancedb.params);
@@ -345,6 +361,11 @@ export function fromEnv(): Config {
       5_000,
     ),
     graphJobConcurrency: Math.max(1, readNumber(process.env.WORKER_GRAPH_JOB_CONCURRENCY, 4)),
+    summaryTreeJobPollIntervalMs: parseDurationMs(
+      process.env.WORKER_SUMMARY_TREE_JOB_POLL_INTERVAL,
+      5_000,
+    ),
+    summaryTreeJobDocumentConcurrency: Math.max(1, readNumber(process.env.WORKER_SUMMARY_TREE_JOB_DOCUMENT_CONCURRENCY, 2)),
     retentionSweepBatchSize: readNumber(
       process.env.WORKER_RETENTION_SWEEP_BATCH_SIZE,
       25,
@@ -365,10 +386,9 @@ export function fromEnv(): Config {
       process.env.WORKER_INTEGRITY_SWEEP_PREFIX?.trim() || null,
     // The same rule the parse-source resolver applies (lib/parse-source.ts): with quarantine on, nothing parses unscanned.
     quarantineEnabled: quarantineRequired(),
-    quarantineFailOpenOnToolMissing: !isProductionEnvironment() && readBoolean(
-      process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING,
-      !isProductionEnvironment(),
-    ),
+    // Development and test only (lib/unsafe-overrides.ts): there it defaults to accepting files whose inspection tool is
+    // missing, so local ingestion works without ClamAV; everywhere else it is off and worker startup refuses it.
+    quarantineFailOpenOnToolMissing: unsafeOverrideEnabled("QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING", process.env, true),
     quarantineMaxArchiveEntries: readNumber(
       process.env.QUARANTINE_MAX_ARCHIVE_ENTRIES,
       2_000,
