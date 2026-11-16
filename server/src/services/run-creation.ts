@@ -2,7 +2,7 @@ import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
 import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, runPipelineToConfigV1 } from "@docslurp/shared";
-import { effectiveFleetCapabilitiesSync } from "./worker-fleet.js";
+import { effectiveFleetCapabilitiesSync, taskQueueForOrgKey } from "./worker-fleet.js";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import { resolveRunExtraction } from "./extraction-settings.js";
 import {
@@ -175,9 +175,10 @@ export function stampRunConfigV1<T extends PipelineFeatures>(
   env: Readonly<Record<string, string | undefined>> = process.env,
   // Proven support only: with the capability gate off nothing is known about the fleet, so nothing is stamped.
   fleetSupportsV1: () => boolean = () => effectiveFleetCapabilitiesSync()?.has("extraction.config-v1") === true,
+  taskQueue?: string,
 ): T {
   if (env.DOCSLURP_EXTRACTION_CONFIG_V1_STAMP?.trim().toLowerCase() === "off") return pipeline;
-  if (!fleetSupportsV1()) return pipeline;
+  if (taskQueue ? effectiveFleetCapabilitiesSync(taskQueue)?.has("extraction.config-v1") !== true : !fleetSupportsV1()) return pipeline;
   return (runPipelineToConfigV1(pipeline as unknown as Record<string, unknown>) as unknown as T | null) ?? pipeline;
 }
 
@@ -1097,7 +1098,8 @@ export function createRunCreation(deps: RunCreationDeps) {
       sourceKeys: sources.kind === "files" ? sources.files.map((file) => file.sourceKey) : [],
       // New files always run every enabled stage; a caller re-running existing
       // Documents chooses its own stage selection.
-      pipeline: stampRunConfigV1({ ...executionPipeline, effective } as PipelineFeatures),
+      // The queue this org's runs go to (load-test orgs have their own): every worker on it must support v1.
+      pipeline: stampRunConfigV1({ ...executionPipeline, effective } as PipelineFeatures, process.env, undefined, taskQueueForOrgKey(access.orgId).taskQueue),
     });
 
     // Stamped on every Document so a later project mode switch never rewrites how it was indexed.

@@ -4,6 +4,8 @@ import {
   mapLegacyExtractionSettings,
   migrateProjectPipelineToConfigV1,
   parseStoredPipelineFeatures,
+  projectFigureResumeMode,
+  projectFiguresOff,
   QUALITY_LEVEL_RANK,
   qualityLevelFromLegacy,
   VISUALS_LEVEL_RANK,
@@ -12,7 +14,7 @@ import {
 } from "@docslurp/shared";
 import { applyRemainingMigrations, createMigratedDatabase } from "@docslurp/worker/testing";
 // @ts-expect-error plain .mjs script without types
-import { COUNTS_SQL, LEVELS_SQL, reportFunctionsSql } from "../../db/extraction-config-v1-report.mjs";
+import { COUNTS_SQL, LEVELS_SQL, reportFunctionsSql, UNSUPPORTED_SQL } from "../../db/extraction-config-v1-report.mjs";
 import { readFileSync } from "node:fs";
 
 /**
@@ -61,6 +63,17 @@ const FIXTURES: Record<string, unknown> = {
   mixedNewQuality: { quality: "balanced", visionFallback: false },
   keepsOtherKeys: { quality: "auto", summarize: true, piiPolicy: { enabled: true, action: "flag_for_review", patterns: ["ssn"] }, ladder: { maxRung: 2 } },
   scalar: "x",
+  figuresOffString: { figures: "off", chartExport: { tier: "free" } },
+  figuresOffObject: { figures: { enabled: false } },
+  numericQuality: { quality: 5, visionFallback: false },
+  unknownQuality: { quality: "medium", visionFallback: false },
+  versionTwo: { quality: "fast", configVersion: 2 },
+  versionString: { quality: "good", configVersion: "1" },
+  chartExportNull: { chartExport: null, quality: "good" },
+  chartExportArray: { chartExport: ["x"], figures: false },
+  tierNull: { chartExport: { tier: null } },
+  hostedTargetLocalProfile: { quality: "good", privacyMode: "local-only", vision: { profile: "good-fast-local", target: "hosted" }, embed: false, indexVectors: false },
+  goodStandard: { quality: "good", privacyMode: "standard" },
 };
 
 async function sqlJson<T>(query: string, params: unknown[] = []): Promise<T> {
@@ -85,7 +98,7 @@ beforeAll(async () => {
   pipelinesBeforeDryRun = (await db.query(`select id, pipeline from projects order by id`)).rows;
   await db.exec("begin");
   await db.exec(reportFunctionsSql(readFileSync(new URL("../../db/migrations/0183_extraction_config_v1_projects.sql", import.meta.url), "utf8")));
-  dryRun = { ...(await db.query<Record<string, unknown>>(COUNTS_SQL)).rows[0], ...(await db.query<Record<string, unknown>>(LEVELS_SQL)).rows[0] };
+  dryRun = { ...(await db.query<Record<string, unknown>>(COUNTS_SQL)).rows[0], ...(await db.query<Record<string, unknown>>(LEVELS_SQL)).rows[0], ...(await db.query<Record<string, unknown>>(UNSUPPORTED_SQL)).rows[0] };
   await db.exec("rollback");
   expect((await db.query(`select id, pipeline from projects order by id`)).rows).toEqual(pipelinesBeforeDryRun);
   await applyRemainingMigrations(db, MIGRATION);
@@ -106,35 +119,42 @@ describe("migration 0183 extraction config v1", () => {
     const { rows } = await db.query<{ id: string; pipeline: unknown }>(`select id, pipeline from projects`);
     for (const row of rows) {
       const before = FIXTURES[row.id];
-      expect(row.pipeline, row.id).toEqual(row.id === "alreadyNew" ? before : migrateProjectPipelineToConfigV1(before).pipeline);
+      const unchanged = ["alreadyNew", "versionTwo", "versionString"].includes(row.id);
+      expect(row.pipeline, row.id).toEqual(unchanged ? before : migrateProjectPipelineToConfigV1(before).pipeline);
     }
   });
 
   it("flags Q1, Q3, Q11 and the refused combinations", () => {
     const flagged = (key: keyof ReturnType<typeof migrateProjectPipelineToConfigV1>["flags"]) =>
       Object.entries(FIXTURES).filter(([, pipeline]) => migrateProjectPipelineToConfigV1(pipeline).flags[key]).map(([id]) => id).sort();
-    expect(flagged("q1")).toEqual(["autoFallbackOff", "mixedNewQuality", "noQualityFallbackOff", "nullQuality"]);
+    expect(flagged("q1")).toEqual(["autoFallbackOff", "mixedNewQuality", "noQualityFallbackOff", "nullQuality", "numericQuality", "unknownQuality"]);
     expect(flagged("q3")).toEqual(["resumeManual", "resumeOff"]);
-    expect(flagged("q11")).toEqual(["figuresOffFree", "figuresOffModels"]);
-    expect(flagged("loweredQuality")).toEqual(["goodPrivacy"]);
+    expect(flagged("q11")).toEqual(["figuresOffFree", "figuresOffModels", "figuresOffString"]);
+    expect(flagged("loweredQuality")).toEqual(["goodPrivacy", "hostedTargetLocalProfile"]);
+    expect(flagged("unsupportedVersion")).toEqual(["versionString", "versionTwo"]);
     expect(flagged("loweredVisuals")).toEqual(["modelsPrivacy"]);
   });
 
   it("never raises effective quality or visuals except Q1, as release R0 reads the migrated rows back", () => {
     const visualsRank = (level: VisualsLevel | null) => (level === null ? null : VISUALS_LEVEL_RANK[level]);
     for (const [id, pipeline] of Object.entries(FIXTURES)) {
-      if (id === "scalar" || id === "alreadyNew") continue;
+      if (["scalar", "alreadyNew", "versionTwo", "versionString"].includes(id)) continue;
       const before = parseStoredPipelineFeatures(pipeline, id);
       const migrated = migrateProjectPipelineToConfigV1(pipeline);
       const after = parseStoredPipelineFeatures(migrated.pipeline, id);
       // Quality never goes up a rung.
       expect(QUALITY_LEVEL_RANK[qualityLevelFromLegacy(after.quality)], id).toBeLessThanOrEqual(QUALITY_LEVEL_RANK[qualityLevelFromLegacy(before.quality)]);
-      // Rescue reads turn on only for Q1.
-      if (before.quality === "auto" && before.visionFallback === false && after.visionFallback !== false) expect(migrated.flags.q1, id).toBe(true);
+      // visionFallback (rescue reads, page rasters, estimates) turns on only for Q1, at any quality.
+      if (before.visionFallback === false && after.visionFallback !== false) expect(migrated.flags.q1, id).toBe(true);
+      // Every figures-off shape stays off for the figure readers (resume, runner, sweeps).
+      if (projectFiguresOff(pipeline)) expect(projectFiguresOff(migrated.pipeline), id).toBe(true);
+      // Figure resume never opens up: an opted-out project is counted (Q3) and its partial levels blocked.
+      if (projectFigureResumeMode(pipeline) !== "auto" && projectFigureResumeMode(migrated.pipeline) === "auto") expect(migrated.flags.q3, id).toBe(true);
       // Visuals: unset stays unset; a set rung never goes up.
       const beforeVisuals = visualsLevelFromLegacy({ figures: before.figures, tier: before.chartExport?.tier }, { explicitFreeAllowed: true });
       const afterVisuals = visualsLevelFromLegacy({ figures: after.figures, tier: after.chartExport?.tier }, { explicitFreeAllowed: true });
-      if (beforeVisuals === null) expect(afterVisuals, id).toBeNull();
+      // Unset stays unset (the origin default), or lowers to none for a figures-off shape the stored read let through.
+      if (beforeVisuals === null) expect([null, "none"], id).toContain(afterVisuals);
       else expect(visualsRank(afterVisuals) ?? -1, id).toBeLessThanOrEqual(visualsRank(beforeVisuals)!);
       // Figures never turn on.
       if (before.figures === false) expect(after.figures, id).toBe(false);
@@ -145,10 +165,10 @@ describe("migration 0183 extraction config v1", () => {
 
   it("the dry-run report counts what the migration then changes, without changing anything", () => {
     expect(dryRun).toMatchObject({
-      projects: Object.keys(FIXTURES).length - 1, // alreadyNew is skipped
-      q1: 4, q3: 2, q11: 2, lowered_quality: 1, lowered_visuals: 1, levels: 2,
-      q1_ids: ["autoFallbackOff", "mixedNewQuality", "noQualityFallbackOff", "nullQuality"],
-      q11_ids: ["figuresOffFree", "figuresOffModels"],
+      projects: Object.keys(FIXTURES).length - 3, // alreadyNew and the two versioned rows are skipped
+      unsupported_version_left: 2, q1: 6, q3: 2, q11: 3, lowered_quality: 2, lowered_visuals: 1, levels: 2,
+      q1_ids: ["autoFallbackOff", "mixedNewQuality", "noQualityFallbackOff", "nullQuality", "numericQuality", "unknownQuality"],
+      q11_ids: ["figuresOffFree", "figuresOffModels", "figuresOffString"],
     });
   });
 
@@ -166,8 +186,30 @@ describe("migration 0183 extraction config v1", () => {
 
   it("is idempotent: a second application changes nothing", async () => {
     const before = await db.query(`select id, pipeline from projects order by id`);
-    await db.exec(`update projects set pipeline = docslurp_extraction_config_v1(pipeline) where not coalesce(jsonb_typeof(pipeline) = 'object' and pipeline -> 'configVersion' = '1'::jsonb, false)`);
+    await db.exec(`update projects set pipeline = docslurp_extraction_config_v1(pipeline) where not docslurp_extraction_config_v1_versioned(pipeline)`);
     const after = await db.query(`select id, pipeline from projects order by id`);
     expect(after.rows).toEqual(before.rows);
   });
+});
+
+describe("migration 0183 pauses on a large Q1 count", () => {
+  it("refuses to rewrite when more projects than the confirmed limit would gain rescue reads, and runs once confirmed", async () => {
+    const gate = await createMigratedDatabase({ stopBefore: MIGRATION });
+    try {
+      await gate.exec(`
+        insert into "user"(id, name, email) values ('u1', 'U', 'u1@example.com');
+        insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'O', 'o1-slug', 'u1');
+        insert into projects(id, org_id, user_id, name, pipeline) values
+          ('a', 'o1', 'u1', 'a', '{"quality": "auto", "visionFallback": false}'), ('b', 'o1', 'u1', 'b', '{"visionFallback": false}');
+        select set_config('docslurp.extraction_config_v1_max_q1', '1', false);
+      `);
+      await expect(applyRemainingMigrations(gate, MIGRATION)).rejects.toThrow(/2 projects would move .* above the confirmed limit 1/);
+      expect((await gate.query<{ pipeline: unknown }>(`select pipeline from projects where id = 'a'`)).rows[0]!.pipeline).toEqual({ quality: "auto", visionFallback: false });
+      await gate.exec(`select set_config('docslurp.extraction_config_v1_max_q1', '2', false)`);
+      await applyRemainingMigrations(gate, MIGRATION);
+      expect((await gate.query<{ pipeline: unknown }>(`select pipeline from projects where id = 'a'`)).rows[0]!.pipeline).toEqual({ quality: "balanced", configVersion: 1 });
+    } finally {
+      await gate.close();
+    }
+  }, 300_000);
 });

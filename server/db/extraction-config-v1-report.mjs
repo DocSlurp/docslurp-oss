@@ -5,7 +5,8 @@
 //
 // Runs the migration file's own functions (between `report:functions-begin` and `report:functions-end`) as temporary
 // functions (pg_temp) inside a transaction that is rolled back, so the counts come from exactly the code the migration
-// runs. Needs only SELECT on projects and document_extraction_levels and the TEMP privilege. Reports:
+// runs. Needs SELECT on projects and document_extraction_levels and the TEMP privilege (locked-down runtime roles may
+// lack TEMP: use the migration role, e.g. DATABASE_URL=$MIGRATION_DATABASE_URL). Reports:
 //
 // - q1: `visionFallback: false` with `auto` (or no quality) -> `balanced`, which turns rescue reads on (a raise, Q1;
 //   owner-approved, a large count pauses the production migration for confirmation);
@@ -39,7 +40,7 @@ export const COUNTS_SQL = `
            pg_temp.docslurp_extraction_config_v1(pipeline) is distinct from pipeline as changes
       from projects
      where pipeline is not null
-       and not coalesce(jsonb_typeof(pipeline) = 'object' and pipeline -> 'configVersion' = '1'::jsonb, false)
+       and not pg_temp.docslurp_extraction_config_v1_versioned(pipeline)
   )
   select count(*)::int as projects,
          count(*) filter (where changes)::int as rewritten,
@@ -54,6 +55,10 @@ export const COUNTS_SQL = `
          coalesce(array_agg(id order by id) filter (where (f ->> 'loweredQuality')::boolean or (f ->> 'loweredVisuals')::boolean), '{}') as lowered_ids
     from rows`;
 
+export const UNSUPPORTED_SQL = `
+  select count(*)::int as unsupported_version_left from projects
+   where pg_temp.docslurp_extraction_config_v1_versioned(pipeline) and pipeline -> 'configVersion' <> '1'::jsonb`;
+
 export const LEVELS_SQL = `
   select count(*)::int as levels
     from document_extraction_levels l join projects p on p.id = l.project_id
@@ -66,7 +71,8 @@ export async function extractionConfigV1Report(sql, migrationSql = readFileSync(
       await tx.unsafe(reportFunctionsSql(migrationSql));
       const [counts] = await tx.unsafe(COUNTS_SQL);
       const [levels] = await tx.unsafe(LEVELS_SQL);
-      report = { ...counts, figure_levels_to_block: levels.levels };
+      const [unsupported] = await tx.unsafe(UNSUPPORTED_SQL);
+      report = { ...counts, figure_levels_to_block: levels.levels, ...unsupported };
       throw new RollbackSignal();
     });
   } catch (error) {
@@ -78,7 +84,7 @@ export async function extractionConfigV1Report(sql, migrationSql = readFileSync(
 class RollbackSignal extends Error {}
 
 async function main() {
-  const url = process.env.DATABASE_URL;
+  const url = process.env.MIGRATION_DATABASE_URL?.trim() || process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is required");
   const args = new Set(process.argv.slice(2));
   const sql = postgres(url, { max: 1, prepare: false, onnotice: () => {} });
@@ -94,6 +100,8 @@ async function main() {
     console.log(`lowered quality (privacy)           ${report.lowered_quality}`);
     console.log(`lowered visuals (privacy)           ${report.lowered_visuals}`);
     console.log(`resumable figure levels blocked     ${report.figure_levels_to_block}`);
+    console.log(`rows with an unknown configVersion  ${report.unsupported_version_left}  (left unchanged)`);
+    console.log(`The migration pauses when Q1 > DOCSLURP_EXTRACTION_CONFIG_V1_MAX_Q1 (default 100); set it to ${report.q1} to confirm.`);
     if (args.has("--ids")) for (const key of ["q1_ids", "q3_ids", "q11_ids", "lowered_ids"]) console.log(`${key}: ${report[key].join(", ") || "-"}`);
   } finally {
     await sql.end();

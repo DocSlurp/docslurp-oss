@@ -42,7 +42,9 @@ function assertScope(scope: FigureResumeScope): void {
 }
 
 /** Blocks no request clears (`unscanned`: only a new run that records a parse decision, R6-H1 F3). */
-const STICKY_BLOCKS = ["unscanned"] as const;
+// `resume-off`: a partial pass from before extraction config v1 whose project opted out of resuming (migration 0183, Q3)
+// stays as it is; only a new run (a fresh pass) clears it.
+const STICKY_BLOCKS = ["unscanned", "resume-off"] as const;
 
 /**
  * Live, completed documents of the scope whose current level has figure work left (the unsharded document's resumable
@@ -229,6 +231,8 @@ export async function sweepFigureResumeQueue(now = Date.now()): Promise<number> 
         and l2.updated_at < now() - interval '5 minutes'
         and coalesce(p.pipeline ->> 'figureResume', 'auto') = 'auto'
         and ${sql.unsafe(figuresOnSqlText("p"))}
+        -- A run started under figureResume off/manual keeps that (legacy runs keep their semantics until they complete).
+        and not exists (select 1 from project_runs r where r.id = l2.run_id and coalesce(r.pipeline ->> 'figureResume', 'auto') <> 'auto')
       order by l2.updated_at
       limit 200)
     returning l.document_id`;

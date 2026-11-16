@@ -1394,7 +1394,10 @@ async function queueFigureResume(tx: Tx, scope: DocumentAssetLedgerScope, resume
         when l.images_status <> 'resumable' or not l.assets_current then null
         when ${resumed} then now() + (case least(l.resumes, 2) when 0 then interval '2 minutes' when 1 then interval '15 minutes' else interval '2 hours' end)
         when l.resume_after is not null then l.resume_after
-        when ${projectAutoResumeSql(tx, "p")} then now() + interval '2 minutes'
+        when ${projectAutoResumeSql(tx, "p")}
+          -- A run started under figureResume off/manual keeps that until it completes (extraction config v1, Q3).
+          and not exists (select 1 from project_runs r where r.id = l.run_id and coalesce(r.pipeline ->> 'figureResume', 'auto') <> 'auto')
+          then now() + interval '2 minutes'
         else null end,
       -- A fresh pass clears a block other than the lifetime cap; the counters move only with the run (resumeRunChangeSql).
       resume_blocked = case when ${resumed} or l.resume_blocked = 'attempts' then l.resume_blocked else null end

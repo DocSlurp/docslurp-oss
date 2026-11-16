@@ -1,5 +1,7 @@
 import {
   EXTRACTION_CONFIG_VERSION,
+  isLegacyQualityMode,
+  isQualityLevel,
   legacyFieldsForVisuals,
   legacyQualityModeFor,
   mapLegacyExtractionSettings,
@@ -32,6 +34,8 @@ export type ExtractionConfigV1Flags = {
   loweredQuality: boolean;
   /** Chart tier `models` under a restricted privacy mode: lowered to `charts`. */
   loweredVisuals: boolean;
+  /** A `configVersion` this release does not know: the row is left unchanged and reported. */
+  unsupportedVersion: boolean;
 };
 
 export type ExtractionConfigV1Migration = {
@@ -62,18 +66,31 @@ export function isConfigV1Pipeline(pipeline: unknown): boolean {
  */
 export function migrateProjectPipelineToConfigV1(stored: unknown): ExtractionConfigV1Migration {
   const source: Record<string, unknown> = isRecord(stored) ? stored : {};
+  const noFlags: ExtractionConfigV1Flags = { q1: false, q3: false, q11: false, loweredQuality: false, loweredVisuals: false, unsupportedVersion: false };
+  // A row that already names a semantics version is never rewritten: v1 is done, and an unknown version (a newer
+  // release's row) is left for that release rather than reinterpreted under v1 (fail closed, as runConfigSemantics).
+  if ("configVersion" in source && source.configVersion !== null && source.configVersion !== undefined) {
+    const mapped = mapLegacyExtractionSettings(source, { explicitFreeAllowed: true });
+    return { pipeline: source, quality: mapped.quality, visuals: mapped.visuals, flags: { ...noFlags, unsupportedVersion: source.configVersion !== EXTRACTION_CONFIG_VERSION } };
+  }
   const upgraded = upgradeStoredPipelineChartExport(migrateLegacyQualitySettings(source)) as Record<string, unknown>;
-  const mapped = mapLegacyExtractionSettings(upgraded, { explicitFreeAllowed: true });
+  // Every shape the figure readers treat as off (`false`, `"off"`, `{ enabled: false }`; projectFiguresOff) is off here.
+  const figures = upgraded.figures;
+  const figuresOff = figures === false || figures === "off" || (isRecord(figures) && figures.enabled === false);
+  const mapped = mapLegacyExtractionSettings({ ...upgraded, figures: figuresOff ? false : figures }, { explicitFreeAllowed: true });
   const chartExport = isRecord(upgraded.chartExport) ? upgraded.chartExport : null;
   const tier = chartExport?.tier;
+  // The quality the row ran before any privacy lowering: Q1 is a balanced row whose rescue reads were off.
   const rawQuality = upgraded.quality;
-  const legacyAuto = rawQuality === "auto" || rawQuality === "balanced" || !("quality" in upgraded) || rawQuality === null;
+  const legacyLevel = isQualityLevel(rawQuality) ? rawQuality : qualityLevelFromLegacy(isLegacyQualityMode(rawQuality) ? rawQuality : null);
+  const fallbackOff = upgraded.visionFallback === false;
   const flags: ExtractionConfigV1Flags = {
-    q1: legacyAuto && upgraded.visionFallback === false,
+    q1: legacyLevel === "balanced" && fallbackOff,
     q3: upgraded.figureResume === "off" || upgraded.figureResume === "manual",
-    q11: upgraded.figures === false && (tier === "free" || tier === "models"),
+    q11: figuresOff && (tier === "free" || tier === "models"),
     loweredQuality: mapped.lowered.some((cap) => cap.field === "quality"),
     loweredVisuals: mapped.lowered.some((cap) => cap.field === "visuals"),
+    unsupportedVersion: false,
   };
   const next: Record<string, unknown> = { ...upgraded };
   for (const key of ["visionFallback", "figures", "figureResume", "visuals", "configVersion"]) delete next[key];
@@ -82,6 +99,9 @@ export function migrateProjectPipelineToConfigV1(stored: unknown): ExtractionCon
     next.chartExport = rest;
   }
   next.quality = mapped.quality;
+  // Fastest never reads pages, but `visionFallback` also gates page rasters and estimates: a fastest row keeps an
+  // explicit `false`, so reading it back (where the default is true) changes nothing.
+  if (mapped.quality === "fastest" && fallbackOff) next.visionFallback = false;
   if (mapped.visuals !== null) next.visuals = mapped.visuals;
   next.configVersion = EXTRACTION_CONFIG_VERSION;
   return { pipeline: next, quality: mapped.quality, visuals: mapped.visuals, flags };
@@ -106,7 +126,8 @@ export function runPipelineToConfigV1<T extends Record<string, unknown>>(pipelin
   const quality = qualityLevelFromLegacy(legacyQuality);
   const visuals = visualsLevelForRun(figures, tier);
   // Round trip: balanced sets visionFallback true when absent; visuals writes figures and the tier.
-  if (legacyQuality === "auto" && pipeline.visionFallback === false) return null;
+  // The stored default for visionFallback is true, so a run with it off (any quality) keeps the legacy shape.
+  if (pipeline.visionFallback === false) return null;
   const back = legacyFieldsForVisuals(visuals);
   if (back.figures !== figures || back.tier !== tier || legacyQualityModeFor(quality) !== legacyQuality) return null;
   const next: Record<string, unknown> = { ...pipeline };

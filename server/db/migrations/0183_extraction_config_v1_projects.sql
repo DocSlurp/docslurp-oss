@@ -80,7 +80,7 @@ BEGIN
   END IF;
   visuals := CASE
     WHEN jsonb_typeof(u -> 'visuals') = 'string' AND u ->> 'visuals' IN ('none', 'figures', 'charts', 'charts-ai') THEN u ->> 'visuals'
-    WHEN (u -> 'figures') = 'false'::jsonb THEN 'none'
+    WHEN ((u -> 'figures') = 'false'::jsonb OR (u -> 'figures') = '"off"'::jsonb OR (jsonb_typeof(u -> 'figures') = 'object' AND (u -> 'figures' -> 'enabled') = 'false'::jsonb)) THEN 'none'
     WHEN tier = 'off' THEN 'figures'
     WHEN tier = 'free' THEN 'charts'
     WHEN tier = 'models' THEN 'charts-ai'
@@ -88,6 +88,12 @@ BEGIN
   IF visuals = 'charts-ai' AND restricted THEN visuals := 'charts'; lowered_visuals := true; END IF;
   RETURN jsonb_build_object('quality', quality, 'visuals', visuals, 'loweredQuality', lowered_quality, 'loweredVisuals', lowered_visuals);
 END $$;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION docslurp_extraction_config_v1_versioned(p jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+  -- A row that names a semantics version is never rewritten (v1 done; an unknown version is left for its release).
+  SELECT coalesce(jsonb_typeof(p) = 'object' AND p ? 'configVersion' AND jsonb_typeof(p -> 'configVersion') <> 'null', false)
+$$;
 --> statement-breakpoint
 -- The new-shape pipeline (migrateProjectPipelineToConfigV1).
 CREATE OR REPLACE FUNCTION docslurp_extraction_config_v1(p jsonb) RETURNS jsonb
@@ -97,8 +103,11 @@ DECLARE
   m jsonb := docslurp_extraction_config_v1_mapping(u);
   n jsonb := u - 'visionFallback' - 'figures' - 'figureResume' - 'visuals' - 'configVersion';
 BEGIN
+  IF docslurp_extraction_config_v1_versioned(p) THEN RETURN p; END IF;
   IF jsonb_typeof(n -> 'chartExport') = 'object' THEN n := jsonb_set(n, '{chartExport}', (n -> 'chartExport') - 'tier'); END IF;
   n := n || jsonb_build_object('quality', m -> 'quality');
+  -- Fastest keeps an explicit visionFallback: false (it also gates page rasters and estimates; the read default is true).
+  IF m ->> 'quality' = 'fastest' AND (u -> 'visionFallback') = 'false'::jsonb THEN n := n || '{"visionFallback": false}'::jsonb; END IF;
   IF jsonb_typeof(m -> 'visuals') = 'string' THEN n := n || jsonb_build_object('visuals', m -> 'visuals'); END IF;
   RETURN n || '{"configVersion": 1}'::jsonb;
 END $$;
@@ -109,22 +118,32 @@ LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE
   u jsonb := docslurp_extraction_config_v1_upgraded(p);
   m jsonb := docslurp_extraction_config_v1_mapping(u);
-  tier text := CASE WHEN jsonb_typeof(u -> 'chartExport') = 'object' THEN u -> 'chartExport' ->> 'tier' END;
-  legacy_auto boolean := NOT (u ? 'quality') OR jsonb_typeof(u -> 'quality') = 'null'
-    OR (jsonb_typeof(u -> 'quality') = 'string' AND u ->> 'quality' IN ('auto', 'balanced'));
+  tier text := CASE WHEN jsonb_typeof(u -> 'chartExport') = 'object' AND jsonb_typeof(u -> 'chartExport' -> 'tier') = 'string' THEN u -> 'chartExport' ->> 'tier' END;
+  -- The level the row ran before privacy lowering (unknown values read as balanced).
+  legacy_level text := CASE
+    WHEN jsonb_typeof(u -> 'quality') = 'string' AND u ->> 'quality' IN ('fastest', 'balanced', 'smart') THEN u ->> 'quality'
+    WHEN jsonb_typeof(u -> 'quality') = 'string' AND u ->> 'quality' = 'fast' THEN 'fastest'
+    WHEN jsonb_typeof(u -> 'quality') = 'string' AND u ->> 'quality' = 'good' THEN 'smart'
+    ELSE 'balanced' END;
 BEGIN
+  IF docslurp_extraction_config_v1_versioned(p) THEN
+    RETURN jsonb_build_object('q1', false, 'q3', false, 'q11', false, 'loweredQuality', false, 'loweredVisuals', false,
+      'unsupportedVersion', (p -> 'configVersion') <> '1'::jsonb);
+  END IF;
   RETURN jsonb_build_object(
-    'q1', coalesce(legacy_auto AND (u -> 'visionFallback') = 'false'::jsonb, false),
+    'q1', coalesce(legacy_level = 'balanced' AND (u -> 'visionFallback') = 'false'::jsonb, false),
     'q3', coalesce(jsonb_typeof(u -> 'figureResume') = 'string' AND u ->> 'figureResume' IN ('off', 'manual'), false),
-    'q11', coalesce((u -> 'figures') = 'false'::jsonb AND jsonb_typeof(u -> 'chartExport' -> 'tier') = 'string' AND tier IN ('free', 'models'), false),
+    'q11', coalesce(((u -> 'figures') = 'false'::jsonb OR (u -> 'figures') = '"off"'::jsonb OR (jsonb_typeof(u -> 'figures') = 'object' AND (u -> 'figures' -> 'enabled') = 'false'::jsonb)) AND tier IN ('free', 'models'), false),
     'loweredQuality', m -> 'loweredQuality',
-    'loweredVisuals', m -> 'loweredVisuals');
+    'loweredVisuals', m -> 'loweredVisuals',
+    'unsupportedVersion', false);
 END $$;
 -- report:functions-end
 --> statement-breakpoint
 DO $$
 DECLARE
-  total bigint; q1 bigint; q3 bigint; q11 bigint; lq bigint; lv bigint; levels bigint;
+  total bigint; q1 bigint; q3 bigint; q11 bigint; lq bigint; lv bigint; levels bigint; unsupported bigint;
+  max_q1 bigint := coalesce(nullif(current_setting('docslurp.extraction_config_v1_max_q1', true), '')::bigint, 100);
 BEGIN
   SELECT count(*),
          count(*) FILTER (WHERE (f ->> 'q1')::boolean),
@@ -134,11 +153,17 @@ BEGIN
          count(*) FILTER (WHERE (f ->> 'loweredVisuals')::boolean)
     INTO total, q1, q3, q11, lq, lv
     FROM (SELECT docslurp_extraction_config_v1_flags(pipeline) AS f FROM projects
-          WHERE NOT coalesce(jsonb_typeof(pipeline) = 'object' AND pipeline -> 'configVersion' = '1'::jsonb, false)) rows;
+          WHERE NOT docslurp_extraction_config_v1_versioned(pipeline)) rows;
   SELECT count(*) INTO levels FROM document_extraction_levels l JOIN projects p ON p.id = l.project_id
    WHERE l.images_status = 'resumable' AND l.resume_blocked IS NULL AND p.pipeline ->> 'figureResume' IN ('off', 'manual');
-  RAISE NOTICE '[extraction-config-v1] projects=% q1_vision_fallback_off_auto=% q3_figure_resume_off_manual=% q11_figures_off_with_chart_tier=% lowered_quality_privacy=% lowered_visuals_privacy=% figure_levels_to_block=%',
-    total, q1, q3, q11, lq, lv, levels;
+  SELECT count(*) INTO unsupported FROM projects
+   WHERE docslurp_extraction_config_v1_versioned(pipeline) AND pipeline -> 'configVersion' <> '1'::jsonb;
+  RAISE NOTICE '[extraction-config-v1] projects=% q1_vision_fallback_off_auto=% q3_figure_resume_off_manual=% q11_figures_off_with_chart_tier=% lowered_quality_privacy=% lowered_visuals_privacy=% figure_levels_to_block=% unsupported_version_left=%',
+    total, q1, q3, q11, lq, lv, levels, unsupported;
+  -- Q1 raises (rescue reads turn on): a large count pauses the migration until the owner confirms by raising the limit.
+  IF q1 > max_q1 THEN
+    RAISE EXCEPTION '[extraction-config-v1] % projects would move from auto with rescue reads off to balanced (Q1), above the confirmed limit %. Review server/db/extraction-config-v1-report.mjs and rerun with DOCSLURP_EXTRACTION_CONFIG_V1_MAX_Q1=% to confirm.', q1, max_q1, q1;
+  END IF;
 END $$;
 --> statement-breakpoint
 -- Q3: block resumable partial figure levels of projects that opted out of automatic resume, before their opt-out key goes.
@@ -153,4 +178,4 @@ UPDATE document_extraction_levels l
 UPDATE projects
    SET pipeline = docslurp_extraction_config_v1(pipeline)
  WHERE pipeline IS NOT NULL
-   AND NOT coalesce(jsonb_typeof(pipeline) = 'object' AND pipeline -> 'configVersion' = '1'::jsonb, false);
+   AND NOT docslurp_extraction_config_v1_versioned(pipeline);
