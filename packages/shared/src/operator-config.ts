@@ -193,10 +193,16 @@ interface KnobSpec {
 const ON = ["1", "true", "on"];
 const OFF = ["0", "false", "off"];
 const lower = (raw: string) => raw.trim().toLowerCase();
-const intCanonical = (raw: string) => (/^\d+$/.test(raw.trim()) ? String(Number(raw.trim())) : undefined);
+/**
+ * Numbers compare only in their canonical spelling (no sign, leading zeros, exponent or spaces inside): some readers
+ * (figure resume) reject any other spelling and fall back to their default, so a looser match could "agree" with the
+ * file while the reader runs a different value. Any other spelling is a conflict.
+ */
+const intCanonical = (raw: string) => (/^(0|[1-9]\d*)$/.test(raw.trim()) ? raw.trim() : undefined);
 const numCanonical = (raw: string) => {
-  const value = Number(raw.trim());
-  return raw.trim() !== "" && Number.isFinite(value) ? String(value) : undefined;
+  const trimmed = raw.trim();
+  const value = Number(trimmed);
+  return trimmed !== "" && Number.isFinite(value) && String(value) === trimmed ? trimmed : undefined;
 };
 const boolCanonical = (raw: string) => (ON.includes(lower(raw)) ? "on" : OFF.includes(lower(raw)) ? "off" : undefined);
 const enumCanonical = (raw: string) => lower(raw);
@@ -424,6 +430,37 @@ export function parseOperatorConfig(value: unknown, env: Record<string, string |
   return parsed.data;
 }
 
+/**
+ * The first key repeated within one object of already-valid JSON text, or null. JSON.parse keeps the last of duplicate
+ * keys, so a reviewer reading the first could approve a different cap than the one that runs.
+ */
+export function duplicateJsonKey(text: string): string | null {
+  const stack: Array<Set<string> | null> = [];
+  let expectKey = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "{") { stack.push(new Set()); expectKey = true; continue; }
+    if (ch === "[") { stack.push(null); expectKey = false; continue; }
+    if (ch === "}" || ch === "]") { stack.pop(); expectKey = false; continue; }
+    if (ch === ",") { expectKey = stack[stack.length - 1] instanceof Set; continue; }
+    if (ch === "\"") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== "\"") j += text[j] === "\\" ? 2 : 1;
+      if (expectKey) {
+        const key = JSON.parse(text.slice(i, j + 1)) as string;
+        const keys = stack[stack.length - 1];
+        if (keys) {
+          if (keys.has(key)) return key;
+          keys.add(key);
+        }
+        expectKey = false;
+      }
+      i = j;
+    }
+  }
+  return null;
+}
+
 export interface LoadedOperatorConfig {
   path: string;
   config: OperatorConfig;
@@ -460,6 +497,8 @@ export function loadOperatorConfig(
   } catch {
     throw new OperatorConfigError(`${OPERATOR_CONFIG_ENV}=${path} is not valid JSON`);
   }
+  const duplicate = duplicateJsonKey(text);
+  if (duplicate) throw new OperatorConfigError(`${OPERATOR_CONFIG_ENV}=${path} repeats the key ${JSON.stringify(duplicate.slice(0, 80))} (JSON keeps only the last one)`);
   const config = parseOperatorConfig(json, env);
   return { path, config, digest: operatorConfigDigest(config) };
 }
@@ -498,9 +537,13 @@ export function applyOperatorConfigEnvironment(
   const conflicts: string[] = [];
   for (const [name, { path, value }] of operatorConfigEnvironment(config, role)) {
     const raw = env[name];
-    const present = raw !== undefined && raw.trim() !== "";
-    if (!present) {
+    // An empty value is a value: some readers give "" a meaning (Number("") is 0), so it is compared, never overwritten.
+    if (raw === undefined) {
       if (value !== null) applied.push([name, value]);
+      continue;
+    }
+    if (value === null && raw.trim() === "") {
+      agreed.push(name);
       continue;
     }
     const knob = knobs.get(name)!;
@@ -535,13 +578,15 @@ let state: OperatorConfigState | null = null;
  */
 export function initializeOperatorConfig(role: OperatorConfigRole, env: Record<string, string | undefined> = process.env, log: (line: string) => void = (line) => console.log(line)): OperatorConfigState {
   const rawPath = env[OPERATOR_CONFIG_ENV]?.trim() || null;
-  if (state && state.path === rawPath && state.roles.includes(role)) return state;
   const loaded = state && state.path === rawPath && state.config ? { path: state.path!, config: state.config, digest: state.digest! } : loadOperatorConfig(env);
+  const repeat = !!state && state.path === rawPath && state.roles.includes(role);
   if (!loaded) {
     state = { path: null, digest: null, config: null, roles: [...new Set([...(state?.roles ?? []), role])], applied: [], agreed: [] };
     return state;
   }
+  // Always applied into the env given (a caller may pass its own env object); repeats change nothing and log nothing.
   const result = applyOperatorConfigEnvironment(loaded.config, env, role);
+  if (repeat) return state!;
   const previous = state?.path === loaded.path ? state : null;
   state = {
     path: loaded.path,

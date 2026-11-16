@@ -17,6 +17,7 @@ import {
   operatorConfigEnvironment,
   operatorConfigSchema,
   OperatorConfigError,
+  duplicateJsonKey,
   operatorModelOverrideProblem,
   parseOperatorConfig,
   resetOperatorConfigState,
@@ -62,6 +63,14 @@ describe("loadOperatorConfig", () => {
     expect(() => loadOperatorConfig({ ...PRODUCTION, [OPERATOR_CONFIG_ENV]: "ops/operator.json" })).toThrow(/absolute path/);
     expect(() => loadOperatorConfig({ ...PRODUCTION, [OPERATOR_CONFIG_ENV]: file("{ not json") })).toThrow(/not valid JSON/);
     expect(() => loadOperatorConfig({ ...PRODUCTION, [OPERATOR_CONFIG_ENV]: file(" ".repeat(300 * 1024)) })).toThrow(/ETOOBIG|larger than/);
+  });
+
+  it("refuses a repeated key, which JSON.parse would silently resolve to the last value", () => {
+    const text = `{"version":1,"ocr":{"pageReader":{"mode":"all","orgDailyMaxCostCents":2000,"orgDailyMaxCostCents":10000000}}}`;
+    expect(() => loadOperatorConfig({ ...PRODUCTION, [OPERATOR_CONFIG_ENV]: file(text) })).toThrow(/repeats the key "orgDailyMaxCostCents"/);
+    expect(duplicateJsonKey(`{"a":{"b":1},"c":{"b":2},"s":"x\\"y","l":[{"b":1},{"b":2}]}`)).toBeNull();
+    expect(duplicateJsonKey(`{"a":1,"b":{"x":1},"a":2}`)).toBe("a");
+    expect(duplicateJsonKey(`{"a\\u0062":1,"ab":2}`)).toBe("ab");
   });
 
   it("loads a valid file and digests it independently of formatting and key order", () => {
@@ -241,6 +250,13 @@ describe("environment overlay", () => {
       { DOCSLURP_OCR_ESCALATION: "maybe" },
       { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" },
       { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" },
+      // Non-canonical number spellings: some readers reject them and fall back to their default.
+      { DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "02000" },
+      { DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "2e3" },
+      { DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "2000.0" },
+      // An empty value means something to some readers (Number("") is 0): never overwritten.
+      { DOCSLURP_OCR_ESCALATION_MAX_PAGES: "" },
+      { DOCSLURP_OCR_ESCALATION_MAX_PAGES: "  " },
     ]) {
       const env: Record<string, string | undefined> = { ...conflicting };
       expect(() => applyOperatorConfigEnvironment(config, env, "worker"), JSON.stringify(conflicting)).toThrow(/disagree/);
@@ -289,6 +305,21 @@ describe("initializeOperatorConfig", () => {
     const env: Record<string, string | undefined> = {};
     expect(initializeOperatorConfig("worker", env, () => {}).digest).toBeNull();
     expect(env).toEqual({});
+  });
+
+  it("applies into every env it is given, even after the first call", () => {
+    const path = file({ version: 1, ocr: { maxConcurrent: 2 } });
+    const first: Record<string, string | undefined> = { ...PRODUCTION, [OPERATOR_CONFIG_ENV]: path };
+    initializeOperatorConfig("worker", first, () => {});
+    const second: Record<string, string | undefined> = { ...PRODUCTION, [OPERATOR_CONFIG_ENV]: path };
+    initializeOperatorConfig("worker", second, () => {});
+    expect(second.DOCSLURP_OCR_MAX_CONCURRENT).toBe("2");
+    expect(() => initializeOperatorConfig("worker", { ...PRODUCTION, [OPERATOR_CONFIG_ENV]: path, DOCSLURP_OCR_MAX_CONCURRENT: "3" }, () => {})).toThrow(/disagree/);
+  });
+
+  it("an auto field agrees with an empty variable", () => {
+    const config = parseOperatorConfig({ version: 1, charts: { explicitFree: "auto" } }, PRODUCTION);
+    expect(applyOperatorConfigEnvironment(config, { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "" }, "server").agreed).toEqual(["DOCSLURP_CHART_EXPORT_FREE_EXPLICIT"]);
   });
 
   it("applies once per role and reports the digest", () => {
