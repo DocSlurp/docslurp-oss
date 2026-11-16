@@ -192,6 +192,15 @@ describe("block_indexing withholds the page, not the document", () => {
     expect(pages).toEqual(["one", piiWithheldPageText(2), "card [REDACTED:credit-card]", "[REDACTED:credit-card] end", "five"]);
   });
 
+  it("overlapping matches on a clean page are merged: no tail of the longer one survives", () => {
+    const text = "head\fx 0123456789abcdefghij tail";
+    const outer = text.indexOf("0123");
+    const inner = text.indexOf("5678");
+    const match = (charOffset: number, length: number) => ({ patternType: "generic-api-key" as const, matchedPrefix: "fp", pageNumber: null, byteOffset: charOffset, charOffset, length });
+    const pages = withholdPagesThenRedact(text, new Set([1]), (page) => page, [match(outer, 20), match(inner, 4)]).split("\f");
+    expect(pages).toEqual([piiWithheldPageText(1), "x [REDACTED:generic-api-key] tail"]);
+  });
+
   it("every page withheld: the document is blocked", async () => {
     const f = setup("block_indexing", [`A ${SSN}`, `B ${SSN}`]);
     await f.stage.run(f.state);

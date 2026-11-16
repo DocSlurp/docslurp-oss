@@ -195,17 +195,20 @@ export function withholdPagesThenRedact(
     const pageEnd = start + page.length;
     start = pageEnd + 1;
     if (pages.has(index + 1)) return piiWithheldPageText(index + 1);
-    const spans = matches
+    // Clip to the page, merge overlapping spans (earliest first, as `redactPii` does), then replace from the end.
+    const clippedSpans = matches
       .map((match) => ({ type: match.patternType, from: Math.max(match.charOffset, pageStart), to: Math.min(match.charOffset + match.length, pageEnd) }))
       .filter((span) => span.to > span.from)
-      .sort((left, right) => right.from - left.from);
+      .sort((left, right) => left.from - right.from || right.to - left.to);
+    const merged: typeof clippedSpans = [];
+    for (const span of clippedSpans) {
+      const last = merged.at(-1);
+      if (last && span.from < last.to) last.to = Math.max(last.to, span.to);
+      else merged.push({ ...span });
+    }
     let clipped = page;
-    let floor = Number.POSITIVE_INFINITY;
-    for (const span of spans) {
-      const to = Math.min(span.to, floor);
-      if (to <= span.from) continue;
-      clipped = `${clipped.slice(0, span.from - pageStart)}[REDACTED:${span.type}]${clipped.slice(to - pageStart)}`;
-      floor = span.from;
+    for (const span of merged.reverse()) {
+      clipped = `${clipped.slice(0, span.from - pageStart)}[REDACTED:${span.type}]${clipped.slice(span.to - pageStart)}`;
     }
     return redact(clipped);
   }).join("\f");
