@@ -13,8 +13,6 @@ Send DocSlurp any file. Get back page-by-page Markdown and structured fields, hy
 
 This repository holds the **DocSlurp server** (API and worker), the **database migrations**, the **CLI**, the **client SDKs** and the search integrations. The hosted product and its web dashboard are developed separately at <https://docslurp.io>.
 
-> **Status: pre-release.** APIs and data models change without notice until v1.
-
 ## What is in this repository
 
 | Path | What it is | License |

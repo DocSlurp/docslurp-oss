@@ -1,6 +1,6 @@
 # Repository guidelines for coding agents
 
-DocSlurp is a document and media ingestion service: files go through a configurable pipeline that produces page-by-page Markdown, chunks, embeddings and structured fields, served through search, RAG context and a cited chat endpoint. This repository is pre-release: breaking changes to APIs and data models are acceptable, so prefer the cleanest design over compatibility shims.
+DocSlurp is a document and media ingestion service: files go through a configurable pipeline that produces page-by-page Markdown, chunks, embeddings and structured fields, served through search, RAG context and a cited chat endpoint. DocSlurp is live: production holds customer data, so ship schema changes as migrations and keep API and data-model changes compatible unless the owner approves a break.
 
 ## Source of truth
 

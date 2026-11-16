@@ -1,6 +1,6 @@
 # Contributing to DocSlurp
 
-Thanks for your interest. DocSlurp is pre-release and moving quickly, so small, focused contributions that match the current direction are the easiest to merge. Please open an issue before starting anything large.
+Thanks for your interest. DocSlurp moves quickly, so small, focused contributions that match the current direction are the easiest to merge. Please open an issue before starting anything large.
 
 ## Layout
 
