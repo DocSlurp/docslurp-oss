@@ -18,6 +18,7 @@ import {
   operatorConfigSchema,
   OperatorConfigError,
   duplicateJsonKey,
+  currentOperatorConfigDigest,
   operatorModelOverrideProblem,
   parseOperatorConfig,
   resetOperatorConfigState,
@@ -70,6 +71,7 @@ describe("loadOperatorConfig", () => {
     expect(() => loadOperatorConfig({ ...PRODUCTION, [OPERATOR_CONFIG_ENV]: file(text) })).toThrow(/repeats the key "orgDailyMaxCostCents"/);
     expect(duplicateJsonKey(`{"a":{"b":1},"c":{"b":2},"s":"x\\"y","l":[{"b":1},{"b":2}]}`)).toBeNull();
     expect(duplicateJsonKey(`{"a":1,"b":{"x":1},"a":2}`)).toBe("a");
+    expect(() => loadOperatorConfig({ ...PRODUCTION, [OPERATOR_CONFIG_ENV]: file(`{"version":1,"":1,"":2}`) })).toThrow(/repeats the key ""/);
     expect(duplicateJsonKey(`{"a\\u0062":1,"ab":2}`)).toBe("ab");
   });
 
@@ -315,6 +317,18 @@ describe("initializeOperatorConfig", () => {
     initializeOperatorConfig("worker", second, () => {});
     expect(second.DOCSLURP_OCR_MAX_CONCURRENT).toBe("2");
     expect(() => initializeOperatorConfig("worker", { ...PRODUCTION, [OPERATOR_CONFIG_ENV]: path, DOCSLURP_OCR_MAX_CONCURRENT: "3" }, () => {})).toThrow(/disagree/);
+  });
+
+  it("an empty explicit-free variable (which reads as auto) never agrees with off", () => {
+    const config = parseOperatorConfig({ version: 1, charts: { explicitFree: "off" } }, PRODUCTION);
+    expect(() => applyOperatorConfigEnvironment(config, { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: " " }, "server")).toThrow(/disagree/);
+  });
+
+  it("a call without the variable keeps the loaded config's digest", () => {
+    const path = file({ version: 1 });
+    const loaded = initializeOperatorConfig("worker", { ...PRODUCTION, [OPERATOR_CONFIG_ENV]: path }, () => {});
+    initializeOperatorConfig("worker", { ...PRODUCTION }, () => {});
+    expect(currentOperatorConfigDigest()).toBe(loaded.digest);
   });
 
   it("an auto field agrees with an empty variable", () => {

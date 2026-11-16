@@ -287,7 +287,8 @@ export const OPERATOR_CONFIG_KNOBS: readonly KnobSpec[] = [
     // `auto` is the variable left unset (it then follows inline extraction).
     render: (value: "auto" | "on" | "off") => (value === "auto" ? null : value),
     // The reader's on words (chart-export.ts CHART_EXPORT_ENV_ON_VALUES); anything else refuses explicit free.
-    canonical: (raw) => (["on", "1", "true", "yes"].includes(lower(raw)) ? "on" : "off"),
+    // Empty reads as unset (auto) there, never as off.
+    canonical: (raw) => (lower(raw) === "" ? undefined : ["on", "1", "true", "yes"].includes(lower(raw)) ? "on" : "off"),
   },
   {
     path: "charts.inline",
@@ -498,7 +499,7 @@ export function loadOperatorConfig(
     throw new OperatorConfigError(`${OPERATOR_CONFIG_ENV}=${path} is not valid JSON`);
   }
   const duplicate = duplicateJsonKey(text);
-  if (duplicate) throw new OperatorConfigError(`${OPERATOR_CONFIG_ENV}=${path} repeats the key ${JSON.stringify(duplicate.slice(0, 80))} (JSON keeps only the last one)`);
+  if (duplicate !== null) throw new OperatorConfigError(`${OPERATOR_CONFIG_ENV}=${path} repeats the key ${JSON.stringify(duplicate.slice(0, 80))} (JSON keeps only the last one)`);
   const config = parseOperatorConfig(json, env);
   return { path, config, digest: operatorConfigDigest(config) };
 }
@@ -581,6 +582,8 @@ export function initializeOperatorConfig(role: OperatorConfigRole, env: Record<s
   const loaded = state && state.path === rawPath && state.config ? { path: state.path!, config: state.config, digest: state.digest! } : loadOperatorConfig(env);
   const repeat = !!state && state.path === rawPath && state.roles.includes(role);
   if (!loaded) {
+    // An env without the variable never replaces a loaded config: that would drop this process's digest.
+    if (state?.config) return { path: null, digest: null, config: null, roles: [role], applied: [], agreed: [] };
     state = { path: null, digest: null, config: null, roles: [...new Set([...(state?.roles ?? []), role])], applied: [], agreed: [] };
     return state;
   }
