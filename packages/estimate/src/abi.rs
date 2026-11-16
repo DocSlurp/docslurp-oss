@@ -235,7 +235,8 @@ pub unsafe extern "C" fn ds_probe(
 
 /// Why the module last trapped, readable after the trap without allocating: a panic's message (the panic hook writes it
 /// into a fixed static buffer) or the size of an allocation the allocator refused (an out-of-memory abort never reaches
-/// the panic hook). Hosts call `ds_init` once after instantiating, then `ds_last_trap` when a call traps.
+/// the panic hook). Hosts call `ds_init` once after instantiating, `ds_clear_trap` before each call, and
+/// `ds_last_panic` / `ds_last_failed_alloc` when a call traps.
 #[cfg(target_arch = "wasm32")]
 mod trap_note {
     use std::alloc::{GlobalAlloc, Layout, System};
@@ -259,12 +260,26 @@ mod trap_note {
         }
     }
 
-    pub fn install() {
+    /// Forget the last call's note: a refusal a dependency handled (`try_reserve`) must not label a later panic.
+    pub fn clear() {
         MESSAGE_LEN.store(0, Ordering::SeqCst);
         FAILED_ALLOC.store(0, Ordering::SeqCst);
+    }
+
+    pub fn install() {
+        clear();
+        // The message and the source file's name and line only: the full location would carry the build machine's
+        // dependency paths into the host's error text.
         std::panic::set_hook(Box::new(|info| {
             let mut note = Note(0);
-            let _ = core::fmt::write(&mut note, format_args!("{info}"));
+            let message = info.payload_as_str().unwrap_or("panic");
+            let _ = match info.location() {
+                Some(at) => {
+                    let file = at.file().rsplit(['/', '\\']).next().unwrap_or("");
+                    core::fmt::write(&mut note, format_args!("{message} ({file}:{})", at.line()))
+                }
+                None => core::fmt::write(&mut note, format_args!("{message}")),
+            };
             MESSAGE_LEN.store(note.0, Ordering::SeqCst);
         }));
     }
@@ -305,6 +320,11 @@ static ALLOCATOR: trap_note::Recording = trap_note::Recording;
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn ds_init() { trap_note::install() }
+
+/// Clear the trap note before a call, so it describes only that call.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_clear_trap() { trap_note::clear() }
 
 /// The last trap's panic message as `(ptr << 32) | len` into a static buffer (not freed by the host; 0 length for none).
 #[cfg(target_arch = "wasm32")]

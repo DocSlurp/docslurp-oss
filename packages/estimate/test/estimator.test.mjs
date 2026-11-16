@@ -119,15 +119,18 @@ describe("@docslurp/estimate (wasm)", () => {
         assert.ok(["crashed", "out_of_memory"].includes(error.code), error.code);
       }
     }
-    // A trapped memory is dropped for a fresh one; six traps must not keep six 256 MiB memories alive.
-    globalThis.gc?.();
+    // A trapped memory is dropped for a fresh one and left to the garbage collector: six traps must not keep six
+    // 256 MiB memories alive.
     assert.ok(process.memoryUsage().rss - before < 1024 * 1024 * 1024, `rss grew ${(process.memoryUsage().rss - before) >> 20} MiB`);
     assert.deepEqual(estimator.readPlan({ name: "a.pdf", size: 10 }), { head: 10, tail: 0 });
   });
 
   it("reports an input larger than the module's memory as out of memory and recovers", () => {
     const huge = new Uint8Array(300 * 1024 * 1024);
+    const crashes = estimator.health().crashes;
     assert.throws(() => estimator.profile({ name: "huge.pdf", size: huge.length }, huge), (error) => error instanceof EstimatorError && error.code === "out_of_memory" && /allocation was refused/.test(error.message));
+    // Larger than the memory: never retried, one trap only.
+    assert.equal(estimator.health().crashes, crashes + 1);
     assert.equal(estimator.info().profileSchema, FILE_PROFILE_SCHEMA);
   });
 
@@ -152,7 +155,8 @@ describe("@docslurp/estimate (wasm)", () => {
 
   it("reads the page tree instead of loading a document that declares too many objects", async () => {
     const fresh = await createEstimator();
-    const big = manyObjectsPdf({ objects: 150_000, pages: 4 });
+    // 500,000 declared objects would take over 600 MiB to load; the file itself is small.
+    const big = manyObjectsPdf({ objects: 1_000, pages: 4, declaredSize: 500_000 });
     const profile = fresh.profile({ name: "big.pdf", size: big.length }, big);
     assert.equal(profile.pages, 4);
     assert.equal(profile.pdf, undefined);

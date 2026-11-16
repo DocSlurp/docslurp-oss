@@ -64,7 +64,6 @@ class Estimator:
         self._store = wasmtime.Store(self._engine)
         limits = wasmtime.Limits(_MEMORY_INITIAL_PAGES, _MEMORY_MAXIMUM_PAGES)
         self._memory = wasmtime.Memory(self._store, wasmtime.MemoryType(limits))
-        self._resets = 0
         self._instantiate()
 
     _crashes = 0
@@ -74,7 +73,7 @@ class Estimator:
         instance = wasmtime.Instance(self._store, self._module, [self._memory])
         exports = instance.exports(self._store)
         self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe", "ds_detail_open", "ds_detail_next", "ds_detail_close", "ds_range_open", "ds_range_step", "ds_range_supply", "ds_range_close")}
-        for name in ("ds_init", "ds_last_panic", "ds_last_failed_alloc"):
+        for name in ("ds_init", "ds_clear_trap", "ds_last_panic", "ds_last_failed_alloc"):
             if name in exports:
                 self._fn[name] = exports[name]
         if "ds_init" in self._fn:
@@ -101,6 +100,8 @@ class Estimator:
         if self._detail_token is not None and name == "ds_probe":
             raise EstimatorError("invalid_request", "close the detailed profile before a legacy probe")
         store = self._store
+        if "ds_clear_trap" in self._fn:
+            self._fn["ds_clear_trap"](store)
         try:
             args: list[int] = []
             for data in inputs:
@@ -120,6 +121,9 @@ class Estimator:
             panic, failed = self._trap_cause()
             self._crashes += 1
             self._total_resets += 1
+            # The raised error's traceback keeps this frame alive: drop the trapped store here, or a caller holding
+            # the exception would keep its 256 MiB memory too.
+            del store
             self._reset()
             if failed:
                 raise EstimatorError("out_of_memory", f"the estimator ran out of memory on this input (a {failed}-byte allocation was refused)") from None
@@ -157,6 +161,9 @@ class Estimator:
             # A file that ran the module out of memory (or crashed it) is profiled once more without loading the whole
             # document: a PDF still gets its page count, from a bounded read of its page tree.
             if error.code not in ("out_of_memory", "crashed"):
+                raise
+            # Only the PDF probe reads `bounded`, and an input larger than the memory cannot be copied in at all.
+            if b"%PDF-" not in head[:1029] or len(head) > _MEMORY_MAXIMUM_PAGES * 65536:
                 raise
             try:
                 return self._call("ds_probe", self._meta(name, size, type, bounded=True), head, tail)

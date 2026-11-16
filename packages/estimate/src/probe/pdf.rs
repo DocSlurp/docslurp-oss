@@ -44,11 +44,12 @@ const MAX_LOAD_STREAM_BYTES: usize = 16 * 1024 * 1024;
 /// Decompressed bytes of all object streams together (`budget_object_streams`): lopdf decodes and keeps every object
 /// stream at load time with only a per-stream limit.
 const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
-/// lopdf's loader keeps every object in memory: about 1.3 KiB each on wasm32 (measured on real PDFs), charged here at
-/// 1.5 KiB per object the trailer declares (`/Size`), plus the input bytes and lopdf's copy of their streams.
-const LOAD_BYTES_PER_OBJECT: u64 = 1536;
-/// What a whole-document load may take of the module's 256 MiB memory; past it the probe reads only the page tree.
-const MAX_LOAD_BYTES: u64 = 160 * 1024 * 1024;
+/// lopdf's loader keeps every object in memory: 1.0 to 1.25 KiB each on wasm32 beyond the input itself (measured on
+/// real PDFs, streams included), charged at 1.25 KiB per object the trailer declares (`/Size`), plus the input's copy.
+const LOAD_BYTES_PER_OBJECT: u64 = 1280;
+/// What a whole-document load may take of the module's 256 MiB memory; past it the probe reads only the page tree. A
+/// file that declares too few objects still traps, and the host's bounded retry gives it a page count.
+const MAX_LOAD_BYTES: u64 = 224 * 1024 * 1024;
 /// Decompressed page content and form bytes per document, cached forms included.
 const MAX_DOCUMENT_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 /// A page with this much image coverage or this many path operations is layout-heavy (figures, charts, tables).
@@ -296,7 +297,6 @@ fn sample_indices(total: usize, count: usize) -> Vec<usize> {
     indices
 }
 
-/// When the document does not parse, count `/Type /Page` objects in the raw bytes (misses compressed object streams).
 /// The largest object count a `/Size` entry declares (trailers and xref streams; incremental updates repeat it). An
 /// array (`/Size [..]`, function dictionaries) is not a count and is skipped.
 fn declared_objects(bytes: &[u8]) -> u64 {
@@ -316,7 +316,7 @@ fn declared_objects(bytes: &[u8]) -> u64 {
 
 /// Whether lopdf's whole-document load fits the module memory, from the declared objects and the input size.
 fn whole_load_fits(bytes: &[u8]) -> bool {
-    declared_objects(bytes).saturating_mul(LOAD_BYTES_PER_OBJECT).saturating_add(2 * bytes.len() as u64) <= MAX_LOAD_BYTES
+    declared_objects(bytes).saturating_mul(LOAD_BYTES_PER_OBJECT).saturating_add(bytes.len() as u64) <= MAX_LOAD_BYTES
 }
 
 /// The page count from the bounded range reader (`range::RangeSession`, inventory only, no page deep-measured) over the
@@ -366,6 +366,7 @@ fn range_inventory_pages(bytes: &[u8]) -> Result<usize, String> {
     Err("range walk did not finish".to_owned())
 }
 
+/// When the document does not parse, count `/Type /Page` objects in the raw bytes (misses compressed object streams).
 fn fallback_page_count(bytes: &[u8], mut result: ProbeResult) -> ProbeResult {
     let mut count = 0usize;
     let mut at = 0usize;
@@ -1628,7 +1629,7 @@ mod tests {
         assert_eq!(declared_objects(b"<< /Size 9 >> << /Size [2 2] >> << /Size\r\n 40 /Root 1 0 R >>"), 40);
         assert_eq!(declared_objects(b"<< /Type /XRef /Size 754193 /W [1 4 2] >>"), 754_193);
         assert_eq!(declared_objects(b"no counts here /Siz"), 0);
-        // An absurd count saturates rather than overflowing; it only sends the file down the bounded path.
+        // At most ten digits are read, so an absurd count cannot overflow; it only sends the file down the bounded path.
         assert!(declared_objects(b"<< /Size 99999999999999999999999 >>") > 1_000_000);
     }
 

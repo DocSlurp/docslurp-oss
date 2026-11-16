@@ -18,6 +18,16 @@ import { EstimatorError } from "./error.mjs";
 
 export { EstimatorError };
 
+/** Whether these first bytes start a PDF (`%PDF-` within the first KiB, as PDF readers accept). */
+function isPdfHead(head) {
+  const bytes = head instanceof Uint8Array ? head : new Uint8Array(head.buffer ?? head, head.byteOffset ?? 0, head.byteLength);
+  const limit = Math.min(bytes.length - 5, 1024);
+  for (let at = 0; at <= limit; at += 1) {
+    if (bytes[at] === 0x25 && bytes[at + 1] === 0x50 && bytes[at + 2] === 0x44 && bytes[at + 3] === 0x46 && bytes[at + 4] === 0x2d) return true;
+  }
+  return false;
+}
+
 async function compile(source) {
   if (source instanceof WebAssembly.Module) return source;
   if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) return WebAssembly.compile(source);
@@ -67,9 +77,14 @@ export async function createEstimator(options = {}) {
   const health = { calls: 0, crashes: 0, resets: 0 };
   let detailActive = null;
 
+  // Set when a trap's fresh memory could not be created: the trapped heap may be corrupt, so nothing runs on it again.
+  let dead = null;
+
   function call(name, ...inputs) {
+    if (dead) throw new EstimatorError("crashed", `the estimator is unavailable after a trap (${dead})`);
     if (detailActive && name === "ds_probe") throw new EstimatorError("invalid_request", "close the detailed profile before a legacy probe");
     const exports = instance.exports;
+    exports.ds_clear_trap?.();
     let packed;
     health.calls += 1;
     try {
@@ -85,7 +100,7 @@ export async function createEstimator(options = {}) {
         args.push(pointer, bytes.byteLength);
       }
       packed = BigInt.asUintN(64, BigInt(exports[name](...args)));
-      // Inputs are freed by zeroing on the next reset if a call traps; on success, free them now.
+      // Inputs go with the memory a trap replaces; on success, free them now.
       for (let index = 0; index < args.length; index += 2) if (args[index + 1] > 0) exports.ds_free(args[index], args[index + 1]);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
@@ -94,7 +109,12 @@ export async function createEstimator(options = {}) {
         health.crashes += 1;
         const cause = trapCause();
         detailActive = null;
-        instance = instantiate();
+        try {
+          instance = instantiate();
+        } catch (failure) {
+          dead = failure?.message ?? String(failure);
+          throw new EstimatorError("crashed", `the estimator is unavailable after a trap (${dead})`);
+        }
         health.resets += 1;
         if (cause.failedAlloc) {
           throw new EstimatorError("out_of_memory", `the estimator ran out of memory on this input (a ${cause.failedAlloc}-byte allocation was refused)`);
@@ -136,6 +156,8 @@ export async function createEstimator(options = {}) {
         // A file that ran the module out of memory (or crashed it) is profiled once more without loading the whole
         // document: a PDF still gets its page count, from a bounded read of its page tree.
         if (!(error instanceof EstimatorError) || (error.code !== "out_of_memory" && error.code !== "crashed")) throw error;
+        // Only the PDF probe reads `bounded`, and an input larger than the memory cannot be copied in at all.
+        if (dead || !isPdfHead(head) || head.byteLength > MEMORY_MAXIMUM_PAGES * 65536) throw error;
         try {
           return call("ds_probe", json({ ...meta(file), bounded: true }), head, tail);
         } catch {
