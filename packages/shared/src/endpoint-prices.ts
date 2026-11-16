@@ -27,6 +27,9 @@ export interface EndpointPrice {
   readonly priced: boolean;
   readonly inputUsdPerMTok: number;
   readonly outputUsdPerMTok: number;
+  /** The listed `prompt` and `completion` rates alone: what OpenRouter compares with a request's `max_price`. */
+  readonly listedPromptUsdPerMTok?: number;
+  readonly listedCompletionUsdPerMTok?: number;
   /** USD per request and per input image (OpenRouter `request`, `image`); 0 when not listed. */
   readonly requestUsd?: number;
   readonly imageUsd?: number;
@@ -79,9 +82,8 @@ function strictOverride(raw: unknown): LivePriceOverride | null {
   const write = value.input_cache_write === undefined ? 0 : perToken(value.input_cache_write);
   if (prompt === null || completion === null || write === null) return null;
   const parsed = parseOverride({ ...value, prompt: Math.max(prompt, write), completion });
-  // parseOverride bounds rates below $50/M; a dearer override is still a real price, kept here.
-  if (parsed) return parsed;
-  return null;
+  // parseOverride refuses a rate at or above $50/M: null here, so the endpoint is unpriced (fail closed).
+  return parsed;
 }
 
 function parseEndpoint(raw: unknown): EndpointPrice | null {
@@ -108,6 +110,7 @@ function parseEndpoint(raw: unknown): EndpointPrice | null {
   return {
     endpoint: tag.toLowerCase(), priced: true,
     inputUsdPerMTok: Math.max(prompt, write) * 1e6, outputUsdPerMTok: Math.max(completion, reasoning) * 1e6,
+    listedPromptUsdPerMTok: prompt * 1e6, listedCompletionUsdPerMTok: completion * 1e6,
     requestUsd: request, imageUsd: image,
     overrides: overrides as LivePriceOverride[],
   };

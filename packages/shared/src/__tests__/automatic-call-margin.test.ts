@@ -105,8 +105,9 @@ describe("automatic call margin gate", () => {
     expect(decide("page-transcription", { model: MODEL, hosts: ["fireworks", "cheap-host"] }, OFF_PEAK).price).toEqual({ inputUsdPerMTok: 0.4, outputUsdPerMTok: 1.2 });
     // Unrestricted: every listed host can be reached, the most expensive included.
     expect(decide("chat-answer", { model: MODEL }, OFF_PEAK)).toMatchObject({ allowed: false, price: { inputUsdPerMTok: 3, outputUsdPerMTok: 12 } });
-    // A max_price cap excludes hosts above it: OpenRouter never routes there.
-    expect(decide("page-transcription", { model: MODEL, capUsdPerMTok: { inputUsdPerMTok: 0.3, outputUsdPerMTok: 1.2 } }, OFF_PEAK))
+    // The max_price the request sends excludes hosts listed above it: OpenRouter never routes there.
+    const sent = { inputUsdPerMTok: 0.3, outputUsdPerMTok: 1.2 };
+    expect(decide("page-transcription", { model: MODEL, capUsdPerMTok: sent, maxPriceSent: sent }, OFF_PEAK))
       .toMatchObject({ allowed: true, price: { inputUsdPerMTok: 0.3, outputUsdPerMTok: 1.2 } });
   });
 
@@ -167,6 +168,23 @@ describe("automatic call margin gate", () => {
     const route = visionAutomaticRoute("llm://openrouter/z-ai/glm-5.3-flash");
     expect(route.minInputTokens!).toBeGreaterThan(AUTOMATIC_CALL_PLANNING_TOKENS["page-transcription"].inputTokens);
     expect(route.images).toBe(1);
+  });
+
+  it("compares max_price with the listed prompt and completion rates only, and prices the cap path with fees and schedules", () => {
+    // Prompt under the sent max_price but cache write above it: routed, and billed at the write rate.
+    setEndpointPricesForTests({ [MODEL]: { fetchedAt: NOW, endpoints: parseEndpointPrices({ data: { endpoints: [
+      { tag: "h", pricing: { prompt: "0.0000001", completion: "0.0000005", input_cache_write: "0.000002" } },
+    ] } }) } });
+    const sent = { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 };
+    expect(decide("page-transcription", { model: MODEL, maxPriceSent: sent, capUsdPerMTok: sent }, OFF_PEAK).price).toEqual({ inputUsdPerMTok: 2, outputUsdPerMTok: 0.5 });
+    // No listing: the cap, plus the per-image fee max_price allows, raised to DeepSeek's peak schedule.
+    setEndpointPricesForTests(null);
+    const capped = decide("page-transcription", { model: MODEL, capUsdPerMTok: { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.6 }, capImageUsd: 0.001, images: 1 }, PEAK);
+    expect(capped).toMatchObject({ priceSource: "cap", price: { inputUsdPerMTok: 0.3, outputUsdPerMTok: 1.2 } });
+    expect(capped.worstCostUsd).toBeCloseTo((1_500 * 0.3 + 800 * 1.2) / 1e6 + 0.001, 10);
+    // A route pinned away from DeepSeek's own host is not raised to its schedule.
+    expect(decide("page-transcription", { model: MODEL, hosts: ["fireworks"], capUsdPerMTok: { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.6 } }, PEAK).price)
+      .toEqual({ inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.6 });
   });
 
   it("raises the planning shape to a call's own size, never lowers it", () => {

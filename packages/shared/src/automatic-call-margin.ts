@@ -166,9 +166,22 @@ export interface AutomaticCallRoute {
   readonly billing?: "openrouter" | "direct" | "private";
   /** OpenRouter endpoint tags the request is restricted to (`provider.only` / a pinned `order`); null or absent: any. */
   readonly hosts?: readonly string[] | null;
-  /** The `max_price` the request sends (OpenRouter refuses hosts above it), or a direct route's list price. */
+  /**
+   * The highest token price the route can bill without a listing: the request's `max_price` with any prompt-cache write
+   * rate the route bills folded into input, or a direct route's list price. Null: none (a listing is required).
+   */
   readonly capUsdPerMTok?: TokenPrice | null;
-  /** Input tokens one call on this route needs at least (a vision model's own image tokens for a page), beyond planning. */
+  /**
+   * The `max_price` prompt and completion the request actually sends: a host whose listed prompt or completion rate is
+   * above it is not routed to by OpenRouter. Absent: no host is treated as unreachable.
+   */
+  readonly maxPriceSent?: TokenPrice | null;
+  /** The per-image fee the request's `max_price.image` allows, USD: added per image when priced from the cap. */
+  readonly capImageUsd?: number;
+  /**
+   * Input tokens one page read on this route needs at least (a vision model's own image tokens for a full page), beyond
+   * planning. Page transcription only: a chart read's plan is the measured size of real chart reads (crops, not pages).
+   */
   readonly minInputTokens?: number;
   /** Images one call sends: each may be billed a listed per-image fee. */
   readonly images?: number;
@@ -218,9 +231,21 @@ export function automaticRouteWorstPrice(
   const billing = routeBilling(route);
   const cap = route.capUsdPerMTok ?? null;
   if (cap && !validPrice(cap)) return { unknown: "invalid price cap" };
-  const fromCap = (source: string) => ({ price: cap!, source, requestUsd: 0, imageUsd: 0 });
-  if (billing === "direct") return cap ? fromCap("list-price") : { unknown: "no verified list price for a direct route" };
+  if (route.maxPriceSent && !validPrice(route.maxPriceSent)) return { unknown: "invalid max_price" };
   const model = policyModelId(route.model);
+  const hostsAllowed = route.hosts?.length ? route.hosts.map((host) => host.trim().toLowerCase()) : null;
+  // The cap path: the request's token cap, raised to any verified time-of-day schedule the route can reach (whether
+  // OpenRouter's max_price bounds a time-of-day price is not documented), plus the per-image fee max_price allows.
+  const fromCap = (source: string) => {
+    let price: TokenPrice = cap!;
+    for (const schedule of MODEL_PRICE_SCHEDULES) {
+      if (!isModelInFamily(model, schedule.family)) continue;
+      if (hostsAllowed && !hostsAllowed.some((host) => hostMatchesEndpoint(host, schedule.host) || hostMatchesEndpoint(schedule.host, host))) continue;
+      price = withPriceScheduleFloor(model, schedule.host, options.at, price);
+    }
+    return { price, source, requestUsd: 0, imageUsd: Math.max(0, route.capImageUsd ?? 0) };
+  };
+  if (billing === "direct") return cap ? fromCap("list-price") : { unknown: "no verified list price for a direct route" };
   const maxAge = options.maxAgeMs ?? automaticPriceMaxAgeMs();
   const now = options.now ?? Date.now();
   const listing = endpointPriceListing(model, maxAge, now);
@@ -228,7 +253,7 @@ export function automaticRouteWorstPrice(
     requestEndpointPrices(model, maxAge, now);
     return cap ? fromCap("cap") : { unknown: "no fresh price listing" };
   }
-  const hosts = route.hosts?.length ? route.hosts.map((host) => host.trim().toLowerCase()) : null;
+  const hosts = hostsAllowed;
   // Every allowed host must be listed: one that is not could be the dearest, so the listing alone cannot price the route.
   if (hosts && hosts.some((host) => !listing.endpoints.some((endpoint) => hostMatchesEndpoint(host, endpoint.endpoint)))) {
     return cap ? fromCap("cap") : { unknown: "an allowed host is not in the price listing" };
@@ -241,9 +266,12 @@ export function automaticRouteWorstPrice(
     const floored = withPriceScheduleFloor(model, endpoint.endpoint, options.at, endpointPriceAt(endpoint, options.at, options.promptTokens));
     const timeVarying = endpoint.overrides.length > 0 || MODEL_PRICE_SCHEDULES.some((schedule) =>
       hostMatchesEndpoint(schedule.host, endpoint.endpoint) && isModelInFamily(model, schedule.family));
-    // OpenRouter does not route to a host whose listed price is above the request's max_price, so such a host is not
-    // reachable. Whether it compares a time-of-day price is not documented: a host with one always counts.
-    if (cap && !timeVarying && (endpoint.inputUsdPerMTok > cap.inputUsdPerMTok + 1e-12 || endpoint.outputUsdPerMTok > cap.outputUsdPerMTok + 1e-12)) continue;
+    // OpenRouter does not route to a host whose listed prompt or completion rate is above the max_price the request
+    // sends, so such a host is not reachable. Whether it compares a time-of-day price is not documented: a host with one
+    // always counts.
+    const sent = route.maxPriceSent;
+    if (sent && !timeVarying && ((endpoint.listedPromptUsdPerMTok ?? endpoint.inputUsdPerMTok) > sent.inputUsdPerMTok + 1e-12
+      || (endpoint.listedCompletionUsdPerMTok ?? endpoint.outputUsdPerMTok) > sent.outputUsdPerMTok + 1e-12)) continue;
     input = Math.max(input, floored.inputUsdPerMTok);
     output = Math.max(output, floored.outputUsdPerMTok);
     requestUsd = Math.max(requestUsd, endpoint.requestUsd ?? 0);
@@ -313,7 +341,7 @@ export function automaticCallMarginDecision(
   const planned = AUTOMATIC_CALL_PLANNING_TOKENS[kind];
   const positive = (value: number | undefined) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0);
   const tokens = {
-    inputTokens: Math.max(planned.inputTokens, positive(route.minInputTokens), positive(options.tokens?.inputTokens)),
+    inputTokens: Math.max(planned.inputTokens, kind === "page-transcription" ? positive(route.minInputTokens) : 0, positive(options.tokens?.inputTokens)),
     outputTokens: Math.max(planned.outputTokens, positive(options.tokens?.outputTokens)),
   };
   const base = { kind, model, minMargin, at: at.toISOString(), inputTokens: tokens.inputTokens, outputTokens: tokens.outputTokens };
@@ -423,7 +451,15 @@ export function visionAutomaticRoute(modelOrUri: string): AutomaticCallRoute {
   const cap = catalog ? { inputUsdPerMTok: visionInputUsdPerMillion(catalog), outputUsdPerMTok: catalog.outputUsdPerMillion } : null;
   if (direct) return { model: trimmed, billing: "direct", capUsdPerMTok: cap, images: 1, ...pageInput(bareUri) };
   const hosts = catalog?.basis === "pinned-route" && catalog.providers?.length ? catalog.providers : null;
-  return { model: trimmed, billing: "openrouter", capUsdPerMTok: cap, hosts, images: 1, ...pageInput(trimmed) };
+  const input = pageInput(trimmed);
+  // What the vision runtime sends as max_price (worker vision-pricing.ts): the catalog prompt and completion prices,
+  // and an image fee of the largest raster's image tokens at the prompt price.
+  const maxImageTokens = visionImageTokens(bareUri, null) ?? visionImageTokens(policyModelId(trimmed), null);
+  return {
+    model: trimmed, billing: "openrouter", capUsdPerMTok: cap, hosts, images: 1, ...input,
+    ...(catalog ? { maxPriceSent: { inputUsdPerMTok: catalog.inputUsdPerMillion, outputUsdPerMTok: catalog.outputUsdPerMillion } } : {}),
+    ...(catalog && maxImageTokens !== null ? { capImageUsd: (maxImageTokens * catalog.inputUsdPerMillion) / 1e6 } : {}),
+  };
 }
 
 /**
