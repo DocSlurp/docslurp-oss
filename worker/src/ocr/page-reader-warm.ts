@@ -14,8 +14,9 @@
  *   the check and the job fails the job at once (its pages take their other route) instead of booting another.
  * - A failed, refused or slow start never delays or fails a page. A run starts at most PAGE_READER_WARM_MAX_LAUNCHES
  *   readers per process, and a second only after the first one read pages.
- * - The start-up reservation stands until the run's first reader job has been sent (that job records the boot as its
- *   provider cost); a reader that never served a job keeps it for the day (fail closed).
+ * - The start-up reservation stands until the reader answers a job of the run (the provider records a warmed reader's
+ *   boot on the first job it serves); a reader that never answered keeps it for the day (fail closed). A start the
+ *   provider reports `refused` (nothing started) returns it and does not count as a launch.
  *
  * Unset, the threshold is the provider's own `warm.minPages` (its cost model), else 500; `off` restores the blocking
  * behaviour (jobs wait for the reader).
@@ -27,6 +28,8 @@ export const DEFAULT_PAGE_READER_WARM_MIN_PAGES = 500;
 export const PAGE_READER_WARM_MIN_PAGES_LIMIT = 1_000_000;
 /** Readers one run may start in one worker process; after the first, only when an earlier one read pages. */
 export const PAGE_READER_WARM_MAX_LAUNCHES = 3;
+/** Starts one run may have refused by the provider's caps in one process before it stops asking. */
+export const PAGE_READER_WARM_MAX_REFUSALS = 3;
 /** Runs tracked per process (least recently used dropped first). */
 const MAX_TRACKED_RUNS = 4096;
 
@@ -65,6 +68,8 @@ interface RunWarm {
   demand: number;
   minPages: number;
   launches: number;
+  /** Starts the provider refused (nothing started): not launches, but bounded too. */
+  refusals: number;
   launching: boolean;
   /** The start-up reservation on the organization's daily reader budget, until the run's first reader job. */
   reservation: { ticket: string; budget: PageReaderOrgBudget } | null;
@@ -87,12 +92,21 @@ function entryFor(scope: Scope, minPages = DEFAULT_PAGE_READER_WARM_MIN_PAGES): 
     runs.delete(key); // re-inserted: least recently used first
   } else {
     entry = {
-      scope: { ...scope }, demand: 0, minPages, launches: 0, launching: false, reservation: null, state: "none", bootMs: null, bootCostCents: null,
+      scope: { ...scope }, demand: 0, minPages, launches: 0, refusals: 0, launching: false, reservation: null, state: "none", bootMs: null, bootCostCents: null,
       pages: { reader: 0, hostedWhileWarming: 0, hostedBelowThreshold: 0, hostedUnavailable: 0 },
     };
   }
   runs.set(key, entry);
-  while (runs.size > MAX_TRACKED_RUNS) runs.delete(runs.keys().next().value!);
+  if (runs.size > MAX_TRACKED_RUNS) {
+    // Least recently used first, but never a run that is starting a reader or holds a start-up reservation (its launch
+    // count and reservation would be lost) unless the map is twice over its bound.
+    for (const [candidate, value] of runs) {
+      if (runs.size <= MAX_TRACKED_RUNS) break;
+      if (candidate === key) continue;
+      if ((value.launching || value.reservation) && runs.size <= 2 * MAX_TRACKED_RUNS) continue;
+      runs.delete(candidate);
+    }
+  }
   return entry;
 }
 
@@ -119,6 +133,15 @@ function statusOf(provider: PageImageReaderProvider, scope: Scope, entry: RunWar
       );
     } else if (state === "failed" || state === "refused") {
       console.warn(`${logTag} warm-${state} run=${scope.runId} demand=${entry.demand}; pages keep their other route`);
+      // `refused` means the provider started nothing (its caps): nothing was spent, so the reservation goes back, and the
+      // refusal does not count against the run's launches. A `failed` start may have billed: its reservation stands.
+      if (state === "refused") {
+        if (entry.launches > 0) entry.launches -= 1;
+        entry.refusals += 1;
+        const reservation = entry.reservation;
+        entry.reservation = null;
+        if (reservation) void reservation.budget.settle(reservation.ticket, 0).catch(() => undefined);
+      }
     }
   }
   return state;
@@ -151,7 +174,7 @@ export async function pageReaderWarmGate(provider: PageImageReaderProvider, ctx:
   if (state === "ready") return "ready";
   if (state === "booting" || entry.launching) return "warming";
   if (entry.demand < ctx.minPages) return "below-threshold";
-  if (entry.launches >= PAGE_READER_WARM_MAX_LAUNCHES || (entry.launches > 0 && entry.pages.reader === 0)) return "unavailable";
+  if (entry.launches >= PAGE_READER_WARM_MAX_LAUNCHES || (entry.launches > 0 && entry.pages.reader === 0) || entry.refusals >= PAGE_READER_WARM_MAX_REFUSALS) return "unavailable";
   entry.launching = true; // set before any await: concurrent documents of the run start one reader
   try {
     const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
@@ -183,6 +206,7 @@ export async function pageReaderWarmGate(provider: PageImageReaderProvider, ctx:
       return "unavailable";
     }
     let started: PageReaderWarmStatus["state"];
+    entry.state = "none"; // each launch's own transitions (ready, failed, refused) are seen
     try {
       const status = provider.warm.start({ ...scope });
       started = (["none", "booting", "ready", "failed", "refused"] as const).find((value) => value === status?.state) ?? "failed";
@@ -190,14 +214,18 @@ export async function pageReaderWarmGate(provider: PageImageReaderProvider, ctx:
       console.warn(`${ctx.logTag} warm-start failed run=${scope.runId}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
       started = "failed";
     }
-    entry.launches += 1;
-    console.log(`${ctx.logTag} warm-start run=${scope.runId} provider=${provider.id} demand=${entry.demand} minPages=${ctx.minPages} launch=${entry.launches} state=${started} reservedCents=${reserveCents.toFixed(3)}`);
+    console.log(`${ctx.logTag} warm-start run=${scope.runId} provider=${provider.id} demand=${entry.demand} minPages=${ctx.minPages} launch=${entry.launches + 1} state=${started} reservedCents=${reserveCents.toFixed(3)}`);
     if (started === "refused" || started === "none") {
-      // Nothing was started, so nothing was spent: the reservation goes back.
+      // Nothing was started, so nothing was spent: the reservation goes back, and it is no launch.
+      entry.state = started;
+      if (started === "refused") entry.refusals += 1;
       await budget.settle(admission.ticket, 0).catch(() => undefined);
-    } else {
-      // Kept (as reserved) until a job runs on the reader; a start that failed may have billed, so it is not returned.
-      if (entry.reservation) await entry.reservation.budget.settle(entry.reservation.ticket, 0).catch(() => undefined);
+      return "unavailable";
+    }
+    entry.launches += 1;
+    {
+      // Kept (as reserved) until a job the reader answers; a start that failed may have billed, so it is never returned.
+      // An earlier launch's reservation, if any is still open, stands too (its boot may have billed).
       entry.reservation = { ticket: admission.ticket, budget };
     }
     const now = statusOf(provider, scope, entry, ctx.logTag);
@@ -253,16 +281,6 @@ export function pageReaderWarmSnapshot(scope: Scope): Readonly<Omit<RunWarm, "re
   if (!entry) return null;
   const { reservation, ...rest } = entry;
   return { ...rest, pages: { ...rest.pages }, reserved: reservation !== null };
-}
-
-/** Planning's own count of a run's reader demand, per run state (vision-extract planPageTasks). */
-const plannedDemand = new WeakMap<object, number>();
-
-/** Add `pages` to the run state's planned reader demand; true once it has reached `minPages`. */
-export function plannedPageReaderDemandReached(stateKey: object, pages: number, minPages: number): boolean {
-  const total = (plannedDemand.get(stateKey) ?? 0) + (pages > 0 ? pages : 0);
-  plannedDemand.set(stateKey, total);
-  return total >= minPages;
 }
 
 export function resetPageReaderWarmForTest(): void {

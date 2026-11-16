@@ -235,19 +235,23 @@ A reader VM can take many minutes to boot. When the registered reader implements
 - Each run counts its reader-eligible pages per worker process (the provider leases VMs per process): the OCR candidates
   of each document, or vision-extract's plain-transcription pages. Until the count reaches the threshold
   (`DOCSLURP_PAGE_READER_WARM_MIN_PAGES`), the run never starts a reader and its pages take their other route: the
-  hosted vision route, or the recogniser's text and hosted escalation. Planning fans pages out to the hosted route the
-  same way until the run's planned demand reaches the threshold; it never starts a reader itself.
+  hosted vision route, or the recogniser's text and hosted escalation. With page fan-out, planning holds back only a
+  document with at least the threshold of reader pages (so the activity that reads it, in whatever worker, reaches the
+  same threshold); smaller documents fan out to the hosted route. Planning never starts a reader itself.
 - At the threshold the host reserves the provider's start-up estimate (`estimateJobCostCents(0)`, which must be positive)
   against the organization's daily reader cap, then calls `warm.start` and returns at once. A start the cap does not admit
-  is not made. While the reader boots, vision-extract reads the document's held-back pages on the hosted route four at a
-  time per lane, checking readiness before each chunk; OCR pages keep the recogniser read and stay escalation
+  is not made. While the reader boots, vision-extract reads the document's held-back pages on the hosted route in chunks
+  of four on four lanes (eight pages in flight), checking readiness before each chunk; OCR pages keep the recogniser read and stay escalation
   candidates. Pages read that way stay read.
 - Once `warm.status` reports `ready`, the remaining pages go to the reader in jobs marked `requireReady`: a VM that went
   away in between fails the job at once and its pages take their other route. Nothing waits on a boot, and a failed,
   refused or slow start never delays or fails a page.
-- A run starts at most three readers per worker process, and a second only after an earlier one read pages. The start-up
-  reservation stands until the run's first reader job (which records the boot as its provider cost) and otherwise for the
-  day, so a reader started for nothing still counts against the organization's cap.
+- A run starts at most three readers per worker process, and a second only after an earlier one read pages; at most
+  three starts the provider refuses. The start-up reservation stands until the reader answers one of the run's jobs (the
+  provider records a warmed reader's boot on the first job it serves), and otherwise for the day, so a reader started
+  for nothing, or whose boot failed, still counts against the organization's cap. A start the provider reports
+  `refused` (its caps; nothing started) gives the reservation back. Wasted boots are visible in the provider's own
+  telemetry and in the cap, not as usage events.
 - Telemetry per run and process: `warm-start` (demand, threshold, reservation), `warm-ready` (`bootSeconds`,
   `bootCostCents`), `warm-failed` or `warm-refused`, and after each document a cumulative `warm-summary` line with
   `readerPages`, `hostedPages`, `hostedWhileWarming`, `hostedBelowThreshold` and `hostedUnavailable`, under the

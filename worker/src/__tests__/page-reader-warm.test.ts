@@ -48,7 +48,7 @@ afterEach(async () => {
  * A reader whose VM boots slowly: `start` only marks it booting; the test calls `becomeReady()` (or `failBoot()`).
  * A job sent while it is not ready never settles, so any page waiting on the boot would hang the test.
  */
-function slowBootingReader(options: { minPages?: number; startResult?: PageReaderWarmStatus["state"]; estimate?: number } = {}) {
+function slowBootingReader(options: { minPages?: number; startResult?: PageReaderWarmStatus["state"]; estimate?: number; lostAfterReady?: boolean } = {}) {
   const scopes = new Map<string, PageReaderWarmStatus["state"]>();
   const key = (scope: { orgId: string; runId: string }) => `${scope.orgId}/${scope.runId}`;
   const jobs: PageImageReadJob[] = [];
@@ -74,6 +74,7 @@ function slowBootingReader(options: { minPages?: number; startResult?: PageReade
     },
     async read(job) {
       jobs.push(job);
+      if (options.lostAfterReady) throw Object.assign(new Error("no ready VM"), { pageReaderUsage: [] });
       if (scopes.get(key(job.scope)) !== "ready") {
         waitedOnBoot += 1;
         return await new Promise<never>(() => undefined); // a job that waits for the boot never comes back
@@ -89,6 +90,7 @@ function slowBootingReader(options: { minPages?: number; startResult?: PageReade
     waitedOnBoot: () => waitedOnBoot,
     becomeReady: (scope = { orgId: "org-1", runId: "run-1" }) => scopes.set(key(scope), "ready"),
     failBoot: (scope = { orgId: "org-1", runId: "run-1" }) => scopes.set(key(scope), "failed"),
+    refuseLater: (scope = { orgId: "org-1", runId: "run-1" }) => scopes.set(key(scope), "refused"),
   };
 }
 
@@ -206,8 +208,8 @@ describe("vision transcription", () => {
     expect([...hostedPages, ...readerPages].sort((a, b) => a - b)).toEqual(range(1, 40));
     expect(new Set(h.hosted).size).toBe(h.hosted.length);
     expect(hostedPages.length).toBeGreaterThanOrEqual(6);
-    expect(hostedPages.length).toBeLessThan(16);
-    expect(readerPages.length).toBeGreaterThan(24);
+    expect(hostedPages.length).toBeLessThanOrEqual(16); // at most the chunks already in flight on four lanes
+    expect(readerPages.length).toBeGreaterThanOrEqual(24);
     expect(slow.jobs.every((job) => job.requireReady === true && job.scope.orgId === "org-1" && job.scope.runId === "run-1")).toBe(true);
     const snapshot = pageReaderWarmSnapshot({ orgId: "org-1", runId: "run-1" })!;
     expect(snapshot.pages.reader).toBe(readerPages.length);
@@ -357,17 +359,85 @@ describe("vision transcription", () => {
     expect(slow.jobs.every((job) => job.requireReady === undefined)).toBe(true);
   });
 
-  it("planning fans pages out to the hosted route until the run's planned demand reaches the threshold", async () => {
+  it("planning holds back only a document with the threshold of reader pages, which run() then warms for", async () => {
     enableVision("10");
     const slow = slowBootingReader();
     const h = harness();
     register(slow.provider);
-    const documents = [pdf(6, "doc-a"), pdf(6, "doc-b")];
+    const documents = [pdf(6, "doc-a"), pdf(6, "doc-b"), pdf(12, "doc-c")];
     const state = runState(documents);
-    const plan = (document: Document) => h.internals.plannedReaderPages(state, document, state.run.pipeline.vision, range(1, 6), NO_HINTS);
-    expect(await plan(documents[0]!)).toEqual([]);
-    expect(await plan(documents[1]!)).toEqual(range(1, 6));
+    const plan = (document: Document, pages: number) => h.internals.plannedReaderPages(state, document, state.run.pipeline.vision, range(1, pages), NO_HINTS);
+    expect(await plan(documents[0]!, 6)).toEqual([]);
+    expect(await plan(documents[1]!, 6)).toEqual([]);
+    expect(await plan(documents[2]!, 12)).toEqual(range(1, 12));
     expect(slow.starts).toHaveLength(0); // planning never starts a reader (it may run in another worker)
+    // run() in a fresh worker process sees exactly the held-back pages and reaches the same threshold.
+    resetPageReaderWarmForTest();
+    await extract(h, runState(documents), documents[2]!, range(1, 12));
+    expect(slow.starts).toHaveLength(1);
+  });
+
+  it("a start the provider refuses later (its caps) gives the reservation back and is not counted as a launch", async () => {
+    const slow = slowBootingReader();
+    const state = runState([]);
+    const ctx = { state, logTag: "t", minPages: 1, orgDailyMaxCostCents: 100_000 };
+    expect(await pageReaderWarmGate(slow.provider, ctx, 5)).toBe("warming");
+    expect(await state.pageReaderBudget!.committedCents("org-1")).toBeCloseTo(30, 3);
+    slow.refuseLater();
+    expect(await pageReaderWarmGate(slow.provider, ctx, 0)).not.toBe("ready");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(await state.pageReaderBudget!.committedCents("org-1")).toBe(0);
+    expect(pageReaderWarmSnapshot({ orgId: "org-1", runId: "run-1" })!.launches).toBe(0);
+  });
+
+  it("keeps the start-up reservation when the first job after ready was not answered (the VM went away)", async () => {
+    enableVision("10");
+    const slow = slowBootingReader({ lostAfterReady: true });
+    const h = harness();
+    register(slow.provider);
+    const document = pdf(16);
+    const state = runState([document]);
+    expect(await pageReaderWarmGate(slow.provider, { state, logTag: "t", minPages: 1, orgDailyMaxCostCents: 100_000 }, 1)).toBe("warming");
+    slow.becomeReady();
+    const outputs = await extract(h, state, document, range(1, 16));
+    // Every page read exactly once, on the hosted route.
+    expect(byRuntime(outputs, "openai-compatible")).toEqual(range(1, 16));
+    expect(new Set(h.hosted).size).toBe(16);
+    expect(slow.jobs.length).toBeGreaterThan(0);
+    expect(pageReaderWarmSnapshot({ orgId: "org-1", runId: "run-1" })!.reserved).toBe(true);
+  });
+
+  it("a later launch never returns an earlier failed boot's reservation", async () => {
+    const slow = slowBootingReader();
+    const state = runState([]);
+    const ctx = { state, logTag: "t", minPages: 1, orgDailyMaxCostCents: 100_000 };
+    const scope = { orgId: "org-1", runId: "run-1" };
+    await pageReaderWarmGate(slow.provider, ctx, 10);
+    slow.becomeReady();
+    await pageReaderWarmGate(slow.provider, ctx, 0);
+    (await import("../ocr/page-reader-warm.js")).recordPageReaderWarmRouting(scope, "reader", 5);
+    await (await import("../ocr/page-reader-warm.js")).releasePageReaderWarmReservation(scope);
+    slow.failBoot();
+    await pageReaderWarmGate(slow.provider, ctx, 0); // launch 2
+    slow.failBoot(); // launch 2's boot failed after billing
+    await pageReaderWarmGate(slow.provider, ctx, 0); // launch 3
+    // Launch 2's and launch 3's reservations both stand.
+    expect(await state.pageReaderBudget!.committedCents("org-1")).toBeCloseTo(60, 3);
+  });
+
+  it("never sends one run's pages to another run's ready reader", async () => {
+    enableVision("10");
+    const slow = slowBootingReader();
+    slow.becomeReady({ orgId: "org-1", runId: "run-1" });
+    const h = harness();
+    register(slow.provider);
+    const other = pdf(20, "doc-other");
+    const otherOrg = runState([other], { id: "run-1", orgId: "org-2" });
+    const otherRun = runState([other], { id: "run-2" });
+    await extract(h, otherOrg, other, range(1, 20));
+    await extract(h, otherRun, other, range(1, 20));
+    expect(slow.jobs).toHaveLength(0);
+    expect(slow.starts.map((scope) => `${scope.orgId}/${scope.runId}`).sort()).toEqual(["org-1/run-2", "org-2/run-1"]);
   });
 });
 

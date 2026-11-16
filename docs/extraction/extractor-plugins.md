@@ -192,7 +192,8 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
   `warm.start(scope)` begins making a reader ready for that organization and run, within the provider's own caps, and
   returns at once; `warm.status(scope)` answers from memory with `none`, `booting`, `ready` (plus provider-reported
   `bootMs` and `bootCostCents` for telemetry), `failed` or `refused`. Neither may block, throw for a capacity or boot
-  failure, or send a page: a start binds a VM to `scope` exactly as a job's lease would. The host sends jobs only once
+  failure, or send a page: a start binds a VM to `scope` exactly as a job's lease would. `refused` must mean nothing was
+  started or billed (the host then returns the start-up reservation); anything else that ends a start is `failed`. The host sends jobs only once
   `status` reports `ready`, marked `requireReady: true`; the provider must then use an already ready VM of the scope or
   reject the job at once (a `capacity` failure), never boot one for it. The first job served by a warmed reader records
   its boot as provider cost. Optional `warm.minPages`: the reader pages a run should expect before a start-up pays for

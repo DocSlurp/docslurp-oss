@@ -36,6 +36,8 @@ export { VISION_PAGE_READER_METRIC } from "../ocr/page-reader-mode.js";
  * readiness is checked again within a hosted round or two and later pages move to it once it is ready.
  */
 export const VISION_READER_WARMING_HOSTED_CHUNK = 4;
+/** Lanes a document's reader pages are read with under warm start (at most two of them run reader jobs at once). */
+export const VISION_READER_WARMING_LANES = 4;
 
 export type VisionPageReaderRefusal = "off" | "no-provider" | "privacy-mode" | "no-org-scope" | "not-transcription" | "configured-route" | "region-policy" | "cost-capped";
 

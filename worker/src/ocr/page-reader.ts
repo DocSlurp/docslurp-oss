@@ -524,7 +524,8 @@ async function readOcrPagesWarm(outcome: OcrReadOutcome, provider: PageImageRead
   let result = summary;
   if (gate === "ready") {
     result = await readPagesWithProvider(outcome, provider, ctx, { requireReady: true });
-    if (result.jobs > 0) await releasePageReaderWarmReservation(scope);
+    // A job the reader answered ran on the warmed VM and recorded its boot: the start-up reservation goes back.
+    if (result.replaced + result.empty > 0) await releasePageReaderWarmReservation(scope);
     recordPageReaderWarmRouting(scope, "reader", result.replaced);
     // Sent but not read (a failed job, a VM gone between the check and the job): the recogniser's text and escalation.
     recordPageReaderWarmRouting(scope, "hostedUnavailable", candidates - result.replaced);
