@@ -3,7 +3,10 @@ import {
   DEFAULT_FLEET_CAPABILITY_OPTIONS,
   gatedFeatureStates,
   intersectFleetCapabilities,
+  parseDisableList,
+  parseWorkerAdvertisedConfig,
   resolveCreditLeaseConfig,
+  resolveDeploymentProfile,
   type FleetCapabilityOptions,
   type FleetCapabilitySnapshot,
   type FleetPoller,
@@ -90,6 +93,9 @@ export function configuredGatedFlags(env: Env = process.env): Record<string, boo
     WORKER_GROUP_ADJACENT_STAGES: envFlag(env.WORKER_GROUP_LIGHT_STAGES, true) && envFlag(env.WORKER_GROUP_ADJACENT_STAGES, nonProduction),
     WORKER_CREDIT_LEASES: resolveCreditLeaseConfig(env).enabled,
     DOCSLURP_FIRST_PASS: env.DOCSLURP_FIRST_PASS?.trim().toLowerCase() === "on",
+    // Kill switches: the app applies its own lowering whatever the fleet says (switches only lower); the gate reports
+    // whether every worker also enforces them at execution (extraction.config-v1).
+    DOCSLURP_DISABLE: parseDisableList(env.DOCSLURP_DISABLE).tokens.length > 0,
     SEARCH_EARLY_LEXICAL: ["1", "true", "on", "yes"].includes(earlyLexical)
       ? true
       : ["0", "false", "off", "no"].includes(earlyLexical)
@@ -116,10 +122,13 @@ async function readRecordsFromDb(taskQueue: string, recentWindowMs: number, now:
     build_id: string | null;
     protocol: number;
     capabilities: string[] | null;
+    config: unknown;
     age_ms: number | string;
     stopped_age_ms: number | string | null;
   }[]>`
     select instance_id, identity, task_queue, build_id, protocol, capabilities,
+      -- to_jsonb keeps this query valid on a schema without migration 0182 (config reads as null).
+      to_jsonb(worker_capabilities.*) -> 'config' as config,
       extract(epoch from (now() - last_seen_at)) * 1000 as age_ms,
       extract(epoch from (now() - stopped_at)) * 1000 as stopped_age_ms
     from worker_capabilities
@@ -135,6 +144,7 @@ async function readRecordsFromDb(taskQueue: string, recentWindowMs: number, now:
     buildId: row.build_id,
     protocol: Number(row.protocol),
     capabilities: row.capabilities ?? [],
+    config: parseWorkerAdvertisedConfig(row.config),
     lastSeenAt: now - Number(row.age_ms),
     stoppedAt: row.stopped_age_ms === null ? null : now - Number(row.stopped_age_ms),
   }));
@@ -227,7 +237,9 @@ export class WorkerFleetCapabilities {
     for (const state of heldBack) {
       const blocker = snapshot.workers.find((worker) => !worker.capabilities.includes(state.capability));
       this.deps.log(
-        `[worker-fleet] ${state.flag} is configured on but held back on queue=${taskQueue}: ` +
+        (state.flag === "DOCSLURP_DISABLE"
+          ? `[worker-fleet] DOCSLURP_DISABLE applies on the app, but not every worker enforces it yet on queue=${taskQueue} (older workers read only their old variables): `
+          : `[worker-fleet] ${state.flag} is configured on but held back on queue=${taskQueue}: `) +
         (blocker
           ? `worker ${blocker.identity} (build ${blocker.buildId ?? "unknown"}) lacks ${state.capability}${blocker.note ? ` (${blocker.note})` : ""}`
           : snapshot.reason),
@@ -345,7 +357,50 @@ export interface WorkerFleetReport {
   capabilities: WorkerCapability[];
   features: GatedFeatureState[];
   workers: FleetCapabilitySnapshot["workers"];
+  /** Extraction config (release R0): the app's posture beside what each worker advertises. */
+  extractionConfig: ExtractionConfigFleetView;
   checkedAt: string;
+}
+
+export interface ExtractionConfigFleetView {
+  app: { extractionConfig: 1; profile: string | null; disabled: string[]; error?: string };
+  /** True when every counted worker advertises extraction.config-v1, so worker-side switch enforcement is in effect. */
+  fleetEnforcesSwitches: boolean;
+  /** Distinct posture digests among the counted workers (more than one means the fleet runs mixed postures). */
+  workerPostureDigests: string[];
+  /** Workers whose advertised switches differ from the app's (DOCSLURP_DISABLE must be set identically on both). */
+  switchSkew: string[];
+}
+
+/** Pure: the app's posture beside the workers' advertised config. */
+export function extractionConfigFleetView(
+  snapshot: Pick<FleetCapabilitySnapshot, "capabilities" | "workers" | "basis">,
+  env: Env,
+): ExtractionConfigFleetView {
+  let app: ExtractionConfigFleetView["app"];
+  try {
+    const posture = resolveDeploymentProfile(env, { requireProfile: false });
+    app = { extractionConfig: 1, profile: posture.profile, disabled: [...posture.disabled] };
+  } catch (error) {
+    app = { extractionConfig: 1, profile: null, disabled: [], error: errorMessage(error) };
+  }
+  const digests = new Set<string>();
+  const skew: string[] = [];
+  for (const worker of snapshot.workers) {
+    // A row's config counts only while the worker advertises extraction.config-v1: a machine rolled back to an older
+    // build keeps its row (same instance id) and the stale config of the build it replaced.
+    if (!worker.capabilities.includes("extraction.config-v1")) continue;
+    const digest = worker.config?.postureDigest;
+    if (digest) digests.add(digest);
+    const workerSwitches = worker.config?.disabled ? [...worker.config.disabled].sort().join(",") : null;
+    if (workerSwitches !== null && workerSwitches !== [...app.disabled].sort().join(",")) skew.push(worker.identity);
+  }
+  return {
+    app,
+    fleetEnforcesSwitches: snapshot.basis !== "unknown" && snapshot.workers.length > 0 && snapshot.capabilities.includes("extraction.config-v1"),
+    workerPostureDigests: [...digests].sort(),
+    switchSkew: skew.sort(),
+  };
 }
 
 /** Operator view (GET /ops/worker-fleet, /metrics): configured vs effective flags. */
@@ -361,6 +416,7 @@ export async function workerFleetReport(taskQueue?: string, env: Env = process.e
     capabilities: snapshot.capabilities,
     features: gatedFeatureStates(configuredGatedFlags(env), gate ? new Set(snapshot.capabilities) : null),
     workers: snapshot.workers,
+    extractionConfig: extractionConfigFleetView(snapshot, env),
     checkedAt: new Date().toISOString(),
   };
 }

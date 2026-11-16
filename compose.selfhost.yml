@@ -5,6 +5,9 @@ name: docslurp-selfhost
 
 x-server-environment: &server-environment
   NODE_ENV: production
+  # Who runs this deployment (docs/self-host/deployment-profile.md). Required outside development; parsing stays VM-only
+  # under NODE_ENV=production whatever it says. Kill switches go in DOCSLURP_DISABLE (.env.selfhost), set for every service.
+  DOCSLURP_PROFILE: selfhost
   DATABASE_URL: ${DATABASE_URL:?Run node scripts/selfhost-init.mjs first}
   APP_URL: ${SELFHOST_URL:?Set SELFHOST_URL}
   API_URL: ${SELFHOST_URL:?Set SELFHOST_URL}

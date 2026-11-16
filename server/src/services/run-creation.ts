@@ -1,7 +1,7 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import { resolveRunExtraction } from "./extraction-settings.js";
 import {
@@ -164,7 +164,8 @@ function forecastPages(doc: { page_count: number; billing_pages?: number | null;
 
 function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
   const parsed = pageRouterModeSchema.safeParse(process.env.PAGE_ROUTER_MODE?.trim().toLowerCase());
-  return withPlatformPageRouterMode(pipeline, parsed.success ? parsed.data : "off");
+  // DOCSLURP_DISABLE=router (or `ai`) lowers the platform mode to off (switches only lower).
+  return withPlatformPageRouterMode(pipeline, parsed.success && !switchDisabled(process.env, "router") ? parsed.data : "off");
 }
 
 const SKIP_RUN_BUDGET_GUARDS_IN_DEV =

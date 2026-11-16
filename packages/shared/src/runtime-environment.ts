@@ -6,7 +6,9 @@
  * ASCII letters only. Nothing else is folded: JavaScript's `trim()` also strips Unicode spaces such as U+00A0 and
  * U+FEFF, which a shell does not, so the two layers would disagree about the same value. After normalizing, NODE_ENV
  * `development`, `test` or empty is development; any other value (a typo, `staging`, `preview`, a value padded with a
- * Unicode space) is not. A service profile (any DOCSLURP_SERVICE_PROFILE containing `service`) is never development.
+ * Unicode space) is not. A service profile (any DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE containing `service`) is
+ * never development. No profile lowers this floor: `DOCSLURP_PROFILE=dev` or `selfhost` never makes a non-development
+ * NODE_ENV development (deployment-profile.ts refuses `dev` outside development at startup).
  */
 const ASCII_EDGE_WHITESPACE = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g;
 const DEVELOPMENT_NODE_ENVS = new Set(["", "development", "test"]);
@@ -19,7 +21,8 @@ export function normalizeEnvSetting(value: string | undefined | null): string {
 /** Whether one environment source is development under the rule above. */
 export function isDevelopmentEnvSource(source: Record<string, string | undefined>): boolean {
   return DEVELOPMENT_NODE_ENVS.has(normalizeEnvSetting(source.NODE_ENV))
-    && !normalizeEnvSetting(source.DOCSLURP_SERVICE_PROFILE).includes("service");
+    && !normalizeEnvSetting(source.DOCSLURP_SERVICE_PROFILE).includes("service")
+    && !normalizeEnvSetting(source.DOCSLURP_PROFILE).includes("service");
 }
 
 /**

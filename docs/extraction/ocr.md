@@ -22,8 +22,8 @@ to a weaker boundary or to another reader.
 
 | Mode | Default | Where OCR runs | Without what it needs |
 | --- | --- | --- | --- |
-| `vm` | when `DOCSLURP_SERVICE_PROFILE=service` | An extractor plugin's `sandboxedOcr` provider, one fresh VM or microVM per job ([Extractor plugins](extractor-plugins.md#ocr-provider-sandboxedocr)). | No provider: the worker refuses to start. A failed VM read fails the page. |
-| `local` | never | `docslurp_ocr.py` under the worker's parser sandbox (bubblewrap). Customer-owned self-hosting only. | Refused at startup unless `DOCSLURP_SERVICE_PROFILE=self-hosted`. A missing venv or model fails the read. |
+| `vm` | when `DOCSLURP_PROFILE=service` | An extractor plugin's `sandboxedOcr` provider, one fresh VM or microVM per job ([Extractor plugins](extractor-plugins.md#ocr-provider-sandboxedocr)). | No provider: the worker refuses to start. A failed VM read fails the page. |
+| `local` | never | `docslurp_ocr.py` under the worker's parser sandbox (bubblewrap). Customer-owned self-hosting only. | Refused at startup unless `DOCSLURP_PROFILE=selfhost`. A missing venv or model fails the read. |
 | `hosted` | never | A hosted vision model reads the stored image bytes as uploaded (PNG, JPEG or WebP, up to 20 MiB). | Anything that would need host decoding, rasterising or resizing (PDF pages, TIFF, other formats) is refused and the page fails. |
 | `off` | outside production | Nowhere. | Pages that need OCR get no OCR text. |
 
@@ -32,7 +32,7 @@ boundary=vm`.
 
 ### Service and self-hosted profiles
 
-`DOCSLURP_SERVICE_PROFILE` says who owns the files and the machine.
+`DOCSLURP_PROFILE` (`service`, `selfhost` or `dev`; [Deployment profile](../self-host/deployment-profile.md)) says who owns the files and the machine. The deprecated `DOCSLURP_SERVICE_PROFILE` (`service`, `self-hosted`) is still read in this release.
 
 - `service`: the operator processes other people's files. OCR of those files must run behind a VM boundary, so only
   `vm`, `hosted` and `off` start. `local` is refused at startup.
@@ -45,7 +45,7 @@ providers](../self-host/sandbox-providers.md)). That is why `local` needs the cu
 To opt into local OCR on a self-hosted full worker, set:
 
 ```sh
-DOCSLURP_SERVICE_PROFILE=self-hosted
+DOCSLURP_PROFILE=selfhost
 DOCSLURP_OCR_MODE=local
 ```
 
@@ -58,8 +58,8 @@ self-test whenever the runtime is present, and fails when `local` is set without
 ## What fails closed
 
 - `vm` without a provider, or with one whose `assertConfigured()` throws: the worker does not start.
-- `local` under `DOCSLURP_SERVICE_PROFILE=service` or with the profile unset: the worker does not start.
-- A `sandboxedOcr` provider plugin loaded with `DOCSLURP_SERVICE_PROFILE` unset, or with `DOCSLURP_OCR_MODE=local` under
+- `local` under `DOCSLURP_PROFILE=service` or with the profile unset: the worker does not start.
+- A `sandboxedOcr` provider plugin loaded with `DOCSLURP_PROFILE` unset, or with `DOCSLURP_OCR_MODE=local` under
   any profile: the worker does not start, and the local runner refuses every job.
 - A refused or invalid OCR read (a CLI refusal, a model-pin mismatch, hostile input, a result that fails validation):
   the page fails, without another read of the same bytes, and is recorded as such (`ocr-failed-pages`). Vision page
@@ -354,8 +354,8 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DOCSLURP_OCR_MODE` | `vm` under `DOCSLURP_SERVICE_PROFILE=service`, else `off` | `vm`, `local`, `hosted` or `off`. |
-| `DOCSLURP_SERVICE_PROFILE` | unset | `service` or `self-hosted`. `local` needs `self-hosted`. |
+| `DOCSLURP_OCR_MODE` | `vm` under `DOCSLURP_PROFILE=service`, else `off` | `vm`, `local`, `hosted` or `off`. |
+| `DOCSLURP_PROFILE` | unset | `service`, `selfhost` or `dev` (deprecated: `DOCSLURP_SERVICE_PROFILE` `service` / `self-hosted`). `local` needs `selfhost`. `DOCSLURP_DISABLE=ocr` turns OCR off. |
 | `DOCSLURP_OCR_PYTHON` | `/opt/docslurp/ocr-venv/bin/python3` | OCR venv interpreter (`local`). |
 | `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-models` | Directory holding the pinned models (`local`). |
 | `DOCSLURP_OCR_ESCALATION` | off | `on` to enable escalation reads. |

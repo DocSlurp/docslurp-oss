@@ -82,10 +82,10 @@ unless you say so. Pick one:
 - **A VM:** load an extractor plugin with a sandboxed PDF provider (`DOCSLURP_EXTRACTOR_PLUGINS`) and set
   `DOCSLURP_PDF_MODE=vm`. Doppler runs in a fresh, offline VM per document. Use this whenever the files are not yours.
 - **This host, for files you own:** if you own the files you ingest and the machine that runs the worker, add to
-  `.env.selfhost`:
+  `.env.selfhost` (`compose.selfhost.yml` already sets `DOCSLURP_PROFILE=selfhost`; see
+  [Deployment profile](deployment-profile.md)):
 
   ```sh
-  DOCSLURP_SERVICE_PROFILE=self-hosted
   DOCSLURP_PDF_MODE=local
   ```
 
@@ -94,7 +94,7 @@ unless you say so. Pick one:
 
 With neither, the worker starts and processes other formats, logs `[pdf] mode=off` at startup, and fails each PDF with
 `PDF extraction is not configured`. It never falls back to another parser on the host. The worker refuses to start with
-`DOCSLURP_PDF_MODE=local` outside `DOCSLURP_SERVICE_PROFILE=self-hosted`, beside a VM selection, or without Doppler.
+`DOCSLURP_PDF_MODE=local` outside `DOCSLURP_PROFILE=selfhost`, beside a VM selection, or without Doppler.
 
 ### OCR on the full worker
 
@@ -104,7 +104,6 @@ you choose it. If you own the files you ingest and the machine that runs the wor
 add to `.env.selfhost`:
 
 ```sh
-DOCSLURP_SERVICE_PROFILE=self-hosted
 DOCSLURP_OCR_MODE=local
 ```
 

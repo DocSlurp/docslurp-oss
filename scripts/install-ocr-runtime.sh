@@ -53,7 +53,7 @@ fi
 
 cat <<EOF
 [ocr-runtime] ready. To use local OCR (customer-owned self-hosting only), set:
-  DOCSLURP_SERVICE_PROFILE=self-hosted
+  DOCSLURP_PROFILE=selfhost
   DOCSLURP_OCR_MODE=local
   DOCSLURP_OCR_PYTHON=${VENV}/bin/python3
   DOCSLURP_OCR_MODEL_DIR=${MODELS}

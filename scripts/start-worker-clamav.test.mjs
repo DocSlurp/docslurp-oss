@@ -356,6 +356,8 @@ for (const name of unsafeOverrides)
     ["NODE_ENV=production", { NODE_ENV: "production" }],
     ["NODE_ENV=staging", { NODE_ENV: "staging" }],
     ["the service profile", { NODE_ENV: "", DOCSLURP_SERVICE_PROFILE: "service" }],
+    ["DOCSLURP_PROFILE=service", { NODE_ENV: "", DOCSLURP_PROFILE: "service" }],
+    ["DOCSLURP_PROFILE=dev under NODE_ENV=production", { NODE_ENV: "production", DOCSLURP_PROFILE: "dev" }],
   ])
     for (const value of ["true", "1", " TRUE ", "ture"])
       test(`${name}=${JSON.stringify(value)} under ${label} refuses startup`, async (t) => {
@@ -408,6 +410,8 @@ const deployedEnvironments = [
   ["NODE_ENV=<BOM>", { NODE_ENV: "﻿" }],
   ["NODE_ENV=dev elopment", { NODE_ENV: "dev elopment" }],
   ["the service profile", { NODE_ENV: "", DOCSLURP_SERVICE_PROFILE: "service" }],
+  ["DOCSLURP_PROFILE=service", { NODE_ENV: "development", DOCSLURP_PROFILE: " Service " }],
+  ["DOCSLURP_PROFILE=selfhost under NODE_ENV=staging", { NODE_ENV: "staging", DOCSLURP_PROFILE: "selfhost" }],
 ];
 for (const [name, value] of [
   ["QUARANTINE_ENABLED", "false"],

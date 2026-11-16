@@ -104,7 +104,7 @@ describe("customer-owned local mode (DOCSLURP_PDF_MODE=local)", () => {
   it("starts only for customer-owned execution, with Doppler installed, and never beside a VM", () => {
     const self = { DOCSLURP_PDF_MODE: "local", DOCSLURP_SERVICE_PROFILE: "self-hosted" };
     expect(() => assertExtractorPluginConfiguration(self, doppler)).not.toThrow();
-    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_MODE: "local" }, doppler)).toThrow(/customer-owned execution: it needs DOCSLURP_SERVICE_PROFILE=self-hosted/);
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_MODE: "local" }, doppler)).toThrow(/customer-owned execution: it needs DOCSLURP_PROFILE=selfhost/);
     expect(() => assertExtractorPluginConfiguration(self, { dopplerInstalled: () => false })).toThrow(/needs Doppler's pdftomarkdown/);
     // The real check (no stub): a bin dir with the converter but without pdfpagecount, or without prlimit on PATH, refuses.
     const bin = mkdtempSync(path.join(process.env.TMPDIR || tmpdir(), "doppler-bin-"));

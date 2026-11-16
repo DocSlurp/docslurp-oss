@@ -1,3 +1,4 @@
+import { disabledSwitches, type DisableToken } from "./deployment-profile.js";
 import { z } from "zod";
 import {
   upgradeStoredPipelineChartExport,
@@ -297,8 +298,11 @@ export function assertSupportedConfigVersion(snapshot: unknown): void {
 
 // ---- Operator policy (R0 reads today's env; phase 3 moves it to the operator config file) ------------------------
 
-/** Kill-switch tokens (`DOCSLURP_DISABLE`, phase 2) the resolution honours. R0 derives the chart ones from today's env. */
-export type ExtractionSwitch = "ai" | "charts" | "charts-ai" | "figures";
+/**
+ * Kill-switch tokens (`DOCSLURP_DISABLE`, deployment-profile.ts) the resolution honours. Today's chart env
+ * (`DOCSLURP_CHART_EXPORT`) still lowers them too: the lower of the two applies.
+ */
+export type ExtractionSwitch = DisableToken;
 
 export type ExtractionPolicy = {
   /** `charts.originDefaults`: the visuals a run of each origin gets on a project with none. */
@@ -319,9 +323,9 @@ export function chartsExplicitFreeSetting(env: Env): "auto" | "on" | "off" {
   return chartExportFreeExplicitAllowed(env) ? "on" : "off";
 }
 
-/** The extraction policy this deployment runs under, from today's env (`DOCSLURP_CHART_EXPORT*`). */
+/** The extraction policy this deployment runs under: `DOCSLURP_DISABLE` plus today's chart env (`DOCSLURP_CHART_EXPORT*`). */
 export function extractionPolicyFromEnv(env: Env): ExtractionPolicy {
-  const disabled = new Set<ExtractionSwitch>();
+  const disabled = new Set<ExtractionSwitch>(disabledSwitches(env));
   const chartSwitch = chartExportSwitch(env);
   if (chartSwitch === "off") disabled.add("charts");
   if (chartSwitch !== "on") disabled.add("charts-ai");

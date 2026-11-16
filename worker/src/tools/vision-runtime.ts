@@ -1,4 +1,5 @@
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
+import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed, AutomaticCallRefusedError, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
@@ -825,6 +826,7 @@ export async function runVisionRequest(args: {
     },
     async (): Promise<VisionRequestResult> => {
       if (args.runtime === "local-cli") {
+        assertLocalCliReaderAllowed();
         const plan = await args.runner.florence2(
           args.imagePath,
           args.outputPath,

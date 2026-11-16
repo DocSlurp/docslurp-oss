@@ -2,7 +2,7 @@
  * Page reader configuration (page-reader.ts): the operator flag, the per-document page budget and the startup check.
  * Kept apart from the reader so the OCR mode check (mode.ts) can run it without importing the pipeline.
  */
-import { isPrivateModelUri, PRIVATE_MODEL_PROVIDER, privacyModeAllowsHosted, resolveProviderTarget, ROUTE_TIERS, type RouteTier, selectOcrRoute, selectVisionTranscriptionRoute } from "@docslurp/shared";
+import { isPrivateModelUri, PRIVATE_MODEL_PROVIDER, privacyModeAllowsHosted, resolveProviderTarget, ROUTE_TIERS, type RouteTier, selectOcrRoute, selectVisionTranscriptionRoute, switchDisabled } from "@docslurp/shared";
 
 import { pageImageReaderProvider, type PageImageReaderProvider } from "../extractors/plugins.js";
 import type { OcrMode } from "./mode.js";
@@ -24,10 +24,13 @@ export const OCR_PAGE_READER_MAX_PAGES_LIMIT = 20_000;
 export function ocrPageReaderMode(env: NodeJS.ProcessEnv = process.env): OcrPageReaderMode {
   const raw = env.DOCSLURP_OCR_PAGE_READER?.trim().toLowerCase();
   if (!raw) return "off";
-  if ((ROUTE_TIERS as readonly string[]).includes(raw)) return ocrPageReaderRoute(raw as RouteTier, env).pageReader;
-  if (!(OCR_PAGE_READER_MODES as readonly string[]).includes(raw)) {
+  const valid = (ROUTE_TIERS as readonly string[]).includes(raw) || (OCR_PAGE_READER_MODES as readonly string[]).includes(raw);
+  if (!valid) {
     throw new Error(`DOCSLURP_OCR_PAGE_READER must be one of ${[...OCR_PAGE_READER_MODES, ...ROUTE_TIERS].join(", ")}; got ${JSON.stringify(raw)}`);
   }
+  // DOCSLURP_DISABLE: `page-reader` (or `ai`) turns the reader off; `ocr` leaves it no OCR page images to read.
+  if (switchDisabled(env, "page-reader") || switchDisabled(env, "ocr")) return "off";
+  if ((ROUTE_TIERS as readonly string[]).includes(raw)) return ocrPageReaderRoute(raw as RouteTier, env).pageReader;
   return raw as OcrPageReaderMode;
 }
 
@@ -35,7 +38,7 @@ export function ocrPageReaderMode(env: NodeJS.ProcessEnv = process.env): OcrPage
 export function ocrPageReaderRoute(tier: RouteTier, env: NodeJS.ProcessEnv = process.env) {
   const provider = pageImageReaderProvider();
   // DOCSLURP_OCR_ESCALATION, read as hosted-reader.ts ocrEscalationEnabled does (not imported: this module stays free of the pipeline).
-  const escalation = ["on", "1", "true"].includes(env.DOCSLURP_OCR_ESCALATION?.trim().toLowerCase() ?? "");
+  const escalation = ["on", "1", "true"].includes(env.DOCSLURP_OCR_ESCALATION?.trim().toLowerCase() ?? "") && !switchDisabled(env, "ai-escalation");
   return selectOcrRoute(tier, {
     pageReader: provider ? { evalScore: provider.evalScore ?? null } : null,
     hostedEscalation: escalation,
@@ -121,10 +124,13 @@ export const VISION_PAGE_READER_METRIC = "vision-page-reader";
 export function visionPageReaderMode(env: NodeJS.ProcessEnv = process.env): VisionPageReaderMode {
   const raw = env.DOCSLURP_VISION_PAGE_READER?.trim().toLowerCase();
   if (!raw) return "off";
-  if ((ROUTE_TIERS as readonly string[]).includes(raw)) return visionPageReaderRoute(raw as RouteTier).pageReader ? "all" : "off";
-  if (!(VISION_PAGE_READER_MODES as readonly string[]).includes(raw)) {
+  const valid = (ROUTE_TIERS as readonly string[]).includes(raw) || (VISION_PAGE_READER_MODES as readonly string[]).includes(raw);
+  if (!valid) {
     throw new Error(`DOCSLURP_VISION_PAGE_READER must be one of ${[...VISION_PAGE_READER_MODES, ...ROUTE_TIERS].join(", ")}; got ${JSON.stringify(raw)}`);
   }
+  // DOCSLURP_DISABLE=page-reader (or `ai`) turns the reader off in its vision-transcription mode too.
+  if (switchDisabled(env, "page-reader")) return "off";
+  if ((ROUTE_TIERS as readonly string[]).includes(raw)) return visionPageReaderRoute(raw as RouteTier).pageReader ? "all" : "off";
   return raw as VisionPageReaderMode;
 }
 

@@ -33,7 +33,8 @@ CLAMD_BIN="${DOCSLURP_CLAMD_BIN:-}"
 # One rule for "development" in this script and the worker (packages/shared/src/runtime-environment.ts; a parity test
 # in worker/src/lib/unsafe-overrides.test.ts runs both over odd values): trim ASCII whitespace from both ends and
 # lower-case ASCII letters only, then NODE_ENV development, test or empty is development and any other value is not.
-# A DOCSLURP_SERVICE_PROFILE containing "service" is never development.
+# A DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE containing "service" is never development; no other profile value
+# (dev, selfhost) makes a non-development NODE_ENV development (the worker refuses dev outside development at startup).
 normalize_env_setting() {
   local LC_ALL=C
   local value="$1" ws=$' \t\n\v\f\r'
@@ -43,10 +44,12 @@ normalize_env_setting() {
 }
 
 is_development_env() {
-  local node_env profile
+  local node_env profile legacy_profile
   node_env="$(normalize_env_setting "${NODE_ENV:-}")"
-  profile="$(normalize_env_setting "${DOCSLURP_SERVICE_PROFILE:-}")"
-  [[ "${profile}" != *service* ]] && [[ -z "${node_env}" || "${node_env}" == "development" || "${node_env}" == "test" ]]
+  profile="$(normalize_env_setting "${DOCSLURP_PROFILE:-}")"
+  legacy_profile="$(normalize_env_setting "${DOCSLURP_SERVICE_PROFILE:-}")"
+  [[ "${profile}" != *service* ]] && [[ "${legacy_profile}" != *service* ]] \
+    && [[ -z "${node_env}" || "${node_env}" == "development" || "${node_env}" == "test" ]]
 }
 
 if [[ "${1:-}" == "--environment-class" ]]; then

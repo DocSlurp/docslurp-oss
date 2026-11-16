@@ -8,7 +8,7 @@
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
  * missing VM: escalation only follows a VM (or self-hosted) read, and hosted mode is its own operator setting.
  */
-import { admitAutomaticCall, isAutomaticSelectionDenied, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
+import { admitAutomaticCall, isAutomaticSelectionDenied, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute, switchDisabled } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
@@ -74,6 +74,8 @@ export interface HostedOcrReader {
 
 /** Whether escalation runs (`DOCSLURP_OCR_ESCALATION=on`): an explicit operator opt-in, off by default. */
 export function ocrEscalationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  // DOCSLURP_DISABLE=ai-escalation (or `ai`) turns escalation off whatever the flag says.
+  if (switchDisabled(env, "ai-escalation")) return false;
   const raw = env.DOCSLURP_OCR_ESCALATION?.trim().toLowerCase();
   return raw === "on" || raw === "1" || raw === "true";
 }
