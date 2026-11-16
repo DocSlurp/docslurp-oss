@@ -14,7 +14,7 @@ import type { executeVisionRuntime, VisionExecutionResult } from "../../tools/vi
 import type { OcrPageRead, OcrReadOutcome } from "../engine.js";
 import { escalateOcrPages } from "../escalation.js";
 import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped, ocrEscalationModel } from "../hosted-reader.js";
-import { isAutomaticSelectionDenied } from "@docslurp/shared";
+import { installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests } from "@docslurp/shared";
 import { ocrDocument } from "../read-document.js";
 
 const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
@@ -265,13 +265,35 @@ describe("DOCSLURP_OCR_MODE=hosted", () => {
 });
 
 describe("OCR escalation model override", () => {
-  it("never escalates to a model that is never selected automatically (DeepSeek V4.1 Flash, any build or route)", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("takes any non-denylisted override, DeepSeek V4.1 Flash included: its reads pass the margin gate instead", () => {
     expect(isAutomaticSelectionDenied(DEFAULT_OCR_ESCALATION_MODEL)).toBe(false);
-    for (const model of ["llm://openrouter/deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash", "llm://deepinfra/deepseek-ai/DeepSeek-V4.1-Flash"]) {
-      expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: model })).toBe(DEFAULT_OCR_ESCALATION_MODEL);
+    for (const model of ["llm://openrouter/deepseek/deepseek-v4.1-flash-1017", "llm://openrouter/openai/gpt-6-luna"]) {
+      expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: model })).toBe(model);
     }
-    expect(ocrEscalationModel({ DOCSLURP_OCR_ESCALATION_MODEL: "llm://openrouter/openai/gpt-6-luna" })).toBe("llm://openrouter/openai/gpt-6-luna");
-    warn.mockRestore();
+  });
+
+  it("skips an escalation read the margin gate refuses, before anything is sent, and keeps the recogniser's text", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // A billed value the escalation route's list price cannot cover by the minimum margin.
+    installTestPricing({ automaticCallValueUsd: () => 0.000001 });
+    try {
+      const state = runState();
+      const execute = stubExecute();
+      const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+      const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+      const summary = await escalateOcrPages(outcome, reader, "doc-1");
+      expect(summary).toMatchObject({ attempted: 1, replaced: 0, skipped: { margin: 1 } });
+      expect(execute).not.toHaveBeenCalled();
+      expect(outcome.pages[0]!.text).toBe("b1urry");
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] skipped label=ocr-escalation .*reason="below the minimum margin"/));
+      // A value that covers it: the read goes ahead.
+      installTestPricing({ automaticCallValueUsd: () => 1 });
+      const allowed = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+      await escalateOcrPages(allowed, createHostedOcrReader({ state: runState(), cfg: CFG, runner: {} as CommandRunner, env: ON, execute }), "doc-1");
+      expect(execute).toHaveBeenCalledTimes(1);
+    } finally {
+      resetPricingProviderForTests();
+      warn.mockRestore();
+    }
   });
 });

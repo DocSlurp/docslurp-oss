@@ -103,8 +103,8 @@ individual text stages no longer choose a fixed model.
 
 The default vision route is `llm://openrouter/openai/gpt-6-luna` (profile
 `good-fast-hosted`, since 2026-11-13), tuned as described below. DeepSeek V4.1 Flash
-is never selected automatically ([below](#models-never-selected-automatically)), so it is no
-longer the default; it stays in the catalog as an explicit choice. On the 2026-10-22
+is no longer the default; it stays in the catalog as an explicit choice, and automatic
+calls on it pass the margin gate ([below](#automatic-calls-and-the-margin-gate)). On the 2026-10-22
 vision holdout Luna had no significant deficit against DeepSeek V4.1 Flash 1017 on
 content, reading order or math (math 0.994 against 0.982), a significant tolerant-table
 deficit (-0.032), and a p50 of 8.1 s against 2.5 s. It is the cheapest allowed catalog
@@ -245,16 +245,37 @@ defaults for actual extraction.
 the decision chain, executors and the Extract flat-tier OCR routes. It does not touch proprietary hosted APIs; those
 stay under the privacy modes below. Classes, sources and the full table are in `docs/page-router.md` ("Licence classes").
 
-## Models never selected automatically
+## Automatic calls and the margin gate
 
-Some models are never picked by the system on its own: `NO_AUTOMATIC_SELECTION_MODEL_FAMILIES` in
-`packages/shared/src/automatic-model-selection.ts` (today DeepSeek V4.1 Flash, every build, variant, provider suffix and
-spelling). Such a model is never a chat failover, Speed boost swap, route-tier pool option, page-router target, chart
-generator candidate, OCR escalation model or restricted-region fallback; each of those lists is checked when it is
-defined or configured, and a configured value naming one is refused. Built-in defaults are checked too (the default
-vision model, the open-weights profile). A model a caller or operator names explicitly is not affected: a project's
-chat or vision model, and the operator's `DOCSLURP_VISION_MODEL_URI`. Provider aliases that do not name the family
-(for example `deepseek/deepseek-chat`) are not caught by the check.
+A call the system makes on its own choice (a vision fallback, OCR escalation, a chart generator, a page-router target, a
+route-tier pick, a chat failover or a Speed boost swap) is margin-checked at the moment it would be made
+(`packages/shared/src/automatic-call-margin.ts`):
+
+- **Worst-case cost:** the call kind's planning tokens (page transcription 1,500 in / 800 out, chart read 3,300 / 1,400,
+  chat answer 8,000 / 600) times the highest price the route can reach now: each OpenRouter endpoint the route allows,
+  at its listed time-of-day price, from OpenRouter's public per-endpoint listing, read at most
+  `DOCSLURP_AUTOMATIC_PRICE_MAX_AGE_MINUTES` (default 60) ago. A request's enforced `max_price` bounds it (OpenRouter
+  never routes above it). Verified host schedules are a floor: DeepSeek's own endpoint is priced at $0.30 / $1.20 per
+  1M tokens at peak (01:00-04:00 and 06:00-10:00 UTC, Monday to Friday) and $0.15 / $0.60 otherwise
+  ([DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing), checked 2026-11-15; Chinese public holidays,
+  which DeepSeek prices off-peak, are treated as peak).
+- **Billed value:** what the call bills, from the pricing provider (`automaticCallValueUsd`). The open default bills
+  nothing per call and checks nothing.
+- **Rule:** allowed when billed value / worst-case cost is at least `DOCSLURP_AUTOMATIC_MIN_MARGIN` (default 1.3). A
+  refused candidate is skipped (`[automatic-margin] skipped ... reason=...`) and the next one is tried. An unknown or
+  stale price, or a deployment that must price but whose provider states no value, refuses the call (fail closed).
+  Operator private routes (`llm://private/...`) are the operator's own cost and are not checked.
+- **After the call:** the provider-reported cost is compared with the estimate; a call that cost more than it billed
+  logs `[automatic-margin] overrun ... loss=true`.
+
+A model the caller or an operator names explicitly (a project's chat or vision model, a platform admin's tier mapping,
+`DOCSLURP_VISION_MODEL_URI`) is not margin-checked; it keeps the call-time policy (no Pro/Ultra, no output price at or
+above $50 per 1M tokens).
+
+`NO_AUTOMATIC_SELECTION_MODEL_FAMILIES` (`packages/shared/src/automatic-model-selection.ts`) remains for a model that
+must never be picked automatically at any price; it is empty. DeepSeek V4.1 Flash was on it from 2026-11-13 to
+2026-11-15. A listed family is matched across builds, variants, provider suffixes and spellings; provider aliases that do
+not name the family (for example `deepseek/deepseek-chat`) are not caught.
 
 Chat failover: a failed answer retries once, on the first of GPT-6 Luna, Claude Haiku 5.5 and GLM 5.3 Flash that is not
 the project's own model (`PROJECT_CHAT_FAILOVER_MODELS`): Luna, or Haiku for a project that already answers with Luna.

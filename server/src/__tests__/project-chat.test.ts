@@ -99,7 +99,7 @@ vi.mock("../lib/ai.js", () => ({
   generateOpenRouterDocumentText: generateAnthropicDocumentText,
 }));
 
-const { buildFallbackAnswer, buildModelFailoverOrder, PROJECT_CHAT_FAILOVER_MODELS, buildNativeDocumentInputs,
+const { admittedChatFailover, buildFallbackAnswer, buildModelFailoverOrder, PROJECT_CHAT_FAILOVER_MODELS, projectChatFailoverCandidates, buildNativeDocumentInputs,
   loadRetrievedDocumentSummaries, buildSystemInstructions, chatProject: chatProjectWithScope } = await import(
   "../services/project-chat.js"
 );
@@ -158,6 +158,34 @@ describe("chat failover order", () => {
       const order = buildModelFailoverOrder(model);
       expect(order.length).toBeLessThanOrEqual(2);
       expect(order.slice(1).some((entry) => /deepseek-v4\.1-flash/.test(entry))).toBe(false);
+    }
+  });
+
+  it("admits a failover candidate only when it keeps the automatic-call margin at its current price, else the next", async () => {
+    const shared = await import("@docslurp/shared");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const candidates = projectChatFailoverCandidates("z-ai/glm-5.3-flash");
+    expect(candidates).toEqual(["openai/gpt-6-luna", "anthropic/claude-haiku-5.5"]);
+    try {
+      // Nothing billed (open pricing): the first candidate, no price needed.
+      expect((await admittedChatFailover(candidates))?.model).toBe("openai/gpt-6-luna");
+      shared.installTestPricing({ automaticCallValueUsd: ({ model }) => (model === "openai/gpt-6-luna" ? 1e-9 : 0.01) });
+      // No fresh price listing: every candidate fails closed.
+      shared.setEndpointPricesForTests(null);
+      expect(await admittedChatFailover(candidates)).toBeNull();
+      shared.setEndpointPricesForTests({
+        "openai/gpt-6-luna": { endpoints: [{ endpoint: "openai", inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 }] },
+        "anthropic/claude-haiku-5.5": { endpoints: [{ endpoint: "anthropic", inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 }] },
+      });
+      // Luna misses the margin: skipped (logged); Haiku answers.
+      expect((await admittedChatFailover(candidates))?.model).toBe("anthropic/claude-haiku-5.5");
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] skipped label=chat failover kind=chat-answer model=openai\/gpt-6-luna/));
+    } finally {
+      shared.resetPricingProviderForTests();
+      shared.setEndpointPricesForTests(null);
+      warn.mockRestore();
+      log.mockRestore();
     }
   });
 });
