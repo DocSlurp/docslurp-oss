@@ -106,6 +106,20 @@ export function indexConfigHash(config: IndexConfig): string {
   ])).slice(0, 32);
 }
 
+/**
+ * The identity documents were stamped with before normalization joined it. Read-only: it lets a backfill prove which
+ * stored run configuration produced a legacy `documents.index_config_hash`. New documents never carry it.
+ */
+export function legacyIndexConfigHash(config: IndexConfig): string {
+  const { chunking } = config;
+  return sha256Hex(JSON.stringify([
+    config.embeddingModel,
+    config.dims,
+    [chunking.chunkOverlap, chunking.contextualChunkPreambles, chunking.lateChunking, chunking.lateChunkingWindow],
+    [...config.vectorBackends].sort(),
+  ])).slice(0, 32);
+}
+
 type FieldImpact = ConfigChangeKind | ((before: PipelineFeatures, after: PipelineFeatures, ctx?: ConfigChangeContext) => ConfigChangeKind);
 
 /** A feature switched on adds value to old documents; switched off only affects future ones. */

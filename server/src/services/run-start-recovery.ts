@@ -14,6 +14,7 @@ import { isMaintenanceSweepEnabled } from "./maintenance-sweeper.js";
 import { sweepInterruptedRunCreations } from "./run-creation.js";
 import { resumeBlockedRuns } from "./blocked-runs.js";
 import { pruneDrainedIndexConfigs } from "../search/index-serving.js";
+import { backfillLegacyIndexNormalizationOnce } from "../search/legacy-index-normalization.js";
 import { runLifecycle, type RunLifecycle } from "./run-lifecycle.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
 
@@ -232,6 +233,8 @@ export function startRunStartRecovery(): void {
     await warmTemporalClient().catch(logSweepError("temporal-warm"));
     kick();
     sweepStaleQueuedRuns().catch(logSweepError("stale-queued-run-sweep"));
+    // Indexes built before normalization joined their identity: record it where the run snapshots prove it.
+    withBackgroundSpan("api.index-normalization-backfill", () => backfillLegacyIndexNormalizationOnce()).catch(logSweepError("index-normalization-backfill"));
   })();
 
   if (config.intervalMs === 0 || timer) return;

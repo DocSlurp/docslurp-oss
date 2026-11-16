@@ -26,6 +26,7 @@ import {
   citationLocatorSchema,
   indexConfigHash,
   indexConfigOf,
+  type IndexConfig,
   type PipelineFeatures,
   MAX_LOCATOR_BOXES,
   resolveEmbeddingRoute,
@@ -1221,6 +1222,13 @@ export function nativeLexicalQuerySupported(query: string): boolean {
   return !/"[^"]*[^"\s][^"]*"/.test(query) && !/(?:^|\s)-[\p{L}\p{N}"]/u.test(query);
 }
 
+/** Two index configs that build identical rows in one table, differing at most in vector normalization. */
+function sameExceptNormalization(a: IndexConfig, b: IndexConfig): boolean {
+  const rows = (config: IndexConfig) => JSON.stringify([config.embeddingModel, config.dims, config.chunking.chunkOverlap,
+    config.chunking.contextualChunkPreambles, config.chunking.lateChunking, config.chunking.lateChunkingWindow, [...config.vectorBackends].sort()]);
+  return rows(a) === rows(b);
+}
+
 /**
  * Keyword search as BM25 top-k from LanceDB's FTS index over the eligible
  * documents, exact over the whole scope (no candidate sample, unlike the
@@ -1246,8 +1254,11 @@ async function nativeTextSearch(
     countSearchEvent("nativeLexicalOperators");
     return null;
   }
-  const currentHash = indexConfigHash(indexConfigOf(context.pipeline));
-  if (Object.keys(context.indexConfigs).some((hash) => hash !== currentHash)) return null;
+  const current = indexConfigOf(context.pipeline);
+  const currentHash = indexConfigHash(current);
+  // Lexical rows do not depend on normalization: an entry that differs only in it (a legacy identity whose
+  // normalization was recorded later) shares this table and chunking, so native BM25 still covers it.
+  if (Object.entries(context.indexConfigs).some(([hash, config]) => hash !== currentHash && !sameExceptNormalization(config, current))) return null;
   const embedding = resolveEmbeddingRoute(context.pipeline.embedding);
   const limit = options.limit ?? 20;
   const set = await loadEligibleDocuments({ projectId: context.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions });
