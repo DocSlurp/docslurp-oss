@@ -147,6 +147,13 @@ export const projectSchema = z.object({
    * narrows them per project).
    */
   visualsDefaults: z.object({ app: visualsLevelSchema, machine: visualsLevelSchema, available: z.array(visualsLevelSchema) }).optional(),
+  /**
+   * The `quality` and `visuals` this caller may ask for on an upload, URL ingest or extract into this project, from the
+   * caller's origin: a `smart` or `charts-ai` raise above the project's own needs an editor (or an editor's key with
+   * `pipeline:billed-features`), and privacy, the vision profile's locality and the deployment's switches remove rungs.
+   * Present on project reads for the caller; clients offer only these. The server still checks every request.
+   */
+  extractionChoices: z.object({ quality: z.array(qualityLevelSchema), visuals: z.array(visualsLevelSchema) }).optional(),
   /** Retained versions per document for this project; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   /**

@@ -190,6 +190,51 @@ describe("editor-only refusals answer 403 editor_required (R3)", () => {
   });
 });
 
+describe("project reads carry this caller's extractionChoices (#506)", () => {
+  type Choices = { quality: string[]; visuals: string[] };
+  const listChoices = async (caller: Caller) => ((await (await send(caller, "GET", "/v1/projects")).json()) as { projects: Array<{ id: string; extractionChoices?: Choices }> })
+    .projects.find((project) => project.id === "proj-a")?.extractionChoices;
+  const detailChoices = async (caller: Caller) => ((await (await send(caller, "GET", "/v1/projects/proj-a")).json()) as { extractionChoices?: Choices }).extractionChoices;
+
+  it("a default-project contributor or viewer is never offered smart; editors and admins are", async () => {
+    for (const user of ["um", "uv"]) {
+      expect((await listChoices(as(user)))?.quality, user).toEqual(["fastest", "balanced"]);
+      expect((await detailChoices(as(user)))?.quality, user).toEqual(["fastest", "balanced"]);
+      expect((await detailChoices(as(user)))?.visuals, user).not.toContain("charts-ai");
+    }
+    for (const user of ["ue", "ua"]) {
+      expect((await listChoices(as(user)))?.quality, user).toEqual(["fastest", "balanced", "smart"]);
+      expect((await detailChoices(as(user)))?.quality, user).toEqual(["fastest", "balanced", "smart"]);
+    }
+  });
+
+  it("the dashboard bootstrap carries it too", async () => {
+    const choices = async (user: string) => ((await (await send(as(user), "GET", "/dashboard/bootstrap")).json()) as { projects: Array<{ id: string; extractionChoices?: Choices }> })
+      .projects.find((project) => project.id === "proj-a")?.extractionChoices;
+    expect((await choices("um"))?.quality).not.toContain("smart");
+    expect((await choices("ue"))?.quality).toContain("smart");
+  });
+
+  it("a key raises only with an editor owner and the billed scope; a revoked key falls back to no raise", async () => {
+    const { rawKey: ingest } = await keys.createApiKey("ue", `ci-${randomUUID()}`, { orgId: "org-a", scopes: ["artifacts", "ingest"], projectIds: ["proj-a"] });
+    const { rawKey: billed } = await keys.createApiKey("ue", `cb-${randomUUID()}`, { orgId: "org-a", scopes: ["artifacts", "ingest", "pipeline:billed-features"], projectIds: ["proj-a"] });
+    const { rawKey: memberBilled } = await keys.createApiKey("um", `cm-${randomUUID()}`, { orgId: "org-a", scopes: ["artifacts", "ingest", "pipeline:billed-features"], projectIds: ["proj-a"] });
+    expect((await detailChoices(bearer(ingest)))?.quality).toEqual(["fastest", "balanced"]);
+    expect((await detailChoices(bearer(billed)))?.quality).toEqual(["fastest", "balanced", "smart"]);
+    expect((await detailChoices(bearer(memberBilled)))?.quality).toEqual(["fastest", "balanced"]);
+  });
+
+  it("a restricted privacy mode removes smart for editors too", async () => {
+    // A restricted mode needs embeddings off or local; embeddings and vectors off keep the stored pipeline valid.
+    await sql`update projects set pipeline = pipeline || '{"privacyMode": "local-only", "embed": false, "indexVectors": false}'::jsonb where id = 'proj-a'`;
+    try {
+      expect((await detailChoices(as("ue")))?.quality).toEqual(["fastest", "balanced"]);
+    } finally {
+      await sql`update projects set pipeline = pipeline || '{"privacyMode": "standard", "embed": true, "indexVectors": true}'::jsonb where id = 'proj-a'`;
+    }
+  });
+});
+
 describe("canEdit survives every path a client stores the project from (council A1)", () => {
   it("the realtime project snapshot carries the subscriber's own canEdit", async () => {
     const { realtimeBackend } = await import("../realtime/backend.js");
@@ -199,6 +244,14 @@ describe("canEdit survives every path a client stores the project from (council 
     expect((await snapshot("ue")).canEdit).toBe(true);
     expect((await snapshot("ux")).canEdit).toBe(true);
     await expect(realtimeBackend.project("ub", { kind: "project", projectId: "proj-a" } as never)).rejects.toThrow();
+  });
+
+  it("the realtime project snapshot carries the subscriber's own extractionChoices (#506)", async () => {
+    const { realtimeBackend } = await import("../realtime/backend.js");
+    const choices = async (user: string) => (await realtimeBackend.project(user, { kind: "project", projectId: "proj-a" } as never) as { extractionChoices?: { quality: string[] } }).extractionChoices;
+    expect((await choices("um"))?.quality).toEqual(["fastest", "balanced"]);
+    expect((await choices("uv"))?.quality).toEqual(["fastest", "balanced"]);
+    expect((await choices("ue"))?.quality).toEqual(["fastest", "balanced", "smart"]);
   });
 
   it("a created project comes back with canEdit for its creator", async () => {
