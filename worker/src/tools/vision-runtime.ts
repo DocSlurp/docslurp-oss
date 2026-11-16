@@ -359,7 +359,7 @@ export async function executeVisionRuntime(args: {
       const fallbackRoute = visionAutomaticRoute(selected.remoteFallbackModelUri);
       await prepareAutomaticCallPrices("page-transcription", [fallbackRoute]);
       try {
-        fallbackDecision = assertAutomaticModelCallAllowed(selected.remoteFallbackModelUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute });
+        fallbackDecision = assertAutomaticModelCallAllowed(selected.remoteFallbackModelUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute, role: "fallback" });
       } catch (refusal) {
         if (refusal instanceof AutomaticCallRefusedError) throw error;
         throw refusal;

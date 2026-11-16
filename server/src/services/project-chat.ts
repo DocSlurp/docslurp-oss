@@ -530,11 +530,15 @@ export function projectChatFailoverCandidates(preferredModel: string, failover =
  * The first failover candidate that keeps the automatic-call margin now, or null. Each refusal is logged with its reason
  * by the gate; a refused candidate is skipped, never sent.
  */
-export async function admittedChatFailover(candidates: readonly string[]): Promise<{ model: string; decision: ReturnType<typeof admitAutomaticCall> } | null> {
+export async function admittedChatFailover(
+  candidates: readonly string[],
+  turn: { inputTokens?: number; outputTokens?: number } = {},
+): Promise<{ model: string; decision: ReturnType<typeof admitAutomaticCall> } | null> {
   if (candidates.length === 0) return null;
   await prepareAutomaticCallPrices("chat-answer", candidates.map((model) => ({ model })));
   for (const model of candidates) {
-    const decision = admitAutomaticCall("chat-answer", { model }, "chat failover");
+    // Priced at this turn's own size (its prompt and output cap) when larger than the planning shape.
+    const decision = admitAutomaticCall("chat-answer", { model }, "chat failover", { role: "failover", tokens: turn });
     if (decision.allowed) return { model, decision };
   }
   return null;
@@ -604,7 +608,10 @@ async function generateProjectChatTextWithFailover(args: {
     let model = args.preferredModel;
     let failoverDecision: ReturnType<typeof admitAutomaticCall> | null = null;
     if (attempt > 0) {
-      const admitted = await admittedChatFailover(candidates);
+      // The turn's prompt tokens, estimated high: its UTF-8 bytes over 3 (English text runs about 4 bytes a token, CJK
+      // about 3).
+      const promptBytes = Buffer.byteLength(`${args.system}\n${args.prompt}\n${JSON.stringify(args.documents ?? [])}`, "utf8");
+      const admitted = await admittedChatFailover(candidates, { inputTokens: promptBytes / 3, outputTokens: args.maxOutputTokens });
       if (!admitted) break;
       model = admitted.model;
       failoverDecision = admitted.decision;

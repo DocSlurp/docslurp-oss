@@ -131,7 +131,7 @@ export function createHostedOcrReader(args: {
       if (purpose === "ocr-escalation") {
         const marginRoute = visionAutomaticRoute(vision.modelUri ?? ocrEscalationModel(env));
         await prepareAutomaticCallPrices("page-transcription", [marginRoute]);
-        marginDecision = admitAutomaticCall("page-transcription", marginRoute, purpose);
+        marginDecision = admitAutomaticCall("page-transcription", marginRoute, purpose, { role: "escalation" });
         if (!marginDecision.allowed) throw new HostedOcrSkipped("margin", `${purpose} refused by the margin gate (${marginDecision.reason})`);
       }
       const maxPages = ocrEscalationMaxPages(env);

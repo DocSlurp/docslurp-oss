@@ -17,12 +17,19 @@ export const ENDPOINT_PRICES_RETRY_MS = 60_000;
 const MAX_LISTING_BYTES = 1024 * 1024;
 const MAX_TRACKED_MODELS = 64;
 
-/** One endpoint's listed price, USD per million tokens. `priced: false` when a listed price could not be read. */
+/**
+ * One endpoint's listed price, USD per million tokens. Input is the higher of the prompt and the prompt-cache write
+ * rate (a route may write the cache on every request); output the higher of completion and reasoning. `priced: false`
+ * when any listed price, fee or override could not be read or is of a kind not modelled here.
+ */
 export interface EndpointPrice {
   readonly endpoint: string;
   readonly priced: boolean;
   readonly inputUsdPerMTok: number;
   readonly outputUsdPerMTok: number;
+  /** USD per request and per input image (OpenRouter `request`, `image`); 0 when not listed. */
+  readonly requestUsd?: number;
+  readonly imageUsd?: number;
   /** Listed overrides, USD per token (the listing's unit). */
   readonly overrides: readonly LivePriceOverride[];
 }
@@ -39,35 +46,89 @@ const inFlight = new Map<string, Promise<boolean>>();
 const tracked = new Set<string>();
 /** Only a process that started the refresher (startEndpointPriceRefresh) fetches; tests and scripts never do. */
 let fetchEnabled = false;
+const MODEL_ID = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/;
+const MAX_ENDPOINTS = 200;
 
-/** A finite, non-negative price per token; no upper bound (an expensive endpoint must raise the worst case, not vanish). */
+/** A finite, non-negative price; no upper bound (an expensive endpoint must raise the worst case, not vanish). */
 function perToken(value: unknown): number | null {
-  const parsed = typeof value === "string" ? Number(value) : typeof value === "number" ? value : Number.NaN;
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : typeof value === "number" ? value : Number.NaN;
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-/**
- * Endpoints of one `/models/{id}/endpoints` payload. An endpoint whose base price, or any listed override, cannot be read
- * is kept with `priced: false`, so a route that can reach it is never priced as if it were cheap.
- */
-export function parseEndpointPrices(payload: unknown): EndpointPrice[] {
-  const endpoints = (payload as { data?: { endpoints?: unknown } } | null)?.data?.endpoints;
-  if (!Array.isArray(endpoints)) return [];
-  const out: EndpointPrice[] = [];
-  for (const raw of endpoints.slice(0, 200)) {
-    if (!raw || typeof raw !== "object") continue;
-    const entry = raw as Record<string, unknown>;
-    const tag = typeof entry.tag === "string" && entry.tag ? entry.tag : typeof entry.provider_name === "string" ? entry.provider_name : "";
-    if (!tag || tag.length > 120) continue;
-    const pricing = (entry.pricing && typeof entry.pricing === "object" ? entry.pricing : {}) as Record<string, unknown>;
-    const input = perToken(pricing.prompt), output = perToken(pricing.completion ?? 0);
-    const rawOverrides = Array.isArray(pricing.overrides) ? pricing.overrides : [];
-    const overrides = rawOverrides.map(parseOverride).filter((override): override is LivePriceOverride => override !== null);
-    // parseOverride drops a malformed or out-of-range override; dropping it here could under-price that window.
-    const priced = input !== null && output !== null && overrides.length === rawOverrides.length;
-    out.push({ endpoint: tag.toLowerCase(), priced, inputUsdPerMTok: (input ?? 0) * 1e6, outputUsdPerMTok: (output ?? 0) * 1e6, overrides });
+/** Pricing keys that never bill the calls this gate prices (cache reads only lower a bill; web search is not used). */
+const IGNORED_PRICE_KEYS = new Set(["discount", "input_cache_read", "input_cache_write_1h", "web_search", "overrides"]);
+const MODELLED_PRICE_KEYS = new Set(["prompt", "completion", "input_cache_write", "internal_reasoning", "image", "request"]);
+const DAYS = new Set(["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]);
+const OVERRIDE_KEYS = new Set(["prompt", "completion", "input_cache_read", "input_cache_write", "input_cache_write_1h", "utc_days", "utc_start", "utc_end", "min_prompt_tokens"]);
+
+/** One override, strictly: every key known, every day a full day name, every rate readable; else null. */
+function strictOverride(raw: unknown): LivePriceOverride | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  if (Object.keys(value).some((key) => !OVERRIDE_KEYS.has(key))) return null;
+  if (value.utc_days !== undefined) {
+    if (!Array.isArray(value.utc_days) || value.utc_days.length === 0) return null;
+    if (value.utc_days.some((day) => typeof day !== "string" || !DAYS.has(day.toLowerCase()))) return null;
   }
-  return out;
+  for (const key of ["utc_start", "utc_end"] as const) {
+    if (value[key] === undefined) continue;
+    const hhmm = perToken(value[key]);
+    if (hhmm === null || hhmm > 2400 || hhmm % 100 >= 60) return null;
+  }
+  const prompt = perToken(value.prompt), completion = perToken(value.completion);
+  const write = value.input_cache_write === undefined ? 0 : perToken(value.input_cache_write);
+  if (prompt === null || completion === null || write === null) return null;
+  const parsed = parseOverride({ ...value, prompt: Math.max(prompt, write), completion });
+  // parseOverride bounds rates below $50/M; a dearer override is still a real price, kept here.
+  if (parsed) return parsed;
+  return null;
+}
+
+function parseEndpoint(raw: unknown): EndpointPrice | null {
+  if (!raw || typeof raw !== "object") return null;
+  const entry = raw as Record<string, unknown>;
+  const tag = typeof entry.tag === "string" && entry.tag ? entry.tag : typeof entry.provider_name === "string" ? entry.provider_name : "";
+  if (!tag || tag.length > 120) return null;
+  const pricing = (entry.pricing && typeof entry.pricing === "object" ? entry.pricing : null) as Record<string, unknown> | null;
+  const unpriced: EndpointPrice = { endpoint: tag.toLowerCase(), priced: false, inputUsdPerMTok: 0, outputUsdPerMTok: 0, overrides: [] };
+  if (!pricing) return unpriced;
+  for (const [key, value] of Object.entries(pricing)) {
+    if (IGNORED_PRICE_KEYS.has(key) || MODELLED_PRICE_KEYS.has(key)) continue;
+    // A fee of a kind not modelled here: unpriced unless it is listed as zero.
+    if (perToken(value) !== 0) return unpriced;
+  }
+  const read = (key: string) => (pricing[key] === undefined ? 0 : perToken(pricing[key]));
+  const prompt = perToken(pricing.prompt), completion = perToken(pricing.completion);
+  const write = read("input_cache_write"), reasoning = read("internal_reasoning"), image = read("image"), request = read("request");
+  if (prompt === null || completion === null || write === null || reasoning === null || image === null || request === null) return unpriced;
+  const rawOverrides = pricing.overrides === undefined ? [] : pricing.overrides;
+  if (!Array.isArray(rawOverrides)) return unpriced;
+  const overrides = rawOverrides.map(strictOverride);
+  if (overrides.some((override) => override === null)) return unpriced;
+  return {
+    endpoint: tag.toLowerCase(), priced: true,
+    inputUsdPerMTok: Math.max(prompt, write) * 1e6, outputUsdPerMTok: Math.max(completion, reasoning) * 1e6,
+    requestUsd: request, imageUsd: image,
+    overrides: overrides as LivePriceOverride[],
+  };
+}
+
+/**
+ * A `/models/{id}/endpoints` payload, and whether it was read completely: an entry that could not be read (no tag, a
+ * malformed object) or a listing longer than MAX_ENDPOINTS makes it incomplete, and an incomplete listing is never used.
+ * An endpoint whose price, fee or override cannot be read is kept with `priced: false`.
+ */
+export function parseEndpointListing(payload: unknown): { endpoints: EndpointPrice[]; complete: boolean } {
+  const endpoints = (payload as { data?: { endpoints?: unknown } } | null)?.data?.endpoints;
+  if (!Array.isArray(endpoints) || endpoints.length === 0 || endpoints.length > MAX_ENDPOINTS) return { endpoints: [], complete: false };
+  const parsed = endpoints.map(parseEndpoint);
+  const complete = parsed.every((entry) => entry !== null);
+  return { endpoints: parsed.filter((entry): entry is EndpointPrice => entry !== null), complete };
+}
+
+/** The endpoints of a payload (`parseEndpointListing`), complete or not. */
+export function parseEndpointPrices(payload: unknown): EndpointPrice[] {
+  return parseEndpointListing(payload).endpoints;
 }
 
 /** The endpoint's price at `at`, USD per million tokens: a matching listed override, else its base price. */
@@ -79,7 +140,7 @@ export function endpointPriceAt(endpoint: EndpointPrice, at: Date, promptTokens?
 }
 
 function track(model: string): void {
-  if (tracked.has(model) || tracked.size >= MAX_TRACKED_MODELS) return;
+  if (tracked.has(model) || tracked.size >= MAX_TRACKED_MODELS || !MODEL_ID.test(model)) return;
   tracked.add(model);
 }
 
@@ -97,6 +158,8 @@ async function fetchListing(model: string, fetchImpl: typeof fetch): Promise<unk
     headers: { accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_LISTING_BYTES) throw new Error("listing too large");
   const body = await response.text();
   if (body.length > MAX_LISTING_BYTES) throw new Error("listing too large");
   return JSON.parse(body);
@@ -105,7 +168,7 @@ async function fetchListing(model: string, fetchImpl: typeof fetch): Promise<unk
 /** Read one model's listing now. Keeps the previous listing on failure. Concurrent callers share one fetch. */
 export async function refreshEndpointPrices(model: string, options: { fetch?: typeof fetch; now?: () => number; force?: boolean } = {}): Promise<boolean> {
   const key = model.trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/.test(key)) return false;
+  if (!MODEL_ID.test(key)) return false;
   track(key);
   const now = options.now ?? Date.now;
   const last = lastAttempt.get(key);
@@ -113,10 +176,12 @@ export async function refreshEndpointPrices(model: string, options: { fetch?: ty
   let pending = inFlight.get(key);
   if (!pending) {
     pending = (async () => {
+      if (lastAttempt.size > 4 * MAX_TRACKED_MODELS) lastAttempt.clear();
       lastAttempt.set(key, now());
       try {
-        const endpoints = parseEndpointPrices(await fetchListing(key, options.fetch ?? fetch));
-        if (endpoints.length === 0) throw new Error("no endpoints listed");
+        const { endpoints, complete } = parseEndpointListing(await fetchListing(key, options.fetch ?? fetch));
+        // A partial listing could leave out the dearest host: never used (the previous listing ages out).
+        if (!complete || endpoints.length === 0) throw new Error("incomplete or empty endpoint listing");
         listings.set(key, { model: key, fetchedAt: now(), endpoints });
         return true;
       } catch (error) {

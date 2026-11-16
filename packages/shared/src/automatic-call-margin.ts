@@ -23,7 +23,7 @@
  * (model-call-policy.ts).
  */
 import { isModelInFamily } from "./automatic-model-selection.js";
-import { visionInputUsdPerMillion, visionModelTokenPricing } from "./embedding.js";
+import { visionImageTokens, visionInputUsdPerMillion, visionModelTokenPricing } from "./embedding.js";
 import { endpointPriceAt, endpointPriceListing, ensureEndpointPrices, requestEndpointPrices, startEndpointPriceRefresh } from "./endpoint-prices.js";
 import { liveModelPricesDisabled } from "./live-model-prices.js";
 import { policyModelId } from "./model-call-policy.js";
@@ -32,6 +32,7 @@ import {
   pricing,
   pricingRequired,
   type AutomaticCallKind,
+  type AutomaticCallValueInput,
 } from "./pricing-provider.js";
 import { hostMatchesEndpoint } from "./provider-pools.js";
 
@@ -167,7 +168,14 @@ export interface AutomaticCallRoute {
   readonly hosts?: readonly string[] | null;
   /** The `max_price` the request sends (OpenRouter refuses hosts above it), or a direct route's list price. */
   readonly capUsdPerMTok?: TokenPrice | null;
+  /** Input tokens one call on this route needs at least (a vision model's own image tokens for a page), beyond planning. */
+  readonly minInputTokens?: number;
+  /** Images one call sends: each may be billed a listed per-image fee. */
+  readonly images?: number;
 }
+
+/** Why the system makes the call: what the provider's billed value may depend on (a retry may bill nothing new). */
+export type AutomaticCallRole = AutomaticCallValueInput["role"];
 
 export type AutomaticCallDecision = {
   readonly kind: AutomaticCallKind;
@@ -206,41 +214,58 @@ const validPrice = (price: TokenPrice | null | undefined): price is TokenPrice =
 export function automaticRouteWorstPrice(
   route: AutomaticCallRoute,
   options: { at: Date; now?: number; maxAgeMs?: number; promptTokens?: number },
-): { price: TokenPrice; source: string } | { unknown: string } {
+): { price: TokenPrice; source: string; requestUsd: number; imageUsd: number } | { unknown: string } {
   const billing = routeBilling(route);
   const cap = route.capUsdPerMTok ?? null;
   if (cap && !validPrice(cap)) return { unknown: "invalid price cap" };
-  if (billing === "direct") return cap ? { price: cap, source: "list-price" } : { unknown: "no verified list price for a direct route" };
+  const fromCap = (source: string) => ({ price: cap!, source, requestUsd: 0, imageUsd: 0 });
+  if (billing === "direct") return cap ? fromCap("list-price") : { unknown: "no verified list price for a direct route" };
   const model = policyModelId(route.model);
   const maxAge = options.maxAgeMs ?? automaticPriceMaxAgeMs();
   const now = options.now ?? Date.now();
   const listing = endpointPriceListing(model, maxAge, now);
   if (!listing) {
     requestEndpointPrices(model, maxAge, now);
-    return cap ? { price: cap, source: "cap" } : { unknown: "no fresh price listing" };
+    return cap ? fromCap("cap") : { unknown: "no fresh price listing" };
   }
   const hosts = route.hosts?.length ? route.hosts.map((host) => host.trim().toLowerCase()) : null;
+  // Every allowed host must be listed: one that is not could be the dearest, so the listing alone cannot price the route.
+  if (hosts && hosts.some((host) => !listing.endpoints.some((endpoint) => hostMatchesEndpoint(host, endpoint.endpoint)))) {
+    return cap ? fromCap("cap") : { unknown: "an allowed host is not in the price listing" };
+  }
   const reachable = listing.endpoints.filter((endpoint) => !hosts || hosts.some((host) => hostMatchesEndpoint(host, endpoint.endpoint)));
-  if (reachable.length === 0) return cap ? { price: cap, source: "cap" } : { unknown: "no listed endpoint the route allows" };
-  if (reachable.some((endpoint) => !endpoint.priced)) return cap ? { price: cap, source: "cap" } : { unknown: "an allowed endpoint has an unreadable price" };
-  let input = 0, output = 0;
+  if (reachable.length === 0) return cap ? fromCap("cap") : { unknown: "no listed endpoint the route allows" };
+  if (reachable.some((endpoint) => !endpoint.priced)) return cap ? fromCap("cap") : { unknown: "an allowed endpoint has an unreadable price" };
+  let input = 0, output = 0, requestUsd = 0, imageUsd = 0;
   for (const endpoint of reachable) {
     const floored = withPriceScheduleFloor(model, endpoint.endpoint, options.at, endpointPriceAt(endpoint, options.at, options.promptTokens));
-    const endpointInput = floored.inputUsdPerMTok, endpointOutput = floored.outputUsdPerMTok;
-    // OpenRouter never routes to a host above the request's max_price, so such a host is not reachable.
-    if (cap && (endpointInput > cap.inputUsdPerMTok + 1e-12 || endpointOutput > cap.outputUsdPerMTok + 1e-12)) continue;
-    input = Math.max(input, endpointInput);
-    output = Math.max(output, endpointOutput);
+    const timeVarying = endpoint.overrides.length > 0 || MODEL_PRICE_SCHEDULES.some((schedule) =>
+      hostMatchesEndpoint(schedule.host, endpoint.endpoint) && isModelInFamily(model, schedule.family));
+    // OpenRouter does not route to a host whose listed price is above the request's max_price, so such a host is not
+    // reachable. Whether it compares a time-of-day price is not documented: a host with one always counts.
+    if (cap && !timeVarying && (endpoint.inputUsdPerMTok > cap.inputUsdPerMTok + 1e-12 || endpoint.outputUsdPerMTok > cap.outputUsdPerMTok + 1e-12)) continue;
+    input = Math.max(input, floored.inputUsdPerMTok);
+    output = Math.max(output, floored.outputUsdPerMTok);
+    requestUsd = Math.max(requestUsd, endpoint.requestUsd ?? 0);
+    imageUsd = Math.max(imageUsd, endpoint.imageUsd ?? 0);
   }
   if (input === 0 && output === 0 && cap) {
     // Every allowed host is above the cap (the call cannot route) or free: the cap still bounds it.
-    return { price: cap, source: "cap" };
+    return fromCap("cap");
   }
-  return { price: { inputUsdPerMTok: input, outputUsdPerMTok: output }, source: "listing" };
+  return { price: { inputUsdPerMTok: input, outputUsdPerMTok: output }, source: "listing", requestUsd, imageUsd };
 }
 
-/** The pricing provider's billed value for the call: a number, null (not billed: no check) or an error (refuse). */
-export function automaticCallValue(kind: AutomaticCallKind, model: string, tokens: { inputTokens: number; outputTokens: number }): { value: number | null } | { error: string } {
+/**
+ * The pricing provider's billed value for the call: a number, null (not billed: no check) or an error (refuse). Where
+ * pricing is required (pricingRequired), a provider must state a value: no hook, or null, refuses.
+ */
+export function automaticCallValue(
+  kind: AutomaticCallKind,
+  model: string,
+  tokens: { inputTokens: number; outputTokens: number },
+  role: AutomaticCallRole = "pick",
+): { value: number | null } | { error: string } {
   let provider;
   try {
     provider = pricing();
@@ -252,11 +277,11 @@ export function automaticCallValue(kind: AutomaticCallKind, model: string, token
   }
   let value: unknown;
   try {
-    value = provider.automaticCallValueUsd({ kind, model, ...tokens });
+    value = provider.automaticCallValueUsd({ kind, model, role, ...tokens });
   } catch (error) {
     return { error: `the pricing provider's automatic call value failed (${error instanceof Error ? error.message.slice(0, 80) : "error"})` };
   }
-  if (value === null) return { value: null };
+  if (value === null) return pricingRequired() ? { error: "the pricing provider states no value for this automatic call" } : { value: null };
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return { error: "the pricing provider returned an invalid automatic call value" };
   return { value };
 }
@@ -268,29 +293,44 @@ export function automaticCallValue(kind: AutomaticCallKind, model: string, token
 export function automaticCallMarginDecision(
   kind: AutomaticCallKind,
   route: AutomaticCallRoute,
-  options: { at?: Date; now?: number; env?: Env; maxAgeMs?: number } = {},
+  options: {
+    at?: Date; now?: number; env?: Env; maxAgeMs?: number;
+    /** Why the system makes this call (default `pick`); passed to the provider's billed value. */
+    role?: AutomaticCallRole;
+    /** The call's own size when known (a chat turn's prompt and output cap): raises the planning tokens, never lowers them. */
+    tokens?: { inputTokens?: number; outputTokens?: number };
+  } = {},
 ): AutomaticCallDecision {
   const now = options.now ?? Date.now();
   const at = options.at ?? new Date(now);
   const env = options.env ?? processEnv();
   const minMargin = automaticMinMargin(env);
-  const tokens = AUTOMATIC_CALL_PLANNING_TOKENS[kind];
   const model = policyModelId(route.model);
+  if (!AUTOMATIC_CALL_KINDS.includes(kind)) {
+    return { kind, model, minMargin, at: at.toISOString(), inputTokens: 0, outputTokens: 0, allowed: false, reason: "unknown call kind",
+      valueUsd: null, worstCostUsd: null, ratio: null, price: null, priceSource: null };
+  }
+  const planned = AUTOMATIC_CALL_PLANNING_TOKENS[kind];
+  const positive = (value: number | undefined) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0);
+  const tokens = {
+    inputTokens: Math.max(planned.inputTokens, positive(route.minInputTokens), positive(options.tokens?.inputTokens)),
+    outputTokens: Math.max(planned.outputTokens, positive(options.tokens?.outputTokens)),
+  };
   const base = { kind, model, minMargin, at: at.toISOString(), inputTokens: tokens.inputTokens, outputTokens: tokens.outputTokens };
   const refuse = (reason: string, extra: Partial<AutomaticCallDecision> = {}): AutomaticCallDecision =>
     ({ ...base, allowed: false, reason, valueUsd: null, worstCostUsd: null, ratio: null, price: null, priceSource: null, ...extra });
-  if (!AUTOMATIC_CALL_KINDS.includes(kind)) return refuse("unknown call kind");
   if (routeBilling(route) === "private") {
     return { ...base, allowed: true, reason: "private-route", valueUsd: null, worstCostUsd: null, ratio: null, price: null, priceSource: null };
   }
-  const value = automaticCallValue(kind, model, tokens);
+  const value = automaticCallValue(kind, model, tokens, options.role ?? "pick");
   if ("error" in value) return refuse(value.error);
   if (value.value === null) {
     return { ...base, allowed: true, reason: "not-billed", valueUsd: null, worstCostUsd: null, ratio: null, price: null, priceSource: null };
   }
   const worst = automaticRouteWorstPrice(route, { at, now, maxAgeMs: options.maxAgeMs ?? automaticPriceMaxAgeMs(env), promptTokens: tokens.inputTokens });
   if ("unknown" in worst) return refuse(`price unknown: ${worst.unknown}`, { valueUsd: value.value });
-  const cost = (tokens.inputTokens * worst.price.inputUsdPerMTok + tokens.outputTokens * worst.price.outputUsdPerMTok) / 1e6;
+  const cost = (tokens.inputTokens * worst.price.inputUsdPerMTok + tokens.outputTokens * worst.price.outputUsdPerMTok) / 1e6
+    + worst.requestUsd + worst.imageUsd * Math.max(0, route.images ?? 0);
   const ratio = cost > 0 ? value.value / cost : Number.POSITIVE_INFINITY;
   const decided = { valueUsd: value.value, worstCostUsd: cost, ratio, price: worst.price, priceSource: worst.source };
   if (ratio + 1e-9 < minMargin) return refuse("below the minimum margin", decided);
@@ -303,7 +343,8 @@ function fmt(value: number | null | undefined, digits = 6): string {
 
 /** One structured log line for a decision (refusals at warn). */
 export function logAutomaticCallDecision(decision: AutomaticCallDecision, label: string): void {
-  if (decision.allowed && decision.reason !== "margin") return;
+  // Refusals only: an admitted call's numbers come back in its outcome report when it loses or overruns.
+  if (decision.allowed) return;
   const line = `[automatic-margin] ${decision.allowed ? "allowed" : "skipped"} label=${label} kind=${decision.kind} `
     + `model=${decision.model.slice(0, 120)} reason=${JSON.stringify(decision.reason)} value_usd=${fmt(decision.valueUsd)} `
     + `worst_cost_usd=${fmt(decision.worstCostUsd)} ratio=${fmt(decision.ratio, 3)} min_margin=${decision.minMargin} `
@@ -325,7 +366,8 @@ export function admitAutomaticCall(kind: AutomaticCallKind, route: AutomaticCall
  * billed value is stated) and the process runs the price refresher; never throws.
  */
 export async function prepareAutomaticCallPrices(kind: AutomaticCallKind, routes: readonly AutomaticCallRoute[]): Promise<void> {
-  const models = routes.filter((route) => routeBilling(route) === "openrouter").map((route) => policyModelId(route.model));
+  // A capped route is priced without a listing: waiting for one buys nothing on a request path.
+  const models = routes.filter((route) => routeBilling(route) === "openrouter" && !route.capUsdPerMTok).map((route) => policyModelId(route.model));
   if (models.length === 0) return;
   const value = automaticCallValue(kind, models[0]!, AUTOMATIC_CALL_PLANNING_TOKENS[kind]);
   if ("value" in value && value.value === null) return;
@@ -355,6 +397,17 @@ export function reportAutomaticCallOutcome(decision: AutomaticCallDecision, actu
   }
 }
 
+/** A page render the planning size assumes: US Letter at 200 dpi. */
+const PLANNING_PAGE_PX = { widthPx: 1_700, heightPx: 2_200 } as const;
+/** Instructions and framing around the image. */
+const VISION_PROMPT_TOKENS = 600;
+
+/** A vision model's own input tokens for one planning page (its catalog image-token bound), when the catalog has one. */
+function pageInput(modelOrUri: string): { minInputTokens?: number } {
+  const image = visionImageTokens(modelOrUri, PLANNING_PAGE_PX) ?? visionImageTokens(policyModelId(modelOrUri), PLANNING_PAGE_PX);
+  return image === null ? {} : { minInputTokens: image + VISION_PROMPT_TOKENS };
+}
+
 /**
  * The route of a vision call (page transcription, chart read, OCR escalation, a page-router target) on `modelOrUri`, as
  * the vision runtime sends it: an OpenRouter request carries `max_price` at the model's catalog token price, restricted
@@ -368,9 +421,9 @@ export function visionAutomaticRoute(modelOrUri: string): AutomaticCallRoute {
   const bareUri = trimmed.split(/[?#]/, 1)[0] ?? trimmed;
   const catalog = visionModelTokenPricing(bareUri) ?? (direct ? null : visionModelTokenPricing(policyModelId(trimmed)));
   const cap = catalog ? { inputUsdPerMTok: visionInputUsdPerMillion(catalog), outputUsdPerMTok: catalog.outputUsdPerMillion } : null;
-  if (direct) return { model: trimmed, billing: "direct", capUsdPerMTok: cap };
+  if (direct) return { model: trimmed, billing: "direct", capUsdPerMTok: cap, images: 1, ...pageInput(bareUri) };
   const hosts = catalog?.basis === "pinned-route" && catalog.providers?.length ? catalog.providers : null;
-  return { model: trimmed, billing: "openrouter", capUsdPerMTok: cap, hosts };
+  return { model: trimmed, billing: "openrouter", capUsdPerMTok: cap, hosts, images: 1, ...pageInput(trimmed) };
 }
 
 /**

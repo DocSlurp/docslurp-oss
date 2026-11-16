@@ -13,6 +13,7 @@ import {
   defineTierOptions,
   ensureEndpointPrices,
   installTestPricing,
+  parseEndpointListing,
   parseEndpointPrices,
   reportAutomaticCallOutcome,
   resetPricingProviderForTests,
@@ -24,8 +25,8 @@ import {
   type EndpointObservation,
 } from "../index.js";
 
-// Arbitrary test values, not any deployment's prices: a page read bills $0.0025, a chart read $0.0025, a chat answer $0.01.
-const VALUES: Record<AutomaticCallKind, number> = { "page-transcription": 0.0025, "chart-read": 0.0025, "chat-answer": 0.01 };
+// Synthetic test values, not any deployment's prices.
+const VALUES: Record<AutomaticCallKind, number> = { "page-transcription": 0.003, "chart-read": 0.003, "chat-answer": 0.012 };
 const MODEL = "deepseek/deepseek-v4.1-flash-1017";
 // Monday 2026-11-16: 02:00 UTC is DeepSeek peak, 12:00 UTC off-peak; Saturday 2026-11-14 02:00 UTC is off-peak.
 const PEAK = new Date("2026-11-16T02:00:00Z");
@@ -77,12 +78,12 @@ describe("automatic call margin gate", () => {
     listing([{ endpoint: "deepseek", input: 0.15, output: 0.6, overrides: SCHEDULE_OVERRIDES }]);
     const route = { model: MODEL, hosts: ["deepseek"] };
     const peak = decide("chart-read", route, PEAK);
-    // 3,300 x $0.30 + 1,400 x $1.20 per M = $0.00267 against $0.0025: ratio 0.94.
+    // 3,300 x $0.30 + 1,400 x $1.20 per M = $0.00267 against $0.003: ratio 1.12.
     expect(peak).toMatchObject({ allowed: false, reason: "below the minimum margin", price: { inputUsdPerMTok: 0.3, outputUsdPerMTok: 1.2 }, priceSource: "listing" });
     expect(peak.worstCostUsd).toBeCloseTo(0.00267, 8);
     expect(decide("chart-read", route, OFF_PEAK)).toMatchObject({ allowed: true, reason: "margin" });
     expect(decide("chart-read", route, WEEKEND)).toMatchObject({ allowed: true, reason: "margin" });
-    // A page read clears 1.3x at peak too (1,500 x 0.30 + 800 x 1.20 = $0.00141; ratio 1.77).
+    // A page read clears 1.3x at peak too (1,500 x 0.30 + 800 x 1.20 = $0.00141; ratio 2.1).
     expect(decide("page-transcription", route, PEAK)).toMatchObject({ allowed: true });
   });
 
@@ -122,11 +123,58 @@ describe("automatic call margin gate", () => {
     expect(capped).toMatchObject({ allowed: true, priceSource: "cap" });
     // A host the listing does not show, or an unreadable price, is unknown.
     listing([{ endpoint: "fireworks", input: 0.3, output: 1.2 }]);
-    expect(decide("page-transcription", route, OFF_PEAK)).toMatchObject({ allowed: false, reason: "price unknown: no listed endpoint the route allows" });
+    expect(decide("page-transcription", route, OFF_PEAK)).toMatchObject({ allowed: false, reason: "price unknown: an allowed host is not in the price listing" });
     setEndpointPricesForTests({ [MODEL]: { fetchedAt: NOW, endpoints: parseEndpointPrices({ data: { endpoints: [
       { tag: "deepseek", pricing: { prompt: "0.00000015", completion: "0.0000006", overrides: [{ utc_start: 100, utc_end: 400, prompt: "bogus", completion: "1" }] } },
     ] } }) } });
     expect(decide("page-transcription", route, OFF_PEAK)).toMatchObject({ allowed: false, reason: "price unknown: an allowed endpoint has an unreadable price" });
+  });
+
+  it("fails closed when an allowed host is missing from the listing, and counts a time-varying host above the cap", () => {
+    listing([{ endpoint: "a", input: 0.1, output: 0.1 }, { endpoint: "b-other", input: 5, output: 5 }]);
+    expect(decide("page-transcription", { model: MODEL, hosts: ["a", "b"] }, OFF_PEAK)).toMatchObject({ allowed: false, reason: "price unknown: an allowed host is not in the price listing" });
+    expect(decide("page-transcription", { model: MODEL, hosts: ["a", "b"], capUsdPerMTok: { inputUsdPerMTok: 0.2, outputUsdPerMTok: 0.2 } }, OFF_PEAK)).toMatchObject({ priceSource: "cap" });
+    // A host whose base price is under the cap but whose peak override is above it is still counted at peak.
+    listing([{ endpoint: "deepseek", input: 0.15, output: 0.6, overrides: SCHEDULE_OVERRIDES }]);
+    const capped = decide("chart-read", { model: MODEL, hosts: ["deepseek"], capUsdPerMTok: { inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.6 } }, PEAK);
+    expect(capped).toMatchObject({ allowed: false, price: { inputUsdPerMTok: 0.3, outputUsdPerMTok: 1.2 } });
+  });
+
+  it("parses listings strictly: unknown fees, malformed overrides or entries make a host unpriced or the listing incomplete", () => {
+    const one = (pricing: Record<string, unknown>) => parseEndpointListing({ data: { endpoints: [{ tag: "h", pricing }] } });
+    expect(one({ prompt: "0.0000001", completion: "0.0000002", input_cache_write: "0.0000003", internal_reasoning: "0.0000004", image: "0.001", request: "0.002", web_search: "0.01", discount: 0.3 }))
+      .toMatchObject({ complete: true, endpoints: [{ priced: true, imageUsd: 0.001, requestUsd: 0.002 }] });
+    const full = one({ prompt: "0.0000001", completion: "0.0000002", input_cache_write: "0.0000003", internal_reasoning: "0.0000004" }).endpoints[0]!;
+    expect(full.inputUsdPerMTok).toBeCloseTo(0.3, 9);
+    expect(full.outputUsdPerMTok).toBeCloseTo(0.4, 9);
+    expect(one({ prompt: "0.0000001" }).endpoints[0]!.priced).toBe(false);
+    expect(one({ prompt: "0.0000001", completion: "0.0000002", audio: "0.00001" }).endpoints[0]!.priced).toBe(false);
+    expect(one({ prompt: "0.0000001", completion: "0.0000002", audio: "0" }).endpoints[0]!.priced).toBe(true);
+    for (const override of [
+      { utc_days: [1, 2], prompt: "0.0000003", completion: "0.0000012" },
+      { utc_days: ["Mon"], prompt: "0.0000003", completion: "0.0000012" },
+      { utc_start: 100, timezone: "Asia/Shanghai", prompt: "0.0000003", completion: "0.0000012" },
+      { utc_start: 100, prompt: "0.0000003" },
+    ]) expect(one({ prompt: "0.0000001", completion: "0.0000002", overrides: [override] }).endpoints[0]!.priced, JSON.stringify(override)).toBe(false);
+    expect(parseEndpointListing({ data: { endpoints: [{ tag: "h", pricing: { prompt: "0", completion: "0" } }, { pricing: {} }] } }).complete).toBe(false);
+    expect(parseEndpointListing({ data: { endpoints: Array.from({ length: 201 }, (_, i) => ({ tag: `h${i}`, pricing: { prompt: "0", completion: "0" } })) } }).complete).toBe(false);
+  });
+
+  it("adds listed per-request and per-image fees, and prices a vision model's own page image tokens", () => {
+    setEndpointPricesForTests({ [MODEL]: { fetchedAt: NOW, endpoints: [{ endpoint: "deepseek", inputUsdPerMTok: 0.15, outputUsdPerMTok: 0.6, requestUsd: 0.001, imageUsd: 0.0005 }] } });
+    const decision = decide("page-transcription", { model: MODEL, hosts: ["deepseek"], images: 1 }, OFF_PEAK);
+    expect(decision.worstCostUsd).toBeCloseTo((1_500 * 0.15 + 800 * 0.6) / 1e6 + 0.0015, 10);
+    const route = visionAutomaticRoute("llm://openrouter/z-ai/glm-5.3-flash");
+    expect(route.minInputTokens!).toBeGreaterThan(AUTOMATIC_CALL_PLANNING_TOKENS["page-transcription"].inputTokens);
+    expect(route.images).toBe(1);
+  });
+
+  it("raises the planning shape to a call's own size, never lowers it", () => {
+    listing([{ endpoint: "deepseek", input: 0.15, output: 0.6 }]);
+    const big = automaticCallMarginDecision("chat-answer", { model: MODEL, hosts: ["deepseek"] }, { at: OFF_PEAK, now: NOW, env: {}, tokens: { inputTokens: 50_000, outputTokens: 2_048 } });
+    expect(big).toMatchObject({ inputTokens: 50_000, outputTokens: 2_048 });
+    const small = automaticCallMarginDecision("chat-answer", { model: MODEL, hosts: ["deepseek"] }, { at: OFF_PEAK, now: NOW, env: {}, tokens: { inputTokens: 10, outputTokens: 10 } });
+    expect(small).toMatchObject(AUTOMATIC_CALL_PLANNING_TOKENS["chat-answer"]);
   });
 
   it("keeps an expensive endpoint in the listing instead of dropping it", () => {
@@ -142,8 +190,8 @@ describe("automatic call margin gate", () => {
     expect(automaticPriceMaxAgeMs({})).toBe(60 * 60_000);
     expect(automaticPriceMaxAgeMs({ DOCSLURP_AUTOMATIC_PRICE_MAX_AGE_MINUTES: "0" })).toBe(60 * 60_000);
     listing([{ endpoint: "deepseek", input: 0.15, output: 0.6, overrides: SCHEDULE_OVERRIDES }]);
-    // Page at peak: ratio 1.77. Allowed at 1.3, refused at 2.
-    expect(decide("page-transcription", { model: MODEL, hosts: ["deepseek"] }, PEAK, { DOCSLURP_AUTOMATIC_MIN_MARGIN: "2" })).toMatchObject({ allowed: false, minMargin: 2 });
+    // Page at peak: ratio 2.1. Allowed at 1.3, refused at 2.5.
+    expect(decide("page-transcription", { model: MODEL, hosts: ["deepseek"] }, PEAK, { DOCSLURP_AUTOMATIC_MIN_MARGIN: "2.5" })).toMatchObject({ allowed: false, minMargin: 2.5 });
   });
 
   it("asks the pricing provider for the billed value at the planning shape; the open default bills nothing and checks nothing", () => {
@@ -151,9 +199,9 @@ describe("automatic call margin gate", () => {
     installTestPricing({ automaticCallValueUsd: (call) => { seen.push(call); return VALUES[call.kind]; } });
     listing([{ endpoint: "deepseek", input: 0.15, output: 0.6 }]);
     decide("chart-read", { model: `llm://openrouter/${MODEL}:nitro?reasoning=none`, hosts: ["deepseek"] }, OFF_PEAK);
-    expect(seen).toEqual([{ kind: "chart-read", model: MODEL, ...AUTOMATIC_CALL_PLANNING_TOKENS["chart-read"] }]);
+    expect(seen).toEqual([{ kind: "chart-read", model: MODEL, role: "pick", ...AUTOMATIC_CALL_PLANNING_TOKENS["chart-read"] }]);
     resetPricingProviderForTests();
-    expect(OPEN_PRICING.automaticCallValueUsd?.({ kind: "chat-answer", model: MODEL, inputTokens: 1, outputTokens: 1 })).toBeNull();
+    expect(OPEN_PRICING.automaticCallValueUsd?.({ kind: "chat-answer", model: MODEL, role: "failover", inputTokens: 1, outputTokens: 1 })).toBeNull();
     setEndpointPricesForTests(null);
     // No value stated: no check, even with no price at all.
     expect(decide("chat-answer", { model: MODEL }, PEAK)).toMatchObject({ allowed: true, reason: "not-billed" });
@@ -163,11 +211,13 @@ describe("automatic call margin gate", () => {
     listing([{ endpoint: "deepseek", input: 0.15, output: 0.6 }]);
     const route = { model: MODEL, hosts: ["deepseek"] };
     vi.stubEnv("DOCSLURP_PRICING_REQUIRED", "1");
-    const { automaticCallValueUsd: _omit, id: _id, version: _version, ...withoutHook } = OPEN_PRICING;
-    installTestPricing({ ...withoutHook, automaticCallValueUsd: undefined });
-    expect(decide("page-transcription", route, OFF_PEAK)).toMatchObject({ allowed: false, reason: "the pricing provider states no automatic call value" });
+    // A provider without the hook is refused at install where pricing is required (startup fails, loudly).
+    expect(() => installTestPricing({ automaticCallValueUsd: undefined })).toThrow(/automaticCallValueUsd/);
     resetPricingProviderForTests();
     expect(decide("page-transcription", route, OFF_PEAK).allowed).toBe(false);
+    // Null (no value stated) is a refusal there, not "not billed".
+    installTestPricing({ automaticCallValueUsd: () => null });
+    expect(decide("page-transcription", route, OFF_PEAK)).toMatchObject({ allowed: false, reason: "the pricing provider states no value for this automatic call" });
     for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY, "1" as unknown as number]) {
       installTestPricing({ automaticCallValueUsd: () => bad });
       expect(decide("page-transcription", route, OFF_PEAK), String(bad)).toMatchObject({ allowed: false, reason: "the pricing provider returned an invalid automatic call value" });
@@ -213,7 +263,7 @@ describe("automatic call margin gate", () => {
     expect(console.warn).not.toHaveBeenCalled();
     reportAutomaticCallOutcome(decision, { costUsd: decision.worstCostUsd! * 1.5 }, "t");
     expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] overrun .*loss=false/));
-    reportAutomaticCallOutcome(decision, { costUsd: 0.003, inputTokens: 9_000, outputTokens: 1_000 }, "t");
+    reportAutomaticCallOutcome(decision, { costUsd: 0.004, inputTokens: 9_000, outputTokens: 1_000 }, "t");
     expect(console.error).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] overrun .*loss=true/));
   });
 

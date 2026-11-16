@@ -117,7 +117,7 @@ function admittedGenerator(target: RoutingTarget | undefined, ceiling: ChartGene
     && target.pricing.outputUsdPerMTok !== undefined
     && (ceiling === null || (target.pricing.inputUsdPerMTok <= ceiling.inputUsdPerMTok && target.pricing.outputUsdPerMTok <= ceiling.outputUsdPerMTok))
     && !isAutomaticSelectionDenied(target.ref.modelUri)
-    && admitAutomaticCall("chart-read", visionAutomaticRoute(target.ref.modelUri), "chart generator").allowed;
+    && admitAutomaticCall("chart-read", visionAutomaticRoute(target.ref.modelUri), "chart generator", { role: "pick" }).allowed;
 }
 
 function toSelection(target: RoutingTarget, reason: GeneratorSelection["reason"]): GeneratorSelection {

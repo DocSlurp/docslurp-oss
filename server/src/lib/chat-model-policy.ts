@@ -233,6 +233,6 @@ export function resolveSpeedBoostChatModel(model: string, enabled: boolean = fal
   if (enabled && !isSpeedBoostEligible(model)) throw new SpeedBoostUnavailableError(speedBoostUnavailableMessage(speedBoostChatTiers(tierModels)));
   const swap = enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined;
   // A swap is an automatic call: taken only when it keeps the margin at its current price (automatic-call-margin.ts).
-  const admitted = swap && !isAutomaticSelectionDenied(swap) && admitAutomaticCall("chat-answer", { model: swap }, "speed boost swap").allowed;
+  const admitted = swap && !isAutomaticSelectionDenied(swap) && admitAutomaticCall("chat-answer", { model: swap }, "speed boost swap", { role: "pick" }).allowed;
   return (admitted ? swap : undefined) ?? speedBoostModel(model, enabled);
 }

@@ -14,8 +14,8 @@
  * automatic list filters through `isAutomaticSelectionDenied`, and automatic-model-selection.test.ts (shared) plus the
  * worker and server lists' own tests fail if a denied family appears in one.
  *
- * Empty today. DeepSeek V4.1 Flash was listed from 2026-11-13 because at its weekday peak price an automatic call could
- * lose money; since 2026-11-15 (owner decision) it is admitted by the margin gate instead
+ * Empty today. DeepSeek V4.1 Flash was listed from 2026-11-13 to 2026-11-15 (owner decision); it is now admitted by the
+ * margin gate instead
  * (automatic-call-margin.ts): every automatic call is priced at the highest current price its route can reach, time of
  * day included, and is skipped unless the billed value covers it by the minimum margin. Keep this list for a model that
  * must never be picked automatically whatever it costs.

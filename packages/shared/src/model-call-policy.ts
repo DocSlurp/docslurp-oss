@@ -9,7 +9,7 @@
  * margin gate (automatic-call-margin.ts) when its caller names the call kind: its worst-case cost at the highest
  * current price of its route must be covered by the billed value by the minimum margin.
  */
-import { admitAutomaticCall, type AutomaticCallDecision, type AutomaticCallRoute } from "./automatic-call-margin.js";
+import { admitAutomaticCall, type AutomaticCallDecision, type AutomaticCallRole, type AutomaticCallRoute } from "./automatic-call-margin.js";
 import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import type { AutomaticCallKind } from "./pricing-provider.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
@@ -70,7 +70,7 @@ export class AutomaticCallRefusedError extends ModelCallRefusedError {
 export function assertAutomaticModelCallAllowed(
   ref: string | null | undefined,
   label: string,
-  margin?: { kind: AutomaticCallKind; route?: AutomaticCallRoute; at?: Date },
+  margin?: { kind: AutomaticCallKind; route?: AutomaticCallRoute; at?: Date; role?: AutomaticCallRole },
 ): AutomaticCallDecision | null {
   const problem = automaticModelCallProblem(ref);
   if (problem) {
@@ -78,7 +78,7 @@ export function assertAutomaticModelCallAllowed(
     throw new ModelCallRefusedError(label, problem);
   }
   if (!margin || !ref?.trim()) return null;
-  const decision = admitAutomaticCall(margin.kind, margin.route ?? { model: ref }, label, margin.at ? { at: margin.at } : {});
+  const decision = admitAutomaticCall(margin.kind, margin.route ?? { model: ref }, label, { ...(margin.at ? { at: margin.at } : {}), ...(margin.role ? { role: margin.role } : {}) });
   if (!decision.allowed) throw new AutomaticCallRefusedError(label, decision);
   return decision;
 }

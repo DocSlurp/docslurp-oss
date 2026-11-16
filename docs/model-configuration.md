@@ -260,13 +260,24 @@ route-tier pick, a chat failover or a Speed boost swap) is margin-checked at the
   ([DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing), checked 2026-11-15; Chinese public holidays,
   which DeepSeek prices off-peak, are treated as peak).
 - **Billed value:** what the call bills, from the pricing provider (`automaticCallValueUsd`). The open default bills
-  nothing per call and checks nothing.
+  nothing per call and checks nothing. Where pricing is required, a provider without the hook does not install
+  (startup fails) and a null answer refuses the call.
 - **Rule:** allowed when billed value / worst-case cost is at least `DOCSLURP_AUTOMATIC_MIN_MARGIN` (default 1.3). A
   refused candidate is skipped (`[automatic-margin] skipped ... reason=...`) and the next one is tried. An unknown or
   stale price, or a deployment that must price but whose provider states no value, refuses the call (fail closed).
   Operator private routes (`llm://private/...`) are the operator's own cost and are not checked.
-- **After the call:** the provider-reported cost is compared with the estimate; a call that cost more than it billed
-  logs `[automatic-margin] overrun ... loss=true`.
+- **Inputs priced:** input at the higher of the prompt and prompt-cache write rate, output at the higher of completion
+  and reasoning, plus any listed per-request and per-image fee. A vision call plans at least the model's own image
+  tokens for a Letter page at 200 dpi plus its instructions; a chat failover at least the turn's own prompt size and
+  output cap. A listing that cannot be read completely (an unknown fee or override condition, a missing host) is not
+  used.
+- **Billed value:** the provider is told why the call is made (`role`: `fallback`, `escalation`, `failover` or
+  `pick`), so a retry of a unit already charged can be valued at what it adds.
+- **After the call:** the provider-reported cost is compared with the estimate; a vision fallback, OCR escalation or
+  chat failover that cost more than it billed logs `[automatic-margin] overrun ... loss=true`.
+- **Price refresher:** the worker, API and chat executor read listings every 15 minutes, only with `OPENROUTER_API_KEY`
+  set and `LIVE_MODEL_PRICES` not `off`. Without it, vision calls are priced at their `max_price` cap, and chat
+  failover (which sends no cap) is refused.
 
 A model the caller or an operator names explicitly (a project's chat or vision model, a platform admin's tier mapping,
 `DOCSLURP_VISION_MODEL_URI`) is not margin-checked; it keeps the call-time policy (no Pro/Ultra, no output price at or
@@ -278,7 +289,8 @@ must never be picked automatically at any price; it is empty. DeepSeek V4.1 Flas
 not name the family (for example `deepseek/deepseek-chat`) are not caught.
 
 Chat failover: a failed answer retries once, on the first of GPT-6 Luna, Claude Haiku 5.5 and GLM 5.3 Flash that is not
-the project's own model (`PROJECT_CHAT_FAILOVER_MODELS`): Luna, or Haiku for a project that already answers with Luna.
+the project's own model (`PROJECT_CHAT_FAILOVER_MODELS`) and keeps the margin at that moment; a candidate that does not
+is skipped for the next.
 Speed boost and evaluation turns do not fail over.
 
 ## Hosted provider routing
