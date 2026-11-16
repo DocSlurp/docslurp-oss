@@ -105,7 +105,8 @@ describe("managed pipeline model fields", () => {
 
 describe("call-time model policy", () => {
   it("refuses denied, Pro/Ultra and over-cap models whatever their spelling", () => {
-    expect(automaticModelCallProblem("llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=fireworks")).toBe("never selected automatically");
+    // Not refused by name since 2026-11-15: an automatic call on it passes the margin gate instead (automatic-call-margin.ts).
+    expect(automaticModelCallProblem("llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=fireworks")).toBeNull();
     expect(automaticModelCallProblem("openai/gpt-6-sol-pro?reasoning=high")).toBe("prohibited model");
     expect(automaticModelCallProblem("openai%2Fgpt-6-sol-pro")).toBe("prohibited model");
     expect(isProhibitedRoutingModelId("openai/gpt-6-sol-pro?reasoning=high")).toBe(true);

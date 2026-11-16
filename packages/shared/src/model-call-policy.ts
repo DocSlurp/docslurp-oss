@@ -4,8 +4,14 @@
  * automatic-selection-denied (automatic-model-selection.ts), Pro/Ultra (on the normalized id), or priced at or above
  * the output cap ($50 per 1M tokens) by a known price. Operator private routes (`llm://private/...`) skip the price
  * check (their cost is the operator's) but not the denylist.
+ *
+ * An automatic call (a fallback, an escalation, a failover, a chart generator, a router or tier pick) also passes the
+ * margin gate (automatic-call-margin.ts) when its caller names the call kind: its worst-case cost at the highest
+ * current price of its route must be covered by the billed value by the minimum margin.
  */
+import { admitAutomaticCall, type AutomaticCallDecision, type AutomaticCallRoute } from "./automatic-call-margin.js";
 import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
+import type { AutomaticCallKind } from "./pricing-provider.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 import { resolvePipelineTextModel, type PipelineFeatures, type PipelineTextOperation } from "./pipeline.js";
 import { isProhibitedRoutingModelId, MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE } from "./routing-targets.js";
@@ -48,12 +54,33 @@ export function automaticModelCallProblem(ref: string | null | undefined): strin
   return null;
 }
 
-export function assertAutomaticModelCallAllowed(ref: string | null | undefined, label: string): void {
+/** An automatic call the margin gate refused; carries the decision for logs and telemetry. */
+export class AutomaticCallRefusedError extends ModelCallRefusedError {
+  constructor(label: string, readonly decision: AutomaticCallDecision) {
+    super(label, `automatic ${decision.kind} call refused: ${decision.reason}`);
+    this.name = "AutomaticCallRefusedError";
+  }
+}
+
+/**
+ * The call-time policy; with `margin`, also the margin gate for an automatic call of that kind on `margin.route`
+ * (default: an OpenRouter route on `ref` with no host restriction or price cap). Returns the margin decision when one was
+ * made, for `reportAutomaticCallOutcome` after the call.
+ */
+export function assertAutomaticModelCallAllowed(
+  ref: string | null | undefined,
+  label: string,
+  margin?: { kind: AutomaticCallKind; route?: AutomaticCallRoute; at?: Date },
+): AutomaticCallDecision | null {
   const problem = automaticModelCallProblem(ref);
   if (problem) {
     console.error(`[model-policy] refused ${label} model=${String(ref).slice(0, 160)} reason=${problem}`);
     throw new ModelCallRefusedError(label, problem);
   }
+  if (!margin || !ref?.trim()) return null;
+  const decision = admitAutomaticCall(margin.kind, margin.route ?? { model: ref }, label, margin.at ? { at: margin.at } : {});
+  if (!decision.allowed) throw new AutomaticCallRefusedError(label, decision);
+  return decision;
 }
 
 /** resolvePipelineTextModel, then the call-time policy. Every text stage resolves its model through this. */

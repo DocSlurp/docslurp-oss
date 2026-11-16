@@ -134,6 +134,8 @@ export * from "./realtime.js";
 export * from "./reserved-email.js";
 export * from "./managed-pipeline-models.js";
 export * from "./model-call-policy.js";
+export * from "./endpoint-prices.js";
+export * from "./automatic-call-margin.js";
 export * from "./vision-request-profile.js";
 export * from "./document-failure.js";
 

@@ -157,6 +157,9 @@ export const OPEN_PRICING: PricingProvider = {
   visualExportCredits: () => 0,
   visualExportRetryCredits: () => 0,
   chartExportExpectedRetriesPerRead: () => 0,
+  // The open default bills no automatic call on its own, so it asks for no margin check (a self-hosted deployment pays
+  // its own provider bills). A deployment provider states the value it bills.
+  automaticCallValueUsd: () => null,
   speedBoostMultiplier: (speedBoost) => {
     if (typeof speedBoost !== "boolean") throw new Error("speedBoost must be a boolean");
     return 1;

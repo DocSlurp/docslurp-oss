@@ -119,6 +119,15 @@ export type ComputeRateOverrides = Partial<{
   storageCentsPerGbMonth: number;
 }>;
 
+/**
+ * Model calls the system makes on its own choice (a fallback, an escalation, a failover, a chart generator, a tier pool):
+ * each is margin-checked before it is made (automatic-call-margin.ts).
+ */
+export const AUTOMATIC_CALL_KINDS = ["page-transcription", "chart-read", "chat-answer"] as const;
+export type AutomaticCallKind = (typeof AUTOMATIC_CALL_KINDS)[number];
+/** One automatic call as the margin gate plans it: the kind, the model and its planning token shape. */
+export type AutomaticCallValueInput = { kind: AutomaticCallKind; model: string; inputTokens: number; outputTokens: number };
+
 /** Price ceilings for a chart & diagram export generator, USD per million tokens. */
 export type ChartGeneratorPriceCeiling = { inputUsdPerMTok: number; outputUsdPerMTok: number };
 
@@ -180,6 +189,13 @@ export interface PricingProvider {
    * (`summaryTreeBillingActive`) then builds no summary tree: the unit is never priced from a default.
    */
   summaryTreeCallCredits?(): number;
+  /**
+   * What one automatic call of this kind and planning shape bills the customer, in USD, or null when this deployment does
+   * not bill it (no margin check then). Required where pricing is required (pricingRequired): a provider without it
+   * makes every margin-checked automatic call refuse (fail closed). Core compares it with the call's worst-case provider
+   * cost at the highest current price the route can reach (automatic-call-margin.ts).
+   */
+  automaticCallValueUsd?(call: AutomaticCallValueInput): number | null;
   /** Multiplier on unit charges for the opt-in speed boost (1 when off). */
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */
