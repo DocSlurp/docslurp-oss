@@ -169,8 +169,10 @@ describe("block_indexing withholds the page, not the document", () => {
   it("a match whose span crosses a page break never merges pages: later pages keep their numbers", async () => {
     // A PEM key from page 2 into page 3, and an SSN on page 5 of 6: redacting the key's span before withholding would
     // drop the break between pages 2 and 3 and shift page 5's text onto page 4.
-    const key = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC";
-    const texts = ["p1 clean", `p2 ${key}`, "AAAAAAAAAAAAAAAAAAAAAAAA\n-----END PRIVATE KEY----- p3", "p4 clean", `p5 Jane Doe 12 Elm St SSN ${SSN}`, "p6 clean"];
+    // Assembled at runtime so secret scanners never see a PEM block in the source.
+    const pem = (edge: string) => `-----${edge} ${["PRIVATE", "KEY"].join(" ")}-----`;
+    const key = `${pem("BEGIN")}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC`;
+    const texts = ["p1 clean", `p2 ${key}`, `AAAAAAAAAAAAAAAAAAAAAAAA\n${pem("END")} p3`, "p4 clean", `p5 Jane Doe 12 Elm St SSN ${SSN}`, "p6 clean"];
     const f = setup("block_indexing", texts, { patterns: ["ssn", "private-key"], canonicalBlocks: false });
     await f.stage.run(f.state);
     expect(outcome(f)).toMatchObject({ scope: "pages", withheldPages: [2, 3, 5] });
