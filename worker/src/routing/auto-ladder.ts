@@ -33,27 +33,36 @@ type Ledger = {
   record(slot: string, value: string): unknown;
 };
 
-const parsePages = (raw: string | null | undefined): number[] => {
+const pageList = (value: unknown): number[] =>
+  Array.isArray(value) ? value.filter((page): page is number => Number.isSafeInteger(page) && page > 0) : [];
+
+/**
+ * A ladder slot's pages, only when this run wrote it: a reprocess seeds the source run's artifacts into the new run, and
+ * an earlier run's plan or reads (under its own limits) say nothing about this one.
+ */
+function runPages(raw: string | null | undefined, runId: string, field: "pages" | "escalated" | "intelligent"): number[] | null {
+  if (!raw) return null;
   try {
-    const value = JSON.parse(raw ?? "[]") as unknown;
-    return Array.isArray(value) ? value.filter((page): page is number => Number.isSafeInteger(page) && page > 0) : [];
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (value?.runId !== runId) return null;
+    return pageList(value[field]);
   } catch {
-    return [];
+    return null;
   }
-};
+}
 
 /** Pages extraction read above fast for this document in this run. */
-export function extractEscalatedPages(ledger: Pick<Ledger, "readDocument">, documentId: string): Set<number> {
-  return new Set(parsePages(ledger.readDocument(documentId, LADDER_EXTRACT_ESCALATED_KEY)));
+export function extractEscalatedPages(ledger: Pick<Ledger, "readDocument">, documentId: string, runId: string): Set<number> {
+  return new Set(runPages(ledger.readDocument(documentId, LADDER_EXTRACT_ESCALATED_KEY), runId, "pages") ?? []);
 }
 
 /** Adds pages extraction read above fast (also under the content hash, so a deduplicated copy inherits them). */
-export function recordExtractEscalatedPages(ledger: Ledger, documentId: string, pages: readonly number[], contentHash?: string): void {
-  const known = extractEscalatedPages(ledger, documentId);
+export function recordExtractEscalatedPages(ledger: Ledger, documentId: string, runId: string, pages: readonly number[], contentHash?: string): void {
+  const known = extractEscalatedPages(ledger, documentId, runId);
   for (const page of pages) if (Number.isSafeInteger(page) && page > 0) known.add(page);
-  const list = JSON.stringify([...known].sort((a, b) => a - b));
-  ledger.recordDocument(documentId, LADDER_EXTRACT_ESCALATED_KEY, list);
-  if (contentHash) ledger.record(`${LADDER_EXTRACT_ESCALATED_KEY}:${contentHash}`, list);
+  const value = JSON.stringify({ runId, pages: [...known].sort((a, b) => a - b) });
+  ledger.recordDocument(documentId, LADDER_EXTRACT_ESCALATED_KEY, value);
+  if (contentHash) ledger.record(`${LADDER_EXTRACT_ESCALATED_KEY}:${contentHash}`, value);
 }
 
 /** A deduplicated document inherits the pages its original's extraction read (its Markdown is reused). */
@@ -97,6 +106,7 @@ export interface DocumentLadder {
 /** Plans a document's rungs: its selected pages under the run's limits, after the pages extraction already read. */
 export function planDocumentLadder(args: {
   pipeline: Pick<PipelineFeatures, "quality" | "ladder">;
+  runId: string;
   documentId: string;
   pageCount: number;
   selectedPages: readonly number[];
@@ -108,7 +118,7 @@ export function planDocumentLadder(args: {
     pageCount: args.pageCount,
     needs: ladderNeeds(args.selectedPages, args.triage),
     policy,
-    alreadyEscalated: extractEscalatedPages(args.ledger, args.documentId),
+    alreadyEscalated: extractEscalatedPages(args.ledger, args.documentId, args.runId),
   });
   return { policy, plan };
 }
@@ -116,40 +126,35 @@ export function planDocumentLadder(args: {
 /** Document artifact slot: the first plan's escalated pages, so every later plan of this run executes at most those. */
 export const LADDER_PLAN_KEY = "ladder-plan";
 
-/**
- * The pages vision may read under the plan this run first made for the document. The first plan is recorded; a later one
- * (page tasks, the whole-document pass, a retried activity) keeps only pages the first one escalated, so fan-out,
- * retries and restarts can never read more pages than the first plan allowed.
- */
-export function pinLadderPlan(ledger: Ledger, documentId: string, plan: LadderPlan): { escalated: Set<number>; intelligent: Set<number> } {
-  const stored = ledger.readDocument(documentId, LADDER_PLAN_KEY);
-  if (stored) {
-    try {
-      const parsed = JSON.parse(stored) as { escalated?: unknown; intelligent?: unknown };
-      const pages = (value: unknown) => new Set(Array.isArray(value) ? value.filter((page): page is number => Number.isSafeInteger(page) && page > 0) : []);
-      const escalated = pages(parsed.escalated);
-      const intelligent = pages(parsed.intelligent);
-      return {
-        escalated: new Set(plan.escalated.filter((page) => escalated.has(page))),
-        intelligent: new Set(plan.intelligent.filter((page) => intelligent.has(page))),
-      };
-    } catch {
-      // An unreadable pin allows nothing beyond a fresh plan that is itself within the limits.
-    }
-  }
-  ledger.recordDocument(documentId, LADDER_PLAN_KEY, JSON.stringify({ escalated: plan.escalated, intelligent: plan.intelligent }));
-  return { escalated: new Set(plan.escalated), intelligent: new Set(plan.intelligent) };
+/** A run's pinned plan for a document: the pages it escalated and the ones it read on the intelligent rung. */
+export interface LadderPin {
+  escalated: Set<number>;
+  intelligent: Set<number>;
 }
 
-/** Whether a pinned plan (LADDER_PLAN_KEY) lets vision read `page`; no pin yet allows it (the plan made the task). */
-export function ladderPinAllows(stored: string | null | undefined, page: number): boolean {
-  if (!stored) return true;
-  try {
-    const escalated = (JSON.parse(stored) as { escalated?: unknown }).escalated;
-    return Array.isArray(escalated) && escalated.includes(page);
-  } catch {
-    return false;
+/** The plan this run pinned for the document, or null when it has none yet (or only an earlier run's). */
+export function readLadderPin(ledger: Pick<Ledger, "readDocument">, documentId: string, runId: string): LadderPin | null {
+  const raw = ledger.readDocument(documentId, LADDER_PLAN_KEY);
+  const escalated = runPages(raw, runId, "escalated");
+  if (!escalated) return null;
+  return { escalated: new Set(escalated), intelligent: new Set(runPages(raw, runId, "intelligent") ?? []) };
+}
+
+/**
+ * The pages vision may read under the plan this run first made for the document. The first plan is recorded; a later one
+ * (the whole-document pass, a retried activity) keeps only pages the first one escalated, and on the intelligent rung only
+ * pages the first one put there, so retries and restarts never read more than the first plan allowed.
+ */
+export function pinLadderPlan(ledger: Ledger, documentId: string, runId: string, plan: LadderPlan): LadderPin {
+  const stored = readLadderPin(ledger, documentId, runId);
+  if (stored) {
+    return {
+      escalated: new Set(plan.escalated.filter((page) => stored.escalated.has(page))),
+      intelligent: new Set(plan.intelligent.filter((page) => stored.intelligent.has(page))),
+    };
   }
+  ledger.recordDocument(documentId, LADDER_PLAN_KEY, JSON.stringify({ runId, escalated: plan.escalated, intelligent: plan.intelligent }));
+  return { escalated: new Set(plan.escalated), intelligent: new Set(plan.intelligent) };
 }
 
 /**
@@ -159,6 +164,7 @@ export function ladderPinAllows(stored: string | null | undefined, page: number)
  */
 export function visionLadderSelection(args: {
   pipeline: Pick<PipelineFeatures, "quality" | "ladder">;
+  runId: string;
   documentId: string;
   pageCount: number;
   triage: readonly AdaptivePageRoutingEntry[];

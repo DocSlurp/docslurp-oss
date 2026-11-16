@@ -117,7 +117,7 @@ import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, authorizeOcrRead, refuseUnfundedImageFrames } from "../ocr/image-frames.js";
-import { inheritExtractEscalatedPages, recordExtractEscalatedPages } from "../routing/auto-ladder.js";
+import { extractEscalatedPages, inheritExtractEscalatedPages, recordExtractEscalatedPages } from "../routing/auto-ladder.js";
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
@@ -1447,15 +1447,16 @@ export class ExtractMarkdownStage implements Stage {
     const hasWords = ocrPageHasWords;
     const scanned = scanFillPageNumbers(split)!;
     // Auto ladder above-fast share: the OCR engine reads at most the document's budget of scanned pages, in document order
-    // (every one lacks native text alike); the rest stay unread here and are kept as page images (render-images).
-    const empty = args.ladderBudget === undefined ? scanned : scanned.slice(0, Math.max(0, args.ladderBudget));
+    // (every one lacks native text alike); the rest stay unread here and are kept as page images (render-images). Pages an
+    // earlier attempt of this run already sent count first, so a retry that sees other scanned pages cannot pass the cap.
+    const known = args.ladderBudget === undefined ? new Set<number>() : extractEscalatedPages(state.artifactLedger, document.id, state.run.id);
+    const empty = args.ladderBudget === undefined
+      ? scanned
+      : [...scanned.filter((page) => known.has(page)),
+        ...scanned.filter((page) => !known.has(page)).slice(0, Math.max(0, args.ladderBudget - known.size))].sort((a, b) => a - b);
     if (empty.length < scanned.length) {
       console.warn(`[ocr] ladder share cap document=${document.id} scanned=${scanned.length} read=${empty.length} budget=${args.ladderBudget}`);
       pushPerfMetric({ metric: "ladder-capped-pages", value: scanned.length - empty.length, unit: "count", tags: ["ocr", "ladder"], metadata: { documentId: document.id, stage: this.name } });
-    }
-    if (empty.length > 0 && args.ladderBudget !== undefined) {
-      // Recorded before the read: a page sent to the OCR engine counts against the cap whether or not it returns text.
-      recordExtractEscalatedPages(state.artifactLedger, document.id, empty, args.contentHash);
     }
     if (empty.length === 0) return null;
     const mode = resolveOcrMode();
@@ -1471,6 +1472,8 @@ export class ExtractMarkdownStage implements Stage {
     let consecutiveFailedBatches = 0;
     for (let start = 0; start < empty.length; start += OCR_PDF_BATCH_PAGES) {
       const batch = empty.slice(start, start + OCR_PDF_BATCH_PAGES);
+      // Recorded as each batch is sent: a page sent to the OCR engine counts against the ladder's cap, text or not.
+      if (args.ladderBudget !== undefined) recordExtractEscalatedPages(state.artifactLedger, document.id, state.run.id, batch, args.contentHash);
       // Each batch's Rich pages are authorized before its VM starts, as an image's read is: the cost cap, then the balance
       // for this batch plus what earlier batches read (still buffered). A refusal pauses the run here (RunPolicyError, outside
       // the refusal handling below); pages already read stay ledgered and are charged once.

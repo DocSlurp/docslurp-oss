@@ -1,8 +1,8 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, minChartExportTier, tighterLadder, type PipelineLadder, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
-import { assertChartExportModelsCeiling, stampRunChartExport } from "./chart-export-availability.js";
+import { chartExportModelsAllowed, clampRunLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
   countedPagesForForecast,
@@ -950,16 +950,23 @@ export function createRunCreation(deps: RunCreationDeps) {
       storedSummaryTree(access.pipeline)),
     };
     assertPipelineSpeedBoost(input.pipeline);
-    // The project's Auto ladder limits (pipeline.ladder) are a ceiling for callers who cannot edit the project: their run
-    // override may tighten them (a lower rung, a smaller share), never loosen them. Clamped, not refused.
-    if (!canEditProject(access, input.userId)) {
-      const projectLadder = (access.pipeline as { ladder?: Partial<PipelineLadder> | null } | null | undefined)?.ladder ?? null;
-      const runLadder = (input.pipeline as { ladder?: Partial<PipelineLadder> | null }).ladder ?? null;
-      const clamped = tighterLadder(projectLadder, runLadder);
-      if (JSON.stringify(clamped) !== JSON.stringify(runLadder)) {
-        console.log(`[run-creation] ladder override clamped to the project's limits project=${input.projectId}`);
+    // The project's Auto ladder limits (pipeline.ladder) are a ceiling for callers who cannot change the project's spend
+    // settings (non-editors, and API keys without the billed-features or projects:manage scope, as for chart export):
+    // their run override may tighten the limits (a lower rung, a smaller share), never loosen them, and while the project
+    // has a limit it may not raise quality above the project's (auto -> good would read every page). Clamped, not refused.
+    {
+      const projectPipeline = (access.pipeline ?? null) as { quality?: QualityMode | null; ladder?: Partial<PipelineLadder> | null } | null;
+      const apiKeyId = input.apiKeyId ?? currentRequestApiKeyId();
+      let mayLoosen = canEditProject(access, input.userId);
+      if (mayLoosen && apiKeyId) {
+        const scopes = await activeApiKeyScopes(apiKeyId).catch(() => null);
+        mayLoosen = !!scopes && (scopes.includes(BILLED_FEATURES_SCOPE) || scopes.includes("projects:manage"));
       }
-      input.pipeline = { ...input.pipeline, ladder: clamped } as typeof input.pipeline;
+      const clamped = clampRunLadder(input.pipeline, projectPipeline, mayLoosen);
+      if (clamped !== input.pipeline && (JSON.stringify(clamped.ladder) !== JSON.stringify(input.pipeline.ladder) || clamped.quality !== input.pipeline.quality)) {
+        console.log(`[run-creation] ladder override clamped to the project's limits project=${input.projectId} quality=${input.pipeline.quality}->${clamped.quality}`);
+      }
+      input.pipeline = clamped;
     }
     // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
     // an API key, the billed-features scope). Every run (upload, URL, extract, MCP, reprocess) lands here.

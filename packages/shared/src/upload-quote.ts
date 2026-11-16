@@ -107,30 +107,33 @@ export function ladderShareProfile(pipeline: Pick<PipelineFeatures, "quality" | 
 }
 
 /**
- * Caps a quote's credits at the ladder's above-fast share: at most floor(share x pages) pages of each paged file are read
- * (Rich), the rest bill Fast. `quote` is the provider's Auto price and `fast` its Fast price for the same files; the cap is
- * Fast plus the Rich surcharge of the pages the share allows, never above the uncapped quote. Prices are the provider's.
+ * Caps a quote's credits at the ladder's above-fast share: at most budget(share, pages) pages of each paged file are read
+ * (Rich), the rest bill Fast. `credits` is the provider's Auto price and `fastCredits` its Fast price for the same files;
+ * the surcharge per page is the provider's own (Auto minus Fast over the pages, so page equivalents and multi-page reads
+ * count as the provider counts them), and the cap is never above the uncapped quote. Prices are the provider's.
  */
 export function capCreditsToLadderShare(args: {
   credits: { low: number; high: number };
   fastCredits: { low: number; high: number };
   files: readonly QuoteFile[];
   share: number;
-  speedBoost?: boolean;
 }): { low: number; high: number } {
-  const provider = pricing();
-  const surcharge = Math.max(0, provider.pageCredits("rich", 1) - provider.pageCredits("fast", 1)) * provider.speedBoostMultiplier(args.speedBoost === true);
-  let low = 0;
-  let high = 0;
+  let pagesLow = 0;
+  let pagesHigh = 0;
+  let allowedLow = 0;
+  let allowedHigh = 0;
   for (const file of args.files) {
     if (uploadMediaKind(file)) continue;
     const range = quoteFilePageRange(file);
-    low += ladderShareBudget(args.share, range.low);
-    high += ladderShareBudget(args.share, range.high);
+    pagesLow += range.low;
+    pagesHigh += range.high;
+    allowedLow += ladderShareBudget(args.share, range.low);
+    allowedHigh += ladderShareBudget(args.share, range.high);
   }
-  const cappedHigh = Math.min(args.credits.high, args.fastCredits.high + high * surcharge);
-  const cappedLow = Math.min(args.credits.low, args.fastCredits.low + low * surcharge, cappedHigh);
-  return { low: cappedLow, high: cappedHigh };
+  const perPage = (auto: number, fast: number, pages: number) => (pages > 0 ? Math.max(0, auto - fast) / pages : 0);
+  const cappedHigh = Math.min(args.credits.high, args.fastCredits.high + allowedHigh * perPage(args.credits.high, args.fastCredits.high, pagesHigh));
+  const cappedLow = Math.min(args.credits.low, args.fastCredits.low + allowedLow * perPage(args.credits.low, args.fastCredits.low, pagesLow), cappedHigh);
+  return { low: Math.max(0, cappedLow), high: Math.max(0, cappedHigh) };
 }
 
 /** One file to quote: name, size and type, a counted page count or duration when known, and the client's file profile. */
@@ -198,7 +201,7 @@ export function quoteUpload(args: {
   // Auto with an above-fast share (pipeline.ladder): pages beyond the share are not read, so they are not quoted Rich.
   const fast = pricing().quoteUpload({ files, profile: { ...profile, quality: "fast" }, speedBoost });
   if (!fast.estimate.credits) return quote;
-  const credits = capCreditsToLadderShare({ credits: quote.estimate.credits, fastCredits: fast.estimate.credits, files, share: aboveFastShare, speedBoost });
+  const credits = capCreditsToLadderShare({ credits: quote.estimate.credits, fastCredits: fast.estimate.credits, files, share: aboveFastShare });
   return {
     ...quote,
     estimate: {

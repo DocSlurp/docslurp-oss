@@ -8,12 +8,14 @@ import {
   ladderEstimateMix,
   ladderShareBudget,
   pageReadingQuality,
+  clampRunLadder,
+  ladderAllowsOffPlanReads,
   pipelineLadderSchema,
   planLadder,
   tighterLadder,
   type LadderPageNeed,
 } from "./auto-ladder.js";
-import { defaultPipelineFeatures, estimatePipelineWork, normalizePipelineFeatures, pipelineFeatureOverridesSchema, quoteEstimate, quoteUpload, estimateProfileFor, quoteSettingsForPipeline } from "./index.js";
+import { defaultPipelineFeatures, pipelineVersionFeatures, estimatePipelineWork, normalizePipelineFeatures, pipelineFeatureOverridesSchema, quoteEstimate, quoteUpload, estimateProfileFor, quoteSettingsForPipeline } from "./index.js";
 import { DISTINCT_TEST_PRICING, installTestPricing } from "./pricing-testing.js";
 import { OPEN_PRICING } from "./pricing-open.js";
 import { resetPricingProviderForTests } from "./pricing-provider.js";
@@ -37,13 +39,22 @@ describe("pipeline.ladder settings", () => {
       { maxEscalationShare: { aboveFast: Number.NaN } },
       { maxEscalationShare: { aboveFast: Number.POSITIVE_INFINITY } },
       { maxEscalationShare: { aboveFast: "0.5" } },
-      { maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.4 } },
       { maxEscalationShare: { belowFast: 0.2 } },
       { maxRung: "ocr", extra: true },
     ]) {
       expect(pipelineFeatureOverridesSchema.safeParse({ ladder }).success, JSON.stringify(ladder)).toBe(false);
       expect(pipelineLadderSchema.safeParse(ladder).success, JSON.stringify(ladder)).toBe(false);
     }
+  });
+
+  it("merges a project share with an upload's other share without refusing (aboveOcr above aboveFast caps nothing more)", () => {
+    expect(pipelineFeatureOverridesSchema.safeParse({ ladder: { maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.4 } } }).success).toBe(true);
+    expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.4 } } })).toEqual({ active: true, maxRung: "intelligent", aboveFast: 0.2 });
+  });
+
+  it("fails closed on a stored rung that is not one", () => {
+    expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "vision" as never } }).maxRung).toBe("fast");
+    expect(effectiveLadder({ quality: "auto", ladder: {} }).maxRung).toBe("intelligent");
   });
 
   it("applies to auto only, and normalizes zero shares into rung limits", () => {
@@ -62,6 +73,8 @@ describe("pipeline.ladder settings", () => {
     const pipeline = { ...defaultPipelineFeatures, chartExport: { ...defaultPipelineFeatures.chartExport, tier: "models" as const } };
     expect(applyLadderLimits({ ...pipeline, ladder: { maxRung: "ocr" as const } }).chartExport.tier).toBe("free");
     expect(applyLadderLimits({ ...pipeline, ladder: { maxRung: "intelligent" as const } }).chartExport.tier).toBe("models");
+    // A share cap keeps chart export free too: its candidates are read outside the page plan.
+    expect(applyLadderLimits({ ...pipeline, ladder: { maxRung: "intelligent" as const, maxEscalationShare: { aboveOcr: 0.1 } } }).chartExport.tier).toBe("free");
     expect(applyLadderLimits({ ...pipeline, ladder: { maxRung: "fast" as const } }).quality).toBe("fast");
     // No limits: the very same object (defaults change nothing).
     expect(applyLadderLimits(pipeline)).toBe(pipeline);
@@ -86,6 +99,32 @@ describe("tighterLadder (run overrides from non-editors)", () => {
       .toEqual({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.2 } });
     expect(tighterLadder(null, { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } })).toEqual({ maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } });
     expect(tighterLadder(null, null)).toEqual({ maxRung: "intelligent" });
+  });
+});
+
+describe("clampRunLadder (per-upload overrides)", () => {
+  const project = { quality: "auto" as const, ladder: { maxRung: "ocr" as const, maxEscalationShare: { aboveFast: 0.2 } } };
+  it("holds a non-editor's run to the project's limits and quality, and leaves editors alone", () => {
+    const loose = { quality: "good" as const, ladder: { maxRung: "intelligent" as const, maxEscalationShare: null } };
+    expect(clampRunLadder(loose, project, false)).toEqual({ quality: "auto", ladder: { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.2 } } });
+    expect(clampRunLadder(loose, project, true)).toBe(loose);
+    const tighter = { quality: "auto" as const, ladder: { maxRung: "fast" as const } };
+    expect(clampRunLadder(tighter, project, false)).toEqual({ quality: "auto", ladder: { maxRung: "fast", maxEscalationShare: { aboveFast: 0.2 } } });
+    // A project without a limit keeps today's rule: quality overrides are the caller's choice.
+    expect(clampRunLadder({ quality: "good" as const, ladder: null }, { quality: "auto", ladder: { maxRung: "intelligent" } }, false).quality).toBe("good");
+  });
+});
+
+describe("reads outside the plan", () => {
+  it("are refused under an above-fast share (reads) or any limit (embeddings)", () => {
+    expect(ladderAllowsOffPlanReads({ quality: "auto", ladder: { maxRung: "intelligent" } })).toEqual({ pageReads: true, pageEmbeddings: true });
+    expect(ladderAllowsOffPlanReads({ quality: "auto", ladder: { maxRung: "ocr" } })).toEqual({ pageReads: true, pageEmbeddings: false });
+    expect(ladderAllowsOffPlanReads({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.5 } } })).toEqual({ pageReads: false, pageEmbeddings: false });
+  });
+
+  it("keeps the default ladder out of the pipeline version hash, and a limit in it", () => {
+    expect("ladder" in pipelineVersionFeatures(normalizePipelineFeatures(null))).toBe(false);
+    expect(pipelineVersionFeatures(normalizePipelineFeatures({ ladder: { maxRung: "ocr" } }))).toHaveProperty("ladder");
   });
 });
 
@@ -154,7 +193,12 @@ describe("planLadder", () => {
     expect(plan.counts.fast).toBe(18_000);
     expect(ladderShareBudget(0.5, 3)).toBe(1);
     expect(ladderShareBudget(0.3, 10)).toBe(3);
-    expect(documentLadderPolicy({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.5 } } }, 1).quality).toBe("fast");
+    // Small files get at least one page while the share is above 0 (an image, a one-page scan, an Office file before
+    // its pages are measured); a share of 0 reads none.
+    expect(ladderShareBudget(0.01, 3)).toBe(1);
+    expect(ladderShareBudget(0, 3)).toBe(0);
+    const office = documentLadderPolicy({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.1 } } }, 1);
+    expect(office).toMatchObject({ quality: "auto", aboveFastBudget: 1, aboveFastBinding: false });
   });
 });
 

@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import sharp from "../tools/isolated-image.js";
-import { l2Normalize, packSignBits, pageCredits, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
+import { l2Normalize, packSignBits, pageCredits, ladderAllowsOffPlanReads, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";
 import {
@@ -104,6 +104,13 @@ export async function embedPageImages(
   // indexing; this is the backstop, so nothing is rendered, embedded or charged.
   if (!qualityAllowsPageReading(run.pipeline?.quality)) {
     console.error(`[page-embed] refused under quality fast run=${run.id} document=${document.id} pages=${pages.length}`);
+    result.stoppedBy = "quality-fast";
+    return result;
+  }
+  // An Auto ladder limit (pipeline.ladder) plans every model read of a page; embeddings read pages outside that plan. The
+  // server refuses visual mode with a limit; this is the backstop (nothing rendered, embedded or charged).
+  if (!ladderAllowsOffPlanReads(run.pipeline as never).pageEmbeddings) {
+    console.error(`[page-embed] refused under an Auto ladder limit run=${run.id} document=${document.id} pages=${pages.length}`);
     result.stoppedBy = "quality-fast";
     return result;
   }
@@ -256,8 +263,8 @@ export class PageEmbedStage implements Stage {
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const pipeline = state.run.pipeline;
     // Fast reads no page (no Rich charge): skip visual embedding entirely; text indexing still runs.
-    if (!qualityAllowsPageReading(pipeline.quality)) {
-      console.error(`[page-embed] skipped: quality fast does not embed page images run=${state.run.id} documents=${state.documents.length}`);
+    if (!qualityAllowsPageReading(pipeline.quality) || !ladderAllowsOffPlanReads(pipeline).pageEmbeddings) {
+      console.error(`[page-embed] skipped: ${qualityAllowsPageReading(pipeline.quality) ? "an Auto ladder limit" : "quality fast"} does not embed page images run=${state.run.id} documents=${state.documents.length}`);
       return;
     }
     const embedder =

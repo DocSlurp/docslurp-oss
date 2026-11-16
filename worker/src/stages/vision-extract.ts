@@ -43,7 +43,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { ladderPinAllows, planDocumentLadder, pinLadderPlan, LADDER_PLAN_KEY } from "../routing/auto-ladder.js";
+import { planDocumentLadder, pinLadderPlan, readLadderPin } from "../routing/auto-ladder.js";
 import { configuredVisionServedRoute, executeVisionRuntime, isPageTranscription, visionCall, visionRenderLongEdge, VisionImageOverBudgetError } from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 import { primaryFailureUsages, priceVisionResult, visionFailureUsages, type VisionFailureUsage } from "../lib/guarded-vision-call.js";
@@ -200,6 +200,9 @@ const recordedVisionErrors = new WeakSet<object>();
 
 const NO_HINTS: LegacyPageHints = { inkCheckPages: new Set(), fallbackTextPages: new Set() };
 
+/** Per worker process: the pages a document's ladder plan allows, by run, document and limits (page tasks, ladderAllowsPageTask). */
+const LADDER_TASK_PLANS = new Map<string, Promise<Set<number>>>();
+
 export class VisionExtractStage implements Stage {
   readonly name = "vision-extract";
 
@@ -287,8 +290,10 @@ export class VisionExtractStage implements Stage {
       fallbackTextPages: new Set(task.fallbackText ? [task.pageNumber] : []),
       vmOcrPages: new Set(task.vmOcr ? [task.pageNumber] : []),
     };
-    // Defense in depth: page tasks come from the ladder plan (planPageTasks), and a page outside a pinned plan is not read.
-    if (effectiveLadder(state.run.pipeline).active && !ladderPinAllows(state.artifactLedger.readDocument(document.id, LADDER_PLAN_KEY), task.pageNumber)) {
+    // Defense in depth: page tasks come from the ladder plan (planPageTasks); a page outside this run's plan for the
+    // document is not read. Without a pin yet (planning does not persist the ledger) the plan is made again here, from the
+    // same stored inputs, once per document and worker process (fail closed: never "no pin, so allowed").
+    if (effectiveLadder(state.run.pipeline).active && !(await this.ladderAllowsPageTask(state, document, task.pageNumber))) {
       console.warn(`[ladder] page task outside the document's plan document=${document.id} page=${task.pageNumber}: not read`);
       return { pageNumber: task.pageNumber, outcome: "ladder-capped", fallbackText: task.fallbackText === true } satisfies VisionPageSkip;
     }
@@ -297,6 +302,21 @@ export class VisionExtractStage implements Stage {
     // An optional fail-open result is also a checkpoint; do not repeatedly call the provider. A
     // skipped page stores why, never model text.
     return outputs[0] ?? skips.get(task.pageNumber) ?? null;
+  }
+
+  /** Pages this run's ladder plan lets vision read in the document: the pinned plan, else a fresh plan (cached). */
+  private async ladderAllowsPageTask(state: WorkflowState, document: import("../models.js").Document, pageNumber: number): Promise<boolean> {
+    const pin = readLadderPin(state.artifactLedger, document.id, state.run.id);
+    if (pin) return pin.escalated.has(pageNumber);
+    const key = `${state.run.id}:${document.id}:${JSON.stringify(state.run.pipeline.ladder ?? null)}`;
+    let allowed = LADDER_TASK_PLANS.get(key);
+    if (!allowed) {
+      allowed = this.checkNeedsVision(document, maxInt(1, document.pageCount), state).then((needs) => new Set(needs.needed ? needs.selectedPages : []));
+      LADDER_TASK_PLANS.set(key, allowed);
+      allowed.catch(() => LADDER_TASK_PLANS.delete(key));
+      while (LADDER_TASK_PLANS.size > 64) LADDER_TASK_PLANS.delete(LADDER_TASK_PLANS.keys().next().value!);
+    }
+    return (await allowed).has(pageNumber);
   }
 
   /**
@@ -798,8 +818,9 @@ export class VisionExtractStage implements Stage {
     let ladder: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] } | undefined;
     if (state.run.pipeline.quality === "auto") {
       const planned = this.planLadder(state, document, pageCount, routing?.pages ?? [], needed ? selectedPages : [], hints);
-      ladder = { summary: planned.summary, decisions: planned.decisions };
+      // Recorded only under a limit: without one, stats and manifests keep their shape and the reads are unchanged.
       if (planned.active) {
+        ladder = { summary: planned.summary, decisions: planned.decisions };
         selectedPages = planned.selectedPages;
         hints = planned.hints;
         if (needed && selectedPages.length === 0) reason = "ladder-capped";
@@ -864,16 +885,22 @@ export class VisionExtractStage implements Stage {
     hints: LegacyPageHints,
   ): { active: boolean; selectedPages: number[]; hints: LegacyPageHints; summary: Record<string, unknown>; decisions: LadderPlan["decisions"] } {
     const { policy, plan } = planDocumentLadder({
-      pipeline: state.run.pipeline, documentId: document.id, pageCount, selectedPages, triage, ledger: state.artifactLedger,
+      pipeline: state.run.pipeline, runId: state.run.id, documentId: document.id, pageCount, selectedPages, triage, ledger: state.artifactLedger,
     });
     const active = policy.ladder.active;
     if (!active) {
       return { active, selectedPages: [...selectedPages], hints, summary: ladderPlanSummary(plan, policy.ladder), decisions: plan.decisions };
     }
-    const pinned = pinLadderPlan(state.artifactLedger, document.id, plan);
+    const pinned = pinLadderPlan(state.artifactLedger, document.id, state.run.id, plan);
     const decisions = plan.decisions.map((decision) => {
-      if (decision.rung === "fast" || pinned.escalated.has(decision.pageNumber)) return decision;
-      return { ...decision, rung: "fast" as const, cappedBy: decision.cappedBy ?? "share-above-fast" as const, reason: `${decision.reason};pinned-plan` };
+      if (decision.rung === "fast") return decision;
+      if (!pinned.escalated.has(decision.pageNumber)) {
+        return { ...decision, rung: "fast" as const, cappedBy: decision.cappedBy ?? "share-above-fast" as const, reason: `${decision.reason};pinned-plan` };
+      }
+      if (decision.rung === "intelligent" && !pinned.intelligent.has(decision.pageNumber)) {
+        return { ...decision, rung: "ocr" as const, cappedBy: decision.cappedBy ?? "share-above-ocr" as const, reason: `${decision.reason};pinned-plan` };
+      }
+      return decision;
     });
     const lowered = decisions.filter((decision) => decision.need === "intelligent" && decision.rung === "ocr").map((decision) => decision.pageNumber);
     const vmOcr = resolveOcrMode() === "vm" && document.mimeType === "application/pdf";

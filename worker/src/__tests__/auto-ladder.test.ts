@@ -5,8 +5,13 @@ import type { Document } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { VisionExtractStage, legacyPageHints } from "../stages/vision-extract.js";
 import { selectLegacyVisionPages, TABLE_LEAK_ONLY_SIGNAL } from "../stages/classify-route.js";
-import { LADDER_PLAN_KEY, ladderNeeds, ladderPinAllows, recordExtractEscalatedPages, visionLadderSelection, inheritExtractEscalatedPages, extractEscalatedPages } from "../routing/auto-ladder.js";
+import { LADDER_PLAN_KEY, ladderNeeds, readLadderPin, recordExtractEscalatedPages, visionLadderSelection, inheritExtractEscalatedPages, extractEscalatedPages } from "../routing/auto-ladder.js";
+import { recordOcrFailedPages } from "../ocr/mode.js";
 import type { Config } from "../config.js";
+import { RenderImagesStage } from "../stages/render-images.js";
+import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
+import { embedPageImages } from "../stages/page-embed.js";
+import { DocumentMapStage } from "../stages/document-map.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
@@ -69,7 +74,7 @@ const MIXED: AdaptivePageRoutingEntry[] = [
 ];
 
 describe("Auto ladder in vision-extract", () => {
-  it("records every selected page's rung and changes nothing without limits", async () => {
+  it("changes nothing without limits", async () => {
     const document = pdf(10);
     const { internals } = stageFor(MIXED);
     const state = runState(document);
@@ -77,8 +82,9 @@ describe("Auto ladder in vision-extract", () => {
     const legacy = selectLegacyVisionPages(MIXED, {});
     expect(result.selectedPages).toEqual(legacy);
     expect(result.hints).toEqual(legacyPageHints(MIXED));
-    expect(result.ladder?.decisions.filter((decision) => decision.rung === "intelligent").map((decision) => decision.pageNumber)).toEqual([3, 7]);
-    expect(result.ladder?.summary).toMatchObject({ counts: { fast: 3, ocr: 5, intelligent: 2 }, cappedPages: 0 });
+    // Without a limit nothing new is recorded: the stats and manifest keep their shape.
+    expect(result.ladder).toBeUndefined();
+    expect(Object.keys(result).sort()).toEqual(["hints", "needed", "reason", "routing", "score", "selectedPages"]);
     // No pin is written without a limit.
     expect(state.artifactLedger.readDocument(document.id, LADDER_PLAN_KEY)).toBeUndefined();
     // The explicit default object behaves identically.
@@ -135,11 +141,11 @@ describe("Auto ladder in vision-extract", () => {
     const document = pdf(10);
     const { internals } = stageFor(MIXED);
     const state = runState(document, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.3 } } });
-    recordExtractEscalatedPages(state.artifactLedger, document.id, [2, 9]);
+    recordExtractEscalatedPages(state.artifactLedger, document.id, "run-1", [2, 9]);
     const result = await internals.checkNeedsVision(document, 10, state);
     expect(result.selectedPages.sort((a, b) => a - b)).toEqual([2, 6, 9]);
     const state2 = runState(document, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2 } } });
-    recordExtractEscalatedPages(state2.artifactLedger, document.id, [1, 5]);
+    recordExtractEscalatedPages(state2.artifactLedger, document.id, "run-1", [1, 5]);
     expect((await stageFor(MIXED).internals.checkNeedsVision(document, 10, state2)).needed).toBe(false);
   });
 
@@ -161,6 +167,14 @@ describe("Auto ladder in vision-extract", () => {
     const outside = Array.from({ length: pages }, (_, index) => index + 1).find((pageNumber) => !planned.has(pageNumber))!;
     const skipped = await stage.runPageTask(state, { ...first[0]!, pageNumber: outside });
     expect(skipped).toMatchObject({ pageNumber: outside, outcome: "ladder-capped" });
+    // A page task in a fresh state (no pin persisted by planning) re-plans and refuses the page: never fail-open.
+    const fresh = runState(document, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.05, aboveOcr: 0.01 } } });
+    expect(await stage.runPageTask(fresh, { ...first[0]!, pageNumber: outside })).toMatchObject({ outcome: "ladder-capped" });
+    // A pin seeded from another run (a reprocess) is ignored.
+    const seeded = runState(document, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.05 } } });
+    seeded.artifactLedger.recordDocument(document.id, LADDER_PLAN_KEY, JSON.stringify({ runId: "older-run", escalated: [1], intelligent: [] }));
+    expect(readLadderPin(seeded.artifactLedger, document.id, "run-1")).toBeNull();
+    expect(await stage.planPageTasks(seeded)).toHaveLength(1_000);
     // A later plan under a looser limit cannot read past the pinned one.
     const looser = runState(document, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.5 } } });
     looser.artifactLedger.recordDocument(document.id, LADDER_PLAN_KEY, pin);
@@ -181,19 +195,107 @@ describe("ladder helpers", () => {
 
   it("keeps capped pages without native text as page images", () => {
     const state = runState(pdf(10), { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.1 } } });
-    const selection = visionLadderSelection({ pipeline: state.run.pipeline, documentId: "doc-1", pageCount: 10, triage: MIXED, routingV2: false, ledger: state.artifactLedger });
+    const selection = visionLadderSelection({ pipeline: state.run.pipeline, runId: "run-1", documentId: "doc-1", pageCount: 10, triage: MIXED, routingV2: false, ledger: state.artifactLedger });
     expect(selection.plan.escalated).toEqual([6]);
     expect(selection.keepAsImage).toEqual([2, 9]);
   });
 
-  it("pins, inherits and checks plans", () => {
-    expect(ladderPinAllows(undefined, 4)).toBe(true);
-    expect(ladderPinAllows(JSON.stringify({ escalated: [1, 2] }), 2)).toBe(true);
-    expect(ladderPinAllows(JSON.stringify({ escalated: [1, 2] }), 3)).toBe(false);
-    expect(ladderPinAllows("not json", 1)).toBe(false);
+  it("pins, inherits and checks plans per run", () => {
     const state = runState(pdf(4));
-    recordExtractEscalatedPages(state.artifactLedger, "doc-1", [3, 1], "hash-1");
+    expect(readLadderPin(state.artifactLedger, "doc-1", "run-1")).toBeNull();
+    state.artifactLedger.recordDocument("doc-1", LADDER_PLAN_KEY, "not json");
+    expect(readLadderPin(state.artifactLedger, "doc-1", "run-1")).toBeNull();
+    recordExtractEscalatedPages(state.artifactLedger, "doc-1", "run-1", [3, 1], "hash-1");
     inheritExtractEscalatedPages(state.artifactLedger, "doc-2", "hash-1");
-    expect([...extractEscalatedPages(state.artifactLedger, "doc-2")]).toEqual([1, 3]);
+    expect([...extractEscalatedPages(state.artifactLedger, "doc-2", "run-1")]).toEqual([1, 3]);
+    // Another run's reads (seeded by a reprocess) do not count against this run.
+    expect([...extractEscalatedPages(state.artifactLedger, "doc-2", "run-2")]).toEqual([]);
+  });
+
+  it("re-plans around pages whose OCR failed: the budget goes to the next page", async () => {
+    const document = pdf(10);
+    const state = runState(document, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.3 } } });
+    recordOcrFailedPages(state, document.id, [6]);
+    const result = await stageFor(MIXED).internals.checkNeedsVision(document, 10, state);
+    expect(result.selectedPages.sort((a, b) => a - b)).toEqual([2, 4, 9]);
+  });
+});
+
+describe("render-images under the ladder", () => {
+  /** MIXED with text on every page but the scans (2, 6, 9). */
+  function setup(env: Record<string, string> = {}) {
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+    const document = pdf(10);
+    const text = Array.from({ length: 10 }, (_, index) => ([2, 6, 9].includes(index + 1) ? "" : `Page ${index + 1} text.`)).join("\f");
+    const canonical = buildCanonicalDocumentFromMarkdown({ documentId: document.id, text, pageCount: 10, extractor: "native-pdf" });
+    const objects = new Map<string, unknown>([
+      ["canonical/doc.json", canonical],
+      ["classification/doc.json", {
+        status: "ready", documentId: document.id, label: "x", confidence: 1, signals: [], suggestedPlaybook: null,
+        documentComplexity: "mixed", dominantRoutes: [], visionPolicy: "selective", specializedContentSummary: [],
+        evidence: { source: "canonical-document", artifactUri: "s3://bucket/canonical/doc.json", characterCount: 1, pageCount: 10 },
+        pages: MIXED,
+      }],
+    ]);
+    const getJson = vi.fn(async (key: string) => structuredClone(objects.get(key)));
+    const storage = { bucket: "bucket", uri: (key: string) => `s3://bucket/${key}`, getJson } as unknown as ArtifactStore;
+    const state = runState(document, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.1 } } });
+    state.artifactLedger.recordDocument(document.id, "canonical-document", "s3://bucket/canonical/doc.json");
+    state.artifactLedger.recordDocument(document.id, "classification", "s3://bucket/classification/doc.json");
+    const stage = new RenderImagesStage({} as never, storage);
+    const select = (stage as unknown as { selectPages: (s: WorkflowState, d: Document, o?: { shard?: boolean }) => Promise<{
+      pageNumbers: number[]; keptAsImage: number[]; unreadPages: number[];
+    }> }).selectPages.bind(stage);
+    return { document, state, select, getJson };
+  }
+
+  it("keeps capped scans as page images under Fast's caps, renders no capped text page, and fails closed without a budget", async () => {
+    const { document, state, select } = setup();
+    const reserve = vi.fn(async ({ wanted }: { wanted: number }) => wanted);
+    (state as unknown as { store: unknown }).store = { reserveFastPageImageRenders: reserve, listHostPageImagePages: async () => [] };
+    const selected = await select(state, document);
+    expect(selected.keptAsImage).toEqual([2, 9]);
+    expect(selected.unreadPages).toEqual([]);
+    expect(selected.pageNumbers).toEqual([2, 6, 9]);
+    expect(reserve).toHaveBeenCalledWith(expect.objectContaining({ wanted: 2 }));
+    // The per-run reservation grants one: the other stays unread.
+    reserve.mockResolvedValueOnce(1);
+    expect(await select(state, document)).toMatchObject({ keptAsImage: [2], unreadPages: [9] });
+    // No store to reserve from: nothing is kept (fail closed).
+    (state as unknown as { store: unknown }).store = undefined;
+    expect(await select(state, document)).toMatchObject({ keptAsImage: [], unreadPages: [2, 9], pageNumbers: [6] });
+  });
+
+  it("applies the per-document cap, and page-range shards choose no kept pages", async () => {
+    const { document, state, select, getJson } = setup({ WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT: "1" });
+    (state as unknown as { store: unknown }).store = { reserveFastPageImageRenders: async ({ wanted }: { wanted: number }) => wanted, listHostPageImagePages: async () => [] };
+    expect(await select(state, document)).toMatchObject({ keptAsImage: [2], unreadPages: [9] });
+    getJson.mockClear();
+    const shard = await select(state, document, { shard: true });
+    expect(shard.keptAsImage).toEqual([]);
+    expect(getJson).not.toHaveBeenCalledWith("canonical/doc.json");
+  });
+});
+
+describe("reads outside the plan", () => {
+  it("page-image embedding refuses under a ladder limit (nothing rendered or charged)", async () => {
+    const renderSelectedPages = vi.fn();
+    const result = await embedPageImages(
+      { rasters: { renderSelectedPages }, usage: { record: vi.fn() } } as never,
+      { document: pdf(4), pages: [1, 2], run: { id: "run-1", projectId: "proj-1", pipeline: { ...defaultPipelineFeatures, ladder: { maxRung: "ocr" } } } } as never,
+    );
+    expect(result).toMatchObject({ embeddedPages: [], stoppedBy: "quality-fast" });
+    expect(renderSelectedPages).not.toHaveBeenCalled();
+  });
+
+  it("the document map's siphon OCR reads no page under an above-fast share", async () => {
+    const stage = new DocumentMapStage({} as never, {} as ArtifactStore, {} as CommandRunner, {} as Config);
+    const renderSelectedPages = vi.fn();
+    (stage as unknown as { rasters: unknown }).rasters = { renderSelectedPages };
+    const state = runState(pdf(10), { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.5 } } });
+    const ocr = await (stage as unknown as { ocrPages: (args: unknown) => Promise<{ pageTexts: string[]; costCents: number }> })
+      .ocrPages({ document: pdf(10), first: 1, last: 3, state });
+    expect(ocr).toEqual({ pageTexts: ["", "", ""], costCents: 0 });
+    expect(renderSelectedPages).not.toHaveBeenCalled();
   });
 });

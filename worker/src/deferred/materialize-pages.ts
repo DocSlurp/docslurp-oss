@@ -10,7 +10,7 @@ import {
   buildPricedAiUsageLedgerEvent,
   calculateAiUsageCostCents,
   pageCredits,
-  effectiveLadder,
+  ladderAllowsOffPlanReads,
   qualityAllowsPageReading,
   qualityReadsEveryPage,
   richPagesForOutputTokens,
@@ -385,8 +385,7 @@ export async function materializePageRange(
   // An Auto ladder above-fast share (pipeline.ladder.maxEscalationShare.aboveFast) is planned per document at ingest; query-time reads
   // have no document-wide plan to count against, so they read no page under one (fail closed: the page stays an image). Query-time reads are plain transcription (the
   // ocr rung), so maxRung and the above-ocr share change nothing here.
-  const ladder = effectiveLadder(pipeline);
-  const readsPages = qualityAllowsPageReading(pipeline.quality) && ladder.aboveFast === undefined;
+  const readsPages = qualityAllowsPageReading(pipeline.quality) && ladderAllowsOffPlanReads(pipeline).pageReads;
   const readsEveryPage = qualityReadsEveryPage(pipeline.quality);
   const ocrPages: number[] = [];
   const keptUnread: number[] = [];

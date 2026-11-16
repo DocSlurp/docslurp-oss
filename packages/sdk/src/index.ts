@@ -47,7 +47,8 @@ export type LadderRung = "fast" | "ocr" | "intelligent";
 /**
  * Auto ladder limits (`pipeline.ladder`), applied in `auto` quality only. `maxRung` (default `intelligent`) is the highest
  * rung any page may be read on. `maxEscalationShare.aboveFast` / `.aboveOcr` (0..1, unset by default) cap the share of
- * each document's pages read above `fast` / above `ocr` (floor of share x pages). Set either to null to remove it.
+ * each document's pages read above `fast` / above `ocr` (floor of share x pages, at least 1 while above 0). Set either to
+ * null to remove it. A non-editor's per-upload override can only tighten the project's limits.
  */
 export type PipelineLadder = {
   maxRung?: LadderRung;

@@ -249,7 +249,7 @@ function providerQuote(args: ProviderEstimateArgs, billing: "enforced" | "disabl
   const fast = pricing().quote({ ...args, settings: { ...settings, quality: "fast" } as QuoteSettings, profile: { ...args.profile, quality: "fast" } });
   if (fast.kind !== "estimate" || !fast.ingest.credits) return quote;
   const before = quote.ingest.credits;
-  const ingest = capCreditsToLadderShare({ credits: before, fastCredits: fast.ingest.credits, files: args.files, share: aboveFastShare, speedBoost: settings.speedBoost });
+  const ingest = capCreditsToLadderShare({ credits: before, fastCredits: fast.ingest.credits, files: args.files, share: aboveFastShare });
   const saved = { low: before.low - ingest.low, high: before.high - ingest.high };
   const pagesPerDollar = quote.rates.pagesPerDollar && ingest.high > 0 && ingest.low > 0
     ? { low: quote.pages.low / (ingest.high / 100), high: quote.pages.high / (ingest.low / 100) }

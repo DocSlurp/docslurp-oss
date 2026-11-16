@@ -26,22 +26,16 @@ export const LADDER_RUNG_RANK: Record<LadderRung, number> = { fast: 0, ocr: 1, i
 
 const shareSchema = z.number().finite().min(0).max(1);
 
-export const ladderEscalationShareSchema = z
-  .strictObject({
-    /** Largest share (0..1) of a document's pages that may be read by any model (OCR or vision). */
-    aboveFast: shareSchema.nullable().optional(),
-    /** Largest share (0..1) of a document's pages that may be read on the intelligent rung (a vision model on a figure). */
-    aboveOcr: shareSchema.nullable().optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (typeof value.aboveFast === "number" && typeof value.aboveOcr === "number" && value.aboveOcr > value.aboveFast) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["aboveOcr"],
-        message: "aboveOcr cannot exceed aboveFast: every page above ocr is also above fast",
-      });
-    }
-  });
+export const ladderEscalationShareSchema = z.strictObject({
+  /** Largest share (0..1) of a document's pages that may be read by any model (OCR or vision). */
+  aboveFast: shareSchema.nullable().optional(),
+  /**
+   * Largest share (0..1) of a document's pages that may be read on the intelligent rung (a vision model on a figure).
+   * Above `aboveFast` it caps nothing more (effectiveLadder): every page above ocr is also above fast. Not refused, so a
+   * project's share and an upload's tighter one always merge into a valid ladder.
+   */
+  aboveOcr: shareSchema.nullable().optional(),
+});
 export type LadderEscalationShare = z.infer<typeof ladderEscalationShareSchema>;
 
 export const pipelineLadderSchema = z.strictObject({
@@ -73,7 +67,8 @@ export function effectiveLadder(pipeline: LadderPipeline | null | undefined): Ef
   if ((pipeline?.quality ?? "auto") !== "auto") return { active: false, maxRung: "intelligent" };
   const ladder = pipeline?.ladder ?? null;
   const parsed = ladderRungSchema.safeParse(ladder?.maxRung);
-  let maxRung: LadderRung = parsed.success ? parsed.data : "intelligent";
+  // Unset is the default (intelligent); a value that is set but not a rung fails closed to the tightest rung.
+  let maxRung: LadderRung = parsed.success ? parsed.data : ladder?.maxRung === undefined || ladder?.maxRung === null ? "intelligent" : "fast";
   let aboveFast = share(ladder?.maxEscalationShare?.aboveFast);
   let aboveOcr = share(ladder?.maxEscalationShare?.aboveOcr);
   // A share of 0 is a rung limit: no page may go above that rung.
@@ -127,9 +122,11 @@ export function applyLadderLimits<T extends LadderPipeline & { chartExport?: { t
   return { ...next, chartExport: { ...next.chartExport, tier: "free" } };
 }
 
-/** A chart export tier under the ladder: `models` becomes `free` below the intelligent rung. */
+/** A chart export tier under the ladder: `models` becomes `free` while any ladder limit is in force. */
 export function ladderChartExportTier<T extends string | null | undefined>(pipeline: LadderPipeline | null | undefined, tier: T): T | "free" {
-  return tier === "models" && LADDER_RUNG_RANK[effectiveLadder(pipeline).maxRung] < LADDER_RUNG_RANK.intelligent ? "free" : tier;
+  // Chart export reads its candidates outside the page plan, so any ladder limit (a rung below intelligent, or a share
+  // cap) keeps it on the free tier, which reads no chart with a model.
+  return tier === "models" && effectiveLadder(pipeline).active ? "free" : tier;
 }
 
 /**
@@ -157,11 +154,45 @@ export function tighterLadder(project: Partial<PipelineLadder> | null | undefine
   };
 }
 
-/** Pages of a `pageCount`-page document a share allows: floor(share x pages), a maximum never rounded up. */
+/**
+ * A run pipeline from a caller who cannot change the project's spend settings, held to the project's ladder: the ladder
+ * no looser than the project's (tighterLadder), and, while the project has a limit, quality no higher than the
+ * project's (Good would read every page past the limits). Editors (`mayLoosen`) keep the run pipeline as asked.
+ */
+export function clampRunLadder<T extends { quality: QualityMode; ladder?: Partial<PipelineLadder> | null }>(
+  run: T,
+  project: { quality?: QualityMode | null; ladder?: Partial<PipelineLadder> | null } | null | undefined,
+  mayLoosen: boolean,
+): T {
+  if (mayLoosen) return run;
+  const ladder = tighterLadder(project?.ladder ?? null, run.ladder ?? null);
+  const projectQuality = project?.quality ?? "auto";
+  const projectLimited = effectiveLadder({ quality: projectQuality, ladder: project?.ladder ?? null }).active;
+  const rank: Record<QualityMode, number> = { fast: 0, auto: 1, good: 2 };
+  const quality = projectLimited && rank[run.quality] > rank[projectQuality] ? projectQuality : run.quality;
+  return { ...run, quality, ladder };
+}
+
+/**
+ * Pages of a `pageCount`-page document a share allows: floor(share x pages), and at least one page when the share is
+ * above 0, so a small file (a one-page scan, an image, an Office file before its pages are measured) can still be read.
+ */
 export function ladderShareBudget(shareValue: number | undefined, pageCount: number): number {
   const pages = Math.max(0, Math.floor(Number.isFinite(pageCount) ? pageCount : 0));
   if (shareValue === undefined) return pages;
-  return Math.max(0, Math.min(pages, Math.floor(shareValue * pages + 1e-9)));
+  if (shareValue <= 0 || pages === 0) return 0;
+  return Math.max(1, Math.min(pages, Math.floor(shareValue * pages + 1e-9)));
+}
+
+/**
+ * Whether reads outside a document's ladder plan may run: query-time materialization, the document map's siphon OCR,
+ * page-image embeddings. They have no document-wide plan to count against, so under an above-fast share they read
+ * nothing (fail closed). Page-image embedding (visual indexing, the coarse fallback) reads every page it embeds, so it
+ * runs only with no ladder limit at all (`offPlanEmbeddings`).
+ */
+export function ladderAllowsOffPlanReads(pipeline: LadderPipeline | null | undefined): { pageReads: boolean; pageEmbeddings: boolean } {
+  const ladder = effectiveLadder(pipeline);
+  return { pageReads: ladder.aboveFast === undefined, pageEmbeddings: !ladder.active };
 }
 
 /** What the ladder allows one document, from its page count. */

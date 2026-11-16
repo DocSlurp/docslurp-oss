@@ -3,7 +3,7 @@ import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
 import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
-import { defaultPipelineLadder, pipelineLadderSchema } from "./auto-ladder.js";
+import { defaultPipelineLadder, effectiveLadder, pipelineLadderSchema } from "./auto-ladder.js";
 import {
   defaultDocumentExtractionConfig,
   documentExtractionConfigSchema,
@@ -1530,7 +1530,7 @@ export function withoutStageSelection<T extends { restartFromStage?: unknown; st
  * `indexingMode`/`materialization`/`visualPages`, so switching modes (or the
  * new `visualPages` default appearing on stored pipelines) never marks chunks stale.
  * `summaryTree` is dropped too: the tree is a separate index built from the chunks, so
- * turning it on or off (or the key appearing on stored pipelines) changes no chunk.
+ * turning it on or off (or the key appearing on stored pipelines) changes no chunk. `ladder` is dropped at its defaults.
  * The stored pipeline keeps those fields (use `withoutStageSelection` there).
  */
 export function pipelineVersionFeatures<T extends object>(
@@ -1545,6 +1545,9 @@ export function pipelineVersionFeatures<T extends object>(
     summaryTree: _summaryTree,
     ...rest
   } = features as T & Record<string, unknown>;
+  // The Auto ladder at its defaults (no limit) changes no output: dropped, so the key appearing on stored pipelines never
+  // changes a version hash. A limit stays in the hash.
+  if ("ladder" in rest && !effectiveLadder({ quality: "auto", ladder: rest.ladder as never }).active) delete rest.ladder;
   return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree">;
 }
 
