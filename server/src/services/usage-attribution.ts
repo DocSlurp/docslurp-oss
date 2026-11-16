@@ -680,25 +680,9 @@ export interface ProviderCostLossOrgTotal {
   refundedItems: number;
 }
 
-/**
- * Loss items in a window (provider cost above the credits charged), plus
- * per-org totals over all of them (the item list is capped; the totals are
- * not). An item is a chat turn (`metadata.chatTurnId`), a run (judged once
- * terminal, at whichever is later of its last event and its last status
- * change), or a search session that carried a `search-query` charge (chat
- * work outside a turn never forms an item). Events up to `lookbackMs` before
- * `since` count toward an item; items running longer are judged on their
- * recent part. Non-numeric `providerCostCents` counts as 0. The statements
- * run under a statement timeout (default 20 s) so a slow scan cannot stall
- * the alert leader.
- */
-export async function providerCostLossItems(
-  args: { since: Date; until: Date; lookbackMs?: number; limit?: number; statementTimeoutMs?: number },
-  client: SqlClient = sql,
-): Promise<{ items: ProviderCostLossItem[]; orgs: ProviderCostLossOrgTotal[] }> {
-  const from = new Date(args.since.getTime() - (args.lookbackMs ?? 6 * 60 * 60_000));
-  const timeoutMs = Math.max(1_000, Math.round(args.statementTimeoutMs ?? 20_000));
-  const lossItems = (db: SqlClient) => db`
+/** Settled usage items in a window; `lossOnly` keeps those whose provider cost exceeded the credits charged. */
+function settledUsageItems(db: SqlClient, args: { since: Date; until: Date }, from: Date, lossOnly: boolean) {
+  return db`
     with events as (
       select au.*,
         case
@@ -726,16 +710,38 @@ export async function providerCostLossItems(
       group by item_kind, item_key, org_id
     )
     select i.kind, i.key, i.org_id, i.credit_cents, i.provider_cost_cents, i.estimated_cost_cents, i.refunded, i.top_model,
+      case when i.kind = 'run' then coalesce(wr.pages_processed, 0) else 0 end as pages,
       case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end as judged_at
     from items i
     left join project_runs wr on i.kind = 'run' and wr.id = i.key
-    where i.provider_cost_cents > i.credit_cents + 0.000001
+    where (${!lossOnly} or i.provider_cost_cents > i.credit_cents + 0.000001)
       and (i.kind <> 'search-session' or i.search_charged)
       and (i.kind <> 'run' or wr.id is null or wr.status = any(${TERMINAL_RUN_STATUSES}::text[]))
       and (case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end)
         > ${args.since}
       and (case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end)
         <= ${args.until}`;
+}
+
+/**
+ * Loss items in a window (provider cost above the credits charged), plus
+ * per-org totals over all of them (the item list is capped; the totals are
+ * not). An item is a chat turn (`metadata.chatTurnId`), a run (judged once
+ * terminal, at whichever is later of its last event and its last status
+ * change), or a search session that carried a `search-query` charge (chat
+ * work outside a turn never forms an item). Events up to `lookbackMs` before
+ * `since` count toward an item; items running longer are judged on their
+ * recent part. Non-numeric `providerCostCents` counts as 0. The statements
+ * run under a statement timeout (default 20 s) so a slow scan cannot stall
+ * the alert leader.
+ */
+export async function providerCostLossItems(
+  args: { since: Date; until: Date; lookbackMs?: number; limit?: number; statementTimeoutMs?: number },
+  client: SqlClient = sql,
+): Promise<{ items: ProviderCostLossItem[]; orgs: ProviderCostLossOrgTotal[] }> {
+  const from = new Date(args.since.getTime() - (args.lookbackMs ?? 6 * 60 * 60_000));
+  const timeoutMs = Math.max(1_000, Math.round(args.statementTimeoutMs ?? 20_000));
+  const lossItems = (db: SqlClient) => settledUsageItems(db, args, from, true);
   type ItemRow = { kind: ProviderCostLossItem["kind"]; key: string; org_id: string; credit_cents: number; provider_cost_cents: number;
     estimated_cost_cents: number; refunded: boolean; top_model: string | null; judged_at: Date };
   type OrgRow = { org_id: string; loss_cents: number; provider_cost_cents: number; credit_cents: number; estimated_cost_cents: number; items: number; refunded_items: number };
@@ -773,4 +779,46 @@ export async function providerCostLossItems(
     items: Number(row.items), refundedItems: Number(row.refunded_items),
   }));
   return { items, orgs };
+}
+
+/** One settled item (profitable or not) with what it charged and what providers charged for it. */
+export interface SettledItem {
+  kind: ProviderCostLossItem["kind"];
+  key: string;
+  orgId: string;
+  creditCents: number;
+  providerCostCents: number;
+  estimatedCostCents: number;
+  /** Pages the run processed (0 for chat turns and search sessions). */
+  pages: number;
+}
+
+/**
+ * Every item that settled in a window, not only the loss-making ones; refunded chat turns are left out. Same item
+ * rules, lookback and statement timeout as providerCostLossItems. An item's sums cover its events in the lookback, so
+ * a caller that totals across windows must count each item once (ProviderCostLossMonitor keeps the keys it counted).
+ * Capped at `limit` items, oldest first.
+ */
+export async function settledItems(
+  args: { since: Date; until: Date; lookbackMs?: number; limit?: number; statementTimeoutMs?: number },
+  client: SqlClient = sql,
+): Promise<SettledItem[]> {
+  const from = new Date(args.since.getTime() - (args.lookbackMs ?? 6 * 60 * 60_000));
+  const timeoutMs = Math.max(1_000, Math.round(args.statementTimeoutMs ?? 20_000));
+  type Row = { kind: SettledItem["kind"]; key: string; org_id: string; credit_cents: number; provider_cost_cents: number;
+    estimated_cost_cents: number; pages: number };
+  const rows = await client.begin(async (tx) => {
+    const db = tx as unknown as SqlClient;
+    await db`select set_config('statement_timeout', ${String(timeoutMs)}, true)`;
+    return db<Row[]>`
+      select kind, key, org_id, credit_cents, provider_cost_cents, estimated_cost_cents, pages
+      from (${settledUsageItems(db, args, from, false)}) settled
+      where not refunded
+      order by judged_at
+      limit ${args.limit ?? 5_000}`;
+  }) as Row[];
+  return rows.map((row) => ({
+    kind: row.kind, key: row.key, orgId: row.org_id, creditCents: Number(row.credit_cents),
+    providerCostCents: Number(row.provider_cost_cents), estimatedCostCents: Number(row.estimated_cost_cents), pages: Number(row.pages),
+  }));
 }

@@ -17,6 +17,7 @@ import { hasFailedDocumentStage } from "./document-health.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { WorkflowState } from "./pipeline.js";
+import { noteDocumentStageComplete, noteRunPageStage, recordDocumentStageFailure, recordDocumentStageRetry } from "./run-milestones.js";
 import {
   buildRunProgressEvent,
   recordPageProgress,
@@ -177,6 +178,7 @@ function recordRetryPerformance(
   reason: "low-plausibility" | "error",
   metadata: Record<string, unknown>,
 ): void {
+  recordDocumentStageRetry(stageName, reason);
   state.pendingPerformance.push({
     documentId: document.id,
     scope: "document",
@@ -428,6 +430,7 @@ export async function runDocumentStage(
 
       if (state.store) {
         await state.store.completeDocumentStage(state, document.id, stageName, artifactUri, stats, result.geoFinalSource);
+        await noteDocumentStageComplete(state, stageName, document.pageCount);
         if (needsDocumentProgressCheckpoint(state)) await state.store.updateProgress(state);
         await state.store.appendEvent(
           buildRunProgressEvent(state, {
@@ -535,6 +538,7 @@ export async function runDocumentStage(
       finalStats,
       trustedDocumentFailure(cause)
     );
+    recordDocumentStageFailure(stageName, trustedDocumentFailure(cause)?.code);
     await state.store.updateProgress(state);
     await state.store.appendEvent(
       buildRunProgressEvent(state, {
@@ -627,6 +631,7 @@ export async function emitDocumentPageProgress(
 
   if (status === "completed" && state.store) {
     await state.store.setPageStageComplete(state.run.id, document.id, stageName, pageNumber);
+    await noteRunPageStage(state, stageName);
   }
 
   const now = Date.now();
@@ -663,6 +668,7 @@ export async function completeDocumentPages(
     } else if (state.store) {
       for (const page of batch) await state.store.setPageStageComplete(state.run.id, document.id, stageName, page);
     }
+    if (batch.length > 0) await noteRunPageStage(state, stageName);
     if (!emitProgress) continue;
     for (const pageNumber of batch) recordPageProgress(state, { documentId: document.id, stageName, pageNumber, pageCount, status: "completed" });
     if (state.store) {

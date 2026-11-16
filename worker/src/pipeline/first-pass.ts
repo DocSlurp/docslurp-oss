@@ -12,6 +12,7 @@
  * - Nothing becomes searchable before its publish gate passes (first-pass-gate.ts: a clean malware verdict).
  * - A failed file fails only itself (or is handed back); the batch result of one document never reaches another.
  */
+import { noteRunMilestone } from "./run-milestones.js";
 import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -138,6 +139,7 @@ export function markFirstPassDocumentForTest(runId: string, documentId: string):
 // ── Planning ──
 
 export interface FirstPassStore {
+  markRunMilestone?: import("./run-milestones.js").RunMilestoneStore["markRunMilestone"];
   loadRun: Parameters<typeof loadRunState>[0]["loadRun"];
   loadDocumentsForRun: Parameters<typeof loadRunState>[0]["loadDocumentsForRun"];
   hydrateState: Parameters<typeof loadRunState>[0]["hydrateState"];
@@ -382,6 +384,8 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
         return;
       }
       const textMs = now() - started;
+      // The first-pass text is the run's first extracted page, ahead of the extract stage's own page checkpoints.
+      if (timings.firstTextMs === null) void noteRunMilestone(deps.store, input.runId, "first_page_extracted");
       timings.firstTextMs ??= textMs;
       timings.allTextMs = textMs;
       timings.pages += event.pages;

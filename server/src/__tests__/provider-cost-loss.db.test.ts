@@ -33,6 +33,40 @@ async function event(args: { org: string; project: string; user: string; credits
 }
 const window = () => ({ since: new Date(Date.now() - 60 * 60_000), until: new Date(Date.now() - 60_000) });
 
+describe("settledItems", () => {
+  it("returns profitable and loss-making items with run pages, and leaves out refunds and unfinished runs", async () => {
+    const o1 = { org: "o1", project: "w1", user: "u1" };
+    await event({ ...o1, providerCost: 3, metadata: { chatTurnId: "tA", costSource: "provider" } });
+    await event({ ...o1, credits: 1, metadata: { chatTurnId: "tA" } });
+    await event({ ...o1, providerCost: 1, metadata: { chatTurnId: "tB", costSource: "provider" } });
+    await event({ ...o1, credits: 5, metadata: { chatTurnId: "tB" } });
+    await event({ ...o1, providerCost: 2, metadata: { chatTurnId: "tC", costSource: "provider", chatTurnRefund: { reason: "error", credits: 1 } } });
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, pages_processed, updated_at) values
+      (100, 'r-profit', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', 200, ${tenMinutesAgo}),
+      (100, 'r-busy', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '{}', 900, ${tenMinutesAgo})`;
+    await event({ ...o1, runId: "r-profit", providerCost: 2, metadata: { costSource: "estimate" } });
+    await event({ ...o1, runId: "r-profit", credits: 20 });
+    await event({ ...o1, runId: "r-busy", providerCost: 10, metadata: { costSource: "provider" } });
+    // Another organization's run lands in the same kind total: the counters carry no tenant label.
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, pages_processed, updated_at) values
+      (100, 'r-two', 'o2', 'u2', 'w2', 'bulk-upload', 'completed', 'completed', '{}', 50, ${tenMinutesAgo})`;
+    await event({ org: "o2", project: "w2", user: "u2", runId: "r-two", providerCost: 4, metadata: { costSource: "provider" } });
+    await event({ org: "o2", project: "w2", user: "u2", runId: "r-two", credits: 1 });
+
+    const items = await attribution.settledItems(window());
+    const byKey = Object.fromEntries(items.map((item) => [item.key, item]));
+    // Profitable and loss-making items both appear; the refunded turn and the processing run do not.
+    expect(Object.keys(byKey).sort()).toEqual(["r-profit", "r-two", "tA", "tB"]);
+    expect(byKey["r-profit"]).toEqual({ kind: "run", key: "r-profit", orgId: "o1", creditCents: 20, providerCostCents: 2, estimatedCostCents: 2, pages: 200 });
+    expect(byKey["r-two"]).toMatchObject({ orgId: "o2", creditCents: 1, providerCostCents: 4, pages: 50 });
+    expect(byKey.tA).toMatchObject({ kind: "chat-turn", creditCents: 1, providerCostCents: 3, pages: 0 });
+    // Nothing settled outside the window, and the cap holds.
+    expect(await attribution.settledItems({ since: new Date(Date.now() - 5 * 60_000), until: new Date(Date.now() - 60_000) })).toEqual([]);
+    expect(await attribution.settledItems({ ...window(), limit: 1 })).toHaveLength(1);
+  });
+});
+
 describe("providerCostLossItems", () => {
   it("reports chat turns, finished runs and sessions whose provider cost exceeds their credits", async () => {
     const o1 = { org: "o1", project: "w1", user: "u1" };

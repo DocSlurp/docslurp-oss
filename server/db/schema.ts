@@ -2431,6 +2431,11 @@ export const projectRuns = pgTable(
       withTimezone: true,
       mode: "string",
     }),
+    // Run milestones, each stamped once (0183_run_milestones; worker/src/pipeline/run-milestones.ts).
+    workerStartedAt: timestamp("worker_started_at", { withTimezone: true, mode: "string" }),
+    firstPageExtractedAt: timestamp("first_page_extracted_at", { withTimezone: true, mode: "string" }),
+    firstPageCompletedAt: timestamp("first_page_completed_at", { withTimezone: true, mode: "string" }),
+    outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true, mode: "string" }),
     workflowStartAttempts: integer("workflow_start_attempts").default(0).notNull(),
     workflowStartNextAt: timestamp("workflow_start_next_at", {
       withTimezone: true,

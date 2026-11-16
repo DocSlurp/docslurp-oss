@@ -1,4 +1,5 @@
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { recordPageEscalation } from "../pipeline/run-milestones.js";
 import { recordOcrReads } from "../ocr/ledger.js";
 import { OcrInfrastructureError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { authorizeOcrRead } from "../ocr/image-frames.js";
@@ -2018,6 +2019,7 @@ export class VisionExtractStage implements Stage {
     }
     for (const page of failedPages) {
       if (page.outcome === "blank-render") continue;
+      recordPageEscalation("vision", page.outcome, 1);
       state.pendingPerformance.push({
         documentId: document.id,
         scope: "page",

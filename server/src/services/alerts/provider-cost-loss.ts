@@ -1,6 +1,6 @@
-import { emitTelemetryLog } from "@docslurp/shared/observability";
+import { emitTelemetryLog, recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { isBillingEnforced } from "@docslurp/shared";
-import { providerCostLossItems, type ProviderCostLossItem, type ProviderCostLossOrgTotal } from "../usage-attribution.js";
+import { providerCostLossItems, settledItems, type ProviderCostLossItem, type ProviderCostLossOrgTotal, type SettledItem } from "../usage-attribution.js";
 import type { AlertCheck } from "./alert-rules.js";
 
 /**
@@ -15,6 +15,15 @@ import type { AlertCheck } from "./alert-rules.js";
  *   excluded: their loss is the refund policy) fire
  *   `provider-cost-loss:<orgId>` at ALERT_PROVIDER_LOSS_CENTS (default 100,
  *   i.e. $1), through the normal alert tracker and delivery.
+ *
+ * - Wherever billing is enforced (whatever the loss threshold), every item
+ *   that settled since the previous pass, profitable ones included, is added
+ *   once to the `docslurp.billing.*` counters by kind: items, loss items,
+ *   credits charged, provider cost and run pages. Mean cost, mean margin and
+ *   pages per $1 are ratios of those counters. Each item is counted once per
+ *   leader, at its first settlement; usage it receives later is not added, so
+ *   the counters can run slightly low and cannot be inflated by keeping an
+ *   item alive. The pass runs beside the loss query and never delays it.
  *
  * Runs on the alert leader only, at most every ALERT_PROVIDER_LOSS_INTERVAL_MS
  * (default 5 minutes), and only where billing is enforced (with billing off
@@ -94,15 +103,44 @@ function resolvedCheck(orgId: string, thresholdCents: number): AlertCheck {
     summary: `Org ${orgId} provider costs are back within credits charged`, details: { orgId, lossCents: 0, thresholdCents } };
 }
 
+/** What newly settled items of one kind charged and cost. */
+export interface SettledKindTotals {
+  kind: SettledItem["kind"];
+  items: number;
+  lossItems: number;
+  creditCents: number;
+  providerCostCents: number;
+  estimatedCostCents: number;
+  pages: number;
+}
+
+/** How long a counted item is remembered: as long as it can reappear in a settled window (the query's lookback). */
+const COUNTED_TTL_MS = 6 * 60 * 60_000 + 60 * 60_000;
+/** A pass never looks further back than this many intervals; an outage longer than that leaves a gap, not a replay. */
+const MAX_TOTALS_INTERVALS = 3;
+
 export interface ProviderCostLossDeps {
   query: (args: { since: Date; until: Date }) => Promise<{ items: ProviderCostLossItem[]; orgs: ProviderCostLossOrgTotal[] }>;
   now: () => number;
   emit: (item: ProviderCostLossItem) => void;
+  /** Every item settled in a window; absent in tests that only exercise the loss path. */
+  settled?: (args: { since: Date; until: Date }) => Promise<SettledItem[]>;
+  record?: (totals: SettledKindTotals) => void;
   billingEnforced: () => boolean;
 }
 
 const defaultDeps: ProviderCostLossDeps = {
   query: (args) => providerCostLossItems(args),
+  settled: (args) => settledItems(args),
+  record: (totals) => {
+    const labels = { kind: totals.kind };
+    recordPipelineTelemetry("billing.items", totals.items, labels);
+    recordPipelineTelemetry("billing.loss_items", totals.lossItems, labels);
+    recordPipelineTelemetry("billing.credit_cents", totals.creditCents, labels);
+    recordPipelineTelemetry("billing.provider_cost_cents", totals.providerCostCents, labels);
+    recordPipelineTelemetry("billing.estimated_cost_cents", totals.estimatedCostCents, labels);
+    if (totals.pages > 0) recordPipelineTelemetry("billing.pages", totals.pages, labels);
+  },
   now: Date.now,
   emit: (item) => {
     const attributes = {
@@ -126,6 +164,48 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 export class ProviderCostLossMonitor {
+  private totalsUntil = 0;
+  private totalsRunning = false;
+  private readonly counted = new Map<string, number>();
+
+  /**
+   * Adds items that settled since the previous pass to the billing counters, each once. Fire-and-forget from
+   * evaluate(): a slow or failed pass costs counters for that window, never an alert or a leader tick.
+   */
+  async recordTotals(now: number): Promise<void> {
+    if (!this.deps.settled || !this.deps.record || this.totalsRunning) return;
+    const until = now - this.settings.settleMs;
+    if (this.totalsUntil && until - this.totalsUntil < this.settings.intervalMs) return;
+    const earliest = until - MAX_TOTALS_INTERVALS * this.settings.intervalMs;
+    const since = this.totalsUntil ? Math.max(this.totalsUntil, earliest) : until - this.settings.intervalMs;
+    this.totalsRunning = true;
+    // Advance first: a failed window is skipped, not retried wider and wider.
+    this.totalsUntil = until;
+    try {
+      const items = await withTimeout(this.deps.settled({ since: new Date(since), until: new Date(until) }), QUERY_TIMEOUT_MS);
+      const byKind = new Map<string, SettledKindTotals>();
+      for (const item of items) {
+        const key = `${item.kind}:${item.key}:${item.orgId}`;
+        if (this.counted.has(key)) continue;
+        this.counted.set(key, now);
+        const totals = byKind.get(item.kind) ?? { kind: item.kind, items: 0, lossItems: 0, creditCents: 0, providerCostCents: 0, estimatedCostCents: 0, pages: 0 };
+        totals.items += 1;
+        if (item.providerCostCents > item.creditCents + 0.000001) totals.lossItems += 1;
+        totals.creditCents += Math.max(0, item.creditCents);
+        totals.providerCostCents += item.providerCostCents;
+        totals.estimatedCostCents += item.estimatedCostCents;
+        totals.pages += item.pages;
+        byKind.set(item.kind, totals);
+      }
+      for (const totals of byKind.values()) this.deps.record(totals);
+      for (const [key, at] of this.counted) if (now - at > COUNTED_TTL_MS) this.counted.delete(key);
+    } catch (error) {
+      console.error(`[alert] settled item totals failed: ${error instanceof Error ? error.name : "error"}`);
+    } finally {
+      this.totalsRunning = false;
+    }
+  }
+
   private lastRunAt = 0;
   private lastChecks: AlertCheck[] = [];
   private readonly firing = new Set<string>();
@@ -135,6 +215,7 @@ export class ProviderCostLossMonitor {
 
   /** Checks for this evaluation; between runs the previous checks are returned unchanged. */
   async evaluate(): Promise<AlertCheck[]> {
+    if (this.deps.billingEnforced()) void this.recordTotals(this.deps.now());
     if (this.settings.thresholdCents <= 0 || !this.deps.billingEnforced()) {
       // Turned off while an alert fired: resolve it rather than leave it active forever.
       const resolved = [...this.firing].map((orgId) => resolvedCheck(orgId, this.settings.thresholdCents));
@@ -179,5 +260,7 @@ export class ProviderCostLossMonitor {
     this.lastRunAt = 0;
     this.lastChecks = [];
     this.firing.clear();
+    // Another leader counted while this one was out: start from one interval back, not from the old edge.
+    this.totalsUntil = 0;
   }
 }

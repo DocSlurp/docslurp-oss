@@ -3,6 +3,7 @@
  * read. It is an additional read with its own budget and ledger entry, never a substitute for OCR that could not run: a
  * page reaches here only with the boundary's own read and PNG. A skipped or failed escalation keeps the recogniser's text.
  */
+import { recordPageEscalation } from "../pipeline/run-milestones.js";
 import type { OcrReadOutcome } from "./engine.js";
 import { HostedOcrSkipped, type HostedOcrReader } from "./hosted-reader.js";
 
@@ -46,6 +47,9 @@ export async function escalateOcrPages(
     }
   }
   if (summary.attempted) {
+    recordPageEscalation("ocr-hosted", "replaced", summary.replaced);
+    recordPageEscalation("ocr-hosted", "failed", summary.failed);
+    for (const [reason, count] of Object.entries(summary.skipped)) recordPageEscalation("ocr-hosted", `skipped-${reason}`, count);
     console.log(`[ocr] escalation document=${documentId} attempted=${summary.attempted} replaced=${summary.replaced} failed=${summary.failed} skipped=${JSON.stringify(summary.skipped)}`);
   }
   return summary;

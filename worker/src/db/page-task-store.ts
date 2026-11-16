@@ -1,4 +1,5 @@
 import { assertPlanningOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
+import { noteRunPageStage } from "../pipeline/run-milestones.js";
 import { randomUUID } from "node:crypto";
 import type { Sql, JSONValue } from "postgres";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -141,6 +142,7 @@ export class PageTaskStore {
     }));
     usageBatch.commit();
     state.run.spentCents = spentCents;
+    if (!failed) await noteRunPageStage(state, "vision-extract");
     if (leaseConsumed) {
       await this.creditLeases!.afterConsume({
         id: task.runId, orgId: state.run.orgId, projectId: state.run.projectId ?? null, userId: state.run.userId,
