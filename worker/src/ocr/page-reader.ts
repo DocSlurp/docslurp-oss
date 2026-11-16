@@ -32,6 +32,7 @@ import { isCostCapExceeded } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { OcrPageRead, OcrReadOutcome } from "./engine.js";
 import { processPageReaderOrgBudget, type PageReaderOrgBudget } from "./page-reader-budget.js";
+import { logPageReaderWarmSummary, pageReaderWarmGate, pageReaderWarmPolicy, recordPageReaderWarmRouting, releasePageReaderWarmReservation } from "./page-reader-warm.js";
 import { ocrPageReaderMaxPages, ocrPageReaderMode, ocrPageReaderOrgDailyMaxCostCents, OCR_PAGE_READER_METRIC, type OcrPageReaderMode } from "./page-reader-mode.js";
 
 export * from "./page-reader-mode.js";
@@ -239,6 +240,8 @@ export interface PageImageReadUse {
   requireCostEstimate?: boolean;
   /** Longest edge a PNG without `expect` may report (default PAGE_READER_MAX_EDGE_PX). */
   maxLongEdgePx?: number;
+  /** Send jobs marked `requireReady` (warm start, page-reader-warm.ts): the provider never boots or waits for a reader for them. */
+  requireReady?: boolean;
   /** Called for each page the reader returned non-empty, validated text for, before its Rich page charge. */
   onRead(page: PageImageInput, read: { text: string; inputTokens: number; outputTokens: number }): void;
 }
@@ -321,7 +324,7 @@ export async function readPageImagesWithProvider(
     let jobFailed = true;
     try {
       const byKey = new Map<string, PageImageInput>();
-      const job: PageImageReadJob = { scope: { ...scope }, pages: [] };
+      const job: PageImageReadJob = { scope: { ...scope }, pages: [], ...(use.requireReady ? { requireReady: true } : {}) };
       for (const page of chunk) {
         const key = randomUUID();
         byKey.set(key, page);
@@ -391,7 +394,7 @@ const OCR_READ_USE = { metric: OCR_PAGE_READER_METRIC, logTag: "[ocr] page-reade
  * (in `outcome.pages`) when the reader returned Markdown. Replaced pages leave hosted escalation candidacy; every other
  * page is left as the recogniser read it.
  */
-export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext): Promise<PageReaderSummary> {
+export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext, options: { requireReady?: boolean } = {}): Promise<PageReaderSummary> {
   const byInput = new Map<PageImageInput, OcrPageRead>();
   const inputs: PageImageInput[] = [];
   for (const page of outcome.pages) {
@@ -402,6 +405,7 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
   }
   return await readPageImagesWithProvider(inputs, provider, ctx, {
     ...OCR_READ_USE,
+    ...(options.requireReady ? { requireReady: true } : {}),
     onRead(input, read) {
       const page = byInput.get(input)!;
       page.text = read.text;
@@ -490,7 +494,10 @@ export async function readOcrPagesWithConfiguredReader(
     return null;
   }
   try {
-    return await readPagesWithProvider(outcome, provider, { ...ctx, mode, maxPages: ocrPageReaderMaxPages(env), orgDailyMaxCostCents: ocrPageReaderOrgDailyMaxCostCents(env) });
+    const readerCtx = { ...ctx, mode, maxPages: ocrPageReaderMaxPages(env), orgDailyMaxCostCents: ocrPageReaderOrgDailyMaxCostCents(env) };
+    const warm = pageReaderWarmPolicy(provider, env);
+    if (!warm) return await readPagesWithProvider(outcome, provider, readerCtx);
+    return await readOcrPagesWarm(outcome, provider, readerCtx, warm.minPages);
   } catch (error) {
     // The reader never fails a page or document: anything it throws (a ledger write, a file check) is telemetry, and the
     // pages keep the recogniser's text (or a reader text already validated and applied). Only an abort propagates.
@@ -498,6 +505,36 @@ export async function readOcrPagesWithConfiguredReader(
     console.error(`[ocr] page-reader error document=${ctx.documentId}; pages keep their reads: ${(error instanceof Error ? error.stack ?? error.message : String(error)).slice(0, 600)}`);
     return null;
   }
+}
+
+/**
+ * Warm start (page-reader-warm.ts): the outcome's candidate pages go to the reader only when the run's reader is ready in
+ * this process. Otherwise they keep the recogniser's text and stay hosted escalation candidates, and the run's demand may
+ * start a reader for its later pages. Nothing here waits for a reader to boot.
+ */
+async function readOcrPagesWarm(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext, minPages: number): Promise<PageReaderSummary> {
+  const candidates = outcome.pages.filter((page) => page.image).length;
+  const run = ctx.state.run;
+  const summary: PageReaderSummary = { mode: ctx.mode, provider: provider.id, attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0 };
+  if (!candidates || !run?.id || typeof run.orgId !== "string" || !run.orgId) return await readPagesWithProvider(outcome, provider, ctx, { requireReady: true });
+  const scope = { orgId: run.orgId, runId: run.id };
+  const gate = await pageReaderWarmGate(provider, {
+    state: ctx.state, logTag: OCR_READ_USE.logTag, minPages, orgDailyMaxCostCents: ctx.orgDailyMaxCostCents ?? ocrPageReaderOrgDailyMaxCostCents(),
+  }, candidates);
+  let result = summary;
+  if (gate === "ready") {
+    result = await readPagesWithProvider(outcome, provider, ctx, { requireReady: true });
+    if (result.jobs > 0) await releasePageReaderWarmReservation(scope);
+    recordPageReaderWarmRouting(scope, "reader", result.replaced);
+    // Sent but not read (a failed job, a VM gone between the check and the job): the recogniser's text and escalation.
+    recordPageReaderWarmRouting(scope, "hostedUnavailable", candidates - result.replaced);
+  } else {
+    bump(summary.skipped, gate === "warming" ? "reader-warming" : gate === "below-threshold" ? "reader-below-threshold" : "reader-unavailable", candidates);
+    recordPageReaderWarmRouting(scope, gate === "warming" ? "hostedWhileWarming" : gate === "below-threshold" ? "hostedBelowThreshold" : "hostedUnavailable", candidates);
+    logSummary(summary, ctx, OCR_READ_USE);
+  }
+  logPageReaderWarmSummary(scope, "ocr", ctx.documentId, OCR_READ_USE.logTag);
+  return result;
 }
 
 /**

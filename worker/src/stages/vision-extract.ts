@@ -104,7 +104,11 @@ import type { DocumentStageResult } from "../pipeline/checkpoints.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import type { PageImageReaderProvider } from "../extractors/plugins.js";
 import { ocrPageReaderMaxPages, ocrPageReaderOrgDailyMaxCostCents, PAGE_READER_STOP_REASONS, pageReaderOrgHasHeadroom, pageReaderPagesRemaining, readPageImagesWithProvider, type PageImageInput } from "../ocr/page-reader.js";
-import { VISION_PAGE_READER_METRIC, visionPageReaderFor } from "./vision-page-reader.js";
+import { VISION_PAGE_READER_METRIC, VISION_READER_WARMING_HOSTED_CHUNK, visionPageReaderFor } from "./vision-page-reader.js";
+import {
+  logPageReaderWarmSummary, pageReaderWarmGate, pageReaderWarmPolicy, pageReaderWarmState, plannedPageReaderDemandReached, recordPageReaderWarmRouting,
+  releasePageReaderWarmReservation,
+} from "../ocr/page-reader-warm.js";
 
 export interface VisionPageOutput {
   pageNumber: number;
@@ -1315,9 +1319,12 @@ export class VisionExtractStage implements Stage {
     if (pageReader) {
       const readerPages = this.pageReaderCandidates(state, document, vision, missing, hints);
       if (readerPages.length > 0) {
-        const read = await this.readPagesWithPageReader(state, document, pageReader, readerPages, signal);
-        completed.push(...read);
-        const done = new Set(read.map((output) => output.pageNumber));
+        // While a warm-started reader boots, its pages are read here on the hosted route, a few at a time (warm start).
+        const read = await this.readPagesWithPageReader(state, document, pageReader, readerPages, signal, (chunk) => this.extractVisionPagesFromCache(
+          state, document, vision, chunk, signal, storageKey, usageSink, bypassCache, { ...pageOptions, pageReader: false },
+        ));
+        completed.push(...read.outputs);
+        const done = read.handled;
         const rest = missing.filter((page) => !done.has(page));
         if (rest.length === 0) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
         missing.splice(0, missing.length, ...rest);
@@ -1478,6 +1485,12 @@ export class VisionExtractStage implements Stage {
       return [];
     }
     if (!(await pageReaderOrgHasHeadroom(state, state.run.orgId, capCents))) return [];
+    // Warm start: a run whose planned reader demand is still under the threshold fans its pages out to the hosted route
+    // (it never starts a reader); from the threshold on, pages are held back for the reader, which run() reads hosted
+    // while the reader boots.
+    const provider = visionPageReaderFor(state, vision);
+    const warm = pageReaderWarmPolicy(provider);
+    if (warm && !plannedPageReaderDemandReached(state.usageLedger, candidates.length, warm.minPages)) return [];
     return candidates.slice(0, pageReaderPagesRemaining(state.usageLedger, document.id, maxPages));
   }
 
@@ -1495,8 +1508,11 @@ export class VisionExtractStage implements Stage {
     provider: PageImageReaderProvider,
     pages: number[],
     signal?: AbortSignal,
-  ): Promise<VisionPageOutput[]> {
+    readHosted?: (pages: number[]) => Promise<VisionPageOutput[]>,
+  ): Promise<{ outputs: VisionPageOutput[]; handled: Set<number> }> {
     const outputs: VisionPageOutput[] = [];
+    // Pages this call settled: read by the reader, or read on the hosted route while a warm-started reader booted.
+    const handled = new Set<number>();
     const maxLongEdgePx = provider.maxLongEdgePx;
     let maxPages: number;
     let orgDailyMaxCostCents: number;
@@ -1505,24 +1521,48 @@ export class VisionExtractStage implements Stage {
       orgDailyMaxCostCents = ocrPageReaderOrgDailyMaxCostCents();
     } catch (error) {
       console.error(`[vision-extract] page-reader configuration invalid document=${document.id}; pages go hosted: ${toError(error).message.slice(0, 300)}`);
-      return outputs;
+      return { outputs, handled };
     }
     // Never render pages the per-document budget cannot send.
     const sendable = pages.slice(0, pageReaderPagesRemaining(state.usageLedger, document.id, maxPages));
-    const batches: number[][] = [];
-    for (let start = 0; start < sendable.length; start += provider.maxPagesPerJob) batches.push(sendable.slice(start, start + provider.maxPagesPerJob));
+    // Warm start (page-reader-warm.ts): jobs go to the reader only once it is ready for this run; never waited on.
+    const warm = pageReaderWarmPolicy(provider);
+    const scope = state.run.orgId ? { orgId: state.run.orgId, runId: state.run.id } : null;
+    if (warm && scope && sendable.length) {
+      const gate = await pageReaderWarmGate(provider, { state, logTag: "[vision-extract] page-reader", minPages: warm.minPages, orgDailyMaxCostCents }, sendable.length);
+      if (gate === "below-threshold" || gate === "unavailable") {
+        recordPageReaderWarmRouting(scope, gate === "below-threshold" ? "hostedBelowThreshold" : "hostedUnavailable", sendable.length);
+        logPageReaderWarmSummary(scope, "vision", document.id, "[vision-extract] page-reader");
+        return { outputs, handled };
+      }
+    }
+    const queue = [...sendable];
     let stopped: string | null = null;
     // Two batches in flight. The first error (a render or download failure) stops the other worker and aborts its job, and
     // is rethrown only once both workers have finished: no batch keeps reading after the stage failed.
     const local = new AbortController();
     const batchSignal = signal ? AbortSignal.any([signal, local.signal]) : local.signal;
     let failure: { error: unknown } | null = null;
-    let next = 0;
+    let readerJobs = 0;
     const work = async () => {
-      while (next < batches.length && !failure && !stopped) {
-        const batch = batches[next++]!;
+      while (queue.length && !failure && !stopped) {
         try {
-          await readBatch(batch);
+          const state_ = warm && scope ? pageReaderWarmState(provider, scope, "[vision-extract] page-reader") : "ready";
+          if (state_ === "ready") {
+            const batch = queue.splice(0, provider.maxPagesPerJob);
+            readerJobs += 1;
+            await readBatch(batch);
+          } else if (state_ === "booting" && readHosted) {
+            // The reader is starting: these pages go hosted now (and stay there); the next chunk checks again.
+            const chunk = queue.splice(0, VISION_READER_WARMING_HOSTED_CHUNK);
+            for (const page of chunk) handled.add(page);
+            recordPageReaderWarmRouting(scope!, "hostedWhileWarming", chunk.length);
+            outputs.push(...await readHosted(chunk));
+          } else {
+            // The start failed or was refused (or the reader went away): the rest go hosted after this call.
+            recordPageReaderWarmRouting(scope!, "hostedUnavailable", queue.length);
+            return;
+          }
         } catch (error) {
           failure ??= { error };
           local.abort();
@@ -1556,6 +1596,8 @@ export class VisionExtractStage implements Stage {
             metric: VISION_PAGE_READER_METRIC,
             logTag: "[vision-extract] page-reader",
             requireCostEstimate: true,
+            // Warm start: sent only because the reader reported ready; the provider never boots a reader for this job.
+            ...(warm ? { requireReady: true } : {}),
             ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
             // Kept as soon as it is validated: a later error in this batch never sends a read page to the hosted route too.
             onRead: (page, result) => {
@@ -1568,6 +1610,7 @@ export class VisionExtractStage implements Stage {
               };
               read.push({ page: page as PageImageInput & { artifactUri: string }, output });
               outputs.push(output);
+              handled.add(page.pageNumber);
             },
           });
         } catch (error) {
@@ -1578,6 +1621,11 @@ export class VisionExtractStage implements Stage {
         }
         const stop = summary && PAGE_READER_STOP_REASONS.find((reason) => (summary!.skipped[reason] ?? 0) > 0);
         if (stop) stopped = stop;
+        if (warm && scope && summary) {
+          // The first job on the warmed reader records its boot: the start-up reservation goes back.
+          if (summary.jobs > 0) await releasePageReaderWarmReservation(scope);
+          recordPageReaderWarmRouting(scope, "reader", summary.replaced);
+        }
         // The job's wall time, shared by the pages it read (pages per minute stay comparable with hosted reads).
         const latencyMs = read.length ? Math.round((Date.now() - started) / read.length) : 0;
         for (const { page, output } of read) {
@@ -1591,8 +1639,11 @@ export class VisionExtractStage implements Stage {
     };
     await Promise.all([work(), work()]);
     if (failure) throw (failure as { error: unknown }).error;
-    console.log(`[vision-extract] page-reader document=${document.id} read=${outputs.length}/${pages.length} provider=${provider.id}${stopped ? ` stopped=${stopped}` : ""}`);
-    return outputs;
+    const byReader = outputs.filter((output) => output.runtime === "page-reader").length;
+    console.log(`[vision-extract] page-reader document=${document.id} read=${byReader}/${pages.length} jobs=${readerJobs} provider=${provider.id}${stopped ? ` stopped=${stopped}` : ""}` +
+      (warm ? ` hostedWhileWarming=${handled.size - byReader}` : ""));
+    if (warm && scope) logPageReaderWarmSummary(scope, "vision", document.id, "[vision-extract] page-reader");
+    return { outputs, handled };
   }
 
   /**

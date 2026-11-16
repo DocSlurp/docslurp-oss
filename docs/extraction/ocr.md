@@ -227,6 +227,36 @@ every eligible run, whatever vision model a project configured.
 - The reader's Markdown passes through vision-extract's own post-processing: HTML tables are rebuilt in the parser VM and
   `$...$` / `$$...$$` math is kept, the conventions the hosted transcription prompts ask for.
 
+## Warm start
+
+A reader VM can take many minutes to boot. When the registered reader implements the optional `warm` capability
+([Extractor plugins](extractor-plugins.md#page-image-reader-pageimagereader)), neither reader route ever waits for it:
+
+- Each run counts its reader-eligible pages per worker process (the provider leases VMs per process): the OCR candidates
+  of each document, or vision-extract's plain-transcription pages. Until the count reaches the threshold
+  (`DOCSLURP_PAGE_READER_WARM_MIN_PAGES`), the run never starts a reader and its pages take their other route: the
+  hosted vision route, or the recogniser's text and hosted escalation. Planning fans pages out to the hosted route the
+  same way until the run's planned demand reaches the threshold; it never starts a reader itself.
+- At the threshold the host reserves the provider's start-up estimate (`estimateJobCostCents(0)`, which must be positive)
+  against the organization's daily reader cap, then calls `warm.start` and returns at once. A start the cap does not admit
+  is not made. While the reader boots, vision-extract reads the document's held-back pages on the hosted route four at a
+  time per lane, checking readiness before each chunk; OCR pages keep the recogniser read and stay escalation
+  candidates. Pages read that way stay read.
+- Once `warm.status` reports `ready`, the remaining pages go to the reader in jobs marked `requireReady`: a VM that went
+  away in between fails the job at once and its pages take their other route. Nothing waits on a boot, and a failed,
+  refused or slow start never delays or fails a page.
+- A run starts at most three readers per worker process, and a second only after an earlier one read pages. The start-up
+  reservation stands until the run's first reader job (which records the boot as its provider cost) and otherwise for the
+  day, so a reader started for nothing still counts against the organization's cap.
+- Telemetry per run and process: `warm-start` (demand, threshold, reservation), `warm-ready` (`bootSeconds`,
+  `bootCostCents`), `warm-failed` or `warm-refused`, and after each document a cumulative `warm-summary` line with
+  `readerPages`, `hostedPages`, `hostedWhileWarming`, `hostedBelowThreshold` and `hostedUnavailable`, under the
+  `[vision-extract] page-reader` or `[ocr] page-reader` tag.
+
+`DOCSLURP_PAGE_READER_WARM_MIN_PAGES` unset uses the provider's `warm.minPages` (its own cost model: start-up and idle
+cost against the per-page saving over the hosted route), else 500. `off` sends jobs as before, waiting for whatever
+start-up the provider needs. A reader without `warm` is unaffected.
+
 ## Billing and usage
 
 - An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
@@ -325,6 +355,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first, or a tier word (`fastest`, `balanced`, `smart`) resolved by the OCR route options (see [Page reader](#page-reader)). |
 | `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS` | `2000` | Reader provider cost one organization may commit per UTC day, across workers (0 to 10000000; 0 sends nothing). |
 | `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Most pages one document sends to the page reader (0 to 20000). |
+| `DOCSLURP_PAGE_READER_WARM_MIN_PAGES` | provider's `warm.minPages`, else `500` | Reader pages a run needs in one worker before a reader with `warm` is started; pages go to it only once ready (1 to 1000000, or `off` to wait for the reader as before; see [Warm start](#warm-start)). |
 | `DOCSLURP_VISION_PAGE_READER` | `off` | `all` to read vision-extract's plain page transcription with the page image reader plugin, or a tier word (`fastest`, `balanced`, `smart`); see [Vision page reader](#vision-page-reader). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |

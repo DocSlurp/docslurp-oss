@@ -31,6 +31,12 @@ import { isPageTranscription } from "../tools/vision-runtime.js";
 
 export { VISION_PAGE_READER_METRIC } from "../ocr/page-reader-mode.js";
 
+/**
+ * Pages one hosted read takes while the run's warm-started reader boots (page-reader-warm.ts): small, so the reader's
+ * readiness is checked again within a hosted round or two and later pages move to it once it is ready.
+ */
+export const VISION_READER_WARMING_HOSTED_CHUNK = 4;
+
 export type VisionPageReaderRefusal = "off" | "no-provider" | "privacy-mode" | "no-org-scope" | "not-transcription" | "configured-route" | "region-policy" | "cost-capped";
 
 /** Countries whose hosts the provider-region policy treats as China-based (provider-regions.ts `cn`). */
