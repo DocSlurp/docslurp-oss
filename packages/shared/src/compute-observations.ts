@@ -87,3 +87,14 @@ export function decodeComputeObservation<T>(row: Record<string, unknown>, column
       : numericFields.has(key) ? Number(row[column]) : row[column],
   ])) as T;
 }
+
+/** Platform-only allocation admission. It contains no customer content or tenant identity and does not authorize file access. */
+export interface ComputeAllocationReservation { fleetId: string; reservationId: string; clientToken: string }
+export type ComputeAllocationReleaseReason = "not-created" | "provider-deleted";
+export interface ComputeAllocationAdmission {
+  /** Operator must preconfigure the enabled fleet and cap. Repeated IDs are idempotent; released IDs cannot be reused. */
+  reserve(fleetId: string, reservationId: string): Promise<ComputeAllocationReservation | null>;
+  allocated(fleetId: string, reservationId: string, providerId: string): Promise<void>;
+  /** Only after definite non-creation or provider-confirmed deletion. Timeouts and uncertain responses MUST retain the reservation. */
+  release(fleetId: string, reservationId: string, reason: ComputeAllocationReleaseReason): Promise<void>;
+}

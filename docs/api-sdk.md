@@ -245,12 +245,15 @@ So `client.search({ q: "question" })`, `client.getProjectState()` and `docslurp 
 - Reserved words such as `default`, `board`, `templates` and `invites` return 400.
 - A slug that another project uses, or used before, returns 409.
 - API keys need the opt-in `projects:manage` scope, which only server keys can have. The key owner's project role still decides what may change. The same scope covers the other project settings (name, prompt, pipeline, budget).
+- `PATCH /v1/projects/:project` and `PATCH /v1/projects/:project/search-settings` each save one record. To change ingestion and search/chat settings together, with no partial save and no lost update from a concurrent editor, read `GET /v1/projects/:project/settings-publication` and send its revisions back with one `POST` to the same path; a stale revision answers `409 settings_stale`. The dashboard's project settings use this route. See [coherent settings publication](config-change-jobs.md#coherent-settings-publication).
 
 ```bash
 curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
   -H "Authorization: Bearer $DOCSLURP_API_KEY" -H 'Content-Type: application/json' \
   --data '{"slug":"legal-contracts"}'
 ```
+
+**Project settings in the dashboard:** the gear next to the project name opens the project's settings. Pipeline and search/chat options are grouped by job: **Read files** (what runs on each upload), **Find evidence** (index preparation and retrieval defaults) and **Answer questions** (chat behaviour). Each group offers a few presets, such as *Focused evidence* or *Concise and cited*; a preset only changes the unsaved draft, shows each field it would change with a per-field reset, and reads *Customized* once you edit further. Rarely needed controls, such as chunk overlap, contextual preambles, vector normalization and deferred indexing, sit under each group's **Advanced** disclosure. Each setting explains where its effective value comes from, including template locks and organization or key limits. **Save** publishes every change in the dialog as one revisioned commit through `settings-publication`: nothing is saved partially, a change that re-indexes existing documents asks you to confirm its estimate first, and if someone else saved in the meantime you are asked to reload instead of overwriting their change.
 
 **Path responses:** when a `/v1/projects/:project/...` path uses a slug, former slug or `default`, the response carries `X-DocSlurp-Project-Id` (UUID) and `X-DocSlurp-Project-Slug` (current slug), plus `X-DocSlurp-Project-Renamed-From` when a former slug was used, so clients can update stored links. Dashboard URLs are canonical at `/app/projects/<slug>`; UUIDs, former slugs and legacy `/app?projectId=` links redirect there.
 
@@ -272,6 +275,7 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | List projects | `GET /v1/projects` | `listProjects()` | Use HTTP |
 | Read project | `GET /v1/projects/:project` | `getProject(id)` | Use HTTP |
 | Update or rename project | `PATCH /v1/projects/:project` (session or `projects:manage` key) | `updateProject(id, { slug })` | Use HTTP |
+| Read settings with revisions, or save project and search/chat settings in one commit | `GET` / `POST /v1/projects/:project/settings-publication` ([publication](config-change-jobs.md#coherent-settings-publication)) | Use HTTP | Use HTTP |
 | Retrieve passages | `POST /v1/search` or `GET /v1/search` | `search` | `search` |
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
 | Streaming retrieval (SSE, each leg as it lands) | `POST /v1/search/stream` ([events](search-api.md#streaming-search)) | `searchStream` | `search --stream` |

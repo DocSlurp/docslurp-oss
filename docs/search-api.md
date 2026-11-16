@@ -579,7 +579,9 @@ DocSlurp; requests that name `rerankProvider` or `rerankModel` get HTTP 400
 `model_not_allowed`. Self-hosted deployments need the operator's
 `DEEPINFRA_API_KEY`. An authorized project owner opts in through
 `PATCH /v1/projects/:projectId/search-settings` from a signed-in session or a
-server key with `projects:manage`:
+server key with `projects:manage` (or, to save it together with pipeline changes
+under revision checks, the `search` half of
+[`POST /v1/projects/:projectId/settings-publication`](config-change-jobs.md#coherent-settings-publication)):
 
 ```json
 {
