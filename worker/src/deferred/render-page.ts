@@ -1,4 +1,5 @@
 import { ApplicationFailure } from "@temporalio/common";
+import { runWithPerfContext } from "../lib/perf-context.js";
 import { createHash } from "node:crypto";
 import type { RenderDocumentPageInput } from "@docslurp/shared";
 import { pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, isBillingEnforced } from "@docslurp/shared";
@@ -51,7 +52,10 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const started = Date.now();
   const sources = new PdfSourceCache(deps.storage);
   const cache = new PdfRasterCache(deps.runner, deps.storage, sources);
-  const [page] = await cache.renderSelectedPages({ document, runId: input.runId, pageNumbers: [input.pageNumber], dpi, signal }).finally(() => sources.clear());
+  // Organization isolation: the render's parser commands carry this organization's run (one pooled VM for its commands).
+  const [page] = await runWithPerfContext({ runId: input.runId, orgId: row.org_id, projectId: row.project_id, documentId: document.id,
+    scope: "document", stageName: "page-render", pushPerformance: () => {} },
+  () => cache.renderSelectedPages({ document, runId: input.runId, pageNumbers: [input.pageNumber], dpi, signal })).finally(() => sources.clear());
   if (!page) throw new Error("Requested page was not rendered");
   const ledger = new PipelineUsageEventLedger();
   const profile = resolveWorkerDeploymentProfile();

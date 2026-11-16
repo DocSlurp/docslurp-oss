@@ -78,6 +78,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - Untrusted files must be processed behind a VM or microVM boundary, or something stronger. Firecracker, Cloud Hypervisor and a dedicated VM per job qualify.
 - Containers, namespaces, bubblewrap, landlock and seccomp are defense in depth inside that boundary. They are never the boundary on their own.
 - In-process parsing of customer bytes inside a process that holds secrets does not qualify, including native bindings loaded into the worker.
+- Compute units that touch customer bytes (VMs, microVMs, sandboxes, containers, warm or standby pools, GPU readers, OCR hosts, long-lived child processes and their host caches) are never shared or reused across organizations. Reuse only within one organization's run (or a stricter scope), bound both host-side (lease keyed by organization and run) and in-guest (the unit refuses a second scope). A unit or pool that cannot prove its binding is destroyed and replaced by a fresh one (fail closed).
 - The sandbox host holds the minimum keys it needs, ideally none. It gets no database credentials, no model-provider keys, no auth or encryption secrets and no bucket-wide storage keys. Give it short-lived access scoped to its own input and output objects, no network beyond what the job requires, and no cloud metadata endpoint.
 
 **Council review before merge:**
