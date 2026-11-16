@@ -40,10 +40,29 @@ async function compile(source) {
  */
 export async function createEstimator(options = {}) {
   const module = await compile(options.module);
-  // One bounded memory for the estimator's lifetime: after a trap it is zeroed and the module instantiated into it
-  // again, so hostile files cost at most this memory, never a fresh allocation per crash.
-  const memory = new WebAssembly.Memory({ initial: MEMORY_INITIAL_PAGES, maximum: MEMORY_MAXIMUM_PAGES });
-  const instantiate = () => new WebAssembly.Instance(module, { env: { memory } });
+  // One bounded memory at a time. After a trap the module gets a fresh memory and instance: a memory cannot shrink, and
+  // a new instance's allocator only uses pages it grows itself, so reusing a memory a file grew to its maximum would
+  // leave every later file almost no heap. The trapped memory is dropped, so the bound holds per estimator.
+  let memory;
+  const instantiate = () => {
+    memory = new WebAssembly.Memory({ initial: MEMORY_INITIAL_PAGES, maximum: MEMORY_MAXIMUM_PAGES });
+    const created = new WebAssembly.Instance(module, { env: { memory } });
+    created.exports.ds_init?.();
+    return created;
+  };
+  // Why the last call trapped, read before the reset zeroes it: a panic message or a refused allocation size.
+  const trapCause = () => {
+    try {
+      const exports = instance.exports;
+      const failedAlloc = Number(exports.ds_last_failed_alloc?.() ?? 0);
+      const packed = BigInt.asUintN(64, BigInt(exports.ds_last_panic?.() ?? 0));
+      const length = Number(packed & 0xffffffffn);
+      const panic = length ? decoder.decode(new Uint8Array(memory.buffer, Number(packed >> 32n), length)) : "";
+      return { panic, failedAlloc };
+    } catch {
+      return { panic: "", failedAlloc: 0 };
+    }
+  };
   let instance = instantiate();
   const health = { calls: 0, crashes: 0, resets: 0 };
   let detailActive = null;
@@ -70,14 +89,17 @@ export async function createEstimator(options = {}) {
       for (let index = 0; index < args.length; index += 2) if (args[index + 1] > 0) exports.ds_free(args[index], args[index + 1]);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
-        // A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
-        // inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
+        // A trap (a panic, or a file that ran the module out of its memory) leaves the heap inconsistent: read why,
+        // then start over with a fresh memory and instance, exactly as on first load.
         health.crashes += 1;
+        const cause = trapCause();
         detailActive = null;
-        new Uint8Array(memory.buffer).fill(0);
         instance = instantiate();
         health.resets += 1;
-        throw new EstimatorError("crashed", `the estimator stopped on this input (${error.message})`);
+        if (cause.failedAlloc) {
+          throw new EstimatorError("out_of_memory", `the estimator ran out of memory on this input (a ${cause.failedAlloc}-byte allocation was refused)`);
+        }
+        throw new EstimatorError("crashed", `the estimator stopped on this input (${cause.panic || error.message})`);
       }
       throw error;
     }
@@ -108,7 +130,18 @@ export async function createEstimator(options = {}) {
     },
     /** Profile a file from its first bytes (`head`) and, for large media, its last bytes (`tail`). */
     profile(file, head, tail) {
-      return call("ds_probe", json(meta(file)), head, tail);
+      try {
+        return call("ds_probe", json(meta(file)), head, tail);
+      } catch (error) {
+        // A file that ran the module out of memory (or crashed it) is profiled once more without loading the whole
+        // document: a PDF still gets its page count, from a bounded read of its page tree.
+        if (!(error instanceof EstimatorError) || (error.code !== "out_of_memory" && error.code !== "crashed")) throw error;
+        try {
+          return call("ds_probe", json({ ...meta(file), bounded: true }), head, tail);
+        } catch {
+          throw error;
+        }
+      }
     },
     /** Read and profile a `Blob`/`File` (browsers, Deno, Node 20+), reading only the bytes the profile needs. */
     async profileBlob(blob, name = blob.name) {

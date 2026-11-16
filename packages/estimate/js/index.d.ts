@@ -100,7 +100,7 @@ export type LocalRangeSource = { size: number; read(offset: number, length: numb
 export type ReadPlan = { head: number; tail: number };
 export type EstimatorInfo = { profileSchema: number; profiler: string };
 
-export type EstimatorErrorCode = "invalid_request" | "crashed" | "worker_failed" | "quote_failed";
+export type EstimatorErrorCode = "invalid_request" | "crashed" | "out_of_memory" | "worker_failed" | "quote_failed";
 export class EstimatorError extends Error {
   readonly code: EstimatorErrorCode;
   constructor(code: EstimatorErrorCode, message: string);

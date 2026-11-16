@@ -32,7 +32,8 @@ _MEMORY_MAXIMUM_PAGES = 4096
 
 
 class EstimatorError(Exception):
-    """An estimator error with a stable ``code``: invalid_request or crashed; quote_failed from :func:`request_quote`."""
+    """An estimator error with a stable ``code``: invalid_request, crashed (a panic) or out_of_memory (the file needed
+    more than the module's memory); quote_failed from :func:`request_quote`."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -56,8 +57,7 @@ class Estimator:
             with open(wasm, "rb") as handle:
                 module_bytes = handle.read()
         self._module = wasmtime.Module(self._engine, module_bytes)
-        # One bounded memory for the estimator's lifetime: after a trap it is zeroed and the module instantiated into
-        # it again, so hostile files cost at most this memory, never a fresh allocation per crash.
+        # One bounded memory at a time; a trap replaces it (and the store) with a fresh one (see _reset).
         self._new_store()
 
     def _new_store(self) -> None:
@@ -74,19 +74,28 @@ class Estimator:
         instance = wasmtime.Instance(self._store, self._module, [self._memory])
         exports = instance.exports(self._store)
         self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe", "ds_detail_open", "ds_detail_next", "ds_detail_close", "ds_range_open", "ds_range_step", "ds_range_supply", "ds_range_close")}
+        for name in ("ds_init", "ds_last_panic", "ds_last_failed_alloc"):
+            if name in exports:
+                self._fn[name] = exports[name]
+        if "ds_init" in self._fn:
+            self._fn["ds_init"](self._store)
         self._detail_token = None
 
+    def _trap_cause(self) -> tuple[str, int]:
+        """Why the last call trapped, read before the reset: a panic message, or a refused allocation size."""
+        try:
+            failed = int(self._fn["ds_last_failed_alloc"](self._store)) if "ds_last_failed_alloc" in self._fn else 0
+            packed = int(self._fn["ds_last_panic"](self._store)) & _MASK64 if "ds_last_panic" in self._fn else 0
+            pointer, length = packed >> 32, packed & 0xFFFFFFFF
+            panic = bytes(self._memory.read(self._store, pointer, pointer + length)).decode(errors="replace") if length else ""
+            return panic, failed
+        except Exception:  # noqa: BLE001 - a broken instance must not hide the original trap
+            return "", 0
+
     def _reset(self) -> None:
-        # A store keeps a little bookkeeping per instance; start a new one now and then so it stays bounded.
-        self._resets += 1
-        if self._resets >= 64:
-            self._new_store()
-            return
-        size = self._memory.data_len(self._store)
-        chunk = bytes(16 * 1024 * 1024)
-        for offset in range(0, size, len(chunk)):
-            self._memory.write(self._store, chunk[: min(len(chunk), size - offset)], offset)
-        self._instantiate()
+        # A fresh store and memory after every trap: a memory cannot shrink, and a new instance's allocator only uses
+        # pages it grows itself, so reusing a memory a file grew to its maximum would leave later files almost no heap.
+        self._new_store()
 
     def _call(self, name: str, *inputs: Optional[bytes]) -> Any:
         if self._detail_token is not None and name == "ds_probe":
@@ -106,12 +115,15 @@ class Estimator:
                 if length:
                     self._fn["ds_free"](store, pointer, length)
         except wasmtime.Trap as error:
-            # A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
-            # inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
+            # A trap (a panic, or a file that ran the module out of its memory) leaves the heap inconsistent: read why,
+            # then start over with a fresh memory and instance, exactly as on first load.
+            panic, failed = self._trap_cause()
             self._crashes += 1
             self._total_resets += 1
             self._reset()
-            raise EstimatorError("crashed", f"the estimator stopped on this input ({error})") from None
+            if failed:
+                raise EstimatorError("out_of_memory", f"the estimator ran out of memory on this input (a {failed}-byte allocation was refused)") from None
+            raise EstimatorError("crashed", f"the estimator stopped on this input ({panic or error})") from None
         pointer, length = packed >> 32, packed & 0xFFFFFFFF
         raw = self._memory.read(store, pointer, pointer + length)
         self._fn["ds_free"](store, pointer, length)
@@ -121,10 +133,12 @@ class Estimator:
         return envelope["value"]
 
     @staticmethod
-    def _meta(name: str, size: int, type: Optional[str]) -> bytes:
+    def _meta(name: str, size: int, type: Optional[str], bounded: bool = False) -> bytes:
         meta: dict[str, Any] = {"name": name, "size": size}
         if type:
             meta["type"] = type
+        if bounded:
+            meta["bounded"] = True
         return json.dumps(meta).encode()
 
     def info(self) -> dict:
@@ -137,7 +151,17 @@ class Estimator:
 
     def profile(self, name: str, size: int, head: bytes, tail: Optional[bytes] = None, type: Optional[str] = None) -> dict:
         """Profile a file from its first bytes and, for large media, its last bytes."""
-        return self._call("ds_probe", self._meta(name, size, type), head, tail)
+        try:
+            return self._call("ds_probe", self._meta(name, size, type), head, tail)
+        except EstimatorError as error:
+            # A file that ran the module out of memory (or crashed it) is profiled once more without loading the whole
+            # document: a PDF still gets its page count, from a bounded read of its page tree.
+            if error.code not in ("out_of_memory", "crashed"):
+                raise
+            try:
+                return self._call("ds_probe", self._meta(name, size, type, bounded=True), head, tail)
+            except EstimatorError:
+                raise error from None
 
     def profile_path(self, path: str | os.PathLike, type: Optional[str] = None) -> dict:
         """Profile the file at ``path``, reading only the bytes the profile needs."""
