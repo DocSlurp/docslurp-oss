@@ -19,7 +19,7 @@ function* walk(dir: string): Generator<string> {
     if (name === "node_modules" || name === "dist" || name.startsWith(".")) continue;
     const full = path.join(dir, name);
     if (statSync(full).isDirectory()) yield* walk(full);
-    else if (SOURCE.test(name) && !/\.test\.|__tests__|\/test\//.test(full)) yield full;
+    else if (SOURCE.test(name) && !/\.test\.|(^|\/)(__tests__|test)\//.test(path.relative(ROOT, full))) yield full;
   }
 }
 
@@ -52,6 +52,8 @@ describe("retired environment variables (tombstones)", () => {
         }
       }
     }
+    // A scan that read nothing proves nothing (a moved tree, an over-broad exclusion).
+    expect(files.length).toBeGreaterThan(500);
     expect(offenders).toEqual([]);
   });
 });
