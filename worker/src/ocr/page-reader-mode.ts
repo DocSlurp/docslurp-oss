@@ -6,6 +6,7 @@ import { ROUTE_TIERS, type RouteTier, selectOcrRoute, selectVisionTranscriptionR
 
 import { pageImageReaderProvider } from "../extractors/plugins.js";
 import type { OcrMode } from "./mode.js";
+import { pageReaderWarmMinPages } from "./page-reader-warm.js";
 
 export const OCR_PAGE_READER_MODES = ["off", "escalation", "all"] as const;
 export type OcrPageReaderMode = (typeof OCR_PAGE_READER_MODES)[number];
@@ -87,6 +88,7 @@ export function assertOcrPageReaderConfiguration(env: NodeJS.ProcessEnv, ocrMode
   const mode = ocrPageReaderMode(env);
   const maxPages = ocrPageReaderMaxPages(env);
   const orgDailyMaxCostCents = ocrPageReaderOrgDailyMaxCostCents(env);
+  pageReaderWarmMinPages(null, env); // an invalid value stops the worker even with the reader off
   if (mode === "off") return mode;
   if (ocrMode !== "vm" && ocrMode !== "local") {
     throw new Error(`DOCSLURP_OCR_PAGE_READER=${mode} reads the OCR boundary's page images and needs DOCSLURP_OCR_MODE=vm or local (got ${ocrMode}); refusing to start`);
@@ -96,9 +98,10 @@ export function assertOcrPageReaderConfiguration(env: NodeJS.ProcessEnv, ocrMode
     throw new Error(`DOCSLURP_OCR_PAGE_READER=${mode} needs a page image reader plugin (pageImageReader in DOCSLURP_EXTRACTOR_PLUGINS); refusing to start rather than read pages anywhere else`);
   }
   provider.assertConfigured();
+  const warmMinPages = pageReaderWarmMinPages(provider, env);
   const raw = env.DOCSLURP_OCR_PAGE_READER?.trim().toLowerCase() ?? "";
   const tier = (ROUTE_TIERS as readonly string[]).includes(raw) ? ` tier=${raw} option=${ocrPageReaderRoute(raw as RouteTier, env).optionId}` : "";
-  console.log(`[ocr] page-reader mode=${mode}${tier} provider=${provider.id} maxPages=${maxPages} orgDailyMaxCostCents=${orgDailyMaxCostCents}`);
+  console.log(`[ocr] page-reader mode=${mode}${tier} provider=${provider.id} maxPages=${maxPages} orgDailyMaxCostCents=${orgDailyMaxCostCents} warmMinPages=${warmMinPages ?? "off"}`);
   return mode;
 }
 
@@ -156,7 +159,8 @@ export function assertVisionPageReaderConfiguration(env: NodeJS.ProcessEnv): Vis
   }
   console.log(
     `[vision-extract] page-reader mode=${mode}${tier} provider=${provider.id} maxPages=${ocrPageReaderMaxPages(env)} ` +
-      `orgDailyMaxCostCents=${ocrPageReaderOrgDailyMaxCostCents(env)} maxLongEdgePx=${provider.maxLongEdgePx ?? "default"}`,
+      `orgDailyMaxCostCents=${ocrPageReaderOrgDailyMaxCostCents(env)} maxLongEdgePx=${provider.maxLongEdgePx ?? "default"} ` +
+      `warmMinPages=${pageReaderWarmMinPages(provider, env) ?? "off"}`,
   );
   return mode;
 }
