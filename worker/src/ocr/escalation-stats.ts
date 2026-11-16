@@ -1,7 +1,8 @@
 /*
  * Per-document record of the OCR escalation reads (escalation.ts) in the run's artifact ledger: the pages a hosted second read
  * replaced or returned, and the pages that wanted one but kept their first OCR read because the per-document second-read cap
- * (DOCSLURP_OCR_ESCALATION_MAX_PAGES, and its attempt budget) was spent. Kept as page sets, so a retried stage or a second
+ * was spent: the page budget (DOCSLURP_OCR_ESCALATION_MAX_PAGES) or the attempt budget, retries included
+ * (DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS); both are reported as the same per-document cap. Kept as page sets, so a retried stage or a second
  * call for the same page never counts a page twice. Document stages copy it into their stats (`ocrEscalation`), where the
  * ingest report reads it (`ocr-escalation-cap`).
  */

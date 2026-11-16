@@ -16,7 +16,6 @@ import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   applyDefaultVisionOverride,
   mergePipelineFeatures,
   pageCredits,
-  pageUpgradeCredits,
   qualityAllowsPageReading,
   qualityModePriceRange,
   QUALITY_MODES,
@@ -963,17 +962,16 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   // Under Good a vision model reads every page anyway: the cap is not what kept these pages on their OCR read.
   if (capped.pages > 0 && pipeline.quality !== "good") {
     const rich = pageCredits("rich", capped.pages);
-    const extra = pageUpgradeCredits("ocr", "rich", capped.pages);
     recs.push({
       id: "ocr-escalation-cap", severity: "medium",
       title: "Some scanned pages kept their first OCR read",
-      reason: `${plural(capped.pages, "page")} in ${plural(capped.documentIds.length, "file")} read poorly by OCR kept ${agree(capped.pages, "its", "their")} first OCR read because the per-document second-read cap was reached, so ${agree(capped.pages, "its", "their")} text may be incomplete or garbled.`,
+      reason: `${plural(capped.pages, "page")} in ${plural(capped.documentIds.length, "file")} read poorly by OCR kept ${agree(capped.pages, "its", "their")} first OCR read because the per-document second-read cap (pages or attempts) was reached, so ${agree(capped.pages, "its", "their")} text may be incomplete or garbled.`,
       effect: `Reprocess the ${plural(capped.documentIds.length, "affected file")} with quality Good (or switch the project to Good) so a vision model reads every page, these included. Good reads bill Rich (${qualityModePriceRange("good")} per 1,000 pages).`,
       affectedPages: capped.pages, affectedDocuments: capped.documentIds.length,
       cost: {
         centsPer100Pages: round(pageCredits("rich", 100), 2),
         reprocessCents: round(rich, 2),
-        basis: `Reading these ${plural(capped.pages, "page")} with a vision model bills Rich, about ${formatCents(rich)} (${formatCents(extra)} more than their OCR charge); reprocessing at Good also reads the files' other pages with vision.`,
+        basis: `Reprocessing is a new run: reading these ${plural(capped.pages, "page")} with a vision model bills them Rich, about ${formatCents(rich)}, and the files' other pages are read with vision at Good too.`,
       },
       patch: { quality: "good" },
       reprocessDocumentIds: capped.documentIds,

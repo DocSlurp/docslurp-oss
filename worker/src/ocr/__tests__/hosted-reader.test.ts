@@ -15,7 +15,7 @@ import type { OcrPageRead, OcrReadOutcome } from "../engine.js";
 import { escalateOcrPages } from "../escalation.js";
 import { ocrEscalationStageStats } from "../escalation-stats.js";
 import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped, ocrEscalationModel } from "../hosted-reader.js";
-import { installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests } from "@docslurp/shared";
+import { installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests, TEST_PAGE_CREDITS } from "@docslurp/shared";
 import { ocrDocument } from "../read-document.js";
 
 const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
@@ -120,6 +120,36 @@ describe("OCR escalation reads", () => {
     await expect(reader.read({ documentId: "doc-2", pageNumber: 1, imagePath: outcome.pages[0]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).resolves.toMatchObject({ text: "Hosted transcription" });
     await expect(reader.read({ documentId: "doc-1", pageNumber: 2, imagePath: outcome.pages[1]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).resolves.toBeDefined();
     await expect(reader.read({ documentId: "doc-1", pageNumber: 3, imagePath: outcome.pages[2]!.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation")).rejects.toMatchObject({ reason: "budget" });
+  });
+
+  it("checks the balance for the OCR-to-Rich upgrade before each escalation read: an org funded for OCR only never overdraws", async () => {
+    const state = runState();
+    const execute = stubExecute();
+    const checks: number[] = [];
+    // Enough for the pages' OCR charges, not for an upgrade to Rich.
+    const balance = 2 * TEST_PAGE_CREDITS.ocr;
+    (state as unknown as { store: unknown }).store = {
+      enforceSpendForCharge: async (_run: unknown, credits: number) => { checks.push(credits); return { paused: credits > balance, blocked: false }; },
+    };
+    state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 1, readBy: "page-ocr" });
+    state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 2, readBy: "page-ocr" });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([1, 2].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
+    const summary = await escalateOcrPages(outcome, reader, "doc-1");
+    expect(summary).toMatchObject({ attempted: 1, replaced: 0, skipped: { unfunded: 1 }, capped: 0 });
+    // The check covered the upgrade plus the OCR charges still buffered; no provider call, no Rich charge, OCR text kept.
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toBeCloseTo(TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr + 2 * TEST_PAGE_CREDITS.ocr);
+    expect(execute).not.toHaveBeenCalled();
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
+    expect(outcome.pages.map((page) => page.text)).toEqual(["ocr 1", "ocr 2"]);
+    // Funded: the read goes ahead.
+    const funded = runState();
+    (funded as unknown as { store: unknown }).store = { enforceSpendForCharge: async () => ({ paused: false, blocked: false }) };
+    const fundedExecute = stubExecute();
+    const fundedOutcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+    expect(await escalateOcrPages(fundedOutcome, createHostedOcrReader({ state: funded, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: fundedExecute }), "doc-1")).toMatchObject({ replaced: 1 });
+    expect(fundedExecute).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the per-document budget across an activity retry or a worker restart (a new state on the same attempt ledger)", async () => {

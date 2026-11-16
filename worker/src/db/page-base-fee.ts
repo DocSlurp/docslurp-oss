@@ -58,6 +58,14 @@ export function remainingFastPages(row: { pages: number; richRead: number }): nu
   return Math.max(0, row.pages - Math.min(row.richRead, row.pages));
 }
 
+/**
+ * Version of the page billing rules this code settles by: 2 is the OCR page class (Fast, OCR, Rich). Every Fast charge
+ * carries it (`metadata.pageRules`); the database refuses a Fast charge without it for a run that has OCR charges
+ * (migration 0185), so a worker from before the OCR class can never bill a run's OCR pages Fast as well. Its activity
+ * fails and is retried by a current worker.
+ */
+export const PAGE_BILLING_RULES_VERSION = 2;
+
 /** Run artifact slot holding the page billing rules the run started under: the pricing version of the per-read rule. */
 export const PAGE_BILLING_RULES_SLOT = "run:page-billing-rules";
 
@@ -194,7 +202,7 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         // A fixed id per run also records a zero-page decision, so a retry cannot change it.
         {
           id: `fast:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
-          amount: fastPages, unit: "page", costCents: fastCredits, metadata: unitChargeMetadata({ ...base, pages: fastPages }),
+          amount: fastPages, unit: "page", costCents: fastCredits, metadata: unitChargeMetadata({ ...base, pages: fastPages, pageRules: PAGE_BILLING_RULES_VERSION }),
         },
         // Runs started before the per-read rule: image files and scanned pages no read charged.
         ...(scanPages > 0 ? [{
@@ -432,7 +440,7 @@ export async function billLockedMaterializedPages(
     ...fastPages.map(page => ({
       id: `${runId}:${documentId}:${page}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
       amount: 1, unit: "page", costCents: rateCents,
-      metadata: unitChargeMetadata({ projectId: row.project_id, documentId, page, materialized: true }),
+      metadata: unitChargeMetadata({ projectId: row.project_id, documentId, page, materialized: true, pageRules: PAGE_BILLING_RULES_VERSION }),
     })),
   ] });
   // This run read pages another run decided Fast or OCR: upgrade those decisions to Rich (the difference only, once).

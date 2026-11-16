@@ -7,7 +7,6 @@ import {
   UNIT_CHARGE_PROVIDER,
   isUnitChargeEvent,
   pageCredits,
-  pageUpgradeCredits,
   PAGE_READ_METRICS,
   priceAiUsageEvent,
   richPagesForOutputTokens,
@@ -88,7 +87,13 @@ export interface PipelineUsageBatch {
  * Page classes per run and page, each charged once: OCR then Rich pays the
  * Rich charge minus the OCR charge already made (the page's first Rich unit
  * carries the difference); Rich then OCR adds nothing; a page charged OCR or
- * Rich is never charged Fast at completion.
+ * Rich is never charged Fast at completion. The ledger skips what it can see
+ * itself (an OCR read of a page it already charged Rich), but the settlement
+ * is the database's (migration 0185, settle_page_read_charge): reads of one
+ * page may be recorded by different activities, workers or releases, whose
+ * ledgers never see each other. Until a checkpoint persists them, an OCR page
+ * this ledger then charges Rich counts both charges in `pendingBillableCents`
+ * (an overestimate, so cost caps err on the safe side).
  */
 export class PipelineUsageEventLedger {
   readonly speedBoost: boolean;
@@ -240,8 +245,9 @@ export class PipelineUsageEventLedger {
    * after the first is its own event with a deterministic id (`rich:<run>:<document>:<page>:unit:<n>`), so a read that comes
    * after a cheaper one (a retry with a larger output budget) raises the charge to what the total owes, and a retried
    * checkpoint, or a retry that reads again, can never charge a unit twice. A flat read (FLAT_RICH_PAGE_READ_METRICS) counts
-   * no output tokens and charges nothing when it returned no text. A page this run already charged OCR is upgraded: its first
-   * Rich unit charges the Rich price minus the OCR charge (`upgradeOf` names that charge), so the page pays Rich once in all.
+   * no output tokens and charges nothing when it returned no text. A page this run already charged OCR is upgraded when the
+   * charge is persisted: the database inserts its first Rich unit at the Rich price minus the OCR charge (`upgradeOf` names
+   * that charge), so the page pays Rich once in all, whichever activity recorded either read.
    */
   private chargeRichPageRead(
     event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null },
@@ -264,8 +270,6 @@ export class PipelineUsageEventLedger {
     const owed = richPagesForOutputTokens(total);
     const charged = before?.pages ?? 0;
     this.richCharged.set(key, { pages: Math.max(charged, owed), readers });
-    // An OCR charge of this page (this run) is credited against its first Rich unit: the page pays Rich once in all.
-    const ocrCharge = this.ocrCharged.get(key) ?? null;
     const unit = (n: number) => ({
       id: n === 1 ? `rich:${this.runId}:${key}` : `rich:${this.runId}:${key}:unit:${n}`,
       provider: UNIT_CHARGE_PROVIDER,
@@ -273,11 +277,10 @@ export class PipelineUsageEventLedger {
       metric: BILLABLE_UNIT_METRICS.richPage,
       amount: 1,
       unit: "page",
-      costCents: n === 1 && ocrCharge ? pageUpgradeCredits("ocr", "rich") : pageCredits("rich", 1),
+      costCents: pageCredits("rich", 1),
       inputTokens: 0,
       outputTokens: 0,
-      metadata: unitChargeMetadata({ documentId, pageNumber, readBy: event.metric, model: event.model, outputTokens: total,
-        ...(n > 1 ? { unit: n } : {}), ...(n === 1 && ocrCharge ? { upgradeOf: ocrCharge, upgradeFrom: "ocr" } : {}) }),
+      metadata: unitChargeMetadata({ documentId, pageNumber, readBy: event.metric, model: event.model, outputTokens: total, ...(n > 1 ? { unit: n } : {}) }),
     });
     for (let n = Math.max(1, charged + 1); n <= owed; n += 1) {
       // The vision call's request ticket rides on the page's first charge only: a later read of a charged page stays uncharged.

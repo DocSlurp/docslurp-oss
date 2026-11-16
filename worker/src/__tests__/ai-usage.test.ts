@@ -109,24 +109,25 @@ describe("worker AI usage Module", () => {
       inputTokens: 1_149, outputTokens, costCents: 0.12, metadata: { documentId: "img", pageNumber: 1 },
     });
     // An uploaded image: OCR reads it (no output tokens) and charges the page as one OCR page; vision then reads it for
-    // 2,000 output tokens: the page becomes Rich (3 Rich pages in all under the test provider), its first Rich unit
-    // carrying the Rich price minus the OCR charge, so the page pays Rich once in all.
+    // 2,000 output tokens: the page becomes Rich (3 Rich pages in all under the test provider). The ledger buffers the full
+    // Rich units; the database credits the OCR charge against the first one when they are persisted (migration 0185), so
+    // until then the pending figure counts both (an overestimate).
     ledger.chargeOcrPage({ documentId: "img", pageNumber: 1, readBy: "page-ocr" });
     expect(ledger.pendingBillableCents).toBeCloseTo(TEST_PAGE_CREDITS.ocr);
     expect(ledger.pageChargeClass("img", 1)).toBe("ocr");
     vision(2_000);
     const charges = () => ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
     expect(charges().map((event) => event.id)).toEqual(["rich:run-1:img:1", "rich:run-1:img:1:unit:2", "rich:run-1:img:1:unit:3"]);
-    expect(charges()[0]).toMatchObject({ costCents: TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr, metadata: { upgradeOf: "ocr:run-1:img:1", upgradeFrom: "ocr" } });
+    expect(charges()[0]).toMatchObject({ costCents: TEST_PAGE_CREDITS.rich });
     expect(ledger.pageChargeClass("img", 1)).toBe("rich");
-    expect(ledger.pendingBillableCents).toBeCloseTo(0.75);
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.75 + TEST_PAGE_CREDITS.ocr);
     expect(ledger.richPagesCharged("img", 1)).toBe(3);
     // The same vision read recorded again (a retry in the same run) adds nothing; a bigger one adds only the difference.
     vision(1_900);
     expect(charges()).toHaveLength(3);
     vision(2_500);
     expect(charges().map((event) => event.id).at(-1)).toBe("rich:run-1:img:1:unit:4");
-    expect(ledger.pendingBillableCents).toBeCloseTo(1);
+    expect(ledger.pendingBillableCents).toBeCloseTo(1 + TEST_PAGE_CREDITS.ocr);
     // A retry in a new ledger (a restarted activity) reading the same page emits the same ids, which insert nothing twice.
     const retry = new PipelineUsageEventLedger();
     retry.runId = "run-1";
@@ -213,12 +214,13 @@ describe("worker AI usage Module", () => {
     expect(escalation(2, 40, "empty-output")).not.toBeNull();
     expect(charges(2)).toEqual([]);
     expect(ledger.hasRichCharge("doc", 2)).toBe(false);
-    // A page the recogniser already charged OCR is upgraded by its escalation: one Rich page in all, the OCR charge credited.
+    // A page the recogniser already charged OCR is upgraded by its escalation: one Rich unit (the database credits the OCR
+    // charge against it when both are persisted).
     ledger.chargeOcrPage({ documentId: "doc", pageNumber: 3, readBy: "page-ocr" });
     escalation(3, 4_000, "completed");
     expect(charges(3)).toHaveLength(1);
-    expect(charges(3)[0]).toMatchObject({ costCents: TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr, metadata: { upgradeFrom: "ocr" } });
-    expect(ledger.pendingBillableCents).toBeCloseTo(0.5);
+    expect(ledger.pageChargeClass("doc", 3)).toBe("rich");
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.5 + TEST_PAGE_CREDITS.ocr);
     // An empty escalation of an OCR page leaves it OCR.
     ledger.chargeOcrPage({ documentId: "doc", pageNumber: 4, readBy: "page-ocr" });
     escalation(4, 10, "empty-output");

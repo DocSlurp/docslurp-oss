@@ -49,7 +49,9 @@ export async function escalateOcrPages(
     } catch (error) {
       if (error instanceof HostedOcrSkipped) {
         summary.skipped[error.reason] = (summary.skipped[error.reason] ?? 0) + 1;
-        // The per-document cap: this page and every later candidate keep their first OCR read.
+        // The per-document cap: this page and every later candidate keep their first OCR read. `budget` covers both
+        // per-document bounds: the page budget (DOCSLURP_OCR_ESCALATION_MAX_PAGES) and the attempt budget
+        // (DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS, retries included); either one spent leaves the rest on their first read.
         if (error.reason === "budget") capped.push(...candidates.slice(index).map((candidate) => candidate.pageNumber));
         // Once disabled, refused, capped or out of budget, later pages of this document would be skipped the same way.
         if (error.reason !== "guard") break;

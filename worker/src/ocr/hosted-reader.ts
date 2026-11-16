@@ -8,7 +8,7 @@
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
  * missing VM: escalation only follows a VM (or self-hosted) read, and hosted mode is its own operator setting.
  */
-import { admitAutomaticCall, isAutomaticSelectionDenied, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute, switchDisabled } from "@docslurp/shared";
+import { admitAutomaticCall, isAutomaticSelectionDenied, pageUpgradeCredits, prepareAutomaticCallPrices, reportAutomaticCallOutcome, speedBoostMultiplier, visionAutomaticRoute, switchDisabled } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
@@ -63,7 +63,7 @@ export interface HostedOcrRead {
 
 /** Why a hosted read did not happen. Escalation keeps the recogniser's text; hosted mode fails the page. */
 export class HostedOcrSkipped extends Error {
-  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard" | "margin", message: string) {
+  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard" | "margin" | "unfunded", message: string) {
     super(message);
     this.name = "HostedOcrSkipped";
   }
@@ -160,6 +160,10 @@ export function createHostedOcrReader(args: {
           return { text: done.text!, model: done.model, inputTokens: 0, outputTokens: 0, costCents: 0 };
         }
       }
+      // A new escalation read upgrades its page from OCR to Rich: before the call, the balance must cover that upgrade plus the
+      // run's charges still buffered here, as every other read is authorized. Fails closed: an unfunded run is paused by the
+      // check and the page keeps its OCR read; a check that cannot decide throws SpendCheckUnavailableError (retryable).
+      if (purpose === "ocr-escalation") await authorizeEscalationRead(state, page);
       // Unique per real call: two calls of the same page (overlapping activities) never share a usage id, so neither's cost
       // is dropped by the ledger's id dedup. Replays reuse the ids persisted with the call.
       const callId = `${purpose}:${state.run.id}:${page.documentId}:${page.pageNumber}:${randomUUID()}`;
@@ -235,6 +239,18 @@ export function createHostedOcrReader(args: {
       }
     },
   };
+}
+
+/** The balance check before an escalation read: the page's upgrade from OCR to Rich, plus this activity's buffered charges. */
+async function authorizeEscalationRead(state: WorkflowState, page: HostedOcrPage): Promise<void> {
+  const store = state.store;
+  if (!store?.enforceSpendForCharge || !state.run.userId) return;
+  const credits = pageUpgradeCredits("ocr", "rich") * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
+  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, credits);
+  if (outcome.paused || outcome.blocked) {
+    console.warn(`[ocr] ocr-escalation refused run=${state.run.id} document=${page.documentId} page=${page.pageNumber} reason=unfunded credits=${credits.toFixed(4)}`);
+    throw new HostedOcrSkipped("unfunded", "credits do not cover the escalation read; the page keeps its OCR read");
+  }
 }
 
 function toMessage(error: unknown): string {

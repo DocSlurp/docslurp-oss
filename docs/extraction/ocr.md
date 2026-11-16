@@ -287,8 +287,17 @@ start-up the provider needs. A reader without `warm` is unaffected.
   that runs it. An escalated page bills at most one Rich page, whatever the output length (escalation output tokens add
   no Rich pages), and an escalation that returned no text charges nothing more (the page stays OCR); its provider cost is
   still recorded.
-- The per-document escalation cap (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`): when a document reaches it, the page that hit
-  it and every later candidate keep their first OCR read. Each document stage records the pages escalated and the pages
+- Before each new escalation read the balance must cover the page's upgrade from OCR to Rich plus the activity's
+  buffered charges (the store's spend check, as for every other read). An unfunded run is paused and the page keeps its
+  OCR read; a check that cannot decide is retried.
+- The database settles a page's read charges (migration 0185, `settle_page_read_charge`), whichever activity, worker or
+  release recorded them: an OCR charge for a page the run already charged Rich is not inserted, and a page's first Rich
+  unit is inserted at its price minus the run's OCR charge for that page. Fast charges carry `pageRules: 2`; the database
+  refuses a Fast charge without it for a run that has OCR charges, so a worker from before the OCR class cannot settle
+  such a run (its activity is retried on a current worker). Deploy order: migrate, then workers, then the API.
+- The per-document escalation cap: when a document spends its page budget (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`) or its
+  attempt budget (`DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`, retries included), the page that hit it and every later
+  candidate keep their first OCR read. Each document stage records the pages escalated and the pages
   capped (`stats.ocrEscalation`), and the ingest report recommends reading the capped pages with a vision model
   (`ocr-escalation-cap`).
 - Page reader jobs are recorded as `ocr-page-reader` at provider cost, billing 0 credits (`providerCostCents`), also
