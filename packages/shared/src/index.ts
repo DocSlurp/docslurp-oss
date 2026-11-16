@@ -142,3 +142,5 @@ export * from "./upload-recovery.js";
 export type { ComputePriceObservation, ComputeCalibrationObservation, ComputeObservations } from "./compute-observations.js";
 export { computePriceColumns, computeCalibrationColumns, decodeComputeObservation } from "./compute-observations.js";
 export type { ComputeExecutionScope, ComputeCohortGrant } from "./compute-observations.js";
+
+export type { ComputeAllocationAdmission, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "./compute-observations.js";
