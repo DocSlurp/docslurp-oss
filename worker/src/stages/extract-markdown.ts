@@ -117,7 +117,7 @@ import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, authorizeOcrRead, refuseUnfundedImageFrames } from "../ocr/image-frames.js";
-import { extractEscalatedPages, inheritExtractEscalatedPages, recordExtractEscalatedPages } from "../routing/auto-ladder.js";
+import { extractEscalatedPages, inheritExtractEscalatedPages, ladderKeepsImageUnread, recordExtractEscalatedPages } from "../routing/auto-ladder.js";
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
@@ -478,10 +478,11 @@ export class ExtractMarkdownStage implements Stage {
                 // Fast never OCRs: an image file keeps its page image (render-images) and has no extracted text.
                 // The same image test billing and render-images use (MIME image/*), so an image MIME the format map
                 // does not know is kept unread too instead of reaching an OCR-capable extractor.
-                // Under an above-fast share smaller than the image's frames, the OCR engine (which reads every frame) does not
-                // run either: the image is kept unread, as Fast keeps it (render-images keeps its page image).
+                // Under an above-fast share the OCR engine (which reads every frame) does not read a multi-frame image or one
+                // whose frames the share does not cover (ladderKeepsImageUnread): kept unread, as Fast keeps it.
+                const ladderKeepsImage = ladderKeepsImageUnread(ladderPolicy, { filename: document.filename, mimeType: document.mimeType, sniffedMimeType: document.fileFacts?.sniffedMimeType ?? null });
                 const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
-                  (!qualityAllowsPageReading(pageQuality) || ladderBinding);
+                  (!qualityAllowsPageReading(pageQuality) || ladderKeepsImage);
                 // An Office file no reader here can open fails now, loudly and for good, never through a weaker reader.
                 const unsupported = keepImageUnread ? null : await unsupportedSourceReason(tempFile, {
                   format, mimeType: document.fileFacts?.sniffedMimeType ?? document.mimeType, filename: document.filename,
@@ -504,7 +505,7 @@ export class ExtractMarkdownStage implements Stage {
                 // Why an image continues without extracted text (reported in the manifest and stats).
                 let textlessFallback: string | null = null;
                 if (keepImageUnread) {
-                  textlessFallback = ladderBinding ? "ladder share cap keeps images unread" : "quality fast keeps images unread";
+                  textlessFallback = ladderKeepsImage ? "ladder share cap keeps images unread" : "quality fast keeps images unread";
                   plannedExtractors = {
                     primary: this.textlessImageExtractor(state, document, textlessFallback, true),
                     secondary: null,

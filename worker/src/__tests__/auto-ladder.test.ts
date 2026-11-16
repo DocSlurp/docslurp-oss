@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyLadderLimits, defaultPipelineFeatures, type AdaptivePageRoutingEntry } from "@docslurp/shared";
+import { applyLadderLimits, defaultPipelineFeatures, documentLadderPolicy, type AdaptivePageRoutingEntry } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { VisionExtractStage, legacyPageHints } from "../stages/vision-extract.js";
 import { selectLegacyVisionPages, TABLE_LEAK_ONLY_SIGNAL } from "../stages/classify-route.js";
-import { LADDER_PLAN_KEY, ladderNeeds, readLadderPin, recordExtractEscalatedPages, visionLadderSelection, inheritExtractEscalatedPages, extractEscalatedPages } from "../routing/auto-ladder.js";
+import { LADDER_PLAN_KEY, ladderKeepsImageUnread, ladderNeeds, readLadderPin, recordExtractEscalatedPages, visionLadderSelection, inheritExtractEscalatedPages, extractEscalatedPages } from "../routing/auto-ladder.js";
 import { recordOcrFailedPages } from "../ocr/mode.js";
 import type { Config } from "../config.js";
 import { RenderImagesStage } from "../stages/render-images.js";
@@ -198,6 +198,15 @@ describe("ladder helpers", () => {
     const selection = visionLadderSelection({ pipeline: state.run.pipeline, runId: "run-1", documentId: "doc-1", pageCount: 10, triage: MIXED, routingV2: false, ledger: state.artifactLedger });
     expect(selection.plan.escalated).toEqual([6]);
     expect(selection.keepAsImage).toEqual([2, 9]);
+  });
+
+  it("keeps multi-frame images unread under an above-fast share; a single-frame image is read", () => {
+    const share = documentLadderPolicy({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.1 } } }, 1);
+    expect(ladderKeepsImageUnread(share, { filename: "fax.tiff", mimeType: "image/tiff" })).toBe(true);
+    expect(ladderKeepsImageUnread(share, { filename: "anim.gif", mimeType: "image/gif" })).toBe(true);
+    expect(ladderKeepsImageUnread(share, { filename: "photo.jpg", mimeType: "image/jpeg" })).toBe(false);
+    const noShare = documentLadderPolicy({ quality: "auto", ladder: { maxRung: "ocr" } }, 1);
+    expect(ladderKeepsImageUnread(noShare, { filename: "fax.tiff", mimeType: "image/tiff" })).toBe(false);
   });
 
   it("pins, inherits and checks plans per run", () => {

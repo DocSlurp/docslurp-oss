@@ -15,7 +15,7 @@ import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { Config } from "../config.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
-import { visionLadderSelection } from "../routing/auto-ladder.js";
+import { ladderKeepsImageUnread, visionLadderSelection } from "../routing/auto-ladder.js";
 import { pagesNeedingPixels } from "../routing/runtime.js";
 import { prioritizePagesWithoutNativeText, selectLegacyVisionPages } from "./classify-route.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
@@ -161,10 +161,10 @@ export class RenderImagesStage implements Stage {
     const isImage = mimeType.startsWith("image/");
     // Fast never reads a page: render exactly the pages without a text layer, which keep their page image, up to
     // the per-document and per-run caps. Every other textless page stays unread. A document the Auto ladder keeps
-    // entirely at the fast rung (pipeline.ladder: no page may go above fast, or an image whose frames the share cannot
-    // cover, which extraction kept unread) is kept the same way.
+    // entirely at the fast rung (pipeline.ladder: no page may go above fast, or an image extraction kept unread under a
+    // share, ladderKeepsImageUnread) is kept the same way.
     const ladderPolicy = documentLadderPolicy(state.run.pipeline, Math.max(1, document.pageCount));
-    const ladderFast = ladderPolicy.quality === "auto" && isImage && ladderPolicy.aboveFastBinding;
+    const ladderFast = isImage && ladderKeepsImageUnread(ladderPolicy, { filename: document.filename, mimeType: document.mimeType, sniffedMimeType: document.fileFacts?.sniffedMimeType ?? null });
     if (!qualityAllowsPageReading(ladderPolicy.quality) || ladderFast) {
       if (!isPdf && !isImage) return { pageNumbers: [], request, routed: null, keptAsImage: [], unreadPages: [] };
       const caps = fastPageImageCaps();

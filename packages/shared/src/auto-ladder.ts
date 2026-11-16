@@ -135,7 +135,8 @@ export function ladderChartExportTier<T extends string | null | undefined>(pipel
  * it can only tighten the project's limits, never loosen them.
  */
 export function tighterLadder(project: Partial<PipelineLadder> | null | undefined, run: Partial<PipelineLadder> | null | undefined): PipelineLadder {
-  const rung = (value: unknown): LadderRung => (ladderRungSchema.safeParse(value).success ? value as LadderRung : "intelligent");
+  // Unset is the default (intelligent); a value that is set but not a rung fails closed to the tightest rung.
+  const rung = (value: unknown): LadderRung => (ladderRungSchema.safeParse(value).success ? value as LadderRung : value === undefined || value === null ? "intelligent" : "fast");
   const a = rung(project?.maxRung);
   const b = rung(run?.maxRung);
   const maxRung = LADDER_RUNG_RANK[a] <= LADDER_RUNG_RANK[b] ? a : b;

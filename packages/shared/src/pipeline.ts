@@ -1547,7 +1547,12 @@ export function pipelineVersionFeatures<T extends object>(
   } = features as T & Record<string, unknown>;
   // The Auto ladder at its defaults (no limit) changes no output: dropped, so the key appearing on stored pipelines never
   // changes a version hash. A limit stays in the hash.
-  if ("ladder" in rest && !effectiveLadder({ quality: "auto", ladder: rest.ladder as never }).active) delete rest.ladder;
+  if ("ladder" in rest) {
+    // Hashed as its effective limits, so equal limits written differently (an explicit null, a share of 1) hash alike.
+    const { active, ...limits } = effectiveLadder({ quality: "auto", ladder: rest.ladder as never });
+    if (active) (rest as Record<string, unknown>).ladder = limits;
+    else delete (rest as Record<string, unknown>).ladder;
+  }
   return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree">;
 }
 

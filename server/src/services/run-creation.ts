@@ -1,7 +1,7 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, clampRunLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, tighterLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
@@ -962,7 +962,13 @@ export function createRunCreation(deps: RunCreationDeps) {
         const scopes = await activeApiKeyScopes(apiKeyId).catch(() => null);
         mayLoosen = !!scopes && (scopes.includes(BILLED_FEATURES_SCOPE) || scopes.includes("projects:manage"));
       }
-      const clamped = clampRunLadder(input.pipeline, projectPipeline, mayLoosen);
+      let clamped = clampRunLadder(input.pipeline, projectPipeline, mayLoosen);
+      // A replay (reprocess, bulk reprocess, retry as new) carries an older run's snapshot: the project's limits as they are
+      // now tighten it whoever asks, as the chart tier caps a replay at what the project resolves to now.
+      if (reprocessing || request.chartExportReplay) {
+        const ladder = tighterLadder(projectPipeline?.ladder ?? null, clamped.ladder ?? null);
+        clamped = { ...clamped, ladder };
+      }
       if (clamped !== input.pipeline && (JSON.stringify(clamped.ladder) !== JSON.stringify(input.pipeline.ladder) || clamped.quality !== input.pipeline.quality)) {
         console.log(`[run-creation] ladder override clamped to the project's limits project=${input.projectId} quality=${input.pipeline.quality}->${clamped.quality}`);
       }
@@ -982,6 +988,15 @@ export function createRunCreation(deps: RunCreationDeps) {
     // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
     // with Fast (or a refused privacy/PII policy) is refused whatever the project or request says
     // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).
+    // Visual mode embeds every page, which no ladder limit allows: a limit the project does not have (a run override)
+    // is dropped for a visual run rather than refusing the upload; a project limit is refused below as before.
+    if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual" && effectiveLadder(input.pipeline).active) {
+      const projectLadder = (access.pipeline as { ladder?: PipelineFeatures["ladder"] } | null | undefined)?.ladder;
+      if (!effectiveLadder({ quality: input.pipeline.quality, ladder: projectLadder ?? null }).active) {
+        console.warn(`[run-creation] ladder override ignored on a visual-mode run project=${input.projectId}`);
+        input.pipeline = { ...input.pipeline, ladder: projectLadder ?? defaultPipelineLadder };
+      }
+    }
     if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual") assertVisualModeAllowed(input.pipeline);
 
     const { sources } = input;

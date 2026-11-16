@@ -66,8 +66,9 @@ tasks:
 
 1. Scanned pages read by the OCR engine during extraction count first. Extraction reads at most the document's
    above-fast budget of them, in document order, and runs only text-layer extractors on a document the share does not
-   cover entirely (an extractor that OCRs every page could otherwise pass the cap). An image file is read only when the
-   share covers all its frames.
+   cover entirely (an extractor that OCRs every page could otherwise pass the cap). An image file is one page and is read; one in a
+   format that can hold several frames (TIFF, GIF, WebP), whose frame count is unknown before the OCR engine reads
+   every frame, is kept as its page image under an above-fast share (and quoted Fast).
 2. The rest of the budget goes to the pages triage selected: pages without native text first, then higher triage
    confidence, then document order.
 3. Under `aboveOcr`, figure pages keep the `intelligent` rung in the same order while its budget lasts; the others are
@@ -95,7 +96,10 @@ A limit is a project setting. A per-upload `pipeline.ladder` override from a cal
 settings (not an editor, or an API key without the `pipeline:billed-features` or `projects:manage` scope, as for chart
 export's `models` tier) can only tighten the project's limits: the run gets the lower rung and the smaller share of
 each. While the project has a limit, such a caller cannot raise quality above the project's either (an upload asking
-Good on an Auto project with a limit runs Auto). The override is clamped, not refused.
+Good on an Auto project with a limit runs Auto). The override is clamped, not refused; on a visual-mode project a limit the project does not have is dropped from the
+run. A replay (reprocess, bulk reprocess, retry as new) and query-time materialization carry an older run's pipeline:
+the project's limits as they are now tighten it, whoever asks. Adding a limit to a visual-mode project is refused
+(`visual_mode_quality`).
 
 ## Billing and estimates
 

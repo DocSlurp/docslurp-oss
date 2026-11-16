@@ -311,7 +311,11 @@ export class VisionExtractStage implements Stage {
     const key = `${state.run.id}:${document.id}:${JSON.stringify(state.run.pipeline.ladder ?? null)}`;
     let allowed = LADDER_TASK_PLANS.get(key);
     if (!allowed) {
-      allowed = this.checkNeedsVision(document, maxInt(1, document.pageCount), state).then((needs) => new Set(needs.needed ? needs.selectedPages : []));
+      allowed = this.checkNeedsVision(document, maxInt(1, document.pageCount), state).then((needs) => {
+        // A plan made without page triage (a transient storage failure) is used once and not cached.
+        if (!needs.routing) LADDER_TASK_PLANS.delete(key);
+        return new Set(needs.needed ? needs.selectedPages : []);
+      });
       LADDER_TASK_PLANS.set(key, allowed);
       allowed.catch(() => LADDER_TASK_PLANS.delete(key));
       while (LADDER_TASK_PLANS.size > 64) LADDER_TASK_PLANS.delete(LADDER_TASK_PLANS.keys().next().value!);

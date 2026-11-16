@@ -10,6 +10,7 @@
  */
 import {
   documentLadderPolicy,
+  isMultiFrameImageFile,
   DRAWN_CONTENT_SIGNAL,
   MIXED_SCAN_IMAGE_SIGNAL,
   planLadder,
@@ -180,3 +181,25 @@ export function visionLadderSelection(args: {
     .map((decision) => decision.pageNumber);
   return { ...ladder, selected, keepAsImage };
 }
+
+/**
+ * Whether the ladder keeps an image file unread (kept as its page image, as Fast keeps it). The OCR engine reads every
+ * frame of an image and intake counts an image as one page, so under an above-fast share a format that can hold several
+ * frames (TIFF, GIF, WebP), whose frame count is unknown before the read, is never sent; nor is any image whose frames the share does not
+ * cover. A single-frame image is one page and the share always allows one.
+ */
+export function ladderKeepsImageUnread(
+  policy: Pick<DocumentLadderPolicy, "quality" | "ladder" | "aboveFastBinding">,
+  file: { filename?: string | null; mimeType?: string | null; sniffedMimeType?: string | null },
+): boolean {
+  if (policy.quality !== "auto" || policy.ladder.aboveFast === undefined) return false;
+  const type = (file.sniffedMimeType ?? file.mimeType ?? "").split(";")[0]!.trim().toLowerCase();
+  const extension = /\.([a-z0-9]+)$/i.exec(file.filename ?? "")?.[1]?.toLowerCase() ?? "";
+  // Formats that can hold several frames (animated GIF and WebP as well as TIFF): never sent under a share (fail closed).
+  const mayHoldFrames = isMultiFrameImageFile({ name: file.filename ?? "", type: type || null })
+    || MAY_HOLD_FRAMES_TYPES.has(type) || MAY_HOLD_FRAMES_EXTENSIONS.has(extension);
+  return policy.aboveFastBinding || mayHoldFrames;
+}
+
+const MAY_HOLD_FRAMES_TYPES = new Set(["image/gif", "image/webp", "image/apng"]);
+const MAY_HOLD_FRAMES_EXTENSIONS = new Set(["gif", "webp", "apng"]);

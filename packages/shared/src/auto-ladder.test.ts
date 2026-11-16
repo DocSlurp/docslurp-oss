@@ -99,6 +99,8 @@ describe("tighterLadder (run overrides from non-editors)", () => {
       .toEqual({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.2 } });
     expect(tighterLadder(null, { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } })).toEqual({ maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } });
     expect(tighterLadder(null, null)).toEqual({ maxRung: "intelligent" });
+    // A stored rung that is not one fails closed.
+    expect(tighterLadder({ maxRung: "vision" as never }, { maxRung: "intelligent" })).toEqual({ maxRung: "fast" });
   });
 });
 
@@ -230,6 +232,10 @@ describe("estimates under the ladder", () => {
     expect(capped.high).toBeCloseTo(fast.high + 10 * (0.25 - 0.005));
     expect(capped.high).toBeLessThan(uncapped.high);
     expect(capped.low).toBeLessThanOrEqual(capped.high);
+    // A multi-frame image is never read under a share: quoted Fast.
+    const tiff = [{ name: "fax.tiff", size: 400_000, pages: 20 }];
+    const tiffFast = quoteUpload({ files: tiff, profile: { ...estimateProfileFor(normalizePipelineFeatures({ ladder: { maxRung: "fast" } }), { env }), billing: "enforced" } }).estimate.credits!;
+    expect(quoteUpload({ files: tiff, profile: shareProfile }).estimate.credits!.high).toBeCloseTo(tiffFast.high);
     // No limit: the uncapped quote, unchanged.
     expect(quoteUpload({ files, profile: { ...estimateProfileFor(base, { env }), billing: "enforced" } }).estimate.credits).toEqual(uncapped);
   });
