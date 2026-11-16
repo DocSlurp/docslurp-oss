@@ -90,7 +90,8 @@ async function extractionChoicesOf(c: Context, project: { id: string; orgId: str
   if (!("pipeline" in project)) return undefined;
   const apiKey = c.get("apiKey");
   const usable = !apiKey || apiKeyCanUseProject(apiKey, { orgId: project.orgId, projectId: project.id });
-  const scopes = apiKey ? (typeof apiKey.keyId === "string" ? await requestApiKeyScopes(c, apiKey.keyId) : null) : undefined;
+  // Scopes only matter for an editor's key (a non-editor never raises), so a non-editor key costs no lookup.
+  const scopes = apiKey && editor && usable ? (typeof apiKey.keyId === "string" ? await requestApiKeyScopes(c, apiKey.keyId) : null) : null;
   return extractionChoicesFor({
     pipeline: project.pipeline,
     origin: runOriginOf(c),

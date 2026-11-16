@@ -525,7 +525,16 @@ export function extractionChoicesFor(input: {
 }): ExtractionChoices {
   const record = isRecord(input.pipeline) ? input.pipeline : {};
   // Stored values as run creation compares them: no privacy lowering here (privacy refuses the request below).
-  const stored = mapLegacyExtractionSettings({ ...record, privacyMode: "standard" }, { explicitFreeAllowed: input.policy.explicitChartsAllowed });
+  const mapped = mapLegacyExtractionSettings({ ...record, privacyMode: "standard" }, { explicitFreeAllowed: input.policy.explicitChartsAllowed });
+  // Run creation compares visuals by the stored chart tier first (a project saved on `models` with figures off still
+  // holds AI chart reads; Q11 lowers it only when R1 migrates the row), so the choices read the tier the same way.
+  const upgraded = upgradeStoredPipelineChartExport(migrateLegacyQualitySettings(record)) as Record<string, unknown>;
+  const rawTier = isRecord(upgraded.chartExport) ? upgraded.chartExport.tier : undefined;
+  const storedTier = rawTier === "off" || rawTier === "free" || rawTier === "models" ? rawTier : undefined;
+  const stored = {
+    quality: mapped.quality,
+    visuals: isVisualsLevel(upgraded.visuals) || storedTier === undefined ? mapped.visuals : visualsLevelFromLegacy({ tier: storedTier }, { explicitFreeAllowed: input.policy.explicitChartsAllowed }),
+  };
   const constraints = { privacyMode: record.privacyMode, vision: record.vision };
   const accepts = (request: { quality?: QualityLevel; visuals?: VisualsLevel }) => resolveExtractionSettings({
     request,

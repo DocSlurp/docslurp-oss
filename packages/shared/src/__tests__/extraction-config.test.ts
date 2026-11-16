@@ -350,6 +350,11 @@ describe("extractionChoicesFor (project.extractionChoices)", () => {
     expect(choices({ quality: "auto" }, editorSession, { explicitChartsAllowed: false }).visuals).not.toContain("charts");
   });
 
+  it("a legacy project with figures off and a chart tier keeps its tier's rung, as run creation compares it", () => {
+    expect(choices({ quality: "auto", figures: false, chartExport: { tier: "models" } }, contributor).visuals).toContain("charts-ai");
+    expect(choices({ quality: "auto", figures: false }, contributor).visuals).not.toContain("charts-ai");
+  });
+
   it("every offered rung is accepted by resolveExtractionSettings and every withheld one refused", () => {
     const pipelines = [{ quality: "fast" }, { quality: "auto", privacyMode: "local-only" }, { quality: "good", figures: false }, { quality: "auto", chartExport: { tier: "free" } }];
     const callers = [editorSession, contributor, billedKey, ingestKey, revokedKey];
