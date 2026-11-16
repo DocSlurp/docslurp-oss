@@ -1,4 +1,5 @@
 import { hasVmHtmlTableWork, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
+import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { htmlTableSources } from "../pipeline/chunking.js";
 import { createHash } from "node:crypto";
 
@@ -994,10 +995,14 @@ export class EmbedStage implements Stage {
     // Keyword search can serve the chunks from here on, ahead of the index stage.
     if (store.finalizeDocumentChunks) {
       await store.finalizeDocumentChunks(args.document.id, keep, dbChunks.length > 0);
+      if (dbChunks.length > 0) recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
       return;
     }
     await store.deleteStaleDocumentChunks?.(args.document.id, keep);
-    if (dbChunks.length > 0) await store.markDocumentLexicalSearchable?.(args.document.id);
+    if (dbChunks.length > 0) {
+      await store.markDocumentLexicalSearchable?.(args.document.id);
+      recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
+    }
   }
 }
 

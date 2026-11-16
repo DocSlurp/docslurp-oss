@@ -18,6 +18,7 @@ export type AlertId =
   | "database-unreachable"
   | "queued-run-age"
   | "stale-leases"
+  | "processing-run-stalled"
   | "extract-deletion-stuck"
   | "worker-pollers-missing"
   | "worker-crash-loop"
@@ -55,6 +56,8 @@ export interface QueueSnapshot {
   queueDepth: number;
   processingRuns: number;
   staleLeases: number;
+  /** Processing runs with no run event (page, document or stage progress) inside the stalled window. */
+  stalledRuns?: number;
   oldestQueuedRunAgeSeconds: number | null;
   /** Expired extracts the sweep has not finished deleting (services/extracts.ts). */
   extractDeletion?: { failing: number; overdue: number; oldestOverdueSeconds: number | null };
@@ -79,6 +82,8 @@ export interface AlertThresholds {
   queuedRunAgeSeconds: number;
   /** This many processing runs with expired leases fires stale-leases. */
   staleLeases: number;
+  /** A processing run with no run event for this long counts as stalled, even when its worker still heartbeats. */
+  stalledRunSeconds: number;
   /** Pollers last seen longer ago than this no longer count as live workers. */
   pollerStaleMs: number;
   /** Distinct worker processes per machine within the window that count as a crash loop. */
@@ -94,6 +99,7 @@ export interface AlertThresholds {
 export const DEFAULT_ALERT_THRESHOLDS: AlertThresholds = {
   queuedRunAgeSeconds: 900,
   staleLeases: 1,
+  stalledRunSeconds: 1_800,
   pollerStaleMs: 180_000,
   workerRestartsPerMachine: 3,
   workerRestartWindowMs: 15 * 60_000,
@@ -114,6 +120,7 @@ export function resolveAlertThresholds(env: NodeJS.ProcessEnv = process.env): Al
   return {
     queuedRunAgeSeconds: readNumber(env, "ALERT_QUEUED_RUN_AGE_SECONDS", d.queuedRunAgeSeconds, 1),
     staleLeases: readNumber(env, "ALERT_STALE_LEASES", d.staleLeases, 1),
+    stalledRunSeconds: readNumber(env, "ALERT_STALLED_RUN_SECONDS", d.stalledRunSeconds, 60),
     pollerStaleMs: readNumber(env, "ALERT_POLLER_STALE_MS", d.pollerStaleMs, 1_000),
     workerRestartsPerMachine: readNumber(env, "ALERT_WORKER_RESTARTS_PER_MACHINE", d.workerRestartsPerMachine, 2),
     workerRestartWindowMs: readNumber(env, "ALERT_WORKER_RESTART_WINDOW_MS", d.workerRestartWindowMs, 60_000),
@@ -213,6 +220,15 @@ export function evaluateAlertRules(
       `${queue.staleLeases} processing run(s) have expired worker leases (threshold ${thresholds.staleLeases})`,
       { staleLeases: queue.staleLeases, processingRuns: queue.processingRuns, threshold: thresholds.staleLeases },
     ));
+    if (queue.stalledRuns !== undefined) {
+      checks.push(check(
+        "processing-run-stalled",
+        queue.stalledRuns > 0,
+        "warning",
+        `${queue.stalledRuns} processing run(s) made no progress for ${thresholds.stalledRunSeconds}s`,
+        { stalledRuns: queue.stalledRuns, processingRuns: queue.processingRuns, thresholdSeconds: thresholds.stalledRunSeconds },
+      ));
+    }
 
     if (queue.extractDeletion) {
       const { failing, overdue, oldestOverdueSeconds } = queue.extractDeletion;
@@ -259,7 +275,7 @@ export function evaluateAlertRules(
       checks.push(unknown("migrations-not-at-head", "migration state unavailable"));
     }
   } else if (db && !db.ok) {
-    for (const id of ["queued-run-age", "stale-leases", "migrations-not-at-head"] as const) {
+    for (const id of ["queued-run-age", "stale-leases", "processing-run-stalled", "migrations-not-at-head"] as const) {
       checks.push(unknown(id, "database unreachable"));
     }
   }

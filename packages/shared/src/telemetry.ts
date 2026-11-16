@@ -488,6 +488,38 @@ export function recordFigureTelemetry(name: string, value: number, labels: Recor
   });
 }
 
+/** Seconds: sub-second first-page times through multi-hour big-document runs. The SDK default starts at 5 s. */
+const PIPELINE_DURATION_BUCKETS = [0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 14400];
+const PIPELINE_RATE_BUCKETS = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+
+/**
+ * Product pipeline signals (run milestones, outcomes, page routing): emitted on the OTel meter directly, as
+ * `docslurp.<name>`. `duration` records seconds and `rate` a per-minute throughput, both as histograms; `counter` adds.
+ * Labels are bounded categories (milestone, stage, outcome, reason, page-count bucket), never ids.
+ */
+export function recordPipelineTelemetry(name: string, value: number, labels: Record<string, string> = {},
+  kind: "counter" | "duration" | "rate" = "counter"): void {
+  if (!/^[a-z0-9_.]{1,64}$/.test(name) || !Number.isFinite(value) || value < 0) return;
+  const meter = getRuntime()?.metrics?.getMeter("docslurp.pipeline");
+  if (!meter) return;
+  bestEffort(() => {
+    if (kind === "counter") meter.createCounter(`docslurp.${name}`).add(value, labels);
+    else meter.createHistogram(`docslurp.${name}`, kind === "duration"
+      ? { unit: "s", advice: { explicitBucketBoundaries: PIPELINE_DURATION_BUCKETS } }
+      : { unit: "{page}/min", advice: { explicitBucketBoundaries: PIPELINE_RATE_BUCKETS } }).record(value, labels);
+  });
+}
+
+/** Page-count bucket for metric labels: bounded, and wide enough to tell a one-pager from a 10,000-page upload. */
+export function pageCountBucket(pages: number): string {
+  if (!Number.isFinite(pages) || pages < 1) return "unknown";
+  if (pages === 1) return "1";
+  if (pages <= 10) return "2-10";
+  if (pages <= 100) return "11-100";
+  if (pages <= 1000) return "101-1000";
+  return "1001+";
+}
+
 const dependencyScopeKey = createContextKey("docslurp.dependency.scope");
 export function withDependencyScope<T>(scope: Record<string, unknown>, run: () => T): T {
   return context.with(context.active().setValue(dependencyScopeKey, scope), run);
@@ -581,12 +613,16 @@ export function startTelemetrySpan(tracerName: string, name: string, attributes:
 
 /** Low-cardinality chat agent metrics: model ids, tool names and stop reasons only, never ids. */
 export function recordChatAgentTelemetry(args: { model: string; stopReason: string; durationSeconds: number;
-  toolCalls: Readonly<Record<string, number>> }): void {
+  toolCalls: Readonly<Record<string, number>>; firstTextSeconds?: number }): void {
   const meter = getRuntime()?.metrics?.getMeter("docslurp.chat");
   if (!meter) return;
   bestEffort(() => {
     meter.createHistogram("docslurp.chat.agent.duration", { unit: "s" }).record(args.durationSeconds,
       { "gen_ai.request.model": args.model, "docslurp.chat.stop_reason": args.stopReason });
+    if (args.firstTextSeconds !== undefined && Number.isFinite(args.firstTextSeconds)) {
+      meter.createHistogram("docslurp.chat.agent.first_text", { unit: "s", advice: { explicitBucketBoundaries: [0.25, 0.5, 1, 2, 3, 5, 8, 13, 20, 30, 60] } })
+        .record(Math.max(0, args.firstTextSeconds), { "gen_ai.request.model": args.model });
+    }
     const counter = meter.createCounter("docslurp.chat.agent.tool_calls");
     for (const [tool, count] of Object.entries(args.toolCalls)) {
       if (count > 0) counter.add(count, { "gen_ai.request.model": args.model, "gen_ai.tool.name": tool });

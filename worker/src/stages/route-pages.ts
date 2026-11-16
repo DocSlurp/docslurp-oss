@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { chartExportConfigOf, FORMAT_MODE } from "../chart-export/config.js";
@@ -682,6 +683,11 @@ export class RoutePagesStage implements Stage {
         else if (comparison.routerNeedsPixels) summary.routerOnlyPixels++;
         else summary.v3OnlyPixels++;
       }
+      recordPipelineTelemetry("pages.router_decisions", 1, {
+        mode: plan.mode,
+        pixels: comparison.routerNeedsPixels ? "yes" : "no",
+        agrees: comparison.agreesWithV3 === null ? "unknown" : comparison.agreesWithV3 ? "yes" : "no",
+      });
       state.pendingPerformance.push({
         documentId: document.id,
         scope: "page",

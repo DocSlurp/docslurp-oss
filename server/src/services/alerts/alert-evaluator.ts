@@ -83,10 +83,12 @@ async function readExtractDeletionSnapshot(): Promise<QueueSnapshot["extractDele
 }
 
 async function readQueueSnapshot(): Promise<QueueSnapshot> {
+  const stalledSeconds = resolveAlertThresholds().stalledRunSeconds;
   const [row] = await sql<{
     queue_depth: number;
     processing_runs: number;
     stale_leases: number;
+    stalled_runs: number;
     oldest_queued_run_age_seconds: number | null;
   }[]>`
     select
@@ -99,6 +101,14 @@ async function readQueueSnapshot(): Promise<QueueSnapshot> {
       count(*) filter (
         where status = 'processing' and coalesce(lease_expires_at, to_timestamp(0)) < now()
       )::int as stale_leases,
+      count(*) filter (
+        where status = 'processing' and coalesce(control_state, '') not in ('paused', 'pause_requested', 'cancel_requested', 'cancelled')
+          and created_at < now() - make_interval(secs => ${stalledSeconds})
+          and not exists (
+            select 1 from project_run_events event
+            where event.run_id = project_runs.id and event.created_at > now() - make_interval(secs => ${stalledSeconds})
+          )
+      )::int as stalled_runs,
       extract(epoch from (now() - min(created_at) filter (
         where status = 'queued' and coalesce(control_state, '') not in ('paused', 'cancelled')
       )))::double precision as oldest_queued_run_age_seconds
@@ -108,6 +118,7 @@ async function readQueueSnapshot(): Promise<QueueSnapshot> {
     queueDepth: Number(row?.queue_depth ?? 0),
     processingRuns: Number(row?.processing_runs ?? 0),
     staleLeases: Number(row?.stale_leases ?? 0),
+    stalledRuns: Number(row?.stalled_runs ?? 0),
     oldestQueuedRunAgeSeconds: row?.oldest_queued_run_age_seconds === null || row?.oldest_queued_run_age_seconds === undefined
       ? null
       : Number(row.oldest_queued_run_age_seconds),

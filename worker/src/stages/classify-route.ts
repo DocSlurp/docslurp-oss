@@ -34,6 +34,7 @@ import {
   TABLE_SCAN_MAX_PAGE_CHARS,
   type HtmlTableScan,
 } from "@docslurp/shared";
+import { recordPagesRouted } from "../pipeline/run-milestones.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
@@ -150,6 +151,9 @@ export class ClassifyRouteStage implements Stage {
             measuredPages: imageEvidence?.pages.size ?? 0,
             imageEvidence: imageEvidence?.pages,
           });
+          for (const [reason, count] of Object.entries(decisions.pagesReadByReason)) recordPagesRouted("read", reason, count);
+          recordPagesRouted("blank", "blank", decisions.blankPages);
+          recordPagesRouted("text", "text", Math.max(0, surface.pages.length - decisions.pagesRead - decisions.blankPages));
           console.log(
             `[classify-route] run=${state.run.id} document=${document.id} routing=${routingVersion(routingV2)} ` +
               `pages=${decisions.intakePages} measured=${decisions.measuredPages} read=${decisions.pagesRead} ` +

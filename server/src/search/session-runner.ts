@@ -1,4 +1,5 @@
 import { parseSelfQuerySyntax } from "./self-query.js";
+import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { withObservation } from "@docslurp/shared/observability";
@@ -134,6 +135,7 @@ export async function runSearchSession(args: {
   validateRetrievalControls(args.options);
   try {
     const response = await executeSearchSession(args);
+    recordPipelineTelemetry("search.requests", 1, { results: response.results.length > 0 ? "some" : "zero", mode: response.searchMode ?? "unknown" });
     // Child searches suppress result-session rows, but their paid usage must
     // survive even when a sibling later fails before the parent can adopt it.
     await args.setup.session.flushUsage(args.userId);

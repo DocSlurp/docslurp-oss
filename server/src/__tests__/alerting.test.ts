@@ -77,6 +77,20 @@ describe("alert rules", () => {
     expect(firing(checks)).toEqual(["queued-run-age", "stale-leases", "worker-pollers-missing"]);
   });
 
+  it("warns on processing runs that stopped making progress, and stays silent when the count was not collected", () => {
+    const queue = { queueDepth: 0, processingRuns: 2, staleLeases: 0, oldestQueuedRunAgeSeconds: null };
+    const migrations = { appliedCount: 2, latestAppliedWhen: 200, journal };
+    const stalled = evaluateAlertRules(healthy({ database: { ok: true, queue: { ...queue, stalledRuns: 1 }, migrations } }), DEFAULT_ALERT_THRESHOLDS);
+    expect(firing(stalled)).toEqual(["processing-run-stalled"]);
+    expect(byId(stalled, "processing-run-stalled")).toMatchObject({ severity: "warning", details: { stalledRuns: 1, thresholdSeconds: 1_800 } });
+    const moving = evaluateAlertRules(healthy({ database: { ok: true, queue: { ...queue, stalledRuns: 0 }, migrations } }), DEFAULT_ALERT_THRESHOLDS);
+    expect(byId(moving, "processing-run-stalled").state).toBe("ok");
+    const uncollected = evaluateAlertRules(healthy({ database: { ok: true, queue, migrations } }), DEFAULT_ALERT_THRESHOLDS);
+    expect(uncollected.some((check) => check.id === "processing-run-stalled")).toBe(false);
+    const down = evaluateAlertRules(healthy({ database: { ok: false, error: "down" } }), DEFAULT_ALERT_THRESHOLDS);
+    expect(byId(down, "processing-run-stalled").state).toBe("unknown");
+  });
+
   it("does not page for missing pollers while the queue is idle", () => {
     const checks = evaluateAlertRules(healthy({
       temporal: { ok: true, queues: [{ name: "docslurp-pipeline", type: "activity", pollers: [] }] },

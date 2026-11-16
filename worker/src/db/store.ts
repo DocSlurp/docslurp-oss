@@ -1,4 +1,5 @@
 import { computeAllocationAdmission } from "./compute-fleet-store.js";
+import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneHit } from "../pipeline/run-milestones.js";
 import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation, type ComputeObservations, type ComputePriceObservation, type ComputeCalibrationObservation } from "@docslurp/shared";
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
@@ -2577,6 +2578,17 @@ export class Store {
   /** Applies pending credit debits to org pools (maintenance leader, every few seconds). */
   async flushPendingCreditDebits(): Promise<{ orgs: number; debits: number; credits: number }> {
     return flushPendingCreditDebits(this.sql);
+  }
+
+  /** Stamps a run milestone the first time it happens; null when it was already stamped (pipeline/run-milestones.ts). */
+  async markRunMilestone(runId: string, milestone: RunMilestone): Promise<RunMilestoneHit | null> {
+    const column = this.sql(RUN_MILESTONE_COLUMNS[milestone]);
+    const [row] = await this.sql<{ seconds: number; pages: number }[]>`
+      update project_runs set ${column} = now()
+      where id = ${runId} and ${column} is null
+      returning extract(epoch from (now() - created_at))::float8 as seconds, coalesce(pages_total, 0)::int as pages
+    `;
+    return row ? { seconds: Math.max(0, Number(row.seconds)), pages: Number(row.pages) } : null;
   }
 
   async setPageStageComplete(

@@ -353,6 +353,8 @@ export async function runChatMcpAgent(args: {
   const deadline = new ChatTurnDeadline(budget, args.startedAtMs ?? Date.now(), args.signal);
   const signal = deadline.signal;
   const started = performance.now();
+  // First answer text the reader can see, across steps (tool calls and reasoning before it count toward the wait).
+  let firstTextAt: number | undefined;
   // GenAI semantic conventions: one invoke_agent span, a chat span per model step, an execute_tool span per call.
   const agentSpan = startTelemetrySpan("docslurp.chat", "invoke_agent project-chat", {
     "gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "project-chat", "gen_ai.provider.name": "openrouter",
@@ -493,6 +495,7 @@ export async function runChatMcpAgent(args: {
               if (chunk.id) step.generationId = chunk.id;
               if (chunk.modelId) step.responseModel = chunk.modelId;
             } else if (chunk.type === "text-delta" || chunk.type === "reasoning-delta" || chunk.type === "tool-input-delta") {
+              if (chunk.type === "text-delta" && chunk.delta.length > 0) firstTextAt ??= performance.now();
               if (chunk.delta.length > 0) step.firstToken.dispose();
               step.outputChars += chunk.delta.length;
             } else if (chunk.type === "tool-call") {
@@ -830,6 +833,6 @@ export async function runChatMcpAgent(args: {
     });
     agentSpan.end(failure);
     recordChatAgentTelemetry({ model: args.model, stopReason: telemetryStopReason, durationSeconds: (performance.now() - started) / 1000,
-      toolCalls: context.counters.byTool });
+      toolCalls: context.counters.byTool, firstTextSeconds: firstTextAt === undefined ? undefined : (firstTextAt - started) / 1000 });
   }
 }
