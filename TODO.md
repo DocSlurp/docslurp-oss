@@ -1,5 +1,17 @@
 # TODO
 
+- Page-scoped PII follow-ups (council on #374, 2026-11-15; none blocks page scoping):
+  - Pre-existing: run artifacts written before the scan (page images, raw vision output) are served by the file proxy until pii-detect records the withheld list; refuse a run's pre-scan artifacts while the project policy is on and that document's pii-detect has not completed. `artifactOnWithheldPage` checks slots only on the document's current run.
+  - `sections` scope has no serve-time check: a stale index row from before a rescan is not filtered. Drop hits of `sections` documents from runs older than the pii-detect run.
+  - Contract/canonical nodes are keyed by their own `pageNumber`: unmatched text of a withheld page nested under a node tagged with a clean page (a table spanning pages) stays; under `sections`, contract and canonical keep the rest of the section. Structural-key fields (`*Url`, `*Id`, `mailto:`) are never scanned (pre-existing for redaction).
+  - `artifactOnWithheldPage` expands every run's artifacts of the accessible projects per file-proxy request; fold the slot lookup into `userCanAccessArtifactUri`'s existing query.
+  - Backfill adoption retires any temporary version with a PII outcome (fail closed), so a document with one withheld page never moves to the new indexing mode; carry `metadata.pii` onto the source instead.
+  - A page-scoped outcome removes rough-text rows of `unseen`/`failed`/`parsed` pages only; chunks and vectors of pages already materialized (`indexed`) stay stored (the serve-time filter drops them) until reindex. Delete them and queue vector deletion.
+  - The streamed-hits filter (`stream-hits.ts`) reads withholdings without an org predicate; thread the search scope's org through.
+  - A partial reprocess's pii-detect rewrites Markdown/canonical/contract through artifact keys copied from the source version; write to the current run's own keys.
+  - `flag_for_review` with pages carried over from an earlier scan rewrites them to placeholders but does not declare `extractedText` as produced, so a partial reprocess may reuse a summary built before; declare it whenever pii-detect may withhold pages (costs summary re-runs on every flag-only reprocess).
+  - Under `redact_artifacts` without withheld pages, whole-text redaction of a span that crosses a page break drops the break (pre-existing).
+
 - Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
 
 - Project activity counters (0165), council follow-ups 2026-11-14:

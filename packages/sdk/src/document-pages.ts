@@ -21,6 +21,8 @@ export type ImageManifestRecord = {
 export type DocumentPreviewPage = {
   id: string; imageUrl: string; pageNumber: number | null; label: string;
   detail: string | null; widthPx: number | null; heightPx: number | null;
+  /** The project's PII policy withholds this page: show a placeholder, never request its image. */
+  withheld?: boolean;
 };
 
 function isImageArtifact(artifact: DocumentArtifactEntry) {

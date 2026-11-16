@@ -4,12 +4,12 @@ vi.mock("../pipeline/pdf-asset-cache.js", () => ({ PdfRasterCache: class { rende
 vi.mock("../db/usage-event-store.js", () => ({ persistScopedUsageEvents: mocks.persist }));
 import { renderDocumentPage } from "./render-page.js";
 const document = { id: "doc", runId: "run", userId: "owner", mimeType: "application/pdf", status: "completed", pageCount: 3 };
-function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: boolean; existing?: string } = {}) {
+function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: boolean; existing?: string; metadata?: unknown; lockedMetadata?: unknown } = {}) {
   const artifacts: Record<string, string> = {};
   const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
-    if (query.includes("select d.org_id")) return [{ org_id: "org", project_id: "project", withheld: options.withheld ?? false, low:options.existing, high:options.existing }];
-    if (query.includes("select d.id")) return options.deleted ? [] : [{ id: "doc" }];
+    if (query.includes("select d.org_id")) return [{ org_id: "org", project_id: "project", status: "completed", metadata: options.metadata ?? {}, withheld: options.withheld ?? false, low:options.existing, high:options.existing }];
+    if (query.includes("for update of d")) return options.deleted ? [] : [{ status: "completed", metadata: options.lockedMetadata ?? options.metadata ?? {}, withheld: options.withheld ?? false }];
     if (query.includes("update project_runs")) Object.assign(artifacts, values[0]);
     return [];
   }), { json: (value: unknown) => value, begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
@@ -23,6 +23,26 @@ describe("lazy PDF worker rendering", () => {
     await expect(renderDocumentPage(setup().deps, { documentId: "doc", runId: "run", pageNumber: 4 })).rejects.toThrow("not renderable");
     expect(mocks.render).not.toHaveBeenCalled();
     expect(mocks.persist).not.toHaveBeenCalled();
+  });
+  it("page-scoped PII: refuses only the withheld pages, renders the clean ones", async () => {
+    const metadata = { pii: { scope: "pages", withheldPages: [2], withheldArtifactUris: ["s3://bucket/source"] } };
+    await expect(renderDocumentPage(setup({ withheld: true, metadata }).deps, { documentId: "doc", runId: "run", pageNumber: 2 })).rejects.toThrow("unavailable");
+    expect(mocks.render).not.toHaveBeenCalled();
+    const { deps, artifacts } = setup({ withheld: true, metadata });
+    await renderDocumentPage(deps, { documentId: "doc", runId: "run", pageNumber: 3 });
+    expect(artifacts["doc:page-3"]).toBe("s3://page-3");
+  });
+  it("page-scoped PII: a rescan that withholds the page before the write lock wins", async () => {
+    const { deps, artifacts } = setup({ metadata: {}, lockedMetadata: { pii: { scope: "pages", withheldPages: [1] } } });
+    await expect(renderDocumentPage(deps, { documentId: "doc", runId: "run", pageNumber: 1 })).rejects.toThrow("unavailable");
+    expect(artifacts).toEqual({});
+    expect(mocks.persist).not.toHaveBeenCalled();
+  });
+  it("fails closed on malformed or document-wide PII outcomes", async () => {
+    for (const metadata of [{ pii: { scope: "pages", withheldPages: "2" } }, { pii: { scope: "document" } }, { pii: { blocked: true } }, { pii: { scope: "weird" } }]) {
+      await expect(renderDocumentPage(setup({ metadata }).deps, { documentId: "doc", runId: "run", pageNumber: 1 })).rejects.toThrow("unavailable");
+    }
+    expect(mocks.render).not.toHaveBeenCalled();
   });
   it("merges concurrent different pages and records scoped stable usage receipts", async () => {
     const { deps, artifacts } = setup();

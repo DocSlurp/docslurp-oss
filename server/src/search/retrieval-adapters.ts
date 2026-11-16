@@ -210,7 +210,7 @@ export async function retrieveEvidence(
   for (const adapter of adapters) {
     const startedAt = performance.now();
     const chunks = adapter.name === "summary-tree" ? skippedLeg() : await adapter.retrieve(context, previousResults);
-    if (streaming) reportLeg(adapter.name, chunks, startedAt, context);
+    if (streaming) await reportLeg(adapter.name, chunks, startedAt, context);
     previousResults[adapter.name] = chunks;
     results.push({ adapter: adapter.name, chunks });
   }
@@ -229,6 +229,7 @@ async function retrieveEvidenceInParallel(
   const pending = new Map<EvidenceAdapterName, Promise<SearchChunk[]>>();
   const settled: Partial<Record<EvidenceAdapterName, SearchChunk[]>> = {};
   const streaming = currentSearchStreamSink() !== undefined;
+  const reports: Promise<void>[] = [];
   const startedAt = performance.now();
   for (const adapter of adapters) {
     const elapsed = () => performance.now() - startedAt;
@@ -245,25 +246,28 @@ async function retrieveEvidenceInParallel(
     // Observe rejections now; Promise.all below still surfaces the first one.
     run.catch(() => undefined);
     // Report each leg the moment it lands (completion order). A rejected leg reports nothing.
-    if (streaming) run.then((chunks) => reportLeg(adapter.name, chunks, startedAt, context), () => undefined);
+    // Reporting reads the hits' PII withholding first; the search waits for every report before it returns, so no
+    // provisional hit is sent after the final results, but no leg waits on another leg's report.
+    if (streaming) reports.push(run.then((chunks) => reportLeg(adapter.name, chunks, startedAt, context), () => undefined));
     pending.set(adapter.name, run);
   }
   const lists = await Promise.all(adapters.map((adapter) => pending.get(adapter.name)!));
+  await Promise.all(reports);
   return adapters.map((adapter, index) => ({ adapter: adapter.name, chunks: lists[index]! }));
 }
 
 /** Side effect only: never throws, never changes what the leg returns. Disabled legs are skipped by the callers' own empty results. */
-function reportLeg(
+async function reportLeg(
   leg: EvidenceAdapterName,
   chunks: SearchChunk[],
   startedAt: number,
   context: EvidenceRetrievalContext,
-): void {
+): Promise<void> {
   // The tree leg is not a stream leg: its chunks reach the client only in the final results.
   if (leg === "summary-tree" || skippedLegs.has(chunks)) return;
   try {
     const timeoutEvent = LEG_TIMEOUT_EVENTS[leg];
-    emitLegHits({
+    await emitLegHits({
       leg,
       chunks,
       startedAt,

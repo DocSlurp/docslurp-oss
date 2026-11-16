@@ -187,6 +187,27 @@ export const ingestReportPartialExtractionSchema = z.object({
 });
 export type IngestReportPartialExtraction = z.infer<typeof ingestReportPartialExtractionSchema>;
 
+/**
+ * Files the PII policy withheld part of (page-scoped `block_indexing`): page numbers and counts only, never what
+ * matched. The rest of each file completed and is searchable.
+ */
+export const ingestReportPiiWithheldSchema = z.object({
+  total: count,
+  pages: count,
+  /** Up to 20 files. */
+  examples: z.array(z.object({
+    documentId: z.string(),
+    filename: z.string(),
+    scope: z.enum(["pages", "sections"]),
+    withheldPages: z.array(z.number().int().positive()).max(1000),
+    withheldPageCount: count,
+    withheldSectionCount: count,
+    /** "N pages withheld for privacy (pages 3, 7)". */
+    message: z.string(),
+  })),
+});
+export type IngestReportPiiWithheld = z.infer<typeof ingestReportPiiWithheldSchema>;
+
 /** The warning for a partially extracted PDF: N of M pages, why, and what was billed. Never tool text. */
 export function partialExtractionMessage(extracted: number, inFile: number): string {
   return `Only ${extracted} of this PDF's ${inFile} pages could be extracted because its page structure is inconsistent. Only the extracted pages are searchable and billed; re-save or re-export the PDF to recover the rest.`;
@@ -432,6 +453,8 @@ export const ingestReportSchema = z.object({
   denseText: ingestReportDenseTextSchema.default({ total: 0, examples: [] }),
   /** PDFs extracted short of their page tree (`pdf-partially-extracted`). Defaults to none for older reports. */
   partialExtraction: ingestReportPartialExtractionSchema.default({ total: 0, examples: [] }),
+  /** Files with pages (or sections) withheld by the PII policy. Defaults to none for older reports. */
+  piiWithheld: ingestReportPiiWithheldSchema.default({ total: 0, pages: 0, examples: [] }),
   focus: ingestReportPageSchema.array().nullable(),
   languages: z.array(z.object({ code: z.string(), documents: count })),
   stages: z.object({

@@ -258,6 +258,10 @@ async function findDedupCandidate(
       and d.status = 'completed'
       and d.superseded_at is null
       and d.purged_at is null
+      -- A document the PII policy touched (pages or sections withheld, redacted, flagged) is never a dedup source: the
+      -- copy would not carry its withholding (metadata.pii), so its server-side checks would see nothing withheld.
+      and d.metadata->'pii' is null
+      and (owner.id is null or owner.metadata->'pii' is null)
       and runs.status = 'completed'
       -- Extract documents are deleted when their retention ends; nothing may borrow their artifacts.
       and runs.extract_id is null

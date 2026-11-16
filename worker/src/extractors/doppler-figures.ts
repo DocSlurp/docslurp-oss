@@ -1324,10 +1324,21 @@ export function dopplerFigureUris(
   storage: Pick<DopplerFigureStorage, "uri">, document: { id: string; userId: string; runId: string; artifactRoot?: string | null }, runId: string,
   set: Pick<DopplerFigureSet, "files" | "manifests" | "version">,
 ): string[] {
+  return dopplerFigureSlotUris(storage, document, runId, set).map(({ uri }) => uri);
+}
+
+/**
+ * {@link dopplerFigureUris} with what each URI is: a figure file's slot (`doppler-figure:<id>`, which names its page),
+ * `DOPPLER_MARKDOWN_SLOT` for `document.md`, and `null` for the index and manifests (never page-scoped).
+ */
+export function dopplerFigureSlotUris(
+  storage: Pick<DopplerFigureStorage, "uri">, document: { id: string; userId: string; runId: string; artifactRoot?: string | null }, runId: string,
+  set: Pick<DopplerFigureSet, "files" | "manifests" | "version">,
+): Array<{ slot: string | null; uri: string }> {
   const key = (object: Parameters<typeof dopplerFolderKey>[2]) => storage.uri(dopplerFolderKey(document, runId, object));
   return [
-    ...set.files.map((file) => key({ id: file.id, format: file.format })),
-    ...set.manifests.map((manifest) => key(manifest.range ? { shard: manifest.range } : set.version === 3 ? "manifestV3" : "manifest")),
-    key("index"), key("markdown"),
+    ...set.files.map((file) => ({ slot: dopplerFigureSlot(file.id), uri: key({ id: file.id, format: file.format }) })),
+    ...set.manifests.map((manifest) => ({ slot: null, uri: key(manifest.range ? { shard: manifest.range } : set.version === 3 ? "manifestV3" : "manifest") })),
+    { slot: null, uri: key("index") }, { slot: DOPPLER_MARKDOWN_SLOT, uri: key("markdown") },
   ];
 }

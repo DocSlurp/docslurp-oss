@@ -110,6 +110,115 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
     });
   }
 
+  it("page-scoped block_indexing: figures of clean pages stay servable; withheld pages' figures and every other file join the list", async () => {
+    const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
+    const appended: string[] = [];
+    (env.state as any).store = {
+      documentPiiWithholds: async () => true,
+      documentPiiWithholding: async () => ({ scope: "pages", pages: new Set([3]) }),
+      appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); },
+    };
+    await run(env, await folder());
+    const slots = Object.entries(env.state.artifactLedger.all() as Record<string, string>).filter(([slot]) => slot.startsWith(`${DOC_ID}:doppler`));
+    const figurePage = (slot: string) => /:doppler-figure:p(\d+)\./.exec(slot)?.[1];
+    expect(slots.some(([slot]) => figurePage(slot) === "3")).toBe(true);
+    expect(slots.some(([slot]) => figurePage(slot) === "1")).toBe(true);
+    for (const [slot, uri] of slots) {
+      const page = figurePage(slot);
+      expect(appended.includes(uri), slot).toBe(page === undefined || page === "3");
+    }
+    expect([...env.objects.keys()].some((key) => key.endsWith("/document.md"))).toBe(false);
+  });
+
+  it("page-scoped block_indexing: the withheld page's figure and the index are on the list before any object is uploaded", async () => {
+    const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
+    const firstAppend: { uris: string[]; objectsBefore: number } = { uris: [], objectsBefore: -1 };
+    (env.state as any).store = {
+      documentPiiWithholds: async () => true,
+      documentPiiWithholding: async () => ({ scope: "pages", pages: new Set([3]) }),
+      appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => {
+        if (firstAppend.objectsBefore === -1) { firstAppend.objectsBefore = env.objects.size; firstAppend.uris = [...uris]; }
+      },
+    };
+    const before = env.objects.size;
+    await run(env, await folder());
+    expect(firstAppend.objectsBefore).toBe(before);
+    expect(firstAppend.uris.some((uri) => uri.includes("/images/page-0003/"))).toBe(true);
+    expect(firstAppend.uris.some((uri) => uri.includes("/images/page-0001/"))).toBe(false);
+    expect(firstAppend.uris.some((uri) => uri.endsWith("/index.json"))).toBe(true);
+  });
+
+  describe("one PII page (page 3 of 4) under page-scoped block_indexing", () => {
+    const placeholder = "[Page 3 withheld by the project's privacy policy]";
+    async function scopedSlot() {
+      // What pii-detect leaves in the Markdown slot: page 3 replaced by its placeholder, the other pages intact.
+      const pages = (await readFile(path.join(FIXTURE, "document.md"), "utf8")).split("\f");
+      pages[2] = placeholder;
+      return Buffer.from(pages.join("\f"), "utf8");
+    }
+    function scopedEnv() {
+      const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
+      const appended: string[] = [];
+      (env.state as any).store = {
+        documentPiiWithholds: async () => true,
+        documentPiiWithholding: async () => ({ scope: "pages", pages: new Set([3]) }),
+        appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); },
+      };
+      return { env, appended };
+    }
+
+    it("keeps document.md with the placeholder and page 1's figure; withholds page 3's figure, the index and manifests", async () => {
+      const { env, appended } = scopedEnv();
+      await run(env, await folder(), await scopedSlot());
+      const slots = Object.fromEntries(Object.entries(env.state.artifactLedger.all() as Record<string, string>)
+        .filter(([slot]) => slot.startsWith(`${DOC_ID}:doppler`)).map(([slot, uri]) => [slot.slice(DOC_ID.length + 1), uri]));
+      const markdownKey = [...env.objects.keys()].find((key) => key.endsWith("/document.md"));
+      expect(markdownKey).toBeDefined();
+      const stored = env.objects.get(markdownKey!)!.toString("utf8");
+      expect(stored.split("\f")[2]).toBe(placeholder);
+      expect(stored.split("\f")[0]).toContain("benign paragraph");
+      expect(slots["doppler-markdown"]).toBeDefined();
+      expect(appended).not.toContain(slots["doppler-markdown"]);
+      const figure = (page: number) => Object.entries(slots).filter(([slot]) => slot.startsWith(`doppler-figure:p${page}.`)).map(([, uri]) => uri);
+      expect(figure(1).length).toBeGreaterThan(0);
+      expect(figure(3).length).toBeGreaterThan(0);
+      for (const uri of figure(1)) expect(appended).not.toContain(uri);
+      for (const uri of figure(3)) expect(appended).toContain(uri);
+      expect(appended).toContain(slots["doppler-figures"]);
+      expect(appended).toContain(slots["doppler-manifest"]);
+    });
+
+    it("fails closed: a slot whose withheld page still holds text, or whose page breaks are unknown, is not stored", async () => {
+      for (const slot of [
+        await readFile(path.join(FIXTURE, "document.md")),
+        Buffer.from((await scopedSlot()).toString("utf8").replaceAll("\f", "\n"), "utf8"),
+      ]) {
+        const { env, appended } = scopedEnv();
+        await run(env, await folder(), slot);
+        expect([...env.objects.keys()].some((key) => key.endsWith("/document.md"))).toBe(false);
+        // Figures still follow their pages.
+        const recorded = Object.entries(env.state.artifactLedger.all() as Record<string, string>);
+        const page1 = recorded.filter(([key]) => key.includes(":doppler-figure:p1.")).map(([, uri]) => uri);
+        for (const uri of page1) expect(appended).not.toContain(uri);
+      }
+    });
+  });
+
+  it("page-scoped outcome unreadable: every file joins the list (fail closed)", async () => {
+    const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
+    const appended: string[] = [];
+    (env.state as any).store = {
+      documentPiiWithholds: async () => true,
+      documentPiiWithholding: async () => ({ scope: "document", reason: "malformed-metadata" }),
+      appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); },
+    };
+    await run(env, await folder());
+    const slots = Object.entries(env.state.artifactLedger.all() as Record<string, string>).filter(([slot]) => slot.startsWith(`${DOC_ID}:doppler`));
+    // Every stored slot, plus `document.md` (withheld before upload, then never stored).
+    expect(new Set(appended)).toEqual(new Set([...slots.map(([, uri]) => uri), `s3://b/u/r/doppler/${DOC_ID}/document.md`]));
+    expect(env.objects.has(`u/r/doppler/${DOC_ID}/document.md`)).toBe(false);
+  });
+
   it("a PII scan with nothing withheld stores document.md and withholds nothing; page facts are never stored", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "redact_artifacts" } });
     const appended: string[] = [];

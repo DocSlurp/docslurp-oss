@@ -196,6 +196,22 @@ describe("materializePageRange", () => {
     expect(state.rows[0]!.state).toBe("blocked-pii");
   });
 
+  it("never materializes a page the ingest scan withheld, whatever this read finds (page-scoped PII)", async () => {
+    await db.exec(`update documents set metadata = '{"pii": {"scope": "pages", "withheldPages": [2]}}'::jsonb where id = 'd1'`);
+    try {
+      // No PII policy now, and the page reads clean: the recorded withholding still wins.
+      const h = harness({ 1: LONG, 2: `${LONG} clean on this read.` });
+      const result = await claimAndMaterialize(h.deps, input(h, [1, 2]));
+      expect(result.blocked).toEqual([2]);
+      expect(result.indexed).toEqual([1]);
+      expect(h.lanceWrites.flat().every((r) => r.id.startsWith("d1:p1:"))).toBe(true);
+      const state = await db.query<{ state: string }>(`select state from document_page_states where page_number = 2`);
+      expect(state.rows[0]!.state).toBe("blocked-pii");
+    } finally {
+      await db.exec(`update documents set metadata = '{}'::jsonb where id = 'd1'`);
+    }
+  });
+
   it("redacts page text when the policy redacts artifacts", async () => {
     const h = harness({ 1: `${LONG} SSN 123-45-6789 on file.` });
     const pipeline = {

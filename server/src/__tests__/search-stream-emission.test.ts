@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { searchResultId, searchStreamEventSchema, type SearchStreamEventBody } from "@docslurp/shared";
+import { searchResultId, searchStreamEventSchema, type PiiWithholding, type SearchStreamEventBody } from "@docslurp/shared";
+
+// Page-scoped PII: provisional hits go through the final path's filter. Documents are clean unless listed here.
+const piiState = vi.hoisted(() => ({ withheld: new Map<string, unknown>(), fail: false }));
+vi.mock("../services/pii-artifact-guard.js", () => ({
+  loadPiiWithholdings: vi.fn(async (ids: readonly string[]) => {
+    if (piiState.fail) throw new Error("database down");
+    return new Map(ids.map((id) => [id, piiState.withheld.get(id) ?? { scope: "none" }]));
+  }),
+}));
 
 import {
   retrieveEvidence,
@@ -306,5 +315,37 @@ describe("streaming phase events", () => {
     const s = sink({ stats: false });
     await withSearchStreamSink(s.sink, () => collectSearchTimings(() => timePhase("plan", async () => undefined)));
     expect(s.events).toEqual([]);
+  });
+});
+
+describe("streamed hits never show a PII-withheld page", () => {
+  const paged = (id: string, documentId: string, page: number) => ({ ...chunk(id, page, documentId), pageNumber: page, pageNumbers: [page] });
+
+  it("drops a hit on a withheld page and keeps the document's clean pages and other documents", async () => {
+    piiState.withheld.set("doc-w", { scope: "pages", pages: new Set([2]) } satisfies PiiWithholding);
+    try {
+      const s = sink();
+      const adapters = [adapter("lexical", async () => [paged("a", "doc-w", 1), paged("b", "doc-w", 2), paged("c", "doc-other", 2)])];
+      const results = await withSearchStreamSink(s.sink, () => retrieveEvidence(adapters, context(policy()), { parallel: true }));
+      const sent = s.hits().flatMap((event) => event.hits).map((hit) => [hit.result?.citation.documentId, hit.result?.citation.pageNumber]);
+      expect(sent).toEqual([["doc-w", 1], ["doc-other", 2]]);
+      // The leg's own result is unchanged: the final path filters it (search.ts).
+      expect(results[0]!.chunks).toHaveLength(3);
+    } finally {
+      piiState.withheld.clear();
+    }
+  });
+
+  it("sends no hit bodies when the withholdings cannot be read (fail closed)", async () => {
+    piiState.fail = true;
+    try {
+      for (const parallel of [true, false]) {
+        const s = sink();
+        await withSearchStreamSink(s.sink, () => retrieveEvidence([adapter("lexical", async () => [paged("a", "doc-w", 1)])], context(policy()), { parallel }));
+        expect(s.hits().flatMap((event) => event.hits)).toEqual([]);
+      }
+    } finally {
+      piiState.fail = false;
+    }
   });
 });

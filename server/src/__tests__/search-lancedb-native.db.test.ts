@@ -271,12 +271,15 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(response.results.length).toBeGreaterThan(0);
     // The one: access, settings and pipeline (never cached).
     // Plus, per retrieval branch (vector, keyword; run in parallel), one primary-key check that the
-    // LanceDB-hydrated hits' chunks still exist.
-    expect(reads.length).toBeLessThanOrEqual(4);
+    // LanceDB-hydrated hits' chunks still exist, one index-compatibility read, and one primary-key read of the hit
+    // documents' PII withholding (page-scoped PII: hits on withheld pages are dropped whichever index served them).
+    expect(reads.length).toBeLessThanOrEqual(5);
     expect(reads[0]).toMatch(/from projects w/);
     const compatibility = reads.slice(1).filter(read => /group by d.index_config_hash/.test(read));
     expect(compatibility).toHaveLength(1);
-    for (const read of reads.slice(1).filter(read => !compatibility.includes(read))) expect(read).toMatch(/select id from document_chunks where id in/);
+    const pii = reads.filter((read) => /as pii from documents d where d\.id = any/.test(read));
+    expect(pii).toHaveLength(1);
+    for (const read of reads.slice(1).filter(read => !compatibility.includes(read) && !pii.includes(read))) expect(read).toMatch(/select id from document_chunks where id in/);
     expect(statements.some((statement) => /insert into search_sessions/.test(statement))).toBe(true);
   });
 

@@ -44,6 +44,14 @@ export type DocumentVersionChangelog = {
   additions: DocumentVersionChangelogEntry[]; deletions: DocumentVersionChangelogEntry[];
   rewrites: DocumentVersionChangelogEntry[]; contradictions: DocumentVersionChangelogEntry[];
 };
+export type DocumentPiiWithheld = {
+  scope: "none" | "pages" | "sections" | "document";
+  withheldPages: number[];
+  withheldPageCount: number;
+  withheldSectionCount: number;
+  /** "2 pages withheld for privacy (pages 3, 7)". */
+  message: string | null;
+};
 /** Stage diagnostics retain the API's database column names. */
 export type DocumentViewerStage = {
   stage_name: string; status: string; attempts: number;
@@ -59,6 +67,12 @@ export type DocumentViewerPayload = {
   artifacts: DocumentArtifactEntry[];
   source: DocumentSourceEntry;
   pageStats: { pageCount: number; chunkCount: number; pageTextCount: number };
+  /**
+   * What the project's PII policy withheld: `pages` (the rest of the document is served; these pages' text, images and
+   * figures are not), `sections` (an unpaged document), `document` (all of it) or `none`. Page numbers and counts
+   * only, never the withheld content. Absent from older servers.
+   */
+  piiWithheld?: DocumentPiiWithheld;
   /** The ingest version that produced the document against the workspace's current one. */
   ingest?: IngestStatus;
   /** Whether this caller may reprocess or change the document (edit access to its project); show Reprocess and Retry only then. */

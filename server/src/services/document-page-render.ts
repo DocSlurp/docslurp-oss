@@ -1,4 +1,4 @@
-import { PII_BLOCKED_DOCUMENT_STATUS, type DataUnavailableReason, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
+import { isPageWithheld, piiWithholding, PII_BLOCKED_DOCUMENT_STATUS, type DataUnavailableReason, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { sql } from "../db.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
@@ -18,6 +18,11 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     // Starting a render spends: editors only. The document is visible here, so say so (403), not "missing".
     if (!access || !canEditProject(access, userId)) return { status: "editor-required" as const };
   }
+  // Page-scoped PII: a withheld page is never served or rendered, whatever is cached.
+  const [pii] = await sql<{ status: string | null; metadata: unknown }[]>`select status, metadata from documents where id = ${doc.id}`;
+  if (!pii) return { status: "missing" as const };
+  const withholding = piiWithholding(pii);
+  if (isPageWithheld(withholding, pageNumber)) return { status: "unavailable" as const, reason: "withheld" as const, document: doc };
   const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);
   const capabilities = pageRenderCapabilities();
@@ -29,8 +34,10 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     if (legacy) return { status: "ready" as const, capabilities, observation, artifact: { ...legacy, slot: `${documentId}:page-${pageNumber}` } };
   }
   if (artifact) return { status: "ready" as const, dpi, capabilities, observation, artifact: { ...artifact, slot: `${documentId}:page-${pageNumber}` } };
-  // Withheld sources may never be recreated as unredacted page images.
-  const unavailable = pageRenderUnavailableReason(doc, Boolean(viewer.source?.url));
+  // Withheld sources may never be recreated as unredacted page images. Under page-scoped withholding the source is
+  // withheld, yet its clean pages may be rendered: the page was checked above and the worker rechecks it.
+  const sourceRenderable = Boolean(viewer.source?.url) || (withholding.scope === "pages" && viewer.source?.withheld === true);
+  const unavailable = pageRenderUnavailableReason(doc, sourceRenderable);
   if (unavailable || !doc.runId) return { status: "unavailable" as const, reason: unavailable ?? "processing", document: doc };
   const runId = doc.runId;
   // Scan what we parse (PR #339): the worker refuses to render a document without a parse decision from the current scan

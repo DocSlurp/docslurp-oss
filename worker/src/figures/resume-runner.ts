@@ -46,6 +46,7 @@ import {
   projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS, type FigureResumeBlockReason,
 } from "@docslurp/shared";
 import { recordFigureTelemetry } from "@docslurp/shared/observability";
+import { isPageWithheld, piiWithholding, type PiiWithholding } from "@docslurp/shared";
 
 import {
   adoptPendingAssets, figureLedgerHooks, isMissingObject, ledgerWriteForStoredFigures, markAssetsLost,
@@ -547,70 +548,9 @@ async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: nu
   recordFigureTelemetry("resume.vm_ms", ms, { outcome });
 }
 
-// ---- PII. piiWithholding and isPageWithheld are verbatim copies of feat/pii-page-scoped's
-// packages/shared/src/pii-withholding.ts (same names, same semantics); whichever lands later dedupes to the shared ones. ----
+// ---- PII: the shared helpers (packages/shared/src/pii-withholding.ts), re-exported for this module's callers. ----
 
-export type PiiWithholding =
-  | { scope: "none" }
-  | { scope: "sections"; sectionCount: number }
-  | { scope: "pages"; pages: ReadonlySet<number> }
-  | { scope: "document"; reason: string };
-
-function isPositiveInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-}
-
-/**
- * The withholding recorded for a document. Fails closed: status `pii_blocked`, `pii.blocked`, an unknown scope or a
- * malformed page list all withhold the whole document.
- */
-export function piiWithholding(document: { status?: string | null; metadata?: unknown }): PiiWithholding {
-  if (document.status === "pii_blocked") return { scope: "document", reason: "pii-blocked" };
-  const metadata = document.metadata;
-  if (metadata === null || metadata === undefined) return { scope: "none" };
-  if (typeof metadata !== "object" || Array.isArray(metadata)) return { scope: "document", reason: "malformed-metadata" };
-  const pii = (metadata as { pii?: unknown }).pii;
-  if (pii === null || pii === undefined) return { scope: "none" };
-  if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed-metadata" };
-  const record = pii as { blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown };
-  if (record.blocked === true) return { scope: "document", reason: "pii-blocked" };
-  switch (record.scope) {
-    case undefined:
-    case null:
-    case "none":
-      if (record.withheldPages !== undefined) return { scope: "document", reason: "malformed-metadata" };
-      return { scope: "none" };
-    case "pages": {
-      const pages = record.withheldPages;
-      if (!Array.isArray(pages) || pages.length === 0 || !pages.every(isPositiveInteger)) {
-        return { scope: "document", reason: "malformed-metadata" };
-      }
-      return { scope: "pages", pages: new Set(pages) };
-    }
-    case "sections":
-      return { scope: "sections", sectionCount: isPositiveInteger(record.withheldSectionCount) ? record.withheldSectionCount : 1 };
-    case "document":
-      return { scope: "document", reason: "pii-blocked" };
-    default:
-      return { scope: "document", reason: "unknown-scope" };
-  }
-}
-
-/**
- * Whether a page (or any page of a hit spanning several) is withheld. A hit without a page on a document that
- * withholds pages is withheld: its text cannot be shown to come from a clean page.
- */
-export function isPageWithheld(
-  withholding: PiiWithholding,
-  page: number | readonly (number | null | undefined)[] | null | undefined,
-): boolean {
-  if (withholding.scope === "document") return true;
-  if (withholding.scope !== "pages") return false;
-  const pages = Array.isArray(page) ? page : [page];
-  const known = pages.filter(isPositiveInteger);
-  if (known.length === 0 || known.length !== pages.length) return true;
-  return known.some((value) => withholding.pages.has(value));
-}
+export { isPageWithheld, piiWithholding, type PiiWithholding };
 
 /**
  * What a figure resume may do under a document's PII outcome (R2 adversarial 1 and 7). Only a page-scoped outcome the

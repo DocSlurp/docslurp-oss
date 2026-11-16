@@ -363,6 +363,14 @@ describe("Run creation reuses completed outputs for exact-source duplicates", ()
     const fresh = await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[1]!, filename: "fresh.pdf" }] } });
     expect(fresh.documents[0]).toMatchObject({ dedupedFromDocumentId: null, dedupScope: null });
   });
+
+  it("never dedups from a document the PII policy withheld pages of (the copy would not carry the withholding)", async () => {
+    const first = await runCreation.create({ ...input, sources: { kind: "files", files: files.slice(0, 1) } });
+    await sql`update project_runs set status = 'completed' where id = ${first.run.id}`;
+    await sql`update documents set status = 'completed', metadata = jsonb_build_object('pii', jsonb_build_object('scope', 'pages', 'withheldPages', jsonb_build_array(2))) where run_id = ${first.run.id}`;
+    const duplicate = await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[1]!, filename: "copy.pdf" }] } });
+    expect(duplicate.documents[0]).toMatchObject({ dedupedFromDocumentId: null, dedupScope: null });
+  });
 });
 
 describe("Dedup copies and per-project LanceDB databases", () => {

@@ -1,5 +1,5 @@
 import { publicDocumentFailure } from "@docslurp/shared";
-import { MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
+import { isPageWithheld, type PiiWithheldSummary, piiWithheldSummary, piiWithholding, withheldPageOfSlot, MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
 import { ingestRecordFields, ingestStatus, missingServingCapabilities, type IngestStatus } from "@docslurp/shared";
 
 import {
@@ -21,7 +21,7 @@ import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactText, parseArtifactUri } from "../lib/artifacts.js";
 import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentFigureResumeState, type FigureResumeStateView } from "./figure-resume.js";
-import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
+import { artifactOnWithheldPage, documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
@@ -540,6 +540,8 @@ export interface DocumentViewerPayload {
   };
   /** Present for audio/video: stats for the media focus view ("This recording"). */
   media?: MediaSummary | null;
+  /** What the PII policy withholds: page numbers and counts, never content (packages/shared/src/pii-withholding.ts). */
+  piiWithheld: PiiWithheldSummary;
   /** The figure resume state while the document's figures are resumable (why resumes stopped, when, grants left); else null. */
   figureResume: FigureResumeStateView | null;
   /** The ingest version that produced the document against the workspace's current one (ingest-version.ts). */
@@ -789,7 +791,9 @@ export async function userCanAccessArtifactUri(uri: string, userId: string, orgI
     ) as accessible
   `;
 
-  return row?.accessible ?? false;
+  if (!row?.accessible) return false;
+  // Page-scoped PII: per-page artifacts of withheld pages (including renders written after the scan) are refused.
+  return !(await artifactOnWithheldPage(uri, projectIds, orgId));
 }
 
 async function getDocumentRow(docId: string, userId: string): Promise<DocumentRow | null> {
@@ -1246,9 +1250,15 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
     }
   }
 
+  // Page-scoped PII: per-page artifacts of withheld pages (renders written after the scan included) are not listed.
+  const piiWithheldState = piiWithholding({ status: row.status, metadata: row.metadata });
+  const onWithheldPage = (slot: string) => {
+    const page = withheldPageOfSlot(slot.startsWith(`${docId}:`) ? slot.slice(docId.length + 1) : slot);
+    return piiWithheldState.scope === "document" || (page !== null && isPageWithheld(piiWithheldState, page));
+  };
   const artifacts = await Promise.all(
     Array.from(artifactUris.entries())
-      .filter(([, uri]) => !withheld.has(uri))
+      .filter(([slot, uri]) => !withheld.has(uri) && !onWithheldPage(slot))
       .map(async ([slot, uri]) => ({
         slot,
         uri,
@@ -1345,6 +1355,8 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
       pageTextCount: pageStats?.page_text_count ?? 0
     },
     ...(media ? { media } : {}),
+    /** "N pages withheld for privacy" with page numbers; never the withheld content. */
+    piiWithheld: piiWithheldSummary(piiWithheldState, document.pageCount ?? null),
     figureResume,
     ingest: ingestStatus(document, missingServingCapabilities(row)),
     run: run
