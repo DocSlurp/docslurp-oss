@@ -459,3 +459,15 @@ test("upload and uploadUrls send the processing quality as pipeline.quality", as
   await sdk.uploadUrls({ urls: ["https://example.test/b.pdf"] });
   assert.equal(sent[2], undefined);
 });
+
+test("upload and uploadUrls send quality and visuals in the current names", async () => {
+  const sent = [];
+  const sdk = client(async (url, init) => {
+    if (String(url).endsWith("/url")) sent.push(JSON.parse(init.body).pipeline);
+    else if (init.body instanceof FormData) sent.push(JSON.parse(init.body.get("pipeline")));
+    return json({ run: { id: "run", status: "queued" }, documents: [], project: { id: "w", name: "W" } });
+  });
+  await sdk.upload({ files: [new File(["text"], "note.txt")], quality: "fastest", visuals: "none" }, { directUpload: false });
+  await sdk.uploadUrls({ urls: ["https://example.test/a.pdf"], quality: "smart", visuals: "charts-ai" });
+  assert.deepEqual(sent, [{ quality: "fastest", visuals: "none" }, { quality: "smart", visuals: "charts-ai" }]);
+});

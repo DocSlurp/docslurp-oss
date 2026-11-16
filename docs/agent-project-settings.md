@@ -58,26 +58,33 @@ flow does not silently reprocess earlier videos. A queued job can remain blocked
 by credits, budgets or policy; saving settings does not imply the job finished.
 
 Supported pipeline toggles are video frames, chunk overlap, summaries, embeddings, vector
-indexing, table/code/image preservation, PDF region extraction, vision
-fallback, figure extraction (`figures`; off keeps existing figures until reprocess)
-and chart export (`chartExport.tier`, `formats` and `diagrams`; no model can be named).
-Chart export is off by default: a project with no chart tier runs the deployment's app default
-(`chartExportDefaults.app` in `getProjectSettings`), `off` unless the deployment sets it. A request like "turn on AI chart reading for this
-project" proposes `{"changes":{"pipeline":{"chartExport":{"tier":"models"}}}}`, a billed
-reindex with its estimate. When the effective tier is `off` and `chartExportDefaults.freeAvailable`
-is true, chat may offer `free` instead: an optional free reindex. `off` applies to new uploads.
-A tier the deployment does not offer is refused (`chart_export_tier_unavailable`).
-Then processing quality: `quality` (`fast` reads the text layer only and
-keeps scanned pages as page images, billed as Fast pages; `auto`, the default, reads
-each page the cheapest faithful way, Fast or Rich per page; `good` reads every page with
-vision, Rich; prices on [docslurp.io/pricing](https://docslurp.io/pricing); there is no
-per-file page limit). Quality is what the
-[ingest report](api-sdk.md#ingest-report) recommends for scanned pages that page
-triage skipped or that Fast kept as images, so its `patch` can be proposed as
-`{"changes":{"pipeline":{"visionFallback":true,"quality":"good"}}}`. A retired
-`vision.forceAllPages: true` patch is accepted and proposed as `quality: "good"`;
-`vision.forceAllPages: false` is proposed as `quality: "auto"` on a Good project
-and changes nothing on any other.
+indexing, table/code/image preservation, PDF region extraction, processing quality
+(`quality`) and figures and charts (`visuals`), plus chart export `formats` and `diagrams`
+(no model can be named). See [Quality and visuals](extraction/quality-and-visuals.md).
+
+`visuals` is `none`, `figures` (PDF figures as files), `charts` (also chart data from files
+that carry it, no model, no charge) or `charts-ai` (also reads other charts with AI, billed
+per chart). An unset project runs the deployment's app default (`visualsDefaults.app` in
+`getProjectSettings`, `figures` unless the deployment changes it). A request like "turn on AI
+chart reading for this project" proposes `{"changes":{"pipeline":{"visuals":"charts-ai"}}}`,
+a billed reindex with its estimate; when `charts` is in `visualsDefaults.available`, chat may
+offer it instead: an optional free reindex. A rung the deployment or the project's privacy
+mode does not offer is refused, and chat never proposes one: no `charts-ai` under
+`local-only` or `strict-privacy`.
+
+`quality` is `fastest` (reads the text layer only and keeps scanned pages as page images,
+billed as Fast pages), `balanced` (the default: reads each page the cheapest faithful way,
+Fast or Rich per page) or `smart` (reads every page with AI, Rich); prices come only from the
+estimate tools and [docslurp.io/pricing](https://docslurp.io/pricing). Quality is what the
+[ingest report](api-sdk.md#ingest-report) recommends for scanned pages that page triage
+skipped or that `fastest` kept as images, so its `patch` can be proposed as
+`{"changes":{"pipeline":<patch>}}`. Chat never proposes `smart` under `local-only` or
+`strict-privacy` unless the project's vision profile is local.
+
+The deprecated names are still accepted in proposals and mapped: `quality` `fast`/`auto`/`good`,
+`visionFallback`, `figures` and `chartExport.tier` (`off`/`free`/`models` = `figures`/`charts`/
+`charts-ai`). A retired `vision.forceAllPages: true` patch is proposed as `smart`;
+`vision.forceAllPages: false` as `balanced` on a `smart` project, and nothing on any other.
 Raising quality is `reindex-recommended`: it adds per-page cost and applies to
 new uploads, existing files keep their text until you reprocess them (optional,
 with the usual cost estimate and a separate consent), and reprocessing is never

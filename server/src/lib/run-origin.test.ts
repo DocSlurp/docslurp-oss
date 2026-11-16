@@ -66,7 +66,11 @@ describe("chart export override schemas agree across REST, MCP and estimates", (
     expect(ESTIMATE_TOOL_NAMES).toContain("uploadEstimate");
     for (const name of ["uploadEstimate", "reprocessEstimate"] as const) {
       const definition = estimateToolDefinitions.find((tool) => tool.name === name)!;
-      expect((definition.inputSchema as { properties: Record<string, unknown> }).properties.chartExport).toBe(chartExportOverrideJsonSchema);
+      // The deprecated override keeps the same JSON Schema (its description says it is deprecated); visuals sits beside it.
+      const properties = (definition.inputSchema as { properties: Record<string, { description?: string; enum?: string[] }> }).properties;
+      expect({ ...properties.chartExport, description: undefined }).toEqual({ ...chartExportOverrideJsonSchema, description: undefined });
+      expect(properties.chartExport!.description).toMatch(/^Deprecated: use visuals\./);
+      expect(properties.visuals!.enum).toEqual(["none", "figures", "charts", "charts-ai"]);
     }
     const upload = planEstimateTool("uploadEstimate", { files: [{ name: "a.pdf", size: 1 }], chartExport: { tier: "models" } }, "p1");
     expect(upload.ok && upload.plan.body.chartExport).toEqual({ tier: "models" });

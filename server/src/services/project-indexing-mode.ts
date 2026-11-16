@@ -348,7 +348,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
         await requireRunCreditLease(tx, { runId, orgId: prepared.orgId, projectId: prepared.projectId });
       }
       result.runIds.push(runId);
-      result.pipelines.set(runId, runPipeline);
+      result.pipelines.set(runId, withRunEffective(runPipeline));
     }
   };
   if (transaction) await commit(transaction);

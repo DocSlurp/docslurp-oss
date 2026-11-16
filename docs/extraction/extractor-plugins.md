@@ -179,6 +179,11 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
   before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0. It is required
   with `DOCSLURP_VISION_PAGE_READER` (the worker refuses to start without it), and a vision job whose estimate is 0 or not
   finite is not sent.
+- Optional `privateRoute` (`{ modelUri, capability, baseUrl? }`): the operator-registered private model route the reader
+  serves (`llm://private/<alias>/<model>`, registered in `DOCSLURP_PRIVATE_MODEL_ENDPOINTS` for `capability`). Projects
+  under `local-only` or `strict-privacy` have pages read by the reader only when this resolves as private the same way
+  `llm://private` routes do; without it, or with a route the registry does not hold, they skip the reader before any
+  reader VM starts and keep the recogniser's text ([Quality and visuals](quality-and-visuals.md#the-page-image-reader-under-privacy-modes)).
 - Optional `hostCountry` and `operatorCountry`: ISO 3166-1 alpha-2 codes for where the reader's VMs process pages and for
   the company that operates them, by ownership and jurisdiction (`CN` for a Chinese-owned cloud wherever it is listed).
   Vision page reads require both and apply the organization's provider-region policy to each

@@ -34,9 +34,11 @@ export const deprecationWarnings: MiddlewareHandler = async (c, next) => {
     if (!body || typeof body !== "object" || Array.isArray(body)) return;
     const record = body as Record<string, unknown>;
     const existing = Array.isArray(record.warnings) ? record.warnings : [];
+    // A route that already answers `warnings` as strings keeps that shape: the deprecations join as their messages.
+    const additions = existing.some((entry) => typeof entry === "string") ? warnings.map((warning) => warning.message) : warnings;
     const headers = new Headers(c.res.headers);
     headers.delete("content-length");
-    c.res = new Response(JSON.stringify({ ...record, warnings: [...existing, ...warnings] }), { status: c.res.status, statusText: c.res.statusText, headers });
+    c.res = new Response(JSON.stringify({ ...record, warnings: [...existing, ...additions] }), { status: c.res.status, statusText: c.res.statusText, headers });
   } catch {
     // A body that is not JSON keeps the header only.
   }
