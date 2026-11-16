@@ -93,6 +93,17 @@ if (job) for await (const event of client.streamJob(job.id)) console.log(event.e
 
 The server checks both revisions under the existing config lock. Pipeline, search/chat, admitted work, reservations, audit and actor-scoped retry receipt commit together or roll back. Retry an unchanged intent with the same request ID; changing its parameters requires a new ID. A stale project or search row returns 409, including a concurrent first search-row insertion. Existing independent preference writers also serialize with publication.
 
+A successful `POST` returns `{ requestId, snapshot, replayed, job, queuedRunIds }`: `snapshot` carries the fresh revisions for your next save, `job` and `queuedRunIds` describe admitted work, and a retried request ID returns its original result with `replayed: true` (and no new work). Errors that leave everything unsaved:
+
+| Status and code | Meaning | What to do |
+| --- | --- | --- |
+| `409 settings_stale` | Either revision changed since your `GET`. | Re-read, reapply your intent, publish with a new request ID. |
+| `409 settings_idempotency_conflict` | The request ID was already used with different parameters. | Resend the original intent unchanged, or use a new ID. |
+| `409 settings_reprocess_consent_required` | The change queues work on existing documents and `project.apply` is not `"reindex"`. | Price it with the estimate routes, then send `apply: "reindex"`. |
+| `409 policy_publication_unavailable` | Privacy/PII tightening over a project that holds documents or runs (see below). | Tighten only on an empty project for now. |
+
+The SDK, CLI and MCP tools have no publication wrapper yet: they keep using `updateProject` / `updateSearchSettings` (and the `updateEstimate` / `searchSettingsEstimate` MCP tools), which save one record each and do not check revisions. Use HTTP when both halves must commit together.
+
 Omitted fields retain their stored values; `false` remains explicit. Supported nullable search fields reset to inherited behavior with `null`. Arrays replace. `clearOutputSchema: true` explicitly removes the output schema; omission preserves it. Unknown keys and managed model/provider bindings are refused. The body is limited to 128 KiB. Existing estimates, billing and scope checks remain authoritative; this endpoint does not grant new execution authority. A deferred-mode change that queues work requires explicit `project.apply: "reindex"` consent.
 
 The snapshot includes safe effective-value explanations and bounded legacy-index coverage. Resolved values cannot reconstruct whether an old normalized setting was explicitly chosen or defaulted, so their origin is labeled `project-resolved`. Template locks, independent organization/key ceilings and unavailable/inactive preferences are explained without exporting managed bindings or secrets. Saving desired settings is not proof that existing documents have migrated.

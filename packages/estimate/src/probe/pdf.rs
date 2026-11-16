@@ -44,6 +44,12 @@ const MAX_LOAD_STREAM_BYTES: usize = 16 * 1024 * 1024;
 /// Decompressed bytes of all object streams together (`budget_object_streams`): lopdf decodes and keeps every object
 /// stream at load time with only a per-stream limit.
 const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
+/// lopdf's loader keeps every object in memory: 1.0 to 1.25 KiB each on wasm32 beyond the input itself (measured on
+/// real PDFs, streams included), charged at 1.25 KiB per object the trailer declares (`/Size`), plus the input's copy.
+const LOAD_BYTES_PER_OBJECT: u64 = 1280;
+/// What a whole-document load may take of the module's 256 MiB memory; past it the probe reads only the page tree. A
+/// file that declares too few objects still traps, and the host's bounded retry gives it a page count.
+const MAX_LOAD_BYTES: u64 = 224 * 1024 * 1024;
 /// Decompressed page content and form bytes per document, cached forms included.
 const MAX_DOCUMENT_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 /// A page with this much image coverage or this many path operations is layout-heavy (figures, charts, tables).
@@ -65,6 +71,13 @@ pub(super) fn probe(rules: &Rules, input: &ProbeInput<'_>) -> ProbeResult {
         let mut result = fallback_page_count(input.head, result).note("encrypted PDF; page facts not measured");
         result.encrypted = Some(true);
         return result;
+    }
+    // A document whose objects would not fit a whole load, or one the host retries after the module ran out of memory,
+    // gets its page count from a bounded read of the page tree instead (a declared /Size can lie low: the host retry
+    // covers that).
+    if input.bounded || !whole_load_fits(input.head) {
+        let note = if input.bounded { "retried without loading the whole document" } else { "too many objects to load the whole document" };
+        return bounded_page_count(input.head, result).note(format!("{note}; page facts not measured"));
     }
     OBJECT_STREAM_BUDGET.with(|budget| budget.set(MAX_OBJECT_STREAM_BYTES));
     OBJECT_STREAM_BUDGET_EXCEEDED.with(|exceeded| exceeded.set(false));
@@ -282,6 +295,75 @@ fn sample_indices(total: usize, count: usize) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..count).map(|i| i * (total - 1) / (count - 1)).collect();
     indices.dedup();
     indices
+}
+
+/// The largest object count a `/Size` entry declares (trailers and xref streams; incremental updates repeat it). An
+/// array (`/Size [..]`, function dictionaries) is not a count and is skipped.
+fn declared_objects(bytes: &[u8]) -> u64 {
+    let mut most = 0u64;
+    let mut at = 0usize;
+    while let Some(found) = bytes[at..].windows(5).position(|window| window == b"/Size") {
+        let mut cursor = at + found + 5;
+        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\r' | b'\n' | b'\t' | b'\x0c' | b'\0') {
+            cursor += 1;
+        }
+        let digits = bytes[cursor..].iter().take_while(|byte| byte.is_ascii_digit()).take(10).fold(0u64, |n, byte| n * 10 + u64::from(byte - b'0'));
+        most = most.max(digits);
+        at = cursor.max(at + found + 1);
+    }
+    most
+}
+
+/// Whether lopdf's whole-document load fits the module memory, from the declared objects and the input size.
+fn whole_load_fits(bytes: &[u8]) -> bool {
+    declared_objects(bytes).saturating_mul(LOAD_BYTES_PER_OBJECT).saturating_add(bytes.len() as u64) <= MAX_LOAD_BYTES
+}
+
+/// The page count from the bounded range reader (`range::RangeSession`, inventory only, no page deep-measured) over the
+/// bytes in hand: it parses the xref and page tree lazily under its own object, read and decode limits. Falls back to
+/// the raw page-object scan when the reader refuses the document.
+fn bounded_page_count(bytes: &[u8], result: ProbeResult) -> ProbeResult {
+    match range_inventory_pages(bytes) {
+        Ok(pages) if pages > 0 => {
+            let mut result = result;
+            result.pages = Some(pages as f64);
+            result.note("page count read from the page tree")
+        }
+        Ok(_) => fallback_page_count(bytes, result),
+        Err(error) => fallback_page_count(bytes, result).note(format!("page tree not read ({error})")),
+    }
+}
+
+fn range_inventory_pages(bytes: &[u8]) -> Result<usize, String> {
+    use self::range::{RangeSession, Request};
+    let options = self::detail::Options { max_deep_pages: 0, groups: Vec::new(), ranked_pages: 0, ..Default::default() };
+    let mut session = RangeSession::new(bytes.len() as u64, options, 0).map_err(|error| error.to_string())?;
+    let mut pages = None;
+    // Every step reads, emits or finishes; the reader's own budgets end a hostile walk long before this bound.
+    for _ in 0..10_000_000u32 {
+        let step = session.step().map_err(|error| error.to_string())?;
+        match step["kind"].as_str() {
+            Some("read") => {
+                let offset = step["offset"].as_u64().ok_or("bad read offset")? as usize;
+                let length = step["length"].as_u64().ok_or("bad read length")? as usize;
+                let request_id = step["requestId"].as_u64().ok_or("bad read id")?;
+                let end = offset.checked_add(length).filter(|end| *end <= bytes.len()).ok_or("read past the end")?;
+                session.supply(Request { request_id, offset: offset as u64, length }, &bytes[offset..end]).map_err(|error| error.to_string())?;
+            }
+            Some("output") => {
+                for line in step["jsonl"].as_str().unwrap_or_default().lines() {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                        if value["t"] == "end" {
+                            pages = value["inventoryPages"].as_u64().map(|n| n as usize);
+                        }
+                    }
+                }
+            }
+            Some("done") => return pages.ok_or_else(|| "no page inventory".to_owned()),
+            _ => return Err("unexpected range step".to_owned()),
+        }
+    }
+    Err("range walk did not finish".to_owned())
 }
 
 /// When the document does not parse, count `/Type /Page` objects in the raw bytes (misses compressed object streams).
@@ -1509,6 +1591,80 @@ mod tests {
         assert!(has_name(b"<< /Encrypt\x005 0 R >>", b"Encrypt"));
         assert!(!has_name(b"<< /Encrypted true /EncryptMetadata false >>", b"Encrypt"));
         assert!(!has_name(b"(no names here)", b"Encrypt"));
+    }
+
+    /// A classic-xref PDF of `pages` text pages and `filler` small objects, its trailer declaring `size` objects.
+    fn many_objects(pages: usize, filler: usize, size: Option<usize>) -> Vec<u8> {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = vec![0usize];
+        let mut put = |out: &mut Vec<u8>, number: usize, body: &str| {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{number} 0 obj\n{body}\nendobj\n").as_bytes());
+        };
+        let kids: Vec<String> = (0..pages).map(|i| format!("{} 0 R", 3 + 2 * i)).collect();
+        put(&mut out, 1, "<< /Type /Catalog /Pages 2 0 R >>");
+        put(&mut out, 2, &format!("<< /Type /Pages /Kids [{}] /Count {pages} >>", kids.join(" ")));
+        for i in 0..pages {
+            let content = "BT /F1 12 Tf 72 720 Td (Revenue beat the forecast.) Tj ET";
+            put(&mut out, 3 + 2 * i, &format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R >>", 4 + 2 * i));
+            put(&mut out, 4 + 2 * i, &format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+        }
+        for i in 0..filler {
+            put(&mut out, 3 + 2 * pages + i, &format!("<< /A {i} >>"));
+        }
+        let count = offsets.len();
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {count}\n0000000000 65535 f \n").as_bytes());
+        for offset in &offsets[1..] {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", size.unwrap_or(count)).as_bytes());
+        out
+    }
+
+    #[test]
+    fn reads_the_largest_declared_object_count() {
+        assert_eq!(declared_objects(b"trailer << /Size 12 /Root 1 0 R >>"), 12);
+        // Incremental updates repeat /Size; the largest counts. Arrays (function dictionaries) are not counts.
+        assert_eq!(declared_objects(b"<< /Size 9 >> << /Size [2 2] >> << /Size\r\n 40 /Root 1 0 R >>"), 40);
+        assert_eq!(declared_objects(b"<< /Type /XRef /Size 754193 /W [1 4 2] >>"), 754_193);
+        assert_eq!(declared_objects(b"no counts here /Siz"), 0);
+        // At most ten digits are read, so an absurd count cannot overflow; it only sends the file down the bounded path.
+        assert!(declared_objects(b"<< /Size 99999999999999999999999 >>") > 1_000_000);
+    }
+
+    #[test]
+    fn loads_documents_whose_objects_fit_and_reads_only_the_page_tree_of_bigger_ones() {
+        let small = many_objects(3, 100, None);
+        assert!(whole_load_fits(&small));
+        let fits = probe(Rules::bundled(), &ProbeInput::whole("a.pdf", None, &small));
+        assert_eq!(fits.pages, Some(3.0));
+        assert!(fits.pdf.is_some());
+        // Declares more objects than a whole load may take: page count from the page tree, no page facts.
+        let declared = many_objects(3, 100, Some(500_000));
+        assert!(!whole_load_fits(&declared));
+        let bounded = probe(Rules::bundled(), &ProbeInput::whole("b.pdf", None, &declared));
+        assert_eq!(bounded.pages, Some(3.0));
+        assert!(bounded.pdf.is_none());
+        assert!(bounded.notes.iter().any(|note| note.contains("too many objects")), "{:?}", bounded.notes);
+        assert!(bounded.notes.iter().any(|note| note.contains("page tree")), "{:?}", bounded.notes);
+        // The host's retry after a trap asks for the bounded path whatever the file declares.
+        let retry = probe(Rules::bundled(), &ProbeInput { bounded: true, ..ProbeInput::whole("c.pdf", None, &small) });
+        assert_eq!(retry.pages, Some(3.0));
+        assert!(retry.pdf.is_none());
+        assert!(retry.notes.iter().any(|note| note.contains("retried without loading")), "{:?}", retry.notes);
+    }
+
+    #[test]
+    fn falls_back_to_raw_page_objects_when_the_page_tree_cannot_be_read() {
+        // A startxref pointing nowhere: no xref the bounded reader can follow, but the page objects are still there.
+        let whole = many_objects(2, 10, Some(900_000));
+        let at = whole.windows(10).rposition(|window| window == b"startxref\n").unwrap() + 10;
+        let mut broken = whole[..at].to_vec();
+        broken.extend_from_slice(b"7\n%%EOF\n");
+        let result = probe(Rules::bundled(), &ProbeInput::whole("t.pdf", None, &broken));
+        assert_eq!(result.pages, Some(2.0));
+        assert!(result.notes.iter().any(|note| note.contains("raw page objects")), "{:?}", result.notes);
     }
 
     #[test]

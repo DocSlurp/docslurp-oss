@@ -33,6 +33,7 @@ import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   type PipelineFeatures,
   type ProjectRecord,
   partialExtractionMessage,
+  pageReadingQuality,
 } from "@docslurp/shared";
 import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
@@ -227,7 +228,8 @@ export function visionModelUri(pipeline: PipelineFeatures): string {
 
 /** Whether the project's quality lets vision read pages at all (fast never does; there is no per-file page count). */
 export function qualityAllowsVision(pipeline: PipelineFeatures): boolean {
-  return qualityAllowsPageReading(pipeline.quality);
+  // Auto capped at the fast rung (pipeline.ladder) reads no page, as Fast.
+  return qualityAllowsPageReading(pageReadingQuality(pipeline));
 }
 
 interface PageView extends IngestReportPage {

@@ -7,6 +7,7 @@ import {
   defaultDocumentExtractionConfig,
   defaultPageRouterConfig,
   pageRouterDecisionModels,
+  effectiveLadder,
   qualityAllowsPageReading,
   routePlanSchema,
   type AdaptiveRoutingArtifact,
@@ -181,6 +182,12 @@ export class RoutePagesStage implements Stage {
     // render-images and vision stages never execute a plan anyway.
     if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
       console.log(`[route-pages] skipped run=${state.run.id} reason=quality-fast mode=${mode}`);
+      return;
+    }
+    // An Auto ladder limit (pipeline.ladder) plans reads from page triage and never uses a router plan
+    // (active-plan.ts); routing would still re-OCR probe pages and send thumbnails to decision models.
+    if (effectiveLadder(state.run.pipeline).active) {
+      console.log(`[route-pages] skipped run=${state.run.id} reason=auto-ladder-limit mode=${mode}`);
       return;
     }
     if (mode === "active") assertSupportedActiveMargin((state.run.pipeline.pageRouter ?? defaultPageRouterConfig).marginFloor);

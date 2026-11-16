@@ -34,7 +34,7 @@ import {
 import { sql } from "../db.js";
 import { loadVisualStatsForEstimate, VISUAL_CANDIDATES_DOCUMENT_LIMIT, type VisualEstimateStats } from "./visual-candidates.js";
 import { assertChartExportChangeAllowed, groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
-import { explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
+import { effectiveLadder, explicitProjectChartTier, pageReadingQuality, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./project-indexing-mode.js";
@@ -665,7 +665,7 @@ async function applyPlannedChange(args: {
   const { plan, userId } = args;
   const { project } = plan;
   // Mode-switch validation reads on other connections, so it runs before any transaction opens.
-  if (deferredProfilesEnabled() && (plan.nextPipeline.indexingMode !== project.pipeline.indexingMode || (plan.nextPipeline.indexingMode === "visual" && plan.nextPipeline.quality === "fast"))) {
+  if (deferredProfilesEnabled() && (plan.nextPipeline.indexingMode !== project.pipeline.indexingMode || (plan.nextPipeline.indexingMode === "visual" && (pageReadingQuality(plan.nextPipeline) === "fast" || effectiveLadder(plan.nextPipeline).active)))) {
     await validateModeSwitch({ current: project, nextPipeline: plan.nextPipeline });
   }
   const lock = (tx: Tx) => lockProjectConfigurationWrite(tx as unknown as typeof sql, project.id, project.orgId);

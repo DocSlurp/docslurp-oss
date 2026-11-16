@@ -223,12 +223,13 @@ describe("estimateFiles: failures stay per file", () => {
     assert.equal(result.files[2].status, "failed");
     assert.equal(result.files[2].reason.code, "read_failed");
     assert.deepEqual(result.files[2].requestFile, { name: "gone.pdf", size: 5_000 });
-    // The first oversized parse on a fresh memory traps; the estimator resets and the next file still probes.
+    // An oversized parse traps; the estimator starts a fresh memory, retries the file without the whole load, and
+    // the next file still probes.
     const crashed = result.files[3];
     assert.equal(result.stats.estimator.crashes, fresh.health().crashes);
     if (crashed.status === "failed") {
-      assert.equal(crashed.reason.code, "crashed");
-      assert.equal(result.stats.estimator.resets, 1);
+      assert.ok(["crashed", "out_of_memory"].includes(crashed.reason.code), crashed.reason.code);
+      assert.ok(result.stats.estimator.resets >= 1);
     }
     assert.equal(result.request.files.length, 5);
     assert.equal(result.partial, result.files.some((file) => !file.measured));

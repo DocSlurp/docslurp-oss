@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
 import { groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
-import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, effectiveLadder, pageReadingQuality, EDITOR_REQUIRED_MESSAGE, explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import {
   pageCredits,
@@ -78,11 +78,20 @@ export function hasPrivatePageEmbedder(): boolean {
 }
 
 /** Visual mode sends page images to an embedder: refuse when privacy or PII policy forbids it. */
-export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privacyMode" | "piiPolicy"> & Partial<Pick<PipelineFeatures, "quality">>): void {
-  // Visual mode embeds every page image, which bills Rich; Fast promises Fast pricing and no page reading.
-  if (pipeline.quality === "fast") {
+export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privacyMode" | "piiPolicy"> & Partial<Pick<PipelineFeatures, "quality" | "ladder">>): void {
+  // Visual mode embeds every page image, which bills Rich; Fast promises Fast pricing and no page reading. Auto capped at
+  // the fast rung (pipeline.ladder) reads as Fast.
+  if (pageReadingQuality(pipeline) === "fast") {
     throw new IndexingModeError(
       "Visual mode embeds page images, which bill Rich; Fast quality reads no page. Choose Auto or Good quality, or another indexing mode.",
+      400,
+      "visual_mode_quality",
+    );
+  }
+  // Visual mode embeds every page image: no Auto ladder limit (a rung below intelligent, a share cap) could hold.
+  if (effectiveLadder(pipeline).active) {
+    throw new IndexingModeError(
+      "Visual mode embeds every page image, which an Auto ladder limit (pipeline.ladder) does not allow. Remove the limit or choose another indexing mode.",
       400,
       "visual_mode_quality",
     );

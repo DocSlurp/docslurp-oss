@@ -480,6 +480,7 @@ export interface ExtractorPluginHost {
   documentOwners(documentIds: readonly string[]): Promise<ReadonlyMap<string, { orgId: string | null; runId: string }>>;
   /** Bounded, content-free operational observations; unavailable storage refuses automatic host selection. */
   computeObservations(profileIds: readonly string[]): Promise<import("@docslurp/shared").ComputeObservations>;
+  computeAllocationAdmission: import("@docslurp/shared").ComputeAllocationAdmission;
   authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
   /** The figure outcomes this core accepts: a provider reports `partial` (exit 5, folder kept) only when it is listed. */
   figureOutcomes: readonly ("extracted" | "partial" | "failed")[];
@@ -488,6 +489,12 @@ export interface ExtractorPluginHost {
 type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
 let documentOwnersLookup: DocumentOwnersLookup | undefined;
 let computeObservationsLookup: ExtractorPluginHost["computeObservations"] | undefined;
+let allocationAdmission: ExtractorPluginHost["computeAllocationAdmission"] | undefined;
+export function setExtractorComputeAllocationAdmission(admission: ExtractorPluginHost["computeAllocationAdmission"] | undefined): void { allocationAdmission = admission; }
+function requireAllocationAdmission(): ExtractorPluginHost["computeAllocationAdmission"] {
+  if (!allocationAdmission) throw new SandboxRunError("Compute allocation admission is not bound in this worker");
+  return allocationAdmission;
+}
 let computeCohortAuthorizer: ExtractorPluginHost["authorizeComputeCohort"] | undefined;
 
 export function setExtractorComputeCohortAuthorizer(lookup: ExtractorPluginHost["authorizeComputeCohort"] | undefined): void {
@@ -527,6 +534,11 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
     computeObservations: async (profileIds) => {
       if (!computeObservationsLookup) throw new SandboxRunError("Compute observations lookup is not bound in this worker");
       return await computeObservationsLookup(profileIds);
+    },
+    computeAllocationAdmission: {
+      reserve: async (...args) => requireAllocationAdmission().reserve(...args),
+      allocated: async (...args) => requireAllocationAdmission().allocated(...args),
+      release: async (...args) => requireAllocationAdmission().release(...args),
     },
     authorizeComputeCohort,
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,

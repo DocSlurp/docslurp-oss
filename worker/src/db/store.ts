@@ -1,3 +1,4 @@
+import { computeAllocationAdmission } from "./compute-fleet-store.js";
 import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation, type ComputeObservations, type ComputePriceObservation, type ComputeCalibrationObservation } from "@docslurp/shared";
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
@@ -20,7 +21,7 @@ import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
 import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyLadderLimits, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { completingDocumentStamp, runReusesExtraction, runStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
@@ -712,6 +713,8 @@ export class Store {
    * document, run, user or org identifiers, so one tenant's plan cannot learn anything about another's content.
    * Served by performance_log_shard_timing_idx (0098).
    */
+  computeAllocationAdmission(): import("@docslurp/shared").ComputeAllocationAdmission { return computeAllocationAdmission(this.sql); }
+
   async authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
     for (const value of [scope.orgId, scope.projectId, scope.runId, scope.documentId]) {
       if (!value || value.length > 200) throw new Error("Invalid compute execution scope");
@@ -4399,7 +4402,9 @@ function mapRun(row: ProjectRunRow): ProjectRun {
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
     // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
-    pipeline: applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`)),
+    // The Auto ladder's limits (pipeline.ladder) are applied once here: Auto capped at the fast rung reads as Fast, and
+    // chart export below the intelligent rung keeps its free tier. Every stage reads this pipeline.
+    pipeline: applyLadderLimits(applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`))),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},

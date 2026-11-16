@@ -18,6 +18,16 @@ import { EstimatorError } from "./error.mjs";
 
 export { EstimatorError };
 
+/** Whether these first bytes start a PDF (`%PDF-` within the first KiB, as PDF readers accept). */
+function isPdfHead(head) {
+  const bytes = head instanceof Uint8Array ? head : new Uint8Array(head.buffer ?? head, head.byteOffset ?? 0, head.byteLength);
+  const limit = Math.min(bytes.length - 5, 1024);
+  for (let at = 0; at <= limit; at += 1) {
+    if (bytes[at] === 0x25 && bytes[at + 1] === 0x50 && bytes[at + 2] === 0x44 && bytes[at + 3] === 0x46 && bytes[at + 4] === 0x2d) return true;
+  }
+  return false;
+}
+
 async function compile(source) {
   if (source instanceof WebAssembly.Module) return source;
   if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) return WebAssembly.compile(source);
@@ -40,17 +50,41 @@ async function compile(source) {
  */
 export async function createEstimator(options = {}) {
   const module = await compile(options.module);
-  // One bounded memory for the estimator's lifetime: after a trap it is zeroed and the module instantiated into it
-  // again, so hostile files cost at most this memory, never a fresh allocation per crash.
-  const memory = new WebAssembly.Memory({ initial: MEMORY_INITIAL_PAGES, maximum: MEMORY_MAXIMUM_PAGES });
-  const instantiate = () => new WebAssembly.Instance(module, { env: { memory } });
+  // One bounded memory at a time. After a trap the module gets a fresh memory and instance: a memory cannot shrink, and
+  // a new instance's allocator only uses pages it grows itself, so reusing a memory a file grew to its maximum would
+  // leave every later file almost no heap. The trapped memory is dropped, so the bound holds per estimator.
+  let memory;
+  const instantiate = () => {
+    memory = new WebAssembly.Memory({ initial: MEMORY_INITIAL_PAGES, maximum: MEMORY_MAXIMUM_PAGES });
+    const created = new WebAssembly.Instance(module, { env: { memory } });
+    created.exports.ds_init?.();
+    return created;
+  };
+  // Why the last call trapped, read before the reset zeroes it: a panic message or a refused allocation size.
+  const trapCause = () => {
+    try {
+      const exports = instance.exports;
+      const failedAlloc = Number(exports.ds_last_failed_alloc?.() ?? 0);
+      const packed = BigInt.asUintN(64, BigInt(exports.ds_last_panic?.() ?? 0));
+      const length = Number(packed & 0xffffffffn);
+      const panic = length ? decoder.decode(new Uint8Array(memory.buffer, Number(packed >> 32n), length)) : "";
+      return { panic, failedAlloc };
+    } catch {
+      return { panic: "", failedAlloc: 0 };
+    }
+  };
   let instance = instantiate();
   const health = { calls: 0, crashes: 0, resets: 0 };
   let detailActive = null;
 
+  // Set when a trap's fresh memory could not be created: the trapped heap may be corrupt, so nothing runs on it again.
+  let dead = null;
+
   function call(name, ...inputs) {
+    if (dead) throw new EstimatorError("crashed", `the estimator is unavailable after a trap (${dead})`);
     if (detailActive && name === "ds_probe") throw new EstimatorError("invalid_request", "close the detailed profile before a legacy probe");
     const exports = instance.exports;
+    exports.ds_clear_trap?.();
     let packed;
     health.calls += 1;
     try {
@@ -66,18 +100,26 @@ export async function createEstimator(options = {}) {
         args.push(pointer, bytes.byteLength);
       }
       packed = BigInt.asUintN(64, BigInt(exports[name](...args)));
-      // Inputs are freed by zeroing on the next reset if a call traps; on success, free them now.
+      // Inputs go with the memory a trap replaces; on success, free them now.
       for (let index = 0; index < args.length; index += 2) if (args[index + 1] > 0) exports.ds_free(args[index], args[index + 1]);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
-        // A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
-        // inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
+        // A trap (a panic, or a file that ran the module out of its memory) leaves the heap inconsistent: read why,
+        // then start over with a fresh memory and instance, exactly as on first load.
         health.crashes += 1;
+        const cause = trapCause();
         detailActive = null;
-        new Uint8Array(memory.buffer).fill(0);
-        instance = instantiate();
+        try {
+          instance = instantiate();
+        } catch (failure) {
+          dead = failure?.message ?? String(failure);
+          throw new EstimatorError("crashed", `the estimator is unavailable after a trap (${dead})`);
+        }
         health.resets += 1;
-        throw new EstimatorError("crashed", `the estimator stopped on this input (${error.message})`);
+        if (cause.failedAlloc) {
+          throw new EstimatorError("out_of_memory", `the estimator ran out of memory on this input (a ${cause.failedAlloc}-byte allocation was refused)`);
+        }
+        throw new EstimatorError("crashed", `the estimator stopped on this input (${cause.panic || error.message})`);
       }
       throw error;
     }
@@ -108,7 +150,20 @@ export async function createEstimator(options = {}) {
     },
     /** Profile a file from its first bytes (`head`) and, for large media, its last bytes (`tail`). */
     profile(file, head, tail) {
-      return call("ds_probe", json(meta(file)), head, tail);
+      try {
+        return call("ds_probe", json(meta(file)), head, tail);
+      } catch (error) {
+        // A file that ran the module out of memory (or crashed it) is profiled once more without loading the whole
+        // document: a PDF still gets its page count, from a bounded read of its page tree.
+        if (!(error instanceof EstimatorError) || (error.code !== "out_of_memory" && error.code !== "crashed")) throw error;
+        // Only the PDF probe reads `bounded`, and an input larger than the memory cannot be copied in at all.
+        if (dead || !isPdfHead(head) || head.byteLength > MEMORY_MAXIMUM_PAGES * 65536) throw error;
+        try {
+          return call("ds_probe", json({ ...meta(file), bounded: true }), head, tail);
+        } catch {
+          throw error;
+        }
+      }
     },
     /** Read and profile a `Blob`/`File` (browsers, Deno, Node 20+), reading only the bytes the profile needs. */
     async profileBlob(blob, name = blob.name) {

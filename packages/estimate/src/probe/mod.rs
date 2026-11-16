@@ -269,6 +269,10 @@ pub struct FileMeta {
     #[serde(default, rename = "type")]
     pub mime_type: Option<String>,
     pub size: u64,
+    /// Profile without loading the whole document into memory: page count only, from a bounded read. Hosts set it to
+    /// retry a file that ran the module out of memory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bounded: bool,
 }
 
 impl FileMeta {
@@ -325,12 +329,14 @@ pub struct ProbeInput<'a> {
     pub head: &'a [u8],
     /// The file's last bytes, when `head` is not the whole file.
     pub tail: Option<&'a [u8]>,
+    /// See `FileMeta::bounded`.
+    pub bounded: bool,
 }
 
 impl<'a> ProbeInput<'a> {
     /// A probe over a whole file.
     pub fn whole(name: &'a str, mime_type: Option<&'a str>, bytes: &'a [u8]) -> Self {
-        Self { name, mime_type, size: bytes.len() as u64, head: bytes, tail: None }
+        Self { name, mime_type, size: bytes.len() as u64, head: bytes, tail: None, bounded: false }
     }
 
     pub(crate) fn is_whole(&self) -> bool {
@@ -627,9 +633,9 @@ mod tests {
         let truncated = tiff(5, true, false);
         assert_eq!(probe(rules, &ProbeInput::whole("cut.tiff", None, &truncated[..truncated.len() - 6])).pages, None);
         let whole = tiff(5, true, false);
-        let partial = ProbeInput { name: "fax.tiff", mime_type: None, size: whole.len() as u64 + 10, head: &whole, tail: None };
+        let partial = ProbeInput { name: "fax.tiff", mime_type: None, size: whole.len() as u64 + 10, head: &whole, tail: None, bounded: false };
         assert_eq!(probe(rules, &partial).pages, None);
-        assert_eq!(read_plan(rules, &FileMeta { name: "fax.TIFF".into(), mime_type: None, size: 1_000 }), ReadPlan { head: 1_000, tail: 0 });
+        assert_eq!(read_plan(rules, &FileMeta { name: "fax.TIFF".into(), mime_type: None, size: 1_000, bounded: false }), ReadPlan { head: 1_000, tail: 0 });
     }
 
     #[test]

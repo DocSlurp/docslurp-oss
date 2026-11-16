@@ -1,6 +1,7 @@
 import {
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
+  documentLadderPolicy,
   qualityAllowsPageReading,
   VISUAL_CANDIDATE_STATS_KEY,
   type AdaptiveRoutingDecisionSurface,
@@ -14,6 +15,7 @@ import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { Config } from "../config.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
+import { ladderKeepsImageUnread, visionLadderSelection } from "../routing/auto-ladder.js";
 import { pagesNeedingPixels } from "../routing/runtime.js";
 import { prioritizePagesWithoutNativeText, selectLegacyVisionPages } from "./classify-route.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
@@ -152,14 +154,18 @@ export class RenderImagesStage implements Stage {
   }
 
   /** Pages this document renders, chosen the same way for whole documents and page-range shards. */
-  private async selectPages(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document) {
+  private async selectPages(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, options: { shard?: boolean } = {}) {
     const request = await this.loadRasterRequest(state, document.id);
     const mimeType = document.mimeType ?? "";
     const isPdf = mimeType === "application/pdf";
     const isImage = mimeType.startsWith("image/");
     // Fast never reads a page: render exactly the pages without a text layer, which keep their page image, up to
-    // the per-document and per-run caps. Every other textless page stays unread.
-    if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
+    // the per-document and per-run caps. Every other textless page stays unread. A document the Auto ladder keeps
+    // entirely at the fast rung (pipeline.ladder: no page may go above fast, or an image extraction kept unread under a
+    // share, ladderKeepsImageUnread) is kept the same way.
+    const ladderPolicy = documentLadderPolicy(state.run.pipeline, Math.max(1, document.pageCount));
+    const ladderFast = isImage && ladderKeepsImageUnread(ladderPolicy, { filename: document.filename, mimeType: document.mimeType, sniffedMimeType: document.fileFacts?.sniffedMimeType ?? null });
+    if (!qualityAllowsPageReading(ladderPolicy.quality) || ladderFast) {
       if (!isPdf && !isImage) return { pageNumbers: [], request, routed: null, keptAsImage: [], unreadPages: [] };
       const caps = fastPageImageCaps();
       const canonicalDocument = await this.loadCanonicalDocument(state, document.id);
@@ -222,10 +228,46 @@ export class RenderImagesStage implements Stage {
     // Pages Doppler left to the host's page image (a scan `--scan-pages copy` could not copy, or a scan copy that failed
     // its checks): the Markdown has no image for them, so a project that keeps page images renders them here.
     const hostPages = state.run.pipeline.preserveImages && isPdf ? await this.hostPageImagePages(state, document) : [];
+    // Auto ladder: pages a limit keeps off every model whose content is pixels only are kept as their page image, as Fast
+    // keeps them; pages a limit keeps off a model that have a text layer are not rendered for vision.
+    const ladder = !routed && isPdf && ladderPolicy.ladder.active && request?.status === "ready"
+      ? visionLadderSelection({
+        pipeline: state.run.pipeline, runId: state.run.id, documentId: document.id, pageCount: Math.max(1, document.pageCount),
+        triage: request.pages, routingV2: resolveRunRoutingV2(state), ledger: state.artifactLedger,
+      })
+      : null;
+    // Pages kept as images are chosen once, by the whole-document pass (page-range shards render only what vision reads):
+    // only pages with no extracted text (the same test Fast uses, so a reference never replaces text), under Fast's caps:
+    // the per-document cap and the per-run reservation shared by every worker. Without a store to reserve from, nothing
+    // is kept (fail closed); pages past a cap stay unread.
+    let keepAsImage = new Set<number>();
+    let unreadPages: number[] = [];
+    if (ladder && ladder.keepAsImage.length > 0 && !options.shard) {
+      const caps = fastPageImageCaps();
+      const textless = new Set(pagesKeptAsImage({ canonicalDocument: await this.loadCanonicalDocument(state, document.id), pageCount: Math.max(1, document.pageCount), isImage: false, routing: request }).kept);
+      const candidates = ladder.keepAsImage.filter((page) => textless.has(page)).sort((a, b) => a - b);
+      const wanted = candidates.slice(0, caps.perDocument);
+      const reserve = state.store?.reserveFastPageImageRenders?.bind(state.store);
+      const granted = wanted.length === 0 || !reserve
+        ? 0
+        : await reserve({ runId: state.run.id, documentId: document.id, wanted: wanted.length, perRun: caps.perRun });
+      keepAsImage = new Set(wanted.slice(0, granted));
+      unreadPages = candidates.filter((page) => !keepAsImage.has(page));
+      if (unreadPages.length > 0) {
+        console.warn(`[render-images] ladder page images limited document=${document.id} run=${state.run.id} ` +
+          `reason=${!reserve ? "run-budget-unavailable" : granted < wanted.length ? "run-cap" : "document-cap"} kept=${keepAsImage.size} unread=${unreadPages.length} ` +
+          `capPerDocument=${caps.perDocument} capPerRun=${caps.perRun}`);
+      }
+    }
+    const capped = new Set(ladder?.keepAsImage ?? []);
+    // Pages a limit keeps off every model are not rendered for vision; only those kept as images render.
+    const unselected = new Set<number>(ladder?.plan.decisions.filter((decision) => decision.rung === "fast" && !keepAsImage.has(decision.pageNumber)).map((decision) => decision.pageNumber) ?? []);
+    for (const page of capped) if (!keepAsImage.has(page)) unselected.add(page);
+    const withKept = ladder ? [...new Set([...selected.filter((page) => !unselected.has(page)), ...keepAsImage])].sort((a, b) => a - b) : selected;
     const pageNumbers = isImage
-      ? selected.filter((pageNumber) => pageNumber === 1)
-      : hostPages.length > 0 ? [...new Set([...selected, ...hostPages])].sort((a, b) => a - b) : selected;
-    return { pageNumbers, request, routed, keptAsImage: [] as number[], unreadPages: [] as number[] };
+      ? withKept.filter((pageNumber) => pageNumber === 1)
+      : hostPages.length > 0 ? [...new Set([...withKept, ...hostPages])].sort((a, b) => a - b) : withKept;
+    return { pageNumbers, request, routed, keptAsImage: [...keepAsImage].sort((a, b) => a - b), unreadPages };
   }
 
   /**
@@ -264,7 +306,7 @@ export class RenderImagesStage implements Stage {
       && state.documentStages?.get(document.id)?.get(this.name)?.status !== "completed");
     await runDocuments(documents, state.docConcurrency, async (document) => {
       signal?.throwIfAborted();
-      const { pageNumbers } = await this.selectPages(state, document);
+      const { pageNumbers } = await this.selectPages(state, document, { shard: true });
       const mine = pageNumbers.filter((pageNumber) => pageInRanges(pageNumber, ranges.get(document.id)));
       if (mine.length === 0) return;
       await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers: mine, signal });
