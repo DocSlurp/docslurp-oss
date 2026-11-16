@@ -1965,7 +1965,7 @@ describe("modal usage amount is not provider cost (real-Modal run)", () => {
     const { readFileSync } = await import("node:fs");
     const attribution = readFileSync(new URL("../../../../server/src/services/usage-attribution.ts", import.meta.url), "utf8");
     // The provider-cost loss query takes provider cost from metadata.providerCostCents, never from amount.
-    const loss = attribution.slice(attribution.indexOf("const lossItems"), attribution.indexOf("const lossItems") + 2_000);
+    const loss = attribution.slice(attribution.indexOf("function settledUsageItems"), attribution.indexOf("function settledUsageItems") + 2_500);
     expect(loss).toMatch(/metadata -> 'providerCostCents'/);
     expect(loss).not.toMatch(/\bamount\b/);
     // amount is summed per metric, and only billable unit metrics are read from that sum.
