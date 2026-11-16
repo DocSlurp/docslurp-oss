@@ -1,6 +1,6 @@
-import { emitTelemetryLog } from "@docslurp/shared/observability";
+import { emitTelemetryLog, recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { isBillingEnforced } from "@docslurp/shared";
-import { providerCostLossItems, type ProviderCostLossItem, type ProviderCostLossOrgTotal } from "../usage-attribution.js";
+import { providerCostLossItems, settledItemTotals, type ProviderCostLossItem, type ProviderCostLossOrgTotal, type SettledItemTotals } from "../usage-attribution.js";
 import type { AlertCheck } from "./alert-rules.js";
 
 /**
@@ -15,6 +15,12 @@ import type { AlertCheck } from "./alert-rules.js";
  *   excluded: their loss is the refund policy) fire
  *   `provider-cost-loss:<orgId>` at ALERT_PROVIDER_LOSS_CENTS (default 100,
  *   i.e. $1), through the normal alert tracker and delivery.
+ *
+ * - Every tick also totals all settled items (profitable ones included) that
+ *   settled since the previous tick and adds them to the `docslurp.billing.*`
+ *   counters by kind: items, loss items, credits charged, provider cost and
+ *   run pages. Mean cost, mean margin and pages per $1 are ratios of those
+ *   counters. An item that receives usage after it settled is counted again.
  *
  * Runs on the alert leader only, at most every ALERT_PROVIDER_LOSS_INTERVAL_MS
  * (default 5 minutes), and only where billing is enforced (with billing off
@@ -98,11 +104,24 @@ export interface ProviderCostLossDeps {
   query: (args: { since: Date; until: Date }) => Promise<{ items: ProviderCostLossItem[]; orgs: ProviderCostLossOrgTotal[] }>;
   now: () => number;
   emit: (item: ProviderCostLossItem) => void;
+  /** Totals of every settled item in a window, by kind; absent in tests that only exercise the loss path. */
+  totals?: (args: { since: Date; until: Date }) => Promise<SettledItemTotals[]>;
+  record?: (totals: SettledItemTotals) => void;
   billingEnforced: () => boolean;
 }
 
 const defaultDeps: ProviderCostLossDeps = {
   query: (args) => providerCostLossItems(args),
+  totals: (args) => settledItemTotals(args),
+  record: (totals) => {
+    const labels = { kind: totals.kind };
+    recordPipelineTelemetry("billing.items", totals.items, labels);
+    recordPipelineTelemetry("billing.loss_items", totals.lossItems, labels);
+    recordPipelineTelemetry("billing.credit_cents", totals.creditCents, labels);
+    recordPipelineTelemetry("billing.provider_cost_cents", totals.providerCostCents, labels);
+    recordPipelineTelemetry("billing.estimated_cost_cents", totals.estimatedCostCents, labels);
+    if (totals.pages > 0) recordPipelineTelemetry("billing.pages", totals.pages, labels);
+  },
   now: Date.now,
   emit: (item) => {
     const attributes = {
@@ -126,10 +145,26 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 export class ProviderCostLossMonitor {
+  /** Adds what settled since the previous tick to the billing counters; a failure costs one tick of counters, never an alert. */
+  private async recordTotals(until: Date): Promise<void> {
+    if (!this.deps.totals || !this.deps.record) return;
+    // First tick of a new leader: one interval back, so a handover neither replays the hour nor skips much.
+    const since = new Date(this.totalsUntil || until.getTime() - this.settings.intervalMs);
+    if (since >= until) return;
+    try {
+      const totals = await withTimeout(this.deps.totals({ since, until }), QUERY_TIMEOUT_MS);
+      this.totalsUntil = until.getTime();
+      for (const kind of totals) this.deps.record(kind);
+    } catch (error) {
+      console.error(`[alert] settled item totals failed: ${error instanceof Error ? error.name : "error"}`);
+    }
+  }
+
   private lastRunAt = 0;
   private lastChecks: AlertCheck[] = [];
   private readonly firing = new Set<string>();
   private readonly emitted = new Map<string, number>();
+  private totalsUntil = 0;
 
   constructor(private readonly settings: ProviderCostLossSettings, private readonly deps: ProviderCostLossDeps = defaultDeps) {}
 
@@ -147,6 +182,7 @@ export class ProviderCostLossMonitor {
     this.lastRunAt = now;
     const until = new Date(now - this.settings.settleMs);
     const since = new Date(until.getTime() - this.settings.windowMs);
+    await this.recordTotals(until);
     let items: ProviderCostLossItem[];
     let orgs: ProviderCostLossOrgTotal[];
     try {

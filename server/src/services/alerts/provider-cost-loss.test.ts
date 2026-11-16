@@ -63,6 +63,44 @@ describe("ProviderCostLossMonitor", () => {
     expect(await m.instance.evaluate()).toEqual([expect.objectContaining({ id: "provider-cost-loss:o1", state: "ok" })]);
   });
 
+  it("records settled totals once per window, tick to tick, and keeps alerting when the totals query fails", async () => {
+    let now = 10_000_000;
+    const windows: Array<{ since: number; until: number }> = [];
+    const record = vi.fn();
+    let fail = false;
+    const totalsQuery = vi.fn(async (args: { since: Date; until: Date }) => {
+      if (fail) throw new Error("statement timeout: secret");
+      windows.push({ since: args.since.getTime(), until: args.until.getTime() });
+      return [{ kind: "run" as const, items: 2, lossItems: 1, creditCents: 21, providerCostCents: 6, estimatedCostCents: 2, pages: 250 }];
+    });
+    const instance = new ProviderCostLossMonitor(settings, {
+      query: async () => ({ items: [], orgs: [] }), now: () => now, emit: vi.fn(), billingEnforced: () => true, totals: totalsQuery, record,
+    });
+    await instance.evaluate();
+    // First tick of a leader looks one interval back from the settled edge.
+    expect(windows[0]).toEqual({ since: now - settings.settleMs - settings.intervalMs, until: now - settings.settleMs });
+    now += 60_000;
+    await instance.evaluate();
+    expect(totalsQuery).toHaveBeenCalledTimes(1);
+    now += settings.intervalMs;
+    await instance.evaluate();
+    // The next window starts exactly where the last one ended: nothing counted twice, nothing skipped.
+    expect(windows[1]!.since).toBe(windows[0]!.until);
+    expect(record).toHaveBeenCalledTimes(2);
+
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    fail = true;
+    now += settings.intervalMs;
+    await expect(instance.evaluate()).resolves.toEqual([]);
+    expect(error.mock.calls.flat().join(" ")).not.toContain("secret");
+    fail = false;
+    now += settings.intervalMs;
+    await instance.evaluate();
+    // The failed window is retried from the last recorded edge.
+    expect(windows[2]!.since).toBe(windows[1]!.until);
+    error.mockRestore();
+  });
+
   it("does nothing while billing is off and reports unknown, not ok, when the query fails", async () => {
     const off = monitor([[item({ lossCents: 500 })]], false);
     expect(await off.instance.evaluate()).toEqual([]);

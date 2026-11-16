@@ -59,6 +59,21 @@ The share of pages escalated beyond fast extraction is `read / (text + read + bl
 
 Search latency is `docslurp.operation.duration` with `docslurp.operation.name="api.search"`; chat turn duration and stop reasons are `docslurp.chat.agent.duration`.
 
+## Credits charged against provider cost
+
+Where billing is enforced, the alert leader totals every settled item (a finished run, a chat turn, a charged search session) since its previous tick and adds the totals to counters labelled by `kind` (`run`, `chat-turn`, `search-session`):
+
+| Metric | Meaning |
+| --- | --- |
+| `docslurp.billing.items` | Settled items |
+| `docslurp.billing.loss_items` | Items whose provider cost exceeded the credits they charged |
+| `docslurp.billing.credit_cents` | Credits charged (1 credit = 1 cent) |
+| `docslurp.billing.provider_cost_cents` | What providers charged, or the list-price estimate where no receipt arrived |
+| `docslurp.billing.estimated_cost_cents` | The estimated part of the provider cost |
+| `docslurp.billing.pages` | Pages of the runs among the items |
+
+Means and ratios are divisions of these counters over a window: mean cost per run is `provider_cost_cents / items`, mean margin `(credit_cents - provider_cost_cents) / items`, and pages per $1 of provider cost `pages / (provider_cost_cents / 100)`. Refunded chat turns are excluded. An item that receives usage after it settled is counted again, so treat the counters as operational trends, not accounting; `usage_events` remains the ledger.
+
 ## Stalled runs
 
 The alert evaluator (`ALERTS_ENABLED`) adds `processing-run-stalled`: a warning when a processing run has written no run event (page, document or stage progress) for `ALERT_STALLED_RUN_SECONDS` (default 1800). It complements `stale-leases`, which only sees a worker that stopped heartbeating: a worker can stay alive and make no progress.
