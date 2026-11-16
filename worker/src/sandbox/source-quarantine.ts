@@ -17,14 +17,13 @@ import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
  * strategy retry. Timing and host causes (processes not reaped within the verify bound, a refused
  * provider) never list a source. Every row expires after WORKER_SOURCE_QUARANTINE_TTL_HOURS
  * (default 168, 7 days), so a false positive heals itself; a later attributable failure extends it.
- * Every organization whose document hit the row (teardown or refusal) is kept for attribution.
  *
- * Organization isolation: a listed hash refuses only documents of an organization whose own document
- * defeated teardown with those bytes (`org_ids`). Another organization's identical upload is admitted
- * and parsed in its own fresh VM, so the denylist never reveals that someone else uploaded the bytes;
- * if it defeats teardown there too, that organization joins the row (and its breaker counts it).
- * Every value this module returns describes the asking document's own organization, never the first
- * attributor's.
+ * Organization isolation (migration 0184): a row lists one hash for one organization, with its own
+ * expiry and counts. It refuses only that organization's documents; another organization's identical
+ * upload is admitted and parsed in its own VM, and one organization's teardown never lists, extends or
+ * revives another's refusal, so the denylist reveals nothing across organizations. A document without
+ * an organization is refused outright. Trade-off: one hostile file can cost one worker per uploading
+ * organization, bounded per organization by the breaker below.
  *
  * Hashes are the staged ones: the bytes this worker downloaded and hashed (source-integrity.ts),
  * which must equal the server's `documents.source_sha256` or the document is refused before any
@@ -63,7 +62,7 @@ export interface SourceQuarantineStore {
     detail: string;
     ttlHours: number;
   }): Promise<QuarantinedSource | null>;
-  /** Note that the document was refused (its organization joins the row's attribution). */
+  /** Count a refusal on the document's organization's own row. */
   noteRefusal(entry: { documentId: string; sourceSha256: string }): Promise<void>;
   /** Count a teardown failure against the document's organization; its failures within the window. */
   recordOrgFailure(entry: {
@@ -143,55 +142,43 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
     row ? { sourceSha256: String(row.source_sha256), orgId: (row.org_id as string | null) ?? null, projectId: (row.project_id as string | null) ?? null } : null;
   return {
     async find(documentId, stagedSha256 = null) {
+      // A document without an organization is refused outright (organization is the only tenant scope; fail closed).
       const rows = await sql`
-        select q.source_sha256, d.org_id, d.project_id
+        select coalesce(${stagedSha256}::text, d.source_sha256, '') as source_sha256, d.org_id, d.project_id, d.org_id is null as unscoped
         from documents d
-        join quarantined_sources q on q.source_sha256 = coalesce(${stagedSha256}::text, d.source_sha256)
-        where d.id = ${documentId} and q.expires_at > now()
-          -- Only this organization's own listing; a document without an organization (none should exist) fails closed.
-          and (d.org_id is null or d.org_id = any(q.org_ids))
+        left join quarantined_sources q on q.org_id = d.org_id
+          and q.source_sha256 = coalesce(${stagedSha256}::text, d.source_sha256) and q.expires_at > now()
+        where d.id = ${documentId} and (d.org_id is null or q.source_sha256 is not null)
         limit 1`;
       return mapRow(rows[0]);
     },
     async record({ documentId, stagedSha256 = null, runId, stage, detail, ttlHours }) {
-      // The first attribution is kept; a later failure (another worker raced it, or the row expired)
-      // extends the expiry and adds its organization.
+      // One row per (hash, organization). Within the organization the first attribution is kept; a later failure
+      // extends the expiry (an expired row starts a fresh listing).
       const rows = await sql`
-        with doc as (select d.org_id, d.project_id from documents d where d.id = ${documentId}),
-        listed as (
         insert into quarantined_sources as q (
-          source_sha256, org_id, project_id, run_id, document_id, stage, detail, expires_at,
-          org_ids, last_org_id, last_document_id
+          source_sha256, org_id, project_id, run_id, document_id, stage, detail, expires_at, last_document_id
         )
         select coalesce(${stagedSha256}::text, d.source_sha256), d.org_id, d.project_id, ${runId ?? null}, d.id, ${stage ?? null},
-          ${detail.slice(0, 2000)}, now() + ${ttlHours}::double precision * interval '1 hour',
-          case when d.org_id is null then '{}'::text[] else array[d.org_id] end, d.org_id, d.id
+          ${detail.slice(0, 2000)}, now() + ${ttlHours}::double precision * interval '1 hour', d.id
         from documents d
-        where d.id = ${documentId} and coalesce(${stagedSha256}::text, d.source_sha256) is not null
-        on conflict (source_sha256) do update set
+        where d.id = ${documentId} and d.org_id is not null and coalesce(${stagedSha256}::text, d.source_sha256) is not null
+        on conflict (source_sha256, org_id) do update set
           expires_at = greatest(q.expires_at, excluded.expires_at),
-          org_ids = case when excluded.last_org_id is null or excluded.last_org_id = any(q.org_ids) then q.org_ids
-                         else q.org_ids || excluded.last_org_id end,
-          last_org_id = excluded.last_org_id,
           last_document_id = excluded.last_document_id,
           last_seen_at = now(),
           teardown_count = q.teardown_count + 1
-        returning source_sha256)
-        select listed.source_sha256, doc.org_id, doc.project_id from listed, doc`;
+        returning source_sha256, org_id, project_id`;
       return mapRow(rows[0]);
     },
     async noteRefusal({ documentId, sourceSha256 }) {
       await sql`
         update quarantined_sources q set
-          org_ids = case when d.org_id is null or d.org_id = any(q.org_ids) then q.org_ids else q.org_ids || d.org_id end,
-          last_org_id = d.org_id,
           last_document_id = d.id,
           last_seen_at = now(),
           refused_count = q.refused_count + 1
         from documents d
-        where q.source_sha256 = ${sourceSha256} and d.id = ${documentId}
-          -- Only a refusal of this organization's own listing (find never refuses on another's).
-          and (d.org_id is null or d.org_id = any(q.org_ids))
+        where q.source_sha256 = ${sourceSha256} and d.id = ${documentId} and q.org_id = d.org_id
           -- A hashed document's bytes are its server hash (staging refuses anything else); an
           -- unhashed one was found by its staged hash.
           and (d.source_sha256 is null or d.source_sha256 = q.source_sha256)`;
@@ -345,6 +332,10 @@ export async function admitCommandSource(): Promise<void> {
         throw new QuarantinedOrgError(documentId, org.orgId, org.count);
       }
       if (!listed) return;
+      if (listed.orgId === null) {
+        console.error(`[worker-quarantine] status=unscoped-refused run=${currentPerfContext()?.runId ?? "none"} document=${documentId}`);
+        throw new SourceRefusalError(`document ${documentId} refused: it belongs to no organization`, documentId);
+      }
       const context = currentPerfContext();
       console.error(
         `[worker-quarantine] status=source-refused org=${listed.orgId ?? "none"} project=${listed.projectId ?? "none"} ` +
