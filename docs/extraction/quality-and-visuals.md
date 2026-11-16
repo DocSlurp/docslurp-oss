@@ -102,6 +102,13 @@ Every run resolves both settings once, the same way on every surface (`resolveEx
 Under `local-only` or `strict-privacy`, `smart` needs a local vision reader (a `*-local` vision profile or an
 operator-registered private route); `charts-ai` (a hosted read) is not available.
 
+Project reads (list, detail, dashboard bootstrap, create and update responses) carry the caller's own
+`extractionChoices: { quality: [...], visuals: [...] }`: the rungs this caller may ask for on a new upload, URL ingest
+or extract into that project from the caller's origin, computed by the same resolution function. A default-project
+member who is not an editor sees `["fastest", "balanced"]` on a `balanced` project; an editor also sees `smart`, unless
+privacy or a switch rules it out. Clients should offer only these rungs rather than infer rights from roles; the server
+still checks every request.
+
 ## What a run executed
 
 Every run is stamped with what it executes, `pipeline.effective`:

@@ -4,6 +4,7 @@
  * the layout walker's geometry (worker/scripts/pdf_layout_facts.py `markdown_tables`, `table_box`). Never from words that
  * name a table, and never from document metadata. The offline estimator mirrors this rule.
  */
+import { isDevelopmentEnvironment } from "./runtime-environment.js";
 export const PAGE_TABLE_ROUTING = {
   tableHeavyMinRows: 5,
   tableHeavyMinCoverage: 0.4,
@@ -125,13 +126,13 @@ export function enterTableScanGuest(): void {
 
 /**
  * The HTML table scanner reads customer and model text (Doppler passes PDF prose through `--html` unescaped; vision
- * models write tables as HTML). Under NODE_ENV=production or DOCSLURP_SERVICE_PROFILE=service it runs only in the parser
+ * models write tables as HTML). Outside development (the VM-only floor, runtime-environment.ts) it runs only in the parser
  * VM; on the host it refuses loudly (fail closed) rather than parse.
  */
 function assertTableScanAllowed(): void {
   if (tableScanGuest) return;
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
-  if (env.NODE_ENV?.trim().toLowerCase() === "production" || env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service") {
+  if (!isDevelopmentEnvironment(env)) {
     throw new Error("refusing to scan HTML tables on the host in the service profile; use the parser VM (table-routing guest)");
   }
 }

@@ -13,7 +13,7 @@
 --
 -- Also: resumable figure levels of projects with `figureResume: off` or `manual` are blocked (`resume-off`), so the
 -- runner, which now resumes automatically within a run's visuals (Q3), never finishes partials those projects opted out
--- of. A new run (a fresh pass) clears the block as before.
+-- of (`resume-off-v1`, sticky). A new run (a fresh pass) clears it.
 
 -- report:functions-begin
 CREATE OR REPLACE FUNCTION docslurp_extraction_config_v1_upgraded(p jsonb) RETURNS jsonb
@@ -155,7 +155,8 @@ BEGIN
     FROM (SELECT docslurp_extraction_config_v1_flags(pipeline) AS f FROM projects
           WHERE NOT docslurp_extraction_config_v1_versioned(pipeline)) rows;
   SELECT count(*) INTO levels FROM document_extraction_levels l JOIN projects p ON p.id = l.project_id
-   WHERE l.images_status = 'resumable' AND l.resume_blocked IS NULL AND p.pipeline ->> 'figureResume' IN ('off', 'manual');
+   WHERE l.images_status = 'resumable' AND (l.resume_blocked IS NULL OR l.resume_blocked NOT IN ('attempts', 'resume-off-v1'))
+     AND p.pipeline ->> 'figureResume' IN ('off', 'manual');
   SELECT count(*) INTO unsupported FROM projects
    WHERE docslurp_extraction_config_v1_versioned(pipeline) AND pipeline -> 'configVersion' <> '1'::jsonb;
   RAISE NOTICE '[extraction-config-v1] projects=% q1_vision_fallback_off_auto=% q3_figure_resume_off_manual=% q11_figures_off_with_chart_tier=% lowered_quality_privacy=% lowered_visuals_privacy=% figure_levels_to_block=% unsupported_version_left=%',
@@ -166,13 +167,22 @@ BEGIN
   END IF;
 END $$;
 --> statement-breakpoint
--- Q3: block resumable partial figure levels of projects that opted out of automatic resume, before their opt-out key goes.
+-- Q3: a block reason of its own, sticky (requests do not lift it; a new run, a fresh pass, does).
+DO $$
+BEGIN
+  ALTER TABLE document_extraction_levels DROP CONSTRAINT IF EXISTS document_extraction_levels_resume_blocked_check;
+  ALTER TABLE document_extraction_levels ADD CONSTRAINT document_extraction_levels_resume_blocked_check
+    CHECK (resume_blocked IN ('attempts', 'vm-budget', 'no-progress', 'figures-off', 'resume-off', 'resume-off-v1', 'stale', 'refused', 'unscanned'));
+END $$;
+--> statement-breakpoint
+-- Q3: block resumable partial figure levels of projects that opted out of automatic resume, before their opt-out key
+-- goes, whatever request-clearable block they had (only the lifetime cap, `attempts`, is kept).
 UPDATE document_extraction_levels l
-   SET resume_blocked = 'resume-off', resume_blocked_at = now(), resume_after = NULL
+   SET resume_blocked = 'resume-off-v1', resume_blocked_at = now(), resume_after = NULL
   FROM projects p
- WHERE p.id = l.project_id
+ WHERE p.id = l.project_id AND p.org_id = l.org_id
    AND l.images_status = 'resumable'
-   AND l.resume_blocked IS NULL
+   AND (l.resume_blocked IS NULL OR l.resume_blocked NOT IN ('attempts', 'resume-off-v1'))
    AND p.pipeline ->> 'figureResume' IN ('off', 'manual');
 --> statement-breakpoint
 UPDATE projects

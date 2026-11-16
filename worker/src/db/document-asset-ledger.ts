@@ -1400,7 +1400,7 @@ async function queueFigureResume(tx: Tx, scope: DocumentAssetLedgerScope, resume
           then now() + interval '2 minutes'
         else null end,
       -- A fresh pass clears a block other than the lifetime cap; the counters move only with the run (resumeRunChangeSql).
-      resume_blocked = case when ${resumed} or l.resume_blocked = 'attempts' then l.resume_blocked else null end
+      resume_blocked = case when ${resumed} or l.resume_blocked in ('attempts', 'resume-off-v1') then l.resume_blocked else null end
     from projects p
     where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
       and p.id = l.project_id and p.org_id = l.org_id`;

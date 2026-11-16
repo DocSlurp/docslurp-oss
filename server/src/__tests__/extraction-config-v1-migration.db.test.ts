@@ -180,7 +180,7 @@ describe("migration 0183 extraction config v1", () => {
   it("blocks resumable figure levels of projects that turned resume off or manual, and nothing else", async () => {
     const { rows } = await db.query<{ document_id: string; resume_blocked: string | null }>(`select document_id, resume_blocked from document_extraction_levels order by document_id`);
     expect(Object.fromEntries(rows.map((row) => [row.document_id, row.resume_blocked]))).toEqual({
-      "d-auto": null, "d-manual": "resume-off", "d-off": "resume-off", "d-off-complete": null,
+      "d-auto": null, "d-manual": "resume-off-v1", "d-off": "resume-off-v1", "d-off-complete": null,
     });
   });
 

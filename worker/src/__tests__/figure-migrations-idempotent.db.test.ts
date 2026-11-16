@@ -8,7 +8,7 @@ import { createMigratedDatabase, migrationJournalProblems, readMigrationJournal 
 // The figure migrations (storage billing, storage state, the resume runner and its budgets) are idempotent: applied a second time over a
 // fully migrated database they change nothing and raise nothing (the release pipeline may re-run a migration).
 const migrationsDir = fileURLToPath(new URL("../../../server/db/migrations/", import.meta.url));
-const FIGURE_MIGRATIONS = /_(figure_storage_billing|figure_storage_state|figure_resume_runner|figure_resume_budgets)$/;
+const FIGURE_MIGRATIONS = /_(figure_storage_billing|figure_storage_state|figure_resume_runner|figure_resume_budgets|extraction_config_v1_projects)$/;
 
 let db: PGlite;
 beforeAll(async () => { db = await createMigratedDatabase(); }, 900_000);
@@ -27,7 +27,7 @@ describe("figure migrations", () => {
     const journal = readMigrationJournal();
     expect(migrationJournalProblems(journal)).toEqual([]);
     const figures = journal.filter((entry) => FIGURE_MIGRATIONS.test(entry.tag));
-    expect(figures.map((entry) => entry.tag.replace(/^\d+_/, ""))).toEqual(["figure_storage_billing", "figure_storage_state", "figure_resume_runner", "figure_resume_budgets"]);
+    expect(figures.map((entry) => entry.tag.replace(/^\d+_/, ""))).toEqual(["figure_storage_billing", "figure_storage_state", "figure_resume_runner", "figure_resume_budgets", "extraction_config_v1_projects"]);
     const before = await catalog();
     for (const entry of figures) {
       const sql = readFileSync(`${migrationsDir}${entry.tag}.sql`, "utf8");

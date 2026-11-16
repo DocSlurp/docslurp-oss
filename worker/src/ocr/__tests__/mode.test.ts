@@ -100,9 +100,9 @@ describe("assertOcrConfiguration", () => {
   it("refuses to start when a VM OCR provider is loaded but DOCSLURP_SERVICE_PROFILE is unset", () => {
     register(provider());
     for (const mode of ["vm", "off", "hosted"]) {
-      expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: mode }), mode).toThrow(/DOCSLURP_SERVICE_PROFILE is unset.*refusing to start/);
+      expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: mode }), mode).toThrow(/DOCSLURP_PROFILE is unset or dev.*refusing to start/);
     }
-    expect(() => assertOcrConfiguration({})).toThrow(/DOCSLURP_SERVICE_PROFILE is unset/);
+    expect(() => assertOcrConfiguration({})).toThrow(/DOCSLURP_PROFILE is unset/);
   });
 
   it("refuses local mode whenever a VM OCR provider is loaded, even under the self-hosted profile", () => {
@@ -111,9 +111,27 @@ describe("assertOcrConfiguration", () => {
     expect(localOcrRefusal({ DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toMatch(/VM OCR provider is loaded/);
   });
 
+  it("reads DOCSLURP_PROFILE beside the old name, refuses a conflict, and lets DOCSLURP_DISABLE only lower the mode", () => {
+    expect(resolveOcrMode({ DOCSLURP_PROFILE: "service" })).toBe("vm");
+    expect(resolveOcrMode({ DOCSLURP_PROFILE: "selfhost" })).toBe("off");
+    expect(resolveOcrMode({ DOCSLURP_PROFILE: "service", DOCSLURP_DISABLE: "ocr" })).toBe("off");
+    expect(resolveOcrMode({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_DISABLE: "ocr" })).toBe("off");
+    expect(resolveOcrMode({ DOCSLURP_OCR_MODE: "hosted", DOCSLURP_DISABLE: "ai" })).toBe("off");
+    expect(resolveOcrMode({ DOCSLURP_OCR_MODE: "local", DOCSLURP_DISABLE: "ocr,typo" })).toBe("off");
+    expect(resolveOcrMode({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_DISABLE: "ai" })).toBe("vm");
+    expect(resolveServiceProfile({ DOCSLURP_PROFILE: "selfhost" })).toBe("self-hosted");
+    expect(resolveServiceProfile({ DOCSLURP_PROFILE: "dev" })).toBeNull();
+    expect(() => resolveServiceProfile({ DOCSLURP_PROFILE: "service", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toThrow(/conflicts/);
+    expect(() => resolveServiceProfile({ DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/conflicts/);
+    expect(() => resolveServiceProfile({ DOCSLURP_PROFILE: "dev", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/conflicts/);
+    expect(() => resolveServiceProfile({ DOCSLURP_PROFILE: "hosted" })).toThrow(/must be one of/);
+    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "local", DOCSLURP_PROFILE: "service" })).toThrow(/VM boundary.*refusing to start/);
+    expect(localOcrRefusal({ DOCSLURP_PROFILE: "selfhost" })).toBeNull();
+  });
+
   it("refuses local mode under the service profile and with the profile unset", () => {
     expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/VM boundary.*refusing to start/);
-    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "local" })).toThrow(/needs DOCSLURP_SERVICE_PROFILE=self-hosted; refusing to start/);
+    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "local" })).toThrow(/needs DOCSLURP_PROFILE=selfhost \(or DOCSLURP_SERVICE_PROFILE=self-hosted\); refusing to start/);
     expect(localOcrRefusal({ DOCSLURP_SERVICE_PROFILE: "service" })).toMatch(/service/);
   });
 

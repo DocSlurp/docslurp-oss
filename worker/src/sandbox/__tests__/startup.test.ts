@@ -17,14 +17,14 @@ describe("initializeParserSandbox", () => {
   it("refuses provider none in production without the override", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(
-      initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production" }, "linux"),
+      initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost" }, "linux"),
     ).rejects.toThrow(/DOCSLURP_PARSER_SANDBOX.*refusing to start/);
   });
 
   it("refuses explicitly unisolated production startup before reporting readiness", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
-    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production", DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" }, "linux")).rejects.toBeInstanceOf(UnsafeOverrideError);
+    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" }, "linux")).rejects.toBeInstanceOf(UnsafeOverrideError);
     expect(log).not.toHaveBeenCalled();
   });
 
@@ -33,7 +33,7 @@ describe("initializeParserSandbox", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { default: modal } = await import("../providers/modal/index.js");
     const probe = vi.spyOn(modal, "probe");
-    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "modal", NODE_ENV: "production", [name]: "true" }, "linux"))
+    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "modal", NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", [name]: "true" }, "linux"))
       .rejects.toThrow(new RegExp(`${name}.*refusing to start`));
     expect(probe).not.toHaveBeenCalled();
   });
@@ -47,7 +47,7 @@ describe("initializeParserSandbox", () => {
     const { default: modal } = await import("../providers/modal/index.js");
     const probe = vi.spyOn(modal, "probe");
     for (const nodeEnv of ["production", "staging", "\u00a0development"]) {
-      await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "modal", NODE_ENV: nodeEnv, [name]: value }, "linux"))
+      await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "modal", NODE_ENV: nodeEnv, DOCSLURP_PROFILE: "selfhost", [name]: value }, "linux"))
         .rejects.toThrow(new RegExp(`${name}.*refusing to start`));
     }
     expect(probe).not.toHaveBeenCalled();
@@ -58,7 +58,7 @@ describe("initializeParserSandbox", () => {
     const { default: none } = await import("../providers/none/index.js");
     vi.spyOn(none, "probe").mockResolvedValue({ ok: true, detail: "test", isolation: { filesystem: false, network: "none", processes: true, location: "local" } });
     expect(resolveSandboxProviderId({ NODE_ENV: "staging" }, "darwin")).toBe("modal");
-    await expect(initializeParserSandbox({ NODE_ENV: "staging", DOCSLURP_PARSER_SANDBOX: "none" }, "darwin"))
+    await expect(initializeParserSandbox({ NODE_ENV: "staging", DOCSLURP_PROFILE: "selfhost", DOCSLURP_PARSER_SANDBOX: "none" }, "darwin"))
       .rejects.toBeInstanceOf(UnsafeOverrideError);
     expect(none.probe).not.toHaveBeenCalled();
     await expect(initializeParserSandbox({ NODE_ENV: "development" }, "darwin")).resolves.toMatchObject({ provider: none });

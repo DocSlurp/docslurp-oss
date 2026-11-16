@@ -97,7 +97,7 @@ export const FIGURE_RESUME_BUDGET_ENV = {
 export type FigureResumeBudgetConfig = { [K in keyof typeof FIGURE_RESUME_BUDGET_ENV]: number };
 
 /** Why the runner stopped a document. The last three are the budget's; a request may grant past them (bounded). */
-export const FIGURE_RESUME_BLOCK_REASONS = ["attempts", "vm-budget", "no-progress", "figures-off", "resume-off", "stale", "refused", "unscanned"] as const;
+export const FIGURE_RESUME_BLOCK_REASONS = ["attempts", "vm-budget", "no-progress", "figures-off", "resume-off", "resume-off-v1", "stale", "refused", "unscanned"] as const;
 export type FigureResumeBlockReason = (typeof FIGURE_RESUME_BLOCK_REASONS)[number];
 /** Blocks a single-document request clears by granting an extension. */
 export const FIGURE_RESUME_BUDGET_BLOCKS = ["attempts", "vm-budget", "no-progress"] as const satisfies readonly FigureResumeBlockReason[];

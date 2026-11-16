@@ -3,6 +3,7 @@ import { withBackgroundSpan } from "@docslurp/shared/observability";
 
 import {
   WORKER_CAPABILITY_PROTOCOL,
+  type WorkerAdvertisedConfig,
   type WorkerCapability,
 } from "@docslurp/shared";
 
@@ -37,6 +38,8 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
     "workflow.page-range-shards",
     "workflow.quarantine-shards",
     "workflow.quarantine-document-threshold",
+    // This build resolves DOCSLURP_PROFILE and enforces every DOCSLURP_DISABLE token at execution (release R0).
+    "extraction.config-v1",
   ];
   const [leases, lexical] = await Promise.all([
     probes.creditLeasesActive().catch(() => false),
@@ -73,12 +76,18 @@ export interface WorkerCapabilityRegistryOptions {
   taskQueue: string;
   buildId: string | null;
   capabilities: () => Promise<WorkerCapability[]>;
+  /** What this worker advertises about its configuration (`worker_capabilities.config`, migration 0182). */
+  config?: () => WorkerAdvertisedConfig | null;
   intervalMs?: number;
   log?: (line: string) => void;
 }
 
 function isUndefinedTable(error: unknown): boolean {
   return (error as { code?: string } | null)?.code === "42P01";
+}
+
+function isUndefinedColumn(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "42703";
 }
 
 /** Host key: the Fly machine id, else hostname plus pid (several local workers per host). */
@@ -96,6 +105,8 @@ export class WorkerCapabilityRegistry {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastAdvertised: string | null = null;
   private missingTableLogged = false;
+  /** Migration 0182 (`config`) is missing: heartbeat without it, re-checked with the schema cache. */
+  private configColumnMissingAt: number | null = null;
   private readonly log: (line: string) => void;
   readonly intervalMs: number;
 
@@ -125,6 +136,20 @@ export class WorkerCapabilityRegistry {
     try {
       const capabilities = await this.options.capabilities();
       const schemaWhen = await this.schemaAppliedWhen();
+      const config = this.options.config?.() ?? null;
+      const configColumn = config !== null && (this.configColumnMissingAt === null || Date.now() - this.configColumnMissingAt > 5 * 60_000);
+      if (configColumn) {
+        try {
+          await this.upsert(capabilities, schemaWhen, config);
+          this.configColumnMissingAt = null;
+          this.logAdvertised(capabilities, config);
+          return true;
+        } catch (error) {
+          if (!isUndefinedColumn(error)) throw error;
+          if (this.configColumnMissingAt === null) this.log("[worker-capabilities] worker_capabilities.config missing (migration 0182 not applied); advertising capabilities without the posture digest");
+          this.configColumnMissingAt = Date.now();
+        }
+      }
       await sql`
         insert into worker_capabilities (
           instance_id, identity, task_queue, build_id, protocol, capabilities,
@@ -147,14 +172,7 @@ export class WorkerCapabilityRegistry {
           last_seen_at = now(),
           stopped_at = null
       `;
-      const advertised = `${buildId ?? "auto"}:${capabilities.join(",")}`;
-      if (advertised !== this.lastAdvertised) {
-        this.lastAdvertised = advertised;
-        this.log(
-          `[worker-capabilities] registered instance=${instanceId} identity=${identity} taskQueue=${taskQueue} ` +
-          `buildId=${buildId ?? "auto"} protocol=${WORKER_CAPABILITY_PROTOCOL} capabilities=${capabilities.join(",") || "none"}`,
-        );
-      }
+      this.logAdvertised(capabilities, null);
       return true;
     } catch (error) {
       if (isUndefinedTable(error)) {
@@ -167,6 +185,45 @@ export class WorkerCapabilityRegistry {
       }
       return false;
     }
+  }
+
+  private async upsert(capabilities: WorkerCapability[], schemaWhen: number | null, config: WorkerAdvertisedConfig): Promise<void> {
+    const { sql, instanceId, identity, taskQueue, buildId } = this.options;
+    await sql`
+      insert into worker_capabilities (
+        instance_id, identity, task_queue, build_id, protocol, capabilities, config,
+        schema_applied_when, started_at, last_seen_at, stopped_at
+      ) values (
+        ${instanceId}, ${identity}, ${taskQueue}, ${buildId}, ${WORKER_CAPABILITY_PROTOCOL},
+        ${sql.array(capabilities)}::text[], ${sql.json(config as never)}, ${schemaWhen}, now(), now(), null
+      )
+      on conflict (instance_id) do update set
+        identity = excluded.identity,
+        task_queue = excluded.task_queue,
+        build_id = excluded.build_id,
+        protocol = excluded.protocol,
+        capabilities = excluded.capabilities,
+        config = excluded.config,
+        schema_applied_when = excluded.schema_applied_when,
+        started_at = case
+          when worker_capabilities.identity = excluded.identity then worker_capabilities.started_at
+          else now()
+        end,
+        last_seen_at = now(),
+        stopped_at = null
+    `;
+  }
+
+  private logAdvertised(capabilities: WorkerCapability[], config: WorkerAdvertisedConfig | null): void {
+    const { instanceId, identity, taskQueue, buildId } = this.options;
+    const advertised = `${buildId ?? "auto"}:${capabilities.join(",")}:${config?.postureDigest ?? ""}`;
+    if (advertised === this.lastAdvertised) return;
+    this.lastAdvertised = advertised;
+    this.log(
+      `[worker-capabilities] registered instance=${instanceId} identity=${identity} taskQueue=${taskQueue} ` +
+      `buildId=${buildId ?? "auto"} protocol=${WORKER_CAPABILITY_PROTOCOL} capabilities=${capabilities.join(",") || "none"}` +
+      (config ? ` extractionConfig=${config.extractionConfig ?? "none"} posture=${config.postureDigest ?? "none"}` : ""),
+    );
   }
 
   /** Register now (bounded wait) and keep heartbeating until stop(). */

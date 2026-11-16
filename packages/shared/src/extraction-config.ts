@@ -1,3 +1,4 @@
+import { disabledSwitches, type DisableToken } from "./deployment-profile.js";
 import { z } from "zod";
 import {
   upgradeStoredPipelineChartExport,
@@ -297,8 +298,11 @@ export function assertSupportedConfigVersion(snapshot: unknown): void {
 
 // ---- Operator policy (R0 reads today's env; phase 3 moves it to the operator config file) ------------------------
 
-/** Kill-switch tokens (`DOCSLURP_DISABLE`, phase 2) the resolution honours. R0 derives the chart ones from today's env. */
-export type ExtractionSwitch = "ai" | "charts" | "charts-ai" | "figures";
+/**
+ * Kill-switch tokens (`DOCSLURP_DISABLE`, deployment-profile.ts) the resolution honours. Today's chart env
+ * (`DOCSLURP_CHART_EXPORT`) still lowers them too: the lower of the two applies.
+ */
+export type ExtractionSwitch = DisableToken;
 
 export type ExtractionPolicy = {
   /** `charts.originDefaults`: the visuals a run of each origin gets on a project with none. */
@@ -319,9 +323,9 @@ export function chartsExplicitFreeSetting(env: Env): "auto" | "on" | "off" {
   return chartExportFreeExplicitAllowed(env) ? "on" : "off";
 }
 
-/** The extraction policy this deployment runs under, from today's env (`DOCSLURP_CHART_EXPORT*`). */
+/** The extraction policy this deployment runs under: `DOCSLURP_DISABLE` plus today's chart env (`DOCSLURP_CHART_EXPORT*`). */
 export function extractionPolicyFromEnv(env: Env): ExtractionPolicy {
-  const disabled = new Set<ExtractionSwitch>();
+  const disabled = new Set<ExtractionSwitch>(disabledSwitches(env));
   const chartSwitch = chartExportSwitch(env);
   if (chartSwitch === "off") disabled.add("charts");
   if (chartSwitch !== "on") disabled.add("charts-ai");
@@ -505,6 +509,49 @@ export function resolveExtractionSettings(input: ExtractionResolutionInput): Ext
     visuals = switched.level;
   }
   return { ok: true, quality, visuals, capsApplied };
+}
+
+/** The rungs a caller may ask for on a new run in one project (`project.extractionChoices`). */
+export type ExtractionChoices = { quality: QualityLevel[]; visuals: VisualsLevel[] };
+
+/**
+ * The `quality` and `visuals` rungs this caller may request on a new run in this project (upload, URL ingest, extract),
+ * from this origin: exactly the rungs `resolveExtractionSettings` accepts as a request, so a client that offers only
+ * these never offers a choice the server refuses (403 for a billed raise, 400 for privacy, locality or a switch). Rungs
+ * at or below the project's own are always offered unless a constraint blocks them. Clients show these; the server
+ * still resolves every request. The project's stored values are read as run creation reads them.
+ */
+export function extractionChoicesFor(input: {
+  pipeline: unknown;
+  origin: RunOrigin;
+  caller: ExtractionCaller;
+  policy: ExtractionPolicy;
+}): ExtractionChoices {
+  const record = isRecord(input.pipeline) ? input.pipeline : {};
+  // Stored values as run creation compares them: no privacy lowering here (privacy refuses the request below).
+  const mapped = mapLegacyExtractionSettings({ ...record, privacyMode: "standard" }, { explicitFreeAllowed: input.policy.explicitChartsAllowed });
+  // Run creation compares visuals by the stored chart tier first (a project saved on `models` with figures off still
+  // holds AI chart reads; Q11 lowers it only when R1 migrates the row), so the choices read the tier the same way.
+  const upgraded = upgradeStoredPipelineChartExport(migrateLegacyQualitySettings(record)) as Record<string, unknown>;
+  const rawTier = isRecord(upgraded.chartExport) ? upgraded.chartExport.tier : undefined;
+  const storedTier = rawTier === "off" || rawTier === "free" || rawTier === "models" ? rawTier : undefined;
+  const stored = {
+    quality: mapped.quality,
+    visuals: isVisualsLevel(upgraded.visuals) || storedTier === undefined ? mapped.visuals : visualsLevelFromLegacy({ tier: storedTier }, { explicitFreeAllowed: input.policy.explicitChartsAllowed }),
+  };
+  const constraints = { privacyMode: record.privacyMode, vision: record.vision };
+  const accepts = (request: { quality?: QualityLevel; visuals?: VisualsLevel }) => resolveExtractionSettings({
+    request,
+    project: stored,
+    origin: input.origin,
+    caller: input.caller,
+    constraints,
+    policy: input.policy,
+  }).ok;
+  return {
+    quality: QUALITY_LEVELS.filter((quality) => accepts({ quality })),
+    visuals: VISUALS_LEVELS.filter((visuals) => accepts({ visuals })),
+  };
 }
 
 // ---- The run's stamped effective values (`run.pipeline.effective`) --------------------------------------------------

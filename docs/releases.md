@@ -43,3 +43,18 @@ organization, and memberships beyond one per user), and the only rollback is a d
 Run `node server/db/predeploy-check.mjs --strict` from the new image first, snapshot, migrate as a standalone step (not a
 `release_command`), then build the folded keyword index with `node server/db/folded-search-index.mjs`. The order, what is
 deleted and not rollback-safe, the mixed-version window and SigNoz signals are in [rollout-0121-0127.md](rollout-0121-0127.md).
+
+## Extraction config compatibility release (R0) and cutover (R1)
+
+`DOCSLURP_PROFILE` and `DOCSLURP_DISABLE` ([Deployment profile](self-host/deployment-profile.md)) replace
+`DOCSLURP_SERVICE_PROFILE` and several older variables in two releases:
+
+- **R0 (compatibility).** Reads both the old and the new names: a warning when they agree, a startup refusal when they
+  disagree. A worker outside development refuses to start with no profile on either name. Knows the whole `DOCSLURP_DISABLE` vocabulary. Workers advertise `extraction.config-v1` and their posture
+  digest (migration 0182, additive); `GET /ops/worker-fleet` shows whether the whole fleet enforces the switches.
+- **R1 (cutover).** Retired variables refuse startup. Deploy R1 only after R0 runs everywhere and every deployment's
+  configuration has moved to the new names.
+
+Rollback is an image, environment and configuration bundle, never an image alone, and goes from R1 to R0 only: R0
+understands both name sets and every switch, so it never meets an unknown token. Roll out app first, worker first or as
+a mixed fleet in either order; the API applies its own switch lowering whatever the fleet runs.

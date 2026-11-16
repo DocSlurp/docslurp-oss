@@ -62,7 +62,8 @@ export const UNSUPPORTED_SQL = `
 export const LEVELS_SQL = `
   select count(*)::int as levels
     from document_extraction_levels l join projects p on p.id = l.project_id
-   where l.images_status = 'resumable' and l.resume_blocked is null and p.pipeline ->> 'figureResume' in ('off', 'manual')`;
+   where l.images_status = 'resumable' and (l.resume_blocked is null or l.resume_blocked not in ('attempts', 'resume-off-v1'))
+     and p.pipeline ->> 'figureResume' in ('off', 'manual')`;
 
 export async function extractionConfigV1Report(sql, migrationSql = readFileSync(MIGRATION, "utf8")) {
   let report;

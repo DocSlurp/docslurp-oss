@@ -141,7 +141,7 @@ describe("worker preflight", () => {
     const silenced = vi.spyOn(console, "error").mockImplementation(() => {});
     const sandbox = vi.fn(stubs.initializeParserSandbox!);
     const error = await runWorkerPreflight(
-      { NODE_ENV: "production", QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING: "true", DOCSLURP_OCR_MODE: "off" },
+      { NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING: "true", DOCSLURP_OCR_MODE: "off" },
       { ...stubs, initializeParserSandbox: sandbox },
     ).catch((e) => e);
     expect(error).toBeInstanceOf(WorkerPreflightError);

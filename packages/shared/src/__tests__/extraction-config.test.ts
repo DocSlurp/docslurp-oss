@@ -3,6 +3,7 @@ import {
   applyExtractionConfigInput,
   applyProjectPipelineOverrides,
   deprecatedExtractionFields,
+  extractionChoicesFor,
   extractionPolicyFromEnv,
   getProjectTemplate,
   mapLegacyExtractionSettings,
@@ -305,5 +306,65 @@ describe("policy and stamped values", () => {
 
   it("project view reports stored values", () => {
     expect(projectExtractionView({ quality: "good", privacyMode: "local-only", chartExport: { tier: "models" } }, {})).toEqual({ quality: "smart", visuals: "charts-ai" });
+  });
+});
+
+describe("extractionChoicesFor (project.extractionChoices)", () => {
+  const choices = (pipeline: Record<string, unknown>, caller: Parameters<typeof extractionChoicesFor>[0]["caller"], over: Partial<ExtractionPolicy> = {}, origin: "app" | "machine" = "app") =>
+    extractionChoicesFor({ pipeline, origin, caller, policy: policy(over) });
+
+  it("a default-project contributor is never offered smart or charts-ai above the project", () => {
+    const result = choices({ quality: "auto" }, contributor);
+    expect(result.quality).toEqual(["fastest", "balanced"]);
+    expect(result.visuals).toEqual(["none", "figures", "charts"]);
+  });
+
+  it("an editor session is offered every rung the deployment and project allow", () => {
+    const result = choices({ quality: "auto" }, editorSession, { disabled: new Set() });
+    expect(result.quality).toEqual(["fastest", "balanced", "smart"]);
+    expect(result.visuals).toEqual(["none", "figures", "charts", "charts-ai"]);
+  });
+
+  it("a contributor keeps the project's own billed rung (not a raise)", () => {
+    const result = choices({ quality: "good", chartExport: { tier: "models" } }, contributor);
+    expect(result.quality).toContain("smart");
+    expect(result.visuals).toContain("charts-ai");
+  });
+
+  it("keys need an editor owner and the billed scope; unreadable scopes fail closed", () => {
+    expect(choices({ quality: "auto" }, billedKey, {}, "machine").quality).toContain("smart");
+    expect(choices({ quality: "auto" }, ingestKey, {}, "machine").quality).not.toContain("smart");
+    expect(choices({ quality: "auto" }, revokedKey, {}, "machine").quality).not.toContain("smart");
+    expect(choices({ quality: "auto" }, billedKeyOfViewer, {}, "machine").quality).not.toContain("smart");
+  });
+
+  it("privacy, locality and switches remove rungs even for editors", () => {
+    const restricted = choices({ quality: "auto", privacyMode: "strict-privacy" }, editorSession);
+    expect(restricted.quality).toEqual(["fastest", "balanced"]);
+    expect(restricted.visuals).not.toContain("charts-ai");
+    const local = choices({ quality: "auto", privacyMode: "local-only", vision: { profile: "good-fast-local" } }, editorSession);
+    expect(local.quality).toContain("smart");
+    const switched = choices({ quality: "auto" }, editorSession, { disabled: new Set(["ai", "charts"]) });
+    expect(switched.quality).toEqual(["fastest", "balanced"]);
+    expect(switched.visuals).toEqual(["none", "figures"]);
+    expect(choices({ quality: "auto" }, editorSession, { explicitChartsAllowed: false }).visuals).not.toContain("charts");
+  });
+
+  it("a legacy project with figures off and a chart tier keeps its tier's rung, as run creation compares it", () => {
+    expect(choices({ quality: "auto", figures: false, chartExport: { tier: "models" } }, contributor).visuals).toContain("charts-ai");
+    expect(choices({ quality: "auto", figures: false }, contributor).visuals).not.toContain("charts-ai");
+  });
+
+  it("every offered rung is accepted by resolveExtractionSettings and every withheld one refused", () => {
+    const pipelines = [{ quality: "fast" }, { quality: "auto", privacyMode: "local-only" }, { quality: "good", figures: false }, { quality: "auto", chartExport: { tier: "free" } }];
+    const callers = [editorSession, contributor, billedKey, ingestKey, revokedKey];
+    for (const pipeline of pipelines) for (const caller of callers) {
+      const offered = choices(pipeline, caller);
+      const stored = mapLegacyExtractionSettings({ ...pipeline, privacyMode: "standard" }, allowed);
+      for (const quality of ["fastest", "balanced", "smart"] as const) {
+        const ok = resolveExtractionSettings({ request: { quality }, project: stored, origin: "app", caller, constraints: { privacyMode: pipeline.privacyMode, vision: undefined }, policy: policy() }).ok;
+        expect(offered.quality.includes(quality)).toBe(ok);
+      }
+    }
   });
 });

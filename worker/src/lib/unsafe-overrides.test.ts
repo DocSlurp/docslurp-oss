@@ -151,6 +151,22 @@ describe("start-worker.sh and the worker agree on what development is", () => {
     expect(shell({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: value })).toBe(node);
   });
 
+  it.each(["service", " Service ", "\u00a0service", "selfhost", "dev", "DEV", "services", ""])("DOCSLURP_PROFILE=%j", (value) => {
+    for (const nodeEnv of ["development", "test", "", "production", "staging"]) {
+      const env = { NODE_ENV: nodeEnv, DOCSLURP_PROFILE: value };
+      const node = isDevelopmentEnvironment(env) ? "development" : "deployed";
+      expect(shell(env), JSON.stringify(env)).toBe(node);
+    }
+  });
+
+  it("never classifies DOCSLURP_PROFILE=service as development, nor dev/selfhost under a deployed NODE_ENV", () => {
+    expect(shell({ NODE_ENV: "development", DOCSLURP_PROFILE: "service" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "test", DOCSLURP_PROFILE: "service", DOCSLURP_SERVICE_PROFILE: "" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "production", DOCSLURP_PROFILE: "dev" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "staging", DOCSLURP_PROFILE: "selfhost" })).toBe("deployed");
+    expect(shell({ NODE_ENV: "development", DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "service" })).toBe("deployed");
+  });
+
   it("matches the expected classification for the council's odd values", () => {
     expect(shell({ NODE_ENV: " " })).toBe("development");
     for (const value of ["\u00a0", "\ufeff", "Production", " production", "dev elopment"]) expect(shell({ NODE_ENV: value })).toBe("deployed");
