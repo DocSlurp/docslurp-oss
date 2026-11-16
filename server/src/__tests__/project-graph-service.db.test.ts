@@ -18,23 +18,29 @@ describe.skipIf(!databaseUrl)("project graph service (database)", () => {
     const shared = await import("@docslurp/shared");
 
     await sql`delete from graph_jobs`;
-    await sql`delete from projects where id = 'ws-graph'`;
+    await sql`delete from projects where id in ('ws-graph','sparse-graph','malformed-graph')`;
     await sql`delete from organizations where id = 'org-graph'`;
     await sql`delete from "user" where id = 'user-graph'`;
     await sql`insert into "user"(id, name, email) values ('user-graph', 'Graph Owner', 'graph-owner@example.test')`;
     await sql`insert into organizations(id, name, slug, created_by_user_id) values ('org-graph', 'Graph Org', 'graph-org', 'user-graph')`;
     await sql`insert into org_memberships(org_id, user_id, role) values ('org-graph', 'user-graph', 'owner')`;
+    // Match createProject's normalization/template application: a sparse raw row tagged
+    // legal-contracts would otherwise resolve as standard/PII-off until the first save.
+    const fixturePipeline = shared.applyProjectTemplateLocks(shared.normalizePipelineFeatures({
+      ...shared.getProjectTemplate("legal-contracts")!.pipeline,
+      graphRag: true, propositionIndex: true,
+    }), "legal-contracts");
     // propositionIndex is a non-graph setting the legal-contracts template
     // leaves unlocked; summarize is locked off by the template (strict
     // privacy forbids hosted summaries), so it is seeded as the template has it.
     await sql`
       insert into projects(id, org_id, user_id, name, template_key, pipeline)
       values ('ws-graph', 'org-graph', 'user-graph', 'Contracts', 'legal-contracts',
-        ${sql.json({ graphRag: true, summarize: false, propositionIndex: true })})
+        ${sql.json(JSON.parse(JSON.stringify(fixturePipeline)))})
     `;
     await sql`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
-      values ('run-graph', 'org-graph', 'user-graph', 'ws-graph', 'bulk-upload', 'completed', 'completed', 3, '{}'::jsonb)
+      values ('run-graph', 'org-graph', 'user-graph', 'ws-graph', 'bulk-upload', 'completed', 'completed', 3, ${sql.json(JSON.parse(JSON.stringify(fixturePipeline)))})
     `;
     for (const [index, id] of ["doc-current", "doc-stale", "doc-missing"].entries()) {
       await sql`
@@ -46,7 +52,7 @@ describe.skipIf(!databaseUrl)("project graph service (database)", () => {
         values (${`${id}-c0`}, ${id}, 'run-graph', 'user-graph', 0, ${"Acme supplies Globex. ".repeat(500 * (index + 1))})
       `;
     }
-    const pipeline = shared.normalizePipelineFeatures({ graphRag: true });
+    const pipeline = fixturePipeline;
     const currentHash = shared.graphConfigFingerprint(
       pipeline.graph,
       shared.resolvePipelineTextModel(pipeline, "graph-extraction", process.env.DOCSLURP_TEXT_MODEL?.trim() || undefined),
@@ -75,6 +81,10 @@ describe.skipIf(!databaseUrl)("project graph service (database)", () => {
   });
 
   it("updates only the graph fields and marks earlier extractions stale", async () => {
+    const { getProject } = await import("../services/projects.js");
+    const before = (await getProject("ws-graph", "user-graph"))!;
+    expect(before.pipeline.privacyMode).toBe("strict-privacy");
+    expect(before.pipeline.piiPolicy.enabled).toBe(true);
     const status = await service.updateProjectGraph("ws-graph", "user-graph", { depth: "deep", entityTypes: ["party", "clause"] });
     expect(status.config).toEqual({ domain: null, entityTypes: ["party", "clause"], depth: "deep" });
     expect(status.coverage).toMatchObject({ current: 0, stale: 2, missing: 1 });
@@ -82,6 +92,11 @@ describe.skipIf(!databaseUrl)("project graph service (database)", () => {
       select pipeline from projects where id = 'ws-graph'
     `;
     expect(project?.pipeline).toMatchObject({ propositionIndex: true, summarize: false, graphRag: true });
+    const after = (await getProject("ws-graph", "user-graph"))!;
+    expect(after.pipeline.privacyMode).toBe(before.pipeline.privacyMode);
+    expect(after.pipeline.piiPolicy).toEqual(before.pipeline.piiPolicy);
+    expect(after.pipeline.embedding).toEqual(before.pipeline.embedding);
+
   });
 
   it("queues one rebuild at a time with its estimate, and cancels queued jobs at once", async () => {
@@ -110,4 +125,35 @@ describe.skipIf(!databaseUrl)("project graph service (database)", () => {
   it("hides other users' projects", async () => {
     await expect(service.getProjectGraphStatus("ws-graph", "someone-else")).rejects.toMatchObject({ status: 404 });
   });
+  it("preserves sparse non-template PII choices during a graph-only update over retained data", async () => {
+    const shared = await import("@docslurp/shared");
+    const { getProject } = await import("../services/projects.js");
+    const sparse = { graphRag: true, propositionIndex: true, piiPolicy: { enabled: true, action: "redact_artifacts", patterns: ["ssn"], allowlistPatterns: ["safe-example"] } };
+    await sql`insert into projects(id,org_id,user_id,name,pipeline) values ('sparse-graph','org-graph','user-graph','Sparse',${sql.json(sparse)})`;
+    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values ('sparse-run','org-graph','user-graph','sparse-graph','upload','completed','index',${sql.json(sparse)})`;
+    await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status) values ('sparse-doc','org-graph','user-graph','sparse-graph','sparse-run','synthetic.txt','text/plain','synthetic','completed')`;
+    const before = (await getProject("sparse-graph", "user-graph"))!;
+    expect(before.pipeline.privacyMode).toBe("standard");
+    expect(before.pipeline.piiPolicy).toEqual(shared.normalizePipelineFeatures(sparse as never).piiPolicy);
+    await service.updateProjectGraph("sparse-graph", "user-graph", { depth: "deep" });
+    const after = (await getProject("sparse-graph", "user-graph"))!;
+    expect(after.pipeline.privacyMode).toBe(before.pipeline.privacyMode);
+    expect(after.pipeline.piiPolicy).toEqual(before.pipeline.piiPolicy);
+    expect(after.pipeline.propositionIndex).toBe(true);
+    expect(after.pipeline.graph.depth).toBe("deep");
+  });
+
+  it("refuses an implicit locked-template policy change on a malformed retained fixture", async () => {
+    const { getProject, resolveUpdatedPipeline } = await import("../services/projects.js");
+    const sparse = { graphRag: true, summarize: false, propositionIndex: true };
+    await sql`insert into projects(id,org_id,user_id,name,template_key,pipeline) values ('malformed-graph','org-graph','user-graph','Malformed','legal-contracts',${sql.json(sparse)})`;
+    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values ('malformed-run','org-graph','user-graph','malformed-graph','upload','completed','index',${sql.json(sparse)})`;
+    const before = (await getProject("malformed-graph", "user-graph"))!;
+    expect(before.pipeline.privacyMode).toBe("standard"); expect(before.pipeline.piiPolicy.enabled).toBe(false);
+    const resolved = await resolveUpdatedPipeline(before.id, before, { pipeline: { ...before.pipeline, graph: { ...before.pipeline.graph, depth: "deep" } } });
+    expect(resolved.privacyMode).toBe("strict-privacy"); expect(resolved.piiPolicy.enabled).toBe(true);
+    await expect(service.updateProjectGraph(before.id, "user-graph", { depth: "deep" })).rejects.toMatchObject({ status: 409, code: "policy_publication_unavailable" });
+    expect((await getProject(before.id, "user-graph"))!.pipeline).toEqual(before.pipeline);
+  });
+
 });

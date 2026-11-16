@@ -407,7 +407,7 @@ describe("estimate twins enforce the mutation's authorization", () => {
   });
 });
 
-describe("PATCH /v1/projects/:id through the real route stays non-breaking", () => {
+describe("PATCH project preferences preserve sparse semantics and refuse unsafe policy transitions", () => {
   beforeEach(seed);
 
   const templateKey = (projectTemplates as Array<{ key: string }>)[0]!.key;
@@ -415,7 +415,6 @@ describe("PATCH /v1/projects/:id through the real route stays non-breaking", () 
     ["empty", {}],
     ["name", { name: "Renamed" }],
     ["slug", { slug: "brand-new-slug" }],
-    ["templateKey", { templateKey }],
     ["templateKey null", { templateKey: null }],
     ["systemPrompt", { systemPrompt: "Be brief" }],
     ["systemPrompt null", { systemPrompt: null }],
@@ -435,6 +434,22 @@ describe("PATCH /v1/projects/:id through the real route stays non-breaking", () 
     const res = await app.request("/v1/projects/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ id: "w" });
+  });
+
+  it("refuses a template policy tightening over retained deferred documents without saving", async () => {
+    const before = await sql`select pipeline,template_key,updated_at::text from projects where id='w'`;
+    const runs = await sql`select id,monthly_reservation_cents from project_runs where project_id='w' order by id`;
+    const res = await appFor("u1").request("/v1/projects/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ templateKey }) });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("Tightening privacy or PII policy requires an empty project");
+    expect(await sql`select pipeline,template_key,updated_at::text from projects where id='w'`).toEqual(before);
+    expect(await sql`select id,monthly_reservation_cents from project_runs where project_id='w' order by id`).toEqual(runs);
+  });
+
+  it("accepts the same template tightening on an empty project", async () => {
+    const res = await appFor("u1").request("/v1/projects/wd", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ templateKey }) });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: "wd", templateKey });
   });
 
   it("accepts a retention override for a starter org while billing is enforced (no plan gate)", async () => {

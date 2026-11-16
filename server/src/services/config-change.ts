@@ -1,3 +1,4 @@
+import { lockProjectConfigurationWrite } from "./project-write-lock.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { randomUUID } from "node:crypto";
 
@@ -53,8 +54,9 @@ import { loadProjectSummaryTree, withProjectSummaryTree } from "./run-summary-tr
 /**
  * Config-change jobs (spec 6.2). A project PATCH is classified by `analyzePipelineChange`; changes that
  * make the existing index inconsistent ("reindex-required") save and automatically queue a minimal re-index,
- * "reindex-recommended" changes re-index on request. The change is never rejected: if spend admission blocks
+ * "reindex-recommended" changes re-index on request. If spend admission blocks
  * the job, the config is still saved and the runs wait as `blocked` until the org can spend again.
+ * Unsafe policy transitions over retained data remain an explicit refusal, not an ordinary rebuild.
  */
 
 type Tx = Parameters<Parameters<typeof sql.begin>[1]>[0];
@@ -264,6 +266,7 @@ export async function planProjectChange(args: {
   env?: EstimateEnv;
   /** Merge a narrow trusted proposal against the same project snapshot this plan versions. */
   pipelineOverrides?: PipelineFeatureOverrides;
+  clearOutputSchema?: boolean;
   /**
    * The caller's surface (`runOriginOf`): an unset chart export tier resolves to its default for the impact, the estimate
    * and the re-index runs this plan queues. Unset: machine.
@@ -278,6 +281,10 @@ export async function planProjectChange(args: {
   const project = await getProject(args.projectId, args.userId);
   if (!project) return null;
   if (args.pipelineOverrides) input.pipeline = mergePipelineFeatures(project.pipeline, args.pipelineOverrides);
+  if (args.clearOutputSchema) {
+    input.pipeline = { ...(input.pipeline ?? project.pipeline) };
+    delete input.pipeline.outputSchema;
+  }
   const nextPipeline = await resolveUpdatedPipeline(project.id, project, input, { indexingMode: args.indexingMode });
   // The deployment kill switch: chart export cannot be turned on while it is off (a stored "on" stays inert).
   assertChartExportChangeAllowed(project.pipeline, nextPipeline, args.env ?? process.env);
@@ -660,7 +667,7 @@ async function applyPlannedChange(args: {
   if (deferredProfilesEnabled() && (plan.nextPipeline.indexingMode !== project.pipeline.indexingMode || (plan.nextPipeline.indexingMode === "visual" && plan.nextPipeline.quality === "fast"))) {
     await validateModeSwitch({ current: project, nextPipeline: plan.nextPipeline });
   }
-  const lock = (tx: Tx) => tx`select pg_advisory_xact_lock(hashtextextended(${`config-change:${project.id}`}, 0))`;
+  const lock = (tx: Tx) => lockProjectConfigurationWrite(tx as unknown as typeof sql, project.id, project.orgId);
   if (!plan.willReindex && !plan.recordsIndexChange) {
     const editAccess = await getProjectAccess(project.id, userId);
     if (!editAccess || !canEditProject(editAccess, userId)) return null;
@@ -732,15 +739,9 @@ async function applyPlannedChange(args: {
       precomputed: { current: project, pipeline: plan.nextPipeline },
     });
     if (!saved) return null;
-    await args.afterSave?.(tx as unknown as typeof sql);
     if (plan.recordsIndexChange) {
-      // Documents indexed before hashes were recorded belong to the config that was current until now.
-      await tx`
-        update documents d set index_config_hash = ${beforeHash}
-        where d.project_id = ${project.id} and d.index_config_hash is null and ${LIVE_DOCUMENT}
-          and (d.indexing_mode is null or d.indexing_mode = 'full')
-          and exists (select 1 from vector_indexes v where v.document_id = d.id)
-      `;
+      // A missing historical hash cannot prove the vector inputs. Keep it unknown until a real rebuild;
+      // stamping the currently selected recipe here would manufacture compatibility.
       // Native search caches each document's owner index config hash.
       await notifySearchEligibilityChanged(tx as unknown as typeof sql, [project.id]);
       await tx`
@@ -751,14 +752,20 @@ async function applyPlannedChange(args: {
         where id = ${project.id}
       `;
     }
-    if (!plan.willReindex) return { runs: null as ReindexRunResult | null, cancelled };
+    if (!plan.willReindex) {
+      await args.afterSave?.(tx as unknown as typeof sql);
+      return { runs: null as ReindexRunResult | null, cancelled };
+    }
     // Re-read the targets under the lock: another PATCH or upload may have changed them since planning.
     const targets = await loadTargets(tx, project.id, {
       hashNot: plan.reindex === "required" && plan.hashChanged ? afterHash : null,
       ignoreReindexRuns: supersedesInFlight,
     });
     if (args.expectedTargetSignature !== undefined && reindexTargetSignature(targets) !== args.expectedTargetSignature) throw new ConfigConflictError();
-    if (targets.length === 0) return { runs: null as ReindexRunResult | null, cancelled };
+    if (targets.length === 0) {
+      await args.afterSave?.(tx as unknown as typeof sql);
+      return { runs: null as ReindexRunResult | null, cancelled };
+    }
     // Documents that appeared since planning re-run in full (their reusability was not checked).
     const split: ReusableSplit = { partial: [], full: [] };
     const planned = new Map<string, { stages: PipelineRunStage[]; docs: ReindexTarget[] }>();
@@ -774,6 +781,7 @@ async function applyPlannedChange(args: {
       tx, project: { ...project, pipeline: plan.nextPipeline }, pipeline: stampRunChartExport({ ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, plan.origin), userId,
       meta: jobMeta, blockedReason, reusable: split, origin: plan.origin,
     });
+    await args.afterSave?.(tx as unknown as typeof sql);
     return { runs, cancelled };
   });
   if (result === STALE_PLAN) return STALE_PLAN;
