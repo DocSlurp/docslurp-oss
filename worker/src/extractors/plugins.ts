@@ -11,7 +11,7 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  *
  * Rules the host enforces:
  * - Fail closed. A named plugin that cannot load is a startup error, and a deployment that asks for the VM extractor
- *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service) without a provider is a startup error. The VM route
+ *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_PROFILE=service) without a provider is a startup error. The VM route
  *   never falls back to parsing on the worker host.
  * - A sandboxed PDF provider must isolate every job in a fresh VM or microVM. The worker holds secrets; providers
  *   receive file paths, not credentials, and return only bounded, validated output.
@@ -972,7 +972,7 @@ export async function loadExtractorPlugins(
  *  - an unknown DOCSLURP_PDF_EXTRACTOR, DOCSLURP_PDF_MODE or DOCSLURP_VM_PDF_INSTALLED;
  *  - a VM selection (or the service profile) without a sandboxed PDF provider;
  *  - a provider loaded without the VM selection (PDFs would otherwise not run in it);
- *  - DOCSLURP_PDF_MODE=local beside a VM selection or a loaded provider, or outside DOCSLURP_SERVICE_PROFILE=self-hosted, or
+ *  - DOCSLURP_PDF_MODE=local beside a VM selection or a loaded provider, or outside DOCSLURP_PROFILE=selfhost, or
  *    without Doppler's pdftomarkdown installed;
  *  - DOCSLURP_DOPPLER_IMAGE_EXTRACT on without the VM route and a provider that returns figures.
  * With neither a VM nor local mode the worker starts (other formats still run) and says loudly that PDFs are refused.
@@ -981,7 +981,7 @@ export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = proc
   const sandboxed = sandboxedPdfConfigured(env);
   const local = localPdfModeRequested(env);
   if (sandboxed && !sandboxedPdfProvider()) {
-    throw new Error(`DOCSLURP_PDF_MODE=vm, DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS; refusing to start rather than parse PDFs on the worker host`);
+    throw new Error(`DOCSLURP_PDF_MODE=vm, DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_PROFILE=service needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS; refusing to start rather than parse PDFs on the worker host`);
   }
   // A loaded VM PDF provider means this deployment reads PDFs in VMs; the selection must be explicit.
   if (!sandboxed && sandboxedPdfProvider()) {

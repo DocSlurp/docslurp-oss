@@ -626,16 +626,16 @@ describe("runtime processes refuse to start as a pricing-state writer (council M
 
   it("is on by default wherever pricing is required, and loadPricingProvider refuses before loading any plugin", async () => {
     const { loadPricingProvider, refusePricingStateWriter, resetPricingLoaderForTests } = await import("@docslurp/shared/pricing-loader");
-    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service" })).toBe(true);
+    expect(refusePricingStateWriter({ DOCSLURP_PROFILE: "service" })).toBe(true);
     expect(refusePricingStateWriter({ DOCSLURP_PRICING_REQUIRED: "1" })).toBe(true);
     expect(refusePricingStateWriter({})).toBe(false);
     // Where pricing is required the check cannot be turned off (council O #3).
-    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" })).toBe(true);
+    expect(refusePricingStateWriter({ DOCSLURP_PROFILE: "service", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" })).toBe(true);
     expect(refusePricingStateWriter({ DOCSLURP_PRICING_REQUIRED: "1", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "false" })).toBe(true);
     expect(refusePricingStateWriter({ DOCSLURP_REFUSE_PRICING_STATE_WRITER: "1" })).toBe(true);
     const importModule = vi.fn();
     resetPricingLoaderForTests();
-    await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs" }, { sql: sqlAs(null), importModule })).rejects.toThrow(/refusing to start/);
+    await expect(loadPricingProvider({ DOCSLURP_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs" }, { sql: sqlAs(null), importModule })).rejects.toThrow(/refusing to start/);
     expect(importModule).not.toHaveBeenCalled();
     resetPricingLoaderForTests();
   });
@@ -694,7 +694,7 @@ describe("no override where pricing is required (council O #3)", () => {
     resetPricingLoaderForTests();
     try {
       const sql = { unsafe: async (query: string, params?: unknown[]) => (await db.query<Record<string, unknown>>(query, params as unknown[])).rows };
-      await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" }, { sql, importModule })).rejects.toThrow(/refusing to start/);
+      await expect(loadPricingProvider({ DOCSLURP_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" }, { sql, importModule })).rejects.toThrow(/refusing to start/);
       expect(importModule).not.toHaveBeenCalled();
       expect(errors.join("\n")).toMatch(/DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored where pricing is required/);
     } finally {

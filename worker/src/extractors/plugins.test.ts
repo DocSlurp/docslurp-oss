@@ -178,7 +178,7 @@ describe("loading plugins by configuration", () => {
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "  vm-pdf\n" })).not.toThrow();
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "   " })).toThrow("vm-pdf is not selected");
     expect(() => assertExtractorPluginConfiguration({})).toThrow("vm-pdf is not selected");
-    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_SERVICE_PROFILE: "service" })).not.toThrow();
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PROFILE: "service" })).not.toThrow();
     resetExtractorPluginsForTest();
     await expect(loadExtractorPlugins({ DOCSLURP_PDF_EXTRACTOR: " vm-pdf " })).rejects.toThrow("needs a sandboxed PDF provider");
   });

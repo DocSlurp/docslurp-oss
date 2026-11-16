@@ -23,8 +23,8 @@ describe("runtime environment rule (#398)", () => {
   );
 
   it("a service profile is never development", () => {
-    expect(isDevelopmentEnvSource({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "service" })).toBe(false);
+    expect(isDevelopmentEnvSource({ NODE_ENV: "development", DOCSLURP_PROFILE: "service" })).toBe(false);
     expect(isDevelopmentEnvSource({ DOCSLURP_SERVICE_PROFILE: " Service " })).toBe(false);
-    expect(isDevelopmentEnvSource({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe(true);
+    expect(isDevelopmentEnvSource({ NODE_ENV: "development", DOCSLURP_PROFILE: "selfhost" })).toBe(true);
   });
 });

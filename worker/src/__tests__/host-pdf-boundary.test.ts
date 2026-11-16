@@ -102,7 +102,7 @@ describe("customer-owned local mode (DOCSLURP_PDF_MODE=local)", () => {
   });
 
   it("starts only for customer-owned execution, with Doppler installed, and never beside a VM", () => {
-    const self = { DOCSLURP_PDF_MODE: "local", DOCSLURP_SERVICE_PROFILE: "self-hosted" };
+    const self = { DOCSLURP_PDF_MODE: "local", DOCSLURP_PROFILE: "selfhost" };
     expect(() => assertExtractorPluginConfiguration(self, doppler)).not.toThrow();
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_MODE: "local" }, doppler)).toThrow(/customer-owned execution: it needs DOCSLURP_PROFILE=selfhost/);
     expect(() => assertExtractorPluginConfiguration(self, { dopplerInstalled: () => false })).toThrow(/needs Doppler's pdftomarkdown/);
@@ -115,7 +115,7 @@ describe("customer-owned local mode (DOCSLURP_PDF_MODE=local)", () => {
     rmSync(bin, { recursive: true, force: true });
     // The service profile is a VM deployment: local mode beside it is refused (with a provider so the VM check passes).
     registerExtractorPlugin({ apiVersion: 1, name: "test-plugin", sandboxedPdf: provider() });
-    for (const env of [{ DOCSLURP_SERVICE_PROFILE: "service" }, { DOCSLURP_PDF_EXTRACTOR: VM_PDF_EXTRACTOR_ID }, { DOCSLURP_PDF_MODE: "vm" }]) {
+    for (const env of [{ DOCSLURP_PROFILE: "service" }, { DOCSLURP_PDF_EXTRACTOR: VM_PDF_EXTRACTOR_ID }, { DOCSLURP_PDF_MODE: "vm" }]) {
       expect(() => assertExtractorPluginConfiguration({ ...env, DOCSLURP_PDF_MODE: "local" }, doppler), JSON.stringify(env)).toThrow(/runs PDFs only in vm-pdf|vm-pdf is not selected/);
     }
   });
@@ -133,7 +133,7 @@ describe("which extractor runs a PDF through the stage", () => {
   it("explicit local opt-in: doppler-md runs on the host at Doppler's path, and the choice is logged at startup", async () => {
     vi.stubEnv("DOCSLURP_DOPPLER_BIN_DIR", "/usr/lib/doppler/bin");
     vi.stubEnv("DOCSLURP_PDF_MODE", "local");
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "self-hosted");
+    vi.stubEnv("DOCSLURP_PROFILE", "selfhost");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     expect(() => assertExtractorPluginConfiguration(process.env, doppler)).not.toThrow();
     expect(warn.mock.calls.flat().join(" ")).toContain("[pdf] mode=local: Doppler (doppler-md) parses customer PDFs on the worker host");
@@ -162,7 +162,7 @@ describe("which extractor runs a PDF through the stage", () => {
 });
 
 describe("a VM deployment runs Doppler in vm-pdf only (production, statically configured)", () => {
-  for (const env of [{ DOCSLURP_PDF_MODE: "vm" }, { DOCSLURP_SERVICE_PROFILE: "service" }, { DOCSLURP_PDF_EXTRACTOR: VM_PDF_EXTRACTOR_ID }, { DOCSLURP_VM_PDF_INSTALLED: "1" }]) {
+  for (const env of [{ DOCSLURP_PDF_MODE: "vm" }, { DOCSLURP_PROFILE: "service" }, { DOCSLURP_PDF_EXTRACTOR: VM_PDF_EXTRACTOR_ID }, { DOCSLURP_VM_PDF_INSTALLED: "1" }]) {
     it(`${JSON.stringify(env)}: vm-pdf alone, every host PDF extractor refused`, async () => {
       for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
       expect(sandboxedPdfConfigured()).toBe(true);
@@ -179,18 +179,18 @@ describe("a VM deployment runs Doppler in vm-pdf only (production, statically co
   }
 
   it("refuses to start without a provider, and with a provider loaded but vm-pdf unselected (preflight fails the same way)", async () => {
-    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/needs a sandboxed PDF provider/);
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PROFILE: "service" })).toThrow(/needs a sandboxed PDF provider/);
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_MODE: "vm" })).toThrow(/needs a sandboxed PDF provider/);
-    await expect(loadExtractorPlugins({ DOCSLURP_SERVICE_PROFILE: "service" })).rejects.toThrow(/needs a sandboxed PDF provider/);
+    await expect(loadExtractorPlugins({ DOCSLURP_PROFILE: "service" })).rejects.toThrow(/needs a sandboxed PDF provider/);
     resetExtractorPluginsForTest();
     registerExtractorPlugin({ apiVersion: 1, name: "test-plugin", sandboxedPdf: provider() });
     expect(() => assertExtractorPluginConfiguration({})).toThrow(/vm-pdf is not selected/);
-    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_SERVICE_PROFILE: "service" })).not.toThrow();
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PROFILE: "service" })).not.toThrow();
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_MODE: "vm" })).not.toThrow();
   });
 
   it("does not treat the self-hosted profile as a VM deployment", () => {
-    expect(sandboxedPdfConfigured({ DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe(false);
-    expect(resolvePdfMode({ DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe("off");
+    expect(sandboxedPdfConfigured({ DOCSLURP_PROFILE: "selfhost" })).toBe(false);
+    expect(resolvePdfMode({ DOCSLURP_PROFILE: "selfhost" })).toBe("off");
   });
 });

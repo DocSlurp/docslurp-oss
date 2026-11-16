@@ -272,7 +272,7 @@ export class ExtractorRegistry {
   resolve(format: string, configured?: string[]): string[] {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
     // PDFs: a VM deployment (DOCSLURP_PDF_MODE=vm, DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or
-    // DOCSLURP_SERVICE_PROFILE=service) runs them only in vm-pdf; with neither a VM nor local mode they are refused here,
+    // DOCSLURP_PROFILE=service) runs them only in vm-pdf; with neither a VM nor local mode they are refused here,
     // whatever a project names, so no host parser runs.
     const pdfMode = format === "pdf" ? resolvePdfMode() : null;
     if (pdfMode === "off") throw new Error(PDF_EXTRACTION_UNCONFIGURED);

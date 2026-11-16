@@ -160,8 +160,8 @@ describe("configuration", () => {
   it("runs from the OCR startup check", () => {
     const ocr: SandboxedOcrProvider = { id: "test-vm-ocr", maxSourceBytes: 1024, assertConfigured: vi.fn(), run: vi.fn(), timeoutMs: () => 1 };
     registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "test-ocr-plugin", sandboxedOcr: ocr });
-    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_OCR_PAGE_READER: "escalation" })).toThrow(/page image reader plugin/);
-    expect(assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_SERVICE_PROFILE: "service" })).toBe("vm");
+    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_PROFILE: "service", DOCSLURP_OCR_PAGE_READER: "escalation" })).toThrow(/page image reader plugin/);
+    expect(assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_PROFILE: "service" })).toBe("vm");
   });
 
   it("registers exactly one well-formed provider", () => {

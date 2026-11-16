@@ -20,13 +20,13 @@ describe("loadPricingProvider", () => {
   });
 
   it("refuses to start the service profile without a pricing plugin", async () => {
-    await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service" })).rejects.toThrow(/needs a pricing provider/);
+    await expect(loadPricingProvider({ DOCSLURP_PROFILE: "service" })).rejects.toThrow(/needs a pricing provider/);
     await expect(loadPricingProvider({ DOCSLURP_PRICING_REQUIRED: "1" })).rejects.toThrow(/needs a pricing provider/);
   });
 
   it("installs the plugin's provider and uses it under the service profile", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const env = { DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/opt/pricing/plugin.mjs" };
+    const env = { DOCSLURP_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/opt/pricing/plugin.mjs" };
     const importModule = plugin({ ...OPEN_PRICING, id: "deployment", version: "d-1" });
     // Pricing required: no database handle means no identity check, so it refuses before importing (recheck Q #6).
     await expect(loadPricingProvider(env, { importModule })).rejects.toThrow(/no database connection.*refusing to start/);
@@ -84,7 +84,7 @@ describe("pricing() fails closed when pricing is required (council E #2)", () =>
     } finally {
       vi.unstubAllEnvs();
     }
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
     try {
       expect(() => pricing()).toThrow(/no pricing provider is installed/);
     } finally {

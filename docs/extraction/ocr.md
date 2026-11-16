@@ -32,7 +32,7 @@ boundary=vm`.
 
 ### Service and self-hosted profiles
 
-`DOCSLURP_PROFILE` (`service`, `selfhost` or `dev`; [Deployment profile](../self-host/deployment-profile.md)) says who owns the files and the machine. The deprecated `DOCSLURP_SERVICE_PROFILE` (`service`, `self-hosted`) is still read in this release.
+`DOCSLURP_PROFILE` (`service`, `selfhost` or `dev`; [Deployment profile](../self-host/deployment-profile.md)) says who owns the files and the machine. The retired `DOCSLURP_SERVICE_PROFILE` refuses startup.
 
 - `service`: the operator processes other people's files. OCR of those files must run behind a VM boundary, so only
   `vm`, `hosted` and `off` start. `local` is refused at startup.
@@ -355,7 +355,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DOCSLURP_OCR_MODE` | `vm` under `DOCSLURP_PROFILE=service`, else `off` | `vm`, `local`, `hosted` or `off`. |
-| `DOCSLURP_PROFILE` | unset | `service`, `selfhost` or `dev` (deprecated: `DOCSLURP_SERVICE_PROFILE` `service` / `self-hosted`). `local` needs `selfhost`. `DOCSLURP_DISABLE=ocr` turns OCR off. |
+| `DOCSLURP_PROFILE` | unset | `service`, `selfhost` or `dev` (the retired `DOCSLURP_SERVICE_PROFILE` refuses startup). `local` needs `selfhost`. `DOCSLURP_DISABLE=ocr` turns OCR off. |
 | `DOCSLURP_OCR_PYTHON` | `/opt/docslurp/ocr-venv/bin/python3` | OCR venv interpreter (`local`). |
 | `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-models` | Directory holding the pinned models (`local`). |
 | `DOCSLURP_OCR_ESCALATION` | off | `on` to enable escalation reads. |

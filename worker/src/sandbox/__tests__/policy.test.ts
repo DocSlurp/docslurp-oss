@@ -26,7 +26,7 @@ describe("assertSandboxPolicy in production", () => {
 
   // #398: the override has no effect outside development, and none itself is refused there; worker startup also
   // refuses both (lib/unsafe-overrides.ts).
-  it.each([PROD, { NODE_ENV: "staging" }, { DOCSLURP_SERVICE_PROFILE: "service" }])(
+  it.each([PROD, { NODE_ENV: "staging" }, { DOCSLURP_PROFILE: "service" }])(
     "the unisolated override never lets none run (%o)",
     (base) => {
       const env = { ...base, DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" };
@@ -68,7 +68,7 @@ describe("assertSandboxPolicy outside development, short of production", () => {
   });
 
   it("refuses none under the service profile without NODE_ENV", () => {
-    expect(() => assertSandboxPolicy({ providerId: "none", isolation: NONE_ISOLATION, env: { DOCSLURP_SERVICE_PROFILE: "service" } }))
+    expect(() => assertSandboxPolicy({ providerId: "none", isolation: NONE_ISOLATION, env: { DOCSLURP_PROFILE: "service" } }))
       .toThrow(SandboxPolicyError);
   });
 });

@@ -47,7 +47,7 @@ describe("quarantineRequired (#398: disabling quarantine is development-only)", 
   );
 
   it("is always required under the service profile, even with NODE_ENV=development", () => {
-    expect(quarantineRequired(env({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "service", QUARANTINE_ENABLED: "false" }))).toBe(true);
+    expect(quarantineRequired(env({ NODE_ENV: "development", DOCSLURP_PROFILE: "service", QUARANTINE_ENABLED: "false" }))).toBe(true);
   });
 });
 

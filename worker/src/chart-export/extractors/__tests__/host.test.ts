@@ -41,7 +41,7 @@ describe("deterministic chart extraction: parser VM boundary", () => {
     vi.stubEnv("NODE_ENV", "production");
     expect(() => extractDeterministicVisualsInProcess({ kind: "svg", text: "<svg/>" })).toThrow(ChartExtractRefusedError);
     vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
     expect(() => extractDeterministicVisualsInProcess({ kind: "svg", text: "<svg/>" })).toThrow(/requires-parser-vm/);
   });
 

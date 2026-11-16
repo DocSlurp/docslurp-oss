@@ -67,7 +67,7 @@ function localEnv(modelDir: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
     DOCSLURP_OCR_MODE: "local",
-    DOCSLURP_SERVICE_PROFILE: "self-hosted",
+    DOCSLURP_PROFILE: "selfhost",
     DOCSLURP_OCR_PYTHON: python,
     DOCSLURP_OCR_MODEL_DIR: modelDir,
   };

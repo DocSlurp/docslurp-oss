@@ -18,9 +18,9 @@ describe("public extractor catalog", () => {
     expect(resolvePdfMode({})).toBe("off");
     expect(resolvePdfMode({ DOCSLURP_PDF_MODE: "local" })).toBe("local");
     expect(resolvePdfMode({ DOCSLURP_PDF_MODE: "vm" })).toBe("vm");
-    expect(resolvePdfMode({ DOCSLURP_PDF_MODE: "local", DOCSLURP_SERVICE_PROFILE: "service" })).toBe("vm");
-    expect(sandboxedPdfConfigured({ DOCSLURP_SERVICE_PROFILE: " Service " })).toBe(true);
-    expect(sandboxedPdfConfigured({ DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe(false);
+    expect(resolvePdfMode({ DOCSLURP_PDF_MODE: "local", DOCSLURP_PROFILE: "service" })).toBe("vm");
+    expect(sandboxedPdfConfigured({ DOCSLURP_PROFILE: " Service " })).toBe(true);
+    expect(sandboxedPdfConfigured({ DOCSLURP_PROFILE: "selfhost" })).toBe(false);
     expect(() => resolvePdfMode({ DOCSLURP_PDF_MODE: "true" })).toThrow();
   });
 });

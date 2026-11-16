@@ -7,7 +7,8 @@
  * U+FEFF, which a shell does not, so the two layers would disagree about the same value. After normalizing, NODE_ENV
  * `development`, `test` or empty is development; any other value (a typo, `staging`, `preview`, a value padded with a
  * Unicode space) is not. A service profile (any DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE containing `service`) is
- * never development. No profile lowers this floor: `DOCSLURP_PROFILE=dev` or `selfhost` never makes a non-development
+ * never development (the retired DOCSLURP_SERVICE_PROFILE is still read here, and only here outside retired-env.ts, so a stale
+ * value can only make the floor stricter; startup refuses it anyway). No profile lowers this floor: `DOCSLURP_PROFILE=dev` or `selfhost` never makes a non-development
  * NODE_ENV development (deployment-profile.ts refuses `dev` outside development at startup).
  */
 const ASCII_EDGE_WHITESPACE = /^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g;

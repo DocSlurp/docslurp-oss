@@ -162,7 +162,7 @@ describe("installed pricing provider", () => {
 
 describe("service profile fails closed", () => {
   it("prices nothing with the open default under DOCSLURP_SERVICE_PROFILE=service", () => {
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
     expect(() => pricing()).toThrow(/no pricing provider is installed/);
     expect(() => pageCredits("fast", 1)).toThrow(/no pricing provider is installed/);
     expect(() => workerSlotsFor(true)).toThrow(/no pricing provider is installed/);

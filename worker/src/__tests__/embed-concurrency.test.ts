@@ -216,7 +216,7 @@ describe("EmbedStage concurrency", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       }),
     };
-    const result = await embedOnce({ DOCSLURP_SERVICE_PROFILE: "service" }, ["doc"], {}, false, tableMarkdown, runner as never);
+    const result = await embedOnce({ DOCSLURP_PROFILE: "service" }, ["doc"], {}, false, tableMarkdown, runner as never);
     expect(runner.run).toHaveBeenCalledTimes(1);
     expect(order).toEqual(["vm:preamble-started=1"]);
     expect(result.calls.preamble).toBe(1);
@@ -237,7 +237,7 @@ describe("EmbedStage concurrency", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       }),
     };
-    await embedOnce({ DOCSLURP_SERVICE_PROFILE: "service", EMBED_PREAMBLE_MODE: "inline" }, ["doc"], {}, false, tableMarkdown, runner as never);
+    await embedOnce({ DOCSLURP_PROFILE: "service", EMBED_PREAMBLE_MODE: "inline" }, ["doc"], {}, false, tableMarkdown, runner as never);
     expect(order).toEqual(["vm:preamble-started=0"]);
   });
 

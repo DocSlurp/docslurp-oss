@@ -86,7 +86,7 @@ describe("worker preflight", () => {
     expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "vm" }, stubs).catch((e) => e)).step).toBe("ocr configuration");
     resetExtractorPluginsForTest();
     // The plugin step passes here (as with a VM PDF provider loaded) so the OCR step is the one under test.
-    expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "service", NODE_ENV: "production" }, { ...stubs, loadExtractorPlugins: async () => [] }).catch((e) => e)).step).toBe("ocr configuration");
+    expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_PROFILE: "service", NODE_ENV: "production" }, { ...stubs, loadExtractorPlugins: async () => [] }).catch((e) => e)).step).toBe("ocr configuration");
     expectNothingStarted();
   });
 
@@ -115,22 +115,22 @@ describe("worker preflight", () => {
   });
 
   it("refuses a service profile without a VM PDF provider at the plugin step: PDFs never fall back to the worker host", async () => {
-    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_SERVICE_PROFILE: "service", NODE_ENV: "production" }, stubs).catch((e) => e);
+    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_PROFILE: "service", NODE_ENV: "production" }, stubs).catch((e) => e);
     expect(error).toBeInstanceOf(WorkerPreflightError);
     expect(error.step).toBe("extractor plugins");
-    expect(error.message).toMatch(/DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider/);
+    expect(error.message).toMatch(/DOCSLURP_PROFILE=service needs a sandboxed PDF provider/);
     expectNothingStarted();
   });
 
   it("refuses an OCR mode whose model manifest is missing", async () => {
-    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "self-hosted" }, {
+    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_PROFILE: "selfhost" }, {
       ...stubs, assertOcrConfiguration: () => "local", pinnedOcrModels: () => { throw new Error("OCR model manifest is malformed"); },
     }).catch((e) => e);
     expect(error.step).toBe("ocr model pins");
   });
 
   it("refuses the service profile without NODE_ENV=production before anything else (council G L3)", async () => {
-    const error = await runWorkerPreflight({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_OCR_MODE: "off" }, stubs).catch((e) => e);
+    const error = await runWorkerPreflight({ DOCSLURP_PROFILE: "service", DOCSLURP_OCR_MODE: "off" }, stubs).catch((e) => e);
     expect(error).toBeInstanceOf(WorkerPreflightError);
     expect(error.step).toBe("runtime environment");
     expect(error.message).toMatch(/requires NODE_ENV=production/);

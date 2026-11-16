@@ -33,7 +33,8 @@ def data_roots(env=None):
 def assert_eval_execution(*inputs, env=None):
     """Refuse the service profile, and any input (resolved through symlinks) outside a declared data root."""
     env = os.environ if env is None else env
-    if (env.get("DOCSLURP_SERVICE_PROFILE") or "").strip().lower() == "service":
+    # DOCSLURP_PROFILE, or the retired DOCSLURP_SERVICE_PROFILE (read only to stay strict).
+    if any("service" in (env.get(name) or "").strip().lower() for name in ("DOCSLURP_PROFILE", "DOCSLURP_SERVICE_PROFILE")):
         raise ExecutionRefused("eval-refused-under-service-profile: this harness is for customer-owned or public fixtures; "
                                "service customer files are OCR'd only in the VM boundary")
     roots = data_roots(env)
