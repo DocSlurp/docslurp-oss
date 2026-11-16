@@ -164,8 +164,8 @@ describe("operator dry run (scripts/pii-page-scope-dry-run.sql)", () => {
     await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('pdry', 'oa', 'ua', 'Dry', ${policy("block_indexing")}),
       ('pdoc', 'oa', 'ua', 'Dry doc', ${policy("block_document")})`;
     await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
-      ('rdry', 'oa', 'ua', 'pdry', 'bulk-upload', 'completed', 'completed', '{}'),
-      ('rdoc', 'oa', 'ua', 'pdoc', 'bulk-upload', 'completed', 'completed', '{}')`;
+      ('rdry', 'oa', 'ua', 'pdry', 'bulk-upload', 'completed', 'completed', ${policy("block_indexing")}),
+      ('rdoc', 'oa', 'ua', 'pdoc', 'bulk-upload', 'completed', 'completed', ${policy("block_document")})`;
     const docs: Array<[string, string, string, number, Array<number | null>]> = [
       ["dry-one-page-hit", "pdry", "rdry", 10, [4]],
       ["dry-every-page", "pdry", "rdry", 2, [1, 2]],
