@@ -35,8 +35,17 @@ export async function pinRunOcrPageClass(
 ): Promise<boolean> {
   const stored = state.artifactLedger.read(OCR_PAGE_CLASS_SLOT);
   if (stored === "1" || stored === "0") return stored === "1";
-  const on = ocrPageClassConfigured(env) && await fleetSupports().catch(() => false);
+  let reason: "on" | "operator-off" | "fleet-not-ready" | "fleet-check-failed" = "on";
+  if (!ocrPageClassConfigured(env)) reason = "operator-off";
+  else {
+    const supported = await fleetSupports().then((value) => value, () => null);
+    if (supported === null) reason = "fleet-check-failed";
+    else if (!supported) reason = "fleet-not-ready";
+  }
+  const on = reason === "on";
   state.artifactLedger.record(OCR_PAGE_CLASS_SLOT, on ? "1" : "0");
+  // Operators see why a run kept the earlier rule: a stale older worker would otherwise keep every new run there silently.
+  if (!on) console.warn(`[ocr-page-class] run pinned to the earlier page rule reason=${reason}`);
   return on;
 }
 

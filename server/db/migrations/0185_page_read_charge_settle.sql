@@ -11,7 +11,9 @@
 --   `billing.ocr-page-class` (worker capability handshake), so this fires only when an older worker reappears; see
 --   docs/extraction/ocr.md (rollout and rollback) for disabling it before a worker rollback.
 --
--- Serialization: before reading, the trigger locks the charge's run row (FOR UPDATE). The usage_events_run_spent_cents
+-- Serialization: before reading, the trigger locks the charge's run row (FOR NO KEY UPDATE: it serializes settlers but,
+-- unlike FOR UPDATE, does not conflict with the FOR KEY SHARE every child-row foreign-key insert takes, the 40P01 that
+-- worker/src/__tests__/checkpoint-lock-order.test.ts guards). The usage_events_run_spent_cents
 -- statement trigger (0056) updates that same row at statement end, so every writer takes the run row first and in one
 -- order (no deadlock), and a row lock lives on the tuple, not in the shared lock table, so a transaction inserting tens
 -- of thousands of page charges takes no lock-table slot per page. The function is VOLATILE: under READ COMMITTED each
@@ -35,7 +37,7 @@ BEGIN
   END IF;
   IF NEW.metric = 'ingest-page-ocr' AND NEW.id LIKE 'ocr:%' THEN
     v_page := substr(NEW.id, 5);
-    PERFORM 1 FROM public.project_runs r WHERE r.id = NEW.run_id FOR UPDATE;
+    PERFORM 1 FROM public.project_runs r WHERE r.id = NEW.run_id FOR NO KEY UPDATE;
     IF EXISTS (SELECT 1 FROM public.usage_events e WHERE e.id = 'rich:' || v_page AND e.run_id = NEW.run_id) THEN
       RETURN NULL;
     END IF;
@@ -43,7 +45,7 @@ BEGIN
   END IF;
   IF NEW.metric = 'ingest-page-rich' AND NEW.id LIKE 'rich:%' AND NEW.id NOT LIKE '%:unit:%' THEN
     v_page := substr(NEW.id, 6);
-    PERFORM 1 FROM public.project_runs r WHERE r.id = NEW.run_id FOR UPDATE;
+    PERFORM 1 FROM public.project_runs r WHERE r.id = NEW.run_id FOR NO KEY UPDATE;
     SELECT e.cost_cents INTO v_other FROM public.usage_events e
     WHERE e.id = 'ocr:' || v_page AND e.run_id = NEW.run_id;
     IF FOUND THEN

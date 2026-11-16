@@ -132,8 +132,10 @@ describe("page read charges settle across activities", () => {
     await expect(old("r-legacy", "fast:r-legacy")).resolves.toBeDefined();
   });
 
-  it("settles a 20,000-page document's OCR charges in one checkpoint transaction, then its Rich upgrades", { timeout: 600_000 }, async () => {
-    const pages = 20_000;
+  // 2,000 pages by default (CI time); DOCSLURP_TEST_BIG_SETTLE=1 runs the 20,000-page size the lock-table fix was for.
+  const bigPages = process.env.DOCSLURP_TEST_BIG_SETTLE === "1" ? 20_000 : 2_000;
+  it(`settles a ${bigPages.toLocaleString("en-US")}-page document's OCR charges in one checkpoint transaction, then its Rich upgrades`, { timeout: 600_000 }, async () => {
+    const pages = bigPages;
     // One statement in one transaction, as a checkpoint writes a document's charges (the ledger path is covered above).
     await db.exec(`insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, amount, unit, cost_cents, metadata)
       select 'ocr:r-big:d-r-big:' || g, 'u1', 'r-big', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-ocr', 1, 'page', ${t.ocr},
