@@ -52,6 +52,11 @@ describe("pipeline.ladder settings", () => {
     expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.4 } } })).toEqual({ active: true, maxRung: "intelligent", aboveFast: 0.2 });
   });
 
+  it("fails closed on a stored share that is not a number", () => {
+    expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: "0.1" as never } } }).maxRung).toBe("fast");
+    expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: null } } }).active).toBe(false);
+  });
+
   it("fails closed on a stored rung that is not one", () => {
     expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "vision" as never } }).maxRung).toBe("fast");
     expect(effectiveLadder({ quality: "auto", ladder: {} }).maxRung).toBe("intelligent");
@@ -232,10 +237,11 @@ describe("estimates under the ladder", () => {
     expect(capped.high).toBeCloseTo(fast.high + 10 * (0.25 - 0.005));
     expect(capped.high).toBeLessThan(uncapped.high);
     expect(capped.low).toBeLessThanOrEqual(capped.high);
-    // A multi-frame image is never read under a share: quoted Fast.
+    // A multi-frame image is quoted at the share's budget (the worker may classify it differently by its sniffed type),
+    // never below what the worker can read: 2 of its 20 frames.
     const tiff = [{ name: "fax.tiff", size: 400_000, pages: 20 }];
     const tiffFast = quoteUpload({ files: tiff, profile: { ...estimateProfileFor(normalizePipelineFeatures({ ladder: { maxRung: "fast" } }), { env }), billing: "enforced" } }).estimate.credits!;
-    expect(quoteUpload({ files: tiff, profile: shareProfile }).estimate.credits!.high).toBeCloseTo(tiffFast.high);
+    expect(quoteUpload({ files: tiff, profile: shareProfile }).estimate.credits!.high).toBeCloseTo(tiffFast.high + 2 * (0.25 - 0.005));
     // No limit: the uncapped quote, unchanged.
     expect(quoteUpload({ files, profile: { ...estimateProfileFor(base, { env }), billing: "enforced" } }).estimate.credits).toEqual(uncapped);
   });

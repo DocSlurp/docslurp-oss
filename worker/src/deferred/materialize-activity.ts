@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, applyLadderLimits, normalizeStoredPipelineFeatures, tighterLadder, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
@@ -48,14 +48,21 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
   if (run.kind !== "materialize") return run;
   // Query-time reads follow the project's Auto ladder as it is now, never looser: a materialize run carries an older
   // snapshot of the pipeline (pipeline.ladder), so the project's current limits tighten it.
-  const [project] = await sql<{ ladder: unknown }[]>`
-    select w.pipeline -> 'ladder' as ladder from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
+  // Quality is capped at the project's while it has a limit (clampRunLadder), so a source run at Good cannot read past it.
+  const [project] = await sql<{ ladder: unknown; quality: string | null }[]>`
+    select w.pipeline -> 'ladder' as ladder, w.pipeline ->> 'quality' as quality
+    from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
   `;
+  const projectQuality = qualityModeSchema.safeParse(project?.quality ?? "auto");
   const tighten = <T extends { pipeline: unknown }>(value: T): T => {
     const pipeline = value.pipeline as PipelineFeatures;
     if (!pipeline || typeof pipeline !== "object") return value;
-    const ladder = tighterLadder((project?.ladder ?? null) as never, pipeline.ladder ?? null);
-    return { ...value, pipeline: applyLadderLimits({ ...pipeline, ladder }) };
+    const clamped = clampRunLadder(pipeline, {
+      // An unreadable project quality is treated as the tightest (fail closed).
+      quality: projectQuality.success ? projectQuality.data : "fast",
+      ladder: (project?.ladder ?? null) as never,
+    }, false);
+    return { ...value, pipeline: applyLadderLimits(clamped) };
   };
   const [own] = await sql<{ empty: boolean }[]>`
     select (pipeline = '{}'::jsonb) as empty from project_runs where id = ${run.id}

@@ -68,7 +68,8 @@ tasks:
    above-fast budget of them, in document order, and runs only text-layer extractors on a document the share does not
    cover entirely (an extractor that OCRs every page could otherwise pass the cap). An image file is one page and is read; one in a
    format that can hold several frames (TIFF, GIF, WebP), whose frame count is unknown before the OCR engine reads
-   every frame, is kept as its page image under an above-fast share (and quoted Fast).
+   every frame, is kept as its page image under an above-fast share, by OCR and vision alike (quotes still price the share's
+   budget for it).
 2. The rest of the budget goes to the pages triage selected: pages without native text first, then higher triage
    confidence, then document order.
 3. Under `aboveOcr`, figure pages keep the `intelligent` rung in the same order while its budget lasts; the others are
@@ -98,7 +99,9 @@ export's `models` tier) can only tighten the project's limits: the run gets the 
 each. While the project has a limit, such a caller cannot raise quality above the project's either (an upload asking
 Good on an Auto project with a limit runs Auto). The override is clamped, not refused; on a visual-mode project a limit the project does not have is dropped from the
 run. A replay (reprocess, bulk reprocess, retry as new) and query-time materialization carry an older run's pipeline:
-the project's limits as they are now tighten it, whoever asks. Adding a limit to a visual-mode project is refused
+the project's limits as they are now tighten it, whoever asks, and while the project has a limit its quality is capped
+at the project's (a source run at Good replays at the project's Auto). A stored share or rung that is not a valid value
+reads as the tightest limit. Adding a limit to a visual-mode project is refused
 (`visual_mode_quality`).
 
 ## Billing and estimates

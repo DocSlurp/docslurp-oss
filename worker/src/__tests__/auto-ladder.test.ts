@@ -117,6 +117,15 @@ describe("Auto ladder in vision-extract", () => {
     expect(result.selectedPages.sort((a, b) => a - b)).toEqual([2, 4, 6, 8, 9]);
   });
 
+  it("an image the ladder keeps unread (multi-frame, under a share) is not read by vision either", async () => {
+    const tiff = { ...pdf(1, "fax"), filename: "fax.tiff", mimeType: "image/tiff" } as Document;
+    const { internals } = stageFor([page(1, "scan")]);
+    const share = await internals.checkNeedsVision(tiff, 1, runState(tiff, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.5 } } }));
+    expect(share).toMatchObject({ needed: false, reason: "ladder-kept-image", selectedPages: [] });
+    const jpeg = { ...tiff, filename: "photo.jpg", mimeType: "image/jpeg" } as Document;
+    expect((await stageFor([page(1, "scan")]).internals.checkNeedsVision(jpeg, 1, runState(jpeg, { ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.5 } } }))).selectedPages).toEqual([1]);
+  });
+
   it("maxRung fast reads nothing (Fast)", async () => {
     const document = pdf(10);
     const state = runState(document, { ladder: { maxRung: "fast" } });

@@ -10,6 +10,7 @@ import { rm } from "node:fs/promises";
 import {
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
+  documentLadderPolicy,
   effectiveLadder,
   ladderPlanSummary,
   parserPlaybookCatalog,
@@ -43,7 +44,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { planDocumentLadder, pinLadderPlan, readLadderPin } from "../routing/auto-ladder.js";
+import { ladderKeepsImageUnread, planDocumentLadder, pinLadderPlan, readLadderPin } from "../routing/auto-ladder.js";
 import { configuredVisionServedRoute, executeVisionRuntime, isPageTranscription, visionCall, visionRenderLongEdge, VisionImageOverBudgetError } from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 import { primaryFailureUsages, priceVisionResult, visionFailureUsages, type VisionFailureUsage } from "../lib/guarded-vision-call.js";
@@ -824,6 +825,13 @@ export class VisionExtractStage implements Stage {
     // Without limits the plan keeps every selected page on the rung it asked for, so the reads are unchanged.
     let hints: LegacyPageHints = routing ? legacyPageHints(routing.pages) : NO_HINTS;
     let ladder: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] } | undefined;
+    // An image the ladder kept unread in extraction (a format that can hold several frames, under an above-fast share) is
+    // not read here either: it stays its page image, as quoted.
+    if (state.run.pipeline.quality === "auto" && document.mimeType.startsWith("image/") && needed
+      && ladderKeepsImageUnread(documentLadderPolicy(state.run.pipeline, pageCount), { filename: document.filename, mimeType: document.mimeType, sniffedMimeType: document.fileFacts?.sniffedMimeType ?? null })) {
+      needed = false;
+      reason = "ladder-kept-image";
+    }
     if (state.run.pipeline.quality === "auto") {
       const planned = this.planLadder(state, document, pageCount, routing?.pages ?? [], needed ? selectedPages : [], hints);
       // Recorded only under a limit: without one, stats and manifests keep their shape and the reads are unchanged.

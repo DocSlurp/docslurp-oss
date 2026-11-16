@@ -12,7 +12,7 @@ import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 import { figuresEnabled } from "./doppler-figures.js";
 import { effectiveLadder, ladderShareBudget, pageReadingQuality } from "./auto-ladder.js";
 import { uploadMediaKind } from "./media-upload-estimate.js";
-import { isMultiFrameImageFile, quoteFilePageRange } from "./upload-pages.js";
+import { quoteFilePageRange } from "./upload-pages.js";
 
 /*
  * Upload quotes without a database: what `POST /v1/uploads/estimate` returns. This module holds the generic parts (page
@@ -127,8 +127,8 @@ export function capCreditsToLadderShare(args: {
     const range = quoteFilePageRange(file);
     pagesLow += range.low;
     pagesHigh += range.high;
-    // A multi-frame image (TIFF, GIF) is never read under a share (the worker cannot bound its frames): all Fast.
-    if (isMultiFrameImageFile(file)) continue;
+    // A multi-frame image is kept unread under a share by the worker, which classifies it by its sniffed type; the quote
+    // cannot see that, so it prices the share's budget for it like any file (never below what the worker can read).
     allowedLow += ladderShareBudget(args.share, range.low);
     allowedHigh += ladderShareBudget(args.share, range.high);
   }

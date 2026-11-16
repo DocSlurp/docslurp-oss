@@ -60,8 +60,10 @@ export interface EffectiveLadder {
   aboveOcr?: number;
 }
 
+// Unset (undefined or null) caps nothing; a stored value that is set but not a finite number fails closed to 0.
 const share = (value: unknown): number | undefined =>
-  typeof value === "number" && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : undefined;
+  value === undefined || value === null ? undefined
+  : typeof value === "number" && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
 
 export function effectiveLadder(pipeline: LadderPipeline | null | undefined): EffectiveLadder {
   if ((pipeline?.quality ?? "auto") !== "auto") return { active: false, maxRung: "intelligent" };
