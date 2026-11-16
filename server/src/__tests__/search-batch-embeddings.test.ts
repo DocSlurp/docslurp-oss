@@ -47,7 +47,7 @@ describe("batch query embeddings", () => {
     expect(mocks.recordUsageEvent.mock.calls[0]![0]).toMatchObject({ userId: "u", scope: { orgId: "o", projectId: "w" },
       usage: { metric: "embed-query", inputTokens: 15, metadata: { batch: true, batchSize: 3 } } });
     const pipeline = context().indexing.pipeline;
-    expect(embeddingCache().get(queryEmbeddingCacheKey("valve torque", pipeline.embedding, "standard", "o")!)).toEqual([1, 1]);
+    expect(embeddingCache().get("o", queryEmbeddingCacheKey("valve torque", pipeline.embedding, "standard", "o")!)).toEqual([1, 1]);
   });
 
   it("skips queries that would not embed their own text, and strict-privacy projects", async () => {

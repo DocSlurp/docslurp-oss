@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { requireOrgId } from "@docslurp/shared";
 
-import { envInt, TtlLruCache } from "./ttl-lru.js";
+import { envInt, OrgPartitionedTtlLru } from "./ttl-lru.js";
 
 /**
  * Query-embedding cache. Follow-up and repeated searches re-embed the same
@@ -14,7 +14,12 @@ import { envInt, TtlLruCache } from "./ttl-lru.js";
  * whitespace-collapsed (never lowercased: many models are case-sensitive) and
  * is stored as a hash, so the cache holds no readable query text.
  *
- * Env: SEARCH_EMBEDDING_CACHE_MAX_ENTRIES (default 1000; 0 disables) and
+ * Entries are also held in a per-organization partition with its own share of
+ * the cache (OrgPartitionedTtlLru), so one tenant's volume cannot evict another's
+ * entries and turn its hits into misses.
+ *
+ * Env: SEARCH_EMBEDDING_CACHE_MAX_ENTRIES (default 1000; 0 disables),
+ * SEARCH_EMBEDDING_CACHE_MAX_ENTRIES_PER_ORG (default a quarter of the total) and
  * SEARCH_EMBEDDING_CACHE_TTL_SECONDS (default 3600).
  */
 export interface EmbeddingCacheIdentity {
@@ -42,17 +47,19 @@ export function embeddingCacheKey(identity: EmbeddingCacheIdentity, query: strin
   ])).digest("hex");
 }
 
-export function createEmbeddingCache(env: NodeJS.ProcessEnv = process.env, now?: () => number): TtlLruCache<number[]> {
-  return new TtlLruCache<number[]>(
-    envInt("SEARCH_EMBEDDING_CACHE_MAX_ENTRIES", 1000, env),
+export function createEmbeddingCache(env: NodeJS.ProcessEnv = process.env, now?: () => number): OrgPartitionedTtlLru<number[]> {
+  const maxEntries = envInt("SEARCH_EMBEDDING_CACHE_MAX_ENTRIES", 1000, env);
+  return new OrgPartitionedTtlLru<number[]>(
+    maxEntries,
     envInt("SEARCH_EMBEDDING_CACHE_TTL_SECONDS", 3600, env) * 1000,
+    envInt("SEARCH_EMBEDDING_CACHE_MAX_ENTRIES_PER_ORG", Math.max(1, Math.floor(maxEntries / 4)), env),
     now,
   );
 }
 
-let shared: TtlLruCache<number[]> | undefined;
+let shared: OrgPartitionedTtlLru<number[]> | undefined;
 
-export function embeddingCache(): TtlLruCache<number[]> {
+export function embeddingCache(): OrgPartitionedTtlLru<number[]> {
   return shared ??= createEmbeddingCache();
 }
 

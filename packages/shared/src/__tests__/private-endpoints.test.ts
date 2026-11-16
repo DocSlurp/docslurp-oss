@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   authorizePrivateModelCall,
   configurePrivateCallAudit,
+  foldSystemMessages,
   embeddingConfigSchema,
   isProviderCallAllowed,
   isPrivateNetworkHost,
@@ -185,6 +186,69 @@ describe("authorizePrivateModelCall", () => {
     await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { projectId: "ws" } }))
       .rejects.toThrow();
     expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe("models without the system role", () => {
+  const noSystem = { id: "acme/no-system-llm", capability: "text", systemMessage: false };
+
+  it("accepts systemMessage on text models only", () => {
+    expect(parsePrivateModelEndpointRegistry(registry({ models: [noSystem] })).endpoints[0]!.models[0]!.systemMessage).toBe(false);
+    expect(() => parsePrivateModelEndpointRegistry(registry({ models: [{ id: "v", capability: "vision", systemMessage: false }] }))).toThrow(/systemMessage only applies to text models/);
+  });
+
+  it("refuses the call without the organization's cache salt, before anything is sent or audited", async () => {
+    setPrivateModelEndpointRegistryForTests(JSON.parse(registry({ models: [noSystem] })));
+    process.env.TEST_PRIVATE_GPU1_TOKEN = "secret-token";
+    const write = vi.fn(async () => {});
+    configurePrivateCallAudit({ write });
+    for (const cacheSalt of [undefined, "", "  "]) {
+      await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/acme/no-system-llm", capability: "text", operation: "t", auditScope: { projectId: "ws" }, cacheSalt }))
+        .rejects.toThrow(/no system role/);
+    }
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("strips any system message into the user turn and sends cache_salt; other models never get cache_salt", async () => {
+    setPrivateModelEndpointRegistryForTests(JSON.parse(registry({ models: [noSystem, { id: "plain", capability: "text" }] })));
+    process.env.TEST_PRIVATE_GPU1_TOKEN = "secret-token";
+    const bodies: Array<Record<string, unknown>> = [];
+    const baseFetch = vi.fn(async (_url: unknown, init?: RequestInit) => { bodies.push(JSON.parse(String(init?.body))); return new Response("{}"); });
+    const request = JSON.stringify({ model: "m", messages: [{ role: "system", content: "Workspace 0123. Rules." }, { role: "user", content: "Tenant text." }] });
+    const noSys = await authorizePrivateModelCall({ privacyMode: "standard", modelUri: "llm://private/gpu1/acme/no-system-llm", capability: "text", operation: "t", cacheSalt: "salt-a", baseFetch: baseFetch as never });
+    await noSys.fetch("https://gpu1.example.com/v1/chat/completions", { method: "POST", body: request });
+    expect(bodies[0]).toMatchObject({ cache_salt: "salt-a", messages: [{ role: "user", content: "Workspace 0123. Rules.\n\nTenant text." }] });
+    const plain = await authorizePrivateModelCall({ privacyMode: "standard", modelUri: "llm://private/gpu1/plain", capability: "text", operation: "t", cacheSalt: "salt-a", baseFetch: baseFetch as never });
+    await plain.fetch("https://gpu1.example.com/v1/chat/completions", { method: "POST", body: request });
+    expect(bodies[1]).toEqual(JSON.parse(request));
+  });
+
+  it("fails closed when a no-system-role request cannot be given the cache salt", async () => {
+    setPrivateModelEndpointRegistryForTests(JSON.parse(registry({ models: [noSystem] })));
+    process.env.TEST_PRIVATE_GPU1_TOKEN = "secret-token";
+    const baseFetch = vi.fn(async () => new Response("{}"));
+    const call = await authorizePrivateModelCall({ privacyMode: "standard", modelUri: "llm://private/gpu1/acme/no-system-llm", capability: "text", operation: "t", cacheSalt: "salt-a", baseFetch: baseFetch as never });
+    const body = JSON.stringify({ model: "m", messages: [{ role: "user", content: "Tenant text." }] });
+    await expect(call.fetch("https://gpu1.example.com/v1/completions", { method: "POST", body })).rejects.toThrow(/cache salt/);
+    await expect(call.fetch("https://gpu1.example.com/v1/chat/completions", { method: "POST", body: "not json" })).rejects.toThrow(/cache salt/);
+    await expect(call.fetch("https://gpu1.example.com/v1/chat/completions", { method: "POST", body: new Blob([body]) })).rejects.toThrow(/cache salt/);
+    expect(baseFetch).not.toHaveBeenCalled();
+    // A query string still reaches the rewrite.
+    await call.fetch("https://gpu1.example.com/v1/chat/completions?x=1", { method: "POST", body });
+    expect(JSON.parse(String((baseFetch.mock.calls[0] as unknown as [string, RequestInit])[1].body)).cache_salt).toBe("salt-a");
+  });
+
+  it("folds system text ahead of array user content and keeps other turns", () => {
+    expect(foldSystemMessages([
+      { role: "system", content: [{ type: "text", text: "A" }] },
+      { role: "assistant", content: "earlier" },
+      { role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] },
+    ])).toEqual([
+      { role: "assistant", content: "earlier" },
+      { role: "user", content: [{ type: "text", text: "A" }, { type: "image_url", image_url: { url: "x" } }] },
+    ]);
+    const unchanged = [{ role: "user", content: "q" }];
+    expect(foldSystemMessages(unchanged)).toBe(unchanged);
   });
 });
 
