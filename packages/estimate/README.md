@@ -36,6 +36,8 @@ const estimator = await createEstimator({ module: wasm });
 
 ## What a profile holds
 
+For optional dense per-page evidence, `estimator.profileJsonl(file, options)` yields local-only JSONL through bounded range reads, supports PDFs up to 2 GiB, inventories every page and deeply inspects up to 1,000. Numeric sections include image/vector facts, ruled/unruled table and caption/vector-figure candidates, exclusive text-byte composition, compact chunk summaries and optional top-page rankings. Node paths use `profilePathJsonl` from the `/node` export; Python exposes `Estimator.profile_jsonl(path)`. This is separate from the small quote profile below. See [the JSONL contract and limits](../../docs/offline-page-profile-jsonl.md).
+
 Aggregates only, never file content, never per-page arrays, at most 4 KiB (`fileProfileSchema` in
 `@docslurp/shared`; profile schema 1):
 

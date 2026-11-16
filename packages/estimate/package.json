@@ -38,6 +38,7 @@
     "dist",
     "README.md",
     "LICENSE",
+    "third-party",
     "profiler-rules.json"
   ],
   "engines": {

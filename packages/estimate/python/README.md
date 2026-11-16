@@ -17,3 +17,5 @@ quote = request_quote(result["request"]["files"], api_key=API_KEY)   # the serve
 ```
 
 Offline, show the profiles without credits. See the npm package README for the profile fields.
+
+For dense per-page evidence, `estimator.profile_jsonl(path)` yields numeric JSONL through bounded local range reads (up to 2 GiB). It inventories every page, deeply inspects up to 1,000, and includes optional table/caption/vector candidates, text-byte composition, chunk summaries and rankings. Close a partially consumed generator explicitly. See [the JSONL contract](../../../docs/offline-page-profile-jsonl.md); this stream is separate from the small quote profile.

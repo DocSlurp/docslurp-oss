@@ -341,6 +341,7 @@ export async function runDocumentStage(
       if (stageName !== "quarantine") assertParseSourceDecided(document);
       const watched = await watchSandboxInfrastructure(() => runWithPerfContext({
         runId: state.run.id,
+        executionGeneration: state.executionGeneration,
         documentId: document.id,
         orgId: state.run.orgId,
         ...(state.run.projectId ? { projectId: state.run.projectId } : {}),

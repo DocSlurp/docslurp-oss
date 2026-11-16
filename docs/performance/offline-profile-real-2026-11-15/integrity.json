@@ -1,0 +1,25 @@
+{
+  "schema": "docslurp-evaluation-integrity@v1",
+  "passed": true,
+  "datasetHash": "4e7ba9a6e4d17eb88faa4a411b7a938fb2d41cba6e200eec9b6f391b2a7f34b3",
+  "productionHash": "0f4bb81fa330b7d92a406ff60cbd1fa21d02f03908b716f9bea78f92fc11f522",
+  "gitHead": "0e49c8bc12d8bb4d0b2dfe4f0c6e850830f24368",
+  "base": "HEAD",
+  "repositories": [
+    {
+      "path": ".",
+      "head": "0e49c8bc12d8bb4d0b2dfe4f0c6e850830f24368",
+      "base": "HEAD",
+      "scannedFiles": 3376,
+      "dirty": true
+    }
+  ],
+  "scannedFiles": 3376,
+  "scannedProductionFiles": 1838,
+  "cases": 4,
+  "findings": [],
+  "candidates": [],
+  "candidateSetHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "reviewContext": null,
+  "status": "passed"
+}

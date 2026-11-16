@@ -943,6 +943,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     // run's snapshot on reprocess, a request body, a template): run-summary-tree.ts.
     const input: CreateRunInput = {
       ...request,
+      apiKeyId: request.apiKeyId ?? currentRequestApiKeyId(),
       pipeline: withProjectSummaryTree(request.chartExportReplay
         ? replayChartExport(sanitized, request.chartExportReplay.requested ?? null, projectChartExport, request.origin ?? "machine")
         : stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),

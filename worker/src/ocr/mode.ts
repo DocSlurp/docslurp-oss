@@ -14,7 +14,7 @@
  *   it reads no OCR rather than refusing to start).
  */
 import { sandboxedOcrProvider } from "../extractors/plugins.js";
-import { assertOcrPageReaderConfiguration } from "./page-reader-mode.js";
+import { assertOcrPageReaderConfiguration, assertVisionPageReaderConfiguration } from "./page-reader-mode.js";
 
 export const OCR_MODES = ["vm", "local", "hosted", "off"] as const;
 export type OcrMode = (typeof OCR_MODES)[number];
@@ -175,6 +175,8 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
   console.log(`[ocr] mode=${mode} profile=${profile ?? "unset"}${mode === "vm" ? " boundary=vm" : mode === "local" ? " boundary=local-sandbox" : ""}`);
   // The optional page reader (DOCSLURP_OCR_PAGE_READER): refuses to start when on without a ready provider or boundary PNGs.
   assertOcrPageReaderConfiguration(env, mode);
+  // The vision page reader (DOCSLURP_VISION_PAGE_READER): refuses to start when on without a ready provider.
+  assertVisionPageReaderConfiguration(env);
   const longEdge = ocrLongEdgeOptIn(env);
   if (longEdge !== null) {
     console.warn(

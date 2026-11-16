@@ -26,6 +26,8 @@ export interface PageReaderOrgBudget {
   admit(request: PageReaderAdmitRequest): Promise<PageReaderAdmission>;
   /** Replace the ticket's reservation with the cost the job recorded. */
   settle(ticket: string, costCents: number): Promise<void>;
+  /** The organization's committed reader cost today (settled cost plus open reservations), read without a reservation. */
+  committedCents(orgId: string): Promise<number>;
 }
 
 function utcDay(now: Date): string {
@@ -54,6 +56,15 @@ export class InMemoryPageReaderOrgBudget implements PageReaderOrgBudget {
     const ticket = randomUUID();
     this.tickets.set(ticket, { orgId, day, reserved: reserve, cost: 0, settled: false });
     return { admitted: true, ticket };
+  }
+
+  async committedCents(orgId: string): Promise<number> {
+    const day = utcDay(this.now());
+    let committed = 0;
+    for (const ticket of this.tickets.values()) {
+      if (ticket.orgId === orgId && ticket.day === day) committed += ticket.settled ? ticket.cost : Math.max(ticket.reserved, ticket.cost);
+    }
+    return committed;
   }
 
   async settle(ticket: string, costCents: number): Promise<void> {
@@ -91,6 +102,14 @@ export class PostgresPageReaderOrgBudget implements PageReaderOrgBudget {
         values (${ticket}, ${orgId}, (now() at time zone 'utc')::date, ${reserve})`;
       return { admitted: true as const, ticket };
     });
+  }
+
+  async committedCents(orgId: string): Promise<number> {
+    const [row] = await this.sql<{ committed: string | number }[]>`
+      select coalesce(sum(case when settled then cost_cents else greatest(reserved_cents, cost_cents) end), 0) as committed
+      from ocr_page_reader_org_spend
+      where org_id = ${orgId} and day = (now() at time zone 'utc')::date`;
+    return Number(row?.committed ?? 0);
   }
 
   async settle(ticket: string, costCents: number): Promise<void> {

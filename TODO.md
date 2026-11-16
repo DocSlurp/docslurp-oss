@@ -1,5 +1,7 @@
 # TODO
 
+- Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
+
 - Project activity counters (0165), council follow-ups 2026-11-14:
   - Bulk chat-session delete is quadratic in a surviving project: the row-level delete trigger removes each session's turns and rewrites the same counter row per session (20,000 sessions 7.5 s against 0.3 s without the trigger; account offboarding hits it). Make it statement-level with a transition table.
   - The drift sweep's cursor is per process and restarts at the first id, so with regular deploys later projects are rarely sampled; persist or randomise it, and bisect a batch whose check timed out.
@@ -127,3 +129,4 @@ See [the stage notes](docs/document-summaries.md#summary-tree-section-summaries-
 - Non-native path: one-statement project context read, and the cached availability read.
 - Stream follow-ups from #386: open only on a non-empty `search.hits`; no `seq` gap for a stalled reader; strategy-rate charge on failure when usage is known; gate fusion in the detached-billing e2e test; lean-batch failure charge test.
 - `[search-timing]`: `lanceWarm` now includes the index load when one starts; `service.version` is unset in telemetry, so latency cannot be split by deploy.
+- Offline page profiles: calibrate geometric candidate accuracy on independent licensed documents, add optional local OCR/semantic analysis for image-only pages, design confidence-aware population estimates and separately budgeted damaged-xref recovery. The bounded range reader, 20,000-page/~1 GiB and 10,000-file synthetic acceptance, unruled/caption/vector candidates, rankings and strict streaming validation are implemented; see `docs/offline-page-profile-jsonl.md`.

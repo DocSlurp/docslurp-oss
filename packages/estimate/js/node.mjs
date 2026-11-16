@@ -3,6 +3,13 @@ import { open, stat } from "node:fs/promises";
 import { basename } from "node:path";
 
 import { estimateFiles } from "./index.mjs";
+import { nodePathRangeSource } from "./range.mjs";
+
+/** Stream detailed numeric PDF evidence without reading the file into a Blob. */
+export async function* profilePathJsonl(estimator, path, options = {}) {
+  const source = await nodePathRangeSource(path);
+  yield* estimator.profileSourceJsonl(source, options);
+}
 
 async function read(handle, position, length) {
   const buffer = new Uint8Array(length);

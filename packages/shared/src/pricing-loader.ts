@@ -111,6 +111,7 @@ export function refusePricingStateWriter(env: Record<string, string | undefined>
  * can reach refuses the identity (recheck Q #5); core server/db/roles.mjs revokes PUBLIC EXECUTE on the rest.
  */
 export const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[] = Object.freeze([
+  "public.authorize_compute_cohort(pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text)",
   "public.realtime_changed()",
   "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",

@@ -1,0 +1,21 @@
+{"t":"progress","files":500,"elapsedMs":1893,"peakRss":87842816,"peakWasm":16777216}
+{"t":"progress","files":1000,"elapsedMs":3731,"peakRss":88846336,"peakWasm":16777216}
+{"t":"progress","files":1500,"elapsedMs":5544,"peakRss":89051136,"peakWasm":16777216}
+{"t":"progress","files":2000,"elapsedMs":7353,"peakRss":89051136,"peakWasm":16777216}
+{"t":"progress","files":2500,"elapsedMs":9215,"peakRss":92987392,"peakWasm":16777216}
+{"t":"progress","files":3000,"elapsedMs":11453,"peakRss":92987392,"peakWasm":16777216}
+{"t":"progress","files":3500,"elapsedMs":13412,"peakRss":94998528,"peakWasm":16777216}
+{"t":"progress","files":4000,"elapsedMs":15300,"peakRss":98443264,"peakWasm":16777216}
+{"t":"progress","files":4500,"elapsedMs":17109,"peakRss":99098624,"peakWasm":16777216}
+{"t":"progress","files":5000,"elapsedMs":18900,"peakRss":99557376,"peakWasm":16777216}
+{"t":"progress","files":5500,"elapsedMs":20667,"peakRss":99987456,"peakWasm":16777216}
+{"t":"progress","files":6000,"elapsedMs":22441,"peakRss":99987456,"peakWasm":16777216}
+{"t":"progress","files":6500,"elapsedMs":24226,"peakRss":100093952,"peakWasm":16777216}
+{"t":"progress","files":7000,"elapsedMs":26014,"peakRss":100093952,"peakWasm":16777216}
+{"t":"progress","files":7500,"elapsedMs":27817,"peakRss":100093952,"peakWasm":16777216}
+{"t":"progress","files":8000,"elapsedMs":29592,"peakRss":100093952,"peakWasm":16777216}
+{"t":"progress","files":8500,"elapsedMs":31373,"peakRss":100093952,"peakWasm":16777216}
+{"t":"progress","files":9000,"elapsedMs":33134,"peakRss":101904384,"peakWasm":16777216}
+{"t":"progress","files":9500,"elapsedMs":35268,"peakRss":101904384,"peakWasm":16777216}
+{"t":"progress","files":10000,"elapsedMs":37189,"peakRss":101904384,"peakWasm":16777216}
+{"t":"benchmark","mode":"many","files":10000,"inventoryPages":30000,"deepMeasured":30000,"observedAt":"2026-11-15T17:52:12.192Z","moduleSha256":"99446e6ae63ed150da224db185b2e53f6ae47d299cd011aed0f5e8b8b674c90c","moduleBytes":1327885,"elapsedMs":37189,"firstOutputMs":8,"reads":25231,"readBytes":1008040319,"largestRead":133538,"outputBytes":46580834,"peakRss":101904384,"peakWasm":16777216,"latencyHistogram":{"upperMs":[1,2,5,10,20,50,100,1000,"infinity"],"counts":[0,0,9769,225,5,1,0,0,0]},"methodology":"independent synthetic Blob snapshots; reused WASM instance; sequential bounded queue"}

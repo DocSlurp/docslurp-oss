@@ -131,6 +131,8 @@ export const WORKER_TABLES = Object.freeze({
   // Route tiers (0136): the worker reads current observations to rank vision hosts and records served latency.
   provider_endpoint_observations: { privileges: ["select", "insert"], evidence: "server/src/services/provider-observations.ts recordServedLatency (traffic rows); tier selection" },
   provider_endpoint_current: { privileges: ["select"], evidence: "server/src/services/provider-observations.ts readProviderObservations (view)" },
+  compute_price_observations: { privileges: ["select"], evidence: "operator-owned compute prices; runtime lookup only" },
+  compute_calibration_observations: { privileges: ["select", "insert"], evidence: "append-only operational compute measurements" },
 });
 
 /** Relations the worker must not touch, and why. */
@@ -221,6 +223,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
  * revokes EXECUTE on every other owner definer function, and the runtime identity rule refuses one a runtime role reaches.
  */
 export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
+  "public.authorize_compute_cohort(pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text)",
   "public.realtime_changed()",
   "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
@@ -260,6 +263,13 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       `alter default privileges for role ${ownerIdent} in schema public grant usage, select, update on sequences to ${app}`,
       `alter default privileges for role ${ownerIdent} in schema public grant execute on functions to ${app}`,
     );
+    // Compute prices are operator-owned; measurements are append-only even after schema-wide reconciliation.
+    for (const table of ["compute_price_observations", "compute_calibration_observations"]) {
+      if (!relations.includes(table)) continue;
+      const target = `public.${quoteIdent(table)}`;
+      statements.push(`revoke all on ${target} from ${app}`, `grant select on ${target} to ${app}`);
+      if (table === "compute_calibration_observations") statements.push(`grant insert on ${target} to ${app}`);
+    }
   }
   if (has(roles.worker)) {
     const worker = quoteIdent(roles.worker);
@@ -296,6 +306,12 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
         `grant select on drizzle.__drizzle_migrations to ${worker}`,
       );
     }
+  }
+  if (existingColumns?.project_runs?.includes("compute_input_manifest_hash")) {
+    const signature = "public.authorize_compute_cohort(text,text,text,text,text)";
+    statements.push(`revoke all on function ${signature} from public`);
+    if (has(roles.app)) statements.push(`revoke all on function ${signature} from ${quoteIdent(roles.app)}`);
+    if (has(roles.worker)) statements.push(`grant execute on function ${signature} to ${quoteIdent(roles.worker)}`);
   }
   if (relations.includes("realtime_revision_counters")) {
     // Schema-wide application grants must never expose publication internals.

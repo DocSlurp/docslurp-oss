@@ -156,6 +156,8 @@ export interface VectorIndex {
 }
 
 export class WorkflowState {
+  /** Expected generation from activity intent, not a fresh database row. */
+  executionGeneration?: string | null;
   run: ProjectRun;
   documents: Document[];
   stage: string;

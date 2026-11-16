@@ -1,3 +1,10 @@
+## Compute price and calibration observation storage
+
+- Added bounded, content-free operational price/calibration histories, stable offer identities, source and currency/FX provenance, expiry, idempotent receipts and a worker lookup callback.
+- Runtime roles may read rates and append measurements; operator-only price writes and append-only measurements survive grant reconciliation. Independent review findings about reconciliation, stale calibration and contradictory/stale FX were addressed with database constraints and negative tests.
+
+- Complete offline measurements (#431,2026-11-15): bounded geometry/inline-codec repairs, refusal diagnostics and truthful requested-family completeness. All168 real pages complete across3repetitions; full-deep costs calibrated and independent boundary findings resolved.
+- Real-document offline profiler calibration (2026-11-15, draft #431): three repetitions each on table/vector-heavy publisher PDFs, native text-extraction baseline, numeric cost scenarios and retained failed baseline. Correct supplemental hybrid-xref Prev handling; validate calibration runtime/count identity. No semantic-quality or full-deep completion claim.
 - Recovery council fixes (#425): document-stage restart clears prior typed failure; upload status-only metadata reads require current project/org read access. Migrated database negatives cover revoked shares/memberships and invalid API-key scopes; no parser or OCR checkpoint changes.
 ## Fast scan preview selection (2026-11-14, draft, needs council)
 
@@ -392,3 +399,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Add storage-authoritative direct-upload refresh, transfer expiry checks, original-key binding and immutable client-claimed re-selection identity.
 - Provider response validation no longer trusts upstream MIME: bounded JSON validation or SSE framing precedes byte release, including mislabeled SDK error responses; lazy reads and cancellation remain covered. Database discovery conservatively joins container/return provenance, refuses environment property stores, and invalidates destructuring and loop key writes without adding exemptions.
+- Local detailed page profiles: JSONL schema v3 uses cooperative local range reads up to 2 GiB, all-page inventory, <=1,000 deep inspections, numeric image/vector facts, ruled/unruled-table and caption/vector-figure candidates, exclusive text-byte composition, compact range summaries and bounded rankings. Browser/Node/Python/native adapters avoid whole-file input copies, detect ordinary native file mutations and release state on cancellation. Synthetic acceptance covers a 20,000-page/~1 GiB PDF and 10,000 variable-size files. Pixel semantics, calibrated classification and damaged-xref recovery remain in TODO.md; the small quote profile stays separate.

@@ -280,6 +280,8 @@ export type SandboxedOcrResult = SandboxResult;
 export interface SandboxedOcrRunContext {
   tenantKey?: string;
   affinityKey?: string;
+  /** Revalidate live authorization before admission and publication; an expired/revoked scope returns null. */
+  authorizeCohort?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
 }
 
 export interface SandboxedOcrProvider {
@@ -332,6 +334,24 @@ export interface PageImageReaderProvider {
   maxImageBytes: number;
   /** Largest Markdown (UTF-8 bytes) one page may return; a larger result fails the job. */
   maxMarkdownBytes: number;
+  /**
+   * Optional: the longest page-image edge, in pixels, the reader's model reads at (256..4000). vision-extract renders PDF
+   * pages for the reader at this size and refuses a PNG whose header reports a longer edge. Without it pages render at the
+   * renderer's default size.
+   */
+  maxLongEdgePx?: number;
+  /**
+   * Optional: the ISO 3166-1 alpha-2 country where the reader's VMs process pages (`US`, `FR`). vision-extract sends pages
+   * to the reader only when the organization's provider-region policy admits that country (`CN`, `HK` and `MO` need
+   * allowChinaProviders); a reader without it is never used for vision transcription (fail closed).
+   */
+  hostCountry?: string;
+  /**
+   * Optional: the ISO 3166-1 alpha-2 country of the company that operates those VMs, by controlling ownership and
+   * jurisdiction as packages/shared/src/provider-regions.ts classifies providers (`CN` for a Chinese-owned cloud wherever
+   * it is listed). Vision page reads require it beside `hostCountry`; both must pass the organization's region policy.
+   */
+  operatorCountry?: string;
   /** Throw when the deployment is not ready (unpinned image, missing endpoint). The worker then refuses to start. */
   assertConfigured(): void;
   /**
@@ -407,12 +427,30 @@ export interface ExtractorPluginHost {
    * database bound (setExtractorDocumentOwners): a provider must then refuse the batch, never skip the check.
    */
   documentOwners(documentIds: readonly string[]): Promise<ReadonlyMap<string, { orgId: string | null; runId: string }>>;
+  /** Bounded, content-free operational observations; unavailable storage refuses automatic host selection. */
+  computeObservations(profileIds: readonly string[]): Promise<import("@docslurp/shared").ComputeObservations>;
+  authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
   /** The figure outcomes this core accepts: a provider reports `partial` (exit 5, folder kept) only when it is listed. */
   figureOutcomes: readonly ("extracted" | "partial" | "failed")[];
 }
 
 type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
 let documentOwnersLookup: DocumentOwnersLookup | undefined;
+let computeObservationsLookup: ExtractorPluginHost["computeObservations"] | undefined;
+let computeCohortAuthorizer: ExtractorPluginHost["authorizeComputeCohort"] | undefined;
+
+export function setExtractorComputeCohortAuthorizer(lookup: ExtractorPluginHost["authorizeComputeCohort"] | undefined): void {
+  computeCohortAuthorizer = lookup;
+}
+
+export async function authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
+  if (!computeCohortAuthorizer) throw new SandboxRunError("Compute cohort authorizer is not bound in this worker");
+  return await computeCohortAuthorizer(scope);
+}
+
+export function setExtractorComputeObservations(lookup: ExtractorPluginHost["computeObservations"] | undefined): void {
+  computeObservationsLookup = lookup;
+}
 
 /** Bind the database lookup behind ExtractorPluginHost.documentOwners (worker startup; tests). */
 export function setExtractorDocumentOwners(lookup: DocumentOwnersLookup | undefined): void {
@@ -435,6 +473,11 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
       if (!documentOwnersLookup) throw new SandboxRunError("Document ownership lookup is not bound in this worker");
       return await documentOwnersLookup(documentIds);
     },
+    computeObservations: async (profileIds) => {
+      if (!computeObservationsLookup) throw new SandboxRunError("Compute observations lookup is not bound in this worker");
+      return await computeObservationsLookup(profileIds);
+    },
+    authorizeComputeCohort,
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,
   };
 }
@@ -491,6 +534,15 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     }
     for (const name of ["assertConfigured", "read"] as const) {
       if (typeof reader[name] !== "function") throw new Error(`Page image reader provider lacks ${name}()`);
+    }
+    if (reader.maxLongEdgePx !== undefined && !(Number.isSafeInteger(reader.maxLongEdgePx) && reader.maxLongEdgePx >= 256 && reader.maxLongEdgePx <= 4000)) {
+      throw new Error("Page image reader provider's maxLongEdgePx must be an integer from 256 to 4000");
+    }
+    for (const field of ["hostCountry", "operatorCountry"] as const) {
+      const value = reader[field];
+      if (value !== undefined && !(typeof value === "string" && /^[A-Z]{2}$/.test(value))) {
+        throw new Error(`Page image reader provider's ${field} must be an ISO 3166-1 alpha-2 code such as US`);
+      }
     }
     if (reader.estimateJobCostCents !== undefined && typeof reader.estimateJobCostCents !== "function") throw new Error("Page image reader provider's estimateJobCostCents must be a function");
     if (reader.evalScore !== undefined && !(typeof reader.evalScore === "number" && reader.evalScore >= 0 && reader.evalScore <= 1)) throw new Error("Page image reader provider's evalScore must be from 0 to 1");
