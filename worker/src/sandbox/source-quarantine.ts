@@ -6,7 +6,7 @@ import { SourceRefusalError, stagedSourceSha256 } from "./source-integrity.js";
 import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
 
 /**
- * Source quarantine: a content-hash denylist across the fleet (migration 0101, `quarantined_sources`).
+ * Source quarantine: a per-organization content-hash denylist (migrations 0101 and 0184, `quarantined_sources`).
  *
  * A command whose teardown could not be verified quarantines its worker (teardown-breaker.ts). A
  * hostile file that can do that once can do it on every worker that picks it up, so when the failure
@@ -144,7 +144,7 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
     async find(documentId, stagedSha256 = null) {
       // A document without an organization is refused outright (organization is the only tenant scope; fail closed).
       const rows = await sql`
-        select coalesce(${stagedSha256}::text, d.source_sha256, '') as source_sha256, d.org_id, d.project_id, d.org_id is null as unscoped
+        select coalesce(${stagedSha256}::text, d.source_sha256, '') as source_sha256, d.org_id, d.project_id
         from documents d
         left join quarantined_sources q on q.org_id = d.org_id
           and q.source_sha256 = coalesce(${stagedSha256}::text, d.source_sha256) and q.expires_at > now()
@@ -154,7 +154,7 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
     },
     async record({ documentId, stagedSha256 = null, runId, stage, detail, ttlHours }) {
       // One row per (hash, organization). Within the organization the first attribution is kept; a later failure
-      // extends the expiry (an expired row starts a fresh listing).
+      // extends the expiry (an expired row is listed again, keeping its first attribution and counts).
       const rows = await sql`
         insert into quarantined_sources as q (
           source_sha256, org_id, project_id, run_id, document_id, stage, detail, expires_at, last_document_id
