@@ -94,6 +94,9 @@ describe("GPT-6 Luna vision profile", () => {
     const golden = JSON.parse(await readFile(join(import.meta.dirname, "fixtures/vision-request-bodies-luna.json"), "utf8")) as Record<string, unknown>;
     const { bodies } = await run(LUNA, undefined, [ok]);
     bodies[0]!.messages[1].content[1].image_url.url = "<image>";
+    // The per-organization salt line (organization isolation) follows the fixed instruction; the golden body omits it.
+    expect(bodies[0]!.messages[0].content).toMatch(/\nWorkspace [0-9a-f]{16}\.$/);
+    bodies[0]!.messages[0].content = bodies[0]!.messages[0].content.replace(/\nWorkspace [0-9a-f]{16}\.$/, "");
     expect(bodies[0]).toEqual(golden[`${LUNA}|`]);
   });
 
