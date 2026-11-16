@@ -22,7 +22,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
-import { asParserUser, commandScratchDirs, commandScratchEnv, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, RESET_SCOPE_REFUSED, resetArgv } from "./control.js";
+import { asParserUser, commandScratchDirs, commandScratchEnv, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, bindScopeArgv, RESET_SCOPE_REFUSED, resetArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../concurrency.js";
@@ -1201,6 +1201,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         /** The document whose uploaded inputs the last reset kept on this VM (council X #7). */
         let keptFor: string | undefined;
 
+        /**
+         * The in-guest scope of the command now on this VM, derived from the command itself (its organization's run), never
+         * from the lane: a host routing bug that put another scope's command here is refused inside the VM.
+         */
+        let commandToken: string | undefined;
+
         async function resetVm(keepFor?: string): Promise<void> {
           // The same document's next command reuses its inputs; any other document gets a full wipe first (W #3 holds).
           const keep = keepFor !== undefined ? staging?.uploadedPaths() ?? [] : [];
@@ -1208,7 +1214,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           let transport: unknown;
           let overran = false;
           try {
-            const proc = await sandbox!.exec(resetArgv(parserJobRoots(), keep, lane.scopeToken), { timeoutMs: RESET_DEADLINE_MS });
+            const proc = await sandbox!.exec(resetArgv(parserJobRoots(), keep, commandToken ?? lane.scopeToken), { timeoutMs: RESET_DEADLINE_MS });
             code = await withDeadline(proc.wait(), RESET_DEADLINE_MS + 5_000);
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal reset failed: ${safeMessage(config, error)}`);
@@ -1223,13 +1229,32 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           if (code === 0) return;
           await terminate().catch(() => {});
           if (code === RESET_SCOPE_REFUSED) {
-            // The VM's in-guest binding names another organization's run: the host's lane binding failed. Never used again.
+            // The VM's in-guest binding names another organization's run (or was tampered with): never used again.
             console.error(`[parser-sandbox] ALERT provider=modal vm-scope-mismatch activity=${context.activityId} lane=${lane.id}: VM terminated`);
             throw new SandboxInfrastructureError("parser VM is bound to another organization or run; VM terminated");
           }
           if (transport !== undefined) throw new SandboxInfrastructureError("parser VM reset could not run; VM terminated", undefined, { cause: transport });
           // Only a command that ran can have left what broke the reset; a reset after staging alone strikes no one.
           throw new SandboxInfrastructureError(`parser VM ${overran ? "scratch wipe ran past its deadline" : code === 5 ? "disk or job root unusable" : "scratch could not be wiped"} after this document's command; VM terminated`, undefined, { afterCommand: commandRan });
+        }
+
+        /** Bind (or verify) the VM's in-guest scope as root before staging; see bindScopeArgv. */
+        async function bindVmScope(previous: string | undefined): Promise<void> {
+          let code: number | null = null;
+          try {
+            const proc = await sandbox!.exec(bindScopeArgv(commandToken ?? lane.scopeToken!), { timeoutMs: 30_000 });
+            code = await withDeadline(proc.wait(), 35_000);
+          } catch (error) {
+            throw new SandboxInfrastructureError(`parser VM scope binding could not run: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
+          }
+          if (code === 0) return;
+          await terminate().catch(() => {});
+          if (code === RESET_SCOPE_REFUSED) {
+            console.error(`[parser-sandbox] ALERT provider=modal vm-scope-mismatch activity=${context.activityId} lane=${lane.id} phase=before-staging: VM terminated`);
+            throw new SandboxInfrastructureError("parser VM is bound to another organization or run; VM terminated", meterLane(lane));
+          }
+          // The binding could not be written (a disk the previous document filled): that document's doing, as in probeJobTree.
+          throw new SandboxInfrastructureError("parser VM scope binding failed; VM terminated", meterLane(lane), previous !== undefined ? { blameDocumentId: previous } : undefined);
         }
 
         /** The job roots as the next document's staging finds them; a broken one blames `previous` (council X #1). */
@@ -1256,6 +1281,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let ownStaging = false;
 
         async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
+          commandToken = laneScope(command) ?? lane.scopeToken;
           let cleaned = false;
           commandRan = false;
           ownStaging = false;
@@ -1350,6 +1376,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // On a VM another document used last, check its job roots first (council X #1): missing-and-uncreatable,
             // replaced (not a directory, a link) or owned by someone else is the previous document's doing.
             // Another document's inputs kept on this VM go first: the next document sees nothing of them (council X #7, W #3).
+            // In-guest binding before a new document's inputs reach the VM (organization isolation): a fresh VM is bound to
+            // this command's scope; a VM bound to any other refuses, and is terminated before anything is staged.
+            if (commandCount === 1 || lane.previousKey !== command.affinityKey) await bindVmScope(lane.previousKey);
             if (keptFor !== undefined && keptFor !== command.affinityKey) await resetVm();
             if (lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) await probeJobTree(lane.previousKey);
             // Only the command's inputs travel; the parser runtime comes from the image. From here a failure the VM itself
@@ -1451,7 +1480,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         // A VM of another scope never takes this command: when it holds the place this one needs, it is terminated.
         if (!idle.length && !canGrow()) {
           const other = free.find((lane) => !scopeFits(lane, scope));
-          if (other) void reap(other);
+          // Its worker token returns when the terminate does: wake waiters then, not only at the next release.
+          if (other) void reap(other).then(wakeNext);
         }
         // Its key's VM first, then any idle lane that already has a VM (one without would need a new VM and a token).
         const lane = (key ? idle.find((candidate) => candidate.lastKey === key && candidate.accountedAt !== undefined) : undefined)
@@ -1513,8 +1543,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       }
 
       /** Terminate an idle VM and drop it from the pool; a later command opens a fresh one. */
+      const pendingReaps = new Set<Promise<void>>();
       function reap(lane: Lane): Promise<void> {
         const terminated = lane.terminate().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal idle VM terminate: ${safeMessage(config, error)}`));
+        // settle() awaits these too, so a reaped VM's last metered stretch lands before the stage's checkpoint.
+        pendingReaps.add(terminated);
+        void terminated.finally(() => pendingReaps.delete(terminated));
         const index = lanes.indexOf(lane);
         if (index >= 0) lanes.splice(index, 1);
         wakeNext();
@@ -1642,7 +1676,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           // The stage is done with the pool (VM pool follow-up): terminate idle VMs now, so their time after the last
           // command is recorded in the stage's ledger before its final checkpoint, and Modal stops billing them.
           // Awaited: the terminate is acknowledged and the time recorded before the checkpoint (recheck T #1).
-          await Promise.all(lanes.filter((candidate) => !candidate.busy && !candidate.dead).map(reap));
+          await Promise.all([...lanes.filter((candidate) => !candidate.busy && !candidate.dead).map(reap), ...pendingReaps]);
         },
         close() {
           closing ??= (async () => {

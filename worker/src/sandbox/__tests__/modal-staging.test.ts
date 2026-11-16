@@ -388,8 +388,9 @@ function fakeSdk(
     maxAssetWritesInFlight: 0,
     orphanTerminates: [] as string[],
     resets: [] as Array<{ vm: number; roots: string[] }>,
-    /** The scope each VM's first reset bound in-guest. */
+    /** The scope each VM's first bind or reset bound in-guest. */
     vmScopes: new Map<number, string>(),
+    binds: [] as Array<{ vm: number; scope: string }>,
     rootWrites: [] as string[],
     events: [] as string[],
     clientClose: 0,
@@ -502,13 +503,22 @@ function fakeSdk(
       // VM start: the image lock and writable check (council W #1).
       if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-image-lock")) { state.locks++; return finished("", opts.lockFails ? 6 : 0); }
       // After every command: the root wipe of the parser user's scratch and the health check (council W #1, U #8).
+      // The in-guest scope bind before a new document's staging (bindScopeArgv): no wipe.
+      if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-reset") && argv.includes("--bind-only")) {
+        const scope = argv[5]!;
+        state.binds.push({ vm, scope });
+        if (opts.forgeScopeInVm === vm && !state.vmScopes.has(vm)) state.vmScopes.set(vm, "another-organizations-run");
+        const bound = state.vmScopes.get(vm);
+        if (bound === undefined) state.vmScopes.set(vm, scope);
+        return finished("", bound === undefined || bound === scope ? 0 : 9);
+      }
       if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-reset")) {
         state.resets.push({ vm, roots: argv.slice(4) });
         state.events.push("reset");
         // The in-guest binding (RESET_SCRIPT `--scope`): the first reset records the VM's scope; any other is refused (9).
         if (argv[4] === "--scope") {
           const scope = argv[5]!;
-          if (opts.forgeScopeInVm === vm) state.vmScopes.set(vm, "another-organizations-run");
+          if (opts.forgeScopeInVm === vm && !state.vmScopes.has(vm)) state.vmScopes.set(vm, "another-organizations-run");
           const bound = state.vmScopes.get(vm);
           if (bound === undefined) state.vmScopes.set(vm, scope);
           else if (bound !== scope) return finished("", 9);
@@ -1225,7 +1235,7 @@ describe("modal provider session lifecycle", () => {
       await opened.close();
     });
 
-    it("a VM whose in-guest binding names another scope is terminated and never used again", async () => {
+    it("a VM whose in-guest binding names another scope refuses before anything is staged, and is terminated", async () => {
       const { sdk, state } = fakeSdk({ exec: async () => finished(), forgeScopeInVm: 1 });
       const errors = vi.spyOn(console, "error").mockImplementation(() => {});
       const opened = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 1, vmIdleSeconds: 60 }, { activityId: "a" });
@@ -1233,9 +1243,22 @@ describe("modal provider session lifecycle", () => {
       expect(error).toBeInstanceOf(SandboxInfrastructureError);
       expect(String((error as Error).message)).toMatch(/bound to another organization or run/);
       expect(state.terminate).toBe(1);
+      expect(state.commandVms).toEqual([]); // the document's command never ran on that VM
+      expect(state.mkdirExecs).toBe(0); // nothing of it was staged there either
       expect(errors.mock.calls.some(([line]) => String(line).includes("vm-scope-mismatch"))).toBe(true);
       await opened.run!(scoped("org-a", "run-1", "doc-1"));
-      expect(state.commandVms).toEqual([1, 2]);
+      expect(state.commandVms).toEqual([2]);
+      await opened.close();
+    });
+
+    it("binds the VM in-guest to the command's own scope before each new document, derived from the command", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const opened = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 1, vmIdleSeconds: 60 }, { activityId: "a" });
+      await opened.run!(scoped("org-a", "run-1", "doc-1"));
+      await opened.run!(scoped("org-a", "run-1", "doc-1")); // same document: no second bind
+      await opened.run!(scoped("org-a", "run-1", "doc-2"));
+      const scope = laneScope({ tenantKey: "org-a", runKey: "run-1" });
+      expect(state.binds).toEqual([{ vm: 1, scope }, { vm: 1, scope }]);
       await opened.close();
     });
   });

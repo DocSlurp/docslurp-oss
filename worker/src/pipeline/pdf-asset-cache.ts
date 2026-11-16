@@ -175,11 +175,6 @@ interface SourceEntry {
 type SourceStorage = Pick<ArtifactStore, "downloadToTempFile">;
 
 /**
- * Process-local source cache shared by Temporal activities. The Interface owns
- * download, hashing, bounded eviction, and cleanup so callers never materialize
- * the same source independently inside one worker process.
- */
-/**
  * Organization isolation: a cached source serves only its own run (a run belongs to exactly one organization). The storage
  * key alone is never trusted to separate tenants; the run and its requester are part of the cache key, so no other
  * organization's (or run's) stage can be handed this file.
@@ -189,6 +184,11 @@ function sourceCacheKey(document: Pick<Document, "userId" | "runId" | "sourceKey
   return JSON.stringify([document.runId, document.userId, document.sourceKey]);
 }
 
+/**
+ * Process-local source cache shared by Temporal activities. The Interface owns
+ * download, hashing, bounded eviction, and cleanup so callers never materialize
+ * the same source independently inside one worker process.
+ */
 export class PdfSourceCache {
   private readonly entries = new Map<string, Promise<SourceEntry>>();
 
