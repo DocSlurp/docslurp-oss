@@ -9,7 +9,7 @@ internal cost.
 
 | Method | Called by |
 |---|---|
-| `pageCredits(mode, pages)`, `richPagesForOutputTokens(tokens)` | worker page charges (Fast at completion, Rich per model read) |
+| `pageCredits(mode, pages)`, `richPagesForOutputTokens(tokens)` | worker page charges: `fast` at completion, `ocr` once per page the OCR route read (flat, whatever the output), `rich` per vision-model read (its output-token units). An OCR page a vision model then reads pays `rich` minus `ocr` (`pageUpgradeCredits`). Prices must hold `fast <= ocr <= rich`; installation refuses a provider that does not |
 | `mediaRichPages(kind, seconds)` | worker media charges, media spend reserves, upload estimates |
 | `featureCredits(feature, pages)` | worker optional-feature charges (summary, structured fields, knowledge graph, propositions) |
 | `visualExportRetryCredits()`, `chartExportExpectedRetriesPerRead()` | chart & diagram export second reads: the credits for a visual's one answered repair or cut-off retry (billed as its own event, at most once per visual), and the expected share of such second reads per model-read visual (0 to 1) that estimates and quotes add; the open default charges 0 |
@@ -22,7 +22,7 @@ internal cost.
 | `chatModelTier`, `chatAnswerUnits`, `chatAnswerCredits` | chat answer charges |
 | `plans` | credit packs, the starter grant, org worker ceilings |
 | `qualityModePricing(mode)`, `publicPrices()` | the processing quality picker, `GET /v1/billing/prices` |
-| `estimateIngest(input)`, `quoteUpload(args)` | every work estimate, `POST /v1/uploads/estimate` |
+| `estimateIngest(input)`, `quoteUpload(args)` | every work estimate, `POST /v1/uploads/estimate`. Under `auto`, scanned and image pages (`mix.scanned`) are read by OCR first: a provider prices them at the OCR class and reports them as `ocrPages` / `breakdown.ocr` |
 | `internalCost.*` | internal cost of local compute, remote sandboxes and worker slots (never a customer charge) |
 | `internalCost.chartGeneratorMaxPricesUsdPerMTok()` | chart & diagram export generator selection: the highest input and output list prices (USD per 1M tokens) a generator may have; both must hold. `null` lets core derive them from `visualExportCredits` (one call at the image limit, or one answer at the output cap, costs the whole per-visual charge); with nothing charged per visual there is no ceiling of its own |
 
@@ -34,7 +34,7 @@ rules charged it.
 Without a provider, core prices with `OPEN_PRICING` (`packages/shared/src/pricing-open.ts`), one flat, published rule a
 self-hosted operator can predict:
 
-- every page costs 0.1 credit ($1 per 1,000 pages), however it was read;
+- every page costs 0.1 credit ($1 per 1,000 pages), however it was read (Fast, OCR and Rich alike);
 - an audio or video file counts one page per started minute;
 - storage, searches, chat answers, web tools and optional features cost nothing;
 - no speed boost surcharge, no output-token surcharge, every run pays its full page charge;

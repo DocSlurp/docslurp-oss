@@ -86,7 +86,7 @@ most `DOCSLURP_OCR_MAX_LONG_EDGE` (default 2000 px, 640 to 4000), which bounds t
 mode the memory is the VM's, not the worker's.
 
 A cap above the 2000 px default is an operator opt-in, off unless set. It buys detail on small print at the cost of more
-VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Rich page,
+VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one OCR page,
 so with escalation on a dense page at a high cap can cost more than it bills: slightly loss-making. The worker logs
 `[ocr] long-edge-opt-in` at startup when it is set, and the provider
 cost is recorded at the VM's real rate, so the provider-cost loss alert flags runs that lose money.
@@ -269,9 +269,12 @@ start-up the provider needs. A reader without `warm` is unaffected.
 
 ## Billing and usage
 
-- An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
+- OCR reads bill the OCR page class (`ingest-page-ocr`): one flat OCR page per page and run, however long its text.
+  OCR reads are those of the OCR route: the engine (`page-ocr`, `pdf-ocr`, the native engine's `ocr-native-pdf`), the
+  page reader (`ocr-page-reader`) and `hosted` mode (`hosted-ocr`). A vision model's read of a page bills Rich.
+- An uploaded image: every frame the engine read is one OCR page read, metric `page-ocr`, with or without text in it
   (owner decision, 2026-11-05). The VM costs the same for a blank frame.
-- A scanned PDF page: one Rich page read only when the read found words.
+- A scanned PDF page: one OCR page read only when the read found words.
 - Each charge is keyed by run, document and page, so a retry or a second reader does not charge it twice.
 - A TIFF's frames are its pages: the frames read become `documents.page_count`. A TIFF with more than 64 frames (the
   job's frame cap) is refused before anything is charged, with the public error `imageTooManyFrames`.
@@ -279,12 +282,18 @@ start-up the provider needs. A reader without `warm` is unaffected.
   provider's own cost arrives separately, at provider cost. Remote usage outside a stage context has no usage ledger:
   it is logged as `[usage-unrecorded]` and counted on `docslurp.usage.unrecorded`, never dropped silently.
 - Escalation reads are recorded as `ocr-escalation`, and `hosted` mode reads as `hosted-ocr`, each with the provider's
-  actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
-  (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
-  cost is still recorded.
+  actual input and output tokens and cost. An escalation is a vision model's read: it upgrades the page from OCR to Rich
+  (the page's first Rich charge is the Rich price minus its OCR charge, so the page pays Rich once), in every quality
+  that runs it. An escalated page bills at most one Rich page, whatever the output length (escalation output tokens add
+  no Rich pages), and an escalation that returned no text charges nothing more (the page stays OCR); its provider cost is
+  still recorded.
+- The per-document escalation cap (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`): when a document reaches it, the page that hit
+  it and every later candidate keep their first OCR read. Each document stage records the pages escalated and the pages
+  capped (`stats.ocrEscalation`), and the ingest report recommends reading the capped pages with a vision model
+  (`ocr-escalation-cap`).
 - Page reader jobs are recorded as `ocr-page-reader` at provider cost, billing 0 credits (`providerCostCents`), also
   when the job failed. The host sets the metric, model and tenant scope of each event; a provider cannot record a
-  billable charge. A page the reader replaced is one Rich page, charged once per run like the recogniser's read of it.
+  billable charge. A page the reader replaced is one OCR page, charged once per run like the recogniser's read of it.
 - Quotes count a TIFF's frames as its pages, up to 64.
 
 ## Host phases outside OCR

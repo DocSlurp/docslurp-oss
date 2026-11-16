@@ -105,7 +105,7 @@ export type RunPageCharges = { fastPages: number; ocrPages: number; richPages: n
 /**
  * Charge the run's remaining pages once it completes (deterministic ids per
  * run, so a retry charges nothing twice), excluding content-deduplicated,
- * failed and media documents and pages a vision/OCR read already charged Rich.
+ * failed and media documents and pages an OCR or vision read already charged (OCR or Rich).
  */
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
