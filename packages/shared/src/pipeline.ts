@@ -30,7 +30,7 @@ import {
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 import { chartExportConfigSchema, defaultChartExportConfig, upgradeStoredPipelineChartExport } from "./chart-export.js";
-import { convertExtractionConfigInput, ExtractionConfigConflictError, isVisualsLevel } from "./extraction-config.js";
+import { convertExtractionConfigInput, ExtractionConfigConflictError, isVisualsLevel, UnsupportedConfigVersionError } from "./extraction-config.js";
 import {
   defaultSummaryTreePipelineConfig,
   summaryTreeEnabled,
@@ -743,11 +743,16 @@ const pipelineFeaturesObjectSchema = z
  * disagrees with `figures` or `chartExport.tier` in the same object is a validation error.
  */
 export const pipelineFeaturesSchema = z.preprocess((value, ctx) => {
+  if (isPlainRecord(value) && "visuals" in value && value.visuals !== null && value.visuals !== undefined && !isVisualsLevel(value.visuals)) {
+    ctx.addIssue({ code: "custom", path: ["visuals"], message: "visuals must be one of none, figures, charts, charts-ai", input: value });
+    return value;
+  }
   try {
-    return convertExtractionConfigInput(value).value;
+    // A whole pipeline (create, PATCH) carries the stored legacy fields: visuals wins over them.
+    return convertExtractionConfigInput(value, { preferNew: true }).value;
   } catch (error) {
-    if (!(error instanceof ExtractionConfigConflictError)) throw error;
-    ctx.addIssue({ code: "custom", path: [error.field], message: error.message, input: value });
+    if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
+    ctx.addIssue({ code: "custom", path: [error instanceof UnsupportedConfigVersionError ? "configVersion" : error.field], message: error.message, input: value });
     return value;
   }
 }, pipelineFeaturesObjectSchema);
@@ -1310,8 +1315,8 @@ export const pipelineFeatureOverridesSchema = z
     try {
       return convertExtractionConfigInput(migrated).value;
     } catch (error) {
-      if (!(error instanceof ExtractionConfigConflictError)) throw error;
-      ctx.addIssue({ code: "custom", path: [error.field], message: error.message, input: value });
+      if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
+      ctx.addIssue({ code: "custom", path: [error instanceof UnsupportedConfigVersionError ? "configVersion" : error.field], message: error.message, input: value });
       return migrated;
     }
   }, z.record(z.string(), z.unknown()))

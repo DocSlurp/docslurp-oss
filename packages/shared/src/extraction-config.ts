@@ -1,12 +1,13 @@
 import { z } from "zod";
 import {
+  upgradeStoredPipelineChartExport,
   chartExportFreeExplicitAllowed,
   chartExportSwitch,
   defaultChartExportTier,
   type ChartExportTier,
   type RunOrigin,
 } from "./chart-export.js";
-import type { QualityMode } from "./quality.js";
+import { migrateLegacyQualitySettings, type QualityMode } from "./quality.js";
 
 /**
  * Extraction configuration, release R0 of the simplification (docs/extraction/quality-and-visuals.md):
@@ -148,7 +149,9 @@ export function mapLegacyExtractionSettings(
   pipeline: unknown,
   options: { explicitFreeAllowed: boolean },
 ): LegacyExtractionMapping {
-  const record = isRecord(pipeline) ? pipeline : {};
+  // Legacy upgrades run first (design 3.2): parserPlaybook / vision.forceAllPages, then chartExport.enabled.
+  const migrated = upgradeStoredPipelineChartExport(migrateLegacyQualitySettings(pipeline));
+  const record = isRecord(migrated) ? migrated : {};
   const lowered: ExtractionCap[] = [];
   const rawQuality = record.quality;
   let quality: QualityLevel = isQualityLevel(rawQuality) ? rawQuality : qualityLevelFromLegacy(isLegacyQualityMode(rawQuality) ? rawQuality : null);
@@ -222,7 +225,11 @@ export function applyExtractionConfigInput<T>(source: T): T {
   return convertExtractionConfigInput(source).value;
 }
 
-export function convertExtractionConfigInput<T>(source: T): { value: T; tierUnset: boolean } {
+/**
+ * `preferNew`: the caller sends a whole pipeline it read back (project create/PATCH replace the stored pipeline), so the
+ * legacy `figures` / `chartExport.tier` it carries are the stored values: `visuals` wins over them instead of conflicting.
+ */
+export function convertExtractionConfigInput<T>(source: T, options: { preferNew?: boolean } = {}): { value: T; tierUnset: boolean } {
   if (!isRecord(source)) return { value: source, tierUnset: false };
   const hasNewQuality = isQualityLevel(source.quality);
   const hasVisuals = "visuals" in source;
@@ -249,11 +256,11 @@ export function convertExtractionConfigInput<T>(source: T): { value: T; tierUnse
     if (visuals !== undefined) {
       const level = (visuals ?? null) as VisualsLevel | null;
       const legacy = legacyFieldsForVisuals(level);
-      if ("figures" in source && source.figures !== legacy.figures) {
+      if (!options.preferNew && "figures" in source && source.figures !== legacy.figures) {
         throw new ExtractionConfigConflictError("visuals", `visuals '${level ?? "default"}' conflicts with figures=${String(source.figures)}; send one of them`);
       }
       const chartExport = isRecord(source.chartExport) ? { ...source.chartExport } : {};
-      if ("tier" in chartExport && chartExport.tier !== undefined && chartExport.tier !== legacy.tier) {
+      if (!options.preferNew && "tier" in chartExport && chartExport.tier !== undefined && chartExport.tier !== legacy.tier) {
         throw new ExtractionConfigConflictError("visuals", `visuals '${level ?? "default"}' conflicts with chartExport.tier=${String(chartExport.tier)}; send one of them`);
       }
       next.figures = legacy.figures;
@@ -505,7 +512,10 @@ export function resolveExtractionSettings(input: ExtractionResolutionInput): Ext
 export type RunEffectiveExtraction = {
   quality: QualityLevel;
   visuals: VisualsLevel;
-  /** True when the run may send pages to OCR or a model reader (not `fastest`, and page reading not turned off). */
+  /**
+   * True when the run may read pages with a vision model beyond OCR: `smart`, or `balanced` with rescue reads on
+   * (`visionFallback`). The autoscaler counts these runs' pages as page demand. `fastest` never reads pages.
+   */
   readsPages: boolean;
   capsApplied: ExtractionCap[];
 };
@@ -547,7 +557,7 @@ export function runExtractionView(pipeline: unknown): RunEffectiveExtraction & {
   return {
     ...runEffectiveExtraction({
       quality: isLegacyQualityMode(record.quality) ? record.quality : isQualityLevel(record.quality) ? legacyQualityModeFor(record.quality) : "auto",
-      visionFallback: typeof record.visionFallback === "boolean" ? record.visionFallback : true,
+      visionFallback: typeof record.visionFallback === "boolean" ? record.visionFallback : false,
       figures: record.figures !== false,
       chartExport: { tier },
     }),

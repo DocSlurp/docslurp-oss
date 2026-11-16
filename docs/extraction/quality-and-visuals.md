@@ -48,9 +48,13 @@ Project settings (`PATCH /v1/projects/:project`), per request (upload, URL inges
 website ingest take them in the request's `pipeline`; reprocess and the estimate endpoints take top-level `quality` and
 `visuals`), MCP (`upload`, `extract`, `uploadEstimate`, `reprocessEstimate`, `proposeProjectSettings`), SDK and CLI:
 
+`PATCH /v1/projects/:project` replaces the stored `pipeline`, so send the project's pipeline as you read it with
+`quality` and `visuals` changed; `visuals` wins over the deprecated `figures` and `chartExport.tier` it carries:
+
 ```bash
+pipeline=$(curl -s "$DOCSLURP_URL/v1/projects/q3-earnings" -H "Authorization: Bearer $DOCSLURP_API_KEY" | jq '.pipeline + { quality: "balanced", visuals: "charts" }')
 curl -X PATCH "$DOCSLURP_URL/v1/projects/q3-earnings" -H "Authorization: Bearer $DOCSLURP_API_KEY" \
-  -H "content-type: application/json" -d '{ "pipeline": { "quality": "balanced", "visuals": "charts" } }'
+  -H "content-type: application/json" -d "{ \"pipeline\": $pipeline }"
 
 curl -X POST "$DOCSLURP_URL/v1/uploads/url" -H "Authorization: Bearer $DOCSLURP_API_KEY" \
   -H "content-type: application/json" \
@@ -61,6 +65,8 @@ curl -X POST "$DOCSLURP_URL/v1/runs/$RUN_ID/reprocess" -H "Authorization: Bearer
 ```
 
 ```ts
+const project = await client.getProject("q3-earnings");
+await client.updateProject("q3-earnings", { pipeline: { ...project.pipeline, quality: "balanced", visuals: "charts" } });
 await client.upload({ urls: ["https://example.com/q3-earnings.pdf"] }, { quality: "smart", visuals: "charts-ai" });
 await client.reprocessRun(runId, { visuals: "charts" });
 ```
@@ -70,7 +76,7 @@ docslurp upload q3-earnings.pdf --quality smart --visuals charts-ai
 docslurp reprocess <runId> --visuals charts --estimate
 ```
 
-`visuals: null` on a project means "use the deployment default".
+`visuals: null` on a project means "use the deployment default". Chat settings proposals take a rung, not `null`.
 
 ## Who may choose what
 
@@ -88,9 +94,10 @@ Every run resolves both settings once, the same way on every surface (`resolveEx
    request asks for `smart` explicitly (and passes step 2).
 4. The result is intersected with the project's `privacyMode`, its `vision.profile` locality and the deployment's
    switches. Scopes never override these.
-5. An explicit request they rule out gets `400 quality_unavailable` or `400 visuals_unavailable` (with `details.reason`:
-   `privacy` or `switch`). A saved project value they rule out is lowered for the run and recorded in `capsApplied`;
-   uploads never fail on it.
+5. An explicit run request (upload, URL ingest, extract, reprocess, MCP) they rule out gets `400 quality_unavailable` or
+   `400 visuals_unavailable` (with `details.reason`: `privacy` or `switch`). A project setting is saved as given and
+   lowered for each run, recorded in `capsApplied`; uploads never fail on it. (A project change to a chart rung the
+   deployment does not offer at all is refused as before, with `chart_export_tier_unavailable`.)
 
 Under `local-only` or `strict-privacy`, `smart` needs a local vision reader (a `*-local` vision profile or an
 operator-registered private route); `charts-ai` (a hosted read) is not available.
@@ -110,7 +117,14 @@ were admitted under until they complete, retries and resumes included. `readsPag
 to OCR or a model reader. The ingest report lists any caps a run recorded under "Settings lowered for these runs".
 
 Run snapshots may carry `pipeline.configVersion` (the semantics version). Absent means the rules a run was admitted
-under before this release. A worker refuses a run whose version it does not know.
+under before this release. Run start fails a run whose version this release does not know, and the worker refuses to
+load one; a request that sends an unknown `configVersion` is a `400` validation error.
+
+An upload that creates a project (`newProject`, a new `project` name, `templateKey`) never saves `smart` or `charts-ai`
+on the new project: the run still asks for them, and step 2 decides.
+
+Estimates price what you ask for; they do not apply the privacy cap, so under `local-only` or `strict-privacy` they can
+quote more than the run will read.
 
 ## The page image reader under privacy modes
 

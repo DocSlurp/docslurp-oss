@@ -45,6 +45,9 @@ describe("mapping table (design 3.2)", () => {
     ["free, explicit free allowed", { chartExport: { tier: "free" } }, allowed, "balanced", "charts", 0],
     ["free, explicit free refused -> unset", { chartExport: { tier: "free" } }, refused, "balanced", null, 0],
     ["models", { chartExport: { tier: "models" } }, allowed, "balanced", "charts-ai", 0],
+    ["legacy parserPlaybook review-grade, no quality", { parserPlaybook: "review-grade" }, allowed, "balanced", null, 0],
+    ["legacy vision.forceAllPages", { vision: { forceAllPages: true } }, allowed, "smart", null, 0],
+    ["legacy chartExport.enabled", { chartExport: { enabled: true } }, allowed, "balanced", "charts-ai", 0],
     ["tier unset", { chartExport: { formats: ["csv"] } }, allowed, "balanced", null, 0],
     ["good + local-only + hosted profile -> balanced", { quality: "good", privacyMode: "local-only", vision: { profile: "good-fast-hosted" } }, allowed, "balanced", null, 1],
     ["good + strict-privacy + local profile stays smart", { quality: "good", privacyMode: "strict-privacy", vision: { profile: "good-fast-local" } }, allowed, "smart", null, 0],
@@ -103,7 +106,9 @@ describe("input conversion (R0 writes the legacy shape)", () => {
     expect(parsed.figures).toBe(false);
     expect(parsed.chartExport.tier).toBe("off");
     expect("visuals" in parsed).toBe(false);
-    expect(pipelineFeaturesSchema.safeParse({ visuals: "charts", chartExport: { tier: "models" } }).success).toBe(false);
+    // A whole pipeline read back and sent with visuals: visuals wins over the stored legacy fields it carries.
+    expect(pipelineFeaturesSchema.parse({ visuals: "charts", figures: false, chartExport: { tier: "models" } })).toMatchObject({ figures: true, chartExport: { tier: "free" } });
+    expect(pipelineFeaturesSchema.safeParse({ visuals: "bogus" }).success).toBe(false);
   });
 
   it("the override schema converts, rejects bad values and conflicts", () => {
@@ -128,6 +133,9 @@ describe("input conversion (R0 writes the legacy shape)", () => {
     expect(stored.visionFallback).toBe(true);
     expect(stored.chartExport.tier).toBe("models");
     expect(() => parseStoredPipelineFeatures({ configVersion: 99, quality: "auto" }, "test")).toThrow(/configVersion 99/);
+    // In a request it is a validation error, never a 500.
+    expect(pipelineFeatureOverridesSchema.safeParse({ configVersion: 99 }).success).toBe(false);
+    expect(pipelineFeaturesSchema.safeParse({ configVersion: "1" }).success).toBe(false);
   });
 
   it("legacy snapshots keep legacy semantics: no visionFallback widening", () => {
@@ -152,11 +160,17 @@ describe("templates (design 3.4)", () => {
     }
   });
 
-  it("a quality lock holds visionFallback too: an upload cannot turn off a locked template's rescue reads", () => {
-    const template = projectTemplates.find(t => t.lockedSettings.includes("quality") && t.pipeline.quality === "auto")!;
+  it("a quality lock holds visionFallback where the template sets it: an upload cannot turn its rescue reads off", () => {
+    const template = projectTemplates.find(t => t.key === "medical-records")!;
     const run = applyProjectPipelineOverrides(template.pipeline, { visionFallback: false }, template);
-    expect(run.visionFallback).toBe(template.pipeline.visionFallback);
+    expect(run.visionFallback).toBe(true);
     expect(getProjectTemplate(template.key)).toBeTruthy();
+  });
+
+  it("a template that never set visionFallback keeps the project's own value (no silent raise in R0)", () => {
+    const template = projectTemplates.find(t => t.key === "legal-contracts")!;
+    const project = normalizePipelineFeatures({ ...template.pipeline, visionFallback: false });
+    expect(applyProjectPipelineOverrides(project, {}, template).visionFallback).toBe(false);
   });
 });
 

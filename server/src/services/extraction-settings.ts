@@ -4,6 +4,7 @@ import {
   chartTierForVisuals,
   extractionPolicyFromEnv,
   legacyQualityModeFor,
+  migrateLegacyQualitySettings,
   qualityLevelFromLegacy,
   resolveExtractionSettings,
   runEffectiveExtraction,
@@ -61,7 +62,8 @@ function tierOf(chartExport: unknown): ChartExportTier | undefined {
 }
 
 function storedQuality(pipeline: LegacyHolder): QualityLevel {
-  const raw = pipeline?.quality;
+  // Legacy keys first (parserPlaybook, vision.forceAllPages), as every other reader does (design 3.2).
+  const raw = (migrateLegacyQualitySettings(pipeline ?? null) as LegacyHolder)?.quality;
   return qualityLevelFromLegacy(raw === "fast" || raw === "auto" || raw === "good" ? raw : null);
 }
 
@@ -104,8 +106,9 @@ export async function resolveRunExtraction<T extends PipelineFeatures>(args: Run
   const requestedQuality: QualityLevel | undefined = replay
     ? replay.requestedQuality ?? undefined
     : runQuality !== projectQuality ? runQuality : undefined;
-  // `charts-ai` the project does not hold is the caller's choice; the chart tier code already resolved every other rung.
-  const visualsRequested = runVisuals === "charts-ai" && projectVisuals !== "charts-ai";
+  // AI chart reads the project does not hold are the caller's choice: compared by the stored chart tier (a project saved
+  // on `models` with figures off still holds them, as #363's ceiling has it). The chart tier code resolved the other rungs.
+  const visualsRequested = runTier === "models" && tierOf(args.project?.chartExport) !== "models";
 
   const apiKeyId = args.apiKeyId ?? null;
   const scopes = apiKeyId ? (args.apiKeyScopes ? await args.apiKeyScopes(apiKeyId).catch(() => null) : null) : undefined;
@@ -132,22 +135,39 @@ export async function resolveRunExtraction<T extends PipelineFeatures>(args: Run
     // Lowered from smart: the run keeps today's balanced rules (rescue reads on).
     if (result.quality === "balanced") next = { ...next, visionFallback: true };
   }
-  if (result.visuals !== runVisuals) {
-    next = {
-      ...next,
-      figures: result.visuals !== "none",
-      chartExport: { ...(next.chartExport ?? {}), tier: chartTierForVisuals(result.visuals) },
-    };
-  }
+  if (result.visuals !== runVisuals) next = lowerVisuals(next, result.visuals);
   return { ...next, effective: runEffectiveExtraction(next, result.capsApplied) };
+}
+
+/** A pipeline lowered to `visuals`: the chart tier follows it; figures only ever turn off (a cap never turns them on). */
+function lowerVisuals<T extends PipelineFeatures>(pipeline: T, visuals: VisualsLevel): T {
+  return {
+    ...pipeline,
+    figures: pipeline.figures !== false && visuals !== "none",
+    chartExport: { ...(pipeline.chartExport ?? {}), tier: chartTierForVisuals(visuals) },
+  };
 }
 
 /**
  * The `effective` stamp for a run inserted outside run creation (config-change reindex, full index, mode switch, deferred
  * materialize): those runs take the project's current pipeline, so nothing is raised and only the values are stamped.
  */
-export function withRunEffective<T extends PipelineFeatures>(pipeline: T): T & { effective: RunEffectiveExtraction } {
-  return { ...pipeline, effective: runEffectiveExtraction(pipeline) };
+export function withRunEffective<T extends PipelineFeatures>(pipeline: T, env: Readonly<Record<string, string | undefined>> = process.env): T & { effective: RunEffectiveExtraction } {
+  // No caller choice here, so nothing is refused: the values are capped by privacy, locality and switches and recorded.
+  const quality = qualityLevelFromLegacy(pipeline.quality);
+  const visuals = visualsLevelForRun(pipeline.figures !== false, tierOf(pipeline.chartExport) ?? "off");
+  const result = resolveExtractionSettings({
+    project: { quality, visuals },
+    origin: "machine",
+    caller: { canEdit: false },
+    constraints: { privacyMode: pipeline.privacyMode, vision: pipeline.vision },
+    policy: { ...extractionPolicyFromEnv(env), explicitChartsAllowed: true },
+  });
+  if (!result.ok) return { ...pipeline, effective: runEffectiveExtraction(pipeline) };
+  let next: T = pipeline;
+  if (result.quality !== quality) next = { ...next, quality: legacyQualityModeFor(result.quality), ...(result.quality === "balanced" ? { visionFallback: true } : {}) };
+  if (result.visuals !== visuals) next = lowerVisuals(next, result.visuals);
+  return { ...next, effective: runEffectiveExtraction(next, result.capsApplied) };
 }
 
 export type { QualityLevel, VisualsLevel };

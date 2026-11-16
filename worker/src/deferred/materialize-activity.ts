@@ -1,3 +1,4 @@
+import { QUALITY_RANK, runLegacyQualitySql } from "@docslurp/shared";
 import type { Sql } from "postgres";
 import { applyDefaultVisionOverride, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
@@ -40,7 +41,7 @@ export interface MaterializeActivityDeps {
  * silently become the defaults and write vectors to the wrong table or leak OCR to hosted providers),
  * load the source document's ingest run pipeline, then the project's, and refuse to run on defaults.
  */
-async function withSourcePipeline<R extends { id: string; kind?: string; pipeline: unknown; projectId?: string | null }>(
+export async function withSourcePipeline<R extends { id: string; kind?: string; pipeline: unknown; projectId?: string | null }>(
   sql: Sql<Record<string, unknown>>,
   run: R,
   documentId: string,
@@ -50,7 +51,7 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
   // snapshot of the pipeline (pipeline.ladder), so the project's current limits tighten it.
   // Quality is capped at the project's while it has a limit (clampRunLadder), so a source run at Good cannot read past it.
   const [project] = await sql<{ ladder: unknown; quality: string | null }[]>`
-    select w.pipeline -> 'ladder' as ladder, w.pipeline ->> 'quality' as quality
+    select w.pipeline -> 'ladder' as ladder, ${sql.unsafe(runLegacyQualitySql("w"))} as quality
     from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
   `;
   const projectQuality = qualityModeSchema.safeParse(project?.quality ?? "auto");
@@ -62,7 +63,13 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
       quality: projectQuality.success ? projectQuality.data : "fast",
       ladder: (project?.ladder ?? null) as never,
     }, false);
-    return { ...value, pipeline: applyLadderLimits(clamped) };
+    // A materialize run replays its source run's quality: never above the project's as it is now (extraction-config.ts,
+    // replays are capped at the current project), whether or not the project has a ladder limit.
+    const cap = projectQuality.success ? projectQuality.data : "fast";
+    const capped = QUALITY_RANK[clamped.quality] > QUALITY_RANK[cap]
+      ? { ...clamped, quality: cap, ...(cap === "auto" ? { visionFallback: true } : {}) }
+      : clamped;
+    return { ...value, pipeline: applyLadderLimits(capped) };
   };
   const [own] = await sql<{ empty: boolean }[]>`
     select (pipeline = '{}'::jsonb) as empty from project_runs where id = ${run.id}

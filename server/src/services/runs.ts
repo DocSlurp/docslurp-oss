@@ -540,7 +540,8 @@ export async function retryRun(
     const notRetryable = Symbol("retry-no-longer-eligible");
     try {
       const prepared = await admitRunSpend(run.orgId, run.projectId, async tx => {
-        await tx`update project_runs set pipeline = ${tx.json(JSON.parse(JSON.stringify(retried.pipeline)))} where id = ${run.id}`;
+        // The run's stamped extraction values (pipeline.effective) stay: a retry runs under its own admitted authority.
+        await tx`update project_runs set pipeline = ${tx.json(JSON.parse(JSON.stringify(retried.pipeline)))} || jsonb_strip_nulls(jsonb_build_object('effective', pipeline -> 'effective')) where id = ${run.id}`;
         const status = await runLifecycle.prepareRetry(run, tx);
         // Abort admission before its post-callback lease acquisition. A stale or
         // clean completed run must not retain credits for work it cannot retry.

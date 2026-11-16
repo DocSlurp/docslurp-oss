@@ -10,6 +10,12 @@ import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, m
 function migrateLegacyPatch(value: unknown, ctx?: { addIssue(issue: { code: "custom"; path: string[]; message: string; input: unknown }): void }): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   // The current names (`quality: fastest|balanced|smart`, `visuals`) become the stored legacy fields (extraction-config.ts).
+  // A proposal is a patch merged onto the project, which cannot express "unset the tier": `visuals: null` is refused.
+  if ((value as { visuals?: unknown }).visuals === null) {
+    ctx?.addIssue({ code: "custom", path: ["visuals"], message: "Choose a visuals rung (none, figures, charts or charts-ai); a proposal cannot reset visuals to the default", input: value });
+    const { visuals: _visuals, ...rest } = value as Record<string, unknown>;
+    return rest;
+  }
   try {
     value = applyExtractionConfigInput(value);
   } catch (error) {
@@ -85,8 +91,8 @@ export const projectSettingsPipelinePatchSchema = Object.assign(
       ...projectSettingsPipelinePatchObjectSchema.shape,
       quality: z.union([qualityLevelSchema, qualityModeSchema]).optional()
         .describe("Processing quality: fastest (text layers only), balanced (default: reads scans and complex pages), smart (reads every page with AI). fast/auto/good are deprecated aliases."),
-      visuals: visualsLevelSchema.nullable().optional()
-        .describe("Figures and charts: none, figures (PDF figure files), charts (chart data from files, no model), charts-ai (also reads charts with AI, billed per chart); null = the deployment default. Replaces figures and chartExport.tier."),
+      visuals: visualsLevelSchema.optional()
+        .describe("Figures and charts: none, figures (PDF figure files), charts (chart data from files, no model), charts-ai (also reads charts with AI, billed per chart). Replaces figures and chartExport.tier."),
     },
   },
 );

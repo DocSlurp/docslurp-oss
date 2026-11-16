@@ -1,7 +1,7 @@
 import { pageCredits } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, normalizePipelineFeatures } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 let sql: postgres.Sql;
@@ -474,4 +474,64 @@ it.each([undefined, 0, -1, NaN, Infinity])("refuses unknown source workload (%s)
     .rejects.toThrow(/trusted positive source size/);
   expect(await sql`select id from project_runs`).toHaveLength(0);
   expect(start).not.toHaveBeenCalled();
+});
+
+describe("quality and visuals at run creation (extraction config R0, council #440)", () => {
+  beforeAll(async () => {
+    await sql`insert into "user" (id, name, email) values ('member', 'M', 'member@example.test'), ('outsider', 'X', 'outsider@example.test') on conflict do nothing`;
+    await sql`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents) values ('o2', 'O2', 'o2', 'outsider', 1000) on conflict do nothing`;
+    await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'member', 'member'), ('o2', 'outsider', 'owner') on conflict do nothing`;
+    await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes) values
+      ('k-ingest', 'u', 'o', 'h-ingest', 'ingest', 'server', array['ingest']),
+      ('k-billed', 'u', 'o', 'h-billed', 'billed', 'server', array['ingest', 'pipeline:billed-features']),
+      ('k-revoked', 'u', 'o', 'h-revoked', 'revoked', 'server', array['ingest', 'pipeline:billed-features']),
+      ('k-member', 'member', 'o', 'h-member', 'member', 'server', array['ingest', 'pipeline:billed-features']),
+      ('k-outsider', 'outsider', 'o2', 'h-outsider', 'outsider', 'server', array['ingest', 'pipeline:billed-features'])
+      on conflict do nothing`;
+    await sql`update api_keys set revoked_at = now() where id = 'k-revoked'`;
+  });
+  beforeEach(async () => {
+    await sql`update projects set pipeline = ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))} where id = 'w'`;
+  });
+  const smart = { ...defaultPipelineFeatures, quality: "good" as const };
+  const code = async (promise: Promise<unknown>) => promise.then(() => "ok", (error: { code?: string; message?: string }) => error.code ?? error.message ?? "error");
+  const stamped = async () => (await sql<{ pipeline: { quality: string; effective?: { quality: string; capsApplied: unknown[] } } }[]>`select pipeline from project_runs order by created_at desc limit 1`)[0]!.pipeline;
+
+  it("smart above the project: ingest-only and revoked keys refused; a billed editor key and an editor session allowed", async () => {
+    expect(await code(runCreation.create({ ...input, pipeline: smart, apiKeyId: "k-ingest" }))).toBe("quality_smart_forbidden");
+    expect(await code(runCreation.create({ ...input, pipeline: smart, apiKeyId: "k-revoked" }))).toBe("quality_smart_forbidden");
+    expect(await sql`select id from project_runs`).toHaveLength(0);
+    expect(await code(runCreation.create({ ...input, pipeline: smart, apiKeyId: "k-billed" }))).toBe("ok");
+    expect(await stamped()).toMatchObject({ quality: "good", effective: { quality: "smart", capsApplied: [] } });
+    expect(await code(runCreation.create({ ...input, pipeline: smart }))).toBe("ok");
+  });
+
+  it("a member (not an editor of this project) cannot raise, even with the billed scope; another org's key cannot reach the project", async () => {
+    const member = await code(runCreation.create({ ...input, userId: "member", pipeline: smart, apiKeyId: "k-member" }));
+    expect(["quality_smart_forbidden", "Forbidden", "Project not found"]).toContain(member);
+    const outsider = await code(runCreation.create({ ...input, userId: "outsider", pipeline: smart, apiKeyId: "k-outsider" }));
+    expect(["Project not found", "Forbidden"]).toContain(outsider);
+    expect(await sql`select id from project_runs`).toHaveLength(0);
+  });
+
+  it("a project saved on figures off with AI chart reads runs as saved for an ingest key (stored, not a raise)", async () => {
+    const saved = { ...defaultPipelineFeatures, figures: false, chartExport: { ...defaultPipelineFeatures.chartExport, tier: "models" as const } };
+    await sql`update projects set pipeline = ${sql.json(JSON.parse(JSON.stringify(saved)))} where id = 'w'`;
+    process.env.DOCSLURP_CHART_EXPORT = "on";
+    try {
+      expect(await code(runCreation.create({ ...input, pipeline: saved, apiKeyId: "k-ingest" }))).toBe("ok");
+    } finally { delete process.env.DOCSLURP_CHART_EXPORT; }
+  });
+
+  it("a stored smart under local-only is lowered and recorded, never refused", async () => {
+    const saved = normalizePipelineFeatures({ quality: "good", privacyMode: "local-only" });
+    await sql`update projects set pipeline = ${sql.json(JSON.parse(JSON.stringify(saved)))} where id = 'w'`;
+    expect(await code(runCreation.create({ ...input, pipeline: saved, apiKeyId: "k-ingest" }))).toBe("ok");
+    expect(await stamped()).toMatchObject({ quality: "auto", effective: { quality: "balanced", capsApplied: [{ field: "quality", reason: "privacy" }] } });
+  });
+
+  it("an old project row with only the retired parserPlaybook key is not mistaken for a raise", async () => {
+    await sql`update projects set pipeline = '{"parserPlaybook": "fast"}'::jsonb where id = 'w'`;
+    expect(await code(runCreation.create({ ...input, pipeline: { ...defaultPipelineFeatures, quality: "fast" }, apiKeyId: "k-ingest" }))).toBe("ok");
+  });
 });

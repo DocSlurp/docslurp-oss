@@ -1035,7 +1035,8 @@ export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 /** Walk the installed contract shape without injecting defaults into a sparse publication. Records stay open. */
 function rejectUnknownPatchKeys(value: unknown, schema: z.ZodType, ctx: z.RefinementCtx, path: (string | number)[] = []): void {
   if (!value || typeof value !== "object") return;
-  if (schema instanceof z.ZodPipe) return rejectUnknownPatchKeys(value, schema.in as z.ZodType, ctx, path);
+  // A preprocess pipe (pipelineFeaturesSchema) has a transform as its input: descend into its output schema.
+  if (schema instanceof z.ZodPipe) return rejectUnknownPatchKeys(value, (schema.in instanceof z.ZodTransform ? schema.out : schema.in) as z.ZodType, ctx, path);
   if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodDefault) return rejectUnknownPatchKeys(value, schema.unwrap() as z.ZodType, ctx, path);
   if (schema instanceof z.ZodArray && Array.isArray(value)) {
     value.forEach((entry, index) => rejectUnknownPatchKeys(entry, schema.element as z.ZodType, ctx, [...path, index]));
@@ -1110,12 +1111,23 @@ const projectTemplateCoLockedPaths: Partial<Record<ProjectTemplateLockedSetting,
   quality: [["visionFallback"]],
 };
 
+/**
+ * Templates whose `quality` lock co-locks `visionFallback`: exactly those that locked `visionFallback` before the lock
+ * moved under `quality`. Other templates leave a project's own `visionFallback` alone (R0 never turns rescue reads on
+ * that a project turned off; R1's migration maps them, design Q1).
+ */
+const TEMPLATES_WITH_QUALITY_CO_LOCKS: ReadonlySet<string> = new Set(["medical-records", "meeting-notes"]);
+
+function coLockedPaths(template: Pick<ProjectTemplate, "key">, setting: ProjectTemplateLockedSetting): string[][] {
+  return TEMPLATES_WITH_QUALITY_CO_LOCKS.has(template.key) ? projectTemplateCoLockedPaths[setting] ?? [] : [];
+}
+
 /** Every dotted pipeline path a template's locks hold (its locked settings plus the paths they co-lock). */
-export function projectTemplateLockedPaths(template: Pick<ProjectTemplate, "lockedSettings">): string[] {
+export function projectTemplateLockedPaths(template: Pick<ProjectTemplate, "key" | "lockedSettings">): string[] {
   const paths = new Set<string>();
   for (const setting of template.lockedSettings) {
     paths.add(projectTemplateLockedSettingPaths[setting].join("."));
-    for (const extra of projectTemplateCoLockedPaths[setting] ?? []) paths.add(extra.join("."));
+    for (const extra of coLockedPaths(template, setting)) paths.add(extra.join("."));
   }
   return [...paths];
 }
@@ -1193,9 +1205,8 @@ export function applyProjectTemplateLocks(
   >;
 
   for (const lockedSetting of template.lockedSettings) {
-    for (const path of [projectTemplateLockedSettingPaths[lockedSetting], ...(projectTemplateCoLockedPaths[lockedSetting] ?? [])]) {
-      // A template that leaves a co-locked field unset locks its schema default.
-      const lockedValue = readNestedValue(pipelineFeaturesSchema.parse(template.pipeline), path);
+    for (const path of [projectTemplateLockedSettingPaths[lockedSetting], ...coLockedPaths(template, lockedSetting)]) {
+      const lockedValue = readNestedValue(template.pipeline, path);
       if (lockedValue !== undefined) {
         writeNestedValue(nextPipeline, path, lockedValue);
       }
