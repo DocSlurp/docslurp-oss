@@ -19,6 +19,13 @@ import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
  * (default 168, 7 days), so a false positive heals itself; a later attributable failure extends it.
  * Every organization whose document hit the row (teardown or refusal) is kept for attribution.
  *
+ * Organization isolation: a listed hash refuses only documents of an organization whose own document
+ * defeated teardown with those bytes (`org_ids`). Another organization's identical upload is admitted
+ * and parsed in its own fresh VM, so the denylist never reveals that someone else uploaded the bytes;
+ * if it defeats teardown there too, that organization joins the row (and its breaker counts it).
+ * Every value this module returns describes the asking document's own organization, never the first
+ * attributor's.
+ *
  * Hashes are the staged ones: the bytes this worker downloaded and hashed (source-integrity.ts),
  * which must equal the server's `documents.source_sha256` or the document is refused before any
  * command. So a source swapped after upload can neither list another file's hash nor hide listed
@@ -137,10 +144,12 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
   return {
     async find(documentId, stagedSha256 = null) {
       const rows = await sql`
-        select q.source_sha256, q.org_id, q.project_id
+        select q.source_sha256, d.org_id, d.project_id
         from documents d
         join quarantined_sources q on q.source_sha256 = coalesce(${stagedSha256}::text, d.source_sha256)
         where d.id = ${documentId} and q.expires_at > now()
+          -- Only this organization's own listing; a document without an organization (none should exist) fails closed.
+          and (d.org_id is null or d.org_id = any(q.org_ids))
         limit 1`;
       return mapRow(rows[0]);
     },
@@ -148,6 +157,8 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
       // The first attribution is kept; a later failure (another worker raced it, or the row expired)
       // extends the expiry and adds its organization.
       const rows = await sql`
+        with doc as (select d.org_id, d.project_id from documents d where d.id = ${documentId}),
+        listed as (
         insert into quarantined_sources as q (
           source_sha256, org_id, project_id, run_id, document_id, stage, detail, expires_at,
           org_ids, last_org_id, last_document_id
@@ -165,7 +176,8 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
           last_document_id = excluded.last_document_id,
           last_seen_at = now(),
           teardown_count = q.teardown_count + 1
-        returning source_sha256, org_id, project_id`;
+        returning source_sha256)
+        select listed.source_sha256, doc.org_id, doc.project_id from listed, doc`;
       return mapRow(rows[0]);
     },
     async noteRefusal({ documentId, sourceSha256 }) {
@@ -178,6 +190,8 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
           refused_count = q.refused_count + 1
         from documents d
         where q.source_sha256 = ${sourceSha256} and d.id = ${documentId}
+          -- Only a refusal of this organization's own listing (find never refuses on another's).
+          and (d.org_id is null or d.org_id = any(q.org_ids))
           -- A hashed document's bytes are its server hash (staging refuses anything else); an
           -- unhashed one was found by its staged hash.
           and (d.source_sha256 is null or d.source_sha256 = q.source_sha256)`;

@@ -47,10 +47,12 @@ describe("postgres source quarantine", () => {
     expect(await store.find("hostile")).toBeNull();
     expect(await store.record({ documentId: "hostile", runId: "run-1", stage: "render-images", detail: "pdftoppm teardown could not be verified", ttlHours: 168 }))
       .toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
-    // Recording again (a second worker raced it) keeps the first attribution.
-    expect(await store.record({ documentId: "same-bytes-other-org", detail: "again", ttlHours: 168 })).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
+    // Organization isolation: another organization's identical upload is not refused by o1's listing.
+    expect(await store.find("same-bytes-other-org")).toBeNull();
+    // Recording o2's own teardown on those bytes lists them for o2 too; the result names o2, never o1.
+    expect(await store.record({ documentId: "same-bytes-other-org", detail: "again", ttlHours: 168 })).toEqual({ sourceSha256: "aaaa", orgId: "o2", projectId: "w2" });
     expect(await store.find("hostile")).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
-    expect(await store.find("same-bytes-other-org")).toMatchObject({ sourceSha256: "aaaa" });
+    expect(await store.find("same-bytes-other-org")).toEqual({ sourceSha256: "aaaa", orgId: "o2", projectId: "w2" });
     expect(await store.find("innocent")).toBeNull();
     expect(await store.find("missing")).toBeNull();
   });
@@ -62,23 +64,31 @@ describe("postgres source quarantine", () => {
     const [listed] = await sql`select expires_at - created_at as ttl, org_ids, teardown_count, refused_count from quarantined_sources where source_sha256 = 'aaaa'`;
     expect(String(listed!.ttl)).toMatch(/^(7 days|168:00:00)/);
     expect(listed!.org_ids).toEqual(["o1"]);
-    // A refusal of the same bytes in another organization joins the attribution.
+    // Another organization's document is never refused on o1's listing, and a refusal note for it changes nothing.
+    expect(await store.find("same-bytes-other-org")).toBeNull();
     await store.noteRefusal({ documentId: "same-bytes-other-org", sourceSha256: "aaaa" });
+    const [untouched] = await sql`select org_ids, last_org_id, refused_count from quarantined_sources where source_sha256 = 'aaaa'`;
+    expect(untouched).toEqual({ org_ids: ["o1"], last_org_id: "o1", refused_count: 0 });
+    // Refusals within the listing organization are counted.
+    await store.noteRefusal({ documentId: "hostile", sourceSha256: "aaaa" });
+    await store.noteRefusal({ documentId: "hostile", sourceSha256: "aaaa" });
+    // o2's own teardown on the same bytes joins the attribution.
+    await store.record({ documentId: "same-bytes-other-org", detail: "o2 too", ttlHours: 168 });
     await store.noteRefusal({ documentId: "same-bytes-other-org", sourceSha256: "aaaa" });
     const [refused] = await sql`select org_id, org_ids, last_org_id, last_document_id, refused_count from quarantined_sources where source_sha256 = 'aaaa'`;
-    expect(refused).toEqual({ org_id: "o1", org_ids: ["o1", "o2"], last_org_id: "o2", last_document_id: "same-bytes-other-org", refused_count: 2 });
+    expect(refused).toEqual({ org_id: "o1", org_ids: ["o1", "o2"], last_org_id: "o2", last_document_id: "same-bytes-other-org", refused_count: 3 });
     // A refusal note for another document's bytes changes nothing.
     await store.noteRefusal({ documentId: "innocent", sourceSha256: "aaaa" });
-    expect((await sql`select refused_count from quarantined_sources where source_sha256 = 'aaaa'`)[0]!.refused_count).toBe(2);
+    expect((await sql`select refused_count from quarantined_sources where source_sha256 = 'aaaa'`)[0]!.refused_count).toBe(3);
     // Once expired, the bytes are admitted again.
     await sql`update quarantined_sources set expires_at = now() - interval '1 second' where source_sha256 = 'aaaa'`;
     expect(await store.find("hostile")).toBeNull();
     expect(await store.find("same-bytes-other-org")).toBeNull();
     // A new attributable failure lists them again, keeps the first attribution and counts it.
-    expect(await store.record({ documentId: "same-bytes-other-org", detail: "again", ttlHours: 1 })).toEqual({ sourceSha256: "aaaa", orgId: "o1", projectId: "w1" });
+    expect(await store.record({ documentId: "same-bytes-other-org", detail: "again", ttlHours: 1 })).toEqual({ sourceSha256: "aaaa", orgId: "o2", projectId: "w2" });
     expect(await store.find("hostile")).toMatchObject({ sourceSha256: "aaaa" });
-    const [again] = await sql`select teardown_count, org_ids, expires_at > now() + interval '50 minutes' as fresh from quarantined_sources where source_sha256 = 'aaaa'`;
-    expect(again).toEqual({ teardown_count: 2, org_ids: ["o1", "o2"], fresh: true });
+    const [again] = await sql`select org_id, teardown_count, org_ids, expires_at > now() + interval '50 minutes' as fresh from quarantined_sources where source_sha256 = 'aaaa'`;
+    expect(again).toEqual({ org_id: "o1", teardown_count: 3, org_ids: ["o1", "o2"], fresh: true });
   });
 
   it("cannot list a document without a source hash", async () => {
@@ -101,8 +111,10 @@ describe("postgres source quarantine keyed by the staged hash", () => {
     // The other organization's popular file P stays admitted.
     expect(await store.find("popular-other-org", "pppp")).toBeNull();
     expect(await store.find("popular-other-org")).toBeNull();
-    // The staged hash is what is checked: the listed bytes are refused under any server hash.
+    // The staged hash is what is checked: the listed bytes are refused under any server hash (same organization).
     expect(await store.find("innocent", "x".repeat(64))).toMatchObject({ sourceSha256: "x".repeat(64) });
+    // ...but never for another organization's document with those staged bytes.
+    expect(await store.find("popular-other-org", "x".repeat(64))).toBeNull();
     // A document without a server hash is keyed by its staged hash.
     expect(await store.record({ documentId: "unhashed", stagedSha256: "u".repeat(64), detail: "held", ttlHours: 1 }))
       .toMatchObject({ sourceSha256: "u".repeat(64) });

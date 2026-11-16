@@ -3,6 +3,7 @@
 - Pooled Modal parser VMs are bound to one organization's run: host-side (each lane takes its first command's org+run scope and is never offered another; a session refuses, with an ALERT, a command of a second organization) and in-guest (the root reset records the scope in a root-only marker and exits 9 on any other, so the host terminates the VM). Commands without both an organization and a run get a single-use VM. The runner sends `runKey` with every remote command.
 - The worker's process-local PDF source cache keys entries by run and requester as well as the storage key.
 - The page-image-reader contract now binds reader VMs to one organization's run. AGENTS.md: compute units are never reused across organizations; fail closed to a fresh unit.
+- Source quarantine is per organization: a hash listed after org A's parser teardown failure refuses only A's documents; org B's identical upload is parsed in its own VM and never learns of A's listing (it joins the row only if its own teardown fails). `find`/`record` return the asking document's organization, never the first attributor's.
 
 ## Automatic-call margin gate (2026-11-15)
 
