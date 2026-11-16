@@ -7,10 +7,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
-import { buildModalUsageEvent, buildScannerSnapshot, createModalProvider, modalVmIdleSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
+import { buildModalUsageEvent, buildScannerSnapshot, createModalProvider as createModalProviderRaw, laneScope, modalVmIdleSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
+
+/**
+ * Most tests here exercise the VM pool within one organization's run, as the runner sends commands (tenantKey and runKey
+ * from the stage context): a command that names neither gets that scope. Organization isolation has its own tests below,
+ * which name the scope of every command.
+ */
+const createModalProvider: typeof createModalProviderRaw = (...args) => {
+  const provider = createModalProviderRaw(...args);
+  return {
+    ...provider,
+    openSession: async (config, context) => {
+      const session = await provider.openSession(config, context);
+      if (!session.run) return session;
+      const run = session.run.bind(session);
+      const defaults = context.scanner ? { runKey: "run-1" } : { tenantKey: "org-a", runKey: "run-1" };
+      return { ...session, run: (command, ...rest) => run({ ...defaults, ...command }, ...rest) };
+    },
+  };
+};
 import { jobRootsChanged, modalScannerRegions, ScannerSnapshotCache } from "../providers/modal/scanner.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
-import { SandboxConfigError, SandboxInfrastructureError, SandboxOutputError, SandboxRunError } from "../types.js";
+import { SandboxConfigError, SandboxInfrastructureError, SandboxOutputError, SandboxPolicyError, SandboxRunError } from "../types.js";
 
 /** In-memory remote filesystem; every write gets a fresh mtime so changes are always visible. */
 class MemoryRemoteFs implements RemoteFs {
@@ -304,6 +323,8 @@ function fakeSdk(
     killFailsInVm?: number;
     /** The post-command reset finds the VM's disk or job roots unusable (exit 5) in this VM. */
     resetUnhealthyInVm?: number;
+    /** Test seam: this VM's in-guest binding names another scope (a host binding that failed). */
+    forgeScopeInVm?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
     /** The post-command reset exec throws: Modal's exec deadline (a wipe of millions of files) or a transport error. */
@@ -367,6 +388,8 @@ function fakeSdk(
     maxAssetWritesInFlight: 0,
     orphanTerminates: [] as string[],
     resets: [] as Array<{ vm: number; roots: string[] }>,
+    /** The scope each VM's first reset bound in-guest. */
+    vmScopes: new Map<number, string>(),
     rootWrites: [] as string[],
     events: [] as string[],
     clientClose: 0,
@@ -482,6 +505,14 @@ function fakeSdk(
       if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-reset")) {
         state.resets.push({ vm, roots: argv.slice(4) });
         state.events.push("reset");
+        // The in-guest binding (RESET_SCRIPT `--scope`): the first reset records the VM's scope; any other is refused (9).
+        if (argv[4] === "--scope") {
+          const scope = argv[5]!;
+          if (opts.forgeScopeInVm === vm) state.vmScopes.set(vm, "another-organizations-run");
+          const bound = state.vmScopes.get(vm);
+          if (bound === undefined) state.vmScopes.set(vm, scope);
+          else if (bound !== scope) return finished("", 9);
+        }
         if (opts.resetThrows === "deadline") throw new Error("Deadline exceeded while waiting for the exec");
         if (opts.resetThrows === "transport") throw new Error("stream reset by peer");
         return finished("", opts.resetUnhealthyInVm === vm ? 5 : 0);
@@ -1122,6 +1153,92 @@ describe("modal provider session lifecycle", () => {
   });
 
 
+
+  describe("organization isolation: a parser VM serves one organization's run", () => {
+    const scoped = (tenantKey: string | undefined, runKey: string | undefined, affinityKey: string) =>
+      ({ ...command, affinityKey, tenantKey: tenantKey as string, runKey: runKey as string });
+
+    it("binds each VM to one run: another run of the organization gets a fresh VM, never the idle one", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const opened = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 1, vmIdleSeconds: 60 }, { activityId: "a" });
+      await opened.run!(scoped("org-a", "run-1", "doc-1"));
+      await opened.run!(scoped("org-a", "run-1", "doc-2")); // same run: reuses the VM
+      expect(state.createOptions).toHaveLength(1);
+      await opened.run!(scoped("org-a", "run-2", "doc-3")); // another run: the idle VM is terminated, a fresh one opens
+      expect(state.createOptions).toHaveLength(2);
+      expect(state.terminate).toBe(1);
+      expect(state.commandVms).toEqual([1, 1, 2]);
+      // In-guest: every reset on a VM names that VM's one scope.
+      const scopesByVm = new Map<number, Set<string>>();
+      for (const reset of state.resets) (scopesByVm.get(reset.vm) ?? scopesByVm.set(reset.vm, new Set()).get(reset.vm)!).add(reset.roots[1]!);
+      expect(scopesByVm.get(1)).toEqual(new Set([laneScope({ tenantKey: "org-a", runKey: "run-1" })]));
+      expect(scopesByVm.get(2)).toEqual(new Set([laneScope({ tenantKey: "org-a", runKey: "run-2" })]));
+      await opened.close();
+    });
+
+    it("refuses a command of another organization before it reaches any VM", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const opened = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 2, vmIdleSeconds: 60 }, { activityId: "a" });
+      await opened.run!(scoped("org-a", "run-1", "doc-1"));
+      await expect(opened.run!(scoped("org-b", "run-1", "doc-1"))).rejects.toBeInstanceOf(SandboxPolicyError);
+      await expect(opened.run!(scoped("org-b", "run-9", "doc-9"))).rejects.toThrow(/another/);
+      expect(state.commands).toHaveLength(1);
+      expect(state.commandVms).toEqual([1]);
+      expect(errors.mock.calls.some(([line]) => String(line).includes("ALERT") && String(line).includes("cross-organization"))).toBe(true);
+      await opened.close();
+    });
+
+    it("concurrent runs never share a VM, and a released VM never goes to the other run", async () => {
+      const gates: Array<() => void> = [];
+      const { sdk, state } = fakeSdk({ exec: async () => { const proc = running(); gates.push(() => proc.end(0)); return proc.process; } });
+      const opened = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 3, vmIdleSeconds: 60 }, { activityId: "a" });
+      const a = opened.run!(scoped("org-a", "run-1", "doc-1"));
+      const b = opened.run!(scoped("org-a", "run-2", "doc-2"));
+      await vi.waitFor(() => expect(state.commands).toHaveLength(2));
+      expect(new Set(state.commandVms).size).toBe(2);
+      gates.splice(0).forEach((end) => end());
+      await Promise.all([a, b]);
+      const vmOf = (index: number) => state.commandVms[index]!;
+      const [run1Vm, run2Vm] = [vmOf(0), vmOf(1)];
+      for (const [run, vm] of [["run-2", run2Vm], ["run-1", run1Vm]] as const) {
+        const next = opened.run!(scoped("org-a", run, "doc-x"));
+        await vi.waitFor(() => expect(gates.length).toBe(1));
+        gates.splice(0).forEach((end) => end());
+        await next;
+        expect(state.commandVms.at(-1)).toBe(vm);
+      }
+      await opened.close();
+    });
+
+    it("a command without an organization's run gets a single-use VM, terminated when it ends", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const opened = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 2, vmIdleSeconds: 60 }, { activityId: "a" });
+      await opened.run!(scoped("org-a", "run-1", "doc-1"));
+      await opened.run!(scoped(undefined, "run-1", "doc-2"));
+      await vi.waitFor(() => expect(state.terminate).toBe(1));
+      await opened.run!(scoped("org-a", undefined, "doc-3"));
+      await vi.waitFor(() => expect(state.terminate).toBe(2));
+      await opened.run!(scoped("org-a", "run-1", "doc-4"));
+      // The scoped commands share VM 1; each unscoped one had its own VM, never reused and never VM 1.
+      expect(state.commandVms).toEqual([1, 2, 3, 1]);
+      await opened.close();
+    });
+
+    it("a VM whose in-guest binding names another scope is terminated and never used again", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished(), forgeScopeInVm: 1 });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const opened = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 1, vmIdleSeconds: 60 }, { activityId: "a" });
+      const error = await opened.run!(scoped("org-a", "run-1", "doc-1")).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SandboxInfrastructureError);
+      expect(String((error as Error).message)).toMatch(/bound to another organization or run/);
+      expect(state.terminate).toBe(1);
+      expect(errors.mock.calls.some(([line]) => String(line).includes("vm-scope-mismatch"))).toBe(true);
+      await opened.run!(scoped("org-a", "run-1", "doc-1"));
+      expect(state.commandVms).toEqual([1, 2]);
+      await opened.close();
+    });
+  });
 
   describe("a pool of parser VMs per activity (recheck R #5)", () => {
     async function pooled(vmsPerActivity: number, opts: Parameters<typeof fakeSdk>[0] = {}) {

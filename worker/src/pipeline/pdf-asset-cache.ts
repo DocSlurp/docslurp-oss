@@ -179,6 +179,16 @@ type SourceStorage = Pick<ArtifactStore, "downloadToTempFile">;
  * download, hashing, bounded eviction, and cleanup so callers never materialize
  * the same source independently inside one worker process.
  */
+/**
+ * Organization isolation: a cached source serves only its own run (a run belongs to exactly one organization). The storage
+ * key alone is never trusted to separate tenants; the run and its requester are part of the cache key, so no other
+ * organization's (or run's) stage can be handed this file.
+ */
+function sourceCacheKey(document: Pick<Document, "userId" | "runId" | "sourceKey">): string {
+  if (!document.runId || !document.userId || !document.sourceKey) throw new Error("PDF source cache needs a run-scoped document");
+  return JSON.stringify([document.runId, document.userId, document.sourceKey]);
+}
+
 export class PdfSourceCache {
   private readonly entries = new Map<string, Promise<SourceEntry>>();
 
@@ -201,14 +211,15 @@ export class PdfSourceCache {
     try {
       verifyStagedSource(document, entry.sha256);
     } catch (error) {
-      if (error instanceof SourceIntegrityError) await this.drop(document.sourceKey);
+      if (error instanceof SourceIntegrityError) await this.drop(sourceCacheKey(document));
       throw error;
     }
     return { ...entry, cacheHit };
   }
 
   private async entry(document: Document): Promise<{ entry: SourceEntry; cacheHit: boolean }> {
-    const existing = this.entries.get(document.sourceKey);
+    const key = sourceCacheKey(document);
+    const existing = this.entries.get(key);
     if (existing) {
       const entry = await existing;
       entry.lastAccess = Date.now();
@@ -216,18 +227,18 @@ export class PdfSourceCache {
     }
 
     await this.evictIfNeeded();
-    const raced = this.entries.get(document.sourceKey);
+    const raced = this.entries.get(key);
     if (raced) {
       const entry = await raced;
       entry.lastAccess = Date.now();
       return { entry, cacheHit: true };
     }
     const pending = this.download(document);
-    this.entries.set(document.sourceKey, pending);
+    this.entries.set(key, pending);
     try {
       return { entry: await pending, cacheHit: false };
     } catch (error) {
-      this.entries.delete(document.sourceKey);
+      this.entries.delete(key);
       throw error;
     }
   }

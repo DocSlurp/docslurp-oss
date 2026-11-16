@@ -298,6 +298,28 @@ const RESET_SCRIPT = [
   // Arguments: the job roots, then optionally `--keep` and the current document's uploaded inputs (council X #7). Those
   // stay (and their parent directories) only when under a job root; everything else the parser user owns goes.
   "args = sys.argv[1:]",
+  // In-guest binding (organization isolation): the first reset records the VM's scope (a hash of one organization's run)
+  // in a root-only file the parser user can neither create nor change; every later reset must name the same scope, or the
+  // VM refuses (exit 9) and the host terminates it. A VM never serves a second organization or run.
+  "scope = None",
+  "if args[:1] == ['--scope']: scope = args[1]; args = args[2:]",
+  "if scope is not None:",
+  `    marker = ${JSON.stringify(`${CONTROL_DIR}/scope`)}`,
+  "    try:",
+  "        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)",
+  "        os.write(fd, scope.encode()); os.close(fd)",
+  "    except FileExistsError:",
+  "        try:",
+  "            st = os.lstat(marker)",
+  "            fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)",
+  "            bound = os.read(fd, 256).decode(); os.close(fd)",
+  "        except OSError: bound = None; st = None",
+  "        if st is None or not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or bound != scope:",
+  "            print('[parser-reset] VM is bound to another organization or run; refusing', flush=True)",
+  "            sys.exit(9)",
+  "    except OSError as error:",
+  "        print('[parser-reset] scope binding failed: %s' % error, flush=True)",
+  "        sys.exit(9)",
   "keep_args = args[args.index('--keep') + 1:] if '--keep' in args else []",
   "job_roots = [os.path.normpath(r) for r in (args[:args.index('--keep')] if '--keep' in args else args)]",
   `roots = ${JSON.stringify(PARSER_SCRATCH_ROOTS)} + job_roots`,
@@ -386,9 +408,16 @@ const RESET_SCRIPT = [
   "sys.exit(os.waitstatus_to_exitcode(status))",
 ].join("\n");
 
-/** argv for the post-command reset (RESET_SCRIPT) over these job roots. */
-export function resetArgv(jobRoots: readonly string[], keep: readonly string[] = []): string[] {
-  return ["python3", "-I", "-c", RESET_SCRIPT, ...jobRoots, ...(keep.length ? ["--keep", ...keep] : [])];
+/** Exit code of RESET_SCRIPT when the VM is bound to another scope (organization and run) than the one it was given. */
+export const RESET_SCOPE_REFUSED = 9;
+
+/**
+ * argv for the post-command reset (RESET_SCRIPT) over these job roots. `scope` (a hex digest of one organization's run,
+ * or a single-use token) binds the VM in-guest at its first reset and must match at every later one.
+ */
+export function resetArgv(jobRoots: readonly string[], keep: readonly string[] = [], scope?: string): string[] {
+  if (scope !== undefined && !/^[0-9a-z-]{8,128}$/.test(scope)) throw new Error("invalid parser VM scope");
+  return ["python3", "-I", "-c", RESET_SCRIPT, ...(scope !== undefined ? ["--scope", scope] : []), ...jobRoots, ...(keep.length ? ["--keep", ...keep] : [])];
 }
 
 /** Per-command HOME, temp and XDG directories under `scratch` (council W #1): nothing a command writes there outlives it. */
