@@ -432,7 +432,7 @@ export class PiiDetectStage implements Stage {
         // Pages: withhold on the original text, then redact each clean page alone (a redacted span that crossed a
         // page break would otherwise drop the break and shift every later page).
         currentMarkdown = plan.scope === "pages"
-          ? withholdPagesThenRedact(markdown.text, new Set(plan.pages), (page) => scan(page).redacted)
+          ? withholdPagesThenRedact(markdown.text, new Set(plan.pages), (page) => scan(page).redacted, markdownResult.matches)
           : withholding ? applyPlanToText(plan, markdown.text, markdownResult.matches) : markdownResult.redacted;
         await this.storage.streamText(markdown.key, currentMarkdown, markdown.contentType);
         redactedArtifacts.push(markdown.slot);
@@ -450,7 +450,7 @@ export class PiiDetectStage implements Stage {
         // Embed, summary and page index read the markdown slot before the source file.
         const key = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.redacted.md`;
         currentMarkdown = plan.scope === "pages"
-          ? withholdPagesThenRedact(fallbackText!, new Set(plan.pages), (page) => scan(page).redacted)
+          ? withholdPagesThenRedact(fallbackText!, new Set(plan.pages), (page) => scan(page).redacted, fallbackResult.matches)
           : withholding ? applyPlanToText(plan, fallbackText!, fallbackResult.matches) : fallbackResult.redacted;
         await this.storage.streamText(key, currentMarkdown, "text/markdown");
         ledger.recordDocument(document.id, "markdown", this.storage.uri(key));

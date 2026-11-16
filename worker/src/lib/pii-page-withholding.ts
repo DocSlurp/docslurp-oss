@@ -179,10 +179,36 @@ function planSections(findings: PiiScanFindings): PiiWithholdingPlan {
  * Page-scoped rewrite of `\f`-separated text: withheld pages become their placeholder, and every other page is
  * redacted on its own. Withholding runs on the original text, before any redaction, and redaction never sees a page
  * break, so a match whose span crosses a break can never merge pages and shift later ones (the page count is kept by
- * construction).
+ * construction). `matches` are the whole text's matches (offsets into `text`): each is clipped to every clean page it
+ * touches and replaced there first, so a value split by a page break, which a scan of one page alone may not
+ * recognise, is still redacted on both pages.
  */
-export function withholdPagesThenRedact(text: string, pages: ReadonlySet<number>, redact: (page: string) => string): string {
-  return text.split("\f").map((page, index) => (pages.has(index + 1) ? piiWithheldPageText(index + 1) : redact(page))).join("\f");
+export function withholdPagesThenRedact(
+  text: string,
+  pages: ReadonlySet<number>,
+  redact: (page: string) => string,
+  matches: readonly PiiMatch[] = [],
+): string {
+  let start = 0;
+  return text.split("\f").map((page, index) => {
+    const pageStart = start;
+    const pageEnd = start + page.length;
+    start = pageEnd + 1;
+    if (pages.has(index + 1)) return piiWithheldPageText(index + 1);
+    const spans = matches
+      .map((match) => ({ type: match.patternType, from: Math.max(match.charOffset, pageStart), to: Math.min(match.charOffset + match.length, pageEnd) }))
+      .filter((span) => span.to > span.from)
+      .sort((left, right) => right.from - left.from);
+    let clipped = page;
+    let floor = Number.POSITIVE_INFINITY;
+    for (const span of spans) {
+      const to = Math.min(span.to, floor);
+      if (to <= span.from) continue;
+      clipped = `${clipped.slice(0, span.from - pageStart)}[REDACTED:${span.type}]${clipped.slice(to - pageStart)}`;
+      floor = span.from;
+    }
+    return redact(clipped);
+  }).join("\f");
 }
 
 export function applyPlanToText(plan: PiiWithholdingPlan, text: string, matches: readonly PiiMatch[]): string {

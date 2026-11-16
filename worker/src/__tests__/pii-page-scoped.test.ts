@@ -12,7 +12,7 @@ import {
 
 import { fromEnv } from "../config.js";
 import type { Document, ProjectRun } from "../models.js";
-import { locateMatches, planPiiWithholding } from "../lib/pii-page-withholding.js";
+import { locateMatches, planPiiWithholding, withholdPagesThenRedact } from "../lib/pii-page-withholding.js";
 import { documentPiiWithholding, indexableDocuments, isPageWithheldInRun } from "../pipeline/pii-gate.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
@@ -179,6 +179,17 @@ describe("block_indexing withholds the page, not the document", () => {
     const pages = f.storage.objects.get(f.markdownKey)!.split("\f");
     expect(pages).toEqual(["p1 clean", piiWithheldPageText(2), piiWithheldPageText(3), "p4 clean", piiWithheldPageText(5), "p6 clean"]);
     expect(f.storage.objects.get(f.markdownKey)).not.toContain("Jane Doe");
+  });
+
+  it("a match crossing a break between two clean pages is redacted on both, even when neither half matches alone", () => {
+    // Page 2 is withheld (carried over); a card number runs from page 3 into page 4. Rescanning each page alone finds
+    // nothing (the identity redactor here), so the whole text's match offsets are clipped to each page.
+    const text = "one\fcarried\fcard 4111 1111\f1111 1111 end\ffive";
+    const at = text.indexOf("4111");
+    const length = text.indexOf(" end") - at;
+    const match = { patternType: "credit-card" as const, matchedPrefix: "fp", pageNumber: null, byteOffset: at, charOffset: at, length };
+    const pages = withholdPagesThenRedact(text, new Set([2]), (page) => page, [match]).split("\f");
+    expect(pages).toEqual(["one", piiWithheldPageText(2), "card [REDACTED:credit-card]", "[REDACTED:credit-card] end", "five"]);
   });
 
   it("every page withheld: the document is blocked", async () => {
