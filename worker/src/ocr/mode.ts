@@ -177,7 +177,7 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
   // A loaded VM OCR provider means a deployment that reads customer files in VMs: it must say which profile it is, and it
   // never runs OCR on the worker host instead.
   if (provider && profile === null) {
-    throw new Error("a sandboxedOcr provider plugin is loaded but DOCSLURP_PROFILE is unset; set it (service) rather than let the OCR boundary depend on a default; refusing to start");
+    throw new Error("a sandboxedOcr provider plugin is loaded but DOCSLURP_PROFILE is unset or dev; set it (service or selfhost) rather than let the OCR boundary depend on a default; refusing to start");
   }
   if (provider && mode === "local") {
     throw new Error(`DOCSLURP_OCR_MODE=local would run OCR on the worker host while the ${provider.id} VM provider is loaded; use vm; refusing to start`);

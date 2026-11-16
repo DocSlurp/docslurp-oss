@@ -122,9 +122,13 @@ if (profile !== 'routing') {
   }
   // Local OCR parses customer bytes on the worker host: only customer-owned self-hosting may choose it.
   // DOCSLURP_PROFILE=selfhost, or the deprecated DOCSLURP_SERVICE_PROFILE=self-hosted; either name saying service wins.
-  const profile = (process.env.DOCSLURP_PROFILE ?? '').trim().toLowerCase();
-  const legacyProfile = (process.env.DOCSLURP_SERVICE_PROFILE ?? '').trim().toLowerCase();
-  const selfhost = !profile.includes('service') && !legacyProfile.includes('service') && (profile === 'selfhost' || legacyProfile === 'self-hosted');
+  // ASCII-only trim and lower-case, as packages/shared normalizeEnvSetting does (a Unicode-padded value is not a match).
+  const norm = (value) => (value ?? '').replace(/^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$/g, '').replace(/[A-Z]+/g, (s) => s.toLowerCase());
+  const profile = norm(process.env.DOCSLURP_PROFILE);
+  const legacyProfile = norm(process.env.DOCSLURP_SERVICE_PROFILE);
+  const developmentNodeEnv = ['', 'development', 'test'].includes(norm(process.env.NODE_ENV));
+  const selfhost = !profile.includes('service') && !legacyProfile.includes('service')
+    && (profile === 'selfhost' || legacyProfile === 'self-hosted' || (profile === 'dev' && !legacyProfile && developmentNodeEnv));
   if (ocrMode === 'local' && !selfhost) {
     failures.push('DOCSLURP_OCR_MODE=local requires DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted)');
   }

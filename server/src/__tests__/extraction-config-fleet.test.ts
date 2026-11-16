@@ -29,7 +29,8 @@ function record(identity: string, capabilities: readonly string[], config: Worke
   };
 }
 
-const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled: disabled.length const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled });const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled }); disabled[0] === "ai" && disabled.length === 1 ? ["ai", "ai-rescue", "ai-escalation", "page-reader", "router", "charts-ai"] : disabled });
+const AI = ["ai", "ai-rescue", "ai-escalation", "page-reader", "router", "charts-ai"];
+const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled: disabled.length === 1 && disabled[0] === "ai" ? AI : disabled });
 
 function snapshot(records: WorkerCapabilityRecord[]) {
   return intersectFleetCapabilities({

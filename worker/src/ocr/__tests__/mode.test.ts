@@ -100,7 +100,7 @@ describe("assertOcrConfiguration", () => {
   it("refuses to start when a VM OCR provider is loaded but DOCSLURP_SERVICE_PROFILE is unset", () => {
     register(provider());
     for (const mode of ["vm", "off", "hosted"]) {
-      expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: mode }), mode).toThrow(/DOCSLURP_PROFILE is unset.*refusing to start/);
+      expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: mode }), mode).toThrow(/DOCSLURP_PROFILE is unset or dev.*refusing to start/);
     }
     expect(() => assertOcrConfiguration({})).toThrow(/DOCSLURP_PROFILE is unset/);
   });
