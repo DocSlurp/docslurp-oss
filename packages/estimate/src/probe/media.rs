@@ -378,7 +378,7 @@ mod tests {
         moov.extend_from_slice(b"mvhd");
         moov.extend_from_slice(&mvhd);
         let size = 16 + mdat_len + moov.len() as u64;
-        let input = ProbeInput { name: "clip.mp4", mime_type: None, size, head: &start, tail: Some(&moov) };
+        let input = ProbeInput { name: "clip.mp4", mime_type: None, size, head: &start, tail: Some(&moov), bounded: false };
         let result = probe(&input).unwrap();
         assert_eq!(result.kind, ProbeKind::Video);
         assert_eq!(result.duration_seconds, Some(90.5));
@@ -406,7 +406,7 @@ mod tests {
         head.extend_from_slice(&(8 + mvhd.len() as u32).to_be_bytes());
         head.extend_from_slice(b"mvhd");
         head.extend_from_slice(&mvhd);
-        let input = ProbeInput { name: "a.mp4", mime_type: None, size: 900_000_000, head: &head, tail: Some(&[0u8; 64]) };
+        let input = ProbeInput { name: "a.mp4", mime_type: None, size: 900_000_000, head: &head, tail: Some(&[0u8; 64]), bounded: false };
         assert_eq!(probe(&input).unwrap().duration_seconds, Some(60.0));
     }
 

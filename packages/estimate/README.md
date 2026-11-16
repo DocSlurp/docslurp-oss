@@ -137,10 +137,14 @@ const { files, request, stats, partial, cancelled } = await estimateFiles(estima
 - **Quotes.** `requestQuote({ files, apiKey, project?, speedBoost?, origin? })` posts to
   `POST /v1/uploads/estimate` (an API key with the `ingest` scope). The answer is labelled an estimate: a profile
   never changes what an upload is charged, which the worker measures as it processes the files.
-- **Errors.** `EstimatorError.code` is `invalid_request`, `crashed`, `worker_failed` or `quote_failed`. After
-  `crashed`, the estimator has already started a fresh module instance.
-- **Memory.** An estimator uses one WebAssembly memory of at most 256 MiB for its lifetime; after a `crashed` error it
-  reuses it. Run big batches through `@docslurp/estimate/worker`: a heavy PDF blocks an inline caller's event loop for
+- **Errors.** `EstimatorError.code` is `invalid_request`, `crashed` (a panic, with its message), `out_of_memory` (the
+  file needed more than the module's memory), `worker_failed` or `quote_failed`. After `crashed` or `out_of_memory`,
+  the estimator has already started a fresh module instance, and `profile` has retried the file once without loading
+  the whole document, so a PDF still gets its page count; the error is raised only when that retry fails too.
+- **Memory.** An estimator uses one WebAssembly memory of at most 256 MiB at a time; a trap replaces it with a fresh
+  one (a memory cannot shrink, and reusing one a file grew to its maximum would starve every later file). A PDF whose
+  declared objects would not fit a whole-document load gets its page count from a bounded read of its page tree
+  instead, with a note and no page facts. Run big batches through `@docslurp/estimate/worker`: a heavy PDF blocks an inline caller's event loop for
   a second or more, the worker's caller for a few milliseconds (`test/progress.test.mjs` measures both).
 
 ## Development
