@@ -930,6 +930,14 @@ export type ChartExportOverride = z.infer<typeof chartExportOverrideSchema>;
 export const CHART_EXPORT_OVERRIDE_DESCRIPTION =
   "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting uses the deployment's default for the caller (see the project record's chartExportDefaults; API, MCP, SDK and CLI calls default to off). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge; models also reads other charts with AI, billed per chart read. Each tier is available only where the deployment turns it on: a tier it does not offer is refused with 400 chart_export_tier_unavailable, never silently lowered. models on a project whose tier is not models (unset included) needs project editor rights (or an API key with the pipeline:billed-features scope).";
 
+/** One description for a per-request `quality` on every machine surface (MCP tools, SDK and CLI docs). No prices: estimates quote them. */
+export const QUALITY_OVERRIDE_DESCRIPTION =
+  "Processing quality for this request: fastest reads the text layer only and keeps pages without one as page images (not searchable); balanced (the default) reads scans and complex pages the cheapest faithful way; smart reads every page with AI. Omit for the project's setting. fast, auto and good are deprecated aliases. smart above the project's quality needs project editor rights (or an API key with the pipeline:billed-features scope); a quality the project's privacy mode or the deployment rules out is refused with 400 quality_unavailable.";
+
+/** One description for a per-request `visuals` on every machine surface. */
+export const VISUALS_OVERRIDE_DESCRIPTION =
+  "Figures and charts for this request: none; figures (PDF figures as files, referenced from the Markdown); charts (also chart data from files that carry it, no model, no charge); charts-ai (also reads other charts with AI, billed per chart read). Omit for the project's setting, else the deployment's default for the caller (the project record's visualsDefaults). Replaces chartExport.tier and figures. charts-ai above the project's setting needs project editor rights (or an API key with the pipeline:billed-features scope); a rung the deployment or the project's privacy mode does not offer is refused with 400 visuals_unavailable, never silently lowered.";
+
 /** The chart export override description with the deployment's actual defaults, for tool and prompt text built at runtime. */
 export function chartExportOverrideDescriptionFor(defaults: { app: string; machine: string; modelsAvailable: boolean; freeAvailable: boolean }): string {
   const offered = ["off", ...(defaults.freeAvailable ? ["free"] : []), ...(defaults.modelsAvailable ? ["models"] : [])].join(", ");

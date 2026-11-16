@@ -1,4 +1,4 @@
-import { upgradeStoredPipelineChartExport } from "@docslurp/shared";
+import { applyExtractionConfigInput, ExtractionConfigConflictError, qualityLevelSchema, upgradeStoredPipelineChartExport, visualsLevelSchema } from "@docslurp/shared";
 import { z } from "zod";
 import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
 
@@ -7,8 +7,17 @@ import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, m
  * `true` is good. `false` alone carries no quality here, because what it means depends on the project;
  * resolveLegacyQualityPatch maps it once the project's quality is known.
  */
-function migrateLegacyPatch(value: unknown): unknown {
+function migrateLegacyPatch(value: unknown, ctx?: { addIssue(issue: { code: "custom"; path: string[]; message: string; input: unknown }): void }): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  // The current names (`quality: fastest|balanced|smart`, `visuals`) become the stored legacy fields (extraction-config.ts).
+  try {
+    value = applyExtractionConfigInput(value);
+  } catch (error) {
+    if (!(error instanceof ExtractionConfigConflictError)) throw error;
+    ctx?.addIssue({ code: "custom", path: [error.field], message: error.message, input: value });
+    const { visuals: _visuals, ...rest } = value as Record<string, unknown>;
+    value = rest;
+  }
   // Patches saved in chat history or an ingest report before migration 0151 carry chartExport.enabled/generatorModel.
   value = upgradeStoredPipelineChartExport(value);
   const vision = (value as { vision?: unknown }).vision;
@@ -51,7 +60,10 @@ const projectSettingsPipelinePatchObjectSchema = z.object({
   figures: z.boolean().optional(),
   /** Finishing figures a pass left out: auto (queued on their own), manual (only on request) or off (figure-resume.ts). */
   figureResume: z.enum(["auto", "manual", "off"]).optional(),
-  /** Processing quality (fast / auto / good): the setting the ingest report's vision recommendations change. */
+  /**
+   * Processing quality (`fastest` / `balanced` / `smart`; the deprecated `fast` / `auto` / `good` still accepted): the
+   * setting the ingest report's vision recommendations change.
+   */
   quality: qualityModeSchema.optional(),
   /**
    * Chart and diagram export. Bounded: tier (off, free, models), formats and diagrams only. The generator model is an operator and
@@ -65,8 +77,18 @@ const projectSettingsPipelinePatchObjectSchema = z.object({
   }).strict().optional(),
 }).strict();
 export const projectSettingsPipelinePatchSchema = Object.assign(
-  z.preprocess(migrateLegacyPatch, projectSettingsPipelinePatchObjectSchema),
-  { shape: projectSettingsPipelinePatchObjectSchema.shape },
+  z.preprocess((value, ctx) => migrateLegacyPatch(value, ctx), projectSettingsPipelinePatchObjectSchema),
+  {
+    // What callers (the chat model's tool, MCP) see: the current names beside the deprecated ones. The preprocess maps the
+    // current names onto the stored fields before the object schema runs.
+    shape: {
+      ...projectSettingsPipelinePatchObjectSchema.shape,
+      quality: z.union([qualityLevelSchema, qualityModeSchema]).optional()
+        .describe("Processing quality: fastest (text layers only), balanced (default: reads scans and complex pages), smart (reads every page with AI). fast/auto/good are deprecated aliases."),
+      visuals: visualsLevelSchema.nullable().optional()
+        .describe("Figures and charts: none, figures (PDF figure files), charts (chart data from files, no model), charts-ai (also reads charts with AI, billed per chart); null = the deployment default. Replaces figures and chartExport.tier."),
+    },
+  },
 );
 export const projectSettingsProposalInputSchema = z.object({
   project: z.string().min(1).optional(),

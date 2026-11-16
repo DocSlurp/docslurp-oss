@@ -818,3 +818,113 @@ describe("chart export tier: origin defaults, per-request override and its guard
     vi.stubEnv("DOCSLURP_CHART_EXPORT_APP_DEFAULT", "");
   });
 });
+
+describe("quality and visuals (extraction config R0): raise authorisation, caps, stamps and deprecations", () => {
+  beforeEach(async () => {
+    vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_estimates");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    await seed();
+    await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('k1', 'u1', 'o1', 'hash-quality-k1', 'quality', 'server') on conflict (id) do nothing`;
+    await sql`update api_keys set scopes = array['ingest', 'search:deep', 'artifacts'], revoked_at = null where id = 'k1'`;
+    // The run being reprocessed was read at good (smart); the project is now auto (balanced).
+    await sql`update project_runs set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = 'run'`;
+    await sql`update projects set pipeline = jsonb_set(pipeline, '{quality}', '"auto"') where id = 'w'`;
+  });
+  afterAll(() => { vi.unstubAllEnvs(); });
+  const server = (patch: Partial<Key> = {}): Key => ({ orgId: "o1", scopes: ["ingest"], keyType: "server", ...patch });
+  const latestRun = async () => (await sql<{ pipeline: Record<string, unknown> & { quality?: string; effective?: Record<string, unknown> } }[]>`
+    select pipeline from project_runs where id <> 'run' order by created_at desc limit 1`)[0];
+  const runCount = async () => Number((await sql<{ n: number }[]>`select count(*)::int as n from project_runs`)[0]!.n);
+  /** The production request context and deprecation middleware around a test app (server.ts mounts both on /v1). */
+  const withDeprecations = async (inner: Hono) => {
+    const { requestContextMiddleware } = await import("../lib/request-context.js");
+    const { deprecationWarnings } = await import("../lib/deprecation.js");
+    const app = new Hono();
+    app.use("*", requestContextMiddleware);
+    app.use("*", deprecationWarnings);
+    app.route("/", inner);
+    return app;
+  };
+
+  it("a plain reprocess caps the inherited smart at the project's balanced and stamps effective with capsApplied", async () => {
+    const res = await post(appFor("u1", server()), "/v1/runs/run/reprocess", {});
+    expect(res.status, await res.clone().text()).toBe(201);
+    const run = await latestRun();
+    expect(run!.pipeline.quality).toBe("auto");
+    expect(run!.pipeline.effective).toMatchObject({ quality: "balanced", readsPages: true, capsApplied: [{ field: "quality", from: "smart", to: "balanced", reason: "replay" }] });
+  });
+
+  it("smart above the project: wrong-scope key 403, revoked billed key 403, other org 404; billed key and editor session allowed", async () => {
+    const before = await runCount();
+    const ingest = await post(appFor("u1", server()), "/v1/runs/run/reprocess", { quality: "smart" });
+    expect(ingest.status).toBe(403);
+    expect(await ingest.json()).toMatchObject({ error: { code: "quality_smart_forbidden", details: { field: "quality" } } });
+    expect((await post(appFor("u2", server({ orgId: "o2", userId: "u2" })), "/v1/runs/run/reprocess", { quality: "smart" })).status).toBe(404);
+    await sql`update api_keys set scopes = array['ingest', 'pipeline:billed-features'], revoked_at = now() where id = 'k1'`;
+    expect((await post(appFor("u1", server({ scopes: ["ingest", "pipeline:billed-features"] })), "/v1/runs/run/reprocess", { quality: "smart" })).status).toBe(403);
+    expect(await runCount()).toBe(before);
+    await sql`update api_keys set revoked_at = null where id = 'k1'`;
+    expect((await post(appFor("u1", server({ scopes: ["ingest", "pipeline:billed-features"] })), "/v1/runs/run/reprocess", { quality: "smart" })).status).toBe(201);
+    expect((await latestRun())!.pipeline).toMatchObject({ quality: "good", effective: { quality: "smart", capsApplied: [] } });
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { quality: "smart" })).status).toBe(201);
+  });
+
+  it("a non-editor member's billed key cannot raise (editor owner required)", async () => {
+    await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes) values ('k2', 'u2', 'o1', 'hash-quality-k2', 'member', 'server', array['ingest', 'pipeline:billed-features']) on conflict (id) do nothing`;
+    const res = await post(appFor("u2", { ...server({ scopes: ["ingest", "pipeline:billed-features"], userId: "u2" }), keyId: "k2" } as Key), "/v1/runs/run/reprocess", { quality: "smart" });
+    expect([403, 404]).toContain(res.status);
+  });
+
+  it("privacy refuses an explicit smart or charts-ai (400) whatever the scope; a stored smart is capped", async () => {
+    await sql`update projects set pipeline = pipeline || '{"privacyMode": "local-only"}'::jsonb where id = 'w'`;
+    await sql`update project_runs set pipeline = pipeline || '{"privacyMode": "local-only"}'::jsonb where id = 'run'`;
+    const smart = await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { quality: "smart" });
+    expect(smart.status).toBe(400);
+    expect(await smart.json()).toMatchObject({ error: { code: "quality_unavailable", details: { field: "quality", reason: "privacy" } } });
+    const visuals = await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { visuals: "charts-ai" });
+    expect(visuals.status).toBe(400);
+    expect(await visuals.json()).toMatchObject({ error: { code: "visuals_unavailable", details: { field: "visuals", reason: "privacy" } } });
+    // The project itself saved on good under local-only: runs are capped to balanced, recorded, never refused.
+    await sql`update projects set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = 'w'`;
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", {})).status).toBe(201);
+    expect((await latestRun())!.pipeline).toMatchObject({ quality: "auto", effective: { quality: "balanced", capsApplied: [{ field: "quality", reason: "privacy" }] } });
+  });
+
+  it("reprocess takes visuals; chartExport still works with a Deprecation header and warnings[]", async () => {
+    const session = await withDeprecations(appFor("u1", undefined, { session: true }));
+    const res = await post(session, "/v1/runs/run/reprocess", { visuals: "none" });
+    expect(res.status).toBe(201);
+    expect(res.headers.get("Deprecation")).toBeNull();
+    expect((await latestRun())!.pipeline).toMatchObject({ figures: false, chartExport: { tier: "off" }, effective: { visuals: "none" } });
+    const old = await post(session, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "off" } });
+    expect(old.status).toBe(200);
+    expect(old.headers.get("Deprecation")).toBe("true");
+    expect(await old.json()).toMatchObject({ warnings: [{ code: "deprecated_field", field: "chartExport", replacement: "visuals" }] });
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { visuals: "charts", chartExport: { tier: "models" } })).status).toBe(400);
+  });
+
+  it("project PATCH accepts the new names, stores the legacy shape, and reports extraction and visualsDefaults", async () => {
+    const app = await withDeprecations(appFor("u1", undefined, { session: true }));
+    const patch = (body: unknown) => app.request("/v1/projects/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const res = await patch({ pipeline: { ...graphPipeline, quality: "fastest", visuals: "charts", figures: undefined, chartExport: undefined, visionFallback: undefined } });
+    expect(res.status, await res.clone().text()).toBe(200);
+    const stored = (await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from projects where id = 'w'`)[0]!.pipeline;
+    expect(stored).toMatchObject({ quality: "fast", figures: true, chartExport: { tier: "free" } });
+    expect(stored.visuals).toBeUndefined();
+    const project = await (await app.request("/v1/projects/w")).json() as { extraction?: unknown; visualsDefaults?: unknown; project?: { extraction?: unknown; visualsDefaults?: unknown } };
+    const record = project.project ?? project;
+    expect(record.extraction).toEqual({ quality: "fastest", visuals: "charts" });
+    expect(record.visualsDefaults).toMatchObject({ machine: "figures", available: expect.arrayContaining(["charts-ai"]) });
+    const legacy = await patch({ pipeline: { ...graphPipeline, quality: "auto" } });
+    expect(legacy.status).toBe(200);
+    expect(legacy.headers.get("Deprecation")).toBe("true");
+  });
+
+  it("run records expose extraction: the stamp, or legacy: true for runs stamped before this release", async () => {
+    const app = appFor("u1", undefined, { session: true });
+    const body = await (await app.request("/v1/runs?projectId=w")).json() as { runs?: Array<{ id: string; extraction?: unknown }> } | Array<{ id: string; extraction?: unknown }>;
+    const runs = Array.isArray(body) ? body : body.runs ?? [];
+    expect(runs.find((run) => run.id === "run")?.extraction).toMatchObject({ quality: "smart", legacy: true });
+  });
+});

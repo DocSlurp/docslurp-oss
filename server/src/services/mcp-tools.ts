@@ -1,4 +1,5 @@
 import { chartExportDefaults } from "@docslurp/shared";
+import { extractionPolicyFromEnv, projectExtractionView, visualsDefaults } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { z } from "zod";
 import { getProjectSearchSettings } from "./search-controls.js";
@@ -70,9 +71,13 @@ export const markSessionToolsSurface: MiddlewareHandler = async (c, next) => {
   await next();
 };
 
-/** The pipeline override an MCP upload or extract sends: quality and the chart export tier, nothing else. */
-function mcpPipelineOverride(input: { quality?: string; chartExport?: { tier: string } }): Record<string, unknown> {
-  return { ...(input.quality ? { quality: input.quality } : {}), ...(input.chartExport ? { chartExport: { tier: input.chartExport.tier } } : {}) };
+/** The pipeline override an MCP upload or extract sends: quality and visuals (or the deprecated chart tier), nothing else. */
+function mcpPipelineOverride(input: { quality?: string; visuals?: string; chartExport?: { tier: string } }): Record<string, unknown> {
+  return {
+    ...(input.quality ? { quality: input.quality } : {}),
+    ...(input.visuals ? { visuals: input.visuals } : {}),
+    ...(input.chartExport ? { chartExport: { tier: input.chartExport.tier } } : {}),
+  };
 }
 
 const uploaderHidden = (c: Context) => c.get("mcpSurface") === "session-tools";
@@ -133,11 +138,16 @@ const mcpAdapterRoutes = new Hono()
       const settings = await getProjectSearchSettings(project.id, actor.userId);
       // The customer view first: chartExport (and any later section) never carries a managed model field.
       const visible = customerPipelineView(project.pipeline);
+      // Quality and visuals in the current names; the deprecated fields they replace stay beside them for the window.
+      const extraction = projectExtractionView(project.pipeline, process.env);
       return c.json({ projectId: project.id,
         pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: visible.mediaVideo?.enabled !== false }
+          : key === "quality" ? extraction.quality : key === "visuals" ? extraction.visuals
           : visible[key as keyof typeof visible]])),
         chat: settings.chat, retrieval: settings.retrievalDefaults,
-        // What an unset chart tier runs as on this deployment, and which tiers a change may choose.
+        // What unset visuals run as on this deployment, per origin, and which rungs a change may choose.
+        visualsDefaults: visualsDefaults(extractionPolicyFromEnv(process.env)),
+        // Deprecated: the same for the chart tier.
         chartExportDefaults: chartExportDefaults(process.env),
         // Figures a processing pass left out that a resume could finish (proposeFigureResume), and the project's mode;
         // only while the chat's resume offer is on (R2-M5).
@@ -248,7 +258,7 @@ const mcpAdapterRoutes = new Hono()
         }
         const form = new FormData();
         if (input.project) form.set("project", input.project);
-        if (input.quality || input.chartExport) form.set("pipeline", JSON.stringify(mcpPipelineOverride(input)));
+        if (input.quality || input.visuals || input.chartExport) form.set("pipeline", JSON.stringify(mcpPipelineOverride(input)));
         for (const [name, value] of Object.entries(extractFields)) form.set(name, String(value));
         for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
         return native.request("http://mcp.internal/bulk", { method: "POST", headers, body: form, signal: c.req.raw.signal });
@@ -257,7 +267,7 @@ const mcpAdapterRoutes = new Hono()
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ project: input.project,
           ...(input.urls ? { urls: input.urls } : { files: input.files }),
-          ...(input.quality || input.chartExport ? { pipeline: mcpPipelineOverride(input) } : {}),
+          ...(input.quality || input.visuals || input.chartExport ? { pipeline: mcpPipelineOverride(input) } : {}),
           ...extractFields,
         }), signal: c.req.raw.signal,
       });
