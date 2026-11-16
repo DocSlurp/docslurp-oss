@@ -1,7 +1,8 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, runPipelineToConfigV1 } from "@docslurp/shared";
+import { effectiveFleetCapabilitiesSync } from "./worker-fleet.js";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import { resolveRunExtraction } from "./extraction-settings.js";
 import {
@@ -160,6 +161,24 @@ function sourceMetadata(value: unknown): Record<string, never> {
 function forecastPages(doc: { page_count: number; billing_pages?: number | null; page_count_source?: string | null }): { pages?: number } {
   const pages = countedPagesForForecast({ pageCount: doc.page_count, billingPages: doc.billing_pages, pageCountSource: doc.page_count_source });
   return pages === undefined ? {} : { pages };
+}
+
+/**
+ * Release R1: a new run's snapshot is stamped in the new shape (`quality`/`visuals`, `configVersion: 1`) once every
+ * worker that can pick it up advertises `extraction.config-v1` (the worker capability handshake; an unknown or mixed
+ * fleet keeps the legacy shape, which every release reads). Only a snapshot whose new shape means exactly the same run
+ * is stamped (`runPipelineToConfigV1`), so stamping never widens a run. `DOCSLURP_EXTRACTION_CONFIG_V1_STAMP=off`
+ * keeps the legacy shape (rollback lever).
+ */
+export function stampRunConfigV1<T extends PipelineFeatures>(
+  pipeline: T,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  // Proven support only: with the capability gate off nothing is known about the fleet, so nothing is stamped.
+  fleetSupportsV1: () => boolean = () => effectiveFleetCapabilitiesSync()?.has("extraction.config-v1") === true,
+): T {
+  if (env.DOCSLURP_EXTRACTION_CONFIG_V1_STAMP?.trim().toLowerCase() === "off") return pipeline;
+  if (!fleetSupportsV1()) return pipeline;
+  return (runPipelineToConfigV1(pipeline as unknown as Record<string, unknown>) as unknown as T | null) ?? pipeline;
 }
 
 function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
@@ -1078,7 +1097,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       sourceKeys: sources.kind === "files" ? sources.files.map((file) => file.sourceKey) : [],
       // New files always run every enabled stage; a caller re-running existing
       // Documents chooses its own stage selection.
-      pipeline: { ...executionPipeline, effective } as PipelineFeatures,
+      pipeline: stampRunConfigV1({ ...executionPipeline, effective } as PipelineFeatures),
     });
 
     // Stamped on every Document so a later project mode switch never rewrites how it was indexed.

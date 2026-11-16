@@ -161,3 +161,24 @@ the release after that refuses the deprecated names with a `400` naming the repl
 - Origin defaults and the explicit-charts rule come from today's chart export variables
   (`DOCSLURP_CHART_EXPORT_APP_DEFAULT`, `_API_DEFAULT`, `_FREE_EXPLICIT`, `_INLINE`) until they move to the operator
   config file; `DOCSLURP_CHART_EXPORT=off` / `free` act as the `charts` / `charts-ai` switches.
+
+## Upgrading stored projects (release R1)
+
+Migration `0183_extraction_config_v1_projects` rewrites every stored project pipeline to the new shape (`quality`,
+`visuals`, `configVersion: 1`) with the mapping table above. It needs the previous release (which reads both shapes)
+deployed first, and it never raises a project's effective quality or visuals, with one exception: `visionFallback:
+false` with `auto` becomes `balanced`, which reads scans and complex pages again (and fixes uploaded images that had no
+text). `figures: false` with a chart tier becomes `visuals: none`, so those projects stop exporting charts. Projects that
+turned figure resume `off` or `manual` keep their existing partial figure passes as they are (blocked, `resume-off`);
+new runs finish partial figures automatically within the run's `visuals`.
+
+Before migrating, count what it will change without changing anything:
+
+```sh
+DATABASE_URL=postgres://... node server/db/extraction-config-v1-report.mjs        # counts
+DATABASE_URL=postgres://... node server/db/extraction-config-v1-report.mjs --ids  # plus affected project ids
+```
+
+The migration logs the same counts (`[extraction-config-v1]`) before rewriting. New runs are stamped in the new shape
+once every worker advertises `extraction.config-v1`; set `DOCSLURP_EXTRACTION_CONFIG_V1_STAMP=off` to keep stamping
+the previous shape (every release reads it).

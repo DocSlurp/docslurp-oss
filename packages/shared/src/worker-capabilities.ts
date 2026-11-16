@@ -47,6 +47,11 @@ export const WORKER_CAPABILITIES = [
   "billing.credit-leases",
   /** Stamps documents.lexical_searchable_at at embed (schema 0051). */
   "search.early-lexical",
+  /**
+   * Understands extraction config v1 (design extraction-config-simplification.md, release R0): DOCSLURP_PROFILE, the
+   * full DOCSLURP_DISABLE vocabulary enforced at execution, and the posture digest in its registry row (`config`).
+   */
+  "extraction.config-v1",
 ] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
