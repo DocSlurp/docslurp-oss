@@ -8,7 +8,8 @@
  *   from distinct providers. They are host candidates only: which model answers a chat tier is CHAT_TIER_MODELS
  *   (project-chat-models.ts) plus a project's admin overrides, and nothing routes chat through these options yet.
  * - Every option passes the call-time policy (model-call-policy.ts) at load and again at selection: no Pro/Ultra, no
- *   denied model, no known output price at or above $50 per 1M tokens; a host observed at or above that cap is skipped.
+ *   denylisted model, no known output price at or above $50 per 1M tokens; a host observed at or above that cap is
+ *   skipped.
  * - Pools are `llm://` entries, one per host (`?_provider=`); pool options (`_sort`, `_fallbacks`, `_timeout`,
  *   `_minUptime`, `_maxAge`, `_preferredMargin`) are written once, on the first entry. See provider-pools.ts.
  * - evalScore is the option's composite on its capability's tier benchmark: for page-ocr, the mean tolerant-markdown@v1
@@ -18,8 +19,11 @@
  *   composite on a shared scale yet.
  * - Together is omitted from every pool (owner, 2026-11-12): its DeepSeek V4.1 Flash 1017 endpoint fabricated page
  *   bodies on the tier benchmark (composite 0.673 and 0.333 against Fireworks 0.938 and 0.938).
- * - DeepSeek V4.1 Flash is never an option (owner, 2026-11-13): it is never selected automatically
- *   (automatic-model-selection.ts), and assertTierOptions refuses it.
+ * - Margin: every tier pick passes the automatic-call margin gate at the time of the request (selectTierRoute,
+ *   automatic-call-margin.ts): a host whose current price, time of day included, leaves the billed value under the
+ *   minimum margin is skipped. No model is refused by name for its price (DeepSeek V4.1 Flash was, 2026-11-13 to
+ *   2026-11-15; owner decision 2026-11-15 replaced that with the gate). It is still not an option here: adding one needs
+ *   the eval and disclosure review above.
  */
 import { defineTierOptions, type RouteTier, type TierOption } from "./provider-tiers.js";
 

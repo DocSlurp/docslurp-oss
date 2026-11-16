@@ -1,7 +1,9 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
 import { sandboxedPdfProvider } from "../extractors/plugins.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
-import { startLiveModelPriceRefresh } from "@docslurp/shared";
+import { startAutomaticCallPriceRefresh, startLiveModelPriceRefresh, visionModelCatalog } from "@docslurp/shared";
+import { CHART_GENERATOR_CANDIDATES } from "../chart-export/model-selection.js";
+import { ocrEscalationModel } from "../ocr/hosted-reader.js";
 import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
 /**
  * Temporal worker entry point.
@@ -134,6 +136,10 @@ async function main(): Promise<void> {
   }
   // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
   startLiveModelPriceRefresh();
+  // Per-endpoint prices for the automatic-call margin gate (fallbacks, escalation, chart generators); other models the
+  // gate looks up are tracked as they come.
+  // Hosted catalog models are page-router targets: loaded at startup so a target is priced from its listing, not only its cap.
+  startAutomaticCallPriceRefresh([...CHART_GENERATOR_CANDIDATES, ocrEscalationModel(), ...visionModelCatalog.map((entry) => entry.uri)]);
   // The pricing provider (DOCSLURP_PRICING_PLUGIN) loads first: every charge the worker records is priced by it, including
   // the parser sandbox probe's VM time, so it must be installed before the probe (validation N2). The service profile
   // refuses to start without one rather than price with the open default. Its durable state (pricing_provider_state,

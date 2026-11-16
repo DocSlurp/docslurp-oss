@@ -261,7 +261,7 @@ describe("managed tier mappings", () => {
     expect(managedChatModelProblem("llm://openrouter/anthropic/claude-haiku-5.5", new Set())).toMatch(/bare/);
     expect(managedChatModelProblem("liquid/lfm-2.5-24b-a2b", new Set())).toMatch(/reviewed/);
     expect(managedChatModelProblem("openai/gpt-6-sol-pro", new Set(["openai/gpt-6-sol-pro"]))).toBe("prohibited model");
-    // A tier mapping is automatic selection: DeepSeek V4.1 Flash is never mapped (owner, 2026-11-13).
-    expect(managedChatModelProblem("deepseek/deepseek-v4.1-flash-1017", new Set())).toBe("never selected automatically");
+    // No longer refused by name (owner, 2026-11-15): a reviewed, priced catalog model; automatic calls pass the margin gate.
+    expect(managedChatModelProblem("deepseek/deepseek-v4.1-flash-1017", new Set())).toBeNull();
   });
 });

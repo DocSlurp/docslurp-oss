@@ -9,7 +9,10 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  automaticCallMarginDecision,
   buildDecisionModelCatalog,
+  logAutomaticCallDecision,
+  visionAutomaticRoute,
   buildRoutingTargetCatalog,
   llmModelUriSchema,
   resolvePageRouterMode,
@@ -135,8 +138,32 @@ export function vlmTargetProblem(target: RoutingTarget): string | null {
   return visionModelUriProblem(target.ref.modelUri);
 }
 
+/** Margin refusals already logged, by target and reason, with when: logged again after MARGIN_LOG_EVERY_MS. */
+const reportedMarginRefusals = new Map<string, number>();
+const MARGIN_LOG_EVERY_MS = 10 * 60_000;
+
+/**
+ * Why the router may not pick `target` now on cost: a hosted VLM target is an automatic page read, so it must keep the
+ * automatic-call margin at the highest current price of its route (automatic-call-margin.ts). Null when it may.
+ */
+export function vlmTargetMarginProblem(target: RoutingTarget, now: number = Date.now()): string | null {
+  if (target.kind !== "hosted-vlm" || !target.ref.modelUri) return null;
+  const decision = automaticCallMarginDecision("page-transcription", visionAutomaticRoute(target.ref.modelUri), { now });
+  if (decision.allowed) return null;
+  const key = `${target.id}\u0000${decision.reason}`;
+  const last = reportedMarginRefusals.get(key);
+  if (last === undefined || now - last >= MARGIN_LOG_EVERY_MS) {
+    if (reportedMarginRefusals.size > 512) reportedMarginRefusals.clear();
+    reportedMarginRefusals.set(key, now);
+    logAutomaticCallDecision(decision, `page-router target ${target.id}`);
+  }
+  return `automatic-call margin: ${decision.reason}`;
+}
+
 function admitVisionTargets(targets: RoutingTarget[]): RoutingTarget[] {
   return targets.filter((target) => {
+    // Re-decided at every catalog build: the price, time of day included, can change between runs.
+    if (vlmTargetMarginProblem(target)) return false;
     const problem = vlmTargetProblem(target);
     if (!problem) return true;
     if (!reportedFilteredTargets.has(target.id)) {
@@ -152,7 +179,8 @@ function admitVisionTargets(targets: RoutingTarget[]): RoutingTarget[] {
  * hosted targets and hosted decision models (the call sites also fail closed).
  * DISABLE_NON_FREE_SOFTWARE drops non-free-licensed targets and decision models at admission (a stored plan that
  * names one resolves to no target and falls back to the project vision model). VLM targets the vision runtime
- * refuses (`vlmTargetProblem`: hosted models outside the priced vision catalog) are dropped the same way.
+ * refuses (`vlmTargetProblem`: hosted models outside the priced vision catalog) are dropped the same way, and so are
+ * hosted VLM targets the automatic-call margin gate refuses at their current price (`vlmTargetMarginProblem`).
  */
 export function buildRuntimeCatalog(
   options: { env?: NodeJS.ProcessEnv; privacyMode?: string | null; disableNonFree?: boolean } = {},

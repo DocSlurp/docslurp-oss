@@ -22,7 +22,9 @@
  */
 import { CHAT_TIERS, type ChatTier } from "./project-chat-models.js";
 import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
+import { automaticCallValue, automaticMinMargin, withPriceScheduleFloor } from "./automatic-call-margin.js";
 import { automaticModelCallProblem } from "./model-call-policy.js";
+import type { AutomaticCallKind } from "./pricing-provider.js";
 import { MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE } from "./routing-targets.js";
 import { hostMatchesEndpoint, providerPool, type ProviderPool } from "./provider-pools.js";
 
@@ -96,8 +98,17 @@ export interface TierSelectionInput {
   readonly tier: RouteTier;
   readonly options: readonly TierOption[];
   readonly observations: readonly EndpointObservation[];
-  /** USD one unit of work earns at this tier's fixed price; null when the caller has no price (no margin check). */
+  /**
+   * USD one unit of work earns at this tier's fixed price. Null: the pricing provider's billed value for one automatic
+   * call of the capability's kind on each option's model (`automaticCallValueUsd`), and no margin check when it states
+   * none.
+   */
   readonly unitRevenueUsd: number | null;
+  /**
+   * Billed value / unit cost a host must reach when a value is known (the automatic-call margin gate). Default
+   * DOCSLURP_AUTOMATIC_MIN_MARGIN (1.3).
+   */
+  readonly minMarginRatio?: number;
   /** Speed is preferred among hosts keeping at least this margin, unless the pool sets `_preferredMargin`. Default 0.20. */
   readonly preferredMargin?: number;
   /** The global margin threshold: a pick under it carries `marginWarning`. Default 0.10. */
@@ -194,7 +205,8 @@ export function assertTierOptions(options: readonly TierOption[]): void {
     ids.add(option.id);
     if (option.model !== option.pool.model) throw new Error(`tier option ${option.id}: model must be the pool's model`);
     if (option.tiers.length === 0) throw new Error(`tier option ${option.id}: names no tier`);
-    // A tier picks among its options automatically, so a model that is never selected automatically is never an option.
+    // A tier picks among its options automatically, so a denylisted model (automatic-model-selection.ts) is never an
+    // option. Margin is checked per request (selectTierRoute), at the current price.
     if (isAutomaticSelectionDenied(option.model)) throw new Error(`tier option ${option.id}: ${option.model} is never selected automatically`);
     // The call-time policy too: no Pro/Ultra, no model whose known output price reaches the $50 per 1M token cap.
     const problem = automaticModelCallProblem(option.model);
@@ -206,8 +218,29 @@ export function assertTierOptions(options: readonly TierOption[]): void {
 
 const maxAgeOf = (option: TierOption, input: TierSelectionInput) => option.pool.maxAgeMs ?? input.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
 
-/** The hosts of `option` that can serve now without losing money, each at its cheapest such endpoint, in pool order. */
+/** The automatic call kind of a route capability. */
+export const ROUTE_CAPABILITY_CALL_KIND: Readonly<Record<RouteCapability, AutomaticCallKind>> = { chat: "chat-answer", "page-ocr": "page-transcription" };
+
+/**
+ * What one unit on `option` earns: the caller's revenue, else the pricing provider's billed value for the capability's
+ * call kind on the option's model (null: none stated, no check). Undefined when the provider must state one and cannot:
+ * the option is then never selected (fail closed).
+ */
+export function optionUnitRevenueUsd(option: TierOption, input: Pick<TierSelectionInput, "unitRevenueUsd" | "unit" | "capability">): number | null | undefined {
+  if (input.unitRevenueUsd !== null) return input.unitRevenueUsd;
+  const value = automaticCallValue(ROUTE_CAPABILITY_CALL_KIND[input.capability], option.model, input.unit);
+  return "error" in value ? undefined : value.value;
+}
+
+/**
+ * The hosts of `option` that can serve now without losing money and keep the minimum margin ratio when a revenue is
+ * known, each at its cheapest such endpoint, in pool order. Observed prices are raised to any verified time-of-day
+ * schedule of the host at `input.now`.
+ */
 export function eligibleHosts(option: TierOption, input: TierSelectionInput): RankedHost[] {
+  const revenue = optionUnitRevenueUsd(option, input);
+  if (revenue === undefined) return [];
+  const minRatio = input.minMarginRatio ?? automaticMinMargin();
   const maxAge = maxAgeOf(option, input);
   const minUptime = option.pool.minUptime ?? input.minUptime ?? DEFAULT_MIN_UPTIME;
   const fresh = input.observations.filter((observation) => observation.model === option.model
@@ -218,16 +251,20 @@ export function eligibleHosts(option: TierOption, input: TierSelectionInput): Ra
     for (const observation of fresh) {
       if (!hostMatchesEndpoint(host, observation.endpoint)) continue;
       if (observation.inputUsdPerMTok === null || observation.outputUsdPerMTok === null) continue;
+      const price = withPriceScheduleFloor(option.model, observation.endpoint, input.now,
+        { inputUsdPerMTok: observation.inputUsdPerMTok, outputUsdPerMTok: observation.outputUsdPerMTok });
       // A host that bills at or above the platform output cap is never chosen, whatever the margin.
-      if (observation.outputUsdPerMTok >= MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE) continue;
+      if (price.outputUsdPerMTok >= MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE) continue;
       if (observation.status !== null && observation.status < 0) continue;
       if (observation.uptime30m !== null && observation.uptime30m < minUptime) continue;
-      const cost = unitCostUsd(input.unit, observation.inputUsdPerMTok, observation.outputUsdPerMTok);
-      const margin = unitMargin(cost, input.unitRevenueUsd);
+      const cost = unitCostUsd(input.unit, price.inputUsdPerMTok, price.outputUsdPerMTok);
+      const margin = unitMargin(cost, revenue);
       if (margin !== null && margin < -1e-12) continue;
+      // The automatic-call margin gate: billed value / cost at least the minimum ratio.
+      if (revenue !== null && cost > 0 && revenue / cost + 1e-9 < minRatio) continue;
       if (!best || cost < best.unitCostUsd) {
-        best = { host, endpoint: observation.endpoint, unitCostUsd: cost, inputUsdPerMTok: observation.inputUsdPerMTok,
-          outputUsdPerMTok: observation.outputUsdPerMTok, latencyP50Ms: observation.latencyP50Ms, margin };
+        best = { host, endpoint: observation.endpoint, unitCostUsd: cost, inputUsdPerMTok: price.inputUsdPerMTok,
+          outputUsdPerMTok: price.outputUsdPerMTok, latencyP50Ms: observation.latencyP50Ms, margin };
       }
     }
     if (best) hosts.push(best);
@@ -280,6 +317,11 @@ export function selectTierRoute(input: TierSelectionInput): TierSelection {
   const observed = candidates.some((option) => input.observations.some((observation) => observation.model === option.model
     && input.now.getTime() - observation.observedAt.getTime() <= maxAgeOf(option, input)));
   if (!observed) {
+    // No fresh price: an option with a billed value to keep (or one its provider must state and cannot) is never picked
+    // on reviewed order alone (fail closed). Without a value there is no margin to check.
+    if (candidates.some((option) => optionUnitRevenueUsd(option, input) !== null)) {
+      return { basis: "none", reason: `no fresh ${input.capability} price observation to check the margin for tier ${input.tier}` };
+    }
     const option = input.tier === "smart" ? [...candidates].sort((a, b) => b.evalScore! - a.evalScore!)[0]! : candidates[0]!;
     return { basis: "static", option, provider: { order: [option.pool.hosts[0]!], allow_fallbacks: false } };
   }

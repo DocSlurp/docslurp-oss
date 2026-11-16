@@ -8,7 +8,7 @@
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
  * missing VM: escalation only follows a VM (or self-hosted) read, and hosted mode is its own operator setting.
  */
-import { isAutomaticSelectionDenied } from "@docslurp/shared";
+import { admitAutomaticCall, isAutomaticSelectionDenied, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
@@ -62,7 +62,7 @@ export interface HostedOcrRead {
 
 /** Why a hosted read did not happen. Escalation keeps the recogniser's text; hosted mode fails the page. */
 export class HostedOcrSkipped extends Error {
-  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard", message: string) {
+  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard" | "margin", message: string) {
     super(message);
     this.name = "HostedOcrSkipped";
   }
@@ -82,8 +82,9 @@ export function ocrEscalationEnabled(env: NodeJS.ProcessEnv = process.env): bool
 const HOSTED_OCR_PROVIDERS = new Set(["deepinfra", "openrouter", "openai"]);
 
 /**
- * The escalation model: `DOCSLURP_OCR_ESCALATION_MODEL`, else the default. Escalation is automatic, so a model that is
- * never selected automatically (automatic-model-selection.ts) is refused as an override (logged) and the default used.
+ * The escalation model: `DOCSLURP_OCR_ESCALATION_MODEL`, else the default. Escalation is automatic, so a denylisted
+ * model (automatic-model-selection.ts) is refused as an override (logged) and the default used; every escalation read
+ * also passes the margin gate at its route's current price (`read`).
  */
 export function ocrEscalationModel(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.DOCSLURP_OCR_ESCALATION_MODEL?.trim();
@@ -124,6 +125,15 @@ export function createHostedOcrReader(args: {
         throw new HostedOcrSkipped("privacy", `privacy mode refuses ${purpose}`);
       }
       if (isCostCapExceeded(state)) throw new HostedOcrSkipped("cost-cap", `run cost cap reached before ${purpose}`);
+      // Escalation is an automatic call: it must keep the margin at the escalation route's current price
+      // (automatic-call-margin.ts). Refused: the recogniser's text stands, logged with the reason.
+      let marginDecision: ReturnType<typeof admitAutomaticCall> | null = null;
+      if (purpose === "ocr-escalation") {
+        const marginRoute = visionAutomaticRoute(vision.modelUri ?? ocrEscalationModel(env));
+        await prepareAutomaticCallPrices("page-transcription", [marginRoute]);
+        marginDecision = admitAutomaticCall("page-transcription", marginRoute, purpose, { role: "escalation" });
+        if (!marginDecision.allowed) throw new HostedOcrSkipped("margin", `${purpose} refused by the margin gate (${marginDecision.reason})`);
+      }
       const maxPages = ocrEscalationMaxPages(env);
       const pageRef = { documentId: page.documentId, pageNumber: page.pageNumber };
       const outputPath = `${page.imagePath}.${purpose}.json`;
@@ -182,6 +192,9 @@ export function createHostedOcrReader(args: {
             throw error;
           }
           const costCents = priceVisionResult(result, args.cfg);
+          if (marginDecision) {
+            reportAutomaticCallOutcome(marginDecision, { costUsd: result.costCents !== undefined ? result.costCents / 100 : null, inputTokens: result.inputTokens, outputTokens: result.outputTokens }, purpose);
+          }
           // A Rich page read, once per run and page (the recogniser's read of the same page already charged it); the
           // provider's actual tokens and cost are recorded on the served route.
           const read = recordVisionRead(state.usageLedger, gate, pageRef, {

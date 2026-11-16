@@ -13,7 +13,8 @@ import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
 import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
-import { QuoteSettingsError, startLiveModelPriceRefresh } from "@docslurp/shared";
+import { QuoteSettingsError, startAutomaticCallPriceRefresh, startLiveModelPriceRefresh } from "@docslurp/shared";
+import { PROJECT_CHAT_FAILOVER_MODELS } from "./services/project-chat.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -352,6 +353,8 @@ export function ensureApiStartup(): Promise<void> {
       startDirectUploadReconciler();
       // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
       startLiveModelPriceRefresh();
+      // Per-endpoint prices for the automatic-call margin gate (chat failover candidates).
+      startAutomaticCallPriceRefresh(PROJECT_CHAT_FAILOVER_MODELS);
       // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.
       startAlertEvaluator();
       // Apply workers' pending credit debits to org pools every few seconds.

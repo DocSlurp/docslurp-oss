@@ -71,8 +71,10 @@ describe("platform-admin managed model route", () => {
     expect(sqlMock).not.toHaveBeenCalled();
   });
 
-  it("refuses unreviewed, prohibited, Nitro, llm:// and denied chat models before writing", async () => {
-    for (const model of ["acme/unlisted-1", "openai/gpt-6-sol-pro", "z-ai/glm-5.3-flash:nitro", "llm://openrouter/anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash-1017"]) {
+  // DeepSeek V4.1 Flash is no longer refused by name (2026-11-15): an admin's mapping is an explicit choice, and the
+  // automatic calls around it (failover, fallback, escalation) pass the margin gate.
+  it("refuses unreviewed, prohibited, Nitro and llm:// chat models before writing", async () => {
+    for (const model of ["acme/unlisted-1", "openai/gpt-6-sol-pro", "z-ai/glm-5.3-flash:nitro", "llm://openrouter/anthropic/claude-haiku-5.5"]) {
       const response = await put(adminSession, { chat: { fastest: model } });
       expect(response.status, model).toBe(400);
     }
@@ -89,13 +91,11 @@ describe("platform-admin managed model route", () => {
     expect((update?.[2] as { vision: { modelUri: string } }).vision.modelUri).toBe("llm://openrouter/google/gemini-2.5-flash-lite");
   });
 
-  it("refuses denied, Pro/Ultra (with a ? suffix), unpriced and uncatalogued pipeline models, and embedding changes once documents exist", async () => {
+  it("refuses Pro/Ultra (with a ? suffix), unpriced and uncatalogued pipeline models, and embedding changes once documents exist", async () => {
     for (const pipeline of [
-      { vision: { modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017" } },
       { textGeneration: { model: "openai/gpt-6-sol-pro?reasoning=high" } },
       { textGeneration: { model: "acme/unpriced" } },
       { vision: { modelUri: "llm://openrouter/acme/unlisted" } },
-      { pageRouter: { decisionModel: ["deepseek/deepseek-v4.1-flash-1017"] } },
     ]) {
       expect((await put(adminSession, { pipeline })).status, JSON.stringify(pipeline)).toBe(400);
     }
@@ -106,7 +106,7 @@ describe("platform-admin managed model route", () => {
     expect((await embedding.json()).error.message).toContain("re-index");
   });
 
-  it("lets an admin pin router decision models checked against their own catalog prices, never DeepSeek", async () => {
+  it("lets an admin pin router decision models checked against their own catalog prices", async () => {
     sqlMock.mockResolvedValueOnce(projectRow()).mockResolvedValue([]);
     const ok = await put(adminSession, { pipeline: { pageRouter: { decisionModel: ["cloudflare/clef-flash", "typesafe/jev-1.13"] } } });
     expect(ok.status, await ok.clone().text()).toBe(200);
@@ -131,7 +131,7 @@ describe("platform-admin managed model route", () => {
 describe("stored tier mappings", () => {
   it("drops entries that no longer pass review", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(parseStoredChatTierModels({ fastest: "anthropic/claude-haiku-5.5", smart: "openai/gpt-6-sol-pro", balanced: "deepseek/deepseek-v4.1-flash-1017", other: "x/y" }))
+    expect(parseStoredChatTierModels({ fastest: "anthropic/claude-haiku-5.5", smart: "openai/gpt-6-sol-pro", balanced: "acme/unlisted-1", other: "x/y" }))
       .toEqual({ fastest: "anthropic/claude-haiku-5.5" });
     expect(parseStoredChatTierModels("nope")).toBeNull();
     expect(warn).toHaveBeenCalled();

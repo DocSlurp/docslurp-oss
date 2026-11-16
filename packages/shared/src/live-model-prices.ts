@@ -42,7 +42,7 @@ function cacheRates(value: Record<string, unknown>): Pick<LiveTokenRates, "cache
   return { ...(cacheRead !== null ? { cacheRead } : {}), ...(cacheWrite !== null ? { cacheWrite } : {}) };
 }
 
-interface LivePriceOverride extends LiveTokenRates {
+export interface LivePriceOverride extends LiveTokenRates {
   minPromptTokens?: number;
   utcDays?: readonly string[];
   /** HHMM, inclusive. */
@@ -82,7 +82,8 @@ function count(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function parseOverride(raw: unknown): LivePriceOverride | null {
+/** One listed price override (`pricing.overrides[]`), or null when malformed or unconditional. */
+export function parseOverride(raw: unknown): LivePriceOverride | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
   const input = rate(value.prompt), output = rate(value.completion);
@@ -119,7 +120,8 @@ export function parseOpenRouterCatalog(payload: unknown): Map<string, LiveModelP
 
 const DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 
-function overrideApplies(override: LivePriceOverride, promptTokens: number | undefined, at: Date): boolean {
+/** Whether a listed override applies to a call of `promptTokens` at `at` (UTC days and HHMM windows). */
+export function overrideApplies(override: LivePriceOverride, promptTokens: number | undefined, at: Date): boolean {
   if (override.minPromptTokens !== undefined) {
     if (promptTokens === undefined || promptTokens <= override.minPromptTokens) return false;
   }

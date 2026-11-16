@@ -20,8 +20,9 @@ export const DEFAULT_PROJECT_CHAT_MODEL: ProjectChatModelId =
 /**
  * Speed boost model swaps: a model Speed boost answers with instead of the chosen model's own Nitro variant. Empty:
  * Speed boost answers with the chosen model on Nitro. The 2026-11-10 swap from GLM 5.3 Flash to DeepSeek V4.1 Flash
- * on Nitro was removed (owner, 2026-11-13): a swap is an automatic selection, and DeepSeek V4.1 Flash is never
- * selected automatically (automatic-model-selection.ts). A swap target must never be such a model.
+ * on Nitro was removed (owner, 2026-11-13). A swap is an automatic selection: a swap target is never a denylisted model
+ * (automatic-model-selection.ts), and a swap is made only when it keeps the automatic-call margin
+ * (automatic-call-margin.ts; server chat-model-policy.ts).
  */
 export const SPEED_BOOST_MODEL_SWAPS: Readonly<Record<string, ProjectChatModelId>> = {};
 
