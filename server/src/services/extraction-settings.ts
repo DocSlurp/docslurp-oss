@@ -153,7 +153,9 @@ function lowerVisuals<T extends PipelineFeatures>(pipeline: T, visuals: VisualsL
  * materialize): those runs take the project's current pipeline, so nothing is raised and only the values are stamped.
  */
 export function withRunEffective<T extends PipelineFeatures>(pipeline: T, env: Readonly<Record<string, string | undefined>> = process.env): T & { effective: RunEffectiveExtraction } {
-  // No caller choice here, so nothing is refused: the values are capped by privacy, locality and switches and recorded.
+  // No caller choice here, so nothing is refused or rewritten: the stored fields stay as the run's source had them (the
+  // worker applies switches and privacy at run time, as before), and the stamp records what privacy, locality and the
+  // switches cap them to.
   const quality = qualityLevelFromLegacy(pipeline.quality);
   const visuals = visualsLevelForRun(pipeline.figures !== false, tierOf(pipeline.chartExport) ?? "off");
   const result = resolveExtractionSettings({
@@ -164,10 +166,8 @@ export function withRunEffective<T extends PipelineFeatures>(pipeline: T, env: R
     policy: { ...extractionPolicyFromEnv(env), explicitChartsAllowed: true },
   });
   if (!result.ok) return { ...pipeline, effective: runEffectiveExtraction(pipeline) };
-  let next: T = pipeline;
-  if (result.quality !== quality) next = { ...next, quality: legacyQualityModeFor(result.quality), ...(result.quality === "balanced" ? { visionFallback: true } : {}) };
-  if (result.visuals !== visuals) next = lowerVisuals(next, result.visuals);
-  return { ...next, effective: runEffectiveExtraction(next, result.capsApplied) };
+  const effective = runEffectiveExtraction(pipeline, result.capsApplied);
+  return { ...pipeline, effective: { ...effective, quality: result.quality, visuals: result.visuals, readsPages: effective.readsPages && result.quality !== "fastest" } };
 }
 
 export type { QualityLevel, VisualsLevel };
