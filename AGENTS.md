@@ -63,6 +63,16 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - Never widen a default scope. A query, cache key or storage key without an explicit tenant scope is a bug.
 - Every boundary change ships with negative tests: cross-tenant access, a revoked or wrong-scope key, and a malicious or oversized file.
 
+**Organization isolation (mandatory):** the organization is the only tenant scope. Nothing computed from or for one organization may be served to, reused by or observed by another.
+
+- Every cache, memo, dedup or reuse key and every storage key includes the organization id, or an id (project, run, document, API key) that belongs to exactly one organization and is used only after its access was checked. Build new cache and reuse keys with `orgScopedCacheKey` from `@docslurp/shared`, which throws without an organization; never fall back to a shared or null scope.
+- No cross-organization dedup or reuse of any customer-derived value: uploaded bytes, renders, page images, OCR or vision output, embeddings, model outputs, figures, exports, VM or sandbox state. Identical bytes from two organizations are stored and processed twice.
+- Reuse lookups by content hash (embeddings, renders, extraction checkpoints) filter by organization in the query itself; a hash match is never proof of ownership.
+- Provider prompt caches may share only tenant-free prefixes (fixed system prompts, tool schemas). Prompts that carry tenant content start with the per-organization salt line (`orgPromptSaltLine` / `chatSystemSaltLine`) before any tenant text, and any provider cache key or user id sent with tenant content is per organization.
+- Cache statistics shown to a caller (hits, sizes, timings) are that organization's own, never process-wide.
+- A new process-wide cache must be classified in `server/src/__tests__/org-isolation-caches.test.ts`. Any new cache or reuse path ships with a negative test: organization B never gets organization A's entry with identical inputs, and an unscoped key is refused.
+- Reviewers check this rule on every change that adds or changes a cache, a reuse or dedup path, a storage key, a prompt layout or a tenant query.
+
 **Isolation for untrusted files:**
 
 - Untrusted files must be processed behind a VM or microVM boundary, or something stronger. Firecracker, Cloud Hypervisor and a dedicated VM per job qualify.

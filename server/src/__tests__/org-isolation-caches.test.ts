@@ -61,7 +61,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "server/src/search/lancedb.ts#missingWithDocumentsLoggedAt": { class: "operational", why: "log throttle" },
   "server/src/search/lancedb.ts#tables": { class: "tenant-id", why: "open handles per per-org/project table URI+name" },
   "server/src/search/lean-logging.ts#open": { class: "org", why: "usage batches keyed by user, org, project and key" },
-  "server/src/search/relevance.ts#preparedQueries": { class: "own-input", why: "tokenized query terms, a pure function of the query text; no chunk text" },
+  "server/src/search/relevance.ts#preparedQueries": { class: "org", why: "tokenized query terms keyed by request org + query; no org, no cache" },
   "server/src/search/response-cache.ts#generations": { class: "tenant-id", why: "invalidation generation per project" },
   "server/src/search/response-cache.ts#partitionBytes": { class: "org", why: "byte totals per org partition" },
   "server/src/search/response-cache.ts#partitions": { class: "org", why: "partitioned by org; key hashes orgs, user, key, projects, request" },

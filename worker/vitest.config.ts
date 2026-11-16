@@ -27,6 +27,7 @@ export default defineConfig({
       "@docslurp/shared/chart-export": path.resolve(__dirname, "../packages/shared/src/chart-export.ts"),
       "@docslurp/shared/file-sniff": path.resolve(__dirname, "../packages/shared/src/file-sniff.ts"),
       "@docslurp/shared/observability": path.resolve(__dirname, "../packages/shared/src/observability.ts"),
+      "@docslurp/shared/org-prompt-salt": path.resolve(__dirname, "../packages/shared/src/org-prompt-salt.ts"),
       "@docslurp/shared/lancedb-s3-cache": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-cache.ts"),
       "@docslurp/shared/lancedb-s3-trace": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-trace.ts"),
       "@docslurp/shared/lancedb-query-tuning": path.resolve(__dirname, "../packages/shared/src/lancedb-query-tuning.ts"),

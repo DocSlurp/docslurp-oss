@@ -10,6 +10,7 @@ import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime, VISION_SYSTEM_INSTRUCTION, visionCacheOrdered, visionPromptMessages, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
+const SALTED_SYSTEM = new RegExp(`^${VISION_SYSTEM_INSTRUCTION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\nWorkspace [0-9a-f]{16}\\.$`);
 const image = { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } };
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
 afterEach(() => vi.unstubAllGlobals());
@@ -51,7 +52,7 @@ describe("Claude page reads are cache-ordered; other models keep the original sh
 
     const chartPrompt = "Return one JSON object of this shape: {...}";
     const chart = await body("anthropic/claude-haiku-5.5", "layout", chartPrompt);
-    expect(chart.messages[0]).toEqual({ role: "system", content: VISION_SYSTEM_INSTRUCTION });
+    expect(chart.messages[0]).toEqual({ role: "system", content: expect.stringMatching(SALTED_SYSTEM) });
     expect(chart.messages[1].content[0]).toEqual({ type: "text", text: chartPrompt });
     expect(chart.messages[1].content[1].type).toBe("image_url");
     expect(JSON.stringify(chart)).not.toContain("cache_control");
@@ -59,7 +60,7 @@ describe("Claude page reads are cache-ordered; other models keep the original sh
 
   it("keeps GPT-6 Luna on the original shape", async () => {
     const sent = await body("openai/gpt-6-luna", "layout");
-    expect(sent.messages[0]).toEqual({ role: "system", content: VISION_SYSTEM_INSTRUCTION });
+    expect(sent.messages[0]).toEqual({ role: "system", content: expect.stringMatching(SALTED_SYSTEM) });
     expect(sent.messages[1].content[0]).toEqual({ type: "text", text: visionPromptTemplates.layout });
     expect(sent.messages[1].content[1].type).toBe("image_url");
   });

@@ -716,13 +716,16 @@ export const documentsRoutes = new Hono()
         userAgent: requestUserAgent(c)
       }
     });
-    const job = runs.length > 0
-      ? await (async () => {
-          const meta = jobMetaFor(runs[0]!.id, "reprocess", bulkInline);
-          await recordJobMeta(runs.map((run) => run.id), meta);
-          return await jobStatusForMutation(meta, runs.map((run) => run.id), userId);
-        })()
-      : null;
+    // One job id never spans organizations (organization isolation): runs of each organization get their own job,
+    // so a job id seen in one organization can never report another's runs. The response carries the first one.
+    const runsByOrg = new Map<string, typeof runs>();
+    for (const run of runs) runsByOrg.set(run.orgId, [...(runsByOrg.get(run.orgId) ?? []), run]);
+    let job: Awaited<ReturnType<typeof jobStatusForMutation>> | null = null;
+    for (const orgRuns of runsByOrg.values()) {
+      const meta = jobMetaFor(orgRuns[0]!.id, "reprocess", bulkInline);
+      await recordJobMeta(orgRuns.map((run) => run.id), meta);
+      job ??= await jobStatusForMutation(meta, orgRuns.map((run) => run.id), userId);
+    }
     // Created runs as customers read them (no managed model fields or model keys), as on GET /v1/runs.
     const operator = await isPlatformAdminActor(getRequestActor(c));
     return c.json({ runs: operator ? runs : runs.map((run) => redactOperatorRun(run)), failed, warnings, ...(job ? { job } : {}) }, 201);

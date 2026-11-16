@@ -35,6 +35,7 @@ import type { EvidenceRetrievalResult } from "./retrieval-adapters.js";
 import { flattenEvidenceResults } from "./retrieval-adapters.js";
 import { stopWords } from "./rerank.js";
 import { foldText, hasCjk, matchTerms } from "./text-fold.js";
+import { currentRequestOrgId } from "../lib/request-context.js";
 
 /** Built-in floor, in the rescaled 0..1 relevance space. Overridden by SEARCH_MIN_SCORE, the project default or the request. */
 export const DEFAULT_MIN_SCORE = 0.1;
@@ -182,15 +183,19 @@ const PREPARED_QUERY_MAX_LENGTH = 2048;
 const preparedQueries = new Map<string, PreparedQuery>();
 
 function prepareQuery(query: string): PreparedQuery {
-  const cached = preparedQueries.get(query);
-  if (cached) {
-    preparedQueries.delete(query);
-    preparedQueries.set(query, cached);
+  // Keyed by the request's organization too (organization isolation): another tenant's identical query never hits
+  // this entry, not even as a timing difference. Without an organization nothing is cached.
+  const orgId = currentRequestOrgId();
+  const key = orgId ? `${orgId}\u0000${query}` : null;
+  const cached = key ? preparedQueries.get(key) : undefined;
+  if (key && cached) {
+    preparedQueries.delete(key);
+    preparedQueries.set(key, cached);
     return cached;
   }
   const prepared: PreparedQuery = { terms: prepareTerms(contentTerms(query)) };
-  if (query.length <= PREPARED_QUERY_MAX_LENGTH) {
-    preparedQueries.set(query, prepared);
+  if (key && query.length <= PREPARED_QUERY_MAX_LENGTH) {
+    preparedQueries.set(key, prepared);
     if (preparedQueries.size > PREPARED_QUERY_CACHE_SIZE) preparedQueries.delete(preparedQueries.keys().next().value!);
   }
   return prepared;
