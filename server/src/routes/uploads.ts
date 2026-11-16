@@ -2,6 +2,8 @@ import { uploadContentIdentitySchema } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, chartExportOverrideSchema } from "@docslurp/shared";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
+import { chartTierForVisuals, QuoteSettingsError, normalizeQuoteSettingsInput, VISUALS_UNAVAILABLE_CODE, visualsLevelSchema } from "@docslurp/shared";
+import { deprecatedPipelineFields, deprecatedReprocessFields, markDeprecatedFields } from "../lib/deprecation.js";
 import { runOriginOf } from "../lib/run-origin.js";
 import { withPayloadCanEdit } from "../lib/reprocess-access.js";
 import { Hono, type Context } from "hono";
@@ -594,7 +596,9 @@ const uploadEstimateSchema = z.object({
   files: z.array(quoteFileSchema).min(1).max(1000),
   /** Knobs to quote with instead of the project's own (the same as `POST /v1/estimate`). */
   settings: quoteSettingsSchema.partial().optional(),
-  /** The same per-request chart export override the upload takes; priced only for `models`. */
+  /** Visuals for this estimate (`none` | `figures` | `charts` | `charts-ai`); only `charts-ai` is priced. */
+  visuals: visualsLevelSchema.optional(),
+  /** @deprecated Use `visuals`. The same per-request chart export override the upload takes; priced only for `models`. */
   chartExport: chartExportOverrideSchema.optional(),
   project: projectInputSchema.optional(),
   orgId: z.string().optional(),
@@ -629,11 +633,31 @@ export const uploadEstimateRoutes = new Hono().post(
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
     // After the scope and project checks: a caller that may not upload here never learns what the deployment offers.
-    const refusedTier = chartExportOverrideError(body.chartExport?.tier, "upload estimate");
-    if (refusedTier) return apiStatusError(c, 400, refusedTier, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    if (body.visuals && body.chartExport && chartTierForVisuals(body.visuals) !== body.chartExport.tier) {
+      return apiStatusError(c, 400, "visuals conflicts with chartExport.tier; send visuals only", { code: "extraction_config_conflict", details: { field: "visuals" } });
+    }
+    let settings: typeof body.settings;
+    try {
+      settings = normalizeQuoteSettingsInput(body.settings);
+    } catch (error) {
+      if (!(error instanceof QuoteSettingsError)) throw error;
+      return apiStatusError(c, 400, error.message, { code: "extraction_config_conflict", details: { field: "settings.visuals" } });
+    }
+    markDeprecatedFields(c, [
+      ...deprecatedReprocessFields(body),
+      ...(typeof body.settings?.quality === "string" && ["fast", "auto", "good"].includes(body.settings.quality) ? deprecatedPipelineFields({ quality: body.settings.quality }, "settings.") : []),
+      ...(body.settings?.chartExport ? [{ code: "deprecated_field" as const, field: "settings.chartExport", replacement: "settings.visuals", message: "'settings.chartExport' is deprecated; use 'settings.visuals'." }] : []),
+    ]);
+    const requestedTier = body.visuals ? chartTierForVisuals(body.visuals) : body.chartExport?.tier ?? null;
+    const refusedTier = chartExportOverrideError(requestedTier, "upload estimate");
+    if (refusedTier) {
+      return body.visuals
+        ? apiStatusError(c, 400, refusedTier, { code: VISUALS_UNAVAILABLE_CODE, details: { field: "visuals" } })
+        : apiStatusError(c, 400, refusedTier, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    }
     const { estimate, media, profile, quote, chartExport } = await estimateUpload({
-      files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings,
-      chartExportTier: body.chartExport?.tier ?? null, origin: runOriginOf(c),
+      files: body.files, project, speedBoost: body.speedBoost === true, settings,
+      chartExportTier: requestedTier, origin: runOriginOf(c),
     });
     // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
     // project's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.

@@ -1,4 +1,5 @@
 import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode, resolveManagedPipeline } from "@docslurp/shared";
+import { legacyQualityModeFor, reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE, type QualityLevel, type VisualsLevel } from "@docslurp/shared";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { chartExportOverrideError } from "./chart-export-availability.js";
 import {
@@ -372,7 +373,7 @@ function checkReusableSource(
 export async function reprocessRun(
   runId: string,
   userId: string,
-  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null },
+  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; quality?: QualityLevel; visuals?: VisualsLevel; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null },
 ): Promise<{ run: ProjectRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
@@ -383,8 +384,12 @@ export async function reprocessRun(
     throw new EditorRequiredError();
   }
   // Access first (a caller with no access never learns what the deployment offers), then the tier.
-  const refused = chartExportOverrideError(options?.chartExport?.tier, `reprocess run=${runId}`);
-  if (refused) throw new ReprocessRejectedError(refused, 400, CHART_EXPORT_TIER_UNAVAILABLE_CODE, { field: "chartExport.tier" });
+  const requestedTier = reprocessRequestedTier(options);
+  const refused = chartExportOverrideError(requestedTier, `reprocess run=${runId}`);
+  if (refused) {
+    if (options?.visuals) throw new ReprocessRejectedError(refused, 400, VISUALS_UNAVAILABLE_CODE, { field: "visuals" });
+    throw new ReprocessRejectedError(refused, 400, CHART_EXPORT_TIER_UNAVAILABLE_CODE, { field: "chartExport.tier" });
+  }
   const [extractRun] = await sql<{ extract_id: string | null }[]>`select extract_id from project_runs where id = ${runId}`;
   if (extractRun?.extract_id) throw extractNotReprocessable();
 
@@ -410,6 +415,9 @@ export async function reprocessRun(
     ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
+    // An explicit quality or visuals replaces the snapshot's; run creation checks the raise and caps (extraction-settings.ts).
+    ...(options?.quality ? { quality: legacyQualityModeFor(options.quality), ...(options.quality === "balanced" ? { visionFallback: true } : {}) } : {}),
+    ...(options?.visuals ? { figures: options.visuals !== "none" } : {}),
   };
   const plan = compilePipelinePlan(pipelineConfig);
   if (plan.stageOrder.length === 0) {
@@ -433,7 +441,7 @@ export async function reprocessRun(
     origin: options?.origin ?? "machine",
     // The source run's stamped tier, capped at what the project resolves to now; only an explicit override (refused above
     // when unavailable, and subject to the editor/scope ceiling) may raise it.
-    chartExportReplay: { requested: options?.chartExport?.tier ?? null },
+    chartExportReplay: { requested: requestedTier, quality: options?.quality ?? null },
     apiKeyId: options?.apiKeyId ?? null,
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
   });

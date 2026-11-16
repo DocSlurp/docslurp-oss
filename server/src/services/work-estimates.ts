@@ -19,7 +19,7 @@ import {
   type ReprocessRunInput,
 } from "@docslurp/shared";
 
-import { estimateChartExportCredits, upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
+import { estimateChartExportCredits, legacyQualityModeFor, projectExtractionView, QUALITY_LEVEL_RANK, qualityLevelFromLegacy, reprocessRequestedTier, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type RunOrigin, type VisualsLevel } from "@docslurp/shared";
 import { replayChartExport } from "./run-creation.js";
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
@@ -29,27 +29,50 @@ import { listReprocessableProjectIds } from "./organizations.js";
 /** Estimates for work-creating routes other than config changes. Each is shared by the mutation and its `/estimate` twin. */
 
 /** `POST /v1/runs/:id/reprocess`: the stages the request would run again over the run's documents. */
-/** The stored chart tiers of these projects (org-scoped), for capping replayed runs. */
-async function projectChartTiers(orgId: string | null | undefined, projectIds: readonly string[]): Promise<Map<string, { tier?: ChartExportTier } | null>> {
-  const out = new Map<string, { tier?: ChartExportTier } | null>();
+/** The stored chart tiers and quality of these projects (org-scoped), for capping replayed runs. */
+async function projectReplayCaps(orgId: string | null | undefined, projectIds: readonly string[]): Promise<Map<string, { chartExport: { tier?: ChartExportTier } | null; quality: QualityLevel }>> {
+  const out = new Map<string, { chartExport: { tier?: ChartExportTier } | null; quality: QualityLevel }>();
   if (!orgId || projectIds.length === 0) return out;
   const rows = await sql<{ id: string; pipeline: { chartExport?: unknown } | null }[]>`
     select id, pipeline from projects where org_id = ${orgId} and id = any(${sql.array([...projectIds])})`;
-  for (const row of rows) out.set(row.id, upgradeStoredChartExport(row.pipeline?.chartExport) as { tier?: ChartExportTier } | null);
+  for (const row of rows) {
+    out.set(row.id, {
+      chartExport: upgradeStoredChartExport(row.pipeline?.chartExport) as { tier?: ChartExportTier } | null,
+      quality: projectExtractionView(row.pipeline, process.env).quality,
+    });
+  }
   return out;
 }
 
 /**
- * A run's pipeline as a reprocess of it would run (run-creation `replayChartExport`): the request's override, else the
- * run's stamped chart tier capped at what its project resolves to now. Used by the reprocess estimate and its quote.
+ * A run's pipeline as a reprocess of it would run (run-creation `replayChartExport` and extraction-settings.ts): the
+ * request's overrides, else the run's stamped chart tier and quality capped at what its project resolves to now. Used
+ * by the reprocess estimate and its quote.
  */
 export async function replayedRunPipeline(
   run: { pipeline: PipelineFeatures; projectId: string | null; orgId: string | null },
   requested: ChartExportTier | null,
   env?: EstimateEnv,
+  request: { quality?: QualityLevel | null; visuals?: VisualsLevel | null } = {},
 ): Promise<PipelineFeatures> {
-  const project = run.projectId ? (await projectChartTiers(run.orgId, [run.projectId])).get(run.projectId) ?? null : null;
-  return replayChartExport(run.pipeline, requested, project, "machine", (env ?? process.env) as Record<string, string | undefined>);
+  const caps = run.projectId ? (await projectReplayCaps(run.orgId, [run.projectId])).get(run.projectId) ?? null : null;
+  const replayed = replayChartExport(run.pipeline, requested, caps?.chartExport ?? null, "machine", (env ?? process.env) as Record<string, string | undefined>);
+  const quality = request.quality ?? null;
+  const capped = quality ? withQuality(replayed, quality) : capReplayQuality(replayed, caps?.quality ?? null);
+  return request.visuals ? { ...capped, figures: request.visuals !== "none" } : capped;
+}
+
+function withQuality<T extends PipelineFeatures>(pipeline: T, quality: QualityLevel): T {
+  const current = qualityLevelFromLegacy(pipeline.quality);
+  if (current === quality) return pipeline;
+  return { ...pipeline, quality: legacyQualityModeFor(quality), ...(quality === "balanced" ? { visionFallback: true } : {}) };
+}
+
+/** A replayed run's quality capped at its project's now (extraction-settings.ts does the same at run creation). */
+function capReplayQuality<T extends PipelineFeatures>(pipeline: T, projectQuality: QualityLevel | null): T {
+  if (!projectQuality) return pipeline;
+  const current = qualityLevelFromLegacy(pipeline.quality);
+  return QUALITY_LEVEL_RANK[projectQuality] < QUALITY_LEVEL_RANK[current] ? withQuality(pipeline, projectQuality) : pipeline;
 }
 
 export async function estimateRunReprocess(args: {
@@ -62,7 +85,7 @@ export async function estimateRunReprocess(args: {
   if (!run) return null;
   // The tier reprocess will run at (run-creation `replayChartExport`): the override, else the run's stamp capped at what
   // the project resolves to now. Only `models` is priced.
-  const replayed = await replayedRunPipeline(run, args.options?.chartExport?.tier ?? null, args.env);
+  const replayed = await replayedRunPipeline(run, reprocessRequestedTier(args.options), args.env, { quality: args.options?.quality ?? null, visuals: args.options?.visuals ?? null });
   const features: PipelineFeatures = {
     ...(JSON.parse(JSON.stringify(withoutStageSelection(replayed))) as PipelineFeatures),
     speedBoost: args.options?.speedBoost === true,
@@ -109,14 +132,15 @@ export async function estimateDocumentReprocess(args: {
   const groups = new Map<string, { orgId: string; projectId: string; features: PipelineFeatures; documents: number; pages: number; documentIds: string[] }>();
   // Bulk reprocess replays each run's chart tier capped at what its project resolves to now (run-creation
   // `chartExportReplay`), so the estimate prices the same capped tier.
-  const projectTiers = new Map<string, { tier?: ChartExportTier } | null>();
+  const projectTiers = new Map<string, { chartExport: { tier?: ChartExportTier } | null; quality: QualityLevel }>();
   for (const [orgId, ids] of Map.groupBy(rows, (row) => row.org_id)) {
-    for (const [id, tier] of await projectChartTiers(orgId, [...new Set(ids.map((row) => row.project_id))])) projectTiers.set(id, tier);
+    for (const [id, caps] of await projectReplayCaps(orgId, [...new Set(ids.map((row) => row.project_id))])) projectTiers.set(id, caps);
   }
   for (const row of rows) {
     // Same lenient read as the mutation: drop stored extractor settings the strict schemas now reject.
     const stored = sanitizeStoredPipeline((row.pipeline ?? {}) as PipelineFeatures, `a run in project ${row.project_id}`);
-    const base = replayChartExport(stored, null, projectTiers.get(row.project_id) ?? null, "machine", (args.env ?? process.env) as Record<string, string | undefined>);
+    const caps = projectTiers.get(row.project_id) ?? null;
+    const base = capReplayQuality(replayChartExport(stored, null, caps?.chartExport ?? null, "machine", (args.env ?? process.env) as Record<string, string | undefined>), caps?.quality ?? null);
     base.speedBoost = args.speedBoost === true;
     const features = row.indexing_mode ? { ...base, indexingMode: effectiveIndexingMode(row.indexing_mode as PipelineFeatures["indexingMode"]) } : base;
     const key = `${row.project_id}:${JSON.stringify(features)}`;

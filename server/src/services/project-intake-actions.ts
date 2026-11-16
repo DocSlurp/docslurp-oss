@@ -1,4 +1,5 @@
 import { intakeReceiptContext } from "./intake-receipt-context.js";
+import { deprecatedPipelineFields, markDeprecatedFields } from "../lib/deprecation.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
 /**
  * HTTP-facing Project Intake actions: request parsing, idempotency, and the
@@ -226,6 +227,7 @@ async function idempotently(
  * pipeline (and its template locks) instead of replacing it.
  */
 export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrides {
+  markDeprecatedFields(null, deprecatedPipelineFields(raw));
   const parsed = publicPipelineFeatureOverridesSchema.safeParse(raw === undefined || raw === null ? {} : raw);
   if (!parsed.success) {
     throw new ProjectIntakeError("Invalid pipeline payload", 422, parsed.error.issues.map((issue) => ({

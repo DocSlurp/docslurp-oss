@@ -1,6 +1,7 @@
 import { CHAT_TIERS } from "./project-chat-models.js";
 import { geoPredicateSchema } from "./geo.js";
-import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema } from "./chart-export.js";
+import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema, type ChartExportTier } from "./chart-export.js";
+import { chartTierForVisuals, qualityLevelSchema, visualsLevelSchema, type VisualsLevel } from "./extraction-config.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
@@ -133,6 +134,19 @@ export const projectSchema = z.object({
     freeAvailable: z.boolean(),
     ceiling: z.enum(CHART_EXPORT_SWITCH_VALUES),
   }).optional(),
+  /**
+   * The project's extraction settings in the current names: `quality` (`fastest` | `balanced` | `smart`) and `visuals`
+   * (`none` | `figures` | `charts` | `charts-ai`, null = the run origin's default). Read from the stored pipeline,
+   * which this release still writes in the deprecated shape (`pipeline.quality: fast|auto|good`, `figures`,
+   * `chartExport.tier`).
+   */
+  extraction: z.object({ quality: qualityLevelSchema, visuals: visualsLevelSchema.nullable() }).optional(),
+  /**
+   * Replaces `chartExportDefaults`: the visuals each run origin gets on a project with none (`app` for the DocSlurp
+   * app, `machine` for API, MCP, SDK and CLI) and the rungs a caller may choose on this deployment (privacy still
+   * narrows them per project).
+   */
+  visualsDefaults: z.object({ app: visualsLevelSchema, machine: visualsLevelSchema, available: z.array(visualsLevelSchema) }).optional(),
   /** Retained versions per document for this project; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   /**
@@ -925,6 +939,14 @@ export function chartExportOverrideDescriptionFor(defaults: { app: string; machi
 export const reprocessRunSchema = z
   .object({
     speedBoost: z.boolean().optional(),
+    /**
+     * Quality for this reprocess (`fastest` | `balanced` | `smart`). Omitted: the source run's quality, capped at the
+     * project's now. `smart` above the project's quality needs editor rights (or an API key with pipeline:billed-features).
+     */
+    quality: qualityLevelSchema.optional(),
+    /** Visuals for this reprocess (`none` | `figures` | `charts` | `charts-ai`); replaces the deprecated `chartExport`. */
+    visuals: visualsLevelSchema.optional(),
+    /** @deprecated Use `visuals`. */
     chartExport: chartExportOverrideSchema.optional(),
     stages: z.array(pipelineRunStageSchema).min(1).optional(),
     stageFrom: pipelineRunStageSchema.optional(),
@@ -932,7 +954,17 @@ export const reprocessRunSchema = z
   .refine((value) => !(value.stages && value.stageFrom), {
     message: "Use either stages or stageFrom, not both",
     path: ["stages"],
+  })
+  .refine((value) => !(value.visuals && value.chartExport && chartTierForVisuals(value.visuals) !== value.chartExport.tier), {
+    message: "visuals conflicts with chartExport.tier; send visuals only",
+    path: ["visuals"],
   });
+
+/** The chart tier a reprocess request asks for: `visuals`, else the deprecated `chartExport.tier`, else null (inherit). */
+export function reprocessRequestedTier(body: { visuals?: VisualsLevel | null; chartExport?: { tier: ChartExportTier } | null } | null | undefined): ChartExportTier | null {
+  if (body?.visuals) return chartTierForVisuals(body.visuals);
+  return body?.chartExport?.tier ?? null;
+}
 export type ReprocessRunInput = z.infer<typeof reprocessRunSchema>;
 
 /** The name a project carries until DocSlurp titles it from its files, summaries or first chat question. */

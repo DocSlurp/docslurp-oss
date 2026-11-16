@@ -1,8 +1,9 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, stampRunChartExport } from "./chart-export-availability.js";
+import { resolveRunExtraction } from "./extraction-settings.js";
 import {
   assertPipelineSpeedBoost,
   countedPagesForForecast,
@@ -106,7 +107,7 @@ export interface CreateRunInput {
    * project resolves to now (`projectChartExportTierCap`). `requested` is the request's explicit override, which may
    * raise it and then passes the editor/scope ceiling and spend admission like any override.
    */
-  chartExportReplay?: { requested?: ChartExportTier | null };
+  chartExportReplay?: { requested?: ChartExportTier | null; quality?: QualityLevel | null };
   priority?: number;
   sources: RunSources;
   /**
@@ -961,6 +962,21 @@ export function createRunCreation(deps: RunCreationDeps) {
       apiKeyScopes: activeApiKeyScopes,
       context: `run creation project=${input.projectId}`,
     });
+    // Quality and visuals (extraction-config.ts): a `smart` raise above the project needs the same authority as
+    // `charts-ai`; a replay inherits its source run's quality capped at the project's now; privacy, the vision profile's
+    // locality and the deployment switches cap stored values (recorded in `capsApplied`) and refuse explicit ones (400).
+    // The resolved values are stamped on the run as `pipeline.effective` (additive: older releases ignore it).
+    const { effective, ...resolvedPipeline } = await resolveRunExtraction({
+      pipeline: input.pipeline,
+      project: access.pipeline as never,
+      origin: input.origin ?? "machine",
+      replay: request.chartExportReplay ? { requestedQuality: request.chartExportReplay.quality ?? null } : null,
+      canEdit: canEditProject(access, input.userId),
+      apiKeyId: input.apiKeyId ?? currentRequestApiKeyId(),
+      apiKeyScopes: activeApiKeyScopes,
+      context: `run creation project=${input.projectId}`,
+    });
+    input.pipeline = resolvedPipeline as PipelineFeatures;
     // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
     // with Fast (or a refused privacy/PII policy) is refused whatever the project or request says
     // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).
@@ -1031,7 +1047,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       sourceKeys: sources.kind === "files" ? sources.files.map((file) => file.sourceKey) : [],
       // New files always run every enabled stage; a caller re-running existing
       // Documents chooses its own stage selection.
-      pipeline: executionPipeline,
+      pipeline: { ...executionPipeline, effective } as PipelineFeatures,
     });
 
     // Stamped on every Document so a later project mode switch never rewrites how it was indexed.

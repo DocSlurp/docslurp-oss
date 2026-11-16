@@ -1,3 +1,4 @@
+import { deprecationWarnings } from "./lib/deprecation.js";
 import { realtimeMetrics } from "./realtime/broker.js";
 import { chartExportDefaultsWarnings, chartExportSwitchWarning, summaryTreeSwitchWarnings } from "@docslurp/shared";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
@@ -168,6 +169,7 @@ export function createApiApp(): Hono {
   app.use("/v1/*", clientSurfaceMiddleware);
   app.use("/compat/*", clientSurfaceMiddleware);
   app.use("/v1/*", apiActorRateLimit);
+  app.use("/v1/*", deprecationWarnings);
   // In-flight AI chat turns per API key (and per visitor of a browser key), streams included.
   app.use("/v1/*", chatConcurrencyLimit);
   app.use("/v1/mcp", nativeBodyLimit(1024 * 1024));

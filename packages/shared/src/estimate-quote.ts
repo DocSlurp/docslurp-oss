@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { isBillingEnforced, pipelineProfileIdSchema } from "./billing.js";
+import { chartTierForVisuals, isQualityLevel, legacyQualityModeFor, visualsLevelSchema } from "./extraction-config.js";
 import { fileProfileSchema } from "./file-profile.js";
 import { CHAT_ANSWER_TIERS, pricing } from "./pricing-provider.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, CHART_EXPORT_FORMATS, chartExportFormatSchema, chartExportOverrideRefusal, chartExportTierSchema, defaultChartExportConfig, effectiveChartExportConfig, resolveChartExportTier, type ChartExportTier, type RunOrigin } from "./chart-export.js";
@@ -25,8 +26,11 @@ export const ESTIMATE_MAX_FILES = 1_000;
  * knobs take the project's value (authenticated, with a project) or a new project's default.
  */
 export const quoteSettingsSchema = z.strictObject({
-  /** Processing quality: fast reads text layers only, auto reads scans and complex pages, good reads every page. */
-  quality: pipelineProfileIdSchema,
+  /**
+   * Processing quality: `fastest` reads text layers only, `balanced` reads scans and complex pages, `smart` reads every
+   * page. The deprecated `fast`/`auto`/`good` are still accepted; quotes answer with the deprecated words for now.
+   */
+  quality: z.preprocess((value) => (isQualityLevel(value) ? legacyQualityModeFor(value) : value), pipelineProfileIdSchema),
   /**
    * `full` indexes every page for search and chat on upload (`pipeline.indexingMode: "full"`); `on-demand` maps the
    * documents and indexes pages when a query first needs them (`"map"`); `visual` embeds every page image on upload
@@ -55,11 +59,28 @@ export const quoteSettingsSchema = z.strictObject({
    * charts with AI) is priced.
    */
   chartExport: chartExportTierSchema,
+  /**
+   * Visuals (`none` | `figures` | `charts` | `charts-ai`), replacing `chartExport`: `charts-ai` prices AI chart reads, the
+   * rest price none. Normalized onto `chartExport` (`normalizeQuoteSettingsInput`); both together must agree.
+   */
+  visuals: visualsLevelSchema.optional(),
   /** Chart export formats and diagrams the `models` tier prices with: the project's own, so the quote's charts line equals the upload's `chartExport.credits`. */
   chartFormats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length),
   chartDiagrams: z.boolean(),
 });
 export type QuoteSettings = z.infer<typeof quoteSettingsSchema>;
+
+/**
+ * Quote settings from a request with `visuals` folded onto `chartExport` (the field the pricing reads). Throws
+ * `QuoteSettingsError` (`extraction_config_conflict`) when both are given and disagree.
+ */
+export function normalizeQuoteSettingsInput<T extends Partial<QuoteSettings> | undefined>(settings: T): T {
+  if (!settings || settings.visuals === undefined) return settings;
+  const { visuals, ...rest } = settings;
+  const tier = chartTierForVisuals(visuals);
+  if (rest.chartExport && rest.chartExport !== tier) throw new QuoteSettingsError(`settings.visuals '${visuals}' conflicts with settings.chartExport '${rest.chartExport}'; send visuals only`, "extraction_config_conflict");
+  return { ...rest, chartExport: tier } as T;
+}
 
 export const DEFAULT_QUOTE_SETTINGS: QuoteSettings = {
   quality: "auto",
@@ -214,6 +235,7 @@ export function quoteStoredWork(args: {
   env?: Record<string, string | undefined>;
   origin?: RunOrigin;
 }): EstimateQuote {
+  args = { ...args, settings: normalizeQuoteSettingsInput(args.settings) };
   const settings = quoteSettingsSchema.parse({
     ...DEFAULT_QUOTE_SETTINGS, ...args.base, ...args.settings,
     chartExport: quoteChartTier(args.settings?.chartExport, args.base?.chartExport, args),
@@ -247,6 +269,7 @@ export function quoteEstimate(
   request: EstimateRequest,
   options: { base?: Partial<QuoteSettings>; workerSlots?: number; env?: Record<string, string | undefined>; origin?: RunOrigin } = {},
 ): EstimateQuote {
+  request = { ...request, settings: normalizeQuoteSettingsInput(request.settings) };
   const settings = quoteSettingsSchema.parse({
     ...DEFAULT_QUOTE_SETTINGS, ...options.base, ...request.settings,
     chartExport: quoteChartTier(request.settings?.chartExport, options.base?.chartExport, options),
