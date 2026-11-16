@@ -1,7 +1,8 @@
 # TODO
 
 - Organization isolation follow-ups (council, PR #450, 2026-11-16):
-  - `quarantined_sources` (source quarantine) is keyed by `source_sha256` alone: org B's identical bytes are refused on a verdict from org A's run, which tells org B another tenant's upload of those bytes broke a parser. Look it up per organization and route a hash seen elsewhere to a fresh, disposable VM with a generic failure, instead of refusing it (sandbox owners).
+  - Contract step for #451: drop `quarantined_sources` (0101) once no release reads it (now `org_quarantined_sources`, 0184), and its roles.mjs entry.
+  - Source quarantine is per organization since #451, so one hostile file can cost one worker per uploading organization (bounded per org by the teardown breaker, not fleet-wide). Add a fleet-wide signal used for routing only (a hash listed by any org runs elsewhere on a single-use VM in a capped lane, indistinguishable to the uploader) and an alert on distinct orgs per hash and fleet teardowns per hour (council #451 M2).
   - Unsalted tenant calls still left: page-router decision and verifier requests (`worker/src/routing/decision-client.ts`, page image first) and Llama Guard output moderation (`server/src/services/chat-output-moderation.ts`, question first). Salt both once routing calibration and the moderation template are checked with a salt line, and price moderation at list rate so a cache discount never shows in another org's cost.
   - Shared caches evict across organizations (query-embedding and vector-result `TtlLruCache`, global pressure in the search response cache): one org's volume can turn another's hits into misses. Give each organization its own entry and byte budget.
   - One salt helper: server `chatSystemSaltLine` and shared `orgPromptSaltLine` differ in HKDF label and short-key handling; consolidate on one with the production refusal of a short `EVIDENCE_TAG_KEY`.

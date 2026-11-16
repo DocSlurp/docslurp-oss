@@ -439,6 +439,22 @@ describe("H1: an organization whose parser work keeps defeating teardown is refu
     expect(opened).not.toHaveBeenCalled();
   });
 
+  it("refuses, for good, parser work for a document that belongs to no organization", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const notes: string[] = [];
+    configureSourceQuarantine({
+      async find() { return { sourceSha256: "", orgId: null, projectId: null }; },
+      async record() { return null; },
+      async noteRefusal({ documentId }) { notes.push(documentId); },
+      async recordOrgFailure() { return null; },
+      async orgFailures() { return null; },
+    });
+    const refused = await inDocument(() => admitCommandSource(), "doc-orgless").catch((error: unknown) => error);
+    expect(findQuarantinedSourceError(refused)).toBeTruthy();
+    expect(String((refused as Error).message)).toMatch(/belongs to no organization/);
+    expect(notes).toEqual([]);
+  });
+
   it("below the limit the organization's documents still run", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const { store } = orgStore(2);
