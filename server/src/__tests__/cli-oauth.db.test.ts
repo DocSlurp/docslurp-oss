@@ -113,6 +113,7 @@ afterAll(async () => {
 beforeEach(async () => {
   vi.stubEnv("NODE_ENV", "test");
   vi.stubEnv("MCP_PUBLIC_URL", origin);
+  vi.stubEnv("MCP_BROWSER_URL", "");
   await q("delete from mcp_oauth_device_attempts");
   // Browser authentication is a test double, but action grants remain real,
   // session-bound database state and must never leak into another case.
@@ -556,6 +557,60 @@ describe("device authorization grant", () => {
     expect(await poll(started.device_code)).toMatchObject({ status: 400, body: { error: "authorization_pending" } });
     // The same POST from the page's own origin goes through.
     expect((await verify("owner", { action: "approve", user_code: started.user_code, orgId: "org-owner" })).status).toBe(200);
+  });
+
+  it("with MCP_BROWSER_URL, the code flow starts on the issuer, consents on the browser origin and still names the issuer", async () => {
+    // The same server under another host name stands in for the browser origin.
+    const browser = origin.replace("127.0.0.1", "localhost");
+    vi.stubEnv("MCP_BROWSER_URL", browser);
+    const { verifier, challenge } = pkce();
+    const params = new URLSearchParams({ client_id: CLIENT, redirect_uri: REDIRECT, response_type: "code", code_challenge: challenge, code_challenge_method: "S256", resource: api, scope: "search read", state: "s1" });
+    // A released CLI opens the issuer's authorization endpoint: the page load is sent to the browser origin.
+    const opened = await fetch(`${origin}/oauth/mcp/authorize?${params}`, { headers: { cookie: cookie("owner") }, redirect: "manual" });
+    expect(opened.status).toBe(307);
+    expect(opened.headers.get("location")).toBe(`${browser}/oauth/mcp/authorize?${params}`);
+    expect((await q("select count(*)::int as n from mcp_oauth_requests where state='s1'")).rows[0].n).toBe(0);
+    const start = await fetch(opened.headers.get("location")!, { headers: { cookie: cookie("owner") }, redirect: "manual" });
+    const requestId = new URL(start.headers.get("location") ?? "", browser).searchParams.get("request")!;
+    expect(requestId).toBeTruthy();
+    const decide = (from: string) => fetch(`${browser}/oauth/mcp/authorize`, { method: "POST", redirect: "manual", headers: { cookie: cookie("owner"), origin: from }, body: form({ request: requestId, decision: "allow", orgId: "org-owner" }) });
+    // The issuer origin can no longer decide, and the request stays unconsumed.
+    expect((await decide(origin)).status).toBe(403);
+    expect((await q("select consumed_at from mcp_oauth_requests where id=$1", [requestId])).rows[0].consumed_at).toBeNull();
+    const decision = await decide(browser);
+    expect(decision.status).toBe(303);
+    const callback = new URL(decision.headers.get("location")!).searchParams;
+    expect(callback.get("state")).toBe("s1");
+    expect(callback.get("iss")).toBe(origin);
+    // The token endpoint and the audience stay on the issuer.
+    const issued = await token({ grant_type: "authorization_code", code: callback.get("code")!, redirect_uri: REDIRECT, code_verifier: verifier });
+    expect(issued.status).toBe(200);
+    expect((await whoami(issued.body.access_token)).status).toBe(200);
+  });
+
+  it("with MCP_BROWSER_URL, a signed-in approval is accepted from that origin and refused from the issuer", async () => {
+    const browser = "http://app.localhost:4321";
+    vi.stubEnv("MCP_BROWSER_URL", browser);
+    const started = await startDevice();
+    // Discovery and the verification page stay on the issuer: released CLIs refuse any other origin.
+    expect(started.verification_uri).toBe(`${origin}/oauth/mcp/device`);
+    const approve = (from: string) => fetch(`${origin}/oauth/mcp/device`, { method: "POST", headers: { cookie: cookie("owner"), origin: from }, body: form({ action: "approve", user_code: started.user_code, orgId: "org-owner" }) });
+    const refused = await approve(origin);
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain("Request refused");
+    expect(await poll(started.device_code)).toMatchObject({ status: 400, body: { error: "authorization_pending" } });
+    expect((await approve(browser)).status).toBe(200);
+    await allowNextPoll(started.device_code);
+    const tokens = await poll(started.device_code);
+    expect(tokens.status).toBe(200);
+
+    // The same holds for revoking a grant from the account page.
+    const grantId = (await q("select id from mcp_oauth_grants where user_id='owner' and revoked_at is null order by created_at desc limit 1")).rows[0].id as string;
+    const revoke = (from: string) => fetch(`${origin}/oauth/mcp/grants/${grantId}/revoke`, { method: "POST", headers: { cookie: cookie("owner"), origin: from } });
+    expect((await revoke(origin)).status).toBe(403);
+    expect((await q("select revoked_at from mcp_oauth_grants where id=$1", [grantId])).rows[0].revoked_at).toBeNull();
+    expect((await revoke(browser)).status).toBe(200);
+    expect((await q("select revoked_at from mcp_oauth_grants where id=$1", [grantId])).rows[0].revoked_at).not.toBeNull();
   });
 
   it("caps a device grant at search and read unless the approver opts in", async () => {
