@@ -35,6 +35,12 @@ import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   type ProjectRecord,
   partialExtractionMessage,
   pageReadingQuality,
+  normalizePageExtractTags,
+  PAGE_EXTRACT_METHODS,
+  PAGE_EXTRACT_PASSES,
+  type PageExtractMethod,
+  type PageExtractPass,
+  type PageExtractTag,
 } from "@docslurp/shared";
 import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
@@ -81,6 +87,13 @@ export interface IngestReportPageRow {
   visionStatus: string | null;
   chunkCount: number;
   chunkBytes: number;
+  /** The page's final extract record (page-extracts.ts); absent for pages without one. */
+  extractMethod?: PageExtractMethod | null;
+  finalPass?: PageExtractPass | null;
+  extractTags?: PageExtractTag[];
+  /** How many extract records and final records the page has. */
+  extractRows?: number;
+  extractFinals?: number;
 }
 
 export interface IngestReportStageRow {
@@ -284,6 +297,13 @@ function classifyPage(doc: IngestReportDocumentRow, row: IngestReportPageRow): P
     imageCount: row.imageCount,
     visionStatus: row.visionStatus,
     chunkCount: row.chunkCount,
+    extractMethod: row.extractMethod ?? null,
+    finalPass: row.finalPass ?? null,
+    extractTags: row.extractTags ?? [],
+    extractRecordStatus: !row.extractRows ? null
+      : (row.extractFinals ?? 0) > 1 ? "duplicate"
+      : row.extractFinals === 1 ? "ok"
+      : docStatus === "completed" ? "missing" : null,
     kind,
     scannedLooking,
     docStatus,
@@ -820,6 +840,15 @@ export type IngestRecommendationId = keyof typeof INGEST_RECOMMENDATION_CATALOG;
  * Fast left the page unread on purpose: kept as its page image, or (past the render cap, or blank) not read at all.
  * Both read as "kept as a page image" to users: previews render any page on demand.
  */
+const EXTRACT_METHODS: ReadonlySet<string> = new Set(PAGE_EXTRACT_METHODS);
+const EXTRACT_PASSES: ReadonlySet<string> = new Set(PAGE_EXTRACT_PASSES);
+function pageExtractMethodOrNull(value: string | null): PageExtractMethod | null {
+  return value !== null && EXTRACT_METHODS.has(value) ? value as PageExtractMethod : null;
+}
+function pageExtractPassOrNull(value: string | null): PageExtractPass | null {
+  return value !== null && EXTRACT_PASSES.has(value) ? value as PageExtractPass : null;
+}
+
 function fastLeftUnread(status: string | null | undefined): boolean {
   return status === "kept-as-image" || status === "not-read";
 }
@@ -1353,6 +1382,8 @@ export async function loadIngestReport(args: {
     detailIds.length === 0 ? Promise.resolve([]) : client<{
       document_id: string; page_number: number; has_facts: boolean; text_bytes: number | null; image_count: number | null;
       vision_status: string | null; chunks: number; chunk_bytes: string | number;
+      extract_method: string | null; final_pass: string | null; extract_tags: string[] | null; pii_withheld: boolean | null;
+      extract_rows: number | null; extract_finals: number | null;
     }[]>`
       with d as (
         select id, run_id, least(greatest(page_count, 0), ${MAX_PAGES_PER_DOCUMENT}) as pages
@@ -1377,11 +1408,25 @@ export async function loadIngestReport(args: {
         group by cp.document_id, pg
       )
       select d.id as document_id, gs.n as page_number, (f.text_bytes is not null or f.image_count is not null) as has_facts,
-        f.text_bytes, f.image_count, f.vision_status, coalesce(ch.chunks, 0) as chunks, coalesce(ch.bytes, 0) as chunk_bytes
+        f.text_bytes, f.image_count, f.vision_status, coalesce(ch.chunks, 0) as chunks, coalesce(ch.bytes, 0) as chunk_bytes,
+        x.method as extract_method, x.pass as final_pass, x.tags as extract_tags, ps.state = 'blocked-pii' as pii_withheld,
+        xc.rows as extract_rows, xc.finals as extract_finals
       from d
       cross join lateral generate_series(1, d.pages) as gs(n)
       left join document_page_facts f on f.document_id = d.id and f.page_number = gs.n
       left join ch on ch.document_id = d.id and ch.page_number = gs.n
+      -- The page's final extract record (migration 0188): its method, pass and tags, and how many records and finals the
+      -- page has, so a missing or duplicate final shows instead of hiding. Labels only; scoped to the project.
+      left join lateral (
+        select e.method, e.pass, e.tags from document_page_extracts e
+        where e.document_id = d.id and e.page_number = gs.n and e.project_id = ${projectId} and e.is_final
+        order by e.created_at desc limit 1
+      ) x on true
+      left join lateral (
+        select count(*)::int as rows, (count(*) filter (where e.is_final))::int as finals from document_page_extracts e
+        where e.document_id = d.id and e.page_number = gs.n and e.project_id = ${projectId}
+      ) xc on true
+      left join document_page_states ps on ps.document_id = d.id and ps.page_number = gs.n
       order by d.id, gs.n
     `,
     client<{
@@ -1453,6 +1498,9 @@ export async function loadIngestReport(args: {
       documentId: row.document_id, pageNumber: num(row.page_number), hasFacts: row.has_facts,
       textBytes: numOrNull(row.text_bytes), imageCount: numOrNull(row.image_count), visionStatus: row.vision_status,
       chunkCount: num(row.chunks), chunkBytes: num(row.chunk_bytes),
+      extractMethod: pageExtractMethodOrNull(row.extract_method), finalPass: pageExtractPassOrNull(row.final_pass),
+      extractTags: normalizePageExtractTags([...(row.extract_tags ?? []), ...(row.pii_withheld ? ["pii-withheld"] : [])]),
+      extractRows: num(row.extract_rows), extractFinals: num(row.extract_finals),
     })),
     stages: stageRows.map((row) => ({
       documentId: row.document_id, stage: row.stage_name, status: row.status, skipped: row.skipped, reason: row.reason,

@@ -109,6 +109,7 @@ export * from "./chat-model-prices.js";
 
 export * from "./project-state.js";
 export * from "./ingest-report.js";
+export * from "./page-extracts.js";
 export * from "./organization-management.js";
 export * from "./worker-autoscale.js";
 export * from "./worker-capabilities.js";

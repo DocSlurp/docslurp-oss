@@ -1261,6 +1261,13 @@
       "when": 1798800000007,
       "tag": "0187_usage_attribution_stamped_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 180,
+      "version": "7",
+      "when": 1798800000008,
+      "tag": "0188_document_page_extracts",
+      "breakpoints": true
     }
   ]
 }
