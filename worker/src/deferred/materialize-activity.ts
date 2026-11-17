@@ -106,8 +106,7 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
 export async function runMaterializeRange(deps: MaterializeActivityDeps, input: MaterializePagesInput): Promise<MaterializeResult> {
   const result: MaterializeResult = { indexed: [], blocked: [], failed: [], costCredits: 0 };
   try {
-    // Organization isolation: parser commands carry this organization's run, so a pooled parser VM serves only it (and
-    // is reused across the range's commands instead of each command getting a single-use VM).
+    // Parser commands carry this organization's run (scanner sessions and usage attribution need it).
     const owner = await deps.store.loadRun(input.runId);
     return await runWithPerfContext({
       runId: input.runId, orgId: owner.orgId, ...(owner.projectId ? { projectId: owner.projectId } : {}), documentId: input.documentId,

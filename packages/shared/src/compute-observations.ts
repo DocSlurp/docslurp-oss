@@ -59,9 +59,8 @@ export interface ComputeExecutionScope {
 
 /**
  * A live execution grant. Its existence proves, in SQL, that the run is live and belongs to `orgId` (with the document in
- * that run). `orgId` is the only scope a compute unit may be reused across (organization isolation, AGENTS.md); a caller
- * without a grant whose `orgId` equals the job's organization runs on a fresh, single-use unit. `cohortId` is the
- * narrower run/principal/input cohort, or null.
+ * that run). Compute units may serve any organization's jobs (compute reuse, AGENTS.md), so the grant is a liveness and
+ * revocation check, not a reuse key. `cohortId` is the narrower run/principal/input cohort, or null.
  */
 export interface ComputeCohortGrant {
   cohortId: string | null;

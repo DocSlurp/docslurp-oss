@@ -761,6 +761,10 @@ async function main(): Promise<void> {
       `[lancedb] maintenance drain completed=${lanceDrain.completed} running=${lanceDrain.running.length} dropped=${lanceDrain.dropped.length}`,
     );
     await indexStage?.close();
+    // Warm parser VMs kept between activities (the Modal provider's parked pool) stop now, not at their lifetime limit.
+    await sandbox.provider.drain?.().catch((err: unknown) => {
+      console.error("parser sandbox drain failed:", err instanceof Error ? err.message : String(err));
+    });
     await runner.close().catch((err) => {
       console.error(
         "runner shutdown failed:",
