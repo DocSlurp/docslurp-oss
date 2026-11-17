@@ -51,6 +51,8 @@ export interface OcrDocumentInput {
   refuseUnfundedFrames?: (budget: number) => Promise<never>;
   /** Ask the boundary for a bounded rendition of every frame (visual indexing); returned as bytes on each page. */
   rendition?: { maxLongEdge: number; maxBytes: number };
+  /** The PDF's measured shape (SandboxedOcrJob.pdfShape): host routing only. */
+  pdfShape?: "scanned" | "mixed";
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -108,6 +110,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       escalation: hostedEscalation,
       ...(keepFrames ? { keepFrames } : {}),
       ...(input.rendition ? { rendition: input.rendition } : {}),
+      ...(input.kind === "pdf" && input.pdfShape ? { pdfShape: input.pdfShape } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       env,
     });
