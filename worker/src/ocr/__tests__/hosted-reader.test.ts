@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../../config.js";
 import { priceVisionResult } from "../../lib/guarded-vision-call.js";
 import { MemoryVisionAttemptBackend, visionGuardFor, withVisionCall, type VisionRequestGate } from "../../lib/vision-attempt-guard.js";
-import { attachVisionBilledUsage } from "../../tools/vision-stream.js";
+import { attachVisionBilledUsage, findVisionBilledUsage } from "../../tools/vision-stream.js";
 import type { ProjectRun } from "../../models.js";
 import { WorkflowState } from "../../pipeline/pipeline.js";
 import { pngHeader } from "../../test/fake-ocr.js";
@@ -44,6 +44,8 @@ function stubExecute(read: (args: ExecuteArgs) => string | Error = () => "Hosted
   return vi.fn(async (args: ExecuteArgs): Promise<VisionExecutionResult> => {
     await (args.gate as VisionRequestGate | null | undefined)?.admit();
     const text = read(args);
+    // As the runtime does: a routing refusal (nothing billed) is handed back to the guard before it is thrown.
+    if (text instanceof ProviderRoutingExclusionError && !findVisionBilledUsage(text)) await (args.gate as VisionRequestGate | null | undefined)?.unbilled("routing", { provider: "openrouter", status: text.status });
     if (text instanceof Error) throw text;
     return {
       runtime: "openai-compatible", provider: "deepinfra", model: MODEL, prompt: "p", text, raw: "", latencyMs: 5,
@@ -174,7 +176,7 @@ describe("OCR escalation reads", () => {
     expect(fundedExecute).toHaveBeenCalledTimes(1);
   });
 
-  it("reads with GLM under its price ceiling first, and with Qwen when no host can serve GLM under it", async () => {
+  it("reads with GLM under its price ceiling on Wafer, then on Morph, then with Qwen when no host can serve GLM under either", async () => {
     const state = runState();
     const execute = stubExecute((args) => args.vision.modelUri === OCR_ESCALATION_GLM_MODEL
       ? new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price")
@@ -182,11 +184,15 @@ describe("OCR escalation reads", () => {
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
     const outcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
     expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 1, failed: 0 });
-    expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_QWEN_MODEL]);
-    // GLM's request carries the ceiling and its hosts; Qwen's carries none.
-    const ceiling = OCR_ESCALATION_ROUTES[0]!.priceCeiling!;
-    expect(execute.mock.calls[0]![0].priceCeiling).toEqual({ inputUsdPerMillion: ceiling.inputUsdPerMTok, outputUsdPerMillion: ceiling.outputUsdPerMTok, imageUsd: 0, hosts: ceiling.hosts });
-    expect(execute.mock.calls[1]![0].priceCeiling).toBeUndefined();
+    expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_QWEN_MODEL]);
+    // Each GLM request carries its own ceiling and host; Qwen's carries none.
+    for (const index of [0, 1]) {
+      const ceiling = OCR_ESCALATION_ROUTES[index]!.priceCeiling!;
+      expect(execute.mock.calls[index]![0].priceCeiling).toEqual({ inputUsdPerMillion: ceiling.inputUsdPerMTok, outputUsdPerMillion: ceiling.outputUsdPerMTok, imageUsd: 0, hosts: ceiling.hosts });
+    }
+    expect(execute.mock.calls[0]![0].priceCeiling!.hosts).toEqual(["wafer/us"]);
+    expect(execute.mock.calls[1]![0].priceCeiling!.hosts).toEqual(["morph/fp8"]);
+    expect(execute.mock.calls[2]![0].priceCeiling).toBeUndefined();
     expect(outcome.pages[0]!.text).toBe("Qwen transcription");
   });
 
@@ -196,7 +202,7 @@ describe("OCR escalation reads", () => {
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
     const outcome = await outcomeWith([1, 2].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
     expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 0, failed: 0, skipped: { margin: 1 } });
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(3);
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
     expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "price-check": 2 } });
   });
@@ -218,10 +224,36 @@ describe("OCR escalation reads", () => {
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env, execute });
     const outcome = await outcomeWith(Array.from({ length: 30 }, (_, index) => ({ pageNumber: index + 1, text: `ocr ${index + 1}`, escalate: true })));
     expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ attempted: 30, replaced: 30, failed: 0, skipped: {} });
-    expect(execute).toHaveBeenCalledTimes(60);
+    // Two GLM hosts refuse each page, Qwen reads it: 90 requests, none counted against the breaker or the budget.
+    expect(execute).toHaveBeenCalledTimes(90);
     // The run's other vision reads are unaffected: the breaker is closed and a new call is admitted.
     expect(visionGuardFor(state).stop).toBeNull();
     await expect(withVisionCall(state, { documentId: "doc-2", pageNumber: 1, purpose: "page" }, async (gate) => { await gate.admit(); })).resolves.toBeUndefined();
+  });
+
+  it("a read that times out after it was sent is possibly billed: no fall-through to Qwen, recorded as unknown-billed", async () => {
+    const state = runState();
+    const execute = vi.fn(async (args: ExecuteArgs): Promise<VisionExecutionResult> => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      // Wafer refuses (routing, unbilled); Morph is sent and never answers within its timeout.
+      if ((args as { priceCeiling?: { hosts: string[] } }).priceCeiling?.hosts.includes("wafer/us")) {
+        await (args.gate as VisionRequestGate | null | undefined)?.unbilled("routing", { provider: "openrouter", status: 404 });
+        throw new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price");
+      }
+      if (args.vision.modelUri !== OCR_ESCALATION_GLM_MODEL) throw new Error("Qwen must not be called");
+      await new Promise((_resolve, reject) => args.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+      throw new Error("unreachable");
+    });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute, routeTimeoutMs: (route) => (route.timeoutMs ? 20 : undefined) });
+    const outcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 0, skipped: { "unknown-billed": 1 } });
+    expect(execute.mock.calls.map((call) => (call[0] as { priceCeiling?: { hosts: string[] } }).priceCeiling?.hosts)).toEqual([["wafer/us"], ["morph/fp8"]]);
+    expect(outcome.pages[0]!.text).toBe("ocr 1");
+    // The possible charge stays visible: one usage event of unknown cost, flagged, on the route that was sent.
+    expect(state.usageLedger.snapshot().filter((event) => event.metadata?.possiblyBilled === true)).toEqual([
+      expect.objectContaining({ model: "z-ai/glm-5.3-flash", costCents: 0, metadata: expect.objectContaining({ outcome: "timeout", costSource: "unknown", poolMemberId: "ocr.llm.glm-5.3-flash+morph.us" }) }),
+    ]);
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "unknown-billed": 1 } });
   });
 
   it("does not fall back to Qwen after a GLM attempt of the page was billed: the read fails like any rejected read", async () => {

@@ -111,8 +111,6 @@ describe("vision guard config", () => {
       expect(Math.floor(4_000 / weight) * weight).toBeLessThanOrEqual(4_000);
       expect(weight).toBeLessThanOrEqual(costliest);
     }
-    // gpt-4.1-mini is no longer worth 2,388 default-model requests: about 1,128 of its own.
-    expect(Math.floor(4_000 / visionRequestWeightCents("gpt-4.1-mini", "remote-openai"))).toBeLessThan(1_200);
     // An uncataloged private or loopback model weighs the catalog-dominating prices, never less than the default
     // model's worst case; local runtimes 2 cents.
     expect(visionRequestWeightCents("someone/unknown-vl", "openai-compatible")).toBeGreaterThanOrEqual(worstCaseVisionRequestCents(configuredVisionModel())!);

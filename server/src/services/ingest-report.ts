@@ -710,6 +710,10 @@ function onOff(value: boolean | undefined) {
 }
 
 /** The settings that shaped what this report observed, with why each matters here. */
+/** Shown on the vision setting of projects using the Cheapest hosted preset, which changed model on 2026-11-17. */
+export const CHEAPEST_HOSTED_CHANGE_NOTICE =
+  "Since November 17, 2026, Cheapest hosted reads pages with GLM 5.3 Flash instead of Gemini 2.5 Flash Lite, which has no host in the US or EU. Files processed before then keep their earlier reads; reprocess them to use the new model.";
+
 export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed): IngestReportConfigItem[] {
   const items: IngestReportConfigItem[] = [];
   const kinds = new Set(observed.docs.map((doc) => fileKind(doc.mimeType, doc.filename)));
@@ -730,7 +734,9 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
     items.push({
       // The profile (a category), never the backend model id behind it.
       key: "vision.profile", label: "Vision", value: visionProfileCatalog[pipeline.vision.profile]?.label ?? pipeline.vision.profile,
-      note: perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "Estimated from the project's quality setting.",
+      note: (perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "Estimated from the project's quality setting.")
+        // Notice (2026-11-17): the preset moved models because the old one has no host in the US or EU.
+        + (pipeline.vision.profile === "cheapest-hosted" ? ` ${CHEAPEST_HOSTED_CHANGE_NOTICE}` : ""),
     });
     if (pipeline.pageRouter?.mode && pipeline.pageRouter.mode !== "off") {
       items.push({ key: "pageRouter.mode", label: "Page router", value: pipeline.pageRouter.mode, note: "The decision-model router chooses an extractor per page; only active mode changes extraction." });
@@ -951,8 +957,8 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "vision-stopped", severity: "medium",
       title: "Vision stopped for the run",
-      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, or too many vision requests in the run returned unusable output.`,
-      effect: "These pages keep only their own text. Reprocess the files once the cause is fixed; contact support if the limit is too low for your files.",
+      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, too many vision requests in the run returned unusable output, or the run's vision model is no longer offered (it has no host in the US or EU).`,
+      effect: "These pages keep only their own text. If your project names a vision model that is no longer offered, choose another vision model in the project settings, then reprocess the files; otherwise reprocess them once the cause is fixed, or contact support if the limit is too low for your files.",
       affectedPages: stopped.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
       patch: null, reprocessDocumentIds: [],
@@ -1178,25 +1184,26 @@ const escalationCount = z.number().int().nonnegative().max(1_000_000);
 const ocrEscalationStatsSchema = z.object({
   escalatedPages: escalationCount,
   cappedPages: escalationCount,
-  skippedPages: z.object({ unfunded: escalationCount, "cost-cap": escalationCount, "price-check": escalationCount }).partial().optional(),
+  skippedPages: z.object({ unfunded: escalationCount, "cost-cap": escalationCount, "price-check": escalationCount, "unknown-billed": escalationCount }).partial().optional(),
 }).passthrough();
 
-type OcrEscalationSkipReason = "unfunded" | "cost-cap" | "price-check";
+type OcrEscalationSkipReason = "unfunded" | "cost-cap" | "price-check" | "unknown-billed";
 /** Why a wanted second read did not happen (worker ocr/escalation-stats.ts), as the report says it. */
 const OCR_ESCALATION_SKIP_TEXT: ReadonlyArray<readonly [OcrEscalationSkipReason, string]> = [
   ["unfunded", "skipped it because the balance ran out"],
   ["cost-cap", "skipped it because the run cost cap was reached"],
   ["price-check", "skipped it because no second-read model was available for it"],
+  ["unknown-billed", "kept the first read because the second read timed out after it was sent"],
 ];
 
 /** Pages that kept their first OCR read for a reason other than the cap, per reason and in all (largest count per document). */
 function ocrEscalationSkipped(observed: Pick<Observed, "docs" | "stagesByDoc">): { pages: number; byReason: Record<OcrEscalationSkipReason, number>; documentIds: string[] } {
-  const byReason: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0 };
+  const byReason: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0, "unknown-billed": 0 };
   const documentIds: string[] = [];
   let pages = 0;
   for (const doc of observed.docs) {
     if (statusBucket(doc.status) === "failed") continue;
-    const own: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0 };
+    const own: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0, "unknown-billed": 0 };
     for (const stage of observed.stagesByDoc.get(doc.id) ?? []) {
       const parsed = ocrEscalationStatsSchema.safeParse(stage.ocrEscalation);
       if (!parsed.success) continue;

@@ -16,7 +16,7 @@ export const OCR_ESCALATION_STATS_KEY = "ocr-escalation";
 /** Stage stats key the record is copied under. */
 export const OCR_ESCALATION_STAGE_STAT = "ocrEscalation";
 /** Reasons, besides the cap, a wanted second read did not happen. */
-export const OCR_ESCALATION_SKIP_REASONS = ["unfunded", "cost-cap", "price-check"] as const;
+export const OCR_ESCALATION_SKIP_REASONS = ["unfunded", "cost-cap", "price-check", "unknown-billed"] as const;
 export type OcrEscalationSkipReason = (typeof OCR_ESCALATION_SKIP_REASONS)[number];
 /** Most capped page numbers a stage's stats list (the counts are always whole). */
 const MAX_LISTED_PAGES = 50;
@@ -33,7 +33,7 @@ function pageList(value: unknown): number[] {
 }
 
 function emptySkipped(): Record<OcrEscalationSkipReason, Set<number>> {
-  return { unfunded: new Set(), "cost-cap": new Set(), "price-check": new Set() };
+  return { unfunded: new Set(), "cost-cap": new Set(), "price-check": new Set(), "unknown-billed": new Set() };
 }
 
 function read(ledger: Pick<DocumentLedger, "readDocument">, documentId: string): Pages {

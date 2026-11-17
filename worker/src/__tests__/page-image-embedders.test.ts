@@ -6,7 +6,9 @@ import {
   createPrivateEndpointPageEmbedder,
   GEMINI_PAGE_EMBED_MODEL,
   JINA_NANO_MODEL_SUFFIX,
+  pageImageEmbedderRegionProblem,
   resolvePageImageEmbedder,
+  resolvePageImageEmbedderWithReason,
 } from "../deferred/page-image-embedders.js";
 
 const jpeg = (n: number) => ({ jpeg: new Uint8Array([0xff, 0xd8, n]) });
@@ -111,18 +113,24 @@ describe("private endpoint page embedder", () => {
     expect(sent.input).toEqual(["Query: bridge diagram"]);
   });
 
-  it("resolve prefers the jina private endpoint over Gemini", () => {
+  it("resolve uses the jina private endpoint attesting a US region, and never Gemini (AI Studio states no US or EU region)", () => {
     const env = { GOOGLE_GENERATIVE_AI_API_KEY: "g" } as NodeJS.ProcessEnv;
     expect(resolvePageImageEmbedder({ route: "auto", privacyMode: "standard", env })!.model).toContain(JINA_NANO_MODEL_SUFFIX);
-    expect(resolvePageImageEmbedder({ route: "gemini", privacyMode: "standard", env })!.model).toBe(GEMINI_PAGE_EMBED_MODEL);
+    expect(resolvePageImageEmbedderWithReason({ route: "gemini", privacyMode: "standard", env })).toMatchObject({ embedder: null, reason: expect.stringMatching(/Google AI Studio/) });
   });
 
-  it("resolve falls back to Gemini, honours privacy, and returns null when nothing is configured", () => {
+  it("is unavailable (fail closed, with a reason) without an evidenced embedder: no Gemini fallback, even with its key", () => {
     setPrivateModelEndpointRegistryForTests([]);
     const env = { GOOGLE_GENERATIVE_AI_API_KEY: "g" } as NodeJS.ProcessEnv;
-    expect(resolvePageImageEmbedder({ route: "auto", privacyMode: "standard", env })!.model).toBe(GEMINI_PAGE_EMBED_MODEL);
-    expect(resolvePageImageEmbedder({ route: "auto", privacyMode: "strict-privacy", env })).toBeNull();
+    expect(resolvePageImageEmbedderWithReason({ route: "auto", privacyMode: "standard", env })).toMatchObject({ embedder: null, reason: expect.stringMatching(/Google AI Studio/) });
     expect(resolvePageImageEmbedder({ route: "jina-private", privacyMode: "standard", env })).toBeNull();
     expect(resolvePageImageEmbedder({ route: "auto", privacyMode: "standard", env: {} })).toBeNull();
+  });
+
+  it("refuses a private endpoint that attests a region outside the US and EU", () => {
+    setPrivateModelEndpointRegistryForTests([{ ...registry[0]!, attestation: { ...registry[0]!.attestation, region: "ap-southeast-1" } }]);
+    expect(pageImageEmbedderRegionProblem("jina-private", MODEL_URI)).toMatch(/ap-southeast-1.*not US or EU/);
+    expect(resolvePageImageEmbedderWithReason({ route: "auto", privacyMode: "standard", env: {} })).toMatchObject({ embedder: null });
+    expect(() => createPrivateEndpointPageEmbedder({ modelUri: MODEL_URI })).toThrow(/not US or EU/);
   });
 });

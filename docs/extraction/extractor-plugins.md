@@ -255,6 +255,25 @@ set `DOCSLURP_FIRST_PASS_ORGS` to a comma-separated list of org ids: runs of any
 skip the first pass. Nothing becomes searchable before the document's
 publish gate passes (`worker/src/pipeline/first-pass-gate.ts`: a clean malware verdict).
 
+## Capability pool members (`poolMembers`)
+
+Every plugin service that reads customer pages is a member of its capability's pool (`@docslurp/shared` `capability-pools.ts`): `text` for a sandboxed PDF provider, `ocr` for a sandboxed OCR provider or a page image reader. The plugin registers one `CapabilityPoolServiceRegistration` per service on its `poolMembers` array:
+
+| Field | Meaning |
+| --- | --- |
+| `capability` | `text`, `ocr` or `vision` |
+| `stage` | `read` (default); `second-read` only for `ocr` |
+| `backend` | the service's provider `id` (`sandboxedPdf.id`, `sandboxedOcr.id`, `pageImageReader.id`) |
+| `engine` | a generic, public-safe label (2-24 lowercase letters, digits, `-`): part of the member id, so never a private name |
+| `regions` | where the service processes pages: `{ region: "US" or "EU", evidence: "endpoint-tag", "provider-docs" or "openrouter-metadata", source, checked }`, at least one; never inferred from a company's headquarters |
+| `automaticFailover` | whether the pool may move to this member on its own |
+| `quality`, `pagesPerDollar` | optional `{ value, evalRef }` measurements |
+| `priority` | optional order among the capability's services (lower first) |
+
+The member id is `<capability>.service.<engine>.<region>` (`text.service.vm-pdf.us`). It is stamped where the member serves pages (`SandboxedPdfResult.poolMemberId`, `sandboxedPdfPoolMember(job)`, page reader usage metadata and summary `poolMemberId`), for per-page records.
+
+The worker refuses to start when a service has no member, when a member states a region other than US or EU (`local` is reserved for core's built-in, customer-owned execution), or when `DOCSLURP_CAPABILITY_POOL_<CAPABILITY>` names an id nobody registers. Several plugins may each provide a sandboxed PDF provider when every one is a `text` member: the text pool then runs a job on its first member and fails over to the next automatic member when a member cannot run it (an infrastructure error; a refusal of the input, `refused: true` or `ocrRefused: true`, never fails over). Figures, embedded images, batches and shard profiles are the first member's; a job asking for figures or images fails over only to a member returning them under the same producer id.
+
 ## Isolation requirements
 
 Untrusted files are processed behind a VM or microVM boundary (`AGENTS.md`). The boundary keeps customer bytes away from

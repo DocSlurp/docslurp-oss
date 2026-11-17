@@ -282,11 +282,18 @@ export function worstCaseVisionRequestCents(model: string): number | null {
   return tokenCents + (imageFeeTokens * pricing.inputUsdPerMillion) / 1e4;
 }
 
-/** The most expensive worst-case request across every priced catalog vision model. */
+/**
+ * The most expensive worst-case request across every admitted priced catalog vision model, and of an uncataloged
+ * (private or loopback) model weighed at the catalog-dominating prices: the default org-bound weight covers either.
+ */
 export function maxCatalogWorstCaseVisionRequestCents(): number {
   let max = 0;
-  for (const spec of visionModelCatalog) max = Math.max(max, worstCaseVisionRequestCents(spec.id) ?? 0);
-  return max;
+  for (const spec of visionModelCatalog) {
+    if (visionModelRefusal(spec.id)) continue;
+    max = Math.max(max, worstCaseVisionRequestCents(spec.id) ?? 0);
+  }
+  const uncataloged = "uncataloged/vision-model";
+  return Math.max(max, centsAt(maxCatalogVisionTokenPricing(), visionInputTokenBound(null, "", uncataloged), visionMaxOutputTokens(uncataloged)));
 }
 
 /**
@@ -313,6 +320,8 @@ export function maxCatalogVisionTokenPricing(): VisionTokenPrice {
   let inputUsdPerMillion = 0;
   let outputUsdPerMillion = 0;
   for (const spec of visionModelCatalog) {
+    // A refused model is never sent or weighed.
+    if (visionModelRefusal(spec.id)) continue;
     const pricing = visionModelTokenPricing(spec.id);
     if (!pricing) continue;
     inputUsdPerMillion = Math.max(inputUsdPerMillion, visionInputUsdPerMillion(pricing));
