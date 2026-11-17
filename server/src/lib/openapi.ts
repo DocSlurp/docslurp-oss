@@ -25,7 +25,7 @@ export function buildOpenApiDocument(baseUrl: string) {
     components: {
       securitySchemes: {
         bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_, are domain-restricted and search-only unless granted chat (answers) or, with a project allowlist, web, ingest or artifacts. Keys issued before typed prefixes (dslp_...) remain valid." },
-        sessionAuth: { type: "apiKey", in: "cookie", name: "better-auth.session_token", description: "Authenticated dashboard session" },
+        sessionAuth: { type: "apiKey", in: "cookie", name: "__Host-better-auth.session_token", description: "Authenticated dashboard session (the cookie is named better-auth.session_token on a plain HTTP origin)" },
       },
       schemas: { ApiError: apiErrorSchema, ...settingsPublicationSchemas, ...simpleServiceSchemas, ...stateManagementSchemas, ...projectGraphSchemas, ...projectSummaryTreeSchemas, ...searchCompatibilitySchemas },
     },

@@ -175,6 +175,17 @@ for (const zone of ["Asia/Tokyo", "America/Los_Angeles"])
     assert.ok(zones.length >= 2);
     assert.ok(zones.every((z) => z === "UTC"));
   });
+for (const [limit, age, ok] of [["25", 24.5, true], ["48", 47, true], ["69", 60, true], ["70", 60, true], ["72", 71, true], ["48", 49, false], ["72", 73, false]])
+  test(`a deployed limit of ${limit}h ${ok ? "accepts" : "refuses"} ${age}h-old signatures`, async (t) => {
+    const f = await fixture(t, { age, updateFails: true });
+    f.env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS = limit;
+    const r = f.run();
+    if (ok) assert.equal(r.status, 0, r.stdout + r.stderr);
+    else {
+      assert.notEqual(r.status, 0);
+      await assert.rejects(readFile(f.worker), { code: "ENOENT" });
+    }
+  });
 test("a fractional day beyond the freshness deadline is refused", async (t) => {
   const f = await fixture(t, { age: 24.5, updateFails: true });
   const r = f.run();
@@ -522,12 +533,17 @@ for (const nodeEnv of ["production", "staging", "preview", "prodution", "\u00a0d
     ["DOCSLURP_CLAMAV_ENABLED", "false"],
     ["DOCSLURP_CLAMAV_ENABLED", "typo"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "999999"],
-    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "25"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "73"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "100"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "0"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "072"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "7.2"],
+    // Digits from another script: [0-9] would match them under a UTF-8 locale.
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "\u0664\u0668"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "1+999"],
   ]) {
     test(`startup refuses ${name}=${value} in ${nodeEnv}`, () => {
-      const result = spawnSync("bash", [startup], { env: { ...process.env, NODE_ENV: nodeEnv, [name]: value }, encoding: "utf8", timeout: 5000 });
+      const result = spawnSync("bash", [startup], { env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", NODE_ENV: nodeEnv, [name]: value }, encoding: "utf8", timeout: 5000 });
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stderr, new RegExp(name));
       assert.match(result.stderr, /Refusing to start/);

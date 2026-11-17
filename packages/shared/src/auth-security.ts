@@ -17,6 +17,9 @@ function readEnv(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+/** Prefix of every auth cookie on an HTTPS origin; see `advanced` in createBetterAuthSecurityOptions. */
+export const HOST_ONLY_COOKIE_PREFIX = "__Host-better-auth";
+
 function isHttpsOrigin(value: string): boolean {
   try {
     return new URL(value).protocol === "https:";
@@ -186,7 +189,14 @@ export function createBetterAuthSecurityOptions(env: NodeJS.ProcessEnv) {
       }
     },
     advanced: {
-      useSecureCookies: isHttpsOrigin(baseURL),
+      // On HTTPS every auth cookie is named `__Host-better-auth.*`. A browser
+      // accepts a `__Host-` cookie only with Secure, Path=/ and no Domain, so
+      // script on a sibling host (docs.example.com next to app.example.com)
+      // cannot plant one for this host with a `Domain=` cookie. Better Auth's
+      // own secure mode can only prepend `__Secure-`, which a sibling host can
+      // set, so that mode stays off and Secure comes from the attributes below.
+      useSecureCookies: false,
+      cookiePrefix: isHttpsOrigin(baseURL) ? HOST_ONLY_COOKIE_PREFIX : "better-auth",
       // Pin the session cookie policy instead of relying on library defaults:
       // Lax blocks cross-site sends (the CSRF boundary, SEC-2026-10-02), and
       // HttpOnly keeps the token out of reach of script.
