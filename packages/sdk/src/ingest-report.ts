@@ -19,6 +19,12 @@ export type IngestReportPage = {
   documentId: string; filename: string; pageNumber: number;
   searchable: boolean | null; reason: IngestReportPageReason | null;
   textBytes: number | null; imageCount: number | null; visionStatus: string | null; chunkCount: number;
+  /** How the page's indexed text was produced (`text-layer`, `ocr`, `ocr-second-read`, `vision`, `correction`, `kept-as-image`, `none`). */
+  extractMethod?: string | null;
+  /** The pass whose text the page was indexed with (`extract`, `scan-ocr`, `critique`, `vision`, `human`). */
+  finalPass?: string | null;
+  /** Page tags (`scanned`, `table`, `math`, `garbled-text-layer`, `low-confidence`, ...). */
+  extractTags?: string[];
 };
 export type IngestReportRecommendation = {
   id: string; severity: "high" | "medium" | "info"; title: string; reason: string; effect: string;

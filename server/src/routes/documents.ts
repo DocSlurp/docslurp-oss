@@ -61,6 +61,7 @@ import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "../services/pii-artifact-guard.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
+import { DocumentPageExtractQueryError, getDocumentPageExtracts } from "../services/document-page-extracts.js";
 import { redactOperatorRun } from "../services/progress-snapshot.js";
 
 const bulkSchema = z.object({
@@ -398,6 +399,39 @@ export const documentsRoutes = new Hono()
     }
     if (!ledger) return apiStatusError(c, 404, "Document not found");
     return c.json(ledger);
+  })
+  // Page extract records: how each page got its text (method, pass, route, tags, quality signals), as labels only. Same
+  // gate as the asset ledger: the caller must reach the document's project, and an API key must be allowed that project;
+  // anything else is the same 404 as a missing document. `afterPage` and `limit` page through the document;
+  // `final=true` keeps each page's final record.
+  .get("/:docId/page-extracts", async (c) => {
+    const userId = c.get("sessionUser").id;
+    const docId = c.req.param("docId");
+    const apiKey = c.get("apiKey");
+    const integer = (name: string, min: number): number | undefined | null => {
+      const raw = c.req.query(name);
+      if (raw === undefined) return undefined;
+      return /^[0-9]{1,7}$/.test(raw) && Number(raw) >= min ? Number(raw) : null;
+    };
+    const limit = integer("limit", 1);
+    const afterPage = integer("afterPage", 0);
+    const final = c.req.query("final");
+    if (limit === null || afterPage === null || (final !== undefined && final !== "true" && final !== "false")) {
+      return apiStatusError(c, 400, "Invalid page extract parameters");
+    }
+    const [owner] = await listDocumentOwners([docId], userId);
+    if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
+    let records;
+    try {
+      records = await getDocumentPageExtracts({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId }, {
+        ...(limit === undefined ? {} : { limit }), ...(afterPage === undefined ? {} : { afterPage }), finalOnly: final === "true",
+      });
+    } catch (error) {
+      if (error instanceof DocumentPageExtractQueryError) return apiStatusError(c, 400, "Invalid page extract parameters");
+      throw error;
+    }
+    if (!records) return apiStatusError(c, 404, "Document not found");
+    return c.json(records);
   })
   // Finish the figures a pass left resumable (figure-resume.ts): only queues, under the runner's own caps. Server keys
   // with `ingest` or a session that may edit the project; anything outside the caller's scope is the same 404.

@@ -69,6 +69,7 @@ import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
+import { pageExtractStatements } from "../pipeline/page-extracts.js";
 import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
@@ -867,6 +868,7 @@ export class Store {
     for (const vector of state.vectorIndexes) referenced.add(vector.documentId);
     for (const event of state.pendingPerformance) if (event.documentId) referenced.add(event.documentId);
     for (const evaluation of state.pendingParserEvaluations) referenced.add(evaluation.documentId);
+    for (const row of state.pendingPageExtracts) referenced.add(row.document_id);
     if (referenced.size === 0) return false;
     const live = new Set((await this.sql<{ id: string }[]>`select id from documents where id = any(${[...referenced]})`).map((row) => row.id));
     const missing = new Set([...referenced].filter((id) => !live.has(id)));
@@ -874,6 +876,8 @@ export class Store {
     console.warn(`[store] dropping checkpoint rows for deleted documents run=${state.run.id} documents=${[...missing].join(",")}`);
     state.vectorIndexes = state.vectorIndexes.filter((vector) => !missing.has(vector.documentId));
     state.pendingParserEvaluations = state.pendingParserEvaluations.filter((evaluation) => !missing.has(evaluation.documentId));
+    state.pendingPageExtracts = state.pendingPageExtracts.filter((row) => !missing.has(row.document_id));
+    state.pendingPageExtractTags = state.pendingPageExtractTags.filter((row) => !missing.has(row.document_id));
     // Performance samples stay (stage timings still describe real work), detached from the deleted document.
     state.pendingPerformance = state.pendingPerformance.map((event) => (event.documentId && missing.has(event.documentId) ? { ...event, documentId: undefined } : event));
     return true;
@@ -889,6 +893,8 @@ export class Store {
     const usageBatch = state.usageLedger.checkpoint();
     const vectors = state.vectorIndexes.slice();
     const performance = state.pendingPerformance.slice();
+    const pageExtracts = state.pendingPageExtracts.slice();
+    const pageExtractTags = state.pendingPageExtractTags.slice();
     const parserEvaluations = state.pendingParserEvaluations.length > 0 && (await this.tableExists("parser_eval_results"))
       ? state.pendingParserEvaluations.slice()
       : [];
@@ -1019,6 +1025,7 @@ export class Store {
         statements.push(...this.vectorIndexStatements(vectors, client));
         statements.push(...this.performanceRowStatements(client, state, performance));
         statements.push(...this.parserEvaluationStatements(client, parserEvaluations));
+        statements.push(...pageExtractStatements(client, pageExtracts, pageExtractTags));
         if (options.readControlState) {
           controlIndex = statements.length;
           statements.push(client<{ control_state: string | null }[]>`select control_state from project_runs where id = ${state.run.id}`);
@@ -1070,6 +1077,8 @@ export class Store {
     state.vectorIndexes = without(state.vectorIndexes, vectors);
     state.pendingPerformance = without(state.pendingPerformance, performance);
     state.pendingParserEvaluations = without(state.pendingParserEvaluations, parserEvaluations);
+    state.pendingPageExtracts = without(state.pendingPageExtracts, pageExtracts);
+    state.pendingPageExtractTags = without(state.pendingPageExtractTags, pageExtractTags);
     };
     if (transaction) {
       transaction.afterCommit.push(commit);

@@ -48,6 +48,8 @@ Run outcomes are recorded once per run (`project_runs.outcome_recorded_at`), so 
 | --- | --- | --- |
 | `docslurp.pages.routed` | counter of pages | `route` (`text`, `read`, `blank`), `reason` (why a page was sent to a read: `raster`, `garbled`, `drawn`, `yield-deficit`, `other`) |
 | `docslurp.pages.escalation` | counter of pages | `route` (`ocr-hosted`, `vision`), `outcome` (`replaced`, `failed`, `skipped-<reason>`, or a vision page outcome) |
+| `docslurp.pages.extracts` | counter of page extract records | `method` (`text-layer`, `ocr`, `ocr-second-read`, `vision`, `correction`, `kept-as-image`, `none`), `pass` (`extract`, `scan-ocr`, `critique`, `vision`, `human`), `final` (`true`/`false`), `member` (`pool` when a capability-pool member served the page, else `none`), `class` (`fast`, `ocr`, `rich`, when billed) |
+| `docslurp.pages.extract_tags` | counter of page tags | `tag` (the closed page tag vocabulary, docs/extraction/page-extract-records.md), `method` or `source` (`routing`) |
 | `docslurp.pages.router_decisions` | counter of pages | `mode` (`shadow`, `active`), `pixels` (`yes`/`no`), `agrees` (`yes`/`no`/`unknown`, against the current routing) |
 
 The share of pages escalated beyond fast extraction is `read / (text + read + blank)` over `docslurp.pages.routed`.

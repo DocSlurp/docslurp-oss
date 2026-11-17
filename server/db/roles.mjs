@@ -49,6 +49,7 @@ export const WORKER_TABLES = Object.freeze({
   document_extraction_levels: { privileges: DML, evidence: "worker/src/db/document-asset-ledger.ts writeDocumentAssetLedger and listResumableDocuments" },
   document_extraction_shards: { privileges: DML, evidence: "worker/src/db/document-asset-ledger.ts writeDocumentAssetLedger (per-shard records) and listResumableDocuments" },
   document_maps: { privileges: DML, evidence: "worker/src/deferred/backfill-adoption.ts; document map stage" },
+  document_page_extracts: { privileges: ["select", "insert", "update"], evidence: "worker/src/pipeline/page-extracts.ts checkpoint upsert, supersession and tag merge (org-scoped)" },
   document_page_facts: { privileges: DML, evidence: "worker/src/db/store.ts page facts" },
   document_page_renders: { privileges: DML, evidence: "packages/shared/src/worker-autoscale.ts; page render stages" },
   document_page_states: { privileges: DML, evidence: "worker/src/db/page-base-fee.ts; deferred indexing" },

@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { PAGE_EXTRACT_METHODS, PAGE_EXTRACT_PASSES, PAGE_EXTRACT_TAGS } from "./page-extracts.js";
 import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES, QUARANTINE_PUBLIC_REASONS, quarantineReasonOf } from "./public-errors.js";
 
 /**
@@ -66,6 +67,13 @@ export const ingestReportPageSchema = z.object({
   imageCount: nullableCount,
   visionStatus: z.string().nullable(),
   chunkCount: count,
+  /**
+   * Page extract records (page-extracts.ts): the method of the pass whose text the page was indexed with, that pass, and
+   * the page's tags. Null and empty for pages without records (reports stored before this field, or pages no pass recorded).
+   */
+  extractMethod: z.enum(PAGE_EXTRACT_METHODS).nullable().default(null),
+  finalPass: z.enum(PAGE_EXTRACT_PASSES).nullable().default(null),
+  extractTags: z.array(z.enum(PAGE_EXTRACT_TAGS)).default([]),
 });
 export type IngestReportPage = z.infer<typeof ingestReportPageSchema>;
 
