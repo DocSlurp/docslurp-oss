@@ -19,9 +19,9 @@ import type { SearchMode } from "./project.js";
 import { serviceProfileActive } from "./deployment-profile.js";
 
 /**
- * What a search is priced on: the mode it ran in, whether LLM query strategies ran, whether the hosted reranker scored
- * its candidates, and the provider cost (cents) of the metered calls a provider may pass through (the hosted reranker's
- * tokens). `providerCostCents` covers the whole charge, not each of its `searches`.
+ * What a search is priced on: the mode it ran in, whether LLM query strategies ran, whether the hosted reranker ranked
+ * its candidates, and the measured provider cost (cents) of metered calls a provider may pass through (every hosted
+ * reranker call, a fallback's included). `providerCostCents` covers the whole charge, not each of its `searches`.
  */
 export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode; hostedRerank?: boolean; providerCostCents?: number };
 

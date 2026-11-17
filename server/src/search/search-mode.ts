@@ -24,7 +24,7 @@ export function effectiveSearchMode(options: Pick<SearchOptions, "searchMode">, 
  * Turns off what a mode may not run. Applied after project defaults resolve, so no project setting re-enables it.
  * - keyword: no query embedding or vector leg, nothing below.
  * - hybrid: no graph or community expansion, hosted reranker, web fallback or LLM query strategy (HyDE, rewrite,
- *   decomposition, stepback, self-query, compression, multi-hop).
+ *   decomposition, stepback, self-query, multi-hop).
  * - deep: unchanged.
  * The free BM25 rerank (the default provider) stays in every mode.
  */

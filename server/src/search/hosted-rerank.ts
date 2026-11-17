@@ -6,8 +6,8 @@ import type { SearchSessionJournal } from "./session.js";
 export const HOSTED_RERANK_MODEL = "Qwen/Qwen3-Reranker-0.6B";
 const endpoint = "https://api.deepinfra.com/v1/inference/Qwen/Qwen3-Reranker-0.6B";
 /**
- * Most candidates one search sends to the hosted reranker. Each is billed by the token, so the cap bounds a search's
- * reranker cost; candidates below it keep their fused rank.
+ * Most candidates one reranker call (a search, or each of its sub-searches) sends to the hosted reranker. Each is billed by
+ * the token, so the cap bounds each call's cost; candidates below it keep their fused rank.
  */
 export const HOSTED_RERANK_MAX_CANDIDATES = 50;
 /** Usage metric of one hosted reranker call; the search charge finds the reranker's provider cost by it. */

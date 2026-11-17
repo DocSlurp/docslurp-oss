@@ -377,7 +377,7 @@ export async function finalizeSearchSessionExecution(
     });
   }
 
-  // Compression may rewrite the text; restore the scope qualification afterward.
+  // Restore the scope qualification on community summaries after post-processing.
   results = qualifyCommunityResults(results, input.filters, input.options.runId);
 
   if (input.options.parentRetrieval) {
@@ -477,6 +477,7 @@ export async function finalizeSearchSessionExecution(
         input.availability.status !== "empty",
     },
     usageEvents: input.session.usageEvents(),
+    ...((input.session.diagnostics().hostedRerank as { status?: unknown } | undefined)?.status === "success" ? { hostedRerankRanked: true } : {}),
   };
 }
 
