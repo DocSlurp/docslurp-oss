@@ -12,6 +12,7 @@ import { DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, STANDARD_PAGE_AREA_P
 import { sha256Hex } from "./hash.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { PAGE_TABLE_ROUTING } from "./page-table-routing.js";
+import { PDF_PAGE_ENCODING_BITS, PDF_PAGE_ENCODING_RULES, PDF_PAGE_STAT_COUNTS } from "./pdf-page-encoding.js";
 import { IMAGE_MAX_FRAMES, MULTI_FRAME_IMAGE_EXTENSIONS, MULTI_FRAME_IMAGE_MIME_TYPES } from "./upload-pages.js";
 
 /*
@@ -65,6 +66,8 @@ export function buildProfilerRules() {
     layout: { ...LAYOUT_GRID_RULES },
     /** What the PDF text extractor keeps, so the profiler counts the text billing will measure (EXTRACTION_LIMITS). */
     extraction: { ...EXTRACTION_LIMITS, estimatedContentBytesPerGlyph: ESTIMATED_CONTENT_BYTES_PER_GLYPH },
+    /** How math and tables are encoded on a page: the mask's bit positions and the thresholds (pdf-page-encoding.ts). */
+    pageEncoding: { bits: { ...PDF_PAGE_ENCODING_BITS }, statCounts: [...PDF_PAGE_STAT_COUNTS], ...PDF_PAGE_ENCODING_RULES },
   };
   // A content hash of everything above, so a profile can name the rules it was measured with.
   return { ...body, revision: sha256Hex(JSON.stringify(body)) };

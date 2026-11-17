@@ -49,7 +49,7 @@ export interface AttributedUsageRow {
   input_tokens: number;
   output_tokens: number;
   cost_cents: number;
-  /** The event's own org_id and project_id columns as written (migration 0186), for index-backed prefilters only. */
+  /** The event's own org_id and project_id columns as written (migration 0187), for index-backed prefilters only. */
   stamped_org_id: string | null;
   stamped_project_id: string | null;
 }
@@ -79,7 +79,7 @@ export function attributedUsage(
 
 /**
  * `attributedUsage` limited to one organization's rows. The view's `org_id` is derived (it cannot use an index), so the
- * fragment also filters on the event's stamped columns (migration 0186), which the planner pushes down to
+ * fragment also filters on the event's stamped columns (migration 0187), which the planner pushes down to
  * `usage_events_org_created_idx` and `usage_events_split_created_idx`. That filter is an exact superset of the org's rows:
  * a row whose stamped org is set and that is not split across projects (it has a stamped project, or no `projectIds`)
  * always attributes to its stamped org. The derived `org_id` then decides, as in `attributedUsage`.
