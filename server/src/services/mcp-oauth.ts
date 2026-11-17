@@ -33,7 +33,7 @@ export const oauthHash = (value: string) => createHash("sha256").update(value).d
 export const pkceChallenge = (value: string) => createHash("sha256").update(value).digest("base64url");
 const secret = (prefix: string) => `${prefix}_${randomBytes(32).toString("base64url")}`;
 
-export { mcpOrigin, mcpResource } from '../lib/mcp-origin.js';
+export { mcpOrigin, mcpBrowserOrigin, mcpResource } from '../lib/mcp-origin.js';
 import { mcpOrigin, mcpResource } from '../lib/mcp-origin.js';
 
 /**
