@@ -1482,6 +1482,8 @@ export class ExtractMarkdownStage implements Stage {
       try {
         result = await ocrDocument({ checkpointStorage: this.storage,
           runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
+          // Measured: every walked page lacks words (scanned) or only some do (mixed); routing only.
+          pdfShape: scanned.length >= pageCount ? "scanned" : "mixed",
           ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
           hostedReader, stage: this.name, ...(signal ? { signal } : {}),
         });

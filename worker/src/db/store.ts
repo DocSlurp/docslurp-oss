@@ -1,4 +1,5 @@
 import { computeAllocationAdmission } from "./compute-fleet-store.js";
+import { computeJobAdmission } from "./compute-job-store.js";
 import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneHit } from "../pipeline/run-milestones.js";
 import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation, type ComputeObservations, type ComputePriceObservation, type ComputeCalibrationObservation } from "@docslurp/shared";
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
@@ -721,6 +722,7 @@ export class Store {
    * Served by performance_log_shard_timing_idx (0098).
    */
   computeAllocationAdmission(): import("@docslurp/shared").ComputeAllocationAdmission { return computeAllocationAdmission(this.sql); }
+  computeJobAdmission(): import("@docslurp/shared").ComputeJobAdmission { return computeJobAdmission(this.sql); }
 
   async authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
     for (const value of [scope.orgId, scope.projectId, scope.runId, scope.documentId]) {
