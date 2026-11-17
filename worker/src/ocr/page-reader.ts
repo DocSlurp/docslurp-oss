@@ -17,8 +17,6 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { priceAiUsageEvent } from "@docslurp/shared";
-import { authorizeComputeCohort } from "../extractors/plugins.js";
-import { currentPerfContext } from "../lib/perf-context.js";
 
 import {
   PAGE_IMAGE_READ_FAILURES,
@@ -281,13 +279,6 @@ export async function readPageImagesWithProvider(
     return logSummary(summary, ctx, use);
   }
   const scope = { orgId: run.orgId, runId: run.id };
-  // The run's live SQL grant (authorize_compute_cohort), which the provider checks before each job and before returning
-  // pages: a VM reused across an organization's runs only ever serves runs that SQL says belong to that organization.
-  const generation = currentPerfContext()?.executionGeneration;
-  const projectId = run.projectId;
-  const authorize = projectId && generation !== undefined
-    ? () => authorizeComputeCohort({ orgId: scope.orgId, projectId, runId: scope.runId, documentId: ctx.documentId, executionGeneration: generation })
-    : undefined;
   let sent = pagesSent.get(ctx.state.usageLedger);
   if (!sent) pagesSent.set(ctx.state.usageLedger, (sent = new Map()));
 
@@ -341,7 +332,7 @@ export async function readPageImagesWithProvider(
     let jobFailed = true;
     try {
       const byKey = new Map<string, PageImageInput>();
-      const job: PageImageReadJob = { scope: { ...scope }, pages: [], ...(use.requireReady ? { requireReady: true } : {}), ...(authorize ? { authorize } : {}) };
+      const job: PageImageReadJob = { scope: { ...scope }, pages: [], ...(use.requireReady ? { requireReady: true } : {}) };
       for (const page of chunk) {
         const key = randomUUID();
         byKey.set(key, page);

@@ -275,15 +275,14 @@ export interface SandboxedOcrJob {
 export type SandboxedOcrResult = SandboxResult;
 
 /**
- * Job ownership from the stage run context. `tenantKey` alone never authorizes VM reuse. A provider may reuse a unit
- * across jobs of one organization only when `authorizeCohort` returns a live grant whose `orgId` equals `tenantKey`,
- * bound host-side and in-guest, within a bounded idle window and lifetime (organization isolation, AGENTS.md); anything
- * else runs on a fresh, single-use unit.
+ * Job ownership from the stage run context: accounting, fairness caps and placement hints. A provider may run jobs of
+ * any organization one after another on a warm unit (compute reuse, AGENTS.md), provided each job gets a workspace that
+ * is wiped (or a restarted job process) before the next job, and its results go back only to the job that asked.
  */
 export interface SandboxedOcrRunContext {
   tenantKey?: string;
   affinityKey?: string;
-  /** Revalidate live authorization (and the run's organization) before admission and publication; an expired/revoked scope returns null. */
+  /** Revalidate live authorization (the run is still live) when a provider wants to; an expired/revoked scope returns null. */
   authorizeCohort?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
 }
 
@@ -308,27 +307,20 @@ export interface SandboxedOcrProvider {
 
 /**
  * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
- * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to
- * `scope.orgId` (one organization) for that VM's whole life, both in its own lease table and inside the VM: it may serve
- * jobs of several runs of that organization within a bounded idle window and lifetime, never another organization's, and
- * only after `authorize` proved in SQL that the run belongs to that organization (organization isolation, AGENTS.md). It reads them there and returns only bounded Markdown per page. The VM gets no
- * credentials, no metadata endpoint and no network beyond the job's own connection.
+ * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM, which may be a warm
+ * VM shared by jobs of any run and organization (compute reuse, AGENTS.md): nothing of a job may persist on the VM for
+ * the next one, and each page's Markdown goes back only to the job that sent it. The VM gets no credentials, no metadata
+ * endpoint and no network beyond the job's own connection.
  */
 export interface PageImageReadJob {
-  /** Tenant scope of every page. A provider binds an isolated VM to this organization and refuses a job of any other. */
+  /** Tenant scope of every page: accounting, budgets and per-organization fairness caps. */
   scope: { orgId: string; runId: string };
-  /**
-   * The run's live SQL grant (authorize_compute_cohort). A provider that reuses VMs across runs calls it before the lease
-   * and before returning results, and refuses the job unless the grant's `orgId` equals `scope.orgId`. Absent when the
-   * host cannot form the run's execution scope; such a job must not reach a reused VM.
-   */
-  authorize?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
   /** Opaque keys (never document ids) and absolute paths of PNGs the OCR boundary wrote and the host validated by signature and size. */
   pages: Array<{ key: string; imagePath: string }>;
   /**
-   * Set by the host when it sent the job because `warm.status` reported the scope's reader ready: the provider must not
-   * start or wait for a VM for this job. With no ready VM for the scope it rejects the job at once (a `capacity`
-   * failure), and the host reads the pages its other way.
+   * Set by the host when it sent the job because `warm.status` reported a reader ready: the provider must not start or
+   * wait for a VM for this job. With no ready VM it rejects the job at once (a `capacity` failure), and the host reads
+   * the pages its other way.
    */
   requireReady?: boolean;
 }
@@ -336,7 +328,7 @@ export interface PageImageReadJob {
 export const PAGE_READER_WARM_STATES = ["none", "booting", "ready", "failed", "refused"] as const;
 export type PageReaderWarmState = (typeof PAGE_READER_WARM_STATES)[number];
 
-/** A provider's answer about the reader for one tenant scope. Telemetry fields are provider-reported and only logged. */
+/** A provider's answer about a reader for one tenant scope (a shared warm VM counts). Telemetry fields are provider-reported and only logged. */
 export interface PageReaderWarmStatus {
   /** `none`: nothing started; `booting`; `ready`: a job would start without waiting for a boot; `failed`: the last start failed; `refused`: a cap refused it. */
   state: PageReaderWarmState;
@@ -350,8 +342,9 @@ export interface PageReaderWarmStatus {
  * Optional non-blocking warm-up of a page image reader (docs/extraction/ocr.md, "Warm start"). The host calls `start`
  * when a run's reader demand reaches its threshold and keeps reading pages its other way (the hosted route) until
  * `status` reports `ready`; only then does it send jobs, marked `requireReady`. Neither method may block, throw for a
- * capacity or boot failure, or send any page or user data: a warm-up starts a VM bound to `scope` exactly as a job's
- * lease would, and nothing else.
+ * capacity or boot failure, or send any page or user data: a warm-up starts a VM exactly as a job's lease would, and
+ * nothing else. A provider whose VMs serve every organization reports `ready` for any scope while a warm VM has room, so
+ * a small run uses an already-warm reader at once, below the threshold.
  */
 export interface PageImageReaderWarm {
   /**
@@ -362,7 +355,7 @@ export interface PageImageReaderWarm {
   minPages?: number;
   /** Begin making a reader ready for `scope` (no-op when one is booting or ready), within the provider's own caps. */
   start(scope: { orgId: string; runId: string }): PageReaderWarmStatus;
-  /** The reader's state for `scope`, answered from memory. */
+  /** A reader's state for `scope` (any warm VM that would take the job), answered from memory. */
   status(scope: { orgId: string; runId: string }): PageReaderWarmStatus;
 }
 

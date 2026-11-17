@@ -20,7 +20,7 @@ import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
  *
  * Organization isolation (migration 0184): a row lists one hash for one organization, with its own
  * expiry and counts. It refuses only that organization's documents; another organization's identical
- * upload is admitted and parsed in its own VM, and one organization's teardown never lists, extends or
+ * upload is admitted (on a shared parser VM, after its reset), and one organization's teardown never lists, extends or
  * revives another's refusal, so the denylist reveals nothing across organizations. A document without
  * an organization is refused outright. Trade-off: one hostile file can cost one worker per uploading
  * organization, bounded per organization by the breaker below.
