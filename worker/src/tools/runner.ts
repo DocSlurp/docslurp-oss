@@ -2974,6 +2974,14 @@ export async function readClamDefinitionsHeader(files: readonly string[]): Promi
  */
 export const MAX_DEPLOYED_SIGNATURE_AGE_HOURS = 72;
 
+/** Deployed: a whole number from 1 to the cap, else the 24-hour default. A typo or an oversized value never selects the weakest limit. */
+function deployedSignatureAgeHours(raw: string | undefined): number {
+  const value = raw?.trim() ?? "";
+  if (!/^[1-9][0-9]?$/.test(value)) return 24;
+  const hours = Number(value);
+  return hours <= MAX_DEPLOYED_SIGNATURE_AGE_HOURS ? hours : 24;
+}
+
 export function resolveMalwareScanPolicy(
   env: NodeJS.ProcessEnv = process.env,
 ): MalwareScanPolicy {
@@ -2987,7 +2995,7 @@ export function resolveMalwareScanPolicy(
     maxSignatureAgeHours:
       isDevelopmentEnvironment(env)
         ? readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24
-        : Math.min(readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24, MAX_DEPLOYED_SIGNATURE_AGE_HOURS),
+        : deployedSignatureAgeHours(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS),
     databaseDirectory: env.DOCSLURP_CLAMAV_DB_DIR?.trim() || "/var/lib/clamav",
   };
 }
