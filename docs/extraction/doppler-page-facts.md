@@ -262,14 +262,20 @@ evidence against a table. Exactly what they can change:
   math glyphs when the run did not read math, the page has no TeX or MathML source and at least 16 glyphs are unreadable
   (`encodingCounts` bucket 5). Read reason `encoding`.
 - **Cap those reads:** at most `encodingReadPageCap(pages)` pages a document (the table-leak cap's shape: 3 plus 5% of the
-  pages, at most 20) are read on encodings alone; pages with no native text first, then the most unreadable math glyphs,
-  then page order. The rest keep the decision they had without the encodings (`encoding-read-capped`) and are logged.
+  pages, at most 20) are read because of the encodings: their own reads, and table-unreliable reads on a table route only
+  they added. Pages with no native text go first, then the most unreadable math glyphs, then page order. The rest are the
+  page as it is without the encodings (its route, hint and decision, signal `encoding-read-capped`), and are logged. A read
+  the encodings add keeps the page's route (a code page is not relabelled degraded), and no hint they set asks for a read
+  on its own.
 - **Signals only:** `encoding-math:<route>`, `encoding-math-grid`, `encoding-table-raster-candidate`. They do not change
   the route, so they never reach the complexity or playbook summaries.
 
 Whole pages are read: Doppler's math regions (full level) and the report's `mathUncertainRegions` name boxes to crop, but
 evidence routing has no region scope yet. The upload estimator and the quote do not yet know about encoding reads, which is
-one reason the routing flag stays off in production until they do and the reads have been measured there.
+one reason the routing flag stays off in production until they do and the reads have been measured there. Precision is not
+measured yet either: on a corpus of 638 ordinary pages the encodings added 30 reads to 24 the page evidence made, mostly
+`glyph-outlines` and `type3-bitmap-font` on CVs, forms and annual reports (decorative glyph drawings and bitmap fonts
+that are not math). Measure, and tighten those flags, before turning the routing on in production.
 
 A page's encodings are unknown also with `xref-repaired` or a drawing cap (`vectors.limitHit`, `limit-hit`,
 `drawing-limit`), as for the walker grids. Doppler writes the words at the basic level with `-include mathtables` and at

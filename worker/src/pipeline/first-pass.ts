@@ -125,6 +125,11 @@ export function firstPassDefersPageCount(state: Pick<WorkflowState, "firstPassRu
 interface CachedResult {
   markdownPath: string;
   result: SandboxedPdfResult;
+  /**
+   * The batch read math (`--math`, so pdftotext ran with `-glyphs`): served again, its page facts are accepted as a math
+   * run's (walker-parity fields and grids stripped, unmapped math glyphs the math reader's), never as a plain run's.
+   */
+  glyphs?: boolean;
   /** Figures are stored by the first pass itself after the batch; extract-markdown never waits for them. */
 }
 const results = new Map<string, CachedResult>();
@@ -145,6 +150,12 @@ export async function serveFirstPassResult(context: { runId?: string; documentId
   // (markFirstPassServedFigures), so extract-markdown neither stores figures nor writes the ledger for it.
   if (job.figures) markFirstPassServedFigures(job);
   return { ...cached.result, ...(job.figures ? { figures: { status: "failed" as const, reason: "figures-stored-by-first-pass" } } : {}) };
+}
+
+/** Whether the cached batch result for the document extract-markdown is running came from a math (`-glyphs`) run. */
+export function firstPassResultGlyphs(context: { runId?: string; documentId?: string } | undefined): boolean {
+  if (!context?.runId || !context.documentId) return false;
+  return results.get(key(context.runId, context.documentId))?.glyphs === true;
 }
 
 /** Whether extract-markdown should leave figures to the first pass for this document. */
@@ -418,7 +429,7 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       await recordBatchPageCount(deps.store, state, document, event.pages, event.processedPages);
       // Page facts go on as the validated canonical lines (never the guest's raw bytes), to be accepted again when served.
       const resentFacts = pageFactsForResend(batchFileJob(job, event.index)!);
-      const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) } };
+      const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) }, ...(job.options.math ? { glyphs: true } : {}) };
       if (persistResults) await persistBatchResult(deps.storage, state, document, cached);
       results.set(key(input.runId, file.documentId), cached);
       cachedKeys.push(key(input.runId, file.documentId));
@@ -601,7 +612,7 @@ export async function countFirstPassPages(
 async function persistBatchResult(storage: ArtifactStore, state: WorkflowState, document: Document, cached: CachedResult): Promise<void> {
   const resultKey = `${runArtifactRoot(state.run, document.userId)}/first-pass/${document.id}.json`;
   const markdown = await readFile(cached.markdownPath, "utf8");
-  await storage.putJson(resultKey, { version: 1, documentId: document.id, markdown, result: cached.result });
+  await storage.putJson(resultKey, { version: 1, documentId: document.id, markdown, result: cached.result, ...(cached.glyphs ? { glyphs: true } : {}) });
   state.artifactLedger.recordDocument(document.id, FIRST_PASS_RESULT_ARTIFACT, storage.uri(resultKey));
 }
 
@@ -625,14 +636,14 @@ export async function primeFirstPassResults(state: WorkflowState, storage: Pick<
       const uri = state.artifactLedger.readDocument(document.id, FIRST_PASS_RESULT_ARTIFACT);
       const resultKey = uri ? keyFromStorageUri(uri, storage.bucket) : null;
       if (!resultKey) continue;
-      const stored = await storage.getJson<{ documentId?: unknown; markdown?: unknown; result?: unknown }>(resultKey).catch(() => null);
+      const stored = await storage.getJson<{ documentId?: unknown; markdown?: unknown; result?: unknown; glyphs?: unknown }>(resultKey).catch(() => null);
       // Our own artifact, still checked: the result is validated again when it is served (acceptSandboxedPdfResult).
       if (!stored || stored.documentId !== document.id || typeof stored.markdown !== "string" || !stored.result || typeof stored.result !== "object") continue;
       const dir = await mkdtemp(path.join(tmpdir(), "docslurp-first-pass-served-"));
       dirs.push(dir);
       const markdownPath = path.join(dir, "output.md");
       await writeFile(markdownPath, stored.markdown, { mode: 0o600 });
-      results.set(key(state.run.id, document.id), { markdownPath, result: stored.result as SandboxedPdfResult });
+      results.set(key(state.run.id, document.id), { markdownPath, result: stored.result as SandboxedPdfResult, ...(stored.glyphs === true ? { glyphs: true } : {}) });
       primed.push(key(state.run.id, document.id));
     }
   } catch (error) {

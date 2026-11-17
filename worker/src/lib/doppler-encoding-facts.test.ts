@@ -407,6 +407,47 @@ describe("evidence routing by encodings (DOCSLURP_ENCODING_FACTS_ROUTING)", () =
     expect(on.ocrDecision?.authorized).toBe(true);
   });
 
+  it("caps every read the encodings caused, table-unreliable reads on encoding-only table routes included (council #467)", () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const pageCount = 60;
+    const cap = encodingReadPageCap(pageCount);
+    // A small ragged pipe table: unreliable on a table route, nothing on a prose route.
+    const ragged = ["Quarterly expansion notes for the London office.", "", "| Office | Seats |", "| --- | --- |", "| London | 40 | new |", "", "The move ends in spring."].join("\n");
+    const longProse = "The expansion plan for the London office continues after the earnings beat. ".repeat(200);
+    for (const text of [ragged, longProse]) {
+      for (const flags of [["whitespace"], ["tagged-table"], ["outlined-text-grid"]] as DopplerTableFlag[][]) {
+        const layout = new Map<number, PageLayoutFacts>();
+        for (let n = 1; n <= pageCount; n += 1) layout.set(n, walkerPage({ words: 200, encodings: route([], flags) }));
+        const run = (encodingRouting: boolean) => buildAdaptiveRoutingDecisionSurface({
+          documentId: "doc", filename: "doc.pdf", text: Array.from({ length: pageCount }, () => text).join("\n\f\n"), pageCount,
+          evidence: { source: "canonical-document", artifactUri: "s3://x" }, pageLayout: layout, routingV2: true, encodingRouting,
+        }).pages;
+        const off = run(false);
+        const on = run(true);
+        const reads = (pages: typeof on) => pages.filter((page) => page.ocrDecision?.authorized).length;
+        expect(reads(on) - reads(off), `${flags} ${text.length}`).toBeLessThanOrEqual(cap);
+        for (const page of on.filter((p) => p.signals.includes("encoding-read-capped"))) {
+          expect(page.ocrDecision?.authorized).toBe(false);
+          expect(page.extractorHint).not.toBe("vision-rescue");
+          expect(page.route).toBe(off[page.pageNumber - 1]!.route);
+        }
+        // Without a read, no page carries a vision-rescue hint the encodings alone gave it.
+        for (const page of on) if (!page.ocrDecision?.authorized) expect(page.extractorHint === "vision-rescue" && off[page.pageNumber - 1]!.extractorHint !== "vision-rescue").toBe(false);
+      }
+    }
+   }, 60_000);
+
+  it("an encoding read keeps the page's own route (a code page is not relabelled degraded)", () => {
+    const code = "```python\ndef total(rows):\n    return sum(row.amount for row in rows)\n```\n\nfunction add(a, b) { return a + b; }\nconst x = add(1, 2);\nimport os\nclass Ledger:\n    pass";
+    const surfaceOf = (encodingRouting: boolean) => buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "doc.pdf", text: code, pageCount: 1, evidence: { source: "canonical-document", artifactUri: "s3://x" },
+      pageLayout: new Map([[1, walkerPage({ encodings: route(["glyph-outlines"], []) })]]), routingV2: true, encodingRouting,
+    }).pages[0]!;
+    const on = surfaceOf(true);
+    expect(on.ocrDecision?.authorized).toBe(true);
+    expect(on.route).toBe(surfaceOf(false).route);
+  });
+
   it("caps encoding-only reads per document: no native text first, then the most unreadable math", () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const pageCount = 10;   // cap: 3 + floor(10 * 0.05) = 3

@@ -605,7 +605,20 @@ describe("routing page facts go through the page-facts write (MEDIUM-6)", () => 
     expect(await sql`select math_bits, table_bits, encoding_counts from document_page_facts where document_id = 'doc-a' and page_number = 1`).toEqual([
       { math_bits: null, table_bits: null, encoding_counts: null },
     ]);
+    // The extract-markdown order (council #467): a new run's source and vision rows land before its routing rows, and
+    // already clear the previous run's routing facts; a later routing write without words keeps them cleared.
+    await store.upsertPageFacts(rows.map((row) => ({ ...row, runId: "run-a" })));
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textBytes: 9, wordCount: 2, imageCount: 0, factsSource: "doppler-facts" }]);
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 2, visionStatus: "not-selected" }]);
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textLayer: "visible" }]);
+    expect(await sql`select page_number, text_layer, scan_class, math_bits from document_page_facts where document_id = 'doc-a' order by page_number`).toEqual([
+      { page_number: 1, text_layer: "visible", scan_class: null, math_bits: null },
+      { page_number: 2, text_layer: null, scan_class: null, math_bits: null },
+    ]);
+    // Within one run, source and vision writes keep the run's own routing facts.
     await store.upsertPageFacts(rows.map((row) => ({ ...row, runId: "run-b" })));
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textBytes: 10, wordCount: 3, imageCount: 0, factsSource: "doppler-facts" }]);
+    expect((await sql`select math_bits::text from document_page_facts where document_id = 'doc-a' and page_number = 1`)[0]).toEqual({ math_bits: "4097" });
     // The table refuses a partial set and an out-of-range word.
     await expect(sql`update document_page_facts set math_bits = null where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();
     await expect(sql`update document_page_facts set table_bits = 4294967296 where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();

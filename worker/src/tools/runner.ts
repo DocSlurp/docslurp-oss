@@ -1,5 +1,5 @@
 import { authorizeComputeCohort } from "../extractors/plugins.js";
-import { serveFirstPassResult } from "../pipeline/first-pass.js";
+import { firstPassResultGlyphs, serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
   acceptSandboxedPdfResult, noteSalvagedFigures, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
@@ -1887,7 +1887,9 @@ export class CommandRunner {
       // The first pass already converted this document in a batch VM: serve that result instead of booting another VM.
       const served = await serveFirstPassResult(currentPerfContext(), plan.sandboxedPdf);
       if (served) {
-        return { remote: Promise.resolve(acceptSandboxedPdfResult(plan.sandboxedPdf, served, pages)), timeoutMs: provider.timeoutMs(pages), release: async () => {} };
+        // A math batch's facts are accepted as a math run's again (council #467): grids unknown, unmapped glyphs read.
+        const glyphs = firstPassResultGlyphs(currentPerfContext());
+        return { remote: Promise.resolve(acceptSandboxedPdfResult(plan.sandboxedPdf, served, pages, { glyphs })), timeoutMs: provider.timeoutMs(pages), release: async () => {} };
       }
       // The provider shards long documents itself and notes progress as shards finish.
       return {

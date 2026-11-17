@@ -2848,7 +2848,9 @@ export class Store {
   /**
    * Ingest report page facts. Source facts (text layer, images) and vision
    * outcomes come from different stages, so each write only touches its own
-   * columns and never clears the other stage's values.
+   * columns and never clears the other stage's values, except routing facts
+   * (text_layer, scan_class, the encoding words): those belong to one run, so
+   * any write that moves a row to another run clears them unless it sets them.
    */
   async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
     const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
@@ -2870,6 +2872,12 @@ export class Store {
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
+            -- Routing facts are a run's own: another run's write clears them (council #467).
+            text_layer = case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end,
+            scan_class = case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end,
+            math_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             text_bytes = excluded.text_bytes,
             word_count = excluded.word_count,
             image_count = excluded.image_count,
@@ -2891,6 +2899,12 @@ export class Store {
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
+            -- Routing facts are a run's own: another run's write clears them (council #467).
+            text_layer = case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end,
+            scan_class = case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end,
+            math_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             vision_status = excluded.vision_status,
             vision_text_bytes = excluded.vision_text_bytes,
             updated_at = now()
@@ -2916,10 +2930,11 @@ export class Store {
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
-            text_layer = coalesce(excluded.text_layer, document_page_facts.text_layer),
-            scan_class = coalesce(excluded.scan_class, document_page_facts.scan_class),
-            -- A write without words keeps the stored ones only for the same run: another run's words describe facts this
-            -- run did not produce (a reprocess with page facts off, or an older provider), so they are cleared.
+            -- A value the write does not know keeps the stored one only for the same run: another run's routing facts
+            -- describe facts this run did not produce (a reprocess with page facts off, or an older provider), so they are
+            -- cleared. The source and vision writes clear them the same way when they move the row to a new run.
+            text_layer = coalesce(excluded.text_layer, case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end),
+            scan_class = coalesce(excluded.scan_class, case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end),
             math_bits = case when excluded.encoding_counts is not null then excluded.math_bits
               when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
             table_bits = case when excluded.encoding_counts is not null then excluded.table_bits

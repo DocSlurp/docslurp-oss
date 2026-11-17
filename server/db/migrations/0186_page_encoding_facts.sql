@@ -12,8 +12,8 @@ ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS table_bits bigint
 ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS encoding_counts bigint
   CHECK (encoding_counts IS NULL OR (encoding_counts >= 0 AND encoding_counts <= 4503599627370495));
 --> statement-breakpoint
--- The three words come together: a row has all of them or none. Added NOT VALID (no table scan under the ACCESS
--- EXCLUSIVE lock) and validated separately (a SHARE UPDATE EXCLUSIVE scan that does not block writes).
+-- The three words come together: a row has all of them or none. Drizzle runs pending migrations in one transaction, so the
+-- check is added and validated at once; the columns are new and empty, so the scan finds nothing to refuse.
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -21,8 +21,6 @@ BEGIN
     WHERE conrelid = 'public.document_page_facts'::regclass AND conname = 'document_page_facts_encoding_words_together'
   ) THEN
     ALTER TABLE document_page_facts ADD CONSTRAINT document_page_facts_encoding_words_together
-      CHECK ((math_bits IS NULL) = (table_bits IS NULL) AND (math_bits IS NULL) = (encoding_counts IS NULL)) NOT VALID;
+      CHECK ((math_bits IS NULL) = (table_bits IS NULL) AND (math_bits IS NULL) = (encoding_counts IS NULL));
   END IF;
 END $$;
---> statement-breakpoint
-ALTER TABLE document_page_facts VALIDATE CONSTRAINT document_page_facts_encoding_words_together;

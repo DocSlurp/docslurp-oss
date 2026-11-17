@@ -510,7 +510,11 @@ function buildEvidencePages(
     const pageNumber = index + 1;
     const layout = args.pageLayout?.get(pageNumber);
     const encodings = encodingRouting ? layout?.encodings ?? null : null;
-    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, encodings, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
+    const classify = (withEncodings: PageEncodingRoute | null) =>
+      classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, encodings: withEncodings, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
+    const page = classify(encodings);
+    // The page as it is without Doppler's encodings: what a capped encoding read falls back to (capEncodingReadPages).
+    const pageWithoutEncodings = encodings ? classify(null) : page;
     const complexity = args.structuredComplexity?.get(pageNumber);
     const imageEvidence = evidence?.get(pageNumber);
     const layoutKnown = layout !== undefined && layout.images !== null;
@@ -549,11 +553,14 @@ function buildEvidencePages(
           ],
         }
       : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
-    // Doppler's encodings may add a read (never remove one); such reads are capped per document (capEncodingReadPages).
+    // Doppler's encodings may add a read (never remove one): a read of their own, or a table-unreliable read on a table
+    // route only they added. Either is capped per document (capEncodingReadPages); a capped page is the page as it is
+    // without the encodings (its route, hint and decision), so it neither reads nor carries their vision-rescue hint.
     const withEncoding = encodingReadDecision(baseDecision, encodings);
-    const finished = finishEvidencePage(withEncoding);
-    if (withEncoding === baseDecision) return finished;
-    const declined = finishEvidencePage(baseDecision);
+    const finished = finishEvidencePage(page, withEncoding);
+    if (!encodings) return finished;
+    const declined = finishEvidencePage(pageWithoutEncodings, baseDecision);
+    if (finished.ocrDecision?.authorized !== true || declined.ocrDecision?.authorized === true) return finished;
     return {
       ...finished,
       [ENCODING_UNCAPPED]: {
@@ -563,7 +570,7 @@ function buildEvidencePages(
       },
     };
 
-    function finishEvidencePage(ocrDecision: AdaptiveOcrDecision): AdaptivePageRoutingEntry {
+    function finishEvidencePage(page: AdaptivePageRoutingEntry, ocrDecision: AdaptiveOcrDecision): AdaptivePageRoutingEntry {
     // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
     // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
     // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
@@ -588,7 +595,9 @@ function buildEvidencePages(
       ...page,
       // OCR text that keeps visible structure (numeric rows, field labels, equations) keeps its route, so the
       // ingest report counts the table; any other page a model reads is degraded.
-      route: STRUCTURED_TEXT_ROUTES.has(page.route) ? page.route : ("handwriting-or-degraded" as const),
+      // A read the encodings asked for keeps the page's own route (a code page stays a code page).
+      route: STRUCTURED_TEXT_ROUTES.has(page.route) || ocrDecision.signals.some((signal) => signal === ENCODING_MATH_READ_SIGNAL || signal === ENCODING_TABLE_READ_SIGNAL)
+        ? page.route : ("handwriting-or-degraded" as const),
       extractorHint: "vision-rescue" as const,
       confidence: Math.max(page.confidence, ocrDecision.confidence),
       signals: [...page.signals, ...ocrDecision.signals, ...(ocrDecision.signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || decision.kind === "garbled-text-layer" ? ["garbled-text"] : [])],
@@ -1286,9 +1295,10 @@ export function classifyAdaptivePage(
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
   } else if (encodings?.table === "vision") {
-    // A table drawn as glyph outlines (Doppler `outlined-text-grid`): no text layer holds it, whatever its size.
+    // A table drawn as glyph outlines (Doppler `outlined-text-grid`): no text layer holds it, whatever its size. The read
+    // itself is evidence routing's (encodingReadDecision, capped per document); the hint never asks for one on its own.
     route = "table-heavy";
-    extractorHint = "vision-rescue";
+    extractorHint = "layout-aware";
     confidence = 0.72;
     signals.push(encodingTableSignal(encodings));
   } else if (options.layout?.gridsUnknown === true) {
