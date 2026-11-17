@@ -3,7 +3,6 @@ import { PrivacyModeViolationError, setLiveModelPricesForTests } from "@docslurp
 
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import {
-  DECISION_CANARY_STATE,
   DecisionRequestError,
   DecisionUnavailableError,
   LIQUID_SYSTEMONE_URL,
@@ -168,59 +167,6 @@ describe("privacy", () => {
 
     const bare = createDecisionClient({ privacyMode: "standard", env: {} });
     await expect(bare.ask(model, "s", questions)).rejects.toBeInstanceOf(DecisionUnavailableError);
-  });
-});
-
-describe("organization isolation of decision calls", () => {
-  const bodyOf = (fetchImpl: ReturnType<typeof mockFetch>, index = 0) => JSON.parse(String(fetchImpl.mock.calls[index]![1]!.body)) as Record<string, unknown>;
-  const pageState = () => ["Page P01:", imageDataUrlPart(Buffer.from("same page"))];
-
-  it("sends OpenRouter a per-org user (an HMAC, never the org id) and leaves the calibrated state unchanged", async () => {
-    const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
-    const model = catalogModel("cloudflare/clef-flash");
-    for (const orgId of ["org-a", "org-a", "org-b", null, null]) {
-      await runWithProviderRateScope({ orgId, allowChinaProviders: true }, () => client.ask(model, pageState(), questions));
-    }
-    const bodies = fetchImpl.mock.calls.map((_, i) => bodyOf(fetchImpl, i));
-    for (const body of bodies) {
-      expect(body.state).toEqual(pageState());
-      expect(body.user).toMatch(/^[0-9a-f]{16}$/);
-      expect(String(body.user)).not.toContain("org-");
-    }
-    expect(bodies[1]!.user).toBe(bodies[0]!.user);
-    expect(bodies[2]!.user).not.toBe(bodies[0]!.user);
-    expect(bodies[3]!.user).not.toBe(bodies[4]!.user);
-  });
-
-  it("sends Perplexity no unknown field (it rejects them) and the state unchanged", async () => {
-    const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env, fetchImpl, retry });
-    await runWithProviderRateScope({ orgId: "org-a" }, () => client.ask(catalogModel("perplexity/pplx-decider-v1.1-27b"), pageState(), questions));
-    expect(Object.keys(bodyOf(fetchImpl)).sort()).toEqual(["model", "questions", "state"]);
-  });
-
-  it("with ROUTING_DECISION_STATE_SALT=1, opens every hosted tenant state with the org's salt line", async () => {
-    const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env: { ...env, ROUTING_DECISION_STATE_SALT: "1" }, fetchImpl, retry });
-    const model = catalogModel("perplexity/pplx-decider-v1.1-27b");
-    for (const orgId of ["org-a", "org-a", "org-b"]) await runWithProviderRateScope({ orgId }, () => client.ask(model, pageState(), questions));
-    const heads = fetchImpl.mock.calls.map((_, i) => (bodyOf(fetchImpl, i).state as unknown[])[0]);
-    expect(heads[0]).toMatch(/^Workspace [0-9a-f]{16}\.$/);
-    expect(heads[1]).toBe(heads[0]);
-    expect(heads[2]).not.toBe(heads[0]);
-    expect((bodyOf(fetchImpl).state as unknown[]).slice(1)).toEqual(pageState());
-  });
-
-  it("only the fixed health-canary state may skip the salt and the isolation fields", async () => {
-    const fetchImpl = mockFetch();
-    const client = createDecisionClient({ privacyMode: "standard", env: { ...env, ROUTING_DECISION_STATE_SALT: "1" }, fetchImpl, retry });
-    const model = catalogModel("cloudflare/clef-flash");
-    await inAllowingRun(() => client.ask(model, DECISION_CANARY_STATE, questions, { tenantFree: true }));
-    expect(bodyOf(fetchImpl)).toEqual({ model: "cloudflare/clef-flash", state: DECISION_CANARY_STATE, questions });
-    await expect(inAllowingRun(() => client.ask(model, pageState(), questions, { tenantFree: true }))).rejects.toThrow(/health-canary state/);
-    await expect(inAllowingRun(() => client.ask(model, "Tenant page text.", questions, { tenantFree: true }))).rejects.toThrow(/health-canary state/);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { searchInputSchema } from "./search-input.js";
+import { searchInputSchema, searchOptions } from "./search-input.js";
 
 describe("searchInputSchema query", () => {
   it("accepts a normal query and a query that merely contains a NUL byte", () => {
@@ -11,5 +11,13 @@ describe("searchInputSchema query", () => {
     const result = searchInputSchema.safeParse({ q });
     expect(result.success).toBe(false);
     if (!result.success) expect(result.error.issues[0]?.path).toEqual(["q"]);
+  });
+});
+
+describe("removed contextual compression", () => {
+  it("still accepts compression: false from older clients and refuses compression: true", () => {
+    expect(searchInputSchema.safeParse({ q: "pump", compression: false }).success).toBe(true);
+    expect(searchInputSchema.safeParse({ q: "pump", compression: true }).success).toBe(false);
+    expect(searchOptions({ ...searchInputSchema.parse({ q: "pump", compression: false }), projectId: "p" })).not.toHaveProperty("useContextualCompression");
   });
 });

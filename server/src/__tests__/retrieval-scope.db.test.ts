@@ -84,7 +84,7 @@ it.each([false, true])("intersects tags and document selection for evidence and 
   const result = await search.hybridSearch("budget", "u", {
     filters: { projectId: "w", tags: ["finance"], documentId: "selected" }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: graph,
     enableCommunityExpansion: graph,
   }, TEST_SEARCH_SCOPE);
@@ -109,7 +109,7 @@ it.each([
   const result = await search.hybridSearch("budget", "u", {
     filters: { projectId: "w", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: true,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);
@@ -121,7 +121,7 @@ it("intersects singular and plural document selections even when both match the 
     filters: { projectId: "w", tags: ["finance"], documentId: "selected", documentIds: ["outside"] },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);
@@ -137,7 +137,7 @@ it.each([
   const result = await search.hybridSearch("unfindablequasar", "u", {
     filters: { projectId: "w", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);
@@ -152,7 +152,7 @@ it.each([
   const result = await search.hybridSearch("budget", "u", {
     filters: { projectId: "pages", tags: ["finance"], ...filters }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);
@@ -168,7 +168,7 @@ it.each([
     filters: { projectId: "w", documentId: "selected", tags: ["finance"], ...filters },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: true, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: true, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);
@@ -183,7 +183,7 @@ it("does not fabricate an absent pinned document outside the requested document 
     filters: { projectId: "w", documentId: "selected" },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);
@@ -211,7 +211,7 @@ it.each([
     filters: { projectId: "w", tags: ["finance"], ...filters },
     queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);
@@ -240,7 +240,7 @@ it.each([
   const result = await search.hybridSearch("evidence", "u", {
     filters: { projectId: "w", ...filters }, queryVector: [1, 0, 0], limit: 20, minScore: 0,
     useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
   }, TEST_SEARCH_SCOPE);

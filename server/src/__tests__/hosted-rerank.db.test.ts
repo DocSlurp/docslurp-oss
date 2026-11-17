@@ -50,7 +50,7 @@ afterAll(async () => { await sql?.end(); await stop?.(); vi.unstubAllGlobals(); 
 
 describe("real hybrid search with hosted reranking and actual SQL usage", () => {
   const options = { filters: { projectId: "hosted-ws" }, queryVector: [1,0,0], limit: 2, minScore: 0,
-    parentRetrieval: false, queryRewrite: false, selfQuery: false, useContextualCompression: false,
+    parentRetrieval: false, queryRewrite: false, selfQuery: false,
     useHyDE: false, stepback: false, iterativeMultiHop: false, enableGraphExpansion: false, enableCommunityExpansion: false };
   it("reads project opt-in, preserves citations and persists scoped actual tokens", async () => {
     const result = await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
@@ -63,12 +63,17 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     expect(result.usageEvents).toMatchObject([{ model: "Qwen/Qwen3-Reranker-0.6B", inputTokens: 174 }]);
     await (await import("../search/session.js")).drainSearchSessionWrites();
     const { attributedUsage } = await import("../services/usage-attribution.js");
-    const events = await sql`select org_id,project_id,input_tokens,run_id,metric,cost_cents from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;
-    // The rerank call's provider tokens (billing 0) and the billable search unit.
+    const events = await sql`select org_id,project_id,input_tokens,run_id,metric,cost_cents,metadata from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;
+    // The rerank call's provider tokens (billing 0 itself) and the billable search unit, which counts as a reranked
+    // search and carries the reranker's provider cost to the pricing provider (test pricing: 5 searches plus 1.5x cost).
+    const rerankProviderCents = 174 * 0.01 / 1e6 * 100;
     expect(events.map(e => ({ ...e, input_tokens: Number(e.input_tokens), cost_cents: Number(e.cost_cents) }))).toMatchObject([
       { org_id: "hosted-org", project_id: "hosted-ws", input_tokens: 174, run_id: null, cost_cents: 0 },
-      { org_id: "hosted-org", project_id: "hosted-ws", metric: "search-query", cost_cents: 0.01 },
+      { org_id: "hosted-org", project_id: "hosted-ws", metric: "search-query" },
     ]);
+    expect(Number(events[1].cost_cents)).toBeCloseTo(0.05 + 1.5 * rerankProviderCents, 9);
+    expect(events[1].metadata).toMatchObject({ hostedRerank: true, searchUnits: 5 });
+    expect(events[1].metadata.rerankProviderCostCents).toBeCloseTo(rerankProviderCents, 12);
     const [session] = await sql`select metadata from search_sessions where id=${result.sessionId}`;
     expect(session.metadata.diagnostics.hostedRerank).toMatchObject({ status: "success", inputTokens: 174 });
     expect(forbiddenInference).not.toHaveBeenCalled();
@@ -103,6 +108,21 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     expect(events.reduce((n,e)=>n+Number(e.input_tokens),0)).toBe(30);
     const [session]=await sql`select metadata from search_sessions where id=${result.sessionId}`;
     expect(session.metadata.diagnostics.hostedRerank).toMatchObject({status:"fallback",reason:"provider_http",inputTokens:30,unreceiptedRequests:0});
+  });
+  it("charges a reranker fallback as one search plus the metered provider cost", async () => {
+    http.mockImplementation(async () => Response.json({ input_tokens: 15 }, { status: 429 }));
+    const result = await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
+    expect(result.hostedRerankRanked).toBeUndefined();
+    await (await import("../search/session.js")).drainSearchSessionWrites();
+    const { attributedUsage } = await import("../services/usage-attribution.js");
+    const [charge] = await sql`select cost_cents,metadata from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} and au.metric='search-query'`;
+    const metered = result.usageEvents!.filter((event) => event.metric === "rerank-tokens").reduce((n, event) => n + (event.inputTokens ?? 0), 0);
+    expect(metered).toBeGreaterThan(0);
+    const providerCents = metered * 0.01 / 1e6 * 100;
+    expect(Number(charge.cost_cents)).toBeCloseTo(0.01 + 1.5 * providerCents, 9);
+    expect(charge.metadata).toMatchObject({ searchUnits: 1 });
+    expect(charge.metadata.hostedRerank).toBeUndefined();
+    expect(charge.metadata.rerankProviderCostCents).toBeCloseTo(providerCents, 12);
   });
   it("privacy and actual exhausted budget block provider calls", async () => {
     const before = http.mock.calls.length;

@@ -82,7 +82,7 @@ describe("aggregateProjectRagSearch spend", () => {
     expect(response.answer).toBeNull();
     expect(response.citations).toHaveLength(1);
     expect(mocks.hybridSearch).toHaveBeenCalledWith("who is this for?", "u1", expect.objectContaining({
-      queryRewrite: false, selfQuery: false, useHyDE: false, useContextualCompression: false, queryDecompose: false, stepback: false,
+      queryRewrite: false, selfQuery: false, useHyDE: false, queryDecompose: false, stepback: false,
     }), expect.objectContaining({ orgId: expect.any(String) }));
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
     expect(mocks.assertCanSpend).not.toHaveBeenCalled();

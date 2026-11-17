@@ -23,7 +23,7 @@ async function execute(c: Context, provider: SearchProvider, requestedProjectId:
   const project = projectId ? await loadApiKeyScopedProject(projectId, key) : null;
   const scope = project ? searchAccessScopeFor({ type: "apiKey", apiKey: key }, project) : null;
   if (!project || !projectId || !scope) return Response.json({ error: "Project not found" }, { status: 404 });
-  return await runSearchAdapter(provider, projectId, params, async input => publicSearchResponse(await hybridSearch(searchQueryText(input.q), key.userId, searchOptions({ ...input, projectId, hyde: false, rerank: false, mmr: false, parentRetrieval: false, summarySeed: false, summaryTree: "off", compression: false, queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false }), scope)));
+  return await runSearchAdapter(provider, projectId, params, async input => publicSearchResponse(await hybridSearch(searchQueryText(input.q), key.userId, searchOptions({ ...input, projectId, hyde: false, rerank: false, mmr: false, parentRetrieval: false, summarySeed: false, summaryTree: "off", queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false }), scope)));
 }
 export const searchCompatRoutes = new Hono()
   .onError((error, c) => {

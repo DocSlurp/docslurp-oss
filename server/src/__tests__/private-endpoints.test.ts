@@ -112,31 +112,24 @@ describe("API private endpoint text", () => {
     expect(auditInserts()).toHaveLength(0);
   });
 
-  it("salts grounded answers per org; a no-system-role model gets the instructions in the user turn and cache_salt", async () => {
+  it("sends grounded answers unsalted; a no-system-role model gets the instructions in the user turn", async () => {
     const bodies = () => serverFetch.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)) as { messages: Array<{ role: string; content: unknown }>; cache_salt?: string });
     const ask = (model: string, evidenceScope: string | null) => generateOpenRouterDocumentText({
       apiKey: "", model, prompt: "Same question?", system: "Project rules.", documents: [{ title: "Doc", text: "Same evidence." }], maxOutputTokens: 64,
       privacyMode: "local-only", evidenceScope,
     });
-    await ask(TEXT, "org-a"); await ask(TEXT, "org-a"); await ask(TEXT, "org-b");
+    await ask(TEXT, "org-a"); await ask(TEXT, "org-b");
     const systems = bodies().map((body) => body.messages.find((m) => m.role === "system")!.content as string);
-    expect(systems[0]).toMatch(/^Workspace [0-9a-f]{16}\.\n\nProject rules\.$/);
-    expect(systems[1]).toBe(systems[0]);
-    expect(systems[2]).not.toBe(systems[0]);
+    expect(systems).toEqual(["Project rules.", "Project rules."]);
     expect(bodies().every((body) => body.cache_salt === undefined)).toBe(true);
 
     serverFetch.mockClear();
     await ask("llm://private/gpu1/acme/no-system-llm", "org-a");
-    await ask("llm://private/gpu1/acme/no-system-llm", "org-a");
-    await ask("llm://private/gpu1/acme/no-system-llm", "org-b");
-    const sent = bodies();
-    for (const body of sent) {
+    for (const body of bodies()) {
       expect(body.messages.some((m) => m.role === "system")).toBe(false);
       expect(JSON.stringify(body.messages[0]!.content)).toMatch(/^"Project rules\./);
+      expect(body.cache_salt).toBeUndefined();
     }
-    expect(sent[0]!.cache_salt).toMatch(/^[0-9a-f]{16}$/);
-    expect(sent[1]!.cache_salt).toBe(sent[0]!.cache_salt);
-    expect(sent[2]!.cache_salt).not.toBe(sent[0]!.cache_salt);
   });
 
   it("blocks unregistered aliases without sending anything", async () => {

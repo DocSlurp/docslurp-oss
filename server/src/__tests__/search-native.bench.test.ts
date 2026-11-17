@@ -58,7 +58,7 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
 
   const options = {
     limit: 10, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false, parentRetrieval: false,
-    useContextualCompression: false, useHyDE: false, stepback: false, iterativeMultiHop: false,
+    useHyDE: false, stepback: false, iterativeMultiHop: false,
     enableGraphExpansion: false, enableCommunityExpansion: false, summarySeed: false, queryDecompose: false,
   };
 

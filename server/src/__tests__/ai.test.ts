@@ -261,27 +261,22 @@ describe("OpenRouter credential isolation", () => {
   });
 });
 
-it("starts each org's chat system prompt with its own salt: identical tenant text never shares a cached prefix across orgs", async () => {
+it("sends every org the same chat system prompt for the same instructions (a shared provider cache prefix)", async () => {
   const stream = () => ({
     textStream: (async function* () { yield "Answer [1]"; })(),
     usage: Promise.resolve({ inputTokens: 10, outputTokens: 2, raw: { cost: 0.0001 } }),
     response: Promise.resolve({ id: "gen-test" }),
     sources: Promise.resolve([]),
   });
-  // Same project name, chat instructions and ingest instruction in both orgs.
-  const system = "Project: Falcon deal room. Answer formally and cite every figure.";
+  const system = "Shared rules.";
   const args = { apiKey: "test", privacyMode: "standard" as const, system, prompt: "Q", maxOutputTokens: 100, documents: [{ title: "T", text: "x" }], model: "openai/gpt-6-luna" };
   const systemFor = async (evidenceScope: string) => {
     streamTextMock.mockReturnValueOnce(stream());
     await generateOpenRouterDocumentText({ ...args, evidenceScope });
     return streamTextMock.mock.calls.at(-1)?.[0].system as string;
   };
-  const a1 = await systemFor("org-a"), a2 = await systemFor("org-a"), b = await systemFor("org-b");
-  expect(a1).toBe(a2);
-  expect(a1).not.toBe(b);
-  expect(a1.split("\n")[0]).toMatch(/^Workspace [0-9a-f]{16}\.$/);
-  expect(a1.indexOf(system)).toBeGreaterThan(a1.indexOf("Workspace"));
-  expect(b.split("\n")[0]).not.toBe(a1.split("\n")[0]);
+  expect(await systemFor("org-a")).toBe(system);
+  expect(await systemFor("org-b")).toBe(system);
 });
 
 it("appends the per-model answer guidance to the shared instructions, only for models that have one", async () => {
@@ -294,9 +289,9 @@ it("appends the per-model answer guidance to the shared instructions, only for m
   const args = { apiKey: "test", privacyMode: "standard" as const, system: "Shared rules.", prompt: "Q", maxOutputTokens: 100, documents: [{ title: "T", text: "x" }] };
   streamTextMock.mockReturnValueOnce(stream());
   await generateOpenRouterDocumentText({ ...args, model: "anthropic/claude-haiku-5.5" });
-  // The org salt line leads the system prompt (prompt caching), then the shared rules, then the addendum.
-  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toMatch(/^Workspace [0-9a-f]{16}\.\n\nShared rules\.\n\nLength: answer only what the question asks/);
+  // The shared rules lead the system prompt (prompt caching), then the addendum.
+  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toMatch(/^Shared rules\.\n\nLength: answer only what the question asks/);
   streamTextMock.mockReturnValueOnce(stream());
   await generateOpenRouterDocumentText({ ...args, model: "openai/gpt-6-luna" });
-  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toMatch(/^Workspace [0-9a-f]{16}\.\n\nShared rules\.$/);
+  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toBe("Shared rules.");
 });

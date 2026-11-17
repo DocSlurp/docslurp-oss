@@ -22,7 +22,6 @@ export interface ProjectRetrievalOptions {
   queryRewrite?: boolean;
   queryDecompose?: boolean;
   stepback?: boolean;
-  useContextualCompression?: boolean;
   selfQuery?: boolean;
   iterativeMultiHop?: boolean;
   enableGraphExpansion?: boolean;
@@ -107,11 +106,6 @@ export function resolveProjectRetrievalControls<
     rerankProvider: fromDefault("rerankProvider", defaults.rerankProvider),
     rerankModel: fromDefault("rerankModel", defaults.rerankModel),
     useRerank: fromDefault("useRerank", defaults.useRerank) as boolean,
-    useContextualCompression:
-      fromDefault(
-        "useContextualCompression",
-        defaults.useContextualCompression,
-      ) as boolean,
     useMmr: fromDefault("useMmr", defaults.useMmr) as boolean,
     mmrLambda: fromDefault("mmrLambda", defaults.mmrLambda) as number,
     queryRewrite: fromDefault("queryRewrite", defaults.queryRewrite) as boolean,

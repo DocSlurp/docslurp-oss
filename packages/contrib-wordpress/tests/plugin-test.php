@@ -40,7 +40,7 @@ check($result->headers['Cache-Control'] === 'no-store', 'Proxy response cached')
 $request = $calls[0][1]; $body = json_decode($request['body'], true);
 check($body['project'] === 'public-project' && $body['limit'] === 6, 'Caller controlled search scope');
 check($request['redirection'] === 0 && $request['headers']['Authorization'] === 'Bearer server-key-fixture', 'Invalid credential transport');
-check($body['hyde'] === false && $body['compression'] === false, 'Expansion enabled unexpectedly');
+check($body['hyde'] === false && !array_key_exists('compression', $body), 'Expansion enabled unexpectedly');
 $handler(new Request(array('q' => ''))); check(count($calls) === 1, 'Empty search incurred usage');
 
 // Rate limits: 30 searches per visitor per minute, counted atomically, keyed on the visitor's address.

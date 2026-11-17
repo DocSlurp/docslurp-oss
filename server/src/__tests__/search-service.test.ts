@@ -15,7 +15,6 @@ const sqlMock = Object.assign(vi.fn(), {
 const lanceDbVectorSearch = vi.fn();
 const generateOpenRouterText = vi.fn();
 const embedConfiguredText = vi.fn();
-const compressChunks = vi.fn();
 
 // Spend admission has its own tests (spend-guard.test.ts); allow spend here.
 vi.mock("../services/billing/spend-guard.js", async (importOriginal) => ({
@@ -44,9 +43,6 @@ vi.mock("../search/lancedb.js", () => ({
   warmLanceDbSearch: vi.fn(async () => {}),
 }));
 
-vi.mock("../search/contextual-compression.js", () => ({
-  compressChunks,
-}));
 
 vi.mock("../search/confidence.js", () => ({
   calibrateSearchConfidence: (results: unknown) => results,
@@ -90,7 +86,6 @@ vi.mock("../services/search-controls.js", () => ({
         resultCount: 8,
         useHyDE: false,
         useRerank: true,
-        useContextualCompression: false,
         useMmr: false,
         mmrLambda: 0.4,
         queryRewrite: false,
@@ -134,7 +129,6 @@ describe("hybridSearch", () => {
     lanceDbVectorSearch.mockReset().mockResolvedValue([]);
     embedConfiguredText.mockReset().mockResolvedValue({ embedding: [0.1, 0.2], usage: { inputTokens: 1 } });
     generateOpenRouterText.mockReset();
-    compressChunks.mockReset();
     delete process.env.SEARCH_QUERY_ENCRYPTION_KEY;
     delete process.env.OPENROUTER_API_KEY;
   });
@@ -993,109 +987,6 @@ describe("hybridSearch", () => {
     expect(metadataJson).toContain('"chunkIds":["doc-2:1"');
   });
 
-  it("records contextual compression usage on the search session", async () => {
-    sqlMock.mockReset();
-    sqlMock.unsafe.mockReset();
-    compressChunks.mockImplementation(
-      async (
-        _query: string,
-        _chunks: unknown[],
-        _apiKey: string,
-        usage: { record(input: Record<string, unknown>): void },
-      ) => {
-        usage.record({
-          provider: "openrouter",
-          model: "openrouter-test",
-          metric: "contextual-compression",
-          inputTokens: 33,
-          outputTokens: 7,
-        });
-        return [
-          {
-            id: "chunk-1",
-            text: "Compressed acquisition terms.",
-            score: 1,
-          },
-        ];
-      },
-    );
-
-    sqlMock.mockImplementation(async (strings) => {
-      const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from projects w")) {
-        return [
-          {
-            project_id: "ws-1",
-            org_id: "org-1",
-            project_owner_user_id: "user-1",
-            org_role: "owner",
-            project_role: null,
-          },
-        ];
-      }
-      if (text.includes("with scoped_runs as")) {
-        return [
-          {
-            total_documents: 1,
-            indexed_documents: 1,
-            page_indexed_documents: 0,
-            searchable_documents: 1,
-            in_progress_documents: 0,
-            total_pages: 1,
-            searchable_pages: 0,
-            indexed_chunk_count: 1,
-            queued_runs: 0,
-            processing_runs: 0,
-          },
-        ];
-      }
-      if (
-        text.includes("from document_chunks c") &&
-        text.includes("websearch_to_tsquery")
-      ) {
-        return [
-          {
-            id: "chunk-1",
-            document_id: "doc-1",
-            run_id: "run-1",
-            chunk_index: 0,
-            text: "Acquisition terms with a lot of surrounding context.",
-            heading_path: [],
-            page_number: 1,
-            token_estimate: 12,
-            rank: 1,
-            filename: "ma.pdf",
-            metadata: {},
-          },
-        ];
-      }
-      if (text.includes("progressive_pages")) {
-        return [];
-      }
-      return [];
-    });
-
-    const response = await hybridSearch("acquisition terms", "user-1", {
-      filters: { projectId: "ws-1" },
-      useRerank: false,
-      useMmr: false,
-      useContextualCompression: true,
-      parentRetrieval: false,
-      suppressSessionLog: true,
-    }, TEST_SEARCH_SCOPE);
-
-    expect(response.results[0]?.text).toBe("Compressed acquisition terms.");
-    expect(response.usageEvents).toEqual([
-      expect.objectContaining({ metric: "embed-query", model: "perplexity/pplx-embed-v1-0.6b", inputTokens: 1 }),
-      expect.objectContaining({
-        provider: "openrouter",
-        model: "openrouter-test",
-        metric: "contextual-compression",
-        inputTokens: 33,
-        outputTokens: 7,
-      }),
-    ]);
-  });
   it("names failed documents and downgrades an otherwise complete scope to partial", () => {
     const availability = deriveSearchAvailability(
       {

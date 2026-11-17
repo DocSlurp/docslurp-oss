@@ -74,7 +74,7 @@ describe("batch retrieval and canonical chat", () => {
     expect(result.status).toBe(200); const body = await result.json();
     expect(maximum).toBe(2); expect(body.results.map((r: any) => r.data.sessionId)).toEqual(queries.map(q => q.q));
     expect(mocks.search.mock.calls[0]![2]).toMatchObject({ useHyDE: undefined, useRerank: undefined, queryRewrite: undefined,
-      useContextualCompression: undefined, enableGraphExpansion: undefined, enableCommunityExpansion: undefined });
+      enableGraphExpansion: undefined, enableCommunityExpansion: undefined });
   });
   it("forwards per-item filters and explicitly enabled enhancements", async () => {
     const result = await app().request("/v1/search", json({ queries: [{ ...queries[0], documentId: "doc", filenameContains: "manual", tags: "one,two", limit: 3, hyde: true }] }));

@@ -64,7 +64,6 @@ export interface SearchSessionOptions {
   queryDecompose?: boolean;
   stepback?: boolean;
   summarySeed?: boolean;
-  useContextualCompression?: boolean;
   selfQuery?: boolean;
   iterativeMultiHop?: boolean;
 }
@@ -485,7 +484,6 @@ export function buildSearchSessionMetadata(
     queryDecompose: args.options.queryDecompose ?? false,
     stepback: args.options.stepback ?? false,
     summarySeed: args.options.summarySeed ?? false,
-    useContextualCompression: args.options.useContextualCompression ?? false,
     selfQuery: args.options.selfQuery ?? false,
     iterativeMultiHop: args.options.iterativeMultiHop ?? false,
     availability: args.availability ?? null,

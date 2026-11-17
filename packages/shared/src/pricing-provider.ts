@@ -18,8 +18,12 @@ import type { QualityMode } from "./quality.js";
 import type { SearchMode } from "./project.js";
 import { serviceProfileActive } from "./deployment-profile.js";
 
-/** What a search is priced on: the mode it ran in and whether LLM query strategies ran. */
-export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode };
+/**
+ * What a search is priced on: the mode it ran in, whether LLM query strategies ran, whether the hosted reranker ranked
+ * its candidates, and the measured provider cost (cents) of metered calls a provider may pass through (every hosted
+ * reranker call, a fallback's included). `providerCostCents` covers the whole charge, not each of its `searches`.
+ */
+export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode; hostedRerank?: boolean; providerCostCents?: number };
 
 export const PRICING_PROVIDER_API_VERSION = 1;
 
@@ -178,9 +182,9 @@ export interface PricingProvider {
   storageCreditsPerMonth(bytes: number): number;
   /** Credits for keeping `bytes` for `months` (30-day months) beyond an extract's free window. */
   extractRetentionCredits(bytes: number, months: number): number;
-  /** Searches one search counts as (LLM query strategies may count more). */
+  /** Searches one search counts as (LLM query strategies and the hosted reranker may count more). */
   searchUnits(opts: SearchPriceOptions): number;
-  /** Credits for `searches` searches; `mode` is the search mode that ran (omitted: deep). */
+  /** Credits for `searches` searches; `mode` is the search mode that ran (omitted: deep). May add `providerCostCents`. */
   searchCredits(searches: number, opts: SearchPriceOptions): number;
   webSearchCredits(opts: { deep?: boolean; includeContent?: boolean }): number;
   webPageCredits(pages: number): number;

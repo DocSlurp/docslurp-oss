@@ -53,7 +53,7 @@ it.each([false, true])("filters document evidence and preserves qualified summar
   const result = await search.hybridSearch("budget", "u", {
     filters: { projectId: "w", tags: ["finance"] }, queryVector: [1, 0, 0],
     limit: 20, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
-    parentRetrieval: false, useContextualCompression: false, useHyDE: false,
+    parentRetrieval: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: graph,
     enableCommunityExpansion: graph,
   }, TEST_SEARCH_SCOPE);
