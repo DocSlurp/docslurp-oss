@@ -2,7 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { DocumentNotFoundError } from "./missing-document.js";
+import { DocumentNotFoundError, DocumentOutOfScopeError } from "./missing-document.js";
 import { Store } from "./store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -45,10 +45,15 @@ describe("PostgresRunLedger.loadDocument", () => {
     expect((await store.loadDocument("d1", { orgId: "o1" })).id).toBe("d1");
   }, 60_000);
 
-  it("finds nothing in another organization, another run, or with no organization", async () => {
+  it("refuses another organization, another run, or no organization with a scope error, never a deletion", async () => {
     for (const scope of [{ runId: "r1b" }, { runId: "r2" }, { orgId: "o2" }, { orgId: null }]) {
-      await expect(store.loadDocument("d1", scope)).rejects.toBeInstanceOf(DocumentNotFoundError);
+      await expect(store.loadDocument("d1", scope)).rejects.toBeInstanceOf(DocumentOutOfScopeError);
     }
+  }, 60_000);
+
+  it("reports a missing document as not found", async () => {
+    await expect(store.loadDocument("gone", { orgId: "o1" })).rejects.toBeInstanceOf(DocumentNotFoundError);
+    await expect(store.loadDocument("gone", { runId: "r1" })).rejects.toBeInstanceOf(DocumentNotFoundError);
   }, 60_000);
 });
 

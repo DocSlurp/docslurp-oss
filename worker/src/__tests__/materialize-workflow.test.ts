@@ -310,6 +310,24 @@ describe("runMaterializeRange activity", () => {
       expect((await db.query<{ status: string }>(`select status from project_runs where id = 'm2'`)).rows[0]!.status).toBe("completed");
     });
 
+    it("fails loudly, without settling or billing, when the document belongs to another organization", async () => {
+      await db.exec(`
+        insert into "user"(id, name, email) values ('u9', 'Z', 'z@example.com') on conflict do nothing;
+        insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Other', 'other', 'u9') on conflict do nothing;
+        insert into projects(id, org_id, user_id, name) values ('w9', 'o9', 'u9', 'Other') on conflict do nothing;
+        insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+          values (100, 'up9', 'o9', 'u9', 'w9', 'upload', 'completed', 'completed', '{}', 1) on conflict do nothing;
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
+          values ('foreign', 'o9', 'u9', 'w9', 'up9', 'f.pdf', 'application/pdf', 'k-f', 'completed', 4, 'map', 'counted', 1, repeat('0', 64))
+          on conflict do nothing;`);
+      await db.exec(`update project_runs set status = 'processing' where id = 'm2'`);
+      const error = await runMaterializeRange(deps() as never, { ...input("m2", [1, 2]), documentId: "foreign" }).catch((caught: unknown) => caught);
+      // Not a deletion: no quiet "document-deleted" result, a non-retryable typed failure instead.
+      expect(error).toMatchObject({ type: "DocumentOutOfScope", nonRetryable: true });
+      expect(await usageRows()).toBe(0);
+      expect((await db.query<{ n: number }>(`select count(*)::int as n from document_pages where document_id = 'foreign'`)).rows[0]!.n).toBe(0);
+    });
+
     it("stops cleanly and bills nothing for unwritten pages when the document is deleted mid-run", async () => {
       await seedDoomed("doomed");
       await db.exec(`update project_runs set status = 'processing' where id = 'm2'`);

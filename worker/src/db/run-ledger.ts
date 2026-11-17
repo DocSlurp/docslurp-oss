@@ -4,7 +4,7 @@ import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner,
 import { type GeoFinalSource } from "./geo-final-source.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT } from "@docslurp/shared";
-import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
+import { DocumentNotFoundError, DocumentOutOfScopeError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { randomUUID } from "node:crypto";
 
@@ -385,13 +385,24 @@ export class PostgresRunLedger implements CheckpointStore {
 
   /**
    * One document, within a tenant scope: the run it belongs to, or (for a run that reads another run's document, such as a
-   * deferred materialization) the run's organization. Outside the scope it is not found.
+   * deferred materialization) the run's organization. A row outside the scope throws DocumentOutOfScopeError; a missing
+   * row throws DocumentNotFoundError.
    */
   async loadDocument(documentId: string, scope: { runId: string } | { orgId: string | null }): Promise<Document> {
     const [row] = "runId" in scope
       ? await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from project_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} and d.run_id = ${scope.runId} limit 1`
       : await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from project_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} and d.org_id = ${scope.orgId} limit 1`;
-    if (!row) throw new DocumentNotFoundError(documentId);
+    if (!row) {
+      // Only on a miss, and only whether the id exists (no column of the row): a row outside the scope is a scope error,
+      // never a deletion, so a caller that stops quietly on a deleted document fails loudly instead.
+      const [exists] = await this.sql<{ one: number }[]>`select 1 as one from documents where id = ${documentId} limit 1`;
+      if (exists) {
+        const kind = "runId" in scope ? "run" as const : "org" as const;
+        console.error(`[run-ledger] document out of scope document=${documentId} scope=${kind}`);
+        throw new DocumentOutOfScopeError(documentId, kind);
+      }
+      throw new DocumentNotFoundError(documentId);
+    }
     return mapDocument(row);
   }
 

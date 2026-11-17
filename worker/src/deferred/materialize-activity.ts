@@ -1,9 +1,10 @@
+import { ApplicationFailure } from "@temporalio/common";
 import { QUALITY_RANK, runLegacyQualitySql } from "@docslurp/shared";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import type { Sql } from "postgres";
 import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
-import { isMissingDocumentError } from "../db/missing-document.js";
+import { DocumentOutOfScopeError, isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { Store } from "../db/store.js";
@@ -115,6 +116,10 @@ export async function runMaterializeRange(deps: MaterializeActivityDeps, input: 
   } catch (error) {
     // The document was deleted while (or before) its pages were materialized: stop cleanly. Retrying would
     // only repeat the foreign-key error; pages already written were billed as they finished, the rest are not.
+    // A document outside the run's organization is not a deletion: fail the run loudly, and do not retry.
+    if (error instanceof DocumentOutOfScopeError) {
+      throw ApplicationFailure.nonRetryable(error.message, "DocumentOutOfScope");
+    }
     if (!isMissingDocumentError(error)) throw error;
     console.warn(`[materialize] document ${input.documentId} was deleted; stopping run=${input.runId}`);
     const settled = new Set([...result.indexed, ...result.blocked, ...result.failed.map((f) => f.page)]);
