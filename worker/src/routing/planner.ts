@@ -21,10 +21,10 @@ import {
 } from "@docslurp/shared";
 import { assessAttention } from "./attention.js";
 import { readRoutingFlags } from "./flags.js";
-import { TRUST_RULE, freeTrustVerdict } from "./trust.js";
+import { PAGE_EVIDENCE, mathGlyphNeed, textLayerUnreliable } from "../lib/page-evidence.js";
+import { freeTrustVerdict } from "./trust.js";
 
 /** A page whose math glyph share is this many times the trust threshold needs math handling outright (was a bare 12). */
-const MATH_GLYPH_RATIO_FULL_NEED = 8;
 import {
   applyBudgetGuard,
   estimateChunk,
@@ -186,11 +186,12 @@ export function needsFromFeatures(
   } else if (verdict.mathGated) {
     trust = Math.min(MATH_GATED_TRUST, 0.5 + 0.45 * f.native.plausibility);
   } else if (status === "suspect") trust = 0.3 * f.native.plausibility;
-  if (f.native.garbled || f.native.unmappedGlyphRatio > 0.1) trust = Math.min(trust, 0.2);
+  if (textLayerUnreliable(f.native)) trust = Math.min(trust, 0.2);
   if (f.raster.fullPageImage && f.native.wordCount < 30) trust = Math.min(trust, 0.1);
   // Needs come from the page's own glyphs and ruling, not from the text routes classify-route labels it with.
-  const needsMath = Math.min(1, f.native.mathGlyphRatio / (TRUST_RULE.mathGlyphRatio * MATH_GLYPH_RATIO_FULL_NEED));
-  const needsTables = Math.min(1, f.native.tableRuleScore / 4);
+  const needsMath = mathGlyphNeed(f.native.mathGlyphRatio);
+  // The table rule score is page evidence's (routerTableRuleScore): grids on the table path, unknown included, are full.
+  const needsTables = Math.min(1, f.native.tableRuleScore / PAGE_EVIDENCE.fullTableRuleScore);
   const scanned = f.raster.fullPageImage && f.native.wordCount < 30 ? 0.9 : status === "absent" ? 0.6 : 0;
   const images: ImageNeed[] = page.images.map((img) => {
     const g = guessImageKind(page, img, cfg.tinyImageCoverage);

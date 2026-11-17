@@ -19,10 +19,10 @@ import { documentCostStats } from "../lib/document-cost-stats.js";
 import { DOPPLER_MATH_FLAGS, DOPPLER_TABLE_FLAGS, DOPPLER_ENCODING_COUNTS, dopplerFlagBit, type DopplerMathFlag, type DopplerTableFlag } from "../lib/doppler-encoding-facts.js";
 import { parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
 import { pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "../lib/doppler-page-facts-evidence.js";
-import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
+import { routingFactsWithDopplerFacts } from "../lib/page-evidence-doppler.js";
 import { candidatesFromPageFacts } from "../chart-export/facts-candidates.js";
 import { assessAttention } from "../routing/attention.js";
-import { pageInputFromProbeRow, type ProbeRow } from "../routing/page-input.js";
+import { pageInputFromEvidence, pageInputFromProbeRow, type ProbeRow } from "../routing/page-input.js";
 import { DEFAULT_PLANNER_CONFIG, needsFromFeatures, rolesForPage } from "../routing/planner.js";
 import { createDopplerFactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
 import { shouldTriage } from "../routing/triage.js";
@@ -210,7 +210,8 @@ async function routerFromFacts(jsonlText: string, pageCount: number) {
   const runner = createDopplerFactsProbeRunner(async () => new TextEncoder().encode(jsonlText));
   const result = await runner({ documentId: "doc", pageCount });
   if (result.status !== "ok") return { unavailable: result.reason };
-  const inputs = await Promise.all(result.rows.map((row) => pageInputFromProbeRow(row, null, "pdf")));
+  // The router's own path (route-pages): page evidence from the facts, then its page input.
+  const inputs = await Promise.all(result.pages.map((page) => pageInputFromEvidence(page, null, "pdf", { pageCount })));
   return Object.fromEntries(inputs.map((input) => [input.features.pageNumber, routerDecisions(input)]));
 }
 

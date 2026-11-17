@@ -1975,7 +1975,7 @@
      "input": {
       "status": "ok",
       "words": 410,
-      "tableRuleScore": 0,
+      "tableRuleScore": 4,
       "mathGlyphRatio": 0.0125,
       "garbled": false,
       "unmapped": 0,
@@ -2001,12 +2001,12 @@
      "needs": {
       "trust": 0.5,
       "math": 0.156,
-      "tables": 0,
+      "tables": 1,
       "scanned": 0,
       "blank": false
      },
      "roles": [
-      "extract-text:page",
+      "table:page",
       "skip:image"
      ],
      "triage": "page-1-has-images",
@@ -2133,46 +2133,41 @@
    "router": {
     "1": {
      "input": {
-      "status": "ok",
-      "words": 410,
-      "tableRuleScore": 9,
-      "mathGlyphRatio": 0.05,
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
       "garbled": false,
       "unmapped": 0,
-      "imageCoverage": 0.35,
+      "imageCoverage": 0,
       "fullPageImage": false,
-      "images": 1,
+      "images": 0,
       "size": [
        612,
        792
       ],
       "features": [
-       "acroform-filled",
-       "link-internal",
-       "link-uri",
-       "ocg-visible"
+       "facts-low-confidence"
       ]
      },
      "trust": {
       "trusted": false,
-      "reason": "math-glyphs",
-      "mathGated": true
+      "reason": "text-layer-suspect",
+      "mathGated": false
      },
      "needs": {
-      "trust": 0.5,
-      "math": 0.625,
+      "trust": 0,
+      "math": 0,
       "tables": 1,
       "scanned": 0,
       "blank": false
      },
      "roles": [
-      "math:page",
-      "table:page",
-      "chart-data:image"
+      "table:page"
      ],
-     "triage": "page-1-has-images",
-     "insetCandidates": 1,
-     "renderNeeded": true
+     "triage": "page-1-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
     }
    },
    "pageImageEvidence": null,
@@ -2285,41 +2280,39 @@
    "router": {
     "1": {
      "input": {
-      "status": "ocr-layer",
-      "words": 300,
-      "tableRuleScore": 0,
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
       "mathGlyphRatio": 0,
       "garbled": false,
       "unmapped": 0,
-      "imageCoverage": 1,
-      "fullPageImage": true,
-      "images": 2,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
       "size": [
        612,
        792
       ],
       "features": [
-       "rotated-page",
-       "scan-page"
+       "facts-low-confidence"
       ]
      },
      "trust": {
       "trusted": false,
-      "reason": "ocr-layer-unverified",
+      "reason": "text-layer-suspect",
       "mathGated": false
      },
      "needs": {
       "trust": 0,
       "math": 0,
-      "tables": 0,
+      "tables": 1,
       "scanned": 0,
       "blank": false
      },
      "roles": [
-      "ocr:page",
-      "skip:image"
+      "table:page"
      ],
-     "triage": "page-1-text-layer-ocr-layer",
+     "triage": "page-1-text-layer-unknown",
      "insetCandidates": 0,
      "renderNeeded": false
     }
@@ -5354,45 +5347,41 @@
    "router": {
     "1": {
      "input": {
-      "status": "ok",
-      "words": 410,
-      "tableRuleScore": 0,
-      "mathGlyphRatio": 0.0125,
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
       "garbled": false,
       "unmapped": 0,
-      "imageCoverage": 0.0105,
+      "imageCoverage": 0,
       "fullPageImage": false,
-      "images": 1,
+      "images": 0,
       "size": [
        612,
        792
       ],
       "features": [
-       "acroform-filled",
-       "link-internal",
-       "link-uri",
-       "ocg-visible"
+       "facts-low-confidence"
       ]
      },
      "trust": {
       "trusted": false,
-      "reason": "math-glyphs",
-      "mathGated": true
+      "reason": "text-layer-suspect",
+      "mathGated": false
      },
      "needs": {
-      "trust": 0.5,
-      "math": 0.156,
-      "tables": 0,
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
       "scanned": 0,
       "blank": false
      },
      "roles": [
-      "extract-text:page",
-      "skip:image"
+      "table:page"
      ],
-     "triage": "page-1-has-images",
+     "triage": "page-1-text-layer-unknown",
      "insetCandidates": 0,
-     "renderNeeded": true
+     "renderNeeded": false
     }
    },
    "pageImageEvidence": null,
@@ -7883,7 +7872,7 @@
  "probe: locked": {
   "input": {
    "status": "unknown",
-   "words": 330,
+   "words": 0,
    "tableRuleScore": 0,
    "mathGlyphRatio": 0,
    "garbled": false,

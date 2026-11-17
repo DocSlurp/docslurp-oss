@@ -1,6 +1,7 @@
 import type { PageLayoutImage, PageTable } from "@docslurp/shared";
 
 import { parsePageEncodingRoute, type PageEncodingRoute } from "./doppler-encoding-facts.js";
+import { pageSize } from "./page-evidence.js";
 
 /** One page of pdf-layout-facts@1 as routing reads it (worker/scripts/pdf_layout_facts.py `layout_facts`). */
 export interface PageLayoutFacts {
@@ -62,9 +63,8 @@ export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<n
     const grids = Array.isArray(page.grids) ? (page.grids as Array<Record<string, unknown>>).slice(0, 64).map((grid) => ({
       rows: num(grid.rows) ?? 0, columns: num(grid.columns) ?? 0, coverage: num(grid.coverage),
     })) : null;
-    // A page size from the walk (its visible box), bounded: 1 pt to the PDF limit of 14,400 pt per side.
-    const side = (value: unknown) => { const n = num(value); return n !== null && n >= 1 && n <= 14_400 ? n : null; };
-    const widthPt = side(page.widthPt), heightPt = side(page.heightPt);
+    // A page size from the walk (its visible box), within page evidence's side bounds (pageSize).
+    const size = pageSize(num(page.widthPt), num(page.heightPt));
     // Invisible-layer evidence (the batch guest's walk): a non-negative count, a known layer kind; anything else is unknown.
     const invisible = num(page.invisibleWords);
     const invisibleWords = invisible !== null && Number.isSafeInteger(invisible) && invisible >= 0 ? invisible : null;
@@ -73,7 +73,7 @@ export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<n
     const encodings = page.encodings === undefined ? undefined : parsePageEncodingRoute(page.encodings);
     out.set(pageNumber, { images, tables, words: num(page.words), grids, tableCoverage: num(page.tableCoverage),
       ...(grids === null && page.gridsUnknown === true ? { gridsUnknown: true as const } : {}),
-      ...(widthPt !== null && heightPt !== null ? { widthPt, heightPt } : {}),
+      ...(size ? { widthPt: size.widthPt, heightPt: size.heightPt } : {}),
       ...(invisibleWords !== null ? { invisibleWords } : {}), ...(textLayer !== null ? { textLayer } : {}),
       ...(encodings ? { encodings } : {}) });
   }

@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
-import { pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts } from "./page-evidence-doppler.js";
 import { dopplerFactsCoverEvidence, pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";

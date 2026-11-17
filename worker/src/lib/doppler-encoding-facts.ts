@@ -173,7 +173,7 @@ export function pageEncodingRoute(page: DopplerPageFacts, options: { mathRead?: 
   if (page.failed) return { status: "unknown", reason: "failed" };
   if (page.mathBits === undefined || page.tableBits === undefined || page.encodingCounts === undefined) return { status: "unknown", reason: "absent" };
   if (page.parseWarnings.includes("xref-repaired-earlier")) return { status: "unknown", reason: "low-confidence" };
-  // As gridFacts (lib/doppler-page-facts-layout.ts): a rebuilt cross-reference table or a drawing cap leaves the page's
+  // As gridEvidence (lib/page-evidence-doppler.ts): a rebuilt cross-reference table or a drawing cap leaves the page's
   // drawing (so its rules, outlines and table shapes) incomplete.
   if (page.parseWarnings.includes("xref-repaired")) return { status: "unknown", reason: "xref-repaired" };
   if (page.vectors?.limitHit || page.parseWarnings.includes("limit-hit") || page.unusualFeatures.includes("drawing-limit")) {

@@ -35,7 +35,7 @@ import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
-import { buildPageInputs, createProbeRunner, pageInputFromProbeRow, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
+import { buildPageInputs, createProbeRunner, pageInputFromEvidence, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
 import { HostPdfRefusedError, sandboxedPdfReasonForRun, type SandboxedPdfReason } from "../routing/host-pdf-guard.js";
 import { documentExtractorRegistry } from "../extractors/registry.js";
 import { createDopplerFactsProbeRunner, type FactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
@@ -279,17 +279,14 @@ export class RoutePagesStage implements Stage {
           signal,
         });
         if (facts.status !== "ok") return this.fallback(state, document, mode, probeSource, facts.reason, sandboxed, facts.detail);
-        // A thumbnail is a host file path that pageInputFromProbeRow would open: refused on a sandboxed deployment, and
-        // dropped everywhere before any row is built.
-        if (facts.rows.some((row) => row.thumbnail !== undefined)) guard("facts-thumbnail");
-        const rows = facts.rows.map(({ thumbnail: _thumbnail, ...row }) => row);
-        // An active plan must cover every page the host counted (a locked row covers one): pages the router never saw
+        // Page evidence carries no thumbnail (a host file path), and none is passed: facts never open a host file.
+        // An active plan must cover every page the host counted (a locked page covers one): pages the router never saw
         // would get no extraction at all.
         const hostPages = hostPageCount(document);
-        if (mode === "active" && rows.length !== hostPages) {
-          return this.fallback(state, document, mode, probeSource, "facts-incomplete-for-active", sandboxed, `${rows.length}/${hostPages}`);
+        if (mode === "active" && facts.pages.length !== hostPages) {
+          return this.fallback(state, document, mode, probeSource, "facts-incomplete-for-active", sandboxed, `${facts.pages.length}/${hostPages}`);
         }
-        pages = await Promise.all(rows.map((row) => pageInputFromProbeRow(row, routing, "pdf")));
+        pages = await Promise.all(facts.pages.map((page) => pageInputFromEvidence(page, routing, "pdf", { pageCount: hostPages ?? facts.pages.length })));
         factsSummary = { locked: facts.locked, pagesKnown: facts.pagesKnown, pagesFailed: facts.pagesFailed, linesDropped: facts.linesDropped };
       } else {
         guard("native-probe");

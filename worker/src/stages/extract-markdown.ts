@@ -123,12 +123,12 @@ import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-pag
 import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
 import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
-import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
+import { routingFactsWithDopplerFacts } from "../lib/page-evidence-doppler.js";
 import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
 import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
 import { documentCostStats } from "../lib/document-cost-stats.js";
-import { DOPPLER_FACTS_EVIDENCE_SOURCE, dopplerFactsCoverEvidence, dopplerFactsTextDisagreement, pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "../lib/doppler-page-facts-evidence.js";
+import { DOPPLER_FACTS_EVIDENCE_SOURCE, checkDopplerFactsEvidence, pageFactRowsFromCheckedFacts, pageImageEvidenceFromCheckedFacts } from "../lib/doppler-page-facts-evidence.js";
 import { runBillsScansAtCompletion } from "../db/page-base-fee.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
@@ -1830,15 +1830,12 @@ export class ExtractMarkdownStage implements Stage {
     // The host's own measured count; never coerced: without one, facts have nothing to be checked against.
     const pageCount = document.pageCount;
     if (!Number.isSafeInteger(pageCount) || pageCount < 1) return skipped("no-host-page-count");
-    const coverage = dopplerFactsCoverEvidence(candidate.pageFacts, pageCount);
-    if (!coverage.covered) return skipped(coverage.reason);
-    const pageTexts = pageAlignedTexts(winningText, pageCount);
-    if (!pageTexts) return skipped("text-not-page-aligned");
+    // One check (coverage, page alignment, agreement with the extracted text) for both the evidence and the rows.
     const ocrPages = new Set([...(candidate.ocrPages ?? []), ...modelReadPages]);
-    const disagreement = dopplerFactsTextDisagreement(candidate.pageFacts, pageTexts, ocrPages);
-    if (disagreement !== null) {
-      console.warn(`[doppler-page-facts] document=${document.id} facts disagree with the extracted text page=${disagreement}`);
-      return skipped("words-disagree");
+    const check = checkDopplerFactsEvidence({ facts: candidate.pageFacts, pageCount, pageTexts: () => pageAlignedTexts(winningText, pageCount), ocrPages });
+    if (!check.ok) {
+      if (check.reason === "words-disagree") console.warn(`[doppler-page-facts] document=${document.id} facts disagree with the extracted text page=${check.page}`);
+      return skipped(check.reason);
     }
     let pageImageEvidenceUri: string | null = null;
     let evidencePages = 0;
@@ -1846,7 +1843,7 @@ export class ExtractMarkdownStage implements Stage {
     try {
       if (!state.run.pipeline.visionFallback) evidenceReason = "vision-fallback-off";
       else {
-        const pages = pageImageEvidenceFromDopplerFacts({ facts: candidate.pageFacts, pageCount, pageTexts, ocrPages });
+        const pages = pageImageEvidenceFromCheckedFacts(check.checked);
         if (pages) {
           pageImageEvidenceUri = await this.storePageImageEvidence(document, state, pages, DOPPLER_FACTS_EVIDENCE_SOURCE);
           evidencePages = pages.length;
@@ -1860,7 +1857,7 @@ export class ExtractMarkdownStage implements Stage {
     // A run without a page billing pin bills pages with no text bytes and an image as scans at completion: facts rows would
     // raise its charge, so it keeps going without them.
     const legacyBilling = runBillsScansAtCompletion(state);
-    const rows = legacyBilling ? [] : pageFactRowsFromDopplerFacts({ facts: candidate.pageFacts, pageCount, pageTexts, ocrPages, documentId: document.id, runId: state.run.id });
+    const rows = legacyBilling ? [] : pageFactRowsFromCheckedFacts(check.checked, { documentId: document.id, runId: state.run.id });
     await recordPageFacts(state.store, rows);
     console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${legacyBilling ? " rows-skipped=legacy-billing" : ""}`);
     return {

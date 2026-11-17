@@ -14,11 +14,13 @@ import {
   type TextLayerStatus,
 } from "@docslurp/shared";
 
+import { PAGE_EVIDENCE, pageEvidenceFromProbeRow, readImageBoxes, routerTableRuleScore, type NativeProbePage, type PageEvidence } from "../lib/page-evidence.js";
 import { loadProbeBinding } from "./probe/binding.js";
 import type { Recogniser } from "./probe/ocr-layer.js";
 import { NativeProbeOpenError, PROBE_OVERLAP_MAX_PAGES, looksEncrypted, lockedRow, probeNativePdf } from "./probe/probe.js";
 
-export interface ProbeRow {
+/** The native probe's row (JSON lines). Page evidence reads it through pageEvidenceFromProbeRow. */
+export interface ProbeRow extends NativeProbePage {
   pageNumber: number;
   pageCount: number;
   charCount: number;
@@ -57,13 +59,6 @@ export interface ProbeRow {
   /** Set by the native-pdf probe (`native-pdf@<version>+<sha>`); absent on rows from the Python probe. */
   probeEngine?: string;
 }
-
-const LOCKED_ROW_DEFAULTS = {
-  pageNumber: 1, pageCount: 1, charCount: 0, wordCount: 0, textCoverage: 0, fontCount: 0, unmappedGlyphRatio: 0,
-  mathGlyphRatio: 0, tableRuleScore: 0, imageCoverage: 0, largestImageCoverage: 0, fullPageImage: false,
-  vectorDrawingCount: 0, uncoveredVectorRatio: 0, garbled: false, imageCount: 0, images: [] as ProbeRow["images"],
-  smallestFontPt: null, widthPt: 612, heightPt: 792, rotation: 0, probeMs: 0,
-};
 
 export type ProbeRunner = (args: {
   pdfPath: string;
@@ -168,71 +163,76 @@ async function thumbnailInfo(file: string | undefined): Promise<PageInput["thumb
   }
 }
 
-export async function pageInputFromProbeRow(
-  row: ProbeRow,
+/**
+ * The router's page input from page evidence (lib/page-evidence.ts), merged with the classify-route heuristic for the page.
+ * Unknown quantities read as the probe's failed row does (zero, `unknown` layer, no images); a locked document is one
+ * page; the table rule score is page-evidence.ts routerTableRuleScore (grids on the table path, unknown included, are a full
+ * table need), and only a `known` page's images reach the inset gate (readImageBoxes).
+ */
+export async function pageInputFromEvidence(
+  evidence: PageEvidence,
   routing: AdaptiveRoutingArtifact | null | undefined,
   documentFormat = "pdf",
+  extra: { pageCount: number; thumbnail?: string },
 ): Promise<PageInput> {
-  if (row.locked) {
-    // Locked document: the probe emits one row with no geometry; give it a valid page so the planner can report it.
-    row = {
-      ...LOCKED_ROW_DEFAULTS,
-      ...row,
-      pageNumber: 1,
-      pageCount: 1,
-      textLayerStatus: "unknown",
-      textFacts: { wordCount: null, imageCount: null, imageCoverage: null, textLayerStatus: "unknown" },
-    };
-  }
-  const entry = routing?.pages.find((page) => page.pageNumber === row.pageNumber);
+  const locked = evidence.state === "locked";
+  const pageNumber = locked ? 1 : evidence.page;
+  const t = evidence.text;
+  const img = evidence.state === "known" ? evidence.images : null;
+  const vec = evidence.state === "known" ? evidence.vectors : null;
+  const native = {
+    textLayerStatus: t.status, garbled: t.garbled ?? false, unmappedGlyphRatio: evidence.unmappedGlyphRatio ?? 0,
+  };
+  const entry = routing?.pages.find((page) => page.pageNumber === pageNumber);
+  const size = evidence.size ?? { widthPt: PAGE_EVIDENCE.defaultWidthPt, heightPt: PAGE_EVIDENCE.defaultHeightPt };
   const input: PageInput = {
     schemaVersion: PAGE_INPUT_SCHEMA_VERSION,
     features: {
       schemaVersion: PAGE_FEATURES_SCHEMA_VERSION,
-      pageNumber: row.pageNumber,
+      pageNumber,
       documentFormat,
-      pageCount: row.pageCount,
+      pageCount: locked ? 1 : extra.pageCount,
       native: {
-        charCount: row.charCount,
-        wordCount: row.wordCount,
-        textCoverage: row.textCoverage,
-        fontCount: row.fontCount,
-        unmappedGlyphRatio: row.unmappedGlyphRatio,
-        mathGlyphRatio: row.mathGlyphRatio,
-        tableRuleScore: row.tableRuleScore,
-        garbled: row.garbled,
-        plausibility: nativePlausibility(row),
+        charCount: t.chars ?? 0,
+        wordCount: t.words ?? 0,
+        textCoverage: t.coverage ?? 0,
+        fontCount: evidence.fonts?.count ?? 0,
+        unmappedGlyphRatio: native.unmappedGlyphRatio,
+        mathGlyphRatio: t.mathGlyphRatio ?? 0,
+        tableRuleScore: routerTableRuleScore(evidence),
+        garbled: native.garbled,
+        plausibility: nativePlausibility(native),
       },
       raster: {
-        imageCoverage: row.imageCoverage,
-        largestImageCoverage: row.largestImageCoverage,
-        fullPageImage: row.fullPageImage,
-        vectorDrawingCount: row.vectorDrawingCount,
-        uncoveredVectorRatio: row.uncoveredVectorRatio,
-        smallestFontPt: row.smallestFontPt,
+        imageCoverage: img?.coverage ?? 0,
+        largestImageCoverage: img?.largestCoverage ?? 0,
+        fullPageImage: img?.fullPageImage ?? false,
+        vectorDrawingCount: vec?.paths ?? 0,
+        uncoveredVectorRatio: vec?.uncoveredRatio ?? 0,
+        smallestFontPt: evidence.fonts?.smallestPt ?? null,
       },
-      geometry: { widthPt: row.widthPt, heightPt: row.heightPt, rotation: row.rotation },
+      geometry: { widthPt: size.widthPt, heightPt: size.heightPt, rotation: evidence.rotation ?? 0 },
       heuristic: {
         route: entry?.route ?? "straightforward-text",
         extractorHint: entry?.extractorHint ?? null,
         specializedKinds: entry?.specializedContent.map((s) => s.kind) ?? [],
         ocrAuthorized: entry?.ocrDecision?.authorized ?? null,
-        textDensityScore: entry?.textDensityScore ?? row.textCoverage,
+        textDensityScore: entry?.textDensityScore ?? t.coverage ?? 0,
       },
       decisions: null,
-      provenance: { probe: row.probeEngine === "doppler-facts" ? "doppler-facts" : "native-pdf-probe", probeMs: row.probeMs },
+      provenance: { probe: evidence.source === "doppler-facts" ? "doppler-facts" : "native-pdf-probe", probeMs: evidence.probeMs },
     },
     textFacts: {
-      wordCount: row.textFacts.wordCount,
-      imageCount: row.textFacts.imageCount,
-      imageCoverage: row.textFacts.imageCoverage,
-      textLayerStatus: row.textFacts.textLayerStatus,
-      ...(row.invisibleTextRatio !== undefined ? { invisibleTextRatio: row.invisibleTextRatio } : {}),
-      ...(row.textOverImageRatio !== undefined ? { textOverImageRatio: row.textOverImageRatio } : {}),
-      ...(row.ocrLayerCheck ? { ocrLayerAgreement: row.ocrLayerCheck.agreement, ocrLayerMs: row.ocrLayerCheck.wallMs } : {}),
+      wordCount: t.words,
+      imageCount: img ? img.count : null,
+      imageCoverage: img ? img.coverage : null,
+      textLayerStatus: t.status,
+      ...(t.invisibleTextRatio !== null ? { invisibleTextRatio: t.invisibleTextRatio } : {}),
+      ...(t.textOverImageRatio !== null ? { textOverImageRatio: t.textOverImageRatio } : {}),
+      ...(t.ocrLayerAgreement !== undefined ? { ocrLayerAgreement: t.ocrLayerAgreement, ocrLayerMs: t.ocrLayerMs } : {}),
     },
-    ...(row.unusualFeatures && row.unusualFeatures.length > 0 ? { unusualFeatures: row.unusualFeatures } : {}),
-    images: row.images.map((image, index) => ({
+    ...(evidence.features.length > 0 ? { unusualFeatures: evidence.features } : {}),
+    images: readImageBoxes(evidence).map((image, index) => ({
       index,
       bbox: {
         x: image.bbox[0],
@@ -242,9 +242,18 @@ export async function pageInputFromProbeRow(
       },
       coverage: image.coverage,
     })),
-    thumbnail: await thumbnailInfo(row.thumbnail),
+    thumbnail: await thumbnailInfo(extra.thumbnail),
   };
   return pageInputSchema.parse(input);
+}
+
+/** A native probe row as the router's page input (through its page evidence). */
+export async function pageInputFromProbeRow(
+  row: ProbeRow,
+  routing: AdaptiveRoutingArtifact | null | undefined,
+  documentFormat = "pdf",
+): Promise<PageInput> {
+  return pageInputFromEvidence(pageEvidenceFromProbeRow(row), routing, documentFormat, { pageCount: row.pageCount, thumbnail: row.thumbnail });
 }
 
 export async function buildPageInputs(options: BuildPageInputsOptions): Promise<PageInput[]> {
