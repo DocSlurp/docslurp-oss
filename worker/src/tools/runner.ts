@@ -1,11 +1,12 @@
 import { authorizeComputeCohort } from "../extractors/plugins.js";
-import { serveFirstPassResult } from "../pipeline/first-pass.js";
+import { firstPassResultGlyphs, serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
   acceptSandboxedPdfResult, noteSalvagedFigures, noteSandboxedPdfPoolMember, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
 import { dopplerConverterPath } from "./doppler.js";
+import { dopplerPageFactsRequest } from "../lib/doppler-page-facts.js";
 import { localOcrCommandArgs, localOcrPaths } from "../ocr/local.js";
 import { localOcrRefusal, resolveOcrMode, OcrRefusedError } from "../ocr/mode.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
@@ -866,7 +867,8 @@ export class CommandRunner {
     }
     const provider = requireSandboxedPdfProvider();
     provider.assertConfigured();
-    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output } };
+    const pageFacts = dopplerPageFactsRequest();
+    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output, ...(pageFacts ? { pageFacts } : {}) } };
   }
 
   async extractText(source: string, pages: number, preservePageBreaks = false): Promise<CommandPlan> {
@@ -1884,7 +1886,9 @@ export class CommandRunner {
       // The first pass already converted this document in a batch VM: serve that result instead of booting another VM.
       const served = await serveFirstPassResult(currentPerfContext(), plan.sandboxedPdf);
       if (served) {
-        return { remote: Promise.resolve(acceptSandboxedPdfResult(plan.sandboxedPdf, served, pages)), timeoutMs: provider.timeoutMs(pages), release: async () => {} };
+        // A math batch's facts are accepted as a math run's again (council #467): grids unknown, unmapped glyphs read.
+        const glyphs = firstPassResultGlyphs(currentPerfContext());
+        return { remote: Promise.resolve(acceptSandboxedPdfResult(plan.sandboxedPdf, served, pages, { glyphs })), timeoutMs: provider.timeoutMs(pages), release: async () => {} };
       }
       // The provider shards long documents itself and notes progress as shards finish.
       return {

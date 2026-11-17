@@ -1,0 +1,30 @@
+% Generator for worker/testdata/pdf-fixtures/encoding-math-table.pdf (DocSlurp synthetic fixture, no third-party content).
+% Two ruled tables whose cells are typeset math (symbols, T/F truth values): Doppler can name them math-grid only.
+% Build: pdflatex -interaction=nonstopmode encoding-math-table.tex
+\documentclass{article}
+\pdfinfoomitdate=1
+\pdftrailerid{}
+\pdfsuppressptexinfo=-1
+\begin{document}
+\section*{Notation and results}
+The table below lists the estimated coefficients for each regional office.
+
+\begin{tabular}{|c|c|c|c|}
+\hline
+$\alpha_{ij}$ & $\beta_{ij}$ & $\gamma_{k}$ & $\delta_{k}$ \\ \hline
+$x\le y$ & $y\ge z$ & $\alpha\beta$ & $\pi r$ \\ \hline
+$p\cdot q$ & $\mu\nu$ & $\sigma\tau$ & $\phi\psi$ \\ \hline
+$a\wedge b$ & $a\vee b$ & $\neg a$ & $a\oplus b$ \\ \hline
+$\kappa\lambda$ & $\eta\theta$ & $\rho\omega$ & $\chi\xi$ \\ \hline
+\end{tabular}
+
+\vspace{1cm}
+\begin{tabular}{|c|c|c|}
+\hline
+Input $a$ & Input $b$ & $a \wedge b$ \\ \hline
+$T$ & $T$ & $T$ \\ \hline
+$T$ & $F$ & $F$ \\ \hline
+$F$ & $T$ & $F$ \\ \hline
+$F$ & $F$ & $F$ \\ \hline
+\end{tabular}
+\end{document}

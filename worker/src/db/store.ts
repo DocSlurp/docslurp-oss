@@ -2876,12 +2876,14 @@ export class Store {
   /**
    * Ingest report page facts. Source facts (text layer, images) and vision
    * outcomes come from different stages, so each write only touches its own
-   * columns and never clears the other stage's values.
+   * columns and never clears the other stage's values, except routing facts
+   * (text_layer, scan_class, the encoding words): those belong to one run, so
+   * any write that moves a row to another run clears them unless it sets them.
    */
   async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
     const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
     const vision = rows.filter((row) => row.visionStatus !== undefined);
-    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null);
+    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null || row.mathBits != null);
     for (const batch of batchedRows(source)) {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
@@ -2898,6 +2900,12 @@ export class Store {
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
+            -- Routing facts are a run's own: another run's write clears them (council #467).
+            text_layer = case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end,
+            scan_class = case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end,
+            math_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             text_bytes = excluded.text_bytes,
             word_count = excluded.word_count,
             image_count = excluded.image_count,
@@ -2919,6 +2927,12 @@ export class Store {
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
+            -- Routing facts are a run's own: another run's write clears them (council #467).
+            text_layer = case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end,
+            scan_class = case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end,
+            math_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             vision_status = excluded.vision_status,
             vision_text_bytes = excluded.vision_text_bytes,
             updated_at = now()
@@ -2929,18 +2943,32 @@ export class Store {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
         text_layer: row.textLayer ?? null, scan_class: row.scanClass ?? null,
+        // Doppler's encoding words (migration 0189): all three or none, so one write never mixes two runs' words.
+        ...(row.mathBits != null && row.tableBits != null && row.encodingCounts != null
+          ? { math_bits: row.mathBits, table_bits: row.tableBits, encoding_counts: row.encodingCounts }
+          : { math_bits: null, table_bits: null, encoding_counts: null }),
       }));
       await this.sql`
-        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class)
-        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class
+        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class, math_bits, table_bits, encoding_counts)
+        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class, r.math_bits, r.table_bits, r.encoding_counts
         from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
-          document_id text, page_number integer, run_id text, text_layer text, scan_class text
+          document_id text, page_number integer, run_id text, text_layer text, scan_class text, math_bits bigint, table_bits bigint,
+          encoding_counts bigint
         )
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
-            text_layer = coalesce(excluded.text_layer, document_page_facts.text_layer),
-            scan_class = coalesce(excluded.scan_class, document_page_facts.scan_class),
+            -- A value the write does not know keeps the stored one only for the same run: another run's routing facts
+            -- describe facts this run did not produce (a reprocess with page facts off, or an older provider), so they are
+            -- cleared. The source and vision writes clear them the same way when they move the row to a new run.
+            text_layer = coalesce(excluded.text_layer, case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end),
+            scan_class = coalesce(excluded.scan_class, case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end),
+            math_bits = case when excluded.encoding_counts is not null then excluded.math_bits
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when excluded.encoding_counts is not null then excluded.table_bits
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when excluded.encoding_counts is not null then excluded.encoding_counts
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             updated_at = now()
       `;
     }

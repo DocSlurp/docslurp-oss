@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_LABELER_MODEL, readRoutingFlags } from "./flags.js";
+import { DEFAULT_LABELER_MODEL, readEncodingFactsRouting, readRoutingFlags } from "./flags.js";
 
 describe("routing flags", () => {
   it("defaults every flag to off / built-in values", () => {
@@ -13,7 +13,23 @@ describe("routing flags", () => {
       modelPricesPath: null,
       healthHistoryPath: null,
       localDecisionSidecarCmd: null,
+      // An empty NODE_ENV is development: encoding routing is on there (and in test), off in production.
+      encodingFactsRouting: true,
     });
+  });
+
+  it("reads DOCSLURP_ENCODING_FACTS_ROUTING: on in development and test, off in production, explicit values win", () => {
+    expect(readEncodingFactsRouting({ NODE_ENV: "development" })).toBe(true);
+    expect(readEncodingFactsRouting({ NODE_ENV: "test" })).toBe(true);
+    expect(readEncodingFactsRouting({ NODE_ENV: "production" })).toBe(false);
+    expect(readEncodingFactsRouting({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "service" })).toBe(false);
+    expect(readEncodingFactsRouting({ NODE_ENV: "production", DOCSLURP_ENCODING_FACTS_ROUTING: "ON" })).toBe(true);
+    expect(readEncodingFactsRouting({ NODE_ENV: "production", DOCSLURP_ENCODING_FACTS_ROUTING: "1" })).toBe(true);
+    expect(readEncodingFactsRouting({ NODE_ENV: "test", DOCSLURP_ENCODING_FACTS_ROUTING: "off" })).toBe(false);
+    expect(readEncodingFactsRouting({ NODE_ENV: "test", DOCSLURP_ENCODING_FACTS_ROUTING: "0" })).toBe(false);
+    // A typo keeps the environment's default, never switches it on in production.
+    expect(readEncodingFactsRouting({ NODE_ENV: "production", DOCSLURP_ENCODING_FACTS_ROUTING: "yes" })).toBe(false);
+    expect(readEncodingFactsRouting({ NODE_ENV: "test", DOCSLURP_ENCODING_FACTS_ROUTING: "nope" })).toBe(true);
   });
 
   it("accepts the documented values case-insensitively", () => {

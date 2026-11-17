@@ -26,6 +26,9 @@ export const TRUST_RULE = {
    * are prose and unit symbols) are not accept-text-only. The one math threshold: triage and planner derive theirs
    * from it. PROVISIONAL: chosen after seeing the TL1 development/calibration data (0.01 separated its math pages);
    * it has not been validated on independently collected pages and should be re-fit when more data exists.
+   * A later math-encoding evaluation used 0.02 as its cut; 0.01 is kept because it is the stricter gate (it withholds
+   * accept-text-only from more pages, never fewer), and Doppler's encoding facts (`mathBits`, DOCSLURP_ENCODING_FACTS_ROUTING)
+   * now name the math encodings that need a read directly, so this ratio only has to be a conservative backstop.
    */
   mathGlyphRatio: 0.01,
   /** Insets covering less than this are logos/decoration; no paid question (matches inset-triage minCoverage floor). */

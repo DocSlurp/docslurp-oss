@@ -9,6 +9,7 @@
 import { pageWordCount } from "@docslurp/shared";
 import type { CommandRunner } from "../tools/runner.js";
 import { pdfImagesListFields } from "../lib/page-yield-evidence.js";
+import { DOPPLER_ENCODING_COUNTS_MAX, DOPPLER_FLAG_WORD_MAX } from "../lib/doppler-encoding-facts.js";
 
 /**
  * `rejected`: vision ran but its output was rejected (degenerate, refusal, truncated) and the page
@@ -85,6 +86,13 @@ export interface PageFactUpsert {
   /** Routing facts (document_page_facts.text_layer / scan_class, migration 0141): closed enums; absent keeps the stored value. */
   textLayer?: PageTextLayer | null;
   scanClass?: PageScanClass | null;
+  /**
+   * Doppler's packed math and table encoding words (document_page_facts.math_bits / table_bits / encoding_counts, migration
+   * 0189; lib/doppler-encoding-facts.ts decodes them). Written together or not at all; absent keeps the stored values.
+   */
+  mathBits?: number | null;
+  tableBits?: number | null;
+  encodingCounts?: number | null;
 }
 
 export const PAGE_TEXT_LAYERS = ["none", "invisible", "visible", "mixed"] as const;
@@ -101,7 +109,7 @@ export function buildRoutingPageFacts(args: {
   documentId: string;
   runId: string;
   pageCount: number;
-  layoutFacts: ReadonlyMap<number, { textLayer?: string | null; scanClass?: string | null }> | undefined;
+  layoutFacts: ReadonlyMap<number, { textLayer?: string | null; scanClass?: string | null; mathBits?: number | null; tableBits?: number | null; encodingCounts?: number | null }> | undefined;
 }): PageFactUpsert[] {
   if (!args.layoutFacts) return [];
   const max = Math.min(Math.max(0, Math.trunc(args.pageCount)) || PAGE_FACTS_MAX_PAGES, PAGE_FACTS_MAX_PAGES);
@@ -110,8 +118,11 @@ export function buildRoutingPageFacts(args: {
     if (!Number.isSafeInteger(pageNumber) || pageNumber < 1 || pageNumber > max) continue;
     const textLayer = (PAGE_TEXT_LAYERS as readonly string[]).includes(facts.textLayer ?? "") ? facts.textLayer as PageTextLayer : undefined;
     const scanClass = (PAGE_SCAN_CLASSES as readonly string[]).includes(facts.scanClass ?? "") ? facts.scanClass as PageScanClass : undefined;
-    if (!textLayer && !scanClass) continue;
-    rows.push({ documentId: args.documentId, runId: args.runId, pageNumber, ...(textLayer ? { textLayer } : {}), ...(scanClass ? { scanClass } : {}) });
+    const word = (value: unknown, max: number) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
+    const words = word(facts.mathBits, DOPPLER_FLAG_WORD_MAX) && word(facts.tableBits, DOPPLER_FLAG_WORD_MAX) && word(facts.encodingCounts, DOPPLER_ENCODING_COUNTS_MAX)
+      ? { mathBits: facts.mathBits!, tableBits: facts.tableBits!, encodingCounts: facts.encodingCounts! } : undefined;
+    if (!textLayer && !scanClass && !words) continue;
+    rows.push({ documentId: args.documentId, runId: args.runId, pageNumber, ...(textLayer ? { textLayer } : {}), ...(scanClass ? { scanClass } : {}), ...(words ?? {}) });
   }
   return rows.sort((a, b) => a.pageNumber - b.pageNumber);
 }

@@ -41,6 +41,8 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
+import { encodingMathVisionFlags, TEXT_LAYER_TABLE_FLAGS, VISION_TABLE_FLAGS, type PageEncodingRoute } from "../lib/doppler-encoding-facts.js";
+import { readEncodingFactsRouting } from "../routing/flags.js";
 import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence, type PageTextLayerEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
 import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from "../lib/vision-routing-v2.js";
@@ -385,6 +387,11 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   /** Legacy vision routing v2 (lib/vision-routing-v2.ts). Off reproduces v1 routing. */
   routingV2?: boolean;
   /**
+   * Read Doppler's math and table encoding facts (`pageLayout` pages' `encodings`) in evidence routing. Omitted: the
+   * DOCSLURP_ENCODING_FACTS_ROUTING setting (routing/flags.ts readEncodingFactsRouting).
+   */
+  encodingRouting?: boolean;
+  /**
    * The parser VM's scans of the page texts' HTML tables (ClassifyRouteStage). Omitted, the tables are scanned
    * in-process, which the service profile refuses on the host.
    */
@@ -404,7 +411,7 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename, { routingV2 });
   const pageCount = Math.max(1, args.pageCount);
   const pages = routingV2
-    ? capTableLeakPages(buildEvidencePages(args, pageCount), pageCount)
+    ? capTableLeakPages(capEncodingReadPages(buildEvidencePages(args, pageCount), pageCount), pageCount)
     : buildLegacyPages(args, pageCount);
   const summary = summarizeAdaptiveRouting(pages);
   const specializedContentSummary = summarizeSpecializedContent(pages);
@@ -501,10 +508,16 @@ function buildEvidencePages(
   }
   const documentWithoutText = allPagesKnown && nativeWordTotal / pageCount < DRAWN_TEXT_MAX_WORDS_PER_PAGE;
   const drawnBytes = args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
+  const encodingRouting = args.encodingRouting ?? readEncodingFactsRouting();
   return texts.map((text, index) => {
     const pageNumber = index + 1;
     const layout = args.pageLayout?.get(pageNumber);
-    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
+    const encodings = encodingRouting ? layout?.encodings ?? null : null;
+    const classify = (withEncodings: PageEncodingRoute | null) =>
+      classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, encodings: withEncodings, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
+    const page = classify(encodings);
+    // The page as it is without Doppler's encodings: what a capped encoding read falls back to (capEncodingReadPages).
+    const pageWithoutEncodings = encodings ? classify(null) : page;
     const complexity = args.structuredComplexity?.get(pageNumber);
     const imageEvidence = evidence?.get(pageNumber);
     const layoutKnown = layout !== undefined && layout.images !== null;
@@ -533,7 +546,7 @@ function buildEvidencePages(
       ? pageTextYield(nativeText, complexity.textLength) : null;
     const yieldDeficit = yieldEvidence?.substantialDeficit === true && complexity !== undefined && !complexity.isGarbled &&
       Number.isFinite(complexity.textCoverage) && complexity.textCoverage >= 0.05 && complexity.textCoverage <= 1;
-    const ocrDecision: AdaptiveOcrDecision = yieldDeficit
+    const baseDecision: AdaptiveOcrDecision = yieldDeficit
       ? {
           authorized: true,
           confidence: 0.8,
@@ -543,6 +556,24 @@ function buildEvidencePages(
           ],
         }
       : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
+    // Doppler's encodings may add a read (never remove one): a read of their own, or a table-unreliable read on a table
+    // route only they added. Either is capped per document (capEncodingReadPages); a capped page is the page as it is
+    // without the encodings (its route, hint and decision), so it neither reads nor carries their vision-rescue hint.
+    const withEncoding = encodingReadDecision(baseDecision, encodings);
+    const finished = finishEvidencePage(page, withEncoding);
+    if (!encodings) return finished;
+    const declined = finishEvidencePage(pageWithoutEncodings, baseDecision);
+    if (finished.ocrDecision?.authorized !== true || declined.ocrDecision?.authorized === true) return finished;
+    return {
+      ...finished,
+      [ENCODING_UNCAPPED]: {
+        page: { ...declined, signals: [...declined.signals, ENCODING_READ_CAPPED_SIGNAL] },
+        noNativeText: (words ?? 0) === 0,
+        unreadable: encodings?.unreadableMathGlyphs ?? 0,
+      },
+    };
+
+    function finishEvidencePage(page: AdaptivePageRoutingEntry, ocrDecision: AdaptiveOcrDecision): AdaptivePageRoutingEntry {
     // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
     // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
     // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
@@ -567,16 +598,83 @@ function buildEvidencePages(
       ...page,
       // OCR text that keeps visible structure (numeric rows, field labels, equations) keeps its route, so the
       // ingest report counts the table; any other page a model reads is degraded.
-      route: STRUCTURED_TEXT_ROUTES.has(page.route) ? page.route : ("handwriting-or-degraded" as const),
+      // A read the encodings asked for keeps the page's own route (a code page stays a code page).
+      route: STRUCTURED_TEXT_ROUTES.has(page.route) || ocrDecision.signals.some((signal) => signal === ENCODING_MATH_READ_SIGNAL || signal === ENCODING_TABLE_READ_SIGNAL)
+        ? page.route : ("handwriting-or-degraded" as const),
       extractorHint: "vision-rescue" as const,
       confidence: Math.max(page.confidence, ocrDecision.confidence),
       signals: [...page.signals, ...ocrDecision.signals, ...(ocrDecision.signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || decision.kind === "garbled-text-layer" ? ["garbled-text"] : [])],
       ocrDecision,
     };
+    }
   });
 }
 
 const UNCAPPED = Symbol("table-leak-uncapped");
+const ENCODING_UNCAPPED = Symbol("encoding-read-uncapped");
+
+/**
+ * At most encodingReadPageCap(pageCount) pages of a document are read because Doppler's encodings alone asked for it
+ * (math only a read recovers, tables drawn as outlines): pages with no native text first, then the most unreadable math
+ * glyphs, then page order. The rest keep the decision they had without the encodings (signal `encoding-read-capped`);
+ * the capped pages are logged.
+ */
+function capEncodingReadPages(pages: AdaptivePageRoutingEntry[], pageCount: number): AdaptivePageRoutingEntry[] {
+  type Uncapped = { page: AdaptivePageRoutingEntry; noNativeText: boolean; unreadable: number };
+  type Capped = AdaptivePageRoutingEntry & { [ENCODING_UNCAPPED]?: Uncapped };
+  const reads = (pages as Capped[])
+    .map((page, index) => ({ index, uncapped: page[ENCODING_UNCAPPED] }))
+    .filter((entry): entry is { index: number; uncapped: Uncapped } => entry.uncapped !== undefined)
+    .sort((a, b) => Number(b.uncapped.noNativeText) - Number(a.uncapped.noNativeText) || b.uncapped.unreadable - a.uncapped.unreadable || a.index - b.index);
+  const cap = encodingReadPageCap(pageCount);
+  const dropped = new Set(reads.slice(cap).map(({ index }) => index));
+  if (dropped.size) {
+    const capped = [...dropped].sort((a, b) => a - b).map((index) => pages[index]!.pageNumber);
+    console.log(`[classify-route] encoding-read cap=${cap} pages=${reads.length} capped=${dropped.size} cappedPages=${capped.slice(0, 50).join(",")}${capped.length > 50 ? ",..." : ""}`);
+  }
+  return (pages as Capped[]).map((page, index) => {
+    const { [ENCODING_UNCAPPED]: uncapped, ...kept } = page;
+    return dropped.has(index) && uncapped ? uncapped.page : kept;
+  });
+}
+
+/** Pages a document may have read on Doppler's encodings alone: the table-leak cap's shape (TABLE_LEAK_PAGE_CAP). */
+export function encodingReadPageCap(pageCount: number): number {
+  return tableLeakPageCap(pageCount);
+}
+
+/** Signals of encoding routing (Doppler math and table encoding facts, DOCSLURP_ENCODING_FACTS_ROUTING). */
+export const ENCODING_READ_CAPPED_SIGNAL = "encoding-read-capped";
+export const ENCODING_MATH_GRID_SIGNAL = "encoding-math-grid";
+export const ENCODING_RASTER_TABLE_SIGNAL = "encoding-table-raster-candidate";
+export const ENCODING_MATH_READ_SIGNAL = "ocr-authorized:encoding-math-unreadable";
+export const ENCODING_TABLE_READ_SIGNAL = "ocr-authorized:encoding-table-outlines";
+
+/** `encoding-table:<flags>`: the table encodings that put a page on the table path. */
+function encodingTableSignal(encodings: PageEncodingRoute): string {
+  const flags = encodings.tableFlags.filter((flag) => TEXT_LAYER_TABLE_FLAGS.includes(flag) || VISION_TABLE_FLAGS.includes(flag));
+  return `encoding-table:${flags.join("+")}`;
+}
+
+/**
+ * The page-image decision with Doppler's encoding facts added (evidence routing; `encodings` only when encoding routing is
+ * on and the page's encodings are known). Facts can add a read, never remove one:
+ * - math only a read recovers (raster strips, glyph outlines, Type 3 bitmap fonts; unmapped math glyphs when the run did
+ *   not read math and the page has no TeX or MathML source): the page is read;
+ * - a table drawn as glyph outlines: the page is read;
+ * - a raster image shaped like a table is a candidate only (charts and logos match too): a signal, no read.
+ * Executors read whole pages here; Doppler's math regions (full level) are not yet a read scope.
+ */
+export function encodingReadDecision(decision: AdaptiveOcrDecision, encodings: PageEncodingRoute | null): AdaptiveOcrDecision {
+  if (!encodings || decision.authorized) return decision;
+  if (encodings.math === "vision") {
+    return { authorized: true, confidence: Math.max(decision.confidence, 0.75), signals: [...decision.signals, ENCODING_MATH_READ_SIGNAL, `encoding-math-read:${encodingMathVisionFlags(encodings).join("+")}`] };
+  }
+  if (encodings.table === "vision") {
+    return { authorized: true, confidence: Math.max(decision.confidence, 0.72), signals: [...decision.signals, ENCODING_TABLE_READ_SIGNAL, encodingTableSignal(encodings)] };
+  }
+  return decision;
+}
 
 /**
  * At most tableLeakPageCap(pageCount) pages of a document are read for leak signals alone (TABLE_LEAK_PAGE_CAP): the
@@ -600,13 +698,14 @@ function capTableLeakPages(pages: AdaptivePageRoutingEntry[], pageCount: number)
 export { DRAWN_CONTENT_SIGNAL };
 
 /** Why a page was sent to a vision/OCR read, from the signals of its routing decision. */
-export type PageReadReason = "raster" | "garbled" | "drawn" | "yield-deficit" | "other";
+export type PageReadReason = "raster" | "garbled" | "drawn" | "yield-deficit" | "encoding" | "other";
 
 export function pageReadReason(signals: readonly string[]): PageReadReason {
   if (signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || signals.includes(TEXT_LAYER_DISAGREES_SIGNAL) ||
       signals.includes("ocr-authorized:complexity-and-plausibility-failure")) return "garbled";
   if (signals.includes(DRAWN_CONTENT_SIGNAL)) return "drawn";
   if (signals.includes("ocr-authorized:structured-text-yield-deficit")) return "yield-deficit";
+  if (signals.includes(ENCODING_MATH_READ_SIGNAL) || signals.includes(ENCODING_TABLE_READ_SIGNAL)) return "encoding";
   if (signals.some((signal) => signal.startsWith("ocr-authorized:"))) return "raster";
   return "other";
 }
@@ -621,7 +720,7 @@ export function summarizeRoutingDecisions(
   pages: readonly AdaptivePageRoutingEntry[],
   args: { intakePageCount: number; measuredPages: number; imageEvidence?: ReadonlyMap<number, PageImageEvidence> },
 ) {
-  const pagesReadByReason: Record<PageReadReason, number> = { raster: 0, garbled: 0, drawn: 0, "yield-deficit": 0, other: 0 };
+  const pagesReadByReason: Record<PageReadReason, number> = { raster: 0, garbled: 0, drawn: 0, "yield-deficit": 0, encoding: 0, other: 0 };
   let pagesRead = 0;
   let blankPages = 0;
   for (const page of pages) {
@@ -1105,9 +1204,18 @@ function withoutHtmlTables(normalized: string, shift: number, tableScan: HtmlTab
 export function classifyAdaptivePage(
   pageNumber: number,
   text: string,
-  options: RoutingVersionOptions & { layout?: PageLayoutFacts | null; tableScans?: PageTableScans } = {},
+  options: RoutingVersionOptions & {
+    layout?: PageLayoutFacts | null;
+    tableScans?: PageTableScans;
+    /** Doppler's encoding route for the page, when encoding routing is on and the page's encodings are known. */
+    encodings?: PageEncodingRoute | null;
+  } = {},
 ): AdaptivePageRoutingEntry {
   const routingV2 = options.routingV2 === true;
+  // Doppler's encodings only ADD table routes and reads (council #467): they never settle an unknown grid as "no table" and
+  // never take a grid out of the table count. A ruled table of notation (T/F cells) can read as `math-grid` alone, and a
+  // table of prose cells has no table bit at all.
+  const encodings = options.encodings ?? null;
   const tableScan = tableScanOf(text, options.tableScans);
   const normalized = text.trim();
   const charCount = normalized.length;
@@ -1189,18 +1297,34 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (options.layout?.gridsUnknown === true) {
-    // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
-    // path, never a guessed "no table" a document could steer its own pages into.
+  } else if (encodings?.table === "vision") {
+    // A table drawn as glyph outlines (Doppler `outlined-text-grid`): no text layer holds it, whatever its size. The read
+    // itself is evidence routing's (encodingReadDecision, capped per document); the hint never asks for one on its own.
     route = "table-heavy";
     extractorHint = "layout-aware";
-    confidence = 0.6;
+    confidence = 0.72;
+    signals.push(encodingTableSignal(encodings));
+  } else if (options.layout?.gridsUnknown === true) {
+    // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
+    // path, never a guessed "no table" a document could steer its own pages into. Doppler's encodings never change that;
+    // a text-layer table bit only names the encoding (`encoding-table:*`).
+    route = "table-heavy";
+    extractorHint = "layout-aware";
+    confidence = encodings?.table === "text-layer" ? 0.74 : 0.6;
     signals.push("grids-unknown");
+    if (encodings?.table === "text-layer") signals.push(encodingTableSignal(encodings));
   } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
     signals.push("table-markers");
+  } else if (encodings?.table === "text-layer" && !(options.layout?.grids?.length)) {
+    // A table the text layer holds that no grid or Markdown table showed (rules only across, whitespace columns, shaded
+    // rows, tagged structure): the encodings add the table route.
+    route = "table-heavy";
+    extractorHint = "layout-aware";
+    confidence = 0.7;
+    signals.push(encodingTableSignal(encodings));
   } else if (!routingV2 && chartMarkers >= 2) {
     route = "chart-or-figure";
     extractorHint = "vision-rescue";
@@ -1213,6 +1337,13 @@ export function classifyAdaptivePage(
     signals.push("image-markers");
   } else {
     signals.push("dense-prose");
+  }
+  if (encodings) {
+    // Signals only: the route stays what the page's text and grids made it (an encoding never relabels a page, so it never
+    // reaches the complexity or playbook summaries).
+    if (encodings.mathGrid) signals.push(ENCODING_MATH_GRID_SIGNAL);
+    if (encodings.rasterTableCandidate) signals.push(ENCODING_RASTER_TABLE_SIGNAL);
+    if (encodings.math !== "none") signals.push(`encoding-math:${encodings.math}`);
   }
 
   if (digitCount > Math.max(12, charCount * 0.18)) {

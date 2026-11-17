@@ -1,3 +1,10 @@
+## Doppler math and table encoding facts in routing; math reading by default (2026-11-16)
+
+- The page-facts reader validates Doppler's `mathtables` family: the packed `mathBits`, `tableBits` and `encodingCounts` words (all or none, agreeing with their names and count nibbles) and the full level's readable fields. One bit table (`worker/src/lib/doppler-encoding-facts.ts`, positions pinned by a test) decodes them; `analysis-truncated` or a bit this build does not name leaves a page's encodings unknown, never "no table" or "no math".
+- The host asks providers for `mathtables` page facts (`SandboxedPdfJob.pageFacts`, batch `options.pageFacts`); each page's encoding route rides on its layout facts, and the words are stored in `document_page_facts` (migration 0189).
+- Evidence routing behind `DOCSLURP_ENCODING_FACTS_ROUTING` (on in development and test, off in production) and `DOCSLURP_DOPPLER_PAGE_FACTS=use`: encodings only add. A text-layer table bit adds a table route; outlined-text tables and math only a read recovers add a page read, capped per document; math grids and raster table shapes are signals. They never settle a grid as no table, drop a grid or relabel a page (council #467).
+- `DOCSLURP_DOPPLER_MATH_DEFAULT` (default on): projects read math (`pdftomarkdown --math`) unless they opt out with the vm-pdf option `math: false`; batches still need `DOCSLURP_FIRST_PASS_MATH=on`.
+
 ## Page extract records (2026-11-16)
 
 Every page gets durable, labelled provenance of how its text was produced (docs/extraction/page-extract-records.md).

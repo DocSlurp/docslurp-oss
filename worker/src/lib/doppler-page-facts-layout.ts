@@ -39,6 +39,7 @@ import { PAGE_RASTER_ROUTING, type PageLayoutImage } from "@docslurp/shared";
 
 import { dopplerPageExtent, dopplerPageFactsLowConfidence, type Box, type DopplerColorSpace, type DopplerImageFilter, type DopplerImageItem, type DopplerPageFacts, type DopplerPageFactsDocument, type DopplerVectorGrid, type DopplerScan, type DopplerTextLayer } from "./doppler-page-facts.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
+import { pageEncodingRoute } from "./doppler-encoding-facts.js";
 
 /** The walker's `pdfimages -list` encodings (worker/scripts/pdf_layout_facts.py LISTING_ENCODINGS). */
 const ENCODING: Record<DopplerImageFilter, string> = {
@@ -172,7 +173,7 @@ function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tab
 }
 
 /** One page's layout facts, or null when the page is unknown (failed). `repeated`: furniture image objects of the document. */
-export function pageLayoutFactsFromDopplerPage(page: DopplerPageFacts, repeated: Set<number> = new Set()): PageLayoutFacts | null {
+export function pageLayoutFactsFromDopplerPage(page: DopplerPageFacts, repeated: Set<number> = new Set(), options: { mathRead?: boolean } = {}): PageLayoutFacts | null {
   if (page.failed) return null;
   if (dopplerPageFactsLowConfidence(page)) {
     // Low confidence (`xref-repaired-earlier`): any fact of the page may come from the other body of an object the file
@@ -192,15 +193,17 @@ export function pageLayoutFactsFromDopplerPage(page: DopplerPageFacts, repeated:
   const side = (n: number) => n >= MIN_SIDE_PT && n <= MAX_SIDE_PT;
   if (g && side(g.widthPt) && side(g.heightPt)) { out.widthPt = g.widthPt; out.heightPt = g.heightPt; }
   if (page.text) { out.invisibleWords = page.text.invisibleWordCount; out.textLayer = page.text.textLayer; }
+  const encodings = pageEncodingRoute(page, options);
+  if (encodings.status === "known") out.encodings = encodings.route;
   return out;
 }
 
 /** Every known page's layout facts, keyed by page number. Pages that are unknown in the facts are absent here too. */
-export function pageLayoutFactsFromDopplerFacts(facts: Pick<DopplerPageFactsDocument, "pages">): Map<number, PageLayoutFacts> {
+export function pageLayoutFactsFromDopplerFacts(facts: Pick<DopplerPageFactsDocument, "pages">, options: { mathRead?: boolean } = {}): Map<number, PageLayoutFacts> {
   const repeated = repeatedDopplerImageObjects(facts.pages.values(), facts.pages.size);
   const out = new Map<number, PageLayoutFacts>();
   for (const [number, page] of [...facts.pages].sort(([a], [b]) => a - b)) {
-    const layout = pageLayoutFactsFromDopplerPage(page, repeated);
+    const layout = pageLayoutFactsFromDopplerPage(page, repeated, options);
     if (layout) out.set(number, layout);
   }
   return out;
@@ -237,10 +240,35 @@ export function settleUnknownGrids(layout: ReadonlyMap<number, PageLayoutFacts>,
   return { layout: out, fromFacts, unknown };
 }
 
-/** A page's routing facts as document_page_facts stores them (buildRoutingPageFacts): closed enums only. */
+/**
+ * Each layout page's encodings from the same job's page facts (pageEncodingRoute), replacing any it had: a page whose
+ * encodings are unknown in the facts (or that has no facts line) has none. Only `encodings` comes from the facts; nothing
+ * else of the layout changes. `mathRead`: the job read math (`--math`). Pure.
+ */
+export function withEncodingRoutes(layout: ReadonlyMap<number, PageLayoutFacts>, facts: Pick<DopplerPageFactsDocument, "pages">, options: { mathRead?: boolean } = {}):
+  { layout: Map<number, PageLayoutFacts>; known: number } {
+  const out = new Map<number, PageLayoutFacts>();
+  let known = 0;
+  for (const [number, page] of layout) {
+    const { encodings: _previous, ...rest } = page;
+    const entry = facts.pages.get(number);
+    const verdict = entry ? pageEncodingRoute(entry, options) : null;
+    if (verdict?.status === "known") { out.set(number, { ...rest, encodings: verdict.route }); known += 1; }
+    else out.set(number, rest);
+  }
+  return { layout: out, known };
+}
+
+/**
+ * A page's routing facts as document_page_facts stores them (buildRoutingPageFacts): closed enums and Doppler's packed
+ * encoding words (integers it validated; never text).
+ */
 export interface PageRoutingFacts {
   textLayer?: DopplerTextLayer | null;
   scanClass?: DopplerScan | null;
+  mathBits?: number | null;
+  tableBits?: number | null;
+  encodingCounts?: number | null;
 }
 
 /**
@@ -259,7 +287,10 @@ export function routingFactsWithDopplerFacts(
     const known = out.get(page) ?? {};
     const textLayer = known.textLayer ?? entry.text?.textLayer;
     const scanClass = entry.images?.scan;
-    if (textLayer || scanClass) out.set(page, { ...(textLayer ? { textLayer } : {}), ...(scanClass ? { scanClass } : {}) });
+    // The three words come together (the reader keeps all or none).
+    const words = entry.mathBits !== undefined && entry.tableBits !== undefined && entry.encodingCounts !== undefined
+      ? { mathBits: entry.mathBits, tableBits: entry.tableBits, encodingCounts: entry.encodingCounts } : {};
+    if (textLayer || scanClass || "mathBits" in words) out.set(page, { ...(textLayer ? { textLayer } : {}), ...(scanClass ? { scanClass } : {}), ...words });
   }
   return out.size > 0 ? out : undefined;
 }

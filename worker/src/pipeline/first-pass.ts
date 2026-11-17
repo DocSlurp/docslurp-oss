@@ -25,6 +25,7 @@ import {
 import { markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { pageFactsForResend } from "../extractors/sandboxed-pdf-page-facts.js";
+import { dopplerPageFactsRequest } from "../lib/doppler-page-facts.js";
 import { DopplerFigureRejection, disposeDopplerFigureSet, dopplerFigureUris, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
 import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
@@ -59,17 +60,41 @@ export function firstPassDrainConcurrency(env: NodeJS.ProcessEnv = process.env):
   return Number.isSafeInteger(value) ? Math.max(1, Math.min(16, value)) : 4;
 }
 
+export const DOPPLER_MATH_DEFAULT_ENV = "DOCSLURP_DOPPLER_MATH_DEFAULT";
+
 /**
- * The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has
- * them and the project did not opt out (`figures: false`).
+ * DOCSLURP_DOPPLER_MATH_DEFAULT (default on): whether a project that says nothing about math gets Doppler's math reader
+ * (`pdftomarkdown --math`). Doppler's table-safe `--math` scores the same as without it on every table class and reads
+ * typeset math as LaTeX, so it is the default; a project opts out with the vm-pdf option `math: false`. `off`, `0` or
+ * `false` restores opt-in (`math: true` only). Anything else keeps the default.
+ */
+const warnedMathDefault = new Set<string>();
+export function dopplerMathDefault(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env[DOPPLER_MATH_DEFAULT_ENV]?.trim().toLowerCase();
+  if (!value || value === "on" || value === "1" || value === "true") return true;
+  if (value === "off" || value === "0" || value === "false") return false;
+  if (!warnedMathDefault.has(value)) {
+    warnedMathDefault.add(value);
+    console.warn(`[first-pass] ignoring unknown ${DOPPLER_MATH_DEFAULT_ENV}=${JSON.stringify(value.slice(0, 32))}; using on (allowed: on, off)`);
+  }
+  return true;
+}
+
+/**
+ * The batch options a project's pipeline asks for: math by default (DOCSLURP_DOPPLER_MATH_DEFAULT) unless the project opts
+ * out (`math: false`), figures when the deploy has them and the project did not opt out (`figures: false`), and the page
+ * facts routing reads (`mathtables`) unless page facts are off.
  */
 export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.ProcessEnv = process.env): SandboxedPdfBatchJob["options"] {
   const vmOptions = (pipeline.documentExtraction?.options as Record<string, { math?: unknown } | undefined> | undefined)?.["vm-pdf"];
+  const projectWantsMath = dopplerMathDefault(env) ? vmOptions?.math !== false : vmOptions?.math === true;
+  const pageFacts = dopplerPageFactsRequest(env);
   return {
-    // Math reading stays behind its own deploy flag (default off) until the open council follow-up on the math reader is
-    // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
-    math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
+    // Math reading also stays behind its deploy flag (DOCSLURP_FIRST_PASS_MATH, default off) until the open council
+    // follow-up on the math reader is closed (TODO.md: bound its scan on hostile pages); no project setting turns it on.
+    math: projectWantsMath && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
     figures: figuresEnabled(pipeline as { figures?: boolean | null }, env) && !!sandboxedPdfProvider()?.figures,
+    ...(pageFacts ? { pageFacts } : {}),
   };
 }
 
@@ -100,6 +125,11 @@ export function firstPassDefersPageCount(state: Pick<WorkflowState, "firstPassRu
 interface CachedResult {
   markdownPath: string;
   result: SandboxedPdfResult;
+  /**
+   * The batch read math (`--math`, so pdftotext ran with `-glyphs`): served again, its page facts are accepted as a math
+   * run's (walker-parity fields and grids stripped, unmapped math glyphs the math reader's), never as a plain run's.
+   */
+  glyphs?: boolean;
   /** Figures are stored by the first pass itself after the batch; extract-markdown never waits for them. */
 }
 const results = new Map<string, CachedResult>();
@@ -120,6 +150,12 @@ export async function serveFirstPassResult(context: { runId?: string; documentId
   // (markFirstPassServedFigures), so extract-markdown neither stores figures nor writes the ledger for it.
   if (job.figures) markFirstPassServedFigures(job);
   return { ...cached.result, ...(job.figures ? { figures: { status: "failed" as const, reason: "figures-stored-by-first-pass" } } : {}) };
+}
+
+/** Whether the cached batch result for the document extract-markdown is running came from a math (`-glyphs`) run. */
+export function firstPassResultGlyphs(context: { runId?: string; documentId?: string } | undefined): boolean {
+  if (!context?.runId || !context.documentId) return false;
+  return results.get(key(context.runId, context.documentId))?.glyphs === true;
 }
 
 /** Whether extract-markdown should leave figures to the first pass for this document. */
@@ -393,7 +429,7 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       await recordBatchPageCount(deps.store, state, document, event.pages, event.processedPages);
       // Page facts go on as the validated canonical lines (never the guest's raw bytes), to be accepted again when served.
       const resentFacts = pageFactsForResend(batchFileJob(job, event.index)!);
-      const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) } };
+      const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) }, ...(job.options.math ? { glyphs: true } : {}) };
       if (persistResults) await persistBatchResult(deps.storage, state, document, cached);
       results.set(key(input.runId, file.documentId), cached);
       cachedKeys.push(key(input.runId, file.documentId));
@@ -576,7 +612,7 @@ export async function countFirstPassPages(
 async function persistBatchResult(storage: ArtifactStore, state: WorkflowState, document: Document, cached: CachedResult): Promise<void> {
   const resultKey = `${runArtifactRoot(state.run, document.userId)}/first-pass/${document.id}.json`;
   const markdown = await readFile(cached.markdownPath, "utf8");
-  await storage.putJson(resultKey, { version: 1, documentId: document.id, markdown, result: cached.result });
+  await storage.putJson(resultKey, { version: 1, documentId: document.id, markdown, result: cached.result, ...(cached.glyphs ? { glyphs: true } : {}) });
   state.artifactLedger.recordDocument(document.id, FIRST_PASS_RESULT_ARTIFACT, storage.uri(resultKey));
 }
 
@@ -600,14 +636,14 @@ export async function primeFirstPassResults(state: WorkflowState, storage: Pick<
       const uri = state.artifactLedger.readDocument(document.id, FIRST_PASS_RESULT_ARTIFACT);
       const resultKey = uri ? keyFromStorageUri(uri, storage.bucket) : null;
       if (!resultKey) continue;
-      const stored = await storage.getJson<{ documentId?: unknown; markdown?: unknown; result?: unknown }>(resultKey).catch(() => null);
+      const stored = await storage.getJson<{ documentId?: unknown; markdown?: unknown; result?: unknown; glyphs?: unknown }>(resultKey).catch(() => null);
       // Our own artifact, still checked: the result is validated again when it is served (acceptSandboxedPdfResult).
       if (!stored || stored.documentId !== document.id || typeof stored.markdown !== "string" || !stored.result || typeof stored.result !== "object") continue;
       const dir = await mkdtemp(path.join(tmpdir(), "docslurp-first-pass-served-"));
       dirs.push(dir);
       const markdownPath = path.join(dir, "output.md");
       await writeFile(markdownPath, stored.markdown, { mode: 0o600 });
-      results.set(key(state.run.id, document.id), { markdownPath, result: stored.result as SandboxedPdfResult });
+      results.set(key(state.run.id, document.id), { markdownPath, result: stored.result as SandboxedPdfResult, ...(stored.glyphs === true ? { glyphs: true } : {}) });
       primed.push(key(state.run.id, document.id));
     }
   } catch (error) {
