@@ -35,7 +35,7 @@ import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
-import { buildPageInputs, createProbeRunner, pageInputFromEvidence, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
+import { buildPageInputs, createProbeRunner, pageInputsFromEvidence, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
 import { HostPdfRefusedError, sandboxedPdfReasonForRun, type SandboxedPdfReason } from "../routing/host-pdf-guard.js";
 import { documentExtractorRegistry } from "../extractors/registry.js";
 import { createDopplerFactsProbeRunner, type FactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
@@ -286,7 +286,7 @@ export class RoutePagesStage implements Stage {
         if (mode === "active" && facts.pages.length !== hostPages) {
           return this.fallback(state, document, mode, probeSource, "facts-incomplete-for-active", sandboxed, `${facts.pages.length}/${hostPages}`);
         }
-        pages = await Promise.all(facts.pages.map((page) => pageInputFromEvidence(page, routing, "pdf", { pageCount: hostPages ?? facts.pages.length })));
+        pages = await pageInputsFromEvidence(facts.pages, routing, "pdf", { pageCount: hostPages ?? facts.pages.length });
         factsSummary = { locked: facts.locked, pagesKnown: facts.pagesKnown, pagesFailed: facts.pagesFailed, linesDropped: facts.linesDropped };
       } else {
         guard("native-probe");

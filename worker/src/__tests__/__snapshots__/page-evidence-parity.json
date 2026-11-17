@@ -2077,6 +2077,2398 @@
    }
   }
  },
+ "truncated grids, few rules": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "drawing limit, few rules": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "no vectors family, rules unknown, prose": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": true,
+      "reason": "text-layer-ok",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.95,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page"
+     ],
+     "triage": "all-pages-healthy-text-no-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 0,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "prose only, unreadable xref (20 pages)": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "2": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "3": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "4": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "5": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "6": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "7": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "8": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "9": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "10": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "11": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "12": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "13": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "14": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "15": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "16": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "17": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "18": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "19": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "20": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 19
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 19,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": []
+     },
+     "trust": {
+      "trusted": true,
+      "reason": "text-layer-ok",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.95,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "accept-text:page"
+     ],
+     "triage": "all-pages-healthy-text-no-images",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "2": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-2-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "3": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-3-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "4": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-4-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "5": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-5-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "6": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-6-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "7": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-7-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "8": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-8-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "9": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-9-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "10": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-10-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "11": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-11-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "12": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-12-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "13": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-13-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "14": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-14-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "15": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-15-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "16": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-16-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "17": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-17-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "18": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-18-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "19": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-19-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "20": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-20-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "2": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "3": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "4": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "5": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "6": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "7": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "8": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "9": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "10": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "11": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "12": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "13": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "14": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "15": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "16": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "17": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "18": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "19": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "20": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 20
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 20
+   }
+  }
+ },
  "low confidence (xref-repaired-earlier): table rules, a large image, math glyphs": {
   "use": {
    "layout": {
@@ -2147,7 +4539,11 @@
        792
       ],
       "features": [
-       "facts-low-confidence"
+       "acroform-filled",
+       "facts-low-confidence",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
       ]
      },
      "trust": {
@@ -2163,11 +4559,12 @@
       "blank": false
      },
      "roles": [
-      "table:page"
+      "table:page",
+      "ocr:page"
      ],
      "triage": "page-1-text-layer-unknown",
      "insetCandidates": 0,
-     "renderNeeded": false
+     "renderNeeded": true
     }
    },
    "pageImageEvidence": null,
@@ -2294,7 +4691,9 @@
        792
       ],
       "features": [
-       "facts-low-confidence"
+       "facts-low-confidence",
+       "rotated-page",
+       "scan-page"
       ]
      },
      "trust": {
@@ -2310,7 +4709,8 @@
       "blank": false
      },
      "roles": [
-      "table:page"
+      "table:page",
+      "ocr:page"
      ],
      "triage": "page-1-text-layer-unknown",
      "insetCandidates": 0,
@@ -2659,7 +5059,7 @@
       "blank": false
      },
      "roles": [
-      "extract-text:page"
+      "ocr:page"
      ],
      "triage": "page-1-text-layer-unknown",
      "insetCandidates": 0,
@@ -5361,7 +7761,11 @@
        792
       ],
       "features": [
-       "facts-low-confidence"
+       "acroform-filled",
+       "facts-low-confidence",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
       ]
      },
      "trust": {
@@ -5377,11 +7781,12 @@
       "blank": false
      },
      "roles": [
-      "table:page"
+      "table:page",
+      "ocr:page"
      ],
      "triage": "page-1-text-layer-unknown",
      "insetCandidates": 0,
-     "renderNeeded": false
+     "renderNeeded": true
     }
    },
    "pageImageEvidence": null,

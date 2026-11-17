@@ -24,7 +24,7 @@
  * Pure: no I/O, no clock.
  */
 import {
-  PAGE_RASTER_ROUTING, isTableHeavy, pageCostRoute, type PageCostRoute, type PageLayoutImage, type PageTable, type TextLayerStatus,
+  PAGE_RASTER_ROUTING, isTableHeavy, pageCostRoute, tableLeakPageCap, type PageCostRoute, type PageLayoutImage, type PageTable, type TextLayerStatus,
 } from "@docslurp/shared";
 
 import type { PageEncodingRoute } from "./doppler-encoding-facts.js";
@@ -191,7 +191,8 @@ export interface FontEvidence {
 
 export interface VectorEvidence {
   paths: number;
-  uncoveredRatio: number;
+  /** Vector cells with no word on them; null when the source did not measure it. */
+  uncoveredRatio: number | null;
   /** The source's rule score (min of the horizontal and vertical rule counts); null when unknown. */
   ruleScore: number | null;
 }
@@ -254,6 +255,16 @@ export function unknownPageEvidence(page: number, source: PageEvidenceSource, st
 export const LOW_CONFIDENCE_FEATURE = "facts-low-confidence";
 /** Marks a page the source failed on (the probe's own vocabulary). */
 export const FAILED_PAGE_FEATURE = "probe-error";
+/** Marks a page whose table path from unknown grids was capped for the document (routerTablePaths). */
+export const TABLE_PATH_CAPPED_FEATURE = "table-path-capped";
+
+/**
+ * The source could not read the page's text layer (it failed, or the page is low confidence): nothing says the layer holds
+ * the page's text, so it is never served by a text-layer-only target. Read from the router's unusual features.
+ */
+export function textLayerUnread(features: readonly string[] | undefined): boolean {
+  return (features ?? []).some((feature) => feature === LOW_CONFIDENCE_FEATURE || feature === FAILED_PAGE_FEATURE);
+}
 
 // ── Adapters: the layout walker and the native probe (Doppler's is lib/page-evidence-doppler.ts) ──
 
@@ -396,10 +407,27 @@ export function pageOnTablePath(evidence: PageEvidence): boolean {
  * the table path (unknown included, so a low-confidence or truncated page is never a "no table"). Never lowered: grids that
  * prove no table leave the rule score as it was.
  */
-export function routerTableRuleScore(evidence: PageEvidence): number {
+export function routerTableRuleScore(evidence: PageEvidence, options: { unknownTablePath?: boolean } = {}): number {
   const own = evidence.vectors?.ruleScore ?? 0;
   if (evidence.state === "locked" || evidence.state === "failed") return own;
-  return pageOnTablePath(evidence) ? Math.max(own, PAGE_EVIDENCE.fullTableRuleScore) : own;
+  const decision = pageTableDecision(evidence).decision;
+  if (decision === "unknown" && options.unknownTablePath === false) return own;
+  return decision !== "no-table" ? Math.max(own, PAGE_EVIDENCE.fullTableRuleScore) : own;
+}
+
+/**
+ * The pages of a document whose router table path comes only from unknown grids (their own rule score is below the
+ * router's table need), capped as classify-route caps table-leak reads (shared tableLeakPageCap: 3 + 5% of the pages, at
+ * most 20): the strongest table evidence first (own rule score, then page order). Capped pages keep their own score (their
+ * non-table role) and are flagged. A document of unreadable cross-reference tables would otherwise make every page a
+ * table read.
+ */
+export function routerTablePaths(pages: readonly PageEvidence[], pageCount: number, needScore: number): { capped: Set<number>; kept: Set<number> } {
+  const onlyUnknown = pages.filter((page) => page.state !== "failed" && page.state !== "locked" &&
+    pageTableDecision(page).decision === "unknown" && (page.vectors?.ruleScore ?? 0) < needScore)
+    .sort((a, b) => (b.vectors?.ruleScore ?? 0) - (a.vectors?.ruleScore ?? 0) || a.page - b.page);
+  const cap = tableLeakPageCap(pageCount);
+  return { kept: new Set(onlyUnknown.slice(0, cap).map((page) => page.page)), capped: new Set(onlyUnknown.slice(cap).map((page) => page.page)) };
 }
 
 /** Image boxes that may put a paid question about an inset (the router's inset gate): none unless the page is `known`. */

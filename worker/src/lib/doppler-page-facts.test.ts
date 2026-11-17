@@ -381,7 +381,7 @@ describe("documentEvidenceFromDoppler (golden)", () => {
       text: { words: 300, chars: 1800, invisibleWords: 300, layer: "invisible", coverage: 0.55, mathGlyphRatio: 0, invisibleTextRatio: 1, textOverImageRatio: 1, garbled: false, status: "ocr-layer" },
       unmappedGlyphRatio: 0, fonts: { count: 1, smallestPt: 9.5 },
       images: { count: 2, coverage: 1, largestCoverage: 1, fullPageImage: true, boxes: [{ bbox: [0, 0, 612, 792], coverage: 1 }, { bbox: [36, 36, 108, 72], coverage: 0.0103 }] },
-      vectors: { paths: 0, uncoveredRatio: 0, ruleScore: 0 }, grids: { state: "known", grids: [] }, tables: null,
+      vectors: { paths: 0, uncoveredRatio: null, ruleScore: 0 }, grids: { state: "known", grids: [] }, tables: null,
       features: ["rotated-page", "scan-page"], probeMs: 2.5,
     });
     for (const page of pages) {

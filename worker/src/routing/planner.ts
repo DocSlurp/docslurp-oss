@@ -21,10 +21,9 @@ import {
 } from "@docslurp/shared";
 import { assessAttention } from "./attention.js";
 import { readRoutingFlags } from "./flags.js";
-import { PAGE_EVIDENCE, mathGlyphNeed, textLayerUnreliable } from "../lib/page-evidence.js";
+import { PAGE_EVIDENCE, mathGlyphNeed, textLayerUnread, textLayerUnreliable } from "../lib/page-evidence.js";
 import { freeTrustVerdict } from "./trust.js";
 
-/** A page whose math glyph share is this many times the trust threshold needs math handling outright (was a bare 12). */
 import {
   applyBudgetGuard,
   estimateChunk,
@@ -70,6 +69,11 @@ export interface PageNeeds {
   source: "decision-model" | "features" | "heuristic";
   /** Calibrated decision probabilities handed to the estimator. */
   probs: CalibratedProbabilities;
+  /**
+   * The source could not read the text layer (page evidence textLayerUnread: a failed or low-confidence page): every
+   * text-layer-only role becomes a render (OCR) role, and a page-level table or math role gets an OCR role beside it.
+   */
+  renderRequired?: boolean;
 }
 
 export interface PlannerConfig {
@@ -209,6 +213,7 @@ export function needsFromFeatures(
     images,
     source: "features",
     probs: {},
+    ...(textLayerUnread(page.unusualFeatures) ? { renderRequired: true } : {}),
   };
 }
 
@@ -258,6 +263,7 @@ export function needsFromDecisions(
     images,
     source: "decision-model",
     probs,
+    ...(base.renderRequired ? { renderRequired: true } : {}),
   };
 }
 
@@ -341,6 +347,20 @@ export function rolesForPage(needs: PageNeeds, cfg: PlannerConfig): RoleRequest[
       floorBoost: img.kind === "handwriting" ? 0.05 : 0,
     });
   }
+  if (needs.renderRequired) return withRender(out);
+  return out;
+}
+
+/**
+ * A page whose text layer the source could not read (PageNeeds.renderRequired) is never served from its text layer alone:
+ * text-layer roles become OCR, and a page-level table or math role gets a page OCR role beside it.
+ */
+function withRender(roles: RoleRequest[]): RoleRequest[] {
+  const reason = "text layer unread (failed or low-confidence page facts): render required";
+  const out = roles.map((r) => r.scope.kind === "page" && (r.role === "accept-text" || r.role === "extract-text")
+    ? { ...r, role: "ocr" as const, reason: `${r.reason}; ${reason}` } : r);
+  const pageRole = (role: AssignmentRole) => out.some((r) => r.scope.kind === "page" && r.role === role);
+  if (!pageRole("ocr") && (pageRole("table") || pageRole("math"))) out.push({ role: "ocr", scope: { kind: "page" }, reason });
   return out;
 }
 

@@ -186,9 +186,12 @@ does, for a page with native text and a placed, scan-like, readable image with a
 
 The v2 router reads the same page evidence (`documentEvidenceFromDoppler`, then `pageInputFromEvidence` in
 `worker/src/routing/page-input.ts`), with provenance `doppler-facts` and no thumbnail. A low-confidence page
-(`xref-repaired-earlier`) reaches it as it reaches classify-route: only its size is known, so it offers no image to the
-inset gate and no rule, math or text counts, and its grids are unknown, which is the table path (a full table rule score),
-as in classify-route.
+(`xref-repaired-earlier`) reaches it as it reaches classify-route: only its size and features are known, so it offers no
+image to the inset gate and no rule, math or text counts, and its grids are unknown, which is the table path (a full table
+rule score), as in classify-route. Table paths that come only from unknown grids are capped per document as classify-route
+caps table-leak reads (`routerTablePaths`, 3 + 5% of the pages, at most 20); the rest keep their own role, flagged
+`table-path-capped`. A low-confidence or failed page's text layer is unread, so it is never served by a text-layer-only
+target: its text roles become OCR, and a table or math role gets an OCR role beside it.
 
 ## Math and table encodings
 

@@ -5,8 +5,8 @@
  *
  * Field by field (evidence ← facts; a family that was not computed is unknown):
  * - `state`: `failed` for a page Doppler could not display; `low-confidence` for `xref-repaired-earlier` (any fact of the
- *   page may come from the other body of an object the file holds twice): only its size is kept, and nothing on it steers
- *   routing (no images, words, grids, encodings or page features); `locked` for a locked document's single page.
+ *   page may come from the other body of an object the file holds twice): only its size and its features are kept (no
+ *   images, words, grids or encodings), and the `facts-low-confidence` mark keeps it off text-layer-only targets; `locked` for a locked document's single page.
  * - `size` ← `geometry.widthPt`/`heightPt` (the CropBox, rotation applied), within 1..14,400 pt; `rotation` ← `geometry`.
  * - `text` ← `text`: words (visible and invisible, as the walker's word boxes count them), characters, invisible words, the
  *   layer kind, coverage, math glyphs, invisible and over-image shares. `garbled` and `status` follow the probe's rules
@@ -181,7 +181,7 @@ function textEvidence(page: DopplerPageFacts, unmapped: number, imageCoverage: n
   }
   if (status === "ok" && unusual.includes("no-tounicode")) status = "suspect";
   return {
-    words, chars, invisibleWords: t.invisibleWordCount, layer: t.textLayer, coverage: t.textCoverage, mathGlyphRatio: t.mathGlyphRatio ?? 0,
+    words, chars, invisibleWords: t.invisibleWordCount, layer: t.textLayer, coverage: t.textCoverage, mathGlyphRatio: t.mathGlyphRatio ?? null,
     invisibleTextRatio: chars ? round(t.invisibleCharCount / chars, 4) : 0, textOverImageRatio: t.textOverImageRatio ?? null, garbled, status,
   };
 }
@@ -201,9 +201,10 @@ export function pageEvidenceFromDopplerPage(page: DopplerPageFacts, context: Dop
   const rotation = g ? g.rotation : null;
   if (page.failed) return unknownPageEvidence(page.page, "doppler-facts", "failed", { features: features(page, doc), probeMs: page.factsMs ?? 0 });
   if (dopplerPageFactsLowConfidence(page)) {
-    // Nothing read from the page steers routing; the document's own features (its doc line) still stand.
+    // No count, image or grid read from the page steers routing. Its features stay: they only ever add caution (an
+    // appearance-only form still needs a render), and the low-confidence mark keeps it off text-layer-only targets.
     return unknownPageEvidence(page.page, "doppler-facts", "low-confidence", {
-      size, rotation, features: [...new Set([...features(null, doc), LOW_CONFIDENCE_FEATURE])].sort(), probeMs: page.factsMs ?? 0,
+      size, rotation, features: [...new Set([...features(page, doc), LOW_CONFIDENCE_FEATURE])].sort(), probeMs: page.factsMs ?? 0,
     });
   }
   const t = page.text;
@@ -225,7 +226,7 @@ export function pageEvidenceFromDopplerPage(page: DopplerPageFacts, context: Dop
       boxes: (img.items ?? []).map((item) => ({ bbox: [...item.bbox] as [number, number, number, number], coverage: item.coverage })),
     } : null,
     placements: placements(page, context.repeated ?? new Set()),
-    vectors: vec ? { paths: vec.paths, uncoveredRatio: vec.uncoveredRatio ?? 0, ruleScore: Math.min(vec.hRules, vec.vRules) } : null,
+    vectors: vec ? { paths: vec.paths, uncoveredRatio: vec.uncoveredRatio ?? null, ruleScore: Math.min(vec.hRules, vec.vRules) } : null,
     ...gridEvidence(page),
     tables: null,
     encodings: encodings.status === "known" ? encodings.route : null,

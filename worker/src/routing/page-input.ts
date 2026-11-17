@@ -14,7 +14,11 @@ import {
   type TextLayerStatus,
 } from "@docslurp/shared";
 
-import { PAGE_EVIDENCE, pageEvidenceFromProbeRow, readImageBoxes, routerTableRuleScore, type NativeProbePage, type PageEvidence } from "../lib/page-evidence.js";
+import {
+  PAGE_EVIDENCE, TABLE_PATH_CAPPED_FEATURE, pageEvidenceFromProbeRow, readImageBoxes, routerTablePaths, routerTableRuleScore,
+  type NativeProbePage, type PageEvidence,
+} from "../lib/page-evidence.js";
+import { DEFAULT_PLANNER_CONFIG } from "./planner.js";
 import { loadProbeBinding } from "./probe/binding.js";
 import type { Recogniser } from "./probe/ocr-layer.js";
 import { NativeProbeOpenError, PROBE_OVERLAP_MAX_PAGES, looksEncrypted, lockedRow, probeNativePdf } from "./probe/probe.js";
@@ -173,7 +177,7 @@ export async function pageInputFromEvidence(
   evidence: PageEvidence,
   routing: AdaptiveRoutingArtifact | null | undefined,
   documentFormat = "pdf",
-  extra: { pageCount: number; thumbnail?: string },
+  extra: { pageCount: number; thumbnail?: string; tablePathCapped?: boolean },
 ): Promise<PageInput> {
   const locked = evidence.state === "locked";
   const pageNumber = locked ? 1 : evidence.page;
@@ -184,6 +188,7 @@ export async function pageInputFromEvidence(
     textLayerStatus: t.status, garbled: t.garbled ?? false, unmappedGlyphRatio: evidence.unmappedGlyphRatio ?? 0,
   };
   const entry = routing?.pages.find((page) => page.pageNumber === pageNumber);
+  const features = extra.tablePathCapped ? [...new Set([...evidence.features, TABLE_PATH_CAPPED_FEATURE])].sort() : evidence.features;
   const size = evidence.size ?? { widthPt: PAGE_EVIDENCE.defaultWidthPt, heightPt: PAGE_EVIDENCE.defaultHeightPt };
   const input: PageInput = {
     schemaVersion: PAGE_INPUT_SCHEMA_VERSION,
@@ -198,8 +203,9 @@ export async function pageInputFromEvidence(
         textCoverage: t.coverage ?? 0,
         fontCount: evidence.fonts?.count ?? 0,
         unmappedGlyphRatio: native.unmappedGlyphRatio,
+        // Unmeasured math glyphs read as none (the math gate cannot fire); the encodings name math that needs a read.
         mathGlyphRatio: t.mathGlyphRatio ?? 0,
-        tableRuleScore: routerTableRuleScore(evidence),
+        tableRuleScore: routerTableRuleScore(evidence, { unknownTablePath: !extra.tablePathCapped }),
         garbled: native.garbled,
         plausibility: nativePlausibility(native),
       },
@@ -208,6 +214,7 @@ export async function pageInputFromEvidence(
         largestImageCoverage: img?.largestCoverage ?? 0,
         fullPageImage: img?.fullPageImage ?? false,
         vectorDrawingCount: vec?.paths ?? 0,
+        // The router's features are numbers: an unmeasured share reads as none, as the probe's failed row does.
         uncoveredVectorRatio: vec?.uncoveredRatio ?? 0,
         smallestFontPt: evidence.fonts?.smallestPt ?? null,
       },
@@ -231,7 +238,7 @@ export async function pageInputFromEvidence(
       ...(t.textOverImageRatio !== null ? { textOverImageRatio: t.textOverImageRatio } : {}),
       ...(t.ocrLayerAgreement !== undefined ? { ocrLayerAgreement: t.ocrLayerAgreement, ocrLayerMs: t.ocrLayerMs } : {}),
     },
-    ...(evidence.features.length > 0 ? { unusualFeatures: evidence.features } : {}),
+    ...(features.length > 0 ? { unusualFeatures: features } : {}),
     images: readImageBoxes(evidence).map((image, index) => ({
       index,
       bbox: {
@@ -245,6 +252,21 @@ export async function pageInputFromEvidence(
     thumbnail: await thumbnailInfo(extra.thumbnail),
   };
   return pageInputSchema.parse(input);
+}
+
+/**
+ * A document's page inputs from its page evidence, with the table paths that come only from unknown grids capped per
+ * document (page-evidence.ts routerTablePaths, at the planner's table need).
+ */
+export async function pageInputsFromEvidence(
+  pages: readonly PageEvidence[],
+  routing: AdaptiveRoutingArtifact | null | undefined,
+  documentFormat: string,
+  extra: { pageCount: number },
+): Promise<PageInput[]> {
+  const { capped } = routerTablePaths(pages, extra.pageCount, DEFAULT_PLANNER_CONFIG.needThreshold * PAGE_EVIDENCE.fullTableRuleScore);
+  if (capped.size > 0) console.log(`[page-input] unknown-grid table paths capped=${capped.size} pages=${[...capped].slice(0, 50).join(",")}`);
+  return Promise.all(pages.map((page) => pageInputFromEvidence(page, routing, documentFormat, { pageCount: extra.pageCount, tablePathCapped: capped.has(page.page) })));
 }
 
 /** A native probe row as the router's page input (through its page evidence). */

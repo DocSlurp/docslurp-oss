@@ -22,7 +22,7 @@ import { pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from 
 import { routingFactsWithDopplerFacts } from "../lib/page-evidence-doppler.js";
 import { candidatesFromPageFacts } from "../chart-export/facts-candidates.js";
 import { assessAttention } from "../routing/attention.js";
-import { pageInputFromEvidence, pageInputFromProbeRow, type ProbeRow } from "../routing/page-input.js";
+import { pageInputFromProbeRow, pageInputsFromEvidence, type ProbeRow } from "../routing/page-input.js";
 import { DEFAULT_PLANNER_CONFIG, needsFromFeatures, rolesForPage } from "../routing/planner.js";
 import { createDopplerFactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
 import { shouldTriage } from "../routing/triage.js";
@@ -84,6 +84,18 @@ const CASES: FactsCase[] = [
   { name: "truncated grids", pages: [page(1, { vectors: { grids: [], gridsTruncated: true } })] },
   { name: "drawing limit", pages: [page(1, { vectors: { grids: [], gridsTruncated: false, limitHit: true } })] },
   { name: "no vectors family", pages: [page(1, { extra: { vectors: undefined } })] },
+  { name: "truncated grids, few rules", pages: [page(1, { vectors: { hRules: 1, vRules: 1, grids: [], gridsTruncated: true } })] },
+  { name: "drawing limit, few rules", pages: [page(1, { vectors: { hRules: 1, vRules: 2, grids: [], gridsTruncated: false, limitHit: true } })] },
+  { name: "no vectors family, rules unknown, prose", pages: [page(1, { text: { mathGlyphRatio: 0 }, images: { imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, items: [] }, extra: { vectors: undefined } })] },
+  {
+    // A prose document whose cross-reference table the reader had to rebuild: every page low confidence but the first
+    // (xref-repaired). The router's table paths from unknown grids are capped per document (tableLeakPageCap).
+    name: "prose only, unreadable xref (20 pages)",
+    pages: Array.from({ length: 20 }, (_, i) => page(i + 1, {
+      vectors: { hRules: 0, vRules: 0 }, text: { mathGlyphRatio: 0 }, images: { imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, items: [] },
+      extra: { parseWarnings: i === 0 ? ["internal-error", "xref-repaired"] : ["xref-repaired-earlier"], unusualFeatures: [] },
+    })),
+  },
   {
     name: "low confidence (xref-repaired-earlier): table rules, a large image, math glyphs",
     pages: [page(1, {
@@ -211,7 +223,7 @@ async function routerFromFacts(jsonlText: string, pageCount: number) {
   const result = await runner({ documentId: "doc", pageCount });
   if (result.status !== "ok") return { unavailable: result.reason };
   // The router's own path (route-pages): page evidence from the facts, then its page input.
-  const inputs = await Promise.all(result.pages.map((page) => pageInputFromEvidence(page, null, "pdf", { pageCount })));
+  const inputs = await pageInputsFromEvidence(result.pages, null, "pdf", { pageCount });
   return Object.fromEntries(inputs.map((input) => [input.features.pageNumber, routerDecisions(input)]));
 }
 

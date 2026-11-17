@@ -11,10 +11,11 @@ import { parseDopplerPageFacts, withoutWalkerParityFacts, type DopplerPageFactsD
 import {
   PAGE_EVIDENCE, furnitureFloor, isFurnitureShare, mathGlyphNeed, mathGlyphsNeedTriage, mathGlyphsWithholdTrust, pageCostRouteOf,
   pageEvidenceFromLayout, pageEvidenceFromProbeRow, pageLayoutFactsFromEvidence, pageSize, pageTableDecision, readImageBoxes,
-  routerTableRuleScore, settleGrids, textLayerGarbled, textLayerUnreliable, type PageEvidence,
+  routerTablePaths, routerTableRuleScore, settleGrids, textLayerGarbled, textLayerUnreliable, type PageEvidence,
 } from "./page-evidence.js";
 import { documentEvidenceFromDoppler, settleUnknownGrids } from "./page-evidence-doppler.js";
-import { pageInputFromEvidence } from "../routing/page-input.js";
+import { pageInputFromEvidence, pageInputsFromEvidence } from "../routing/page-input.js";
+import { assessAttention } from "../routing/attention.js";
 import { DEFAULT_PLANNER_CONFIG, needsFromFeatures, rolesForPage } from "../routing/planner.js";
 import { freeTrustVerdict, insetGateCandidates } from "../routing/trust.js";
 import { classifyAdaptivePage } from "../stages/classify-route.js";
@@ -86,8 +87,8 @@ describe("page evidence: one fixture page per edge case", () => {
   it("low confidence keeps only the page size, in every form a consumer reads", () => {
     const low = EDGE["low confidence (xref-repaired-earlier)"]!.evidence();
     expect(low.size).toEqual({ widthPt: 612, heightPt: 792 });
-    // Page features are read from the page too: only the document's stand, with the low-confidence mark.
-    expect(low.features).toEqual(["facts-low-confidence"]);
+    // Its features stay (they only add caution: an appearance-only form still needs a render), with the low-confidence mark.
+    expect(low.features).toEqual(["acroform-filled", "facts-low-confidence", "link-internal", "link-uri", "ocg-visible"]);
     expect(pageLayoutFactsFromEvidence(low)).toEqual({ images: null, tables: null, words: null, grids: null, tableCoverage: null, widthPt: 612, heightPt: 792 });
     expect(routerTableRuleScore(low)).toBe(PAGE_EVIDENCE.fullTableRuleScore);
   });
@@ -251,10 +252,39 @@ describe("cross-path parity: classify-route and the v2 router read a page the sa
     expect(input.features.raster.imageCoverage).toBe(0);
     expect(input.features.native).toMatchObject({ mathGlyphRatio: 0, wordCount: 0, tableRuleScore: PAGE_EVIDENCE.fullTableRuleScore });
     expect(input.textFacts.textLayerStatus).toBe("unknown");
-    expect(input.unusualFeatures).toEqual(["facts-low-confidence"]);
-    // The table path, as classify-route; no math role, no image role, no inset question from untrusted facts.
-    expect(router.roles).toEqual(["table"]);
+    expect(input.unusualFeatures).toContain("facts-low-confidence");
+    // The table path, as classify-route, with a render (OCR) role beside it; no math or image role, no inset question.
+    expect(router.roles).toEqual(["table", "ocr"]);
     expect(router.trust).toMatchObject({ trusted: false, mathGated: false });
+  });
+
+  it("a page whose text layer is unread is never text-layer-only: a low-confidence scan and a failed page get an OCR role", async () => {
+    for (const line of [scanPage(1, { parseWarnings: ["xref-repaired-earlier"] }), { schema: "doppler-page-facts/1", type: "page", page: 1, error: "failed", parseWarnings: [], unusualFeatures: [] }]) {
+      const router = await routerRoute(documentEvidenceFromDoppler(parse([line]))[0]!);
+      expect(router.roles).toContain("ocr");
+      expect(router.roles.filter((role) => role === "accept-text" || role === "extract-text")).toEqual([]);
+    }
+    // An appearance-only form on a low-confidence page still needs a render (its features are kept).
+    const form = await pageInputFromEvidence(documentEvidenceFromDoppler(parse([page(1, { extra: { parseWarnings: ["xref-repaired-earlier"] } })]))[0]!, null, "pdf", { pageCount: 1 });
+    expect(assessAttention(form).renderNeeded).toBe(true);
+  });
+
+  it("table paths from unknown grids alone are capped per document (classify-route's table-leak cap), strongest evidence first", async () => {
+    const lines = Array.from({ length: 20 }, (_, i) => page(i + 1, {
+      // Page 8 is known, with truncated grids and one rule each way: the strongest unknown-grid evidence of the document.
+      vectors: i === 7 ? { hRules: 1, vRules: 1, grids: [], gridsTruncated: true } : { hRules: 0, vRules: 0 }, text: { mathGlyphRatio: 0 },
+      images: { imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, items: [] },
+      extra: { parseWarnings: i === 7 ? [] : ["xref-repaired-earlier"], unusualFeatures: [] },
+    }));
+    const pages = documentEvidenceFromDoppler(parse(lines));
+    expect(routerTablePaths(pages, 20, 2)).toMatchObject({ kept: new Set([8, 1, 2, 3]) });
+    const inputs = await pageInputsFromEvidence(pages, null, "pdf", { pageCount: 20 });
+    const tables = inputs.filter((input) => rolesForPage(needsFromFeatures(input), DEFAULT_PLANNER_CONFIG).some((role) => role.role === "table"));
+    expect(tables.map((input) => input.features.pageNumber)).toEqual([1, 2, 3, 8]);
+    const capped = inputs.filter((input) => input.unusualFeatures?.includes("table-path-capped"));
+    expect(capped).toHaveLength(16);
+    // Capped pages keep their own (non-table) role, which for an unread layer is still a render.
+    for (const input of capped) expect(rolesForPage(needsFromFeatures(input), DEFAULT_PLANNER_CONFIG).map((role) => role.role)).toEqual(["ocr"]);
   });
 
   it("a native probe row reaches the router through the same evidence, unchanged (no grids: its own rule score)", async () => {
