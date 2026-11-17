@@ -117,9 +117,9 @@ fn c_a_font_whose_class_cannot_be_read_makes_the_page_partial() {
     let mut document = Document::with_version("1.7");
     let mut fonts = Dictionary::new();
     let mut content = String::new();
-    // Fonts that need their program read to be classified; past the cache only names are read.
-    let program = document.add_object(Stream::new(Dictionary::new(), b"\x00\x01\x00\x00\x00\x00".to_vec()));
+    // Fonts that need their own program read to be classified; past the cache only names are read.
     for i in 0..4_200 {
+        let program = document.add_object(Stream::new(Dictionary::new(), b"\x00\x01\x00\x00\x00\x00".to_vec()));
         fonts.set(format!("F{i}"), dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Plain", "FontDescriptor" => dictionary! { "FontFile2" => program } });
         content.push_str(&format!("BT /F{i} 1 Tf 72 700 Td (x) Tj ET "));
     }
@@ -296,4 +296,100 @@ fn l_cut_or_corrupt_streams_are_unknown_not_absent() {
     let file = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, empty_blocks(14_000)));
     let bytes = build(&mut document, dictionary! { "F1" => helvetica() }, Dictionary::new(), b"BT /F1 10 Tf 72 700 Td (x) Tj ET", 1, dictionary! { "AF" => vec![Object::Reference(file)] });
     assert_eq!(timed("cut associated file", &bytes).pdf.unwrap().tagged_truncated, Some(true));
+}
+
+/// A document of `pages` pages each showing 130 TrueType fonts that share one 64 KiB empty-block program.
+fn shared_program_fonts(pages: usize) -> Vec<u8> {
+    let mut document = Document::with_version("1.7");
+    let program = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, empty_blocks(13_200)));
+    let mut fonts = Dictionary::new();
+    let mut content = String::from("BT ");
+    for i in 0..130 {
+        fonts.set(format!("B{i}"), dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => format!("Body{i}").as_str(),
+            "FontDescriptor" => dictionary! { "Type" => "FontDescriptor", "FontFile2" => program } });
+        content.push_str(&format!("/B{i} 10 Tf 72 700 Td (a) Tj "));
+    }
+    content.push_str("ET");
+    build(&mut document, fonts, Dictionary::new(), content.as_bytes(), pages, Dictionary::new())
+}
+
+#[test]
+fn m_detail_and_range_sessions_read_no_font_programs() {
+    use docslurp_estimate::probe::{DetailOptions, DetailSession, RangeRequest, RangeSession};
+    let bytes = shared_program_fonts(300);
+    let started = Instant::now();
+    let (mut session, _) = DetailSession::open(&bytes, DetailOptions::default()).unwrap();
+    while session.next().is_some() {}
+    assert!(started.elapsed() < LIMIT * 3, "detail session: {:?}", started.elapsed());
+
+    let started = Instant::now();
+    let mut session = RangeSession::new(bytes.len() as u64, DetailOptions::default(), 1).unwrap();
+    loop {
+        let step = session.step().unwrap();
+        match step["kind"].as_str().unwrap() {
+            "read" => {
+                let (offset, length) = (step["offset"].as_u64().unwrap() as usize, step["length"].as_u64().unwrap() as usize);
+                let request: RangeRequest = serde_json::from_value(serde_json::json!({ "requestId": step["requestId"], "offset": offset, "length": length })).unwrap();
+                session.supply(request, &bytes[offset..offset + length]).unwrap();
+            }
+            "done" => break,
+            _ => {}
+        }
+    }
+    assert!(started.elapsed() < LIMIT * 3, "range session: {:?}", started.elapsed());
+}
+
+#[test]
+fn n_a_shared_font_program_is_read_once_and_leaves_the_budget_for_other_pages() {
+    // Page 1: 130 fonts sharing an unreadable program (partial). Pages 2-24: a font known only by its MATH table.
+    let mut document = Document::with_version("1.7");
+    let bomb = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, empty_blocks(13_200)));
+    let mut head = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    head.extend_from_slice(b"MATH\0\0\0\0\0\0\0\0\0\0\0\0");
+    let math = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, zlib(&head)));
+    let font = |name: &str, program| dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => name, "FontDescriptor" => dictionary! { "FontFile2" => program } };
+    let pages_id = document.new_object_id();
+    let mut kids = Vec::new();
+    for page in 0..24 {
+        let (fonts, content) = if page == 0 {
+            let mut fonts = Dictionary::new();
+            let mut content = String::from("BT ");
+            for i in 0..130 { fonts.set(format!("B{i}"), font(&format!("Body{i}"), bomb)); content.push_str(&format!("/B{i} 10 Tf 72 700 Td (a) Tj ")); }
+            (fonts, content + "ET")
+        } else {
+            (dictionary! { "M" => font("Plain", math) }, "BT /M 10 Tf 72 700 Td (x) Tj ET".to_string())
+        };
+        let content = document.add_object(Stream::new(Dictionary::new(), content.into_bytes()));
+        kids.push(Object::Reference(document.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content, "Resources" => dictionary! { "Font" => fonts } })));
+    }
+    document.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 24 }));
+    let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    let result = timed("shared unreadable program", &bytes);
+    let encodings = result.pdf.unwrap().page_encodings.unwrap();
+    assert!(encodings.contains(&(1, 23)), "{encodings:?}");
+}
+
+#[test]
+fn o_predictors_external_data_and_q_overflow_are_unknown() {
+    let mut head = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    head.extend_from_slice(b"MATH\0\0\0\0\0\0\0\0\0\0\0\0");
+    for extra in [dictionary! { "DecodeParms" => dictionary! { "Predictor" => 12, "Columns" => 4 } }, dictionary! { "F" => Object::string_literal("font.bin") }] {
+        let mut document = Document::with_version("1.7");
+        let mut dict = dictionary! { "Filter" => "FlateDecode" };
+        for (key, value) in extra.iter() { dict.set(key.clone(), value.clone()); }
+        let program = document.add_object(Stream::new(dict, zlib(&head)));
+        let font = dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Plain", "FontDescriptor" => dictionary! { "FontFile2" => program } };
+        let bytes = build(&mut document, dictionary! { "F1" => font }, Dictionary::new(), b"BT /F1 10 Tf 72 700 Td (x) Tj ET", 1, Dictionary::new());
+        assert_eq!(mask(&timed("predictor or external data", &bytes)) & (PARTIAL | 1), PARTIAL);
+    }
+    // 300 saves (past the 256 the walker keeps): the font in force after the restores is unknown.
+    let mut document = Document::with_version("1.7");
+    let content = format!("{} BT /M 10 Tf 72 700 Td (x) Tj ET {}", "q ".repeat(300), "Q ".repeat(300));
+    let cmmi = dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "CMMI10" };
+    let bytes = build(&mut document, dictionary! { "M" => cmmi }, Dictionary::new(), content.as_bytes(), 1, Dictionary::new());
+    assert_eq!(mask(&timed("q overflow", &bytes)) & PARTIAL, PARTIAL);
 }

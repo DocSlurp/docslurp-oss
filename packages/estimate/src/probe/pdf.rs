@@ -456,6 +456,8 @@ struct FormCache {
     /// Bytes the encoding facts may read (font program and glyph procedure heads, associated files, text prefixes),
     /// apart from the content budget so they never cut the pages sampled; set on first use.
     encoding_left: Option<usize>,
+    /// Font program and glyph procedure answers per stream object (`encoding::stream_facts`).
+    streams: encoding::StreamMemo,
 }
 
 const MAX_CACHED_FONTS: usize = 4_096;
@@ -1383,9 +1385,12 @@ impl<'a> Context<'a, '_> {
         }
         let unmapped = unmapped_font(self.document, font);
         let cacheable = self.forms.fonts.len() < MAX_CACHED_FONTS;
-        let mut budget = encoding::Budget::new(if cacheable { self.forms.encoding_budget() } else { 0 });
+        // Detail and range sessions (strict validation) do not report encoding facts: they classify by name only and
+        // read no font program or glyph procedure.
+        let reads = cacheable && !self.strict_validation;
+        let mut budget = encoding::Budget::new(if reads { self.forms.encoding_budget() } else { 0 });
         let left = budget.left;
-        let class = encoding::font_class(self.document, font, unmapped, &mut budget);
+        let class = encoding::font_class(self.document, font, unmapped, &mut budget, &mut self.forms.streams);
         if cacheable {
             self.forms.encoding_spend(left - budget.left);
             self.forms.fonts.insert(key, usize::from(class));
@@ -1435,7 +1440,12 @@ impl<'a> Context<'a, '_> {
             let operands = &operation.operands;
             match operation.operator.as_str() {
                 "q" if stack.len() < 256 => stack.push((ctm, line_width, stats.encoding.font)),
-                "Q" => (ctm, line_width, stats.encoding.font) = stack.pop().unwrap_or((base, line_width, stats.encoding.font)),
+                // A save past the stack, or a restore with nothing saved, leaves the font in force unknown.
+                "q" => stats.encoding.unknown = true,
+                "Q" => match stack.pop() {
+                    Some(saved) => (ctm, line_width, stats.encoding.font) = saved,
+                    None => { (ctm, line_width) = (base, line_width); stats.encoding.unknown = true; }
+                },
                 "w" => line_width = operands.first().and_then(number).filter(|width| width.is_finite()).unwrap_or(line_width),
                 "cm" => {
                     if let Some(matrix) = matrix_from(operands) {

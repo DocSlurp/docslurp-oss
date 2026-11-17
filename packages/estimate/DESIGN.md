@@ -41,7 +41,8 @@ They describe pages, not prices, and the worker reads the same thresholds (`prof
   never emitted. The structure-tree walk is bounded (elements, depth, each object once). Every stream the facts read
   (font programs, Type 3 glyph procedures, associated files) is read from a capped compressed prefix, fed to the decoder
   in small pieces, and charged (input consumed plus output) to the encoding facts' own 8 MiB budget, so it never cuts
-  the pages sampled; fonts are classified once per font dictionary, and text strings by a bounded prefix. What
+  the pages sampled; each stream object is read once per document, and detail and range sessions (which do not
+  report these facts) read none; fonts are classified once per font dictionary, and text strings by a bounded prefix. What
   could not be decided marks the page `partial` or the tree `taggedTruncated`, never "absent".
 
 ## Per-page stat stream (separate output)

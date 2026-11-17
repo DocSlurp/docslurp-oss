@@ -463,7 +463,7 @@ fn rows_of(words: &[&[f64; 4]]) -> Vec<(f64, bool)> {
 /// A font's class: math by name or by an OpenType MATH table, a symbol font, a Type 3 font that paints images, and no
 /// Unicode mapping (`unmapped`, decided by the caller's rule). Stream reads are charged to `budget`; one it refuses, an
 /// unsupported filter or glyph procedures past the cap make the class `FONT_UNKNOWN` rather than "not math".
-pub fn font_class(document: &Document, font: &Dictionary, unmapped: bool, budget: &mut Budget) -> u8 {
+pub fn font_class(document: &Document, font: &Dictionary, unmapped: bool, budget: &mut Budget, memo: &mut StreamMemo) -> u8 {
     let name_of = |dict: &Dictionary, key: &[u8]| match dict.get(key).ok().and_then(|o| document.dereference(o).ok()).map(|(_, v)| v) {
         Some(Object::Name(value)) => Some(value.clone()),
         _ => None,
@@ -482,18 +482,15 @@ pub fn font_class(document: &Document, font: &Dictionary, unmapped: bool, budget
     class |= name_class(base).unwrap_or(0);
     if name_of(font, b"Subtype").is_some_and(|subtype| subtype == b"Type3") {
         // Type 3 glyphs are procedures: a bitmap font paints images.
-        return class | match type3_paints_images(document, font, budget) { Some(true) => FONT_TYPE3_BITMAP, Some(false) => 0, None => FONT_UNKNOWN };
+        return class | match type3_paints_images(document, font, budget, memo) { Some(true) => FONT_TYPE3_BITMAP, Some(false) => 0, None => FONT_UNKNOWN };
     }
     if class & (FONT_MATH | FONT_SYMBOL) != 0 { return class; }
     // An OpenType or TrueType program with a MATH table.
     if let Some(descriptor) = descriptor {
         for key in [&b"FontFile2"[..], b"FontFile3"] {
-            if let Some((_, Object::Stream(program))) = descriptor.get(key).ok().and_then(|o| document.dereference(o).ok()) {
-                match stream_head(program, FONT_HEAD_BYTES, budget) {
-                    Some(head) if has_math_table(&head) => return class | FONT_MATH,
-                    Some(_) => {}
-                    None => class |= FONT_UNKNOWN,
-                }
+            if let Some((id, Object::Stream(program))) = descriptor.get(key).ok().and_then(|o| document.dereference(o).ok()) {
+                let facts = stream_facts(id, program, FONT_HEAD_BYTES, budget, memo);
+                if facts & HEAD_UNKNOWN != 0 { class |= FONT_UNKNOWN; } else if facts & HEAD_MATH != 0 { return class | FONT_MATH; }
             }
         }
     }
@@ -531,7 +528,7 @@ pub fn has_math_table(head: &[u8]) -> bool {
 /// Whether a Type 3 font's glyph procedures paint images: an inline image, or an image XObject from the font's own
 /// resources (a procedure drawing a form is vector drawing). None when a procedure could not be read or there were more
 /// than `TYPE3_PROCS_READ` and none painted an image.
-fn type3_paints_images<'a>(document: &'a Document, font: &'a Dictionary, budget: &mut Budget) -> Option<bool> {
+fn type3_paints_images<'a>(document: &'a Document, font: &'a Dictionary, budget: &mut Budget, memo: &mut StreamMemo) -> Option<bool> {
     // Borrowed, never copied: many fonts may share one huge resource dictionary; 64 entries are looked at.
     let dict_of = |object: &'a Object| -> Option<&'a Dictionary> {
         match document.dereference(object).ok()?.1 {
@@ -544,12 +541,33 @@ fn type3_paints_images<'a>(document: &'a Document, font: &'a Dictionary, budget:
         .is_some_and(|xobjects| xobjects.iter().take(64).any(|(_, x)| dict_of(x).is_some_and(|dict| matches!(dict.get(b"Subtype"), Ok(Object::Name(kind)) if kind == b"Image"))));
     let Some((_, Object::Dictionary(procs))) = font.get(b"CharProcs").ok().and_then(|o| document.dereference(o).ok()) else { return Some(false) };
     for (_, proc) in procs.iter().take(TYPE3_PROCS_READ) {
-        if let Some((_, Object::Stream(stream))) = document.dereference(proc).ok() {
-            let content = stream_head(stream, TYPE3_PROC_BYTES, budget)?;
-            if has_token(&content, b"BI") || (images && has_token(&content, b"Do")) { return Some(true); }
+        if let Some((id, Object::Stream(stream))) = document.dereference(proc).ok() {
+            let facts = stream_facts(id, stream, TYPE3_PROC_BYTES, budget, memo);
+            if facts & HEAD_UNKNOWN != 0 { return None; }
+            if facts & HEAD_IMAGE != 0 || (images && facts & HEAD_DRAWS != 0) { return Some(true); }
         }
     }
     (procs.len() <= TYPE3_PROCS_READ).then_some(false)
+}
+
+/// What a stream's head says, remembered per stream object so a stream many fonts share is read (and charged) once.
+pub type StreamMemo = HashMap<ObjectId, usize>;
+const HEAD_MATH: usize = 1;
+const HEAD_IMAGE: usize = 2;
+const HEAD_DRAWS: usize = 4;
+const HEAD_UNKNOWN: usize = 8;
+const MAX_REMEMBERED_STREAMS: usize = 8_192;
+
+fn stream_facts(id: Option<ObjectId>, stream: &lopdf::Stream, max: u64, budget: &mut Budget, memo: &mut StreamMemo) -> usize {
+    if let Some(facts) = id.and_then(|id| memo.get(&id)) { return *facts; }
+    let facts = match stream_head(stream, max, budget) {
+        None => HEAD_UNKNOWN,
+        Some(head) => (if has_math_table(&head) { HEAD_MATH } else { 0 })
+            | (if has_token(&head, b"BI") { HEAD_IMAGE } else { 0 })
+            | (if has_token(&head, b"Do") { HEAD_DRAWS } else { 0 }),
+    };
+    if let Some(id) = id { if memo.len() < MAX_REMEMBERED_STREAMS { memo.insert(id, facts); } }
+    facts
 }
 
 fn has_token(content: &[u8], token: &[u8]) -> bool {
@@ -568,6 +586,19 @@ pub fn stream_head(stream: &lopdf::Stream, max: u64, budget: &mut Budget) -> Opt
         Some(Object::Array(filters)) if filters.len() == 1 && matches!(&filters[0], Object::Name(name) if flate(name)) => true,
         _ => return None,
     };
+    // Data in an external file, or behind a predictor, is not what the head bytes say: unknown.
+    if stream.dict.get(b"F").is_ok() || stream.dict.get(b"FFilter").is_ok() { return None; }
+    // A predictor (or parameters held by reference) means the decoded bytes are not the data yet.
+    let predictor = |parms: &Object| match parms {
+        Object::Dictionary(dict) => dict.get(b"Predictor").is_ok_and(|p| p.as_i64().map_or(true, |p| p > 1)),
+        Object::Reference(_) => true,
+        _ => false,
+    };
+    match stream.dict.get(b"DecodeParms").or_else(|_| stream.dict.get(b"DP")) {
+        Ok(Object::Array(items)) if items.iter().any(predictor) => return None,
+        Ok(parms) if predictor(parms) => return None,
+        _ => {}
+    }
     if !compressed {
         let head = &stream.content[..stream.content.len().min(max as usize)];
         return budget.take(head.len()).then(|| head.to_vec());
