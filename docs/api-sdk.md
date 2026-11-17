@@ -1320,7 +1320,7 @@ Ingest records chart and diagram counts per document whatever the tier. That let
 
 ### Credits and budgets
 
-DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. Buy a credit pack ($25, $50 or $100) or any amount from $10 to $10,000 on the billing page; credits do not expire while the account exists. Every new account starts with 100 free credits ($1), no card needed: enough for 10,000 text pages or 400 pages read by a vision model. You pay per unit:
+DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. Buy a credit pack ($25, $50 or $100) or any amount from $10 to $10,000 on the billing page; credits do not expire while the account exists. Every new account starts with 100 free credits ($1), no card needed: enough for 10,000 Text pages, 3,333 Scan pages or 666 Vision pages (pages read by a vision model). You pay per unit:
 
 | Unit | What counts |
 | --- | --- |

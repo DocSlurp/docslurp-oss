@@ -287,8 +287,9 @@ start-up the provider needs. A reader without `warm` is unaffected.
   that runs it. An escalated page bills at most one Vision page, whatever the output length (escalation output tokens
   add no Vision pages), and an escalation that returned no text charges nothing more (the page stays Scan); its usage
   is still recorded.
-- Escalation readers, tried in order: GLM 5.3 Flash on OpenRouter, restricted to the hosts listed at or under the
-  request's price ceiling (`max_price`), then Qwen3-VL 30B A3B on DeepInfra. Each is checked on its own before it is
+- Escalation readers, tried in order: GLM 5.3 Flash on OpenRouter, restricted to Wafer's US endpoint and only when it
+  is listed at or under the request's price ceiling (`max_price`), then Qwen3-VL 30B A3B on DeepInfra (US-hosted).
+  Both send pages only to US-hosted endpoints. Each is checked on its own before it is
   used; when no host can serve a reader under its ceiling, the next one is tried, and with none left the page keeps its
   OCR read (recorded as skipped). `DOCSLURP_OCR_ESCALATION_MODEL` names a single reader instead.
 - Before each new escalation read the balance must cover the page's upgrade from Scan to Vision plus the activity's

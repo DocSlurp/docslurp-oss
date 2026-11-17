@@ -6,10 +6,11 @@
  *
  * - GLM 5.3 Flash on OpenRouter, with a per-request price ceiling: the request sends `max_price` at the ceiling and is
  *   restricted to `hosts`, so only hosts listed at or under it serve the read, and the gate prices the call at the
- *   ceiling. Hosts: Wafer's nvfp4 endpoint (the measured production pool's first host) and Wafer's US endpoint (same
- *   provider and quantization). OpenRouter endpoint listings, 2026-11-16: wafer/nvfp4 $0.065 / $0.24, wafer/us
- *   $0.042 / $0.184 per 1M prompt / completion tokens, no per-image fee; the pool's other hosts (friendli $0.15 / $0.50,
- *   inference-net/fp4 $0.108 / $0.35) are above the ceiling and never serve an escalation. When no host is under the
+ *   ceiling. Host: Wafer's US endpoint only. It is the one GLM host whose hosting region is stated (the endpoint tag);
+ *   the provider states no location for its other endpoints, so an escalation, which sends a customer page, never goes
+ *   there. Measured on the tier benchmark's page-OCR development split on 2026-11-16 (composite 0.932, against 0.934
+ *   for the pooled production route). OpenRouter endpoint listing, 2026-11-16: $0.042 / $0.184 per 1M prompt /
+ *   completion tokens, no per-image fee; the ceiling leaves room for a price move before the next reader takes over. When no host is under the
  *   ceiling, OpenRouter refuses the request (nothing billed) and the next reader is tried.
  * - Qwen3-VL 30B A3B on DeepInfra's own API, at its list price.
  */
@@ -37,7 +38,7 @@ export const OCR_ESCALATION_ROUTES: readonly OcrEscalationRoute[] = Object.freez
   {
     optionId: "scan-ocr/hosted-escalation-glm",
     model: OCR_ESCALATION_GLM_MODEL,
-    priceCeiling: Object.freeze({ inputUsdPerMTok: 0.065, outputUsdPerMTok: 0.24, imageUsd: 0, hosts: Object.freeze(["wafer/nvfp4", "wafer/us"]) }),
+    priceCeiling: Object.freeze({ inputUsdPerMTok: 0.065, outputUsdPerMTok: 0.24, imageUsd: 0, hosts: Object.freeze(["wafer/us"]) }),
   },
   { optionId: "scan-ocr/hosted-escalation", model: OCR_ESCALATION_QWEN_MODEL, priceCeiling: null },
 ]);

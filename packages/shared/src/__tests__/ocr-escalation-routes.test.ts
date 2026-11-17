@@ -22,8 +22,9 @@ describe("OCR escalation readers", () => {
     expect(ocrEscalationRoutes(null)).toBe(OCR_ESCALATION_ROUTES);
     expect(ocrEscalationRoutes("llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct").map((route) => route.optionId)).toEqual(["scan-ocr/hosted-escalation"]);
     expect(ocrEscalationRoutes("llm://openrouter/some/model")).toEqual([{ optionId: "scan-ocr/hosted-escalation-configured", model: "llm://openrouter/some/model", priceCeiling: null }]);
-    // At least two hosts can serve the capped reader.
-    expect(OCR_ESCALATION_ROUTES[0]!.priceCeiling!.hosts.length).toBeGreaterThanOrEqual(2);
+    // The capped reader sends pages only to a host whose region is stated (US); two readers keep escalation available.
+    expect(OCR_ESCALATION_ROUTES[0]!.priceCeiling!.hosts).toEqual(["wafer/us"]);
+    expect(OCR_ESCALATION_ROUTES).toHaveLength(2);
   });
 
   it("prices the GLM reader at its ceiling: the request's max_price, its hosts and no per-image fee", () => {
