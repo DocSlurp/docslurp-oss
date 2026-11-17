@@ -44,7 +44,7 @@ export class QuarantineStage implements Stage {
     // snapshot and terminated when the document's checks finish. No VM ever serves a second document (council M1): a
     // document that compromised the daemon could otherwise answer for every later one. Off: the stage runs as before.
     const snapshot = quarantineScanSnapshotEnabled();
-    const perDocument = <T>(fn: () => Promise<T>): Promise<T> => snapshot ? this.runner.withMalwareScanner(state.run.orgId, fn) : fn();
+    const perDocument = <T>(fn: () => Promise<T>): Promise<T> => snapshot ? this.runner.withMalwareScanner(fn) : fn();
     await runDocuments(documents, state.docConcurrency, async (document) => {
       const key = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.json`);
       const artifactSlot = `${document.id}:quarantine`;
