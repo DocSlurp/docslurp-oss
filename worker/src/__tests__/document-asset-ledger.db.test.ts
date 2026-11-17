@@ -588,6 +588,23 @@ describe("routing page facts go through the page-facts write (MEDIUM-6)", () => 
     ]);
     await sql`delete from document_page_facts where document_id = 'doc-a'`;
   });
+
+  it("Doppler's encoding words (migration 0186) land all three together, and a later write without them keeps them", async () => {
+    const { buildRoutingPageFacts } = await import("../pipeline/page-facts.js");
+    // 2^52 - 1 is the largest count word: exact through JSON and bigint.
+    const words = { mathBits: 2 ** 12 + 1, tableBits: 2 ** 31, encodingCounts: 2 ** 52 - 1 };
+    const rows = buildRoutingPageFacts({ documentId: "doc-a", runId: "run-a", pageCount: 2, layoutFacts: new Map([[1, { textLayer: "visible", ...words }], [2, { scanClass: "single" }]]) });
+    await store.upsertPageFacts(rows);
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-a", pageNumber: 1, textLayer: "mixed" }]);
+    expect(await sql`select page_number, text_layer, math_bits::text, table_bits::text, encoding_counts::text from document_page_facts where document_id = 'doc-a' order by page_number`).toEqual([
+      { page_number: 1, text_layer: "mixed", math_bits: "4097", table_bits: "2147483648", encoding_counts: "4503599627370495" },
+      { page_number: 2, text_layer: null, math_bits: null, table_bits: null, encoding_counts: null },
+    ]);
+    // The table refuses a partial set and an out-of-range word.
+    await expect(sql`update document_page_facts set math_bits = null where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();
+    await expect(sql`update document_page_facts set table_bits = 4294967296 where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();
+    await sql`delete from document_page_facts where document_id = 'doc-a'`;
+  });
 });
 
 describe("sharded documents: a record per shard, the level is the aggregate, resume per shard", () => {

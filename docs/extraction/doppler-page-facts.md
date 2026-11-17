@@ -33,6 +33,11 @@ The facts come from a VM that read a customer file, so the worker treats every b
   has its centre inside). A partial or malformed count set, or a bad `unlistedRuledGrids`, makes `vectors` unknown; a grid
   with more distinct lines than the page has rules (what a `-glyphs` run can write) loses the page's thin-rule counts, which
   then read as an older build's; a bad centred pair is dropped (contradicting whole-box counts go too);
+- reads the math and table encoding facts (family `mathtables`, [below](#math-and-table-encodings)) the same way: the three
+  packed words all or none, each in range, agreeing with the full level's `mathFlags`/`tableFlags` and with the count
+  nibbles that define a flag; readable fields (`text.unicodeMath`, `fonts.mathClasses`, `images.mathStrips` and per image
+  `stripLike`/`inTextFlow`, `vectors.glyphOutlineClusters`, `vectors.ruleTables`, page `structure`, `mathRegions`,
+  `mathLayout`, `tableLayout`, doc `mathmlFiles`) are kept when they validate, and boxes off the page drop their list;
 - never reads `producer`, `creator` or `lang`, the document's own strings in the stream, nor any field it does not know; the run
   line's `version` and `commit` are kept only as a dotted version and a hex commit.
 
@@ -162,8 +167,10 @@ context pages), and the run-wide rule budget and any later cross-reference rebui
 Doppler withholds the counts in those cases, so they come out unknown. What remains is Doppler's documented residual: an
 older `/Prev` section read lazily, which neither run can see. `pdftomarkdown --math` adds
 `-glyphs`, which turns thin stencil masks into rules, so facts from a math batch (`DOCSLURP_FIRST_PASS_MATH=on` and a
-project asking for math) lose the walker-parity fields when they are accepted (`withoutWalkerParityFacts`) and map as an
-older build's would. The single-file guest never passes `--math`.
+project that did not opt out of math) lose the walker-parity fields when they are accepted (`withoutWalkerParityFacts`) and
+map as an older build's would. Their math and table encoding words stand: they describe the PDF, not the conversion, and
+are the same with or without `--math`, so a grid a math batch leaves unknown can still be settled by them
+([below](#math-and-table-encodings)). The single-file guest never passes `--math`.
 
 Facts are routing evidence from a VM that read a hostile file. A compromised guest can forge a connected grid, and so
 route its own document table-heavy in `use` mode.
@@ -174,6 +181,86 @@ does, for a page with native text and a placed, scan-like, readable image with a
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
+
+## Math and table encodings
+
+Doppler's `mathtables` family names, per page, the encodings a router must tell apart, one fact per distinction (never one
+score); the contract is the "Math and table encodings" section of Doppler's page-facts README. The host asks every
+provider for it (`SandboxedPdfJob.pageFacts` and the batch's `options.pageFacts`: `{ include: ["mathtables"] }`, passed as
+`pdftomarkdown --page-facts-include mathtables`) unless page facts are `off`. At the basic level it adds three integers a
+page: the cheap router form.
+
+| word | meaning |
+|---|---|
+| `mathBits` | bit i = 1 << i, names in `DOPPLER_MATH_FLAGS` (`worker/src/lib/doppler-encoding-facts.ts`) |
+| `tableBits` | bit i = 1 << i, names in `DOPPLER_TABLE_FLAGS` |
+| `encodingCounts` | 13 four-bit log2 buckets (0 for 0, else floor(log2 n) + 1, at most 15), nibble i at bits 4i..4i+3 (52 bits) |
+
+`mathBits`:
+
+| bit | name | route |
+|---|---|---|
+| 0 | `text-math` | text layer |
+| 1 | `stacked-math` | text layer (2D math: the math reader's to lay out) |
+| 2 | `actualtext-tex` | source (keep the text layer) |
+| 3 | `alt-tex` | source |
+| 4 | `mathml` | source |
+| 5 | `raster-strips` | read the page |
+| 6 | `glyph-outlines` | read the page |
+| 7 | `type3-bitmap-font` | read the page |
+| 8 | `math-font-no-unicode` | read the page, unless the run read math (`--math` reads glyph names) or the page has a source |
+| 9 | `plain-unicode-math` | text layer |
+| 10 | `formula-struct` | text layer |
+| 11 | `math-matrix` | text layer (not a table) |
+| 12 | `analysis-truncated` | unknown |
+
+`tableBits`:
+
+| bit | name | route |
+|---|---|---|
+| 0 | `rule-grid` | text-layer table |
+| 1 | `hrule-open` | text-layer table |
+| 2 | `booktabs` | text-layer table |
+| 3 | `whitespace` | text-layer table |
+| 4 | `shaded-rows` | text-layer table |
+| 5 | `tagged-table` | text-layer table |
+| 6 | `raster-table-like` | candidate only: a lossless image shaped like a table (charts and logos match too), never a read on its own |
+| 7 | `outlined-text-grid` | read the page: a table drawn as glyph outlines has no text layer |
+| 8 | `math-grid` | not a table |
+| 9 | `analysis-truncated` | unknown |
+
+`encodingCounts` nibbles, in order: math-font characters with a Unicode value, plain Unicode math, unreadable math glyphs,
+math strips, glyph-outline clusters, formulas, TeX sources, MathML, ruled grids, rule tables, whitespace tables, structure
+tables, math regions. A test pins every position (`worker/src/lib/doppler-encoding-facts.test.ts`).
+
+**Unknown is never "none".** `pageEncodingRoute` reads a page's encodings as unknown, and routing keeps today's behaviour
+for it, when the words are absent (an older build, or the family was not asked for), the page failed or is low confidence
+(`xref-repaired-earlier`), either word sets `analysis-truncated` (a cap was hit, so a missing bit is not evidence), or a
+word holds a bit this build does not name (Doppler appends names; an encoding we cannot route is not "no table"). The
+reader also drops all three words when they contradict their own names or count nibbles.
+
+**Where they go.** Each known page's route is attached to its layout facts (`PageLayoutFacts.encodings`, flags and
+`mathRead` only; a stored route is re-derived from its flags when read back), and the three words are stored per page in
+`document_page_facts` (`math_bits`, `table_bits`, `encoding_counts`; migration 0186), all three or none. Never a billing
+input.
+
+**Routing** (`DOCSLURP_ENCODING_FACTS_ROUTING`: on in development and test, off in production until measured; off, the facts
+are still parsed and stored). Evidence routing (`stages/classify-route.ts`):
+
+- tables matter most. A ruled grid neither the walker nor the facts could settle (`gridsUnknown`) stays on the table path
+  when the encodings name a text-layer table (signal `encoding-table:<flags>`), and is settled as no table when they name
+  none (`encoding-no-table`), instead of sending every such page down the table path;
+- a math grid is never a table: with `math-grid` and no table encoding, the page's grids leave the table count
+  (`encoding-math-grid`);
+- a table drawn as glyph outlines, or math only a read recovers, authorizes a page read (`ocr-authorized:encoding-table-outlines`,
+  `ocr-authorized:encoding-math-unreadable`; read reason `encoding`). Facts only add a read, never remove one, and the read
+  bills as any other read the project's vision setting allows. Doppler's math regions (full level) and the report's
+  `mathUncertainRegions` name boxes to crop, but evidence routing reads whole pages today;
+- `raster-table-like` is a signal only (`encoding-table-raster-candidate`), and text math or a TeX or MathML source keeps
+  the text layer; a page with math and no other label is labelled `formula-heavy` for the report.
+
+The v2 page router's trust cascade keeps its own math gate on `mathGlyphRatio` (0.01, `routing/trust.ts`), which these
+facts do not change.
 
 ## Page router
 

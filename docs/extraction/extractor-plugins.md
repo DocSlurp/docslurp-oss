@@ -122,8 +122,10 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
   provider that returns `figures` for a job that did not ask is refused.
 - `run` may return `pageFacts`: Doppler's [page facts](doppler-page-facts.md) (`doppler-page-facts/1` JSON lines, a
   string or the raw bytes) from the same job. The host parses them with a strict, bounded reader and records each
-  page's text layer and scan class (`document_page_facts`); malformed or oversized facts are dropped, never repaired,
-  and never bill or authorize a read.
+  page's text layer, scan class and math and table encoding words (`document_page_facts`); malformed or oversized facts
+  are dropped, never repaired, and never bill. `job.pageFacts.include` names the families to add to the basic level
+  (`pdftomarkdown --page-facts-include`, comma-separated; today `mathtables`); a provider that cannot compute one returns
+  facts without it, which the host reads as unknown.
 - `shardProfile` registers the provider's prior cost profile; calibration refines it from the shard timings it
   records through `context.recordTiming`.
 
@@ -246,8 +248,9 @@ batch?: {
   PDFs differently (served from the persisted batch result, no second VM) or when the Markdown a later stage read changed.
 - **Isolation.** The same rules as single-file runs: a fresh VM per batch, no credentials or network in it, bounded output.
   Every file of the batch belongs to the same organization.
-- **Options.** `math` (the project's `documentExtraction.options["vm-pdf"].math`) and `figures` (the deploy's figure
-  extraction). Workers advertise `workflow.first-pass` only when a batch provider is registered.
+- **Options.** `math` (`pdftomarkdown --math`: on unless the project's `documentExtraction.options["vm-pdf"].math` is
+  `false`, with `DOCSLURP_DOPPLER_MATH_DEFAULT` on, the default; still behind the deploy gate `DOCSLURP_FIRST_PASS_MATH`),
+  `figures` (the deploy's figure extraction) and `pageFacts` (as a single-file job's `pageFacts`). Workers advertise `workflow.first-pass` only when a batch provider is registered.
 
 The first pass runs only when the deploy sets `DOCSLURP_FIRST_PASS=on`, the pipeline's `firstPass` is not `off`, and the
 whole fleet advertises the capability; unsetting the flag is the rollback. To roll out to a few organizations first, also

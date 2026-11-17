@@ -1,4 +1,5 @@
 # TODO
+- [ ] Doppler encoding facts follow-ups (2026-11-16): measure `DOCSLURP_ENCODING_FACTS_ROUTING` in production (pages read per document, table-path pages settled, read reason `encoding`) before turning it on there; send Doppler's `mathRegions` and the math report's `mathUncertainRegions` to a region-scoped read once evidence routing has one (whole pages today); plumb `mathUncertainRegions` from the provider result; have the VM guest pass `--page-facts-include mathtables` (`SandboxedPdfJob.pageFacts`) and return page facts; give the v2 page router's probe rows (`routing/probe/doppler-facts.ts`) the encodings.
 - [ ] Parked Modal VMs (compute reuse, #459): hand a session's idle VM to a session waiting at the worker VM cap (park instead of terminate in the budget reaper, and let `createVm`'s wait adopt a parked VM) so capacity pressure does not force a 2 s cold start; consider a full wipe at park time so a crash between park and adoption leaves no previous-document inputs in a parked VM until its lifetime ends (council M3/M4).
 
 - Organization isolation follow-ups (council, PR #450, 2026-11-16):
