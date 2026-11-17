@@ -149,7 +149,8 @@ export const vmPdfExtractorOptionsSchema = z.object({
   images: extractionImageConfigSchema.strict().optional(),
   /**
    * Read typeset math as LaTeX (inline and display). On by default for PDFs (the worker's DOCSLURP_DOPPLER_MATH_DEFAULT);
-   * `false` opts the project out, which saves the math reader's CPU (about a fifth more per page on small documents).
+   * `false` opts the project out, which saves the math reader's CPU (measured: about a fifth more converter CPU on mixed
+   * small documents, about half more on math-dense pages).
    */
   math: z.boolean().optional(),
   pdf: extractionPdfOptionsSchema.pick({ extractImages: true }).strict().optional(),
