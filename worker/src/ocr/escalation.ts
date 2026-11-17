@@ -14,6 +14,7 @@ const SKIP_REASON: Partial<Record<HostedOcrSkipped["reason"], OcrEscalationSkipR
   unfunded: "unfunded",
   "cost-cap": "cost-cap",
   margin: "price-check",
+  "unknown-billed": "unknown-billed",
 };
 
 export interface EscalationSummary {
@@ -64,9 +65,10 @@ export async function escalateOcrPages(
         // (DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS, retries included); either one spent leaves the rest on their first read.
         const rest = candidates.slice(index).map((candidate) => candidate.pageNumber);
         if (error.reason === "budget") capped.push(...rest);
-        // An unfunded balance, the run cost cap and a refused price stop the rest of this document the same way.
+        // An unfunded balance, the run cost cap and a refused price stop the rest of this document the same way; a timed-out
+        // read (unknown-billed) is this page's alone.
         const reason = SKIP_REASON[error.reason];
-        if (reason) (skipped[reason] ??= []).push(...rest);
+        if (reason) (skipped[reason] ??= []).push(...(error.reason === "unknown-billed" ? [page.pageNumber] : rest));
         // Once disabled, refused, capped or out of budget, later pages of this document would be skipped the same way.
         // A timed-out read (unknown-billed) is this page's alone: later pages are still read.
         if (error.reason !== "guard" && error.reason !== "unknown-billed") break;

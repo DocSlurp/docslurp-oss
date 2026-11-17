@@ -152,6 +152,17 @@ export function endpointTagRegion(host: string): "US" | "EU" | null {
   return null;
 }
 
+/**
+ * The region an operator attests for its own endpoint (a private model endpoint's `attestation.region`, a cloud region
+ * name such as `us-east-1`, `eu-west-1`, `europe-west4`, or `US` / `EU`), or null when it names neither.
+ */
+export function attestedRegion(label: string | null | undefined): "US" | "EU" | null {
+  const value = (label ?? "").trim().toLowerCase();
+  if (/^(us|usa|united states)([-_ ].*)?$/.test(value)) return "US";
+  if (/^(eu|eea|europe|european union)([-_ ].*)?$/.test(value)) return "EU";
+  return null;
+}
+
 /** Stated region evidence for a host, or null when nothing states one (never inferred from headquarters). */
 export function poolHostRegion(host: string, checked = "2026-11-17"): PoolRegionEvidence | null {
   const tagged = endpointTagRegion(host);

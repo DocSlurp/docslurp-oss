@@ -6,7 +6,7 @@
  */
 import {
   activeCapabilityPools, assertCapabilityPoolRegions, capabilityPoolsLogLine, isAutomaticSelectionDenied, localPdfModeRequested,
-  isLocalModelProvider, localServiceMember, parseLlmModelUri, poolMemberForModel, resolveCapabilityPools, setActiveCapabilityPools, visionRouteRegionProblem,
+  attestedRegion, buildDecisionModelCatalog, findJinaNanoUri, poolHostRegion, switchDisabled, isLocalModelProvider, localServiceMember, lookupPrivateModelRoute, parseLlmModelUri, poolMemberForModel, resolveCapabilityPools, setActiveCapabilityPools, visionRouteRegionProblem,
   visionModelCatalog, visionModelUriProblem, visionProfileCatalog,
   type CapabilityPools, type PoolCapability, type PoolFailoverReason, type ServicePoolMember,
 } from "@docslurp/shared";
@@ -15,6 +15,7 @@ import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { pageImageReaderProvider, poolServiceMembers, sandboxedOcrProvider, sandboxedPdfProviders } from "../extractors/plugins.js";
 import { setTextPoolTelemetry } from "../extractors/text-pool.js";
 import { VISION_MODEL_PROFILES, visionModelProfile } from "../tools/vision-model-profiles.js";
+import { decisionModelRegionProblem } from "../routing/decision-client.js";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -64,6 +65,26 @@ export function initializeCapabilityPools(env: Env = process.env, log: (line: st
     const problem = visionPageRouteRegionProblem(entry.uri);
     if (problem) problems.push(`vision catalog: ${problem}`);
   }
+  // The page router's hosted decision models (when the router is on) must reach only stated US or EU upstreams.
+  const routerMode = env.PAGE_ROUTER_MODE?.trim().toLowerCase();
+  if ((routerMode === "shadow" || routerMode === "active") && !switchDisabled(env, "router")) {
+    const present = Object.fromEntries(Object.keys(env).filter((key) => env[key]?.trim()).map((key) => [key, true]));
+    for (const model of buildDecisionModelCatalog({ env: present }).models) {
+      const problem = decisionModelRegionProblem(model);
+      if (problem) problems.push(`page router (PAGE_ROUTER_MODE=${routerMode}): ${problem}`);
+    }
+  }
+  // Media frame descriptions go to the configured media vision provider: it must state a US or EU region too.
+  if (env.MEDIA_REMOTE_ENABLED === "true" && !poolHostRegion(env.MEDIA_VISION_PROVIDER?.trim() || "deepinfra")) {
+    problems.push(`media vision provider ${env.MEDIA_VISION_PROVIDER} states no US or EU hosting region`);
+  }
+  // A private page-image embedder (Jina) must attest a US or EU region.
+  const jina = findJinaNanoUri();
+  if (jina) {
+    const problem = privateRouteRegionProblem(jina, "embedding");
+    if (problem) problems.push(`page-image embedder: ${problem}`);
+  }
+  problems.push(...priceCeilingHostProblems(pools));
   for (const [key, preset] of Object.entries(visionProfileCatalog)) {
     const uri = preset.config.modelUri;
     const problem = visionModelUriProblem(uri) ?? visionPageRouteRegionProblem(uri);
@@ -133,6 +154,22 @@ export function secondReadPoolMemberId(optionId: string, pools: CapabilityPools 
   return pools.ocr.find((member) => member.kind === "llm" && member.escalationRoute?.optionId === optionId)?.id ?? null;
 }
 
+/**
+ * A member's price ceiling restricts its requests to `ceiling.hosts` (sent as `provider.only`): those hosts must be among
+ * the member's own hosts, and each must state a US or EU region itself.
+ */
+export function priceCeilingHostProblems(pools: CapabilityPools): string[] {
+  const problems: string[] = [];
+  for (const member of [...pools.ocr, ...pools.vision]) {
+    if (member.kind !== "llm" || !member.priceCeiling) continue;
+    for (const host of member.priceCeiling.hosts) {
+      if (!member.hosts.includes(host)) problems.push(`${member.id}: price ceiling host ${host} is not one of its hosts`);
+      if (!poolHostRegion(host)) problems.push(`${member.id}: price ceiling host ${host} has no stated US or EU region`);
+    }
+  }
+  return problems;
+}
+
 /** A vision profile's bounded OpenRouter allowlist, or null when it names none (or lets OpenRouter fall back anywhere). */
 function profileHosts(model: string): string[] | null {
   const route = visionModelProfile(model)?.openRouterProvider;
@@ -155,9 +192,21 @@ export function visionPageRouteRegionProblem(modelUri: string): string | null {
   } catch {
     return `${trimmed} is not a model route`;
   }
-  if (parsed.provider === "private" || isLocalModelProvider(parsed.provider)) return null;
+  if (isLocalModelProvider(parsed.provider)) return null;
+  if (parsed.provider === "private") return privateRouteRegionProblem(trimmed, "vision");
   if (parsed.provider === "openrouter") return visionRouteRegionProblem(parsed.model, profileHosts(parsed.model));
   return visionRouteRegionProblem(trimmed, [parsed.provider]);
+}
+
+/**
+ * Why a private (operator-registered) route may not carry customer content: its endpoint must attest a US or EU region
+ * (`attestation.region`). An unregistered route is left to the caller's own fail-closed lookup.
+ */
+export function privateRouteRegionProblem(modelUri: string, capability: "vision" | "embedding" | "text"): string | null {
+  const lookup = lookupPrivateModelRoute({ ref: modelUri, capability });
+  if (!lookup.ok) return null;
+  const region = lookup.route.endpoint.attestation.region;
+  return attestedRegion(region) ? null : `${modelUri} is on a private endpoint attesting region "${region}", which is not US or EU`;
 }
 
 /** DOCSLURP_VISION_POOL_FALLBACK=on: page reads fall back to the vision pool's next member when the project names none. Off by default. */

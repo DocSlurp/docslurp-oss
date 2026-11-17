@@ -249,6 +249,11 @@ describe("OCR escalation reads", () => {
     expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 0, skipped: { "unknown-billed": 1 } });
     expect(execute.mock.calls.map((call) => (call[0] as { priceCeiling?: { hosts: string[] } }).priceCeiling?.hosts)).toEqual([["wafer/us"], ["morph/fp8"]]);
     expect(outcome.pages[0]!.text).toBe("ocr 1");
+    // The possible charge stays visible: one usage event of unknown cost, flagged, on the route that was sent.
+    expect(state.usageLedger.snapshot().filter((event) => event.metadata?.possiblyBilled === true)).toEqual([
+      expect.objectContaining({ model: "z-ai/glm-5.3-flash", costCents: 0, metadata: expect.objectContaining({ outcome: "timeout", costSource: "unknown", poolMemberId: "ocr.llm.glm-5.3-flash+morph.us" }) }),
+    ]);
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "unknown-billed": 1 } });
   });
 
   it("does not fall back to Qwen after a GLM attempt of the page was billed: the read fails like any rejected read", async () => {

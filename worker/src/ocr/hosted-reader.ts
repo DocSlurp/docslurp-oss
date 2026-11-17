@@ -295,6 +295,15 @@ export function createHostedOcrReader(args: {
           if (routeTimeout?.aborted && !signal?.aborted) {
             console.warn(`[ocr] ${purpose} reader=${candidate.route.optionId} document=${page.documentId} page=${page.pageNumber} timed out (possibly billed)`);
             recordPoolFailover("ocr", candidate.memberId, null, "timeout");
+            // The possible charge stays visible: a usage event of unknown cost, flagged, on the route that was sent.
+            const unknown = state.usageLedger.enqueue({
+              provider: "openrouter", model: candidate.route.model.replace(/^llm:\/\/[^/]+\//, ""), metric: purpose, amount: 1, unit: "attempt",
+              costCents: 0, inputTokens: 0, outputTokens: 0,
+              metadata: { documentId: page.documentId, pageNumber: page.pageNumber, purpose, outcome: "timeout", costSource: "unknown", possiblyBilled: true,
+                ...(candidate.memberId ? { poolMemberId: candidate.memberId } : {}) },
+            }, { logAiUsage: true });
+            if (unknown) unknown.id = `${callId}:${candidate.route.optionId}:timeout`;
+            await persist("failed", null, candidate.route.model, [unknown]);
             throw new HostedOcrSkipped("unknown-billed", `${purpose}: the read timed out after it was sent; it may have been billed`);
           }
           // No host could serve this reader under its price ceiling (nothing billed): the next reader, else skip. Never sent

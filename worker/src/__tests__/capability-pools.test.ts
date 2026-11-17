@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { activeCapabilityPools, resetActiveCapabilityPoolsForTests, VISION_GLM_HOSTS, VISION_LUNA_HOSTS, type CapabilityPoolServiceRegistration } from "@docslurp/shared";
+import { activeCapabilityPools, JINA_NANO_MODEL_SUFFIX, resetActiveCapabilityPoolsForTests, setPrivateModelEndpointRegistryForTests, VISION_GLM_HOSTS, VISION_LUNA_HOSTS, type CapabilityPoolServiceRegistration, type LlmPoolMember } from "@docslurp/shared";
 
 import {
   EXTRACTOR_PLUGIN_API_VERSION, registerExtractorPlugin, resetExtractorPluginsForTest, sandboxedPdfProvider,
   type SandboxedPdfExtractorProvider, type SandboxedPdfJob, type SandboxedPdfResult,
 } from "../extractors/plugins.js";
 import { setTextPoolTelemetry, TEXT_POOL_UNAVAILABLE } from "../extractors/text-pool.js";
-import { defaultVisionFallbackModel, initializeCapabilityPools, visionPageRouteRegionProblem } from "../lib/capability-pools.js";
+import { defaultVisionFallbackModel, initializeCapabilityPools, priceCeilingHostProblems, visionPageRouteRegionProblem } from "../lib/capability-pools.js";
 import { VISION_MODEL_PROFILES, visionModelProfile } from "../tools/vision-model-profiles.js";
 
 const US = { region: "US" as const, evidence: "provider-docs" as const, source: "https://example.com/privacy", checked: "2026-11-17" };
@@ -119,6 +119,48 @@ describe("worker capability pools at startup", () => {
   it("keeps the vision profiles' host allowlists equal to the pool members' stated-region hosts", () => {
     expect(visionModelProfile("openai/gpt-6-luna")?.openRouterProvider).toMatchObject({ only: [...VISION_LUNA_HOSTS] });
     expect(visionModelProfile("z-ai/glm-5.3-flash")?.openRouterProvider).toMatchObject({ only: [...VISION_GLM_HOSTS] });
+  });
+});
+
+describe("worker startup: every other path that sends customer pages", () => {
+  it("refuses a page router whose configured decision models state no US or EU region", () => {
+    expect(() => initializeCapabilityPools({ PAGE_ROUTER_MODE: "shadow", PERPLEXITYAI_API_KEY: "k" }, quiet.log)).toThrow(/page router \(PAGE_ROUTER_MODE=shadow\).*states no US or EU hosting region/);
+    // Off (production's worker setting), or switched off: nothing to check.
+    expect(() => initializeCapabilityPools({ PAGE_ROUTER_MODE: "off", PERPLEXITYAI_API_KEY: "k" }, quiet.log)).not.toThrow();
+    expect(() => initializeCapabilityPools({ PAGE_ROUTER_MODE: "shadow", PERPLEXITYAI_API_KEY: "k", DOCSLURP_DISABLE: "router" }, quiet.log)).not.toThrow();
+  });
+
+  it("refuses a media vision provider without a stated region; DeepInfra (US) passes", async () => {
+    expect(() => initializeCapabilityPools({ MEDIA_REMOTE_ENABLED: "true", MEDIA_VISION_PROVIDER: "acme" }, quiet.log)).toThrow(/media vision provider acme/);
+    expect(() => initializeCapabilityPools({ MEDIA_REMOTE_ENABLED: "true" }, quiet.log)).not.toThrow();
+    const { MediaVisionRegistry } = await import("../media/vision.js");
+    const provider = (id: string) => ({ id, model: "m", reserveUsd: 0, describe: async () => { throw new Error("unused"); } });
+    expect(() => new MediaVisionRegistry().register(provider("acme"))).toThrow(/states no US or EU hosting region/);
+    expect(() => new MediaVisionRegistry().register(provider("deepinfra"))).not.toThrow();
+  });
+
+  it("refuses a private page-image embedder attesting a region outside the US and EU", () => {
+    setPrivateModelEndpointRegistryForTests([{
+      alias: "gpu1", baseUrl: "https://gpu1.example.com/v1", auth: { tokenEnv: "TEST_POOL_EMBED_TOKEN" },
+      models: [{ id: `jinaai/${JINA_NANO_MODEL_SUFFIX}`, capability: "embedding", dimensions: 768 }],
+      attestation: { tenancy: "single-tenant", hostProvider: "runpod", region: "ap-southeast-1" },
+    }]);
+    try {
+      expect(() => initializeCapabilityPools({}, quiet.log)).toThrow(/page-image embedder.*ap-southeast-1/);
+    } finally {
+      setPrivateModelEndpointRegistryForTests(undefined);
+    }
+  });
+
+  it("checks that a member's price-ceiling hosts are its own and each states a region", () => {
+    const pools = initializeCapabilityPools({}, quiet.log);
+    expect(priceCeilingHostProblems(pools)).toEqual([]);
+    const glm = pools.vision[1] as LlmPoolMember;
+    const widened = { ...glm, priceCeiling: { ...glm.priceCeiling!, hosts: ["wafer/us", "wafer/nvfp4"] } };
+    expect(priceCeilingHostProblems({ ...pools, vision: [pools.vision[0]!, widened] })).toEqual([
+      `${glm.id}: price ceiling host wafer/nvfp4 is not one of its hosts`,
+      `${glm.id}: price ceiling host wafer/nvfp4 has no stated US or EU region`,
+    ]);
   });
 });
 
