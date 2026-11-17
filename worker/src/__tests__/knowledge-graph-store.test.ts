@@ -18,6 +18,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { GraphEnrichStage } from "../stages/graph-enrich.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import { refreshKnowledgeGraphNodes } from "../db/superseded-purge.js";
 import { refreshProjectCommunities } from "../graph/communities.js";
 import { graphNodeKey, type DocumentGraph } from "../graph/extract.js";
@@ -263,7 +264,7 @@ describe("project knowledge graph persistence", () => {
   });
 
   const retention = () =>
-    store as unknown as {
+    new Maintenance(store.stageSql) as unknown as {
       purgeExpiredArtifacts(storage: ArtifactStore, batchSize: number): Promise<void>;
       deleteExpiredRuns(batchSize: number): Promise<void>;
     };

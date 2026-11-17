@@ -12,6 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import { materializePageRange } from "../deferred/materialize-pages.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { inspectArchive } from "../lib/quarantine-bytes.js";
@@ -252,7 +253,7 @@ describe("R7-H1: a reprocess re-runs quarantine and parses its own scanned copy,
     const deleted: string[] = [];
     const purgeStorage = { bucket: "b", deleteKeys: async (keys: string[]) => { deleted.push(...keys); for (const key of keys) objects.delete(key); } } as unknown as ArtifactStore;
     try {
-      await (store as unknown as { purgeExpiredArtifacts(storage: ArtifactStore, batchSize: number): Promise<void> }).purgeExpiredArtifacts(purgeStorage, 10);
+      await (new Maintenance(store.stageSql) as unknown as { purgeExpiredArtifacts(storage: ArtifactStore, batchSize: number): Promise<void> }).purgeExpiredArtifacts(purgeStorage, 10);
     } finally {
       await sql`update projects set artifact_retention_days = null where id = 'w'`;
     }

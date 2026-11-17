@@ -26,6 +26,7 @@ import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security
 
 import { fromEnv } from "../config.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import { assertVisionLedgerSchemaWithRetry, VisionLedgerSchemaError } from "../db/vision-attempt-store.js";
 import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
@@ -127,10 +128,13 @@ async function main(): Promise<void> {
   // Shared infrastructure — reused across all activity invocations
   const store = new Store(cfg.databaseUrl, cfg.workerLeaseTtlMs, {
     plausibilityWarningThreshold: cfg.plausibilityWarningThreshold,
-    apiKeyUsageRetentionDays: cfg.apiKeyUsageRetentionDays,
-    perfLogRetentionDays: cfg.perfLogRetentionDays,
     poisonRunFailureThreshold: cfg.poisonRunFailureThreshold,
     poolMax: cfg.workerDbPoolMax,
+  });
+  // Periodic sweeps and alerts (db/maintenance.ts): the maintenance loop below, never pipeline stages.
+  const maintenance = new Maintenance(store.stageSql, {
+    apiKeyUsageRetentionDays: cfg.apiKeyUsageRetentionDays,
+    perfLogRetentionDays: cfg.perfLogRetentionDays,
   });
   // Invalid private endpoint config fails startup; the /models probe never blocks it.
   try {
@@ -486,13 +490,13 @@ async function main(): Promise<void> {
 
   // Background maintenance tasks (same as legacy worker)
   const budgetTimer = setInterval(onLeader(() => {
-    withBackgroundSpan("worker.budget-alerts", () => store.processBudgetAlerts()).catch((err) => {
+    withBackgroundSpan("worker.budget-alerts", () => maintenance.processBudgetAlerts()).catch((err) => {
       console.error(
         "budget alert sweep failed:",
         err instanceof Error ? err.message : String(err)
       );
     });
-    withBackgroundSpan("worker.secret-expiry-alerts", () => store.processSecretExpiryAlerts()).catch((err) => {
+    withBackgroundSpan("worker.secret-expiry-alerts", () => maintenance.processSecretExpiryAlerts()).catch((err) => {
       console.error(
         "secret expiry sweep failed:",
         err instanceof Error ? err.message : String(err)
@@ -529,7 +533,7 @@ async function main(): Promise<void> {
   // Replaced canonical versions: delete derived data once the grace period passes.
   const purgeOptions = purgeConfig();
   const purgeSuperseded = () =>
-    withBackgroundSpan("worker.superseded-purge", () => store.purgeSupersededDocuments(storage, purgeOptions)).catch((err) => {
+    withBackgroundSpan("worker.superseded-purge", () => maintenance.purgeSupersededDocuments(storage, purgeOptions)).catch((err) => {
       console.error(
         "superseded purge sweep failed:",
         err instanceof Error ? err.message : String(err)
@@ -654,13 +658,13 @@ async function main(): Promise<void> {
   lanceSweepTimer?.unref();
 
   const retentionTimer = setInterval(onLeader(() => {
-    withBackgroundSpan("worker.retention-sweep", () => store.runRetentionSweep(storage, cfg.retentionSweepBatchSize)).catch((err) => {
+    withBackgroundSpan("worker.retention-sweep", () => maintenance.runRetentionSweep(storage, cfg.retentionSweepBatchSize)).catch((err) => {
       console.error(
         "retention sweep failed:",
         err instanceof Error ? err.message : String(err)
       );
     });
-    withBackgroundSpan("worker.storage-integrity-sweep", () => store.runStorageIntegritySweep(storage, {
+    withBackgroundSpan("worker.storage-integrity-sweep", () => maintenance.runStorageIntegritySweep(storage, {
       maxKeys: cfg.storageIntegritySweepMaxKeys,
       prefix: cfg.storageIntegritySweepPrefix,
     }))
@@ -707,12 +711,12 @@ async function main(): Promise<void> {
   try {
     // Run initial maintenance sweep (leader only)
     if (maintenanceLeader) {
-      await store.processBudgetAlerts().catch(() => {});
-      await store.processSecretExpiryAlerts().catch(() => {});
-      await store
+      await maintenance.processBudgetAlerts().catch(() => {});
+      await maintenance.processSecretExpiryAlerts().catch(() => {});
+      await maintenance
         .runRetentionSweep(storage, cfg.retentionSweepBatchSize)
         .catch(() => {});
-      await withBackgroundSpan("worker.storage-integrity-sweep", () => store
+      await withBackgroundSpan("worker.storage-integrity-sweep", () => maintenance
         .runStorageIntegritySweep(storage, {
           maxKeys: cfg.storageIntegritySweepMaxKeys,
           prefix: cfg.storageIntegritySweepPrefix,

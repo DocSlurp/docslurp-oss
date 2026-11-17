@@ -11,6 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { Stage } from "../pipeline/pipeline.js";
@@ -290,7 +291,7 @@ describe("partial reprocess", () => {
     await seedPartialRun(pipeline);
     const deleted: string[] = [];
     const storage = { bucket: "b", deleteKeys: async (keys: string[]) => { deleted.push(...keys); } } as unknown as ArtifactStore;
-    const purge = () => (store as unknown as {
+    const purge = () => (new Maintenance(store.stageSql) as unknown as {
       purgeExpiredArtifacts(storage: ArtifactStore, batchSize: number): Promise<void>;
     }).purgeExpiredArtifacts(storage, 10);
 

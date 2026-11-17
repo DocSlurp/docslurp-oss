@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { billLockedMaterializedPages, lockPageRows, pinRunPageBillingRules, recordMaterializedPageFee, recordPageBaseFee } from "../db/page-base-fee.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
 import { claimPages, ensurePageRows, markPages } from "../deferred/page-ledger.js";
 import type { PageMaterializerOps } from "../deferred/materialize-pages.js";
@@ -997,7 +998,7 @@ describe("runMaterializeRange activity", () => {
                   if (kind === "retention") {
                     await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
                       update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
-                    await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+                    await (new Maintenance(store.stageSql) as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                       .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
                   } else {
                     await db.exec(`update documents set materialization_generation = materialization_generation + 1, source_materialization_blocked = true where id = 'd1';
@@ -1030,7 +1031,7 @@ describe("runMaterializeRange activity", () => {
                   if (kind === "retention") {
                     await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
                       update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
-                    await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+                    await (new Maintenance(store.stageSql) as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                       .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
                   } else {
                     await db.exec(`update documents set materialization_generation = materialization_generation + 1, source_materialization_blocked = true where id = 'd1';
@@ -1083,7 +1084,7 @@ describe("runMaterializeRange activity", () => {
             await db.exec(`update projects set artifact_retention_days = 1 where id = 'w';
               update project_runs set status = 'completed', created_at = now() - interval '3 days' where id = 'up'`);
             try {
-              await (store as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
+              await (new Maintenance(store.stageSql) as unknown as { purgeExpiredArtifacts(storage: unknown, batchSize: number): Promise<void> })
                 .purgeExpiredArtifacts({ bucket: "b", deleteKeys: async () => {} }, 10);
               expect(await readState()).toMatchObject({ state: "failed", read_billed_run: "m1", kept: false });
               // Belt and braces: a kept read of a purged run is never reused even if one survived.

@@ -188,7 +188,7 @@ export class RunNotifications {
       lines.push(PUBLIC_ERROR_MESSAGES.processing);
     }
 
-    await this.recordNotificationEvent({
+    await recordNotificationEvent(this.sql, {
       deliveryId: randomUUID(),
       userId: row.user_id,
       orgId: row.org_id,
@@ -259,7 +259,7 @@ export class RunNotifications {
       `Threshold: ${this.plausibilityWarningThreshold.toFixed(3)}`,
     ];
 
-    await this.recordNotificationEvent({
+    await recordNotificationEvent(this.sql, {
       deliveryId: randomUUID(),
       userId: row.user_id,
       orgId: row.org_id,
@@ -282,93 +282,6 @@ export class RunNotifications {
     });
   }
 
-  /**
-   * Workers never send email. Each notification event goes to SigNoz as a
-   * structured log and to the in-app inbox (notification_deliveries).
-   */
-  async recordNotificationEvent(args: {
-    deliveryId: string;
-    userId: string;
-    orgId?: string | null;
-    projectId?: string | null;
-    runId?: string | null;
-    documentId?: string | null;
-    event:
-      | "run.completed"
-      | "run.failed"
-      | "plausibility.warning"
-      | "cost.alert"
-      | "project.invite";
-    recipient: string;
-    subject: string;
-    text: string;
-    html: string;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
-    const provider = "log";
-    emitEventLog(`notification.${args.event}`, {
-      "notification.id": args.deliveryId,
-      "notification.event": args.event,
-      "notification.subject": args.subject,
-      "notification.text": args.text,
-      "enduser.id": args.userId,
-      "docslurp.org_id": args.orgId,
-      "docslurp.project_id": args.projectId,
-      "docslurp.run_id": args.runId,
-      "docslurp.document_id": args.documentId,
-      "notification.metadata": args.metadata,
-    });
-
-    await this.sql`
-      insert into notification_deliveries (
-        id,
-        user_id,
-        org_id,
-        project_id,
-        event_type,
-        provider,
-        recipient,
-        subject,
-        delivered,
-        metadata,
-        created_at
-      )
-      values (
-        ${args.deliveryId},
-        ${args.userId},
-        ${args.orgId ?? null},
-        ${args.projectId ?? null},
-        ${args.event},
-        ${provider},
-        ${args.recipient},
-        ${args.subject},
-        true,
-        ${this.toJson({
-          ...(args.metadata ?? {}),
-          runId: args.runId ?? null,
-          documentId: args.documentId ?? null,
-        })}::jsonb,
-        now()
-      )
-    `;
-
-    await appendAuditLog(this.sql, {
-      orgId: args.orgId ?? null,
-      userId: args.userId,
-      projectId: args.projectId ?? null,
-      runId: args.runId ?? null,
-      documentId: args.documentId ?? null,
-      action: "notification.logged",
-      resourceType: "notification",
-      resourceId: args.deliveryId,
-      metadata: {
-        event: args.event,
-        provider,
-        subject: args.subject,
-        ...(args.metadata ?? {}),
-      },
-    });
-  }
 
   private toJson(value: unknown) {
     return sqlJson(this.sql, value);
@@ -396,4 +309,92 @@ export function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+/**
+ * Workers never send email. Each notification event goes to SigNoz as a
+ * structured log and to the in-app inbox (notification_deliveries).
+ */
+export async function recordNotificationEvent(sql: Sql<Record<string, unknown>>, args: {
+  deliveryId: string;
+  userId: string;
+  orgId?: string | null;
+  projectId?: string | null;
+  runId?: string | null;
+  documentId?: string | null;
+  event:
+    | "run.completed"
+    | "run.failed"
+    | "plausibility.warning"
+    | "cost.alert"
+    | "project.invite";
+  recipient: string;
+  subject: string;
+  text: string;
+  html: string;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const provider = "log";
+  emitEventLog(`notification.${args.event}`, {
+    "notification.id": args.deliveryId,
+    "notification.event": args.event,
+    "notification.subject": args.subject,
+    "notification.text": args.text,
+    "enduser.id": args.userId,
+    "docslurp.org_id": args.orgId,
+    "docslurp.project_id": args.projectId,
+    "docslurp.run_id": args.runId,
+    "docslurp.document_id": args.documentId,
+    "notification.metadata": args.metadata,
+  });
+
+  await sql`
+    insert into notification_deliveries (
+      id,
+      user_id,
+      org_id,
+      project_id,
+      event_type,
+      provider,
+      recipient,
+      subject,
+      delivered,
+      metadata,
+      created_at
+    )
+    values (
+      ${args.deliveryId},
+      ${args.userId},
+      ${args.orgId ?? null},
+      ${args.projectId ?? null},
+      ${args.event},
+      ${provider},
+      ${args.recipient},
+      ${args.subject},
+      true,
+      ${sqlJson(sql, {
+        ...(args.metadata ?? {}),
+        runId: args.runId ?? null,
+        documentId: args.documentId ?? null,
+      })}::jsonb,
+      now()
+    )
+  `;
+
+  await appendAuditLog(sql, {
+    orgId: args.orgId ?? null,
+    userId: args.userId,
+    projectId: args.projectId ?? null,
+    runId: args.runId ?? null,
+    documentId: args.documentId ?? null,
+    action: "notification.logged",
+    resourceType: "notification",
+    resourceId: args.deliveryId,
+    metadata: {
+      event: args.event,
+      provider,
+      subject: args.subject,
+      ...(args.metadata ?? {}),
+    },
+  });
 }
