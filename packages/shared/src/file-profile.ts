@@ -174,7 +174,7 @@ export const pdfProfileSchema = z.strictObject({
   taggedFormulas: count.optional(),
   taggedTables: count.optional(),
   taggedMathSources: count.optional(),
-  taggedTruncated: z.boolean().optional(),
+  taggedTruncated: z.literal(true).optional(),
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -293,7 +293,7 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         scanBesideTextUnknownPages: Math.min(pdf.scanBesideTextUnknownPages, sampled),
         ruledTablePages: Math.min(pdf.ruledTablePages, sampled),
         // Recoverable formula sources are a subset of the formulas.
-        ...(pdf.taggedMathSources !== undefined ? { taggedMathSources: Math.min(pdf.taggedMathSources, pdf.taggedFormulas ?? pdf.taggedMathSources) } : {}),
+        ...(pdf.taggedMathSources !== undefined && pdf.taggedFormulas !== undefined ? { taggedMathSources: Math.min(pdf.taggedMathSources, pdf.taggedFormulas) } : {}),
         // Routes are a partition of the sampled pages: a profile whose routes sum past them is cut back route by route.
         ...(pdf.routePages ? { routePages: clampPartition(pdf.routePages, sampled) } : {}),
         scanBesideTextPages: Math.min(pdf.scanBesideTextPages, Math.max(0, sampled - Math.min(sampled, pdf.rasterPages)), pdf.textLayerPages),
@@ -311,6 +311,8 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         maxes.push(Math.max(1, Math.min(pdf.maxPageEquivalentsByAllowance[index]!, index === 0 ? clamped.maxPageEquivalents : maxes[index - 1]!)));
       });
       clamped.pageEquivalentsByAllowance = sums;
+      // Formula sources without a formula count describe nothing.
+      if (clamped.taggedFormulas === undefined) delete clamped.taggedMathSources;
       clamped.maxPageEquivalentsByAllowance = maxes;
       if (sampled !== pdf.sampledPages) delete normalized.pdf;
     }

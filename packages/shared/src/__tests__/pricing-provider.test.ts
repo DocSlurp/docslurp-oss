@@ -211,6 +211,10 @@ describe("file profiles are untrusted", () => {
     // Encodings that do not account for exactly the sampled pages drop the page facts; sources never exceed formulas.
     expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 9]] }), { size: 100_000 })?.pdf).toBeUndefined();
     expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedFormulas: 1, taggedMathSources: 5 }), { size: 100_000 })?.pdf?.taggedMathSources).toBe(1);
+    // Sources with no formula count describe nothing; "not truncated" is said by omission only.
+    expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedMathSources: 5 }), { size: 100_000 })?.pdf?.taggedMathSources).toBeUndefined();
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { taggedFormulas: 1, taggedTruncated: true })).success).toBe(true);
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { taggedFormulas: 1, taggedTruncated: false as never })).success).toBe(false);
   });
 
   it("drops a profile measured on another file size or with inconsistent histograms", () => {

@@ -128,7 +128,10 @@ fn parse<T: serde::de::DeserializeOwned>(what: &str, bytes: &[u8]) -> Result<T, 
 
 /// `ds_probe` without the memory plumbing.
 pub fn probe_json(meta: &[u8], head: &[u8], tail: Option<&[u8]>) -> String {
-    envelope(probe_value(meta, head, tail))
+    let profile = probe_value(meta, head, tail);
+    // The per-page stat lines belong to `ds_probe_pages` only: never left over for a later call.
+    crate::probe::take_page_stats();
+    envelope(profile)
 }
 
 fn probe_value(meta: &[u8], head: &[u8], tail: Option<&[u8]>) -> Result<crate::probe::FileProfile, Error> {

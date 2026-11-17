@@ -90,7 +90,7 @@ PDF facts (counts are over the sampled pages):
 | `routePages` | Sampled pages per cost route, as production routes them (`pageCostRoute` in `@docslurp/shared`): `ocr-read` (no text-layer word, something drawn: scan-fill OCR reads it), `ocr-blank` (nothing to read), `table` (ruled grids unknown or table-heavy: the table path), `text`, `unknown` |
 | `sampledTextEquivalents`, `sampledAreaEquivalents`, `sampledPageEquivalents`, `maxPageEquivalents` | Page equivalents of the sampled pages by the rule billing measures with (`page-equivalents.ts`): a page counts as the larger of 1, its text pages (60 lines or 3,500 characters a page) and its area in Letter pages (capped at 8). A page packed with tiny, invisible or off-page text, or an oversized page, counts as the pages it holds |
 | `pageEncodings` | How math and tables are encoded on the sampled pages: `[mask, pages]` pairs, one per distinct page mask, sorted by mask; the pages add up to `sampledPages`. A histogram, never a per-page array. Bits (`PDF_PAGE_ENCODING_BITS` in `@docslurp/shared`, below); `pdfPageEncodingPages(pageEncodings, "mathFont")` gives the pages with one |
-| `taggedFormulas`, `taggedTables`, `taggedMathSources`, `taggedTruncated?` | The whole document's structure tree: /Formula and /Table elements (custom types through the RoleMap), and formulas whose source is recoverable (TeX-like Alt or ActualText, a MathML associated file or MathML structure). 0 when the document is untagged; `taggedTruncated` when the bounded walk (50,000 elements, 64 levels, each object once) stopped early and the counts are lower bounds |
+| `taggedFormulas`, `taggedTables`, `taggedMathSources`, `taggedTruncated?` | The whole document's structure tree: /Formula and /Table elements (custom types through the RoleMap), and formulas whose source is recoverable (TeX-like Alt or ActualText, a MathML associated file or MathML structure). 0 when the document is untagged; absent when the document's content budget was spent before the tree was read; `taggedTruncated` when the bounded walk (50,000 elements, 64 levels, each object once, source reads within the content budget) stopped early or met a root or kid that does not resolve, so the counts are lower bounds |
 
 Page encoding bits (a page can carry several; read from the page's own content stream and structure tree, never
 rendered; font names, text and element text are only classified into these bits and never leave the profiler):
@@ -111,7 +111,7 @@ rendered; font names, text and element text are only classified into these bits 
 | 11 | `taggedFormula` | is named by a /Formula element or its descendants |
 | 12 | `tableImage` | places a lossless (not JPEG) image 48 pt or taller, 5 to 60% of the page and 40% of its width wide, in a page of 30 or more words. A chart in a PNG looks the same |
 | 13 | `mathGrid` | has a matrix-like grid of math glyphs: two rows of two or more aligned columns with a delimiter beside them and no fraction bar between them |
-| 15 | `partial` | was not read to the end or hit a cap: its bits are a lower bound |
+| 15 | `partial` | was not read to the end, hit a cap or a work budget, showed glyphs from a font whose class could not be read (an unsupported filter, too many glyph procedures, the content budget or the font cache spent), checked its ActualText cap, or its structure tree was not read: its bits are a lower bound |
 
 Tables aligned by whitespace alone are not detected: the profiler places words only by estimate (half an em a glyph),
 which cannot find column gaps reliably without font metrics.

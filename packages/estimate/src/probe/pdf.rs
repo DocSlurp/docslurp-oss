@@ -132,7 +132,14 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
     profile.furniture_images = repeated.len() as u32;
     let encoding_rules = &rules.encoding;
     let sampled_ids: HashSet<ObjectId> = read_pages.iter().map(|(_, id)| *id).collect();
-    let tagged = encoding::struct_facts(document, encoding_rules, &sampled_ids);
+    // The structure tree is read only while the document's content budget lasts; its reads are charged to it.
+    let tagged = (!forms.document_budget_spent()).then(|| {
+        let mut budget = encoding::Budget::new(MAX_DOCUMENT_CONTENT_BYTES.saturating_sub(forms.decompressed));
+        let left = budget.left;
+        let facts = encoding::struct_facts(document, encoding_rules, &sampled_ids, &mut budget);
+        forms.charge(left - budget.left);
+        facts
+    });
     // Strip and table-shaped images repeated like page furniture (often too small to count as significant images).
     let mut furniture = repeated.clone();
     let mut shaped: HashMap<ObjectId, usize> = HashMap::new();
@@ -142,10 +149,10 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
     }
     let scope = readings.len().max(1) as f64;
     furniture.extend(shaped.into_iter().filter(|(_, pages)| *pages as f64 >= routing.repeated_image_min_pages && *pages as f64 / scope >= routing.repeated_image_min_share).map(|(id, _)| id));
-    profile.tagged_formulas = Some(tagged.formulas);
-    profile.tagged_tables = Some(tagged.tables);
-    profile.tagged_math_sources = Some(tagged.sources);
-    profile.tagged_truncated = tagged.truncated.then_some(true);
+    profile.tagged_formulas = tagged.as_ref().map(|facts| facts.formulas);
+    profile.tagged_tables = tagged.as_ref().map(|facts| facts.tables);
+    profile.tagged_math_sources = tagged.as_ref().map(|facts| facts.sources);
+    profile.tagged_truncated = tagged.as_ref().is_some_and(|facts| facts.truncated).then_some(true);
     let mut masks: Vec<(u16, u32)> = Vec::new();
     let mut page_stats: Vec<PageStat> = Vec::new();
     for (reading, (page_index, page_id)) in readings.iter().zip(&read_pages) {
@@ -264,8 +271,9 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
             images: totals.count,
             path_operations: reading.path_operations,
             repeated: &furniture,
-            tagged: tagged.pages.iter().filter(|entry| entry.0 == *page_id).fold(0, |bits, entry| bits | entry.1),
-            document_mathml: tagged.document_mathml,
+            // Unknown structure (not read): the page's tagged bits are unknown too.
+            tagged: tagged.as_ref().map_or(1 << encoding_rules.bits.partial, |facts| facts.pages.iter().filter(|entry| entry.0 == *page_id).fold(0, |bits, entry| bits | entry.1)),
+            document_mathml: tagged.as_ref().is_some_and(|facts| facts.document_mathml),
         });
         match masks.iter_mut().find(|entry| entry.0 == mask) {
             Some(entry) => entry.1 += 1,
@@ -440,8 +448,10 @@ fn fallback_page_count(bytes: &[u8], mut result: ProbeResult) -> ProbeResult {
 struct FormCache {
     content: HashMap<ObjectId, Option<Rc<Vec<u8>>>>,
     decompressed: usize,
-    /// Font classes (`encoding::font_class`) per font object, at most `MAX_CACHED_FONTS`.
-    fonts: HashMap<ObjectId, usize>,
+    /// Font classes (`encoding::font_class`) per font dictionary (by its place in the loaded document, so direct fonts
+    /// are cached too), at most `MAX_CACHED_FONTS`; past that fonts are not classified and their glyphs make the page
+    /// partial.
+    fonts: HashMap<usize, usize>,
 }
 
 const MAX_CACHED_FONTS: usize = 4_096;
@@ -872,12 +882,7 @@ fn page_resources(document: &Document, page_id: ObjectId) -> Vec<&Dictionary> {
 
 /// A composite (Type0) font, or a simple font with an Identity encoding, that has no ToUnicode map: its shown bytes are
 /// glyph ids, so the page's extracted text is likely unreadable.
-fn unmapped_font(document: &Document, resources: &[&Dictionary], name: &[u8]) -> bool {
-    let font = resources.iter().find_map(|resource| {
-        let fonts = resource.get(b"Font").ok().and_then(|object| dictionary(document, object))?;
-        fonts.get(name).ok().and_then(|object| dictionary(document, object))
-    });
-    let Some(font) = font else { return false };
+fn unmapped_font(document: &Document, font: &Dictionary) -> bool {
     if font.get(b"ToUnicode").is_ok() {
         return false;
     }
@@ -1346,21 +1351,28 @@ impl<'a> Context<'a, '_> {
         }
     }
 
-    /// The class of font resource `name` (`encoding::font_class`), cached per font object.
-    fn font_class(&mut self, resources: &[&Dictionary], name: &[u8], unmapped: bool) -> u8 {
+    /// The class of font resource `name` (`encoding::font_class`, with `FONT_UNMAPPED` from `unmapped_font`), cached per
+    /// font dictionary so a page switching fonts reads each once; its stream reads are charged to the document's content
+    /// budget, and a font met once that budget or the cache is full is unknown.
+    fn font_class(&mut self, resources: &[&Dictionary], name: &[u8]) -> u8 {
         let found = resources.iter().find_map(|resource| {
             let fonts = resource.get(b"Font").ok().and_then(|object| dictionary(self.document, object))?;
-            fonts.get(name).ok().and_then(|object| deref(self.document, object))
+            fonts.get(name).ok().and_then(|object| dictionary(self.document, object))
         });
-        let Some((id, object)) = found else { return 0 };
-        let Some(font) = (match object { Object::Dictionary(dict) => Some(dict), _ => None }) else { return 0 };
-        if let Some(class) = id.and_then(|id| self.forms.fonts.get(&id)) {
+        let Some(font) = found else { return 0 };
+        let key = font as *const Dictionary as usize;
+        if let Some(class) = self.forms.fonts.get(&key) {
             return *class as u8;
         }
-        let class = encoding::font_class(self.document, font, unmapped);
-        if let Some(id) = id.filter(|_| self.forms.fonts.len() < MAX_CACHED_FONTS) {
-            self.forms.fonts.insert(id, usize::from(class));
+        let unmapped = unmapped_font(self.document, font);
+        if self.forms.fonts.len() >= MAX_CACHED_FONTS || self.forms.document_budget_spent() {
+            return encoding::FONT_UNKNOWN | if unmapped { encoding::FONT_UNMAPPED } else { 0 };
         }
+        let mut budget = encoding::Budget::new(MAX_DOCUMENT_CONTENT_BYTES.saturating_sub(self.forms.decompressed));
+        let left = budget.left;
+        let class = encoding::font_class(self.document, font, unmapped, &mut budget);
+        self.forms.charge(left - budget.left);
+        self.forms.fonts.insert(key, usize::from(class));
         class
     }
 
@@ -1441,8 +1453,9 @@ impl<'a> Context<'a, '_> {
                 "Tf" => {
                     font_size = operands.get(1).and_then(number).unwrap_or(font_size);
                     if let Some(Object::Name(name)) = operands.first() {
-                        font_unmapped = unmapped_font(self.document, resources, name);
-                        stats.encoding.font = self.font_class(resources, name, font_unmapped);
+                        let class = self.font_class(resources, name);
+                        font_unmapped = class & encoding::FONT_UNMAPPED != 0;
+                        stats.encoding.font = class;
                     }
                 }
                 "Td" | "TD" => {
@@ -1549,8 +1562,7 @@ impl<'a> Context<'a, '_> {
                         _ => None,
                     };
                     if let Some(Object::String(text, _)) = properties.and_then(|dict| dict.get(b"ActualText").ok()).and_then(|object| deref(self.document, object)).map(|(_, value)| value) {
-                        stats.encoding.actual_text = true;
-                        stats.encoding.tex_source |= encoding::tex_like(text);
+                        stats.encoding.actual_text(text);
                     }
                 }
                 "BI" => {
