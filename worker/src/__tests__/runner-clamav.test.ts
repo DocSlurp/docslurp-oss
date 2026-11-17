@@ -5,7 +5,13 @@ import { assessClamDatabaseHealth, resolveMalwareScanPolicy } from "../tools/run
 describe("malware scan policy", () => {
   it.each(["production", "staging", "preview", "prodution"])("caps signature age even when startup was skipped in %s", (NODE_ENV) => {
     const policy = resolveMalwareScanPolicy({ NODE_ENV, DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "999999" });
-    expect(policy.maxSignatureAgeHours).toBe(24);
+    expect(policy.maxSignatureAgeHours).toBe(72);
+  });
+  it("defaults to 24 hours and accepts up to 72 when deployed", () => {
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "production" }).maxSignatureAgeHours).toBe(24);
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "production", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "48" }).maxSignatureAgeHours).toBe(48);
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "production", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "72" }).maxSignatureAgeHours).toBe(72);
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "production", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "73" }).maxSignatureAgeHours).toBe(72);
   });
   it("retains stricter deployed ages and development controls", () => {
     expect(resolveMalwareScanPolicy({ NODE_ENV: "staging", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "12" }).maxSignatureAgeHours).toBe(12);

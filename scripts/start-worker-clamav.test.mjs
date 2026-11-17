@@ -522,7 +522,8 @@ for (const nodeEnv of ["production", "staging", "preview", "prodution", "\u00a0d
     ["DOCSLURP_CLAMAV_ENABLED", "false"],
     ["DOCSLURP_CLAMAV_ENABLED", "typo"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "999999"],
-    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "25"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "73"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "100"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "0"],
     ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "1+999"],
   ]) {

@@ -17,6 +17,23 @@ describe("email authentication policy", () => {
   });
 });
 
+describe("auth cookie names", () => {
+  it("uses the __Host- prefix with Secure on an HTTPS origin, so a sibling host cannot plant the cookie", () => {
+    const { advanced } = createBetterAuthSecurityOptions({ NODE_ENV: "production", BETTER_AUTH_URL: "https://app.example.com" });
+    expect(advanced.cookiePrefix).toBe("__Host-better-auth");
+    // Better Auth's secure mode would prepend `__Secure-`, giving `__Secure-__Host-…`, which no browser treats as host-only.
+    expect(advanced.useSecureCookies).toBe(false);
+    expect(advanced.defaultCookieAttributes).toEqual({ httpOnly: true, sameSite: "lax", secure: true });
+    expect(advanced).not.toHaveProperty("crossSubDomainCookies");
+  });
+
+  it("keeps the plain name on HTTP, where a browser would refuse a __Host- cookie", () => {
+    const { advanced } = createBetterAuthSecurityOptions({ BETTER_AUTH_URL: "http://localhost:4321" });
+    expect(advanced.cookiePrefix).toBe("better-auth");
+    expect(advanced.defaultCookieAttributes.secure).toBe(false);
+  });
+});
+
 describe("session revocation", () => {
   it("checks the session row on every request instead of trusting a cached session cookie", () => {
     expect(createBetterAuthSecurityOptions({}).session.cookieCache).toEqual({ enabled: false });

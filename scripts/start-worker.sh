@@ -110,7 +110,7 @@ refuse_unsafe_overrides() {
     *) refused+=(DOCSLURP_CLAMAV_ENABLED) ;;
   esac
   value="$(normalize_env_setting "${DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS:-}")"
-  if [[ -n "${value}" && ! "${value}" =~ ^([1-9]|1[0-9]|2[0-4])$ ]]; then
+  if [[ -n "${value}" && ! "${value}" =~ ^([1-9]|[1-6][0-9]|7[0-2])$ ]]; then
     refused+=(DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS)
   fi
   value="$(normalize_env_setting "${DOCSLURP_PARSER_SANDBOX:-}")"
