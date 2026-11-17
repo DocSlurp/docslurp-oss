@@ -259,19 +259,21 @@ export const FAILED_PAGE_FEATURE = "probe-error";
 
 /**
  * A page of pdf-layout-facts@1 (parsed by parsePageLayoutFacts): the walker's own, or the stored layout classify-route reads.
- * `grids: null` is unknown with `gridsUnknown` (a source tried), otherwise unmeasured (the walker's own "no ruling line").
+ * Grids are unknown with `gridsUnknown` (a source tried), else known from the list, else unmeasured (the walker's own "no
+ * ruling line"). Fields a caller left out are unknown.
  */
 export function pageEvidenceFromLayout(page: number, layout: PageLayoutFacts): PageEvidence {
-  const grids: GridEvidence = layout.grids !== null ? { state: "known", grids: [...layout.grids] }
-    : layout.gridsUnknown === true ? { state: "unknown" } : { state: "unmeasured" };
+  // The mark wins (it is only ever set beside unknown grids); a missing list is not a known one.
+  const grids: GridEvidence = layout.gridsUnknown === true ? { state: "unknown" }
+    : Array.isArray(layout.grids) ? { state: "known", grids: [...layout.grids] } : { state: "unmeasured" };
   return {
     page, source: "layout-walker", state: "known",
     size: pageSize(layout.widthPt, layout.heightPt), rotation: null,
     text: {
-      ...UNKNOWN_TEXT, words: layout.words, invisibleWords: layout.invisibleWords ?? null, layer: layout.textLayer ?? null,
+      ...UNKNOWN_TEXT, words: layout.words ?? null, invisibleWords: layout.invisibleWords ?? null, layer: layout.textLayer ?? null,
     },
     unmappedGlyphRatio: null, fonts: null, images: null,
-    placements: layout.images, vectors: null, grids, tables: layout.tables, tableCoverage: layout.tableCoverage,
+    placements: layout.images ?? null, vectors: null, grids, tables: layout.tables ?? null, tableCoverage: layout.tableCoverage ?? null,
     encodings: layout.encodings ?? null, features: [], probeMs: 0,
   };
 }
