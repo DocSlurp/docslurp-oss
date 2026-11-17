@@ -84,7 +84,7 @@ export class RenderImagesStage implements Stage {
           const keptSet = new Set(referencedPages);
           const unread = [...new Set([...unreadPages, ...keptAsImage.filter((pageNumber) => !keptSet.has(pageNumber))])];
           if (referencedPages.length > 0 || unread.length > 0) {
-            await recordPageFacts(state.store?.content, [
+            await recordPageFacts(state, [
               ...referencedPages.map((pageNumber) => ({
                 documentId: document.id, runId: state.run.id, pageNumber, visionStatus: "kept-as-image" as const,
               })),

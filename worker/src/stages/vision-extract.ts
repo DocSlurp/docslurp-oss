@@ -381,7 +381,7 @@ export class VisionExtractStage implements Stage {
               totalCost: runSpentCents(state),
             },
           });
-          await recordPageFacts(state.store?.content, buildVisionPageFacts({
+          await recordPageFacts(state, buildVisionPageFacts({
             documentId: document.id, runId: state.run.id, pageCount: maxInt(1, document.pageCount),
             selected: [], processed: [], costCapped: true,
           }));
@@ -460,7 +460,7 @@ export class VisionExtractStage implements Stage {
                 ...(needsVision.ladder ? { ladder: needsVision.ladder } : {}),
               });
 
-              await recordPageFacts(state.store?.content, buildVisionPageFacts({
+              await recordPageFacts(state, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
                 selected: [], processed: [],
               }));
@@ -542,7 +542,7 @@ export class VisionExtractStage implements Stage {
                 },
               });
 
-              await recordPageFacts(state.store?.content, buildVisionPageFacts({
+              await recordPageFacts(state, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
                 selected: needsVision.selectedPages, processed: [],
               }));
@@ -668,7 +668,7 @@ export class VisionExtractStage implements Stage {
               },
             });
 
-            await recordPageFacts(state.store?.content, buildVisionPageFacts({
+            await recordPageFacts(state, buildVisionPageFacts({
               documentId: document.id, runId: state.run.id, pageCount: pages,
               selected: needsVision.selectedPages, processed: outputs,
               costCapped: isCostCapExceeded(state),

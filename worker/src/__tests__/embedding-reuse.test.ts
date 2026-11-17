@@ -108,7 +108,13 @@ class MemoryReuseStore implements EmbeddingReuseStore {
 /** An in-memory checkpoint store whose content port uses this reuse table and any replaced content writes. */
 function checkpointStore(reuse: MemoryReuseStore, extras: Record<string, unknown> = {}) {
   const store = memoryCheckpointStore();
-  const { failDocumentStage, ...content } = extras;
+  const { failDocumentStage, ...legacy } = extras;
+  // The extras are written against the writes' rows (and a document id); the port takes the write's scope first.
+  const content = Object.fromEntries(Object.entries(legacy).map(([name, fn]) => {
+    const write = fn as (...args: unknown[]) => unknown;
+    const byDocument = ["staleDocumentChunkIds", "deleteStaleDocumentChunks", "markDocumentLexicalSearchable"].includes(name);
+    return [name, (scope: { documentId: string }, ...rest: unknown[]) => (byDocument ? write(scope.documentId, ...rest) : write(...rest))];
+  }));
   Object.assign(store.content, {
     findEmbeddingReuseRefs: reuse.findEmbeddingReuseRefs.bind(reuse),
     recordEmbeddingReuseRefs: reuse.recordEmbeddingReuseRefs.bind(reuse),

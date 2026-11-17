@@ -1,22 +1,32 @@
-import type { JSONValue, Sql } from "postgres";
+import type { JSONValue, PendingQuery, Row, Sql } from "postgres";
 
 import type { EmbeddingReuseRef } from "../embeddings/embedding-reuse.js";
 import type { PageFactUpsert } from "../pipeline/page-facts.js";
+import type { DocumentRowScope } from "./document-records.js";
+import { DocumentNotFoundError, DocumentOutOfScopeError } from "./missing-document.js";
 import { batchedRows, sqlJson } from "./sql-helpers.js";
 import { pipelineTransaction } from "./transaction-pipeline.js";
 
 /** The document content port stages write through (pipeline CheckpointStore.content). */
 export type DocumentContentWriter = Pick<PostgresDocumentContent, keyof PostgresDocumentContent>;
 
+/** The run whose documents a page-facts write may touch. */
+export type RunScope = { orgId: string | null; runId: string };
+
 /**
  * Document content: the searchable rows a run derives from a document (pages, chunks and their page links, propositions,
  * summaries), its per-page ingest facts, and the org-scoped embedding reuse refs. Stages write through it (as the
  * DocumentContentWriter port); the run ledger's checkpoints commit the stage state around these writes.
+ *
+ * Every write names its tenant scope: the run's organization and the run the document belongs to. A write outside it
+ * changes nothing: an insert throws (DocumentOutOfScopeError, or DocumentNotFoundError for a deleted document), a
+ * delete, marker or link matches no row, and page facts skip the row.
  */
 export class PostgresDocumentContent {
   constructor(private readonly sql: Sql<Record<string, unknown>>) {}
 
   async insertChunks(
+    scope: DocumentRowScope,
     chunks: Array<{
       id: string;
       documentId: string;
@@ -35,6 +45,7 @@ export class PostgresDocumentContent {
     if (chunks.length === 0) {
       return;
     }
+    assertRowsInScope(scope, chunks);
 
     const rows = chunks.map((chunk) => ({
       id: chunk.id,
@@ -46,28 +57,24 @@ export class PostgresDocumentContent {
       heading_path: chunk.headingPath,
       page_number: chunk.pageNumber ?? null,
       token_estimate: chunk.tokenEstimate,
-      metadata: this.toJson(chunk.metadata),
+      metadata: chunk.metadata,
       content_hash: chunk.contentHash ?? null,
       pipeline_version: chunk.pipelineVersion ?? null,
     }));
 
     for (const batch of batchedRows(rows)) {
-      await this.sql`
-        insert into document_chunks ${this.sql(
-          batch,
-          "id",
-          "document_id",
-          "run_id",
-          "user_id",
-          "chunk_index",
-          "text",
-          "heading_path",
-          "page_number",
-          "token_estimate",
-          "metadata",
-          "content_hash",
-          "pipeline_version",
-        )}
+      await this.scopedWrite(scope, (inScope) => this.sql`
+        insert into document_chunks (
+          id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata,
+          content_hash, pipeline_version
+        )
+        select r.id, r.document_id, r.run_id, r.user_id, r.chunk_index, r.text, r.heading_path, r.page_number, r.token_estimate,
+          coalesce(r.metadata, '{}'::jsonb), r.content_hash, r.pipeline_version
+        from jsonb_to_recordset(${this.toJson(batch)}::jsonb) as r(
+          id text, document_id text, run_id text, user_id text, chunk_index integer, text text, heading_path text[],
+          page_number integer, token_estimate integer, metadata jsonb, content_hash text, pipeline_version text
+        )
+        where ${inScope}
         on conflict (id) do update
         set
           document_id = excluded.document_id,
@@ -81,7 +88,7 @@ export class PostgresDocumentContent {
           metadata = excluded.metadata,
           content_hash = excluded.content_hash,
           pipeline_version = excluded.pipeline_version
-      `;
+      `);
     }
   }
 
@@ -135,7 +142,8 @@ export class PostgresDocumentContent {
    * (text_layer, scan_class, the encoding words): those belong to one run, so
    * any write that moves a row to another run clears them unless it sets them.
    */
-  async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
+  async upsertPageFacts(scope: RunScope, rows: readonly PageFactUpsert[]): Promise<void> {
+    rows = rows.filter((row) => row.runId === scope.runId);
     const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
     const vision = rows.filter((row) => row.visionStatus !== undefined);
     const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null || row.mathBits != null);
@@ -152,7 +160,7 @@ export class PostgresDocumentContent {
           document_id text, page_number integer, run_id text, text_bytes integer, word_count integer,
           image_count integer, facts_source text
         )
-        join documents d on d.id = r.document_id
+        join documents d on d.id = r.document_id and d.org_id = ${scope.orgId} and d.run_id = ${scope.runId}
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
             -- Routing facts are a run's own: another run's write clears them (council #467).
@@ -179,7 +187,7 @@ export class PostgresDocumentContent {
         from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
           document_id text, page_number integer, run_id text, vision_status text, vision_text_bytes integer
         )
-        join documents d on d.id = r.document_id
+        join documents d on d.id = r.document_id and d.org_id = ${scope.orgId} and d.run_id = ${scope.runId}
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
             -- Routing facts are a run's own: another run's write clears them (council #467).
@@ -210,7 +218,7 @@ export class PostgresDocumentContent {
           document_id text, page_number integer, run_id text, text_layer text, scan_class text, math_bits bigint, table_bits bigint,
           encoding_counts bigint
         )
-        join documents d on d.id = r.document_id
+        join documents d on d.id = r.document_id and d.org_id = ${scope.orgId} and d.run_id = ${scope.runId}
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
             -- A value the write does not know keeps the stored one only for the same run: another run's routing facts
@@ -230,6 +238,7 @@ export class PostgresDocumentContent {
   }
 
   async insertPages(
+    scope: DocumentRowScope,
     pages: Array<{
       id: string;
       documentId: string;
@@ -243,6 +252,7 @@ export class PostgresDocumentContent {
     if (pages.length === 0) {
       return;
     }
+    assertRowsInScope(scope, pages);
 
     const rows = pages.map((page) => ({
       id: page.id,
@@ -255,24 +265,20 @@ export class PostgresDocumentContent {
     }));
 
     for (const batch of batchedRows(rows)) {
-      await this.sql`
-        insert into document_pages ${this.sql(
-          batch,
-          "id",
-          "document_id",
-          "run_id",
-          "user_id",
-          "page_number",
-          "text",
-          "token_estimate",
-        )}
+      await this.scopedWrite(scope, (inScope) => this.sql`
+        insert into document_pages (id, document_id, run_id, user_id, page_number, text, token_estimate)
+        select r.id, r.document_id, r.run_id, r.user_id, r.page_number, r.text, r.token_estimate
+        from jsonb_to_recordset(${this.toJson(batch)}::jsonb) as r(
+          id text, document_id text, run_id text, user_id text, page_number integer, text text, token_estimate integer
+        )
+        where ${inScope}
         on conflict (id) do update
         set run_id = excluded.run_id,
             user_id = excluded.user_id,
             page_number = excluded.page_number,
             text = excluded.text,
             token_estimate = excluded.token_estimate
-      `;
+      `);
     }
   }
 
@@ -280,18 +286,20 @@ export class PostgresDocumentContent {
    * The document's chunks are replaced by `keepChunkIds`; rows an earlier attempt
    * wrote beyond them are stale. Scoped to this document only.
    */
-  async staleDocumentChunkIds(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+  async staleDocumentChunkIds(scope: DocumentRowScope, keepChunkIds: readonly string[]): Promise<string[]> {
     const rows = await this.sql<{ id: string }[]>`
       select id from document_chunks
-      where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+      where document_id = ${scope.documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+        and ${documentInScope(this.sql, scope)}
     `;
     return rows.map((row) => row.id);
   }
 
-  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+  async deleteStaleDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[]): Promise<string[]> {
     const rows = await this.sql<{ id: string }[]>`
       delete from document_chunks
-      where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+      where document_id = ${scope.documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
+        and ${documentInScope(this.sql, scope)}
       returning id
     `;
     return rows.map((row) => row.id);
@@ -301,16 +309,17 @@ export class PostgresDocumentContent {
    * deleteStaleDocumentChunks, then (when the replacement set is non-empty) markDocumentLexicalSearchable,
    * in one transaction and one round trip: the marker never precedes the tail drop.
    */
-  async finalizeDocumentChunks(documentId: string, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
+  async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
     await pipelineTransaction(this.sql, (client) => [
       client`
         delete from document_chunks
-        where document_id = ${documentId} and id <> all(${client.array([...keepChunkIds])}::text[])
+        where document_id = ${scope.documentId} and id <> all(${client.array([...keepChunkIds])}::text[])
+          and ${documentInScope(client, scope)}
       `,
       ...(markSearchable ? [client`
         update documents
         set lexical_searchable_at = coalesce(lexical_searchable_at, now())
-        where id = ${documentId}
+        where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId}
       `] : []),
     ]);
   }
@@ -321,15 +330,16 @@ export class PostgresDocumentContent {
    * Called after the last insertChunks batch, so a reader never sees a
    * half-materialized chunk set behind the marker.
    */
-  async markDocumentLexicalSearchable(documentId: string): Promise<void> {
+  async markDocumentLexicalSearchable(scope: DocumentRowScope): Promise<void> {
     await this.sql`
       update documents
       set lexical_searchable_at = coalesce(lexical_searchable_at, now())
-      where id = ${documentId}
+      where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId}
     `;
   }
 
-  async linkChunksToPages(documentId: string, runId: string): Promise<void> {
+  async linkChunksToPages(scope: DocumentRowScope): Promise<void> {
+    const { documentId, runId } = scope;
     await this.sql`
       update document_chunks c
       set parent_page_id = p.id
@@ -340,10 +350,12 @@ export class PostgresDocumentContent {
         and p.run_id = ${runId}
         and c.page_number = p.page_number
         and c.parent_page_id is null
+        and ${documentInScope(this.sql, scope, "c.document_id")}
     `;
   }
 
   async insertPropositions(
+    scope: DocumentRowScope,
     propositions: Array<{
       id: string;
       documentId: string;
@@ -358,6 +370,7 @@ export class PostgresDocumentContent {
     if (propositions.length === 0) {
       return;
     }
+    assertRowsInScope(scope, propositions);
 
     const rows = propositions.map((prop) => ({
       id: prop.id,
@@ -371,46 +384,81 @@ export class PostgresDocumentContent {
     }));
 
     for (const batch of batchedRows(rows)) {
-      await this.sql`
-        insert into document_propositions ${this.sql(
-          batch,
-          "id",
-          "document_id",
-          "run_id",
-          "user_id",
-          "chunk_index",
-          "text",
-          "source_paragraph",
-          "token_estimate",
-        )}
+      await this.scopedWrite(scope, (inScope) => this.sql`
+        insert into document_propositions (id, document_id, run_id, user_id, chunk_index, text, source_paragraph, token_estimate)
+        select r.id, r.document_id, r.run_id, r.user_id, r.chunk_index, r.text, r.source_paragraph, r.token_estimate
+        from jsonb_to_recordset(${this.toJson(batch)}::jsonb) as r(
+          id text, document_id text, run_id text, user_id text, chunk_index integer, text text, source_paragraph text,
+          token_estimate integer
+        )
+        where ${inScope}
         on conflict (id) do nothing
-      `;
+      `);
     }
   }
 
-  async insertSummary(summary: {
+  async insertSummary(scope: DocumentRowScope, summary: {
     id: string;
     documentId: string;
     runId: string;
     userId: string;
     summary: string;
   }): Promise<void> {
-    await this.sql`
+    assertRowsInScope(scope, [summary]);
+    await this.scopedWrite(scope, (inScope) => this.sql`
       insert into document_summaries (
         id, document_id, run_id, user_id, summary
       )
-      values (
+      select
         ${summary.id},
         ${summary.documentId},
         ${summary.runId},
         ${summary.userId},
         ${summary.summary}
-      )
+      where ${inScope}
       on conflict (id) do nothing
-    `;
+    `);
   }
+
+  /**
+   * One insert, run only when the scope's document is the organization's and the run's (`inScope`, the statement's own
+   * predicate), in the same statement that reports whether it was. Out of scope writes nothing and throws: a document of
+   * another organization or run (DocumentOutOfScopeError), or one that is gone (DocumentNotFoundError).
+   */
+  private async scopedWrite(scope: DocumentRowScope, insert: (inScope: PendingQuery<Row[]>) => PendingQuery<Row[]>): Promise<void> {
+    // A data-modifying CTE always runs; its rows exist only when the document is in scope.
+    const [row] = await this.sql<{ in_scope: boolean }[]>`
+      with in_scope as (
+        select 1 from documents where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId}
+      ),
+      written as (${insert(this.sql`exists (select 1 from in_scope)`)} returning 1)
+      select exists (select 1 from in_scope) as in_scope
+    `;
+    if (row?.in_scope) return;
+    const [exists] = await this.sql<{ one: number }[]>`select 1 as one from documents where id = ${scope.documentId} limit 1`;
+    if (exists) {
+      console.error(`[document-content] write out of scope document=${scope.documentId} run=${scope.runId}`);
+      throw new DocumentOutOfScopeError(scope.documentId, "run");
+    }
+    throw new DocumentNotFoundError(scope.documentId);
+  }
+
 
   private toJson(value: unknown) {
     return sqlJson(this.sql, value);
+  }
+}
+
+/** The document's rows, only while the document is the organization's and the run's: `<column> in (that document)`. */
+function documentInScope(client: Sql<Record<string, unknown>>, scope: DocumentRowScope, column = "document_id") {
+  return client`${client.unsafe(column)} in (
+    select id from documents where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId}
+  )`;
+}
+
+/** Rows a caller writes under a scope must be that document's and that run's: anything else is a caller bug. */
+function assertRowsInScope(scope: DocumentRowScope, rows: ReadonlyArray<{ documentId: string; runId: string }>): void {
+  if (rows.some((row) => row.documentId !== scope.documentId || row.runId !== scope.runId)) {
+    throw new Error(`content rows outside their write scope document=${scope.documentId} run=${scope.runId}`);
   }
 }

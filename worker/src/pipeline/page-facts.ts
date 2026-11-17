@@ -10,6 +10,7 @@ import { pageWordCount } from "@docslurp/shared";
 import type { CommandRunner } from "../tools/runner.js";
 import { pdfImagesListFields } from "../lib/page-yield-evidence.js";
 import { DOPPLER_ENCODING_COUNTS_MAX, DOPPLER_FLAG_WORD_MAX } from "../lib/doppler-encoding-facts.js";
+import type { DocumentContentWriter } from "../db/document-content.js";
 
 /**
  * `rejected`: vision ran but its output was rejected (degenerate, refusal, truncated) and the page
@@ -301,12 +302,14 @@ export function buildVisionPageFacts(args: {
 
 /** Best-effort write; a failure is logged and never fails the stage. */
 export async function recordPageFacts(
-  store: { upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> } | undefined,
+  state: { store?: { readonly content: Pick<DocumentContentWriter, "upsertPageFacts"> }; run: { id: string; orgId?: string | null } },
   rows: readonly PageFactUpsert[],
 ): Promise<void> {
+  const store = state.store?.content;
   if (rows.length === 0 || !store || !pageFactsEnabled()) return;
   try {
-    await store.upsertPageFacts(rows);
+    // Scoped to the run's organization and its own documents (db/document-content.ts).
+    await store.upsertPageFacts({ orgId: state.run.orgId ?? null, runId: state.run.id }, rows);
   } catch (error) {
     console.warn(`[page-facts] write failed document=${rows[0]?.documentId ?? "unknown"}: ${error instanceof Error ? error.message : String(error)}`);
   }

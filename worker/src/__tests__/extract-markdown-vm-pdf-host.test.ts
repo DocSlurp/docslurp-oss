@@ -93,7 +93,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   const state = WorkflowState.create(run(documentExtraction), [document]);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", "pdf");
-  const upsertPageFacts = vi.fn(async (_rows: unknown) => undefined);
+  const upsertPageFacts = vi.fn(async (_scope: unknown, _rows: unknown) => undefined);
   // An in-memory store, so page facts would be recorded if the stage wrote them.
   // Its page basis is an in-memory ledger over the run's documents (a funded run).
   const ledger = new MemoryPageBasisLedger().seed([document]);
@@ -230,7 +230,7 @@ describe("the sandboxed PDF route on the worker host", () => {
       expect(h.hostPdf()).toEqual([]);
       expect(h.richIds()).toEqual([]);
       // One routing row per page the host counted (page 4 is past it): closed enums only.
-      const rows = h.upsertPageFacts.mock.calls.flatMap((call) => call[0] as Array<Record<string, unknown>>).filter((row) => row.scanClass !== undefined);
+      const rows = h.upsertPageFacts.mock.calls.flatMap((call) => call[1] as Array<Record<string, unknown>>).filter((row) => row.scanClass !== undefined);
       expect(rows).toEqual([1, 2, 3].map((pageNumber) => ({ documentId: "doc-1", runId: "run-1", pageNumber, textLayer: "visible", scanClass: "none" })));
       const everything = JSON.stringify([...h.json.values(), ...h.upsertPageFacts.mock.calls]);
       expect(everything).not.toContain("PRODUCER-MARKER");
@@ -468,7 +468,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     return h;
   }
   const sourceRows = (h: Awaited<ReturnType<typeof harness>>) =>
-    h.upsertPageFacts.mock.calls.flatMap((call) => call[0] as Array<Record<string, unknown>>).filter((row) => row.factsSource !== undefined);
+    h.upsertPageFacts.mock.calls.flatMap((call) => call[1] as Array<Record<string, unknown>>).filter((row) => row.factsSource !== undefined);
   const evidence = (h: Awaited<ReturnType<typeof harness>>) =>
     [...h.json.entries()].find(([key]) => key.includes("/page-image-evidence/"))?.[1] as { source: string; drawnBytesPerPage: unknown; pages: Array<Record<string, unknown>> } | undefined;
 

@@ -143,7 +143,7 @@ export class DocumentSummaryStage implements Stage {
 
             // Unbound states (unit tests) persist no row; every stage activity's state is bound (loadRunState).
             if (state.store) {
-              await state.store.content.insertSummary({
+              await state.store.content.insertSummary({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id }, {
                 id: `${document.id}-summary`,
                 documentId: document.id,
                 runId: state.run.id,

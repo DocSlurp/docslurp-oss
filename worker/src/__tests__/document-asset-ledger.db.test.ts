@@ -583,8 +583,8 @@ describe("routing page facts go through the page-facts write (MEDIUM-6)", () => 
     const rows = buildRoutingPageFacts({ documentId: "doc-a", runId: "run-a", pageCount: 3, layoutFacts: layout });
     // Out-of-vocabulary values and pages outside the document are dropped.
     expect(rows.map((row) => [row.pageNumber, row.textLayer, row.scanClass])).toEqual([[1, "visible", undefined], [3, "invisible", "single"]]);
-    await store.content.upsertPageFacts(rows);
-    await store.content.upsertPageFacts([{ documentId: "doc-a", runId: "run-a", pageNumber: 3, textBytes: 10, wordCount: 2, imageCount: 1, factsSource: "pdftotext" }]);
+    await store.content.upsertPageFacts({ orgId: "org-a", runId: "run-a" }, rows);
+    await store.content.upsertPageFacts({ orgId: "org-a", runId: "run-a" }, [{ documentId: "doc-a", runId: "run-a", pageNumber: 3, textBytes: 10, wordCount: 2, imageCount: 1, factsSource: "pdftotext" }]);
     expect(await sql`select page_number, text_layer, scan_class from document_page_facts where document_id = 'doc-a' order by page_number`).toEqual([
       { page_number: 1, text_layer: "visible", scan_class: null }, { page_number: 3, text_layer: "invisible", scan_class: "single" },
     ]);
@@ -595,36 +595,44 @@ describe("routing page facts go through the page-facts write (MEDIUM-6)", () => 
     const { buildRoutingPageFacts } = await import("../pipeline/page-facts.js");
     // 2^52 - 1 is the largest count word: exact through JSON and bigint.
     const words = { mathBits: 2 ** 12 + 1, tableBits: 2 ** 31, encodingCounts: 2 ** 52 - 1 };
+    // Each write is its run's own (stages write only their run's documents): a "later run" is simulated by moving doc-a to
+    // run-a-new, the organization's other run, before that run's writes.
+    const write = async (rowsOfRun: Parameters<typeof store.content.upsertPageFacts>[1]) => {
+      const runId = rowsOfRun[0]!.runId;
+      await sql`update documents set run_id = ${runId} where id = 'doc-a'`;
+      await store.content.upsertPageFacts({ orgId: "org-a", runId }, rowsOfRun);
+    };
     const rows = buildRoutingPageFacts({ documentId: "doc-a", runId: "run-a", pageCount: 2, layoutFacts: new Map([[1, { textLayer: "visible", ...words }], [2, { scanClass: "single" }]]) });
-    await store.content.upsertPageFacts(rows);
-    await store.content.upsertPageFacts([{ documentId: "doc-a", runId: "run-a", pageNumber: 1, textLayer: "mixed" }]);
+    await write(rows);
+    await write([{ documentId: "doc-a", runId: "run-a", pageNumber: 1, textLayer: "mixed" }]);
     expect(await sql`select page_number, text_layer, math_bits::text, table_bits::text, encoding_counts::text from document_page_facts where document_id = 'doc-a' order by page_number`).toEqual([
       { page_number: 1, text_layer: "mixed", math_bits: "4097", table_bits: "2147483648", encoding_counts: "4503599627370495" },
       { page_number: 2, text_layer: null, math_bits: null, table_bits: null, encoding_counts: null },
     ]);
     // Another run's write without words clears them: they described facts that run did not produce.
-    await store.content.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textLayer: "visible" }]);
+    await write([{ documentId: "doc-a", runId: "run-a-new", pageNumber: 1, textLayer: "visible" }]);
     expect(await sql`select math_bits, table_bits, encoding_counts from document_page_facts where document_id = 'doc-a' and page_number = 1`).toEqual([
       { math_bits: null, table_bits: null, encoding_counts: null },
     ]);
     // The extract-markdown order (council #467): a new run's source and vision rows land before its routing rows, and
     // already clear the previous run's routing facts; a later routing write without words keeps them cleared.
-    await store.content.upsertPageFacts(rows.map((row) => ({ ...row, runId: "run-a" })));
-    await store.content.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textBytes: 9, wordCount: 2, imageCount: 0, factsSource: "doppler-facts" }]);
-    await store.content.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 2, visionStatus: "not-selected" }]);
-    await store.content.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textLayer: "visible" }]);
+    await write(rows.map((row) => ({ ...row, runId: "run-a" })));
+    await write([{ documentId: "doc-a", runId: "run-a-new", pageNumber: 1, textBytes: 9, wordCount: 2, imageCount: 0, factsSource: "doppler-facts" }]);
+    await write([{ documentId: "doc-a", runId: "run-a-new", pageNumber: 2, visionStatus: "not-selected" }]);
+    await write([{ documentId: "doc-a", runId: "run-a-new", pageNumber: 1, textLayer: "visible" }]);
     expect(await sql`select page_number, text_layer, scan_class, math_bits from document_page_facts where document_id = 'doc-a' order by page_number`).toEqual([
       { page_number: 1, text_layer: "visible", scan_class: null, math_bits: null },
       { page_number: 2, text_layer: null, scan_class: null, math_bits: null },
     ]);
     // Within one run, source and vision writes keep the run's own routing facts.
-    await store.content.upsertPageFacts(rows.map((row) => ({ ...row, runId: "run-b" })));
-    await store.content.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textBytes: 10, wordCount: 3, imageCount: 0, factsSource: "doppler-facts" }]);
+    await write(rows.map((row) => ({ ...row, runId: "run-a-new" })));
+    await write([{ documentId: "doc-a", runId: "run-a-new", pageNumber: 1, textBytes: 10, wordCount: 3, imageCount: 0, factsSource: "doppler-facts" }]);
     expect((await sql`select math_bits::text from document_page_facts where document_id = 'doc-a' and page_number = 1`)[0]).toEqual({ math_bits: "4097" });
     // The table refuses a partial set and an out-of-range word.
     await expect(sql`update document_page_facts set math_bits = null where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();
     await expect(sql`update document_page_facts set table_bits = 4294967296 where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();
     await sql`delete from document_page_facts where document_id = 'doc-a'`;
+    await sql`update documents set run_id = 'run-a' where id = 'doc-a'`;
   });
 });
 

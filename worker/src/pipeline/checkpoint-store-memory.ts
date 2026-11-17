@@ -6,7 +6,7 @@
 import type { DerivedDocumentTitle, FileFacts, PrivacyAuditEntry } from "@docslurp/shared";
 
 import type { DocumentAssets } from "../db/document-asset-ledger.js";
-import type { DocumentContentWriter } from "../db/document-content.js";
+import type { DocumentContentWriter, RunScope } from "../db/document-content.js";
 import type { DocumentRecords, DocumentRowScope } from "../db/document-records.js";
 import type { FleetBudgets } from "../db/fleet-budgets.js";
 import type { GeoAttempt } from "../db/geo-final-source.js";
@@ -21,12 +21,15 @@ import { MemoryPageBasisLedger } from "./page-basis-memory.js";
 import type { CheckpointStore, WorkflowState } from "./pipeline.js";
 import type { RunMilestone, RunMilestoneHit } from "./run-milestones.js";
 
-type ChunkRow = Parameters<DocumentContentWriter["insertChunks"]>[0][number];
-type PageRow = Parameters<DocumentContentWriter["insertPages"]>[0][number];
-type PropositionRow = Parameters<DocumentContentWriter["insertPropositions"]>[0][number];
-type SummaryRow = Parameters<DocumentContentWriter["insertSummary"]>[0];
+type ChunkRow = Parameters<DocumentContentWriter["insertChunks"]>[1][number];
+type PageRow = Parameters<DocumentContentWriter["insertPages"]>[1][number];
+type PropositionRow = Parameters<DocumentContentWriter["insertPropositions"]>[1][number];
+type SummaryRow = Parameters<DocumentContentWriter["insertSummary"]>[1];
 
-/** Search content rows, keyed as their tables are (chunks and pages by id, page facts by document and page). */
+/**
+ * Search content rows, keyed as their tables are (chunks and pages by id, page facts by document and page). Rows must be the
+ * write scope's document and run, as the Postgres adapter requires; it does not model documents' organizations.
+ */
 export class MemoryDocumentContent implements DocumentContentWriter {
   readonly chunks = new Map<string, ChunkRow>();
   readonly pages = new Map<string, PageRow>();
@@ -39,49 +42,53 @@ export class MemoryDocumentContent implements DocumentContentWriter {
   /** Embedding reuse refs per organization and key. */
   readonly reuseRefs = new Map<string, EmbeddingReuseRef>();
 
-  async insertChunks(chunks: ChunkRow[]): Promise<void> {
+  async insertChunks(scope: DocumentRowScope, chunks: ChunkRow[]): Promise<void> {
+    inScope(scope, chunks);
     for (const chunk of chunks) this.chunks.set(chunk.id, chunk);
   }
 
-  async staleDocumentChunkIds(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
+  async staleDocumentChunkIds({ documentId }: DocumentRowScope, keepChunkIds: readonly string[]): Promise<string[]> {
     const keep = new Set(keepChunkIds);
     return [...this.chunks.values()].filter((chunk) => chunk.documentId === documentId && !keep.has(chunk.id)).map((chunk) => chunk.id);
   }
 
-  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
-    const stale = await this.staleDocumentChunkIds(documentId, keepChunkIds);
+  async deleteStaleDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[]): Promise<string[]> {
+    const stale = await this.staleDocumentChunkIds(scope, keepChunkIds);
     for (const id of stale) this.chunks.delete(id);
     return stale;
   }
 
   /** The prune, then the marker: the Postgres adapter's one transaction, as its two halves in order. */
-  async finalizeDocumentChunks(documentId: string, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
-    await this.deleteStaleDocumentChunks(documentId, keepChunkIds);
-    if (markSearchable) await this.markDocumentLexicalSearchable(documentId);
+  async finalizeDocumentChunks(scope: DocumentRowScope, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
+    await this.deleteStaleDocumentChunks(scope, keepChunkIds);
+    if (markSearchable) await this.markDocumentLexicalSearchable(scope);
   }
 
-  async markDocumentLexicalSearchable(documentId: string): Promise<void> {
+  async markDocumentLexicalSearchable({ documentId }: DocumentRowScope): Promise<void> {
     this.lexicalSearchable.add(documentId);
   }
 
-  async insertPages(pages: PageRow[]): Promise<void> {
+  async insertPages(scope: DocumentRowScope, pages: PageRow[]): Promise<void> {
+    inScope(scope, pages);
     for (const page of pages) this.pages.set(page.id, page);
   }
 
-  async linkChunksToPages(documentId: string, runId: string): Promise<void> {
+  async linkChunksToPages({ documentId, runId }: DocumentRowScope): Promise<void> {
     this.linkedDocuments.push({ documentId, runId });
   }
 
-  async insertPropositions(rows: PropositionRow[]): Promise<void> {
+  async insertPropositions(scope: DocumentRowScope, rows: PropositionRow[]): Promise<void> {
+    inScope(scope, rows);
     this.propositions.push(...rows);
   }
 
-  async insertSummary(summary: SummaryRow): Promise<void> {
+  async insertSummary(scope: DocumentRowScope, summary: SummaryRow): Promise<void> {
+    inScope(scope, [summary]);
     this.summaries.set(summary.id, summary);
   }
 
-  async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
-    for (const row of rows) {
+  async upsertPageFacts(scope: RunScope, rows: readonly PageFactUpsert[]): Promise<void> {
+    for (const row of rows.filter((candidate) => candidate.runId === scope.runId)) {
       const key = `${row.documentId}:${row.pageNumber}`;
       this.pageFacts.set(key, { ...this.pageFacts.get(key), ...row });
     }
@@ -99,6 +106,12 @@ export class MemoryDocumentContent implements DocumentContentWriter {
     for (const key of keys) {
       if (this.reuseRefs.get(`${orgId}:${key}`)?.artifactUri === artifactUri) this.reuseRefs.delete(`${orgId}:${key}`);
     }
+  }
+}
+
+function inScope(scope: DocumentRowScope, rows: ReadonlyArray<{ documentId: string; runId: string }>): void {
+  if (rows.some((row) => row.documentId !== scope.documentId || row.runId !== scope.runId)) {
+    throw new Error(`content rows outside their write scope document=${scope.documentId} run=${scope.runId}`);
   }
 }
 

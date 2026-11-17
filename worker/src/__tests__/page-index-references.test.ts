@@ -48,7 +48,7 @@ describe("page-index: Fast page-image references", () => {
 
     const inserted: Array<{ pageNumber: number; text: string }> = [];
     const store = memoryCheckpointStore();
-    store.content.insertPages = async (rows) => void inserted.push(...rows);
+    store.content.insertPages = async (_scope, rows) => void inserted.push(...rows);
     state.store = store;
 
     await new PageIndexStage({} as CommandRunner, storage).run(state);

@@ -949,6 +949,7 @@ export class EmbedStage implements Stage {
       pipelineVersion: args.pipelineVersion
     }));
     const store = args.state.store.content;
+    const scope = { orgId: args.state.run.orgId ?? null, runId: args.state.run.id, documentId: args.document.id };
     // Ids are `<document>-<index>`, so a retry with fewer or zero chunks leaves the old
     // tail behind; drop it before the marker makes the set servable.
     const keep = dbChunks.map((chunk) => chunk.id);
@@ -958,9 +959,9 @@ export class EmbedStage implements Stage {
     // the retry deletes them again. The stale read does not depend on the insert
     // (kept ids are excluded from it), so both go out in one round trip.
     const [, stale] = await Promise.all([
-      store.insertChunks(dbChunks),
+      store.insertChunks(scope, dbChunks),
       args.vectorSpace && args.state.run.orgId
-        ? store.staleDocumentChunkIds(args.document.id, keep)
+        ? store.staleDocumentChunkIds(scope, keep)
         : undefined,
     ]).then(([inserted, ids]) => [inserted, ids ?? []] as const);
     if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
@@ -969,7 +970,7 @@ export class EmbedStage implements Stage {
       args.state.staleVectorIds.set(args.document.id, stale);
     }
     // Keyword search can serve the chunks from here on, ahead of the index stage.
-    await store.finalizeDocumentChunks(args.document.id, keep, dbChunks.length > 0);
+    await store.finalizeDocumentChunks(scope, keep, dbChunks.length > 0);
     if (dbChunks.length > 0) recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
   }
 }

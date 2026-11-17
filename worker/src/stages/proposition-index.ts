@@ -166,7 +166,7 @@ export class PropositionIndexStage implements Stage {
 
             // Unbound states (unit tests) persist no rows; every stage activity's state is bound (loadRunState).
             if (state.store) {
-              await state.store.content.insertPropositions(rows);
+              await state.store.content.insertPropositions({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id }, rows);
             }
 
             const key = `${runArtifactRoot(state.run, document.userId)}/propositions/${document.id}.json`;

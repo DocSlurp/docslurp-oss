@@ -40,7 +40,7 @@ function harness() {
   state.artifactLedger.recordDocument("doc", "markdown", "s3://bucket/extract/doc.md");
   const inserted: Array<{ pageNumber: number; text: string }> = [];
   const store = memoryCheckpointStore();
-  store.content.insertPages = async (rows) => void inserted.push(...rows);
+  store.content.insertPages = async (_scope, rows) => void inserted.push(...rows);
   state.store = store;
   return { state, storage, inserted };
 }

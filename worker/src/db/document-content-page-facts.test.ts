@@ -17,8 +17,10 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'One', 'one', 'u1');
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
-    insert into documents(id, org_id, user_id, project_id, filename, mime_type, source_key, status, page_count)
-      values ('d1', 'o1', 'u1', 'w1', 'a.pdf', 'application/pdf', 'k', 'queued', 2);
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'r1', 'o1', 'u1', 'w1', 'upload', 'processing', 'extract', '{}', 1);
+    insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('d1', 'o1', 'u1', 'w1', 'r1', 'a.pdf', 'application/pdf', 'k', 'queued', 2);
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -34,19 +36,22 @@ afterAll(async () => {
   await db?.close();
 });
 
-describe("Store.upsertPageFacts", () => {
+/** Run r1 of organization o1. */
+const R1 = { orgId: "o1", runId: "r1" };
+
+describe("PostgresDocumentContent.upsertPageFacts", () => {
   it("keeps each stage's columns, is idempotent and skips unknown documents", async () => {
-    await store.content.upsertPageFacts([
+    await store.content.upsertPageFacts(R1, [
       { documentId: "d1", runId: "r1", pageNumber: 1, textBytes: 1200, wordCount: 200, imageCount: 0, factsSource: "pdftotext+pdfimages" },
       { documentId: "d1", runId: "r1", pageNumber: 2, textBytes: 0, wordCount: 0, imageCount: 1, factsSource: "pdftotext+pdfimages" },
       { documentId: "missing", runId: "r1", pageNumber: 1, textBytes: 5 },
     ]);
-    await store.content.upsertPageFacts([
+    await store.content.upsertPageFacts(R1, [
       { documentId: "d1", runId: "r1", pageNumber: 1, visionStatus: "not-selected", visionTextBytes: null },
       { documentId: "d1", runId: "r1", pageNumber: 2, visionStatus: "extracted", visionTextBytes: 900 },
     ]);
     // A retried extraction rewrites only the source facts.
-    await store.content.upsertPageFacts([{ documentId: "d1", runId: "r1", pageNumber: 2, textBytes: 0, wordCount: 0, imageCount: 1, factsSource: "pdftotext+pdfimages" }]);
+    await store.content.upsertPageFacts(R1, [{ documentId: "d1", runId: "r1", pageNumber: 2, textBytes: 0, wordCount: 0, imageCount: 1, factsSource: "pdftotext+pdfimages" }]);
     const rows = (await db.query(`select document_id, page_number, text_bytes, image_count, vision_status, vision_text_bytes from document_page_facts order by document_id, page_number`)).rows;
     expect(rows).toEqual([
       { document_id: "d1", page_number: 1, text_bytes: 1200, image_count: 0, vision_status: "not-selected", vision_text_bytes: null },

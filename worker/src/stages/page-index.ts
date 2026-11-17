@@ -78,8 +78,9 @@ export class PageIndexStage implements Stage {
 
           // Unbound states (unit tests) persist no page rows; every stage activity's state is bound (loadRunState).
           if (state.store) {
-            await state.store.content.insertPages(pageRows);
-            await state.store.content.linkChunksToPages(document.id, state.run.id);
+            const scope = { orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id };
+            await state.store.content.insertPages(scope, pageRows);
+            await state.store.content.linkChunksToPages(scope);
           }
 
           if (this.sql && deferredProfilesEnabled()) {

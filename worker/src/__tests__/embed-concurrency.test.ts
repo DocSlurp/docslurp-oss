@@ -100,7 +100,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   state.docConcurrency = 1;
   const materialized = new Map<string, { id: string; documentId: string; metadata: Record<string, unknown> }>();
   const checkpoints = store();
-  checkpoints.content.insertChunks = async (chunks) => {
+  checkpoints.content.insertChunks = async (_scope, chunks) => {
     for (const chunk of chunks) materialized.set(chunk.id, structuredClone(chunk));
   };
   state.store = checkpoints;

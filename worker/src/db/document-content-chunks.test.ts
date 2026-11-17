@@ -8,6 +8,9 @@ import { loadRunState } from "../pipeline/stage-execution.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
+/** A document of run-1 in organization o1. */
+const doc = (documentId: string) => ({ orgId: "o1", runId: "run-1", documentId });
+
 // A retried embed replaces the document's chunks. Until the replacement is
 // complete the previous attempt's keyword marker is lifted, and chunk rows
 // beyond the new set are dropped (without touching other documents).
@@ -59,8 +62,8 @@ describe("chunk replacement on a retried embed", () => {
   });
 
   it("drops only this document's chunks outside the replacement set", async () => {
-    expect(await store.content.staleDocumentChunkIds("d1", ["d1-000", "d1-001"])).toEqual(["d1-002"]);
-    const stale = await store.content.deleteStaleDocumentChunks("d1", ["d1-000", "d1-001"]);
+    expect(await store.content.staleDocumentChunkIds(doc("d1"), ["d1-000", "d1-001"])).toEqual(["d1-002"]);
+    const stale = await store.content.deleteStaleDocumentChunks(doc("d1"), ["d1-000", "d1-001"]);
     expect(stale).toEqual(["d1-002"]);
     expect(await sql`select id from document_chunks where document_id = 'd1' order by id`)
       .toEqual([{ id: "d1-000" }, { id: "d1-001" }]);
@@ -69,13 +72,13 @@ describe("chunk replacement on a retried embed", () => {
   });
 
   it("replaces, prunes and re-marks in order", async () => {
-    await store.content.insertChunks([{
+    await store.content.insertChunks(doc("d1"), [{
       id: "d1-000", documentId: "d1", runId: "run-1", userId: "u1", chunkIndex: 0,
       text: "new zero", headingPath: [], tokenEstimate: 2, metadata: {},
     }]);
-    await store.content.deleteStaleDocumentChunks("d1", ["d1-000"]);
+    await store.content.deleteStaleDocumentChunks(doc("d1"), ["d1-000"]);
     expect(await lexical("d1")).toBe(false);
-    await store.content.markDocumentLexicalSearchable("d1");
+    await store.content.markDocumentLexicalSearchable(doc("d1"));
     expect(await lexical("d1")).toBe(true);
     expect(await sql`select id, text from document_chunks where document_id = 'd1'`).toEqual([{ id: "d1-000", text: "new zero" }]);
   });

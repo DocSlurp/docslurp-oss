@@ -1044,7 +1044,7 @@ export class ExtractMarkdownStage implements Stage {
                   // Per-page routing facts (text layer, scan class) from the winning VM job, whatever the figure setting: the
                   // walker's layout facts first, then Doppler's validated page facts (DOCSLURP_DOPPLER_PAGE_FACTS store or use;
                   // off never parses them). Closed enums only; never billing.
-                  await recordPageFacts(state.store?.content, buildRoutingPageFacts({
+                  await recordPageFacts(state, buildRoutingPageFacts({
                     documentId: document.id, runId: state.run.id, pageCount: document.pageCount,
                     layoutFacts: routingFactsWithDopplerFacts(winningCandidate.layoutFacts, winningCandidate.pageFacts),
                   }));
@@ -1887,7 +1887,7 @@ export class ExtractMarkdownStage implements Stage {
     // raise its charge, so it keeps going without them.
     const legacyBilling = runBillsScansAtCompletion(state);
     const rows = legacyBilling ? [] : pageFactRowsFromDopplerFacts({ facts: candidate.pageFacts, pageCount, pageTexts, ocrPages, documentId: document.id, runId: state.run.id });
-    await recordPageFacts(state.store?.content, rows);
+    await recordPageFacts(state, rows);
     console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${legacyBilling ? " rows-skipped=legacy-billing" : ""}`);
     return {
       pageImageEvidenceUri,
@@ -1922,7 +1922,7 @@ export class ExtractMarkdownStage implements Stage {
     if (state.documentStage(document.id, this.name)?.status === "completed") return;
     try {
       if (format === "image") {
-        await recordPageFacts(state.store?.content, [{
+        await recordPageFacts(state, [{
           documentId: document.id, runId: state.run.id, pageNumber: 1,
           textBytes: 0, wordCount: 0, imageCount: 1, factsSource: "image-file",
         }]);
@@ -1941,7 +1941,7 @@ export class ExtractMarkdownStage implements Stage {
         onImagesList: (listing) => this.imageListings.set(this.imageListingKey(state, document), listing),
         onPageText: (listing) => this.textLayerListings.set(this.imageListingKey(state, document), listing),
       });
-      await recordPageFacts(state.store?.content, rows);
+      await recordPageFacts(state, rows);
     } catch (error) {
       rethrowIfTeardown(error);
       console.warn(`[page-facts] skipped document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);

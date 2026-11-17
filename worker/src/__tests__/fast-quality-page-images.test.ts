@@ -206,7 +206,7 @@ describe("quality fast: kept-as-image renders are bounded", () => {
     } as unknown as ProjectRun, [blankPdf]);
     // An in-memory store; page facts are captured.
     const store = memoryCheckpointStore();
-    store.content.upsertPageFacts = async (rows) => void facts.push(...rows);
+    store.content.upsertPageFacts = async (_scope, rows) => void facts.push(...rows);
     // In-memory stand-in for the Postgres budget (db/fast-page-image-budget.ts, tested against PGlite).
     store.budgets.reserveFastPageImageRenders = async (args) => {
       const used = [...grants.values()].reduce((sum, granted) => sum + granted, 0);
