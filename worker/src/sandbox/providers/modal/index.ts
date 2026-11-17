@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { pricing } from "@docslurp/shared";
 
 import { boundedVmStream } from "./transfer.js";
@@ -22,7 +22,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
-import { asParserUser, commandScratchDirs, commandScratchEnv, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, bindScopeArgv, RESET_SCOPE_REFUSED, resetArgv } from "./control.js";
+import { asParserUser, commandScratchDirs, commandScratchEnv, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, resetArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../concurrency.js";
@@ -71,6 +71,11 @@ export interface ModalConfig {
   vmsPerWorker?: number;
   /** An idle pool VM is terminated after this long (modalVmIdleSeconds). */
   vmIdleSeconds?: number;
+  /**
+   * How long a session's idle VM stays parked for the worker's next session (modalVmParkSeconds) before it is terminated.
+   * 0 or unset: never parked (every VM is terminated with its session, as before compute reuse).
+   */
+  vmParkSeconds?: number;
   /** Tests only: how long a terminate waits for a create call in flight (CREATE_SETTLE_MS). */
   createSettleMs?: number;
   /** Tests only: the deadline on one read-only asset write (ASSET_WRITE_DEADLINE_MS). */
@@ -139,6 +144,18 @@ export function modalVmIdleSeconds(env: NodeJS.ProcessEnv = process.env): number
   return Number.isFinite(raw) && raw >= 1 && raw <= 300 ? raw : 20;
 }
 
+/**
+ * Seconds a parser VM stays parked for the worker's next activity after its own activity or stage is done with it
+ * (DOCSLURP_MODAL_VM_PARK_SECONDS, 0 to 300, default 30; 0 turns parking off). The next activity adopts it warm instead
+ * of paying about 2 s to create and harden a VM; its first command wipes the job tree first. Compute reuse across
+ * activities, runs and organizations (AGENTS.md, owner 2026-11-16): results only ever go back to the command that ran.
+ */
+export function modalVmParkSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const value = env.DOCSLURP_MODAL_VM_PARK_SECONDS?.trim();
+  const raw = value ? Number(value) : NaN;
+  return Number.isFinite(raw) && raw >= 0 && raw <= 300 ? raw : 30;
+}
+
 /** Lifetime of the startup probe's VM: a backstop if its terminate request is lost. */
 export const PROBE_SESSION_TIMEOUT_SECONDS = 120;
 /** Deadline for the terminate request. Modal stops the VM once it accepts the request; exit is not awaited. */
@@ -151,6 +168,29 @@ const CREATE_SETTLE_MS = 5_000;
 const CREATE_DEADLINE_MS = 30_000;
 /** Added to a quarantined VM's lifetime bound (at most 10% of the lifetime): Modal's stop is not instantaneous. */
 const LIFETIME_MARGIN_MS = 60_000;
+/**
+ * A VM is parked for another session, or adopted from the parked pool, only while at least this fraction of its Modal
+ * lifetime (sessionTimeoutSeconds) remains; a session's own idle VM is not reused past a third of it either.
+ */
+const PARK_MIN_LIFETIME_FRACTION = 2 / 3;
+const LANE_MIN_LIFETIME_FRACTION = 1 / 3;
+/** The job tree a parked VM's last session left: wiped by the adopting session's first command, before any staging. */
+const PARKED_WIPE = "\u0000parked";
+
+/** A warm parser VM between sessions (createModalProvider, `parked`). */
+interface ParkedVm {
+  sandboxId: string;
+  shape: string;
+  lifetimeStart: number;
+  createRequestedAt: number;
+  commandCount: number;
+  /** Read-only asset directories already staged in the VM, by name. */
+  assetDirs: Map<string, string>;
+  parkedAt: number;
+  timer: NodeJS.Timeout;
+  sdk: ModalSdk;
+  config: ModalConfig;
+}
 
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
 
@@ -308,15 +348,6 @@ type RemoteOutcome =
   | { kind: "aborted" };
 
 class CommandAborted extends Error {}
-
-/**
- * The scope a pooled parser VM is bound to (organization isolation): one organization's run, as a digest, or null for a
- * command without both, whose VM is single-use. A VM serves commands of exactly one scope for its whole life.
- */
-export function laneScope(command: Pick<SandboxCommand, "tenantKey" | "runKey">): string | null {
-  if (!command.tenantKey || !command.runKey) return null;
-  return createHash("sha256").update(`docslurp-parser-vm\0${command.tenantKey}\0${command.runKey}`).digest("hex");
-}
 /** A command waiting for a worker VM token gives up its empty lane for an idle VM of its own activity (real-Modal P2). */
 class HandOver extends Error {}
 
@@ -715,6 +746,92 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
   /** Scanner snapshots of this worker process, by image, size, region and signature set (scanner.ts). */
   const scannerSnapshots = new ScannerSnapshotCache<import("modal").SandboxSnapshot>();
 
+  /**
+   * Warm parser VMs between sessions (compute reuse, AGENTS.md: compute units may serve any organization's next job). When
+   * a stage settles or an activity ends, an idle, healthy VM of a parser session is parked here instead of terminated; the
+   * next session of this worker with the same VM shape adopts it and skips the cold start (create, harden, image lock:
+   * about 2 s). The adopting session's first command wipes the whole job tree first (a full reset, exactly as between two
+   * documents in one session), so the next job never sees the last one's files; its results come back only over its own
+   * exec. A parked VM keeps its worker VM token, is terminated after the idle window, and is the first given up when
+   * another session needs a token. Scanner and unmetered (probe) sessions never park.
+   */
+  const parked: ParkedVm[] = [];
+  let parkedMemberRegistered = false;
+  /** Set by drain(): nothing is parked any more (a VM parked after the drain would outlive the worker). */
+  let draining = false;
+
+  function parkedShape(config: ModalConfig): string {
+    return JSON.stringify([config.app, config.imageId ?? config.image, config.cpu, config.memoryMb, config.sessionTimeoutSeconds, config.tokenId]);
+  }
+
+  /** A parked VM is adopted only while at least this much of its Modal lifetime remains. */
+  function adoptMinRemainingMs(config: ModalConfig): number {
+    return config.sessionTimeoutSeconds * 1000 * PARK_MIN_LIFETIME_FRACTION;
+  }
+
+  function parkVm(entry: Omit<ParkedVm, "timer">, vmBudget: VmBudget, idleMs: number): void {
+    if (!parkedMemberRegistered) {
+      parkedMemberRegistered = true;
+      vmBudget.register({
+        hasIdle: () => parked.length > 0,
+        reapIdle: () => {
+          const oldest = parked.shift();
+          if (!oldest) return false;
+          clearTimeout(oldest.timer);
+          void terminateParked(oldest, "capacity", vmBudget);
+          return true;
+        },
+      });
+    }
+    const remaining = entry.lifetimeStart + entry.config.sessionTimeoutSeconds * 1000 - Date.now();
+    const timer = setTimeout(() => {
+      const index = parked.indexOf(full);
+      if (index >= 0) parked.splice(index, 1);
+      void terminateParked(full, "idle", vmBudget);
+    }, Math.max(0, Math.min(idleMs, remaining - adoptMinRemainingMs(entry.config))));
+    timer.unref();
+    const full: ParkedVm = { ...entry, timer };
+    parked.push(full);
+    vmBudget.wake();
+  }
+
+  /** The newest parked VM of this shape with enough lifetime left, taken out of the pool (never shared by two lanes). */
+  function takeParked(config: ModalConfig): ParkedVm | undefined {
+    const shape = parkedShape(config);
+    const minRemaining = adoptMinRemainingMs(config);
+    for (let index = parked.length - 1; index >= 0; index--) {
+      const entry = parked[index]!;
+      if (entry.shape !== shape || entry.lifetimeStart + entry.config.sessionTimeoutSeconds * 1000 - Date.now() < minRemaining) continue;
+      parked.splice(index, 1);
+      clearTimeout(entry.timer);
+      return entry;
+    }
+    return undefined;
+  }
+
+  /**
+   * Stop a parked VM on a client of its own (its session's client may be closed) and return its worker token once Modal
+   * acknowledges. Its parked time is platform cost: logged, never recorded against an organization.
+   */
+  async function terminateParked(entry: ParkedVm, reason: string, vmBudget: VmBudget): Promise<void> {
+    const fresh = new entry.sdk.ModalClient({ tokenId: entry.config.tokenId, tokenSecret: entry.config.tokenSecret });
+    let stopped = false;
+    try {
+      await withDeadline(new entry.sdk.Sandbox(fresh, entry.sandboxId).terminate(), TERMINATE_REQUEST_MS);
+      stopped = true;
+    } catch (error) {
+      console.warn(`[parser-sandbox] provider=modal status=parked-vm-terminate-unconfirmed reason=${reason}: ${safeMessage(entry.config, error)}`);
+    } finally {
+      fresh.close();
+    }
+    const wallSeconds = Math.max(0, Date.now() - entry.parkedAt) / 1000;
+    console.log(`[sandbox-usage] provider=modal status=platform kind=parked reason=${reason} cpu_seconds=${(entry.config.cpu * wallSeconds).toFixed(3)} memory_gb_seconds=${((entry.config.memoryMb / 1024) * wallSeconds).toFixed(3)}`);
+    if (stopped) { vmBudget.release(); return; }
+    // Unconfirmed: Modal's own lifetime limit stops it; its capacity stays taken until then (as an unconfirmed terminate).
+    const lifetimeMs = entry.config.sessionTimeoutSeconds * 1000;
+    setTimeout(() => vmBudget.release(), Math.max(0, entry.lifetimeStart + lifetimeMs + Math.min(LIFETIME_MARGIN_MS, lifetimeMs * 0.1) - Date.now())).unref();
+  }
+
   const provider: ParserSandboxProvider<ModalConfig> = {
     id: "modal",
     name: "Modal",
@@ -729,15 +846,13 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         throw new SandboxConfigError("production parser VM images must be pinned by sha256 digest");
       }
       if (config.imageId && !/^im-[A-Za-z0-9]+$/.test(config.imageId)) throw new SandboxConfigError("invalid DOCSLURP_MODAL_IMAGE_ID");
-      return { ...config, image, vmsPerActivity: modalVmsPerActivity(env), vmsPerWorker: modalVmsPerWorker(env), vmIdleSeconds: modalVmIdleSeconds(env), scannerRegions: modalScannerRegions(env) };
+      return { ...config, image, vmsPerActivity: modalVmsPerActivity(env), vmsPerWorker: modalVmsPerWorker(env), vmIdleSeconds: modalVmIdleSeconds(env), vmParkSeconds: modalVmParkSeconds(env), scannerRegions: modalScannerRegions(env) };
     },
     async probe(config) {
       let session: SandboxSession | undefined;
       try {
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
-        // The probe's commands are one scope of their own (no organization's bytes), so they share the probe's one VM.
-        const probeScope = { tenantKey: "docslurp-startup-probe", runKey: randomUUID() };
-        const result = await session.run!({ ...probeScope, binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
+        const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
         const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown }; hardening?: { suidDumpable?: unknown; ptraceScope?: unknown }; cgroupV2?: unknown; qpdfVersion?: unknown } : null;
         if (contract?.protocol !== "parser-vm@5") throw new Error("parser VM image contract unavailable");
         // Quarantine decrypts empty-user-password PDFs with the image's qpdf (runner.decryptPdfForScan); without a supported
@@ -761,7 +876,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         // Job paths are the worker's own temp paths, staged by the parser user (council M #3): every root must be creatable
         // and writable by uid 10001 in the VM, or every parser command would fail (real-Modal check F4).
         for (const root of parserJobRoots()) {
-          const writable = await session.run!({ ...probeScope, binary: "/bin/sh", args: ["-c", JOB_ROOT_WRITABLE_SCRIPT, "sh", root], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
+          const writable = await session.run!({ binary: "/bin/sh", args: ["-c", JOB_ROOT_WRITABLE_SCRIPT, "sh", root], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
           if (writable.exitCode !== 0) {
             throw new Error(`parser VM job root ${root} is not writable by the parser user (uid 10001); put TMPDIR and DOCSLURP_PARSER_SANDBOX_ROOT under a directory it can write, such as /tmp (docs/self-host/sandbox-providers.md)`);
           }
@@ -779,6 +894,13 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         await session?.close().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal probe VM terminate: ${safeMessage(config, error)}`));
       }
     },
+    async drain() {
+      // Worker shutdown: every parked VM is stopped now rather than left to its idle timer (which a process exit loses).
+      draining = true;
+      const vmBudget = budget;
+      if (!vmBudget) return;
+      await Promise.all(parked.splice(0).map((entry) => { clearTimeout(entry.timer); return terminateParked(entry, "drain", vmBudget); }));
+    },
     async openSession(config, context) {
       const scanner = context.scanner;
       if (scanner) {
@@ -789,17 +911,16 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       const { sdk, client } = await loadClient(config);
       const maxLanes = Math.max(1, Math.floor(config.vmsPerActivity ?? 1));
       const idleMs = Math.max(0.01, config.vmIdleSeconds ?? 20) * 1000;
+      const parkMs = Math.max(0, config.vmParkSeconds ?? 0) * 1000;
       const vmBudget = (budget ??= new VmBudget(Math.max(1, Math.floor(config.vmsPerWorker ?? Number.MAX_SAFE_INTEGER))));
       let closed = false;
       let clientClosed = false;
       /** The one document a scanner session serves (bound by its first command). */
       let scannerDocument: string | undefined;
-      /**
-       * Organization isolation: the one organization this session's commands may belong to, bound by its first command
-       * that names one. A command of any other organization is refused before it can reach a VM (an activity is one
-       * organization's run; anything else is a bug that must fail loudly, never share a VM).
-       */
-      let boundTenant: string | undefined;
+      /** Whether the worker's parked pool holds a VM this session may adopt (never for scanner or unmetered sessions). */
+      const shape = parkedShape(config);
+      const hasParked = () => !scanner && !context.unmetered &&
+        parked.some((entry) => entry.shape === shape && entry.lifetimeStart + entry.config.sessionTimeoutSeconds * 1000 - Date.now() >= adoptMinRemainingMs(config));
 
       async function terminateLate(created: import("modal").Sandbox, freshClient = clientClosed): Promise<boolean> {
         const cleanupClient = freshClient ? new sdk.ModalClient({ tokenId: config.tokenId, tokenSecret: config.tokenSecret }) : client;
@@ -837,14 +958,6 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         dead: boolean;
         /** The affinity key of its last command: a document's later commands prefer the VM that holds its inputs. */
         lastKey: string | undefined;
-        /**
-         * The VM's scope (laneScope: one organization's run), bound by its first command and never changed: undefined until
-         * then; null for a command without both an organization and a run, whose VM serves no other command and is reaped
-         * when it ends. The reset binds the same scope in-guest (resetArgv `--scope`).
-         */
-        scope: string | null | undefined;
-        /** What the in-guest binding records: the scope, or a single-use token for a VM bound to null. */
-        scopeToken: string | undefined;
         /** The key of the command before the current one (who left the job tree as it is). */
         previousKey: string | undefined;
         /** A new document on this VM: its inputs are uploaded afresh (recheck S #7). */
@@ -859,6 +972,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         ensureSandbox(): Promise<void>;
         execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult>;
         terminate(): Promise<void>;
+        /** Hand an idle, healthy VM to the worker's parked pool for the next session (true), instead of terminating it. */
+        park(): boolean;
+        /** How long until Modal's lifetime limit stops this lane's VM (Infinity before it has one). */
+        remainingMs(): number;
       }
 
       let laneCount = 0;
@@ -867,8 +984,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let staging: SessionStaging | undefined;
         let creating: Promise<void> | undefined;
         let terminating: Promise<void> | undefined;
-        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, scope: undefined, scopeToken: undefined, previousKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, reserve, ensureSandbox, execute, terminate, forgetUploads: () => staging?.forgetUploads() };
+        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, previousKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, reserve, ensureSandbox, execute, terminate, park, remainingMs, forgetUploads: () => staging?.forgetUploads() };
         let holdsToken = false;
+        /** The VM was created and hardened (or adopted warm): it may be parked for another session. */
+        let vmReady = false;
+        /** Handed to the parked pool: this lane is done with it and must never terminate it. */
+        let parkedAway = false;
+        /** Read-only asset directories staged in this VM, by name (carried with it when it is parked). */
+        const stagedAssets = new Map<string, string>();
         /**
          * When Modal's create call returned (council V #1): the VM's own lifetime limit started no later than this, so a VM
          * whose terminate is unconfirmed is gone by lifetimeStart + sessionTimeoutSeconds (+ margin). Metering starts at
@@ -881,21 +1004,102 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let terminateDone = false;
 
         async function reserve(signal?: AbortSignal): Promise<void> {
-          if (holdsToken || sandbox || lane.dead) return;
-          let handOver = false;
-          await vmBudget.acquire(() => {
-            if (closed || lane.dead) return true;
-            // This activity's own VM went idle while this command waited for a worker token: take it over rather than
-            // have the budget terminate it and start another (real-Modal P2). Only a VM of this command's scope (or one no
-            // command has used yet): never another organization's or run's.
-            if (idleWithVm(lane.scope)) { handOver = true; return true; }
+          for (;;) {
+            if (holdsToken || sandbox || lane.dead) return;
+            // A warm VM another session parked comes with its own worker token: no wait, no cold start.
+            if (await adoptParked()) return;
+            let handOver = false;
+            let parkedNow = false;
+            try {
+              await vmBudget.acquire(() => {
+                if (closed || lane.dead) return true;
+                // This activity's own VM went idle while this command waited for a worker token: take it over rather than
+                // have the budget terminate it and start another (real-Modal P2). Same activity, so no wipe is needed.
+                if (idleWithVm()) { handOver = true; return true; }
+                // A VM was parked meanwhile: adopt it (above) rather than wait for a token.
+                if (!creating && hasParked()) { parkedNow = true; return true; }
+                return false;
+              }, signal, budgetMember);
+            } catch (error) {
+              if (handOver) throw new HandOver();
+              if (parkedNow && !closed && !lane.dead) continue;
+              throw error;
+            }
+            if (closed || lane.dead) { vmBudget.release(); throw new SandboxInfrastructureError("modal sandbox session is closed"); }
+            holdsToken = true;
+            return;
+          }
+        }
+
+        /**
+         * Adopt a warm VM from the worker's parked pool (see `parked`): it keeps its worker token and its hardening, and its
+         * job tree is wiped by this lane's first command before anything is staged (PARKED_WIPE). Never for a scanner or
+         * unmetered session. False when there is none, or it could not be reattached (then it is stopped).
+         */
+        async function adoptParked(): Promise<boolean> {
+          if (scanner || context.unmetered || sandbox || creating || lane.dead || closed) return false;
+          const entry = takeParked(config);
+          if (!entry) return false;
+          let adopted: Awaited<ReturnType<typeof client.sandboxes.fromId>>;
+          try {
+            adopted = await withDeadline(client.sandboxes.fromId(entry.sandboxId), 10_000);
+          } catch (error) {
+            console.warn(`[parser-sandbox] provider=modal status=parked-vm-reattach-failed activity=${context.activityId}: ${safeMessage(config, error)}`);
+            void terminateParked(entry, "reattach-failed", vmBudget);
             return false;
-          }, signal, budgetMember).catch((error: unknown) => {
-            if (handOver) throw new HandOver();
-            throw error;
-          });
-          if (closed || lane.dead) { vmBudget.release(); throw new SandboxInfrastructureError("modal sandbox session is closed"); }
+          }
+          if (sandbox || creating || lane.dead || closed) { void terminateParked(entry, "adopt-abandoned", vmBudget); return false; }
+          // The previous session's whole job tree is wiped (no input kept) before this session may use the VM; a VM that
+          // cannot be wiped, or is gone, is stopped and this lane starts a fresh one instead.
+          let wiped = false;
+          try {
+            const proc = await adopted.exec(resetArgv(parserJobRoots()), { timeoutMs: RESET_DEADLINE_MS });
+            wiped = (await withDeadline(proc.wait(), RESET_DEADLINE_MS + 5_000)) === 0;
+          } catch (error) {
+            console.warn(`[parser-sandbox] provider=modal status=parked-vm-wipe-failed activity=${context.activityId}: ${safeMessage(config, error)}`);
+          }
+          if (!wiped || sandbox || creating || lane.dead || closed) { void terminateParked(entry, wiped ? "adopt-abandoned" : "wipe-failed", vmBudget); return false; }
+          if (holdsToken) vmBudget.release(); // the parked VM brings its own token
           holdsToken = true;
+          sandbox = adopted;
+          staging = new SessionStaging(buildRemoteFs(sdk, adopted));
+          lifetimeStart = entry.lifetimeStart;
+          createRequestedAt = entry.createRequestedAt;
+          lane.accountedAt = Date.now();
+          commandCount = entry.commandCount;
+          for (const [name, dir] of entry.assetDirs) { stagedAssets.set(name, dir); assetDirs.set(name, Promise.resolve(dir)); }
+          // Wiped above; the first command wipes once more before staging (defense in depth).
+          keptFor = PARKED_WIPE;
+          vmReady = true;
+          creating = Promise.resolve();
+          const parkedSeconds = Math.max(0, Date.now() - entry.parkedAt) / 1000;
+          console.log(`[parser-sandbox] provider=modal status=vm-adopted activity=${context.activityId} lane=${lane.id} parked_ms=${Date.now() - entry.parkedAt} age_s=${Math.round((Date.now() - entry.lifetimeStart) / 1000)}`);
+          console.log(`[sandbox-usage] provider=modal status=platform kind=parked reason=adopted cpu_seconds=${(config.cpu * parkedSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * parkedSeconds).toFixed(3)}`);
+          return true;
+        }
+
+        function remainingMs(): number {
+          return lifetimeStart === undefined ? Infinity : lifetimeStart + config.sessionTimeoutSeconds * 1000 - Date.now();
+        }
+
+        /**
+         * Park this idle VM for the next session instead of terminating it: only a parser session's created (or adopted)
+         * VM that is not running, being stopped or cleaned up, holds its token, and has enough lifetime left. Its time up to
+         * now is recorded in its last stage's ledger, as a terminate would; its worker token goes with it.
+         */
+        function park(): boolean {
+          if (draining || !(parkMs > 0) || scanner || context.unmetered || parkedAway || lane.dead || lane.busy || terminating || !vmReady || !sandbox || !holdsToken) return false;
+          if (pendingDiscards.length > 0 || remainingMs() < adoptMinRemainingMs(config)) return false;
+          lane.dead = true;
+          parkedAway = true;
+          if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = undefined; }
+          const now = Date.now();
+          recordTail(now);
+          holdsToken = false;
+          parkVm({ sandboxId: sandbox.sandboxId, shape: parkedShape(config), lifetimeStart: lifetimeStart!, createRequestedAt: createRequestedAt ?? lifetimeStart!,
+            commandCount, assetDirs: new Map(stagedAssets), parkedAt: now, sdk, config }, vmBudget, parkMs);
+          console.log(`[parser-sandbox] provider=modal status=vm-parked activity=${context.activityId} lane=${lane.id}`);
+          return true;
         }
 
         /** Record the VM's time since it was last metered, up to `until`, where its last command's stage can see it. */
@@ -947,6 +1151,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
          */
         function terminate(): Promise<void> {
           lane.dead = true;
+          // A parked VM belongs to the worker's parked pool now, which stops it.
+          if (parkedAway) return Promise.resolve();
           if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = undefined; }
           terminating ??= (async () => {
             try {
@@ -994,7 +1200,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           return terminating;
         }
 
-        function ensureSandbox(): Promise<void> {
+        function createVm(): Promise<void> {
           creating ??= (async () => {
             if (!holdsToken) { await vmBudget.acquire(() => closed || lane.dead); holdsToken = true; }
             if (closed || lane.dead) throw new Error("parser VM session closed during creation");
@@ -1085,10 +1291,20 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // Root-owned and not writable by the parser user; uploads staged here are copied into place as uid 10001.
             await withDeadline(runChecked(opened, ["/bin/chmod", "0711", "--", CONTROL_DIR], "parser VM control directory setup failed"), 30_000);
             staging = new SessionStaging(buildRemoteFs(sdk, opened));
+            vmReady = true;
           })();
           // A VM that could not be created or hardened is never used: terminate it and let the pool replace the lane.
           creating.catch(() => { terminate().catch(() => {}); });
           return creating;
+        }
+
+        /** A parked VM when one fits (adoptParked), else a new one (createVm). */
+        let adopting: Promise<void> | undefined;
+        function ensureSandbox(): Promise<void> {
+          if (creating) return creating;
+          if (sandbox || scanner || context.unmetered || !hasParked()) return createVm();
+          adopting ??= adoptParked().then((adopted) => (adopted ? creating! : createVm()));
+          return adopting;
         }
 
         /**
@@ -1201,14 +1417,6 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         /** The document whose uploaded inputs the last reset kept on this VM (council X #7). */
         let keptFor: string | undefined;
 
-        /**
-         * The in-guest scope of the command now on this VM, derived from the command itself (its organization's run), never
-         * from the lane: a host routing bug that put another scope's command here is refused inside the VM.
-         */
-        let commandToken: string | undefined;
-        /** The token this VM's in-guest binding last verified (bindVmScope). */
-        let boundToken: string | undefined;
-
         async function resetVm(keepFor?: string): Promise<void> {
           // The same document's next command reuses its inputs; any other document gets a full wipe first (W #3 holds).
           const keep = keepFor !== undefined ? staging?.uploadedPaths() ?? [] : [];
@@ -1216,7 +1424,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           let transport: unknown;
           let overran = false;
           try {
-            const proc = await sandbox!.exec(resetArgv(parserJobRoots(), keep, commandToken ?? lane.scopeToken), { timeoutMs: RESET_DEADLINE_MS });
+            const proc = await sandbox!.exec(resetArgv(parserJobRoots(), keep), { timeoutMs: RESET_DEADLINE_MS });
             code = await withDeadline(proc.wait(), RESET_DEADLINE_MS + 5_000);
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal reset failed: ${safeMessage(config, error)}`);
@@ -1230,34 +1438,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           if (keptFor === undefined) staging?.forgetUploads();
           if (code === 0) return;
           await terminate().catch(() => {});
-          if (code === RESET_SCOPE_REFUSED) {
-            // The VM's in-guest binding names another organization's run (or was tampered with): never used again.
-            console.error(`[parser-sandbox] ALERT provider=modal vm-scope-mismatch activity=${context.activityId} lane=${lane.id}: VM terminated`);
-            throw new SandboxInfrastructureError("parser VM is bound to another organization or run; VM terminated");
-          }
           if (transport !== undefined) throw new SandboxInfrastructureError("parser VM reset could not run; VM terminated", undefined, { cause: transport });
           // Only a command that ran can have left what broke the reset; a reset after staging alone strikes no one.
           throw new SandboxInfrastructureError(`parser VM ${overran ? "scratch wipe ran past its deadline" : code === 5 ? "disk or job root unusable" : "scratch could not be wiped"} after this document's command; VM terminated`, undefined, { afterCommand: commandRan });
-        }
-
-        /** Bind (or verify) the VM's in-guest scope as root before staging; see bindScopeArgv. */
-        async function bindVmScope(previous: string | undefined): Promise<void> {
-          let code: number | null = null;
-          try {
-            const proc = await sandbox!.exec(bindScopeArgv(commandToken ?? lane.scopeToken!), { timeoutMs: 30_000 });
-            code = await withDeadline(proc.wait(), 35_000);
-          } catch (error) {
-            throw new SandboxInfrastructureError(`parser VM scope binding could not run: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
-          }
-          if (code === 0) { boundToken = commandToken ?? lane.scopeToken; return; }
-          await terminate().catch(() => {});
-          if (code === RESET_SCOPE_REFUSED) {
-            console.error(`[parser-sandbox] ALERT provider=modal vm-scope-mismatch activity=${context.activityId} lane=${lane.id} phase=before-staging: VM terminated`);
-            throw new SandboxInfrastructureError("parser VM is bound to another organization or run; VM terminated", meterLane(lane));
-          }
-          // Exit 5: the binding could not be written (a disk the previous document filled), that document's doing as in
-          // probeJobTree. Any other code is the sandbox's: a plain retry, no strike.
-          throw new SandboxInfrastructureError("parser VM scope binding failed; VM terminated", meterLane(lane), code === 5 && previous !== undefined ? { blameDocumentId: previous } : undefined);
         }
 
         /** The job roots as the next document's staging finds them; a broken one blames `previous` (council X #1). */
@@ -1284,7 +1467,6 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let ownStaging = false;
 
         async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
-          commandToken = laneScope(command) ?? lane.scopeToken;
           let cleaned = false;
           commandRan = false;
           ownStaging = false;
@@ -1349,6 +1531,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               return vmDir;
             });
             assetDirs.set(name, staged);
+            staged.then((dir) => { stagedAssets.set(name, dir); }, () => {});
             staged.catch(() => assetDirs.delete(name));
           }
           return staged;
@@ -1379,9 +1562,6 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // On a VM another document used last, check its job roots first (council X #1): missing-and-uncreatable,
             // replaced (not a directory, a link) or owned by someone else is the previous document's doing.
             // Another document's inputs kept on this VM go first: the next document sees nothing of them (council X #7, W #3).
-            // In-guest binding before a new document's inputs reach the VM (organization isolation): a fresh VM is bound to
-            // this command's scope; a VM bound to any other refuses, and is terminated before anything is staged.
-            if (commandCount === 1 || lane.previousKey !== command.affinityKey || (commandToken ?? lane.scopeToken) !== boundToken) await bindVmScope(lane.previousKey);
             if (keptFor !== undefined && keptFor !== command.affinityKey) await resetVm();
             if (lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) await probeJobTree(lane.previousKey);
             // Only the command's inputs travel; the parser runtime comes from the image. From here a failure the VM itself
@@ -1477,21 +1657,16 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         return live < maxLanes && (live === 0 || vmBudget.available(budgetMember));
       }
 
-      function pickLane(key: string | undefined, scope: string | null): Lane | undefined {
-        const free = lanes.filter((lane) => !lane.busy && !lane.dead);
-        const idle = free.filter((lane) => scopeFits(lane, scope));
-        // A VM of another scope never takes this command: when it holds the place this one needs, it is terminated.
-        if (!idle.length && !canGrow()) {
-          const other = free.find((lane) => !scopeFits(lane, scope));
-          // Its worker token returns when the terminate does: wake waiters then, not only at the next release.
-          if (other) void reap(other).then(wakeNext);
-        }
+      function pickLane(key: string | undefined): Lane | undefined {
+        // An idle VM with less than a third of its Modal lifetime left is not reused: Modal could stop it mid-command.
+        const minRemaining = config.sessionTimeoutSeconds * 1000 * LANE_MIN_LIFETIME_FRACTION;
+        for (const old of lanes.filter((lane) => !lane.busy && !lane.dead && lane.remainingMs() < minRemaining)) void reap(old, false).then(wakeNext);
+        const idle = lanes.filter((lane) => !lane.busy && !lane.dead);
         // Its key's VM first, then any idle lane that already has a VM (one without would need a new VM and a token).
         const lane = (key ? idle.find((candidate) => candidate.lastKey === key && candidate.accountedAt !== undefined) : undefined)
           ?? idle.find((candidate) => candidate.accountedAt !== undefined) ?? idle[0]
           ?? (canGrow() ? addLane() : undefined);
         if (lane) {
-          bindLaneScope(lane, scope);
           lane.busy = true;
           lane.previousKey = lane.lastKey;
           lane.lastKey = key;
@@ -1503,12 +1678,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       }
 
       /** Lease a lane for one command: an idle one (its key's first), a new one under the cap, or wait for a release. */
-      async function acquireLane(key: string | undefined, scope: string | null, signal?: AbortSignal): Promise<Lane> {
+      async function acquireLane(key: string | undefined, signal?: AbortSignal): Promise<Lane> {
         for (;;) {
           if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
           if (waiting.length === 0) {
-            const lane = pickLane(key, scope);
+            const lane = pickLane(key);
             if (lane) return lane;
           }
           await new Promise<void>((resolve) => {
@@ -1518,7 +1693,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             waiting.push(wake);
           });
           if (!closed && !signal?.aborted) {
-            const lane = pickLane(key, scope);
+            const lane = pickLane(key);
             if (lane) { wakeNext(); return lane; }
             // Woken but nothing free (a release raced another lease): wait again.
           }
@@ -1535,8 +1710,6 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         // A command of this activity waiting for a worker token may take this VM over (real-Modal P2).
         if (!lane.dead && lane.accountedAt !== undefined) vmBudget.wake();
         if (lane.dead) lanes.splice(lanes.indexOf(lane), 1);
-        // A single-use VM (a command without an organization's run) serves nothing else: terminated now.
-        else if (lane.scope === null) void reap(lane);
         else if (!closed) {
           // Idle VMs are reaped: Modal bills them until terminated (VM pool follow-up).
           lane.idleTimer = setTimeout(() => { lane.idleTimer = undefined; if (!lane.busy && !lane.dead) void reap(lane); }, idleMs);
@@ -1545,10 +1718,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         wakeNext();
       }
 
-      /** Terminate an idle VM and drop it from the pool; a later command opens a fresh one. */
+      /**
+       * Drop an idle VM from this session's pool: parked for the worker's next session when it can be (`park`), else
+       * terminated. A later command of this session opens (or adopts) another.
+       */
       const pendingReaps = new Set<Promise<void>>();
-      function reap(lane: Lane): Promise<void> {
-        const terminated = lane.terminate().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal idle VM terminate: ${safeMessage(config, error)}`));
+      function reap(lane: Lane, park = true): Promise<void> {
+        const terminated = park && lane.park() ? Promise.resolve()
+          : lane.terminate().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal idle VM terminate: ${safeMessage(config, error)}`));
         // settle() awaits these too, so a reaped VM's last metered stretch lands before the stage's checkpoint.
         pendingReaps.add(terminated);
         void terminated.finally(() => pendingReaps.delete(terminated));
@@ -1558,34 +1735,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         return terminated;
       }
 
-      /**
-       * Whether `lane` may run a command of `scope`: a VM no command has used yet takes any scope; a used one only its own,
-       * and a single-use one (null) nothing more. Undefined `scope` asks for any idle VM (to give it up, never to use it).
-       */
-      function scopeFits(lane: Lane, scope: string | null | undefined): boolean {
-        if (scope === undefined || lane.scope === undefined) return true;
-        return scope !== null && lane.scope === scope;
-      }
-
-      function bindLaneScope(lane: Lane, scope: string | null): void {
-        if (lane.scope !== undefined) {
-          // pickLane and the hand-over only offer a fitting VM; this is defense in depth.
-          if (!scopeFits(lane, scope)) throw new SandboxPolicyError("parser VM is bound to another organization or run");
-          return;
-        }
-        lane.scope = scope;
-        lane.scopeToken = scope ?? `single-use-${randomUUID()}`;
-      }
-
-      // Another activity on this worker needs a VM and none is free: give up one idle VM of this pool. With a scope, only
-      // a VM that may run a command of that scope.
-      const idleWithVm = (scope?: string | null) => lanes.find((lane) => !lane.busy && !lane.dead && lane.accountedAt !== undefined && (scope === undefined || scopeFits(lane, scope)));
+      // Another activity on this worker needs a VM and none is free: give up one idle VM of this pool.
+      const idleWithVm = () => lanes.find((lane) => !lane.busy && !lane.dead && lane.accountedAt !== undefined);
       const budgetMember = {
         hasIdle: () => idleWithVm() !== undefined,
         reapIdle: () => {
           const idle = idleWithVm();
           if (!idle) return false;
-          void reap(idle);
+          // Its token is what the other session needs: terminated, not parked.
+          void reap(idle, false);
           return true;
         },
       };
@@ -1624,17 +1782,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             if (command.affinityKey !== scannerDocument) throw new SandboxPolicyError("scanner session serves one document; refusing another document's command");
           }
           if (!scanner && command.requiresScanner) throw new SandboxPolicyError("this command needs a malware scanner session");
-          // Organization isolation: one organization per session, refused loudly otherwise; and each VM is bound to one
-          // organization's run (laneScope), so a command of another run gets a VM of its own.
-          if (command.tenantKey) {
-            boundTenant ??= command.tenantKey;
-            if (command.tenantKey !== boundTenant) {
-              console.error(`[parser-sandbox] ALERT provider=modal cross-organization-command activity=${context.activityId}: refused`);
-              throw new SandboxPolicyError("parser session serves one organization; refusing a command of another");
-            }
-          }
-          const scope = laneScope(command);
-          let lane = await acquireLane(command.affinityKey, scope, signal);
+          let lane = await acquireLane(command.affinityKey, signal);
           if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
           try {
             // The worker VM token too, before admission: a command waiting for capacity is still queued, its time limit not
@@ -1646,12 +1794,11 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
                 break;
               } catch (error) {
                 if (!(error instanceof HandOver)) throw error;
-                const idle = idleWithVm(scope);
+                const idle = idleWithVm();
                 if (!idle) continue;
                 lane.dead = true;
                 lanes.splice(lanes.indexOf(lane), 1);
                 lane = idle;
-                bindLaneScope(lane, scope);
                 lane.busy = true;
                 lane.previousKey = lane.lastKey;
                 lane.lastKey = command.affinityKey;
@@ -1679,14 +1826,16 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           // The stage is done with the pool (VM pool follow-up): terminate idle VMs now, so their time after the last
           // command is recorded in the stage's ledger before its final checkpoint, and Modal stops billing them.
           // Awaited: the terminate is acknowledged and the time recorded before the checkpoint (recheck T #1).
-          await Promise.all([...lanes.filter((candidate) => !candidate.busy && !candidate.dead).map(reap), ...pendingReaps]);
+          // Parked when possible (reap): the next session of this worker adopts the VM warm.
+          await Promise.all([...lanes.filter((candidate) => !candidate.busy && !candidate.dead).map((lane) => reap(lane)), ...pendingReaps]);
         },
         close() {
           closing ??= (async () => {
             closed = true;
             unregisterReaper();
             while (waiting.length > 0) waiting.shift()!();
-            const results = await Promise.allSettled(lanes.map((lane) => lane.terminate()));
+            // Idle, healthy VMs are parked for the worker's next session; the rest (busy, unhealthy, old) are terminated.
+            const results = await Promise.allSettled(lanes.map((lane) => (lane.park() ? Promise.resolve() : lane.terminate())));
             clientClosed = true;
             client.close();
             const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
