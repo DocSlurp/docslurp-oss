@@ -7,7 +7,7 @@ import type { DerivedDocumentTitle, FileFacts, PrivacyAuditEntry } from "@docslu
 
 import type { DocumentAssets } from "../db/document-asset-ledger.js";
 import type { DocumentContentWriter } from "../db/document-content.js";
-import type { DocumentRecords } from "../db/document-records.js";
+import type { DocumentRecords, DocumentRowScope } from "../db/document-records.js";
 import type { FleetBudgets } from "../db/fleet-budgets.js";
 import type { GeoAttempt } from "../db/geo-final-source.js";
 import type { OcrEscalationLog, OcrEscalationReadRow } from "../db/ocr-escalation-reads.js";
@@ -115,8 +115,13 @@ export interface MemoryDocumentRecord {
   withheldArtifactUris?: string[];
 }
 
-/** Document rows by id. A write to a document that is not here (or not in the run) matches no row. */
+/** Document rows by id. A read or write outside the document's run or organization matches no row. */
 export class MemoryDocumentRecords implements DocumentRecords {
+  private row(scope: DocumentRowScope): MemoryDocumentRecord | undefined {
+    const row = this.documents.get(scope.documentId);
+    return row && row.runId === scope.runId && scope.orgId !== null && row.orgId === scope.orgId ? row : undefined;
+  }
+
   readonly documents = new Map<string, MemoryDocumentRecord>();
   readonly geoAttempts: GeoAttempt[] = [];
 
@@ -139,16 +144,16 @@ export class MemoryDocumentRecords implements DocumentRecords {
   }
 
   /** A missing document withholds (fail closed), as the Postgres adapter's does. */
-  async documentPiiWithholds(documentId: string): Promise<boolean> {
-    const row = this.documents.get(documentId);
+  async documentPiiWithholds(scope: DocumentRowScope): Promise<boolean> {
+    const row = this.row(scope);
     if (!row) return true;
     return row.piiWithholds === true || (row.withheldArtifactUris?.length ?? 0) > 0;
   }
 
   /** Throws when the document has no PII outcome to add to (piiWithholds unset). */
-  async appendWithheldArtifactUris(documentId: string, uris: readonly string[]): Promise<void> {
+  async appendWithheldArtifactUris(scope: DocumentRowScope, uris: readonly string[]): Promise<void> {
     if (uris.length === 0) return;
-    const row = this.documents.get(documentId);
+    const row = this.row(scope);
     if (!row || row.piiWithholds === undefined) throw new Error("PII withheld list not updated: the document has no PII outcome");
     row.withheldArtifactUris = [...new Set([...(row.withheldArtifactUris ?? []), ...uris])].sort();
   }
@@ -174,8 +179,8 @@ export class MemoryDocumentRecords implements DocumentRecords {
     return true;
   }
 
-  async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
-    const row = this.documents.get(documentId);
+  async setDocumentTitleIfAbsent(scope: DocumentRowScope, title: DerivedDocumentTitle): Promise<boolean> {
+    const row = this.row(scope);
     if (!row || row.title?.title.trim()) return false;
     row.title = title;
     return true;

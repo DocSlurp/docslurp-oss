@@ -374,8 +374,14 @@ export class PostgresRunLedger implements CheckpointStore {
     return mapRun(row);
   }
 
-  async loadDocument(documentId: string): Promise<Document> {
-    const [row] = await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from project_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} limit 1`;
+  /**
+   * One document, within a tenant scope: the run it belongs to, or (for a run that reads another run's document, such as a
+   * deferred materialization) the run's organization. Outside the scope it is not found.
+   */
+  async loadDocument(documentId: string, scope: { runId: string } | { orgId: string | null }): Promise<Document> {
+    const [row] = "runId" in scope
+      ? await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from project_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} and d.run_id = ${scope.runId} limit 1`
+      : await this.sql<DocumentRow[]>`select d.*, (select r.storage_prefix from project_runs r where r.id = d.run_id) as run_storage_prefix from documents d where d.id = ${documentId} and d.org_id = ${scope.orgId} limit 1`;
     if (!row) throw new DocumentNotFoundError(documentId);
     return mapDocument(row);
   }

@@ -9,6 +9,7 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { compilePipelinePlan, defaultPipelineFeatures, pipelineStageOrder, quarantineReasonOf, type PipelineFeatures } from "@docslurp/shared";
 import type postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
@@ -261,7 +262,7 @@ describe("R7-H1: a reprocess re-runs quarantine and parses its own scanned copy,
     expect(deleted.some((key) => key.startsWith("u1/run-re/"))).toBe(false);
 
     // Deferred materialization and page renders load the document by id: they stage this run's copy, still there.
-    const document = await store.loadDocument("re");
+    const document = await loadFixtureDocument(store, "re");
     expect(document.sourceKey).toBe("u1/run-re/quarantine/re.scanned.pdf");
     const sources = new PdfSourceCache(storage);
     const cached = await sources.get(document);
@@ -301,7 +302,7 @@ describe("R7-H1: a reprocess re-runs quarantine and parses its own scanned copy,
       await new QuarantineStage(quarantineRunner(), storage, config).run(again);
       expect(reads).toEqual(["raw/a.pdf"]);
       expect(again.documents[0]).toMatchObject({ parseSourceDecision: "scanned-copy", sourceKey: "u1/run-old/quarantine/old.scanned.pdf" });
-      expect((await store.loadDocument("old")).parseSourceDecision).toBe("scanned-copy");
+      expect((await loadFixtureDocument(store, "old")).parseSourceDecision).toBe("scanned-copy");
     } finally {
       warn.mockRestore();
       error.mockRestore();
@@ -320,7 +321,7 @@ describe("R7-H1: a document quarantined before this build is never read by the p
   });
 
   it("the loader hands out no readable key and never the upload's", async () => {
-    const document = await store.loadDocument("legacy");
+    const document = await loadFixtureDocument(store, "legacy");
     expect(document.parseSourceDecision).toBe("unscanned");
     expect(JSON.stringify(document)).not.toContain("raw/legacy.pdf");
     for (const key of Reflect.ownKeys(document)) expect(String((document as unknown as Record<PropertyKey, unknown>)[key])).not.toContain("raw/legacy.pdf");
@@ -348,7 +349,7 @@ describe("R7-H1: a document quarantined before this build is never read by the p
     // Pages this run claimed (the activity claims before materializing).
     await sql`insert into document_page_states (document_id, page_number, state, claimed_by_run, claim_expires_at)
       values ('legacy', 1, 'claimed', 'run-legacy', now() + interval '5 minutes'), ('legacy', 2, 'claimed', 'run-legacy', now() + interval '5 minutes')`;
-    const document = await store.loadDocument("legacy");
+    const document = await loadFixtureDocument(store, "legacy");
     const run = (await loadRunState(store, "run-legacy", { totalStages: 1 })).run;
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -368,7 +369,7 @@ describe("R7-H1: a document quarantined before this build is never read by the p
 
   it("the PDF source cache and hash-bound staging refuse it without reading", async () => {
     const { storage, reads } = memoryStorage(new Map([["raw/legacy.pdf", attackPdf]]));
-    const document = await store.loadDocument("legacy");
+    const document = await loadFixtureDocument(store, "legacy");
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await expect(new PdfSourceCache(storage).get(document)).rejects.toBeInstanceOf(UnscannedParseSourceError);
@@ -393,7 +394,7 @@ describe("R7-L2: no reader reaches the upload by building a name at runtime", ()
         parse_source_key, parse_source_sha256, parse_source_scan_version)
       values ('copy', 'o1', 'u1', 'w', 'run-copy', 'board-pack.pdf', 'application/pdf', 'raw/copy.pdf', ${ORIGINAL_SHA}, 'completed', 2,
         'u1/run-copy/quarantine/copy.scanned.pdf', ${sha256Bytes(scannedCopy)}, 1)`;
-    const document = await store.loadDocument("copy");
+    const document = await loadFixtureDocument(store, "copy");
     const record = document as unknown as Record<string, unknown>;
     // The reviewer's probe: names assembled at runtime find nothing.
     expect(record[["orig", "inalSour", "ceKey"].join("")]).toBeUndefined();
@@ -483,7 +484,7 @@ describe("R8-L1: an 'original' decision binds parsers to the bytes quarantine sc
       expect(resolveDocumentSource({ id: "swap", source_key: "raw/swap.pdf", source_sha256: null, parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION }))
         .toEqual({ sourceKey: unscannedParseSourceKey("swap"), sourceSha256: null, parseSourceDecision: "unscanned" });
       await sql`update documents set source_sha256 = ${"e".repeat(64)}, parse_source_sha256 = ${sha256Bytes(benign)}, parse_source_scan_version = 1 where id = 'swap'`;
-      expect((await store.loadDocument("swap")).parseSourceDecision).toBe("unscanned");
+      expect((await loadFixtureDocument(store, "swap")).parseSourceDecision).toBe("unscanned");
     } finally {
       quiet.mockRestore();
     }
@@ -566,7 +567,7 @@ describe("production: quarantine decides a fresh upload under NODE_ENV=productio
       restore();
     }
     expect(await decisionRow("fresh")).toEqual({ parse_source_key: null, parse_source_sha256: sha256Bytes(benign), parse_source_scan_version: 1 });
-    expect((await store.loadDocument("fresh")).parseSourceDecision).toBe("original");
+    expect((await loadFixtureDocument(store, "fresh")).parseSourceDecision).toBe("original");
   }, 60_000);
 
   it("an encrypted upload, end to end: quarantine stores its copy and every later stage parses the copy", async () => {

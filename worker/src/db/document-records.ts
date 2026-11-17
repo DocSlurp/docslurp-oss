@@ -5,6 +5,12 @@ import { assertParseSourceRecord, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSour
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { beginGeoAttempt } from "./geo-final-source.js";
 
+/**
+ * One document of a run, as its tenant scope: every document-row read or write names the run's organization and the run the
+ * document belongs to, so a wrong (or null) organization or run matches no row.
+ */
+export type DocumentRowScope = { orgId: string | null; runId: string; documentId: string };
+
 /** The document records port stages write through (pipeline CheckpointStore.records). */
 export type DocumentRecords = Pick<PostgresDocumentRecords, keyof PostgresDocumentRecords>;
 
@@ -24,15 +30,16 @@ export class PostgresDocumentRecords {
 
   /**
    * Whether the document's PII outcome withholds artifacts (`documents.metadata.pii`: it redacted or blocked, so it keeps
-   * a withheld list). A missing document withholds (fail closed).
+   * a withheld list). A missing document, or one outside the scope, withholds (fail closed).
    */
-  async documentPiiWithholds(documentId: string): Promise<boolean> {
+  async documentPiiWithholds(scope: DocumentRowScope): Promise<boolean> {
+    const { documentId } = scope;
     const [row] = await this.sql<{ withholds: boolean }[]>`
       select coalesce((metadata->'pii'->>'blocked')::boolean, false)
         or coalesce((metadata->'pii'->>'redacted')::boolean, false)
         or coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
           then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
-      from documents where id = ${documentId}`;
+      from documents where id = ${documentId} and run_id = ${scope.runId} and org_id = ${scope.orgId}`;
     return row?.withholds ?? true;
   }
 
@@ -41,7 +48,8 @@ export class PostgresDocumentRecords {
    * after its PII stage. Throws when the document has no PII outcome to add to, so a caller never records the artifacts
    * as servable on a write that did not land.
    */
-  async appendWithheldArtifactUris(documentId: string, uris: readonly string[]): Promise<void> {
+  async appendWithheldArtifactUris(scope: DocumentRowScope, uris: readonly string[]): Promise<void> {
+    const { documentId } = scope;
     if (uris.length === 0) return;
     const updated = await this.sql`
       update documents d
@@ -53,7 +61,8 @@ export class PostgresDocumentRecords {
               select unnest(${this.sql.array([...uris])}::text[])
             ) withheld), true),
           updated_at = now()
-      where d.id = ${documentId} and jsonb_typeof(d.metadata->'pii') = 'object'
+      where d.id = ${documentId} and d.run_id = ${scope.runId} and d.org_id = ${scope.orgId}
+        and jsonb_typeof(d.metadata->'pii') = 'object'
       returning 1`;
     if (updated.length !== 1) throw new Error("PII withheld list not updated: the document has no PII outcome");
   }
@@ -98,12 +107,13 @@ export class PostgresDocumentRecords {
     return rows.length > 0;
   }
 
-  async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
+  async setDocumentTitleIfAbsent(scope: DocumentRowScope, title: DerivedDocumentTitle): Promise<boolean> {
+    const { documentId } = scope;
     const rows = await this.sql`
       update documents
       set metadata = coalesce(metadata, '{}'::jsonb)
         || jsonb_build_object('title', ${title.title}::text, 'titleSource', ${title.source}::text)
-      where id = ${documentId}
+      where id = ${documentId} and run_id = ${scope.runId} and org_id = ${scope.orgId}
         and nullif(btrim(metadata ->> 'title'), '') is null
       returning id
     `;

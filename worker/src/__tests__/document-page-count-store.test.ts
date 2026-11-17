@@ -1,6 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { Store } from "../db/store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -48,7 +49,7 @@ describe("PostgresPageBasisLedger.setBillingPages", () => {
     const [row] = (await db.query<{ page_count: number; billing_pages: number; billing_pages_method: string }>(
       `select page_count, billing_pages, billing_pages_method from documents where id = 'long-docx'`)).rows;
     expect(row).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion" });
-    const document = await store.loadDocument("long-docx");
+    const document = await loadFixtureDocument(store, "long-docx");
     expect(document).toMatchObject({ pageCount: 1, billingPages: 300, fileFacts: { format: "office-word", mismatch: "same-family", declaredMimeType: "application/msword" } });
   }, 60_000);
 
@@ -79,7 +80,7 @@ describe("Store.setDocumentFileFacts", () => {
 
   it("replaces a document's provisional facts and MIME type with the worker's full inspection", async () => {
     expect(await store.records.setDocumentFileFacts("run1", "long-docx", full)).toBe(true);
-    const document = await store.loadDocument("long-docx");
+    const document = await loadFixtureDocument(store, "long-docx");
     expect(document).toMatchObject({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileFacts: { inspection: "full", mismatch: "corrected" } });
   }, 60_000);
 

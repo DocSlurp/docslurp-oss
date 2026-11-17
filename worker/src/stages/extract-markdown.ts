@@ -1388,7 +1388,7 @@ export class ExtractMarkdownStage implements Stage {
         filename: document.filename,
       });
       if (!derived) return;
-      const written = await state.store.records.setDocumentTitleIfAbsent(document.id, derived);
+      const written = await state.store.records.setDocumentTitleIfAbsent({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id }, derived);
       console.log(`[extract-debug] document=${document.id} title-source=${derived.source} title-written=${written}`);
     } catch (error) {
       console.warn(`[extract-markdown] title derivation failed document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);

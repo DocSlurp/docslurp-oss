@@ -93,7 +93,7 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
       const recordedAtAppend: number[] = [];
       (env.state as any).store = withRecords({
         documentPiiWithholds: async () => true,
-        appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => {
+        appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => {
           recordedAtAppend.push(Object.keys(env.state.artifactLedger.all()).length);
           uploadedAtAppend.push([...env.objects.keys()].filter((key) => key.includes("/doppler/")).length);
           appended.push([...uris]);
@@ -121,7 +121,7 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
   it("a PII scan with nothing withheld stores document.md and withholds nothing; page facts are never stored", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "redact_artifacts" } });
     const appended: string[] = [];
-    (env.state as any).store = withRecords({ documentPiiWithholds: async () => false, appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => { appended.push(...uris); } });
+    (env.state as any).store = withRecords({ documentPiiWithholds: async () => false, appendWithheldArtifactUris: async (_scope: unknown, uris: readonly string[]) => { appended.push(...uris); } });
     await run(env, await folder());
     expect(appended).toEqual([]);
     expect(env.objects.has(`u/r/doppler/${DOC_ID}/document.md`)).toBe(true);

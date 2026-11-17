@@ -2,6 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { setSpendCheckConfig, SpendCheckUnavailableError } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
@@ -67,7 +68,7 @@ const row = async (id: string) => (await db.query<{ page_count: number; page_cou
 
 /** A hydrated activity's state for `documentIds` of `runId`: its page basis is bound to the store's Postgres adapter. */
 async function activity(runId: string, documentIds: string[]): Promise<WorkflowState> {
-  const state = WorkflowState.create(await store.loadRun(runId), await Promise.all(documentIds.map(async (id) => (await store.loadDocument(id))!)));
+  const state = WorkflowState.create(await store.loadRun(runId), await Promise.all(documentIds.map(async (id) => (await loadFixtureDocument(store, id))!)));
   await store.hydrateState(state);
   return state;
 }
@@ -128,7 +129,7 @@ describe("PageBasis over Postgres", () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     try {
       const run = { ...(await store.loadRun("run2")), orgId: null };
-      const document = (await store.loadDocument("other-run"))!;
+      const document = (await loadFixtureDocument(store, "other-run"))!;
       const pageBasis = new PageBasis({ run, usageLedger: { pendingBillableCents: 0 } }, store.pageBasisLedger);
       await expect(pageBasis.record(document, { kind: "page-count", pages: 20 })).rejects.toBeInstanceOf(SpendCheckUnavailableError);
       await expect(pageBasis.fund({ kind: "page-read", mode: "ocr", pages: 1 })).rejects.toBeInstanceOf(SpendCheckUnavailableError);

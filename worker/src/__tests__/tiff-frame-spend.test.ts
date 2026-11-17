@@ -2,6 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { defaultPipelineFeatures, installTestPricing, OPEN_PRICING, pricing, TEST_PAGE_CREDITS } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { enforceRunSpendForCharge, setSpendCheckConfig, SpendCheckUnavailableError } from "../db/spend-check.js";
 import { persistRunUsageEvents } from "../db/usage-event-store.js";
@@ -57,7 +58,7 @@ afterAll(async () => {
 });
 
 async function stateFor(runId: string, documentId: string): Promise<WorkflowState> {
-  const state = WorkflowState.create(await store.loadRun(runId), [(await store.loadDocument(documentId))!]);
+  const state = WorkflowState.create(await store.loadRun(runId), [(await loadFixtureDocument(store, documentId))!]);
   state.bindStore(store);
   state.usageLedger.runId = runId;
   return state;

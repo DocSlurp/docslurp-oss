@@ -59,7 +59,7 @@ async function extractWithTitle(args: { filename: string; mimeType: string; form
     const titles: Array<{ documentId: string; title: DerivedDocumentTitle }> = [];
     // An in-memory store; only the title write is observed.
     const store = memoryCheckpointStore();
-    store.records.setDocumentTitleIfAbsent = async (documentId: string, title: DerivedDocumentTitle) => { titles.push({ documentId, title }); return true; };
+    store.records.setDocumentTitleIfAbsent = async (scope, title: DerivedDocumentTitle) => { titles.push({ documentId: scope.documentId, title }); return true; };
     state.store = store;
     await stage.run(state);
     return { titles, status: state.documentStage("doc-1", "extract-markdown")?.status };

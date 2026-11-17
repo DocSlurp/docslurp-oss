@@ -146,7 +146,8 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
   const heartbeat = deps.heartbeat ? () => { deps.heartbeat!(); void renewLease(); } : undefined;
   const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const loaded = await store.loadRun(input.runId);
-  const document = await store.loadDocument(input.documentId);
+  // The run may read another run's document (a query or backfill run): scoped to the run's organization.
+  const document = await store.loadDocument(input.documentId, { orgId: loaded.orgId ?? null });
   const run = coerceIndexingModeForFlag(await withSourcePipeline(sql, loaded, document.id));
   const state = WorkflowState.create(run, [document]);
   // Full-index runs label their pages 'full-index'; query/backfill keep the requested reason.

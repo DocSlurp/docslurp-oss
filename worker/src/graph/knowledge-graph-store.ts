@@ -18,8 +18,8 @@ export interface KnowledgeGraphStore {
   }): Promise<CommunityRefreshResult>;
   /** Documents already extracted with this config; a re-run (e.g. retrying failed Documents) skips them. */
   documentsWithGraph(projectId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>>;
-  /** The project's own definition, used as scope when no domain is set. */
-  projectGraphScope(projectId: string): Promise<string>;
+  /** The project's own definition, used as scope when no domain is set; read only within the run's organization. */
+  projectGraphScope(scope: { orgId: string | null; projectId: string }): Promise<string>;
 }
 
 /** The project knowledge graph in Postgres (kg_* tables, graph/graph-store.ts and graph/communities.ts). */
@@ -61,9 +61,9 @@ export class PostgresKnowledgeGraph implements KnowledgeGraphStore {
     return await refreshProjectCommunities({ sql: this.sql, ...args });
   }
 
-  async projectGraphScope(projectId: string): Promise<string> {
+  async projectGraphScope(scope: { orgId: string | null; projectId: string }): Promise<string> {
     const [project] = await this.sql<{ name: string; template_key: string | null }[]>`
-      select name, template_key from projects where id = ${projectId}
+      select name, template_key from projects where id = ${scope.projectId} and org_id = ${scope.orgId}
     `;
     if (!project) return "Project";
     return graphFallbackScope({

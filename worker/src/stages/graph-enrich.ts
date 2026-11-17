@@ -59,7 +59,7 @@ export class GraphEnrichStage implements Stage {
       ? textModelApiKey(this.config.openRouterApiKey, communityModel)
       : undefined;
     const scope = graphConfig.domain
-      ?? (graphStore ? await graphStore.projectGraphScope(state.run.projectId) : "Project documents");
+      ?? (graphStore ? await graphStore.projectGraphScope({ orgId: state.run.orgId ?? null, projectId: state.run.projectId }) : "Project documents");
 
     const documents: Array<Record<string, unknown>> = [];
     let windows = 0;

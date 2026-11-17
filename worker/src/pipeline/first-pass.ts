@@ -672,7 +672,8 @@ export async function storeFirstPassFigures(args: {
   // Pending, then stored, per upload step: kept whatever later fails (owner rule).
   const ledgerHooks = figureLedgerHooks(state, documentId);
   try {
-    const withhold = piiEnabled ? await pii!.documentPiiWithholds(documentId) : false;
+    const rowScope = { orgId: state.run.orgId ?? null, runId: state.run.id, documentId };
+    const withhold = piiEnabled ? await pii!.documentPiiWithholds(rowScope) : false;
     figures = await readDopplerFigureDir(args.dir, {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
       sourceSha256: document.sourceSha256 ?? null, gaps: outcome.gaps ?? null,
@@ -680,7 +681,7 @@ export async function storeFirstPassFigures(args: {
     const committedUris = committedDocumentUris(state, documentId);
     // Withheld before any byte is uploaded or any row is marked stored (the ledger serves stored rows): every object this
     // store can make reachable joins the list first. A failed append stores nothing (fail closed) and deletes nothing.
-    if (withhold) await pii!.appendWithheldArtifactUris(documentId, dopplerFigureUris(args.storage, document, args.runId, figures));
+    if (withhold) await pii!.appendWithheldArtifactUris(rowScope, dopplerFigureUris(args.storage, document, args.runId, figures));
     const stored = await storeDopplerFigures({
       storage: args.storage, document, runId: args.runId, figures, markdown: args.markdownSlot?.toString("utf8") ?? "",
       documentMarkdown: withhold ? null : args.markdownSlot, source: dopplerSourcePointer(document), signal: args.signal,
@@ -688,7 +689,7 @@ export async function storeFirstPassFigures(args: {
       ...(ledgerHooks ? { ledger: ledgerHooks } : {}),
     });
     // Every recorded slot is withheld (a no-op union when the list above already covers it); never a delete.
-    if (withhold) await pii!.appendWithheldArtifactUris(documentId, stored.slots.map(({ uri }) => uri));
+    if (withhold) await pii!.appendWithheldArtifactUris(rowScope, stored.slots.map(({ uri }) => uri));
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));

@@ -38,6 +38,8 @@ let work: string;
 
 const A: DocumentAssetLedgerScope = { orgId: "org-a", projectId: "proj-a", documentId: "doc-a", runId: "run-a" };
 const B: DocumentAssetLedgerScope = { orgId: "org-b", projectId: "proj-b", documentId: "doc-b", runId: "run-b" };
+/** doc-a as its own run sees it (document records scope). */
+const A_ROW = { orgId: "org-a", runId: "run-a", documentId: "doc-a" };
 const USERS: Record<string, string> = { "doc-a": "ua", "doc-b": "ub", "doc-orphan": "ua", doc_w: "ua" };
 
 beforeAll(async () => {
@@ -698,20 +700,30 @@ describe("LOW-5: shard ranges and the document's total resume cap", () => {
 describe("PII withholding for files stored after the PII stage (HIGH-1)", () => {
   it("withholds only under a recorded redact or block outcome, and appends URIs without dropping the stage's own", async () => {
     await sql`update documents set metadata = '{}'::jsonb where id = 'doc-a'`;
-    expect(await store.records.documentPiiWithholds("doc-a")).toBe(false);
+    expect(await store.records.documentPiiWithholds(A_ROW)).toBe(false);
     // Fail closed: no row, no answer to trust.
-    expect(await store.records.documentPiiWithholds("doc-missing")).toBe(true);
+    expect(await store.records.documentPiiWithholds({ ...A_ROW, documentId: "doc-missing" })).toBe(true);
     // No PII outcome to add to: refused, so the caller records nothing.
-    await expect(store.records.appendWithheldArtifactUris("doc-a", ["s3://b/x"])).rejects.toThrow(/no PII outcome/);
+    await expect(store.records.appendWithheldArtifactUris(A_ROW, ["s3://b/x"])).rejects.toThrow(/no PII outcome/);
     await sql`update documents set metadata = ${sql.json({ pii: { redacted: true, blocked: false, withheldArtifactUris: ["s3://b/ka"] } })} where id = 'doc-a'`;
-    expect(await store.records.documentPiiWithholds("doc-a")).toBe(true);
-    await store.records.appendWithheldArtifactUris("doc-a", ["s3://b/doppler/index.json", "s3://b/ka"]);
-    await store.records.appendWithheldArtifactUris("doc-a", ["s3://b/doppler/images/manifest.jsonl"]);
+    expect(await store.records.documentPiiWithholds(A_ROW)).toBe(true);
+    await store.records.appendWithheldArtifactUris(A_ROW, ["s3://b/doppler/index.json", "s3://b/ka"]);
+    await store.records.appendWithheldArtifactUris(A_ROW, ["s3://b/doppler/images/manifest.jsonl"]);
     const [row] = await sql<{ metadata: { pii: { withheldArtifactUris: string[]; redacted: boolean } } }[]>`select metadata from documents where id = 'doc-a'`;
     expect(row!.metadata.pii.withheldArtifactUris).toEqual(["s3://b/doppler/images/manifest.jsonl", "s3://b/doppler/index.json", "s3://b/ka"]);
     expect(row!.metadata.pii.redacted).toBe(true);
+    // Tenant scope: another organization's or another run's view of doc-a reads nothing (withholds, fail closed) and
+    // writes nothing (refused, the list unchanged); a null organization matches no row.
+    for (const wrong of [{ ...A_ROW, orgId: "org-b" }, { ...A_ROW, runId: "run-b" }, { ...A_ROW, runId: "run-a-new" }, { ...A_ROW, orgId: null }]) {
+      await sql`update documents set metadata = '{}'::jsonb where id = 'doc-a'`;
+      expect(await store.records.documentPiiWithholds(wrong)).toBe(true);
+      await sql`update documents set metadata = ${sql.json({ pii: { redacted: true, withheldArtifactUris: ["s3://b/ka"] } })} where id = 'doc-a'`;
+      await expect(store.records.appendWithheldArtifactUris(wrong, ["s3://b/foreign"])).rejects.toThrow(/no PII outcome/);
+      const [unchanged] = await sql<{ metadata: { pii: { withheldArtifactUris: string[] } } }[]>`select metadata from documents where id = 'doc-a'`;
+      expect(unchanged!.metadata.pii.withheldArtifactUris).toEqual(["s3://b/ka"]);
+    }
     await sql`update documents set metadata = ${sql.json({ pii: { blocked: true, redacted: false, withheldArtifactUris: [] } })} where id = 'doc-a'`;
-    expect(await store.records.documentPiiWithholds("doc-a")).toBe(true);
+    expect(await store.records.documentPiiWithholds(A_ROW)).toBe(true);
     await sql`update documents set metadata = '{}'::jsonb where id = 'doc-a'`;
   });
 });
