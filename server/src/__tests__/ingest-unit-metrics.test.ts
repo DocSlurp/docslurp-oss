@@ -19,21 +19,19 @@ describe("ingest spend metrics", () => {
     // A stand-in SQL client: fragments resolve to themselves, the final query returns per-metric sums.
     const client = ((strings: TemplateStringsArray, ...values: unknown[]) => {
       calls.push(values);
+      // Per-metric sums with each class's final page count (one upgraded page already moved from Scan to Vision).
       const rows = [
-        { metric: BILLABLE_UNIT_METRICS.fastPage, amount: 10, cost_cents: 0.05, events: 1 },
-        { metric: BILLABLE_UNIT_METRICS.ocrPage, amount: 4, cost_cents: 0.16, events: 4 },
-        { metric: BILLABLE_UNIT_METRICS.richPage, amount: 2, cost_cents: 0.5, events: 2 },
+        { metric: BILLABLE_UNIT_METRICS.fastPage, amount: 10, cost_cents: 0.05, events: 0, final_pages: 10 },
+        { metric: BILLABLE_UNIT_METRICS.ocrPage, amount: 4, cost_cents: 0.16, events: 0, final_pages: 3 },
+        { metric: BILLABLE_UNIT_METRICS.richPage, amount: 2, cost_cents: 0.5, events: 0, final_pages: 2 },
       ];
-      const text = strings.join("");
-      if (text.includes("group by au.metric")) return Promise.resolve(rows);
-      // The final-class page counts (one upgraded page already moved from Scan to Vision by the query).
-      if (text.includes("page_charges")) return Promise.resolve([{ fast_pages: 10, ocr_pages: 3, rich_page_reads: 2, rich_aggregate_pages: 0 }]);
-      return { strings, values };
+      return strings.join("").includes("with charges as materialized") ? Promise.resolve(rows) : { strings, values };
     }) as never;
     const usage = await orgUnitUsage("org-a", null, client);
     expect(usage).toMatchObject({ fastPages: 10, ocrPages: 3, richPages: 2 });
     expect(usage.ingestCredits).toBeCloseTo(0.71);
-    // Both the credit and the page-count query are bound to the organization asked for.
-    expect(calls.filter((values) => values.includes("org-a"))).toHaveLength(2);
+    // One pass, bound to the organization asked for (the indexed prefilter, the derived org and the outer filter).
+    expect(calls.flat().filter((value) => value === "org-a").length).toBeGreaterThanOrEqual(3);
+    expect(calls.flat()).not.toContain("org-b");
   });
 });

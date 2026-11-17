@@ -5,7 +5,7 @@ import { BILLABLE_UNIT_METRICS, unitChargeMetadata } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
- * Billing forecast page counts (orgUnitUsage) against a migrated Postgres: each charged page of a run counts once, in
+ * Billing forecast page counts (orgUnitUsage) against a migrated Postgres: each charged page counts once per run, in
  * its final class (Text, Scan, Vision), while credits stay the exact sum of the charges. Charges are written as the
  * worker writes them, so the page-read settle trigger (migration 0185) turns an OCR-then-vision page into an upgrade.
  * Credit amounts below are arbitrary test numbers, not prices.
@@ -100,6 +100,26 @@ describe("org page counts by final class", () => {
     const usage = await usageOf(ORG_A);
     expect(usage).toMatchObject({ fastPages: 1, ocrPages: 1, richPages: 2 });
     expect(usage.ingestCredits).toBe(TEXT + SCAN + VISION + 3 * VISION);
+  });
+
+  it("counts a page read by vision first and then OCR once, as Vision (the OCR charge is never written)", async () => {
+    await vision(RUN_A1, 1);
+    await scan(RUN_A1, 1);
+    const [ocrRows] = await sql<{ n: number }[]>`select count(*)::int as n from usage_events where id = ${`ocr:${RUN_A1}:${DOC}:1`}`;
+    expect(ocrRows?.n).toBe(0);
+    const usage = await usageOf(ORG_A);
+    expect(usage).toMatchObject({ fastPages: 0, ocrPages: 0, richPages: 1 });
+    expect(usage.ingestCredits).toBe(VISION);
+  });
+
+  it("counts a page another run of the org upgraded from Scan once, as Vision", async () => {
+    await scan(RUN_A1, 6);
+    await charge(RUN_A2, `rich-upgrade:${DOC}:6`, BILLABLE_UNIT_METRICS.richPage, VISION - SCAN, {
+      documentId: DOC, pageNumber: 6, readBy: "model-read", upgradeOf: `ocr:${RUN_A1}:${DOC}:6`, upgradeFrom: "ocr", decidedBy: RUN_A1,
+    });
+    const usage = await usageOf(ORG_A);
+    expect(usage).toMatchObject({ fastPages: 0, ocrPages: 0, richPages: 1 });
+    expect(usage.ingestCredits).toBe(VISION);
   });
 
   it("counts a page another run of the org upgraded from Text once, as Vision", async () => {

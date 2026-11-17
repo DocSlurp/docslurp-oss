@@ -1,6 +1,6 @@
 ## Billing forecast page counts by final class (2026-11-16)
 
-- `orgUnitUsage` (billing forecast `fastPagesLast30d` / `ocrPagesLast30d` / `richPagesLast30d`) counts each charged page of a run once, in its final class: a page OCR-read and then vision-read (the 0185 settle), or another run's Text or Scan decision upgraded by `rich-upgrade:`, counts only as Vision, and a Vision page billed several units counts once. Upgrades match the replaced charge by id, document and run inside the same organization. Credits remain the exact sum of the charges.
+- `orgUnitUsage` (billing forecast `fastPagesLast30d` / `ocrPagesLast30d` / `richPagesLast30d`) counts each charged page once per run, in its final class: a page OCR-read and then vision-read (the 0185 settle), or another run's Text or Scan decision upgraded by `rich-upgrade:`, counts only as Vision, and a Vision page billed several units counts once per run. Upgrades match the replaced charge by id, document and run inside the same organization. Credits remain the exact sum of the charges. Counts and credits come from one pass over the org's rows, which now uses the org index through the view's new stamped columns (migration 0186).
 
 ## Compute reuse across organizations (2026-11-16)
 
