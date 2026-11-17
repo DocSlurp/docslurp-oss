@@ -22,7 +22,7 @@
  * per-page extract record can say what produced it. It never names a private fork, a host credential or a price.
  */
 import { automaticCallMarginDecision, visionAutomaticRoute, type AutomaticCallDecision, type AutomaticCallRoute } from "./automatic-call-margin.js";
-import { OCR_ESCALATION_ROUTES, ocrEscalationAutomaticRoute, type OcrEscalationRoute } from "./ocr-escalation-routes.js";
+import { cappedVisionAutomaticRoute, OCR_ESCALATION_ROUTES, ocrEscalationAutomaticRoute, type OcrEscalationPriceCeiling, type OcrEscalationRoute } from "./ocr-escalation-routes.js";
 import { hostMatchesEndpoint } from "./provider-pools.js";
 
 export const POOL_CAPABILITIES = ["text", "ocr", "vision"] as const;
@@ -83,6 +83,11 @@ export interface LlmPoolMember extends PoolMemberBase {
   readonly hosts: readonly string[];
   /** For an OCR second read: the escalation route (with its price ceiling) this member sends. */
   readonly escalationRoute?: OcrEscalationRoute;
+  /**
+   * A per-request price ceiling this member's requests carry (`max_price` and its host allowlist, no per-image fee), so
+   * only hosts listed under it serve them and the margin gate prices the call at it. Null: the catalog route as sent.
+   */
+  readonly priceCeiling: OcrEscalationPriceCeiling | null;
 }
 
 export interface ServicePoolMember extends PoolMemberBase {
@@ -114,7 +119,7 @@ export interface CapabilityPoolServiceRegistration {
 export type CapabilityPools = Readonly<Record<PoolCapability, readonly CapabilityPoolMember[]>>;
 
 /** Why a pool moved past a member (bounded telemetry label). */
-export const POOL_FAILOVER_REASONS = ["margin", "routing", "unavailable", "privacy", "error", "unsupported"] as const;
+export const POOL_FAILOVER_REASONS = ["margin", "routing", "timeout", "unavailable", "privacy", "region", "error", "unsupported"] as const;
 export type PoolFailoverReason = (typeof POOL_FAILOVER_REASONS)[number];
 
 const ENGINE = /^[a-z0-9][a-z0-9.-]{0,30}(\+[a-z0-9][a-z0-9-]{0,20})?$/;
@@ -170,7 +175,7 @@ export function poolMemberId(capability: PoolCapability, kind: PoolMemberKind, e
 function llmMember(spec: {
   capability: PoolCapability; stage: PoolMemberStage; engine: string; model: string; hosts: readonly string[];
   automaticFailover: boolean; quality: PoolMeasurement | null; pagesPerDollar: PoolMeasurement | null;
-  admission: LlmPoolMember["admission"]; escalationRoute?: OcrEscalationRoute;
+  admission: LlmPoolMember["admission"]; escalationRoute?: OcrEscalationRoute; priceCeiling?: OcrEscalationPriceCeiling | null;
 }): LlmPoolMember {
   const regions = spec.hosts.map((host) => {
     const found = poolHostRegion(host);
@@ -182,6 +187,7 @@ function llmMember(spec: {
     id: poolMemberId(spec.capability, "llm", spec.engine, region), capability: spec.capability, kind: "llm" as const, stage: spec.stage,
     engine: spec.engine, region, regions: Object.freeze(regions), automaticFailover: spec.automaticFailover, quality: spec.quality,
     pagesPerDollar: spec.pagesPerDollar, admission: spec.admission, builtin: true, model: spec.model, hosts: Object.freeze([...spec.hosts]),
+    priceCeiling: spec.priceCeiling ?? spec.escalationRoute?.priceCeiling ?? null,
     ...(spec.escalationRoute ? { escalationRoute: spec.escalationRoute } : {}),
   });
 }
@@ -216,15 +222,26 @@ export const VISION_LUNA_HOSTS = Object.freeze(["amazon-bedrock/us-east-1", "azu
 /** GLM 5.3 Flash's vision hosts with a stated US region (worker vision-model-profiles.ts keeps the same allowlist). */
 export const VISION_GLM_HOSTS = Object.freeze(["wafer/us", "friendli", "inference-net/us"]);
 
+/**
+ * The vision fallback's GLM route: the two hosts of the OCR second read (wafer/us, morph/fp8) under the same per-request
+ * ceiling as its first route, so the fallback is priced at that ceiling, not at the dearest host of GLM's vision profile.
+ */
+const GLM_FALLBACK_CEILING: OcrEscalationPriceCeiling = (() => {
+  const glm = OCR_ESCALATION_ROUTES.filter((route) => route.optionId.startsWith("scan-ocr/hosted-escalation-glm") && route.priceCeiling);
+  const first = glm[0]!.priceCeiling!;
+  return Object.freeze({ ...first, hosts: Object.freeze(glm.flatMap((route) => [...route.priceCeiling!.hosts])) });
+})();
+
 const VISION_MEMBERS: readonly LlmPoolMember[] = Object.freeze([
   // Production vision prompt (page-markdown-latex), pinned Bedrock us-east-1: composite 0.931 (text 0.928, tables 0.904,
   // math 1.000). Azure us with the transcription prompt: 0.935.
   llmMember({ capability: "vision", stage: "read", engine: "gpt-6-luna", model: "llm://openrouter/openai/gpt-6-luna", hosts: VISION_LUNA_HOSTS,
     automaticFailover: false, quality: { value: 0.931, evalRef: CANDIDATES_RUN }, pagesPerDollar: { value: 1649, evalRef: CANDIDATES_RUN }, admission: "none" }),
-  // The deployment's default automatic fallback (DOCSLURP_VISION_FALLBACK_MODEL overrides it): composite 0.932 on
-  // wafer/us and on friendli, 0.927 on inference-net/us (production prompt). Admitted per call by the margin gate.
-  llmMember({ capability: "vision", stage: "read", engine: "glm-5.3-flash", model: "llm://openrouter/z-ai/glm-5.3-flash", hosts: VISION_GLM_HOSTS,
-    automaticFailover: true, quality: { value: 0.932, evalRef: CANDIDATES_RUN }, pagesPerDollar: { value: 1569, evalRef: CANDIDATES_RUN }, admission: "margin-gate" }),
+  // The deployment's default automatic fallback (DOCSLURP_VISION_FALLBACK_MODEL overrides it), on the second read's GLM
+  // hosts under their ceiling: composite 0.932 on wafer/us, 0.927 on morph/fp8. Admitted per call by the margin gate.
+  llmMember({ capability: "vision", stage: "read", engine: "glm-5.3-flash", model: "llm://openrouter/z-ai/glm-5.3-flash", hosts: GLM_FALLBACK_CEILING.hosts,
+    automaticFailover: true, quality: { value: 0.932, evalRef: GLM_WAFER_RUN }, pagesPerDollar: { value: 3454, evalRef: GLM_WAFER_RUN }, admission: "margin-gate",
+    priceCeiling: GLM_FALLBACK_CEILING }),
 ]);
 
 /** Core's LLM members, in pool order. */
@@ -404,11 +421,30 @@ export function activeCapabilityPools(): CapabilityPools {
 
 export function setActiveCapabilityPools(pools: CapabilityPools): void {
   active = pools;
+  initialized = true;
+}
+
+let initialized = false;
+
+/** Whether the worker's pools are resolved (setActiveCapabilityPools), not core's lazy defaults. */
+export function capabilityPoolsInitialized(): boolean {
+  return initialized;
+}
+
+/**
+ * Why a vision route's hosts cannot carry a customer page: null when every host has a stated US or EU region. `hosts`
+ * null means the route names no bounded allowlist (any host OpenRouter picks), which is never proven.
+ */
+export function visionRouteRegionProblem(model: string, hosts: readonly string[] | null): string | null {
+  if (!hosts || hosts.length === 0) return `${model} has no host allowlist with a stated US or EU region`;
+  const unproven = hosts.filter((host) => !poolHostRegion(host));
+  return unproven.length ? `${model} may route to ${unproven.join(", ")}, which state no US or EU region` : null;
 }
 
 /** Test hook. */
 export function resetActiveCapabilityPoolsForTests(): void {
   active = null;
+  initialized = false;
 }
 
 /** The LLM member serving `model` for `capability` and `stage`, if any. */
@@ -439,11 +475,13 @@ export function nextAutomaticPoolMember(capability: PoolCapability, memberId: st
 /** The automatic-call route an LLM member is priced on: its escalation route (price ceiling), else its vision route restricted to its hosts. */
 export function poolMemberAutomaticRoute(member: LlmPoolMember): AutomaticCallRoute {
   if (member.escalationRoute) return ocrEscalationAutomaticRoute(member.escalationRoute);
+  if (member.priceCeiling) return cappedVisionAutomaticRoute(member.model, member.priceCeiling);
   const base = visionAutomaticRoute(member.model);
   if (base.billing !== "openrouter") return base;
-  // Never wider than the catalog's own allowlist; the member's hosts narrow it.
+  // Never wider than the catalog's own allowlist: the member's hosts narrow it, and no overlap is a refusal.
   const hosts = base.hosts?.length ? member.hosts.filter((host) => base.hosts!.some((allowed) => hostMatchesEndpoint(allowed, host) || allowed === host)) : [...member.hosts];
-  return { ...base, hosts: hosts.length ? hosts : [...member.hosts] };
+  if (hosts.length === 0) throw new Error(`capability pool member ${member.id}: its hosts are outside the model's catalog route`);
+  return { ...base, hosts };
 }
 
 /**

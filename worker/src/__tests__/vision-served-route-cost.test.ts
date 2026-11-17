@@ -266,6 +266,25 @@ describe("vision usage priced on the served route", () => {
     });
   });
 
+  it("vision-extract refuses a page read whose primary or fallback route can reach a host with no stated US or EU region", async () => {
+    stubFetch(() => answer("stop"));
+    const imagePath = join(await mkdtemp(join(tmpdir(), "vision-region-")), "page.png");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const stage = new VisionExtractStage(new CommandRunner(), {} as ArtifactStore, baseCfg, {} as never);
+    const runVisionCall = (stage as unknown as { runVisionCall(...args: unknown[]): Promise<unknown> }).runVisionCall.bind(stage);
+    const state = { run: { id: "run-1", orgId: "org-1", pipeline: { privacyMode: "standard", outputSchema: null } }, usageLedger: new PipelineUsageEventLedger(), pendingPerformance: [] } as unknown as WorkflowState;
+    const guard = new VisionRunGuard({ id: "run-1", orgId: "org-1" }, {
+      pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4,
+    }, new MemoryVisionAttemptBackend());
+    // A primary with no host allowlist (any host OpenRouter picks): refused, nothing sent.
+    const gate = guard.call({ documentId: "doc", pageNumber: 1, purpose: "page" });
+    const error = await runVisionCall(state, { id: "doc" }, vision(OPENROUTER), { imagePath, outputPath: `${imagePath}.json` },
+      { mimeType: "image/png", pageNumber: 1, artifactUri: "raster://1" }, gate).catch((caught: unknown) => caught);
+    await gate.finish();
+    expect((error as Error).name).toBe("VisionRouteRegionError");
+    expect(sends).toEqual([]);
+  });
+
   it("vision-extract records a billed, rejected primary once when the guard refuses its fallback", async () => {
     // Both OpenRouter attempts are rejected (truncated); the page's bound of two requests then refuses the fallback.
     const rejected = () => new Response(JSON.stringify({ provider: "ProvA", choices: [{ message: { content: "Total: 42" }, finish_reason: "length" }], usage: { prompt_tokens: 1_200, completion_tokens: 300 } }),
@@ -284,7 +303,8 @@ describe("vision usage priced on the served route", () => {
       pageAttempts: 2, regionAttempts: 12, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 100_000, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4,
     }, new MemoryVisionAttemptBackend());
     const gate = guard.call({ documentId: "doc", pageNumber: 1, purpose: "page" });
-    const error = await runVisionCall(state, { id: "doc" }, vision(OPENROUTER, OPENAI), { imagePath, outputPath: `${imagePath}.json` },
+    // Page reads reach only stated US or EU hosts: GLM on its US allowlist, Qwen on DeepInfra (US).
+    const error = await runVisionCall(state, { id: "doc" }, vision("llm://openrouter/z-ai/glm-5.3-flash", "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct"), { imagePath, outputPath: `${imagePath}.json` },
       { mimeType: "image/png", pageNumber: 1, artifactUri: "raster://1" }, gate).catch((caught: unknown) => caught);
     await gate.finish();
     expect(findVisionGuardStop(error)?.reason).toBe("page-attempt-limit");
@@ -292,11 +312,11 @@ describe("vision usage priced on the served route", () => {
     const events = state.usageLedger.snapshot();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
-      provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis-attempt", inputTokens: 2_400, outputTokens: 600,
+      provider: "openrouter", model: "z-ai/glm-5.3-flash", metric: "page-analysis-attempt", inputTokens: 2_400, outputTokens: 600,
       metadata: { outcome: "rejected", fallbackPrimary: true, documentId: "doc", pageNumber: 1 },
     });
     // Not charged to the customer (billable false); our provider spend is kept as providerCostCents.
-    expect(events[0]!.metadata!.providerCostCents as number).toBeCloseTo(visionListPriceCents("google/gemini-3.1-flash-lite", { inputTokens: 2_400, outputTokens: 600 })!, 10);
+    expect(events[0]!.metadata!.providerCostCents as number).toBeCloseTo(visionListPriceCents("z-ai/glm-5.3-flash", { inputTokens: 2_400, outputTokens: 600 })!, 10);
     expect(events[0]!.metadata!.providerCostCents as number).toBeGreaterThan(0);
   });
 });

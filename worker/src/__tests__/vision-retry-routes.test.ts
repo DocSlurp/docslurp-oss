@@ -103,7 +103,7 @@ describe("per-model provider preferences survive the generic retry", () => {
       filtered("Fireworks"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Parasail", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
     ]);
-    const only = ["fireworks", "parasail"];
+    const only = ["fireworks"];
     expect(bodies[0]!.provider).toEqual({ only, sort: "latency", allow_fallbacks: true, max_price: visionMaxPrice(DEEPSEEK) });
     expect(bodies[1]!.provider).toEqual({ only, sort: "latency", allow_fallbacks: true, ignore: ["Fireworks"], max_price: visionMaxPrice(DEEPSEEK) });
     for (const body of bodies) expect(body.provider.only).not.toContain("together");
@@ -114,12 +114,12 @@ describe("per-model provider preferences survive the generic retry", () => {
     await expect(run(MIMO, [])).rejects.toThrow(/is not admitted/);
   });
 
-  it("Luna goes to its preferred retry route over SSE", async () => {
+  it("Luna's content-filter retry stays inside its US allowlist (no separate retry route: its hosts are the retry hosts)", async () => {
     const { bodies } = await run(LUNA, [
-      filtered("OpenAI"),
-      sse([{ id: "g", model: LUNA, provider: "Amazon Bedrock", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+      filtered("Amazon Bedrock"),
+      sse([{ id: "g", model: LUNA, provider: "Azure", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]);
-    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false, max_price: visionMaxPrice(LUNA) });
+    expect(bodies[1]!.provider).toMatchObject({ only: ["amazon-bedrock/us-east-1", "azure/us"], ignore: ["Amazon Bedrock"] });
   });
 });
 
@@ -147,19 +147,19 @@ describe("China-provider restriction (org or project opt-out)", () => {
       filtered("Together"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Fireworks", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ], { allowChinaProviders: false });
-    expect(bodies[0]!.provider).toEqual({ only: ["fireworks", "parasail"], sort: "latency", allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(DEEPSEEK) });
-    expect(bodies[1]!.provider).toMatchObject({ only: ["fireworks", "parasail"], ignore: ["Together", ...CHINA_PROVIDER_SLUGS] });
+    expect(bodies[0]!.provider).toEqual({ only: ["fireworks"], sort: "latency", allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(DEEPSEEK) });
+    expect(bodies[1]!.provider).toMatchObject({ only: ["fireworks"], ignore: ["Together", ...CHINA_PROVIDER_SLUGS] });
     for (const body of bodies) expectRestricted(body.provider);
   });
 
-  it("keeps the restriction on a content-filter retry that moves to a profile's preferred route", async () => {
+  it("keeps the restriction on a content-filter retry", async () => {
     const { bodies } = await run(LUNA, [
-      filtered("OpenAI"),
-      sse([{ id: "g", model: LUNA, provider: "Amazon Bedrock", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
+      filtered("Amazon Bedrock"),
+      sse([{ id: "g", model: LUNA, provider: "Azure", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ], { allowChinaProviders: false });
     expect(bodies).toHaveLength(2);
     for (const body of bodies) expectRestricted(body.provider);
-    expect(bodies[1]!.provider.order).toEqual(["amazon-bedrock/us-east-1", "azure/us"]);
+    expect(bodies[1]!.provider.only).toEqual(["amazon-bedrock/us-east-1", "azure/us"]);
   });
 
   it("restricts a call made outside any run scope (unknown scope fails closed)", async () => {

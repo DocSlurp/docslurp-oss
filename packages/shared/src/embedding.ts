@@ -697,7 +697,9 @@ export const visionModelCatalog = [
       outputUsdPerMillion: 1.2,
       checked: "2026-11-12",
       basis: "pinned-route",
-      providers: ["fireworks", "parasail"],
+      // Fireworks only (2026-11-17): Parasail's privacy policy allows processing "in any other country", so its region is
+      // not stated as US or EU (capability-pools.ts poolHostRegion).
+      providers: ["fireworks"],
     },
     // StreamLake and DeepSeek billed the same input tokens per page as Together on the 2026-10-29 tune/select
     // pages (difference -2 to 0, maximum 1,158), so they serve the same image limit.

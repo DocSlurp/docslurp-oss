@@ -119,8 +119,9 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    // Keep requests and fallback inside the approved transcription endpoints.
-    openRouterProvider: { only: ["fireworks", "parasail"], sort: "latency", allow_fallbacks: true },
+    // Keep requests and fallback inside the approved transcription endpoints with a stated US or EU region (2026-11-17):
+    // Fireworks states US servers; Parasail's policy allows "any other country", so it is no longer on the list.
+    openRouterProvider: { only: ["fireworks"], sort: "latency", allow_fallbacks: true },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.
@@ -154,11 +155,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     reasoning: { effort: "none" },
     // Rare: some models wrap the whole page in a ```markdown fence.
     postProcess: unwrapWholeMarkdownFence,
-    // OpenAI's output filter deterministically stops some ordinary published pages (corporate filings,
-    // government guidance) mid-page; Bedrock and Azure US transcribed them. Both list $0.11/$0.55 per M, so the catalog
-    // prices Luna as this pinned route at that price: the request's max_price must admit the retry hosts (at $0.10/$0.50
-    // they answered 404, live 2026-11-13).
-    contentFilterRetryProvider: { order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false },
+    // No content-filter retry route: OpenAI's own output filter stopped some ordinary pages, and Bedrock and Azure US, the
+    // retry hosts that transcribed them, are now the route itself (2026-11-17).
     // US hosts only (capability-pools.ts VISION_LUNA_HOSTS, 2026-11-17): OpenAI's own endpoint states no region (its
     // documentation processes a project without a selected region globally), so it is not on the list. Measured on the
     // page-OCR development split (dev-page-ocr-20261117-pool-candidates): Bedrock us-east-1 composite 0.931 with this

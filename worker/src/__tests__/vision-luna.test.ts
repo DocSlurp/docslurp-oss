@@ -113,15 +113,15 @@ describe("GPT-6 Luna vision profile", () => {
     expect(bodies[0]!.messages[1].content[1].image_url.detail).toBeUndefined();
   });
 
-  it("retries a content-filtered page once on the profile's preferred route, keeps the retry text and sums both calls", async () => {
+  it("retries a content-filtered page once inside its US allowlist, ignoring the filtering host, keeps the retry text and sums both calls", async () => {
     const { bodies, result } = await run(LUNA, undefined, [
-      { provider: "OpenAI", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } },
+      { provider: "Azure", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } },
       { provider: "Amazon Bedrock", choices: [{ message: { content: "# Full page" }, finish_reason: "stop" }], usage: { prompt_tokens: 2000, completion_tokens: 600, cost: 0.00055 } },
     ]);
     expect(bodies).toHaveLength(2);
     expect(bodies[0]!.provider).toEqual({ only: ["amazon-bedrock/us-east-1", "azure/us"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
-    // The retry goes to the preferred hosts only (order, no fallbacks), under the same max_price, which admits them.
-    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false, max_price: visionMaxPrice(LUNA) });
+    // No separate retry route (its hosts are the old retry hosts): the retry keeps the allowlist and ignores the filtering host.
+    expect(bodies[1]!.provider).toMatchObject({ only: ["amazon-bedrock/us-east-1", "azure/us"], ignore: ["Azure"], max_price: visionMaxPrice(LUNA) });
     expect(result).toMatchObject({ text: "# Full page", finishReason: "stop", inputTokens: 2400, outputTokens: 600, attempts: 2 });
     expect(result.costCents).toBeCloseTo(0.059, 10);
   });

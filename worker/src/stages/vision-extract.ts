@@ -1849,8 +1849,8 @@ export class VisionExtractStage implements Stage {
           outputSchema: state.run.pipeline.outputSchema,
           signal,
           gate,
-          // A page read: with no project fallback, the vision capability pool's default fallback applies.
-          poolFallback: true,
+          // A page read of the vision capability: region-checked routes, pool serves and the pool default fallback.
+          pageRead: true,
         });
       } catch (caught) {
         // Recorded here, once, for every caller (whole page, routed region and their fallbacks). A

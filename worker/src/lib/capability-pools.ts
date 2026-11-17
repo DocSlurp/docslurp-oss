@@ -5,14 +5,15 @@
  * failover, per capability, on the pipeline meter (docs/pipeline-metrics.md).
  */
 import {
-  activeCapabilityPools, assertCapabilityPoolRegions, capabilityPoolsLogLine, DEFAULT_OCR_ESCALATION_MODEL, isAutomaticSelectionDenied,
-  localPdfModeRequested, localServiceMember, poolMemberForModel, resolveCapabilityPools, setActiveCapabilityPools,
+  activeCapabilityPools, assertCapabilityPoolRegions, capabilityPoolsLogLine, isAutomaticSelectionDenied, localPdfModeRequested,
+  isLocalModelProvider, localServiceMember, parseLlmModelUri, poolMemberForModel, resolveCapabilityPools, setActiveCapabilityPools, visionRouteRegionProblem,
   type CapabilityPools, type PoolCapability, type PoolFailoverReason, type ServicePoolMember,
 } from "@docslurp/shared";
 import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 
 import { pageImageReaderProvider, poolServiceMembers, sandboxedOcrProvider, sandboxedPdfProviders } from "../extractors/plugins.js";
 import { setTextPoolTelemetry } from "../extractors/text-pool.js";
+import { VISION_MODEL_PROFILES, visionModelProfile } from "../tools/vision-model-profiles.js";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -43,6 +44,18 @@ export function initializeCapabilityPools(env: Env = process.env, log: (line: st
   const services = [...localMembers(env), ...poolServiceMembers()];
   const pools = resolveCapabilityPools({ services, env });
   const problems: string[] = [];
+  // One registration per service: a backend id serves at most one member of a capability.
+  const seen = new Set<string>();
+  for (const member of services) {
+    const key = `${member.capability}:${member.backend}`;
+    if (seen.has(key)) problems.push(`the ${member.capability} backend ${member.backend} is registered by more than one pool member`);
+    seen.add(key);
+  }
+  // Every vision profile's host allowlist (a project may choose any of these models) must be stated US or EU hosts.
+  for (const model of Object.keys(VISION_MODEL_PROFILES)) {
+    const problem = visionRouteRegionProblem(model, profileHosts(model));
+    if (problem) problems.push(`vision profile: ${problem}`);
+  }
   for (const { capability, backend } of pluginServices()) {
     if (!services.some((member) => member.capability === capability && member.backend === backend)) {
       problems.push(`the ${capability} service ${backend} registers no capability pool member (extractor plugin poolMembers), so where it processes pages is unknown`);
@@ -59,7 +72,7 @@ export function initializeCapabilityPools(env: Env = process.env, log: (line: st
   if (problems.length) throw new Error(`capability pools: ${problems.join("; ")}; refusing to start`);
   assertCapabilityPoolRegions(pools);
   setActiveCapabilityPools(pools);
-  setTextPoolTelemetry({ served: (id) => recordPoolServed("text", id), failover: (from, to, reason) => recordPoolFailover("text", from, to, reason) });
+  setTextPoolTelemetry({ served: (id, pages) => recordPoolServed("text", id, pages), failover: (from, to, reason) => recordPoolFailover("text", from, to, reason) });
   log(capabilityPoolsLogLine(pools));
   return pools;
 }
@@ -71,7 +84,7 @@ export function initializeCapabilityPools(env: Env = process.env, log: (line: st
  */
 export function defaultVisionFallbackModel(model: string, env: Env = process.env, pools: CapabilityPools = activeCapabilityPools()): string | null {
   const configured = env.DOCSLURP_VISION_FALLBACK_MODEL?.trim();
-  if (configured === "off") return null;
+  if (configured === "off" || !visionPoolFallbackEnabled(env)) return null;
   const primary = poolMemberForModel("vision", model, "read", pools);
   if (!primary) return null;
   if (configured) {
@@ -94,9 +107,36 @@ export function secondReadPoolMemberId(optionId: string, pools: CapabilityPools 
   return pools.ocr.find((member) => member.kind === "llm" && member.escalationRoute?.optionId === optionId)?.id ?? null;
 }
 
-/** The default second reader's member id (for logs before any read). */
-export function defaultSecondReadMemberId(pools: CapabilityPools = activeCapabilityPools()): string | null {
-  return poolMemberForModel("ocr", DEFAULT_OCR_ESCALATION_MODEL, "second-read", pools)?.id ?? null;
+/** A vision profile's bounded OpenRouter allowlist, or null when it names none (or lets OpenRouter fall back anywhere). */
+function profileHosts(model: string): string[] | null {
+  const route = visionModelProfile(model)?.openRouterProvider;
+  if (!route) return null;
+  if ("only" in route) return [...route.only];
+  return route.allow_fallbacks ? null : [...route.order];
+}
+
+/**
+ * Why a page read on `modelUri` (a project's primary or fallback vision model) may not carry a customer page: null when
+ * every host it can reach states a US or EU region, or it runs where no third party sees the page (a private operator
+ * route, a local runtime). OpenRouter routes need a bounded profile allowlist; a direct provider route is its provider.
+ */
+export function visionPageRouteRegionProblem(modelUri: string): string | null {
+  const trimmed = modelUri.trim();
+  if (!/^llm:\/\//i.test(trimmed)) return visionRouteRegionProblem(trimmed, profileHosts(trimmed));
+  let parsed: ReturnType<typeof parseLlmModelUri>;
+  try {
+    parsed = parseLlmModelUri(trimmed);
+  } catch {
+    return `${trimmed} is not a model route`;
+  }
+  if (parsed.provider === "private" || isLocalModelProvider(parsed.provider)) return null;
+  if (parsed.provider === "openrouter") return visionRouteRegionProblem(parsed.model, profileHosts(parsed.model));
+  return visionRouteRegionProblem(trimmed, [parsed.provider]);
+}
+
+/** DOCSLURP_VISION_POOL_FALLBACK=on: page reads fall back to the vision pool's next member when the project names none. Off by default. */
+export function visionPoolFallbackEnabled(env: Env = process.env): boolean {
+  return ["on", "1", "true"].includes(env.DOCSLURP_VISION_POOL_FALLBACK?.trim().toLowerCase() ?? "");
 }
 
 /** A member served a page (`docslurp.capability_pool.served`, labels capability and member). Never throws. */

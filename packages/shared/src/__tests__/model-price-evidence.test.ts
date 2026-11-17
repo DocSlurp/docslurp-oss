@@ -88,7 +88,9 @@ describe("official model price evidence", () => {
       // example `fireworks/us`) never serve, since the request's max_price is the route price.
       const endpoints = [...(evidence.endpoints[id] ?? []), ...(routeEvidence.endpoints[id] ?? []), ...(lunaRouteEvidence.endpoints[id] ?? [])];
       const cheapestOf = (provider: string, side: "prompt" | "completion") => {
-        const own = endpoints.filter((endpoint) => endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`));
+        // Service tiers (`/spot`, `/flex`, `/priority`, `/fast`) are separate offers the route never asks for: not its price.
+        const own = endpoints.filter((endpoint) => (endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`))
+          && !/\/(spot|flex|priority|fast)$/.test(endpoint.tag));
         expect(own.length, `${id} ${provider}`).toBeGreaterThan(0);
         // The endpoint that fits both prices at once: the cheapest by prompt among those under both route prices.
         const fitting = own.filter((endpoint) => Number(endpoint.pricing.prompt) * 1e6 <= pricing.inputUsdPerMillion + 1e-9

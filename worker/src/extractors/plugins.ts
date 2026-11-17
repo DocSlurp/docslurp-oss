@@ -21,7 +21,7 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  */
 import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { activeCapabilityPools, isDevelopmentEnvironment, normalizeEnvSetting, registerServicePoolMember, serviceProfileFromEnv, type CapabilityPoolServiceRegistration, type ServicePoolMember } from "@docslurp/shared";
+import { activeCapabilityPools, capabilityPoolsInitialized, isDevelopmentEnvironment, normalizeEnvSetting, registerServicePoolMember, serviceProfileFromEnv, type CapabilityPoolServiceRegistration, type ServicePoolMember } from "@docslurp/shared";
 import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
@@ -662,7 +662,10 @@ function validatePoolMembers(plugin: ExtractorPlugin): ServicePoolMember[] {
     const member = registerServicePoolMember(registration);
     const ok = member.capability === "ocr" ? ocrBackends.includes(member.backend) : own[member.capability] === member.backend;
     if (!ok) throw new Error(`Extractor plugin pool member ${member.id} names backend ${member.backend}, which this plugin does not provide for ${member.capability}`);
-    if ([...poolMembers].some((other) => other.id === member.id)) throw new Error(`Capability pool member ${member.id} is registered twice`);
+    if (poolMembers.some((other) => other.id === member.id)) throw new Error(`Capability pool member ${member.id} is registered twice`);
+    if (poolMembers.some((other) => other.capability === member.capability && other.backend === member.backend)) {
+      throw new Error(`Capability pool backend ${member.backend} is already registered for ${member.capability}`);
+    }
     return member;
   });
 }
@@ -686,7 +689,9 @@ let composite: SandboxedPdfExtractorProvider | null = null;
 export function sandboxedPdfProvider(): SandboxedPdfExtractorProvider | null {
   const providers = sandboxedPdfProviders();
   if (providers.length <= 1) return providers[0] ?? null;
-  return composite ??= createTextPoolProvider(providers, () => activeCapabilityPools().text);
+  // The composite reads the pool order at call time; it is built once and orders its members only after worker startup
+  // resolved the pools (before that, startup checks see the first provider's features).
+  return composite ??= createTextPoolProvider(providers, () => (capabilityPoolsInitialized() ? activeCapabilityPools().text : null));
 }
 
 /** The provider, or a refusal: the VM route never falls back to host parsing. */

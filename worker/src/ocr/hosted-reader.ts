@@ -217,6 +217,10 @@ export function createHostedOcrReader(args: {
         for (const [index, candidate] of candidates.entries()) {
         const { vision, decision: marginDecision } = candidate;
         const ceiling = candidate.route.priceCeiling;
+        // A route with its own timeout (a slow host) is bounded: past it the read counts as unavailable and the next
+        // reader is tried, unless an attempt was already billed.
+        const routeTimeout = candidate.route.timeoutMs ? AbortSignal.timeout(candidate.route.timeoutMs) : null;
+        const readSignal = routeTimeout ? (signal ? AbortSignal.any([signal, routeTimeout]) : routeTimeout) : signal;
         try {
         // The per-document page and attempt budgets are counted by the guard's durable attempt ledger (run, document, page),
         // so an activity retry or a worker restart cannot reset them; a retried call counts against the attempt budget.
@@ -225,7 +229,7 @@ export function createHostedOcrReader(args: {
           try {
             result = await execute({
               imagePath: page.imagePath, mimeType: page.mimeType, outputPath, vision, cfg: args.cfg, runner: args.runner,
-              privacyMode: state.run.pipeline.privacyMode, outputSchema: null, signal, gate,
+              privacyMode: state.run.pipeline.privacyMode, outputSchema: null, signal: readSignal, gate,
               ...(ceiling ? { priceCeiling: { inputUsdPerMillion: ceiling.inputUsdPerMTok, outputUsdPerMillion: ceiling.outputUsdPerMTok, imageUsd: ceiling.imageUsd, hosts: ceiling.hosts } } : {}),
             });
           } catch (error) {
@@ -283,6 +287,13 @@ export function createHostedOcrReader(args: {
             ...(candidate.memberId ? { poolMemberId: candidate.memberId } : {}) };
         });
         } catch (error) {
+          // The route's own timeout fired (not the caller's abort) and nothing was billed: the next reader, as unavailable.
+          if (routeTimeout?.aborted && !signal?.aborted && !findVisionBilledUsage(error) && !findVisionOutputRejected(error)) {
+            console.warn(`[ocr] ${purpose} reader=${candidate.route.optionId} document=${page.documentId} page=${page.pageNumber} timed out`);
+            recordPoolFailover("ocr", candidate.memberId, candidates[index + 1]?.memberId ?? null, "timeout");
+            if (index === candidates.length - 1) throw new HostedOcrSkipped("guard", `${purpose}: every reader timed out or was refused`);
+            continue;
+          }
           // No host could serve this reader under its price ceiling (nothing billed): the next reader, else skip. Never sent
           // to a pricier host.
           if (!findProviderRoutingExclusion(error)) throw error;

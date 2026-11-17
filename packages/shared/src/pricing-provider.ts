@@ -151,6 +151,13 @@ export type AutomaticCallValueInput = {
   role: "fallback" | "escalation" | "failover" | "pick";
   inputTokens: number;
   outputTokens: number;
+  /**
+   * `fallback` only: whether the primary's attempt of this read may have been billed (a rejected or cut-off answer, a
+   * route overrun). False when the primary was refused before acceptance (no host under its routing constraints, a
+   * throttle, an unavailable route): the fallback then serves the page's only billed read. Absent: unknown, treat as
+   * billed.
+   */
+  primaryBilled?: boolean;
 };
 
 /** Price ceilings for a chart & diagram export generator, USD per million tokens. */

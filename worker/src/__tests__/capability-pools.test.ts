@@ -6,9 +6,9 @@ import {
   EXTRACTOR_PLUGIN_API_VERSION, registerExtractorPlugin, resetExtractorPluginsForTest, sandboxedPdfProvider,
   type SandboxedPdfExtractorProvider, type SandboxedPdfJob, type SandboxedPdfResult,
 } from "../extractors/plugins.js";
-import { setTextPoolTelemetry } from "../extractors/text-pool.js";
-import { defaultVisionFallbackModel, initializeCapabilityPools } from "../lib/capability-pools.js";
-import { visionModelProfile } from "../tools/vision-model-profiles.js";
+import { setTextPoolTelemetry, TEXT_POOL_UNAVAILABLE } from "../extractors/text-pool.js";
+import { defaultVisionFallbackModel, initializeCapabilityPools, visionPageRouteRegionProblem } from "../lib/capability-pools.js";
+import { VISION_MODEL_PROFILES, visionModelProfile } from "../tools/vision-model-profiles.js";
 
 const US = { region: "US" as const, evidence: "provider-docs" as const, source: "https://example.com/privacy", checked: "2026-11-17" };
 const textMember = (backend: string, engine: string, extra: Partial<CapabilityPoolServiceRegistration> = {}): CapabilityPoolServiceRegistration =>
@@ -26,7 +26,7 @@ beforeEach(() => {
   resetExtractorPluginsForTest();
   resetActiveCapabilityPoolsForTests();
   events = [];
-  setTextPoolTelemetry({ served: (id) => events.push(`served ${id}`), failover: (from, to, reason) => events.push(`failover ${from}>${to ?? "none"} ${reason}`) });
+  setTextPoolTelemetry({ served: (id, pages) => events.push(`served ${id} pages=${pages}`), failover: (from, to, reason) => events.push(`failover ${from}>${to ?? "none"} ${reason}`) });
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
 afterEach(() => {
@@ -70,12 +70,46 @@ describe("worker capability pools at startup", () => {
     expect(() => initializeCapabilityPools({ DOCSLURP_OCR_ESCALATION_MODEL: "llm://openrouter/z-ai/glm-5.3-flash" }, quiet.log)).not.toThrow();
   });
 
-  it("the default vision fallback is the pool's next automatic member; the operator key overrides or turns it off", () => {
+  it("the default vision fallback is the pool's next automatic member, behind its flag; the operator key overrides or turns it off", () => {
     initializeCapabilityPools({}, quiet.log);
-    expect(defaultVisionFallbackModel("llm://openrouter/openai/gpt-6-luna", {})).toBe("llm://openrouter/z-ai/glm-5.3-flash");
-    expect(defaultVisionFallbackModel("llm://openrouter/z-ai/glm-5.3-flash", {})).toBeNull();
-    expect(defaultVisionFallbackModel("llm://openrouter/other/model", {})).toBeNull();
-    expect(defaultVisionFallbackModel("llm://openrouter/openai/gpt-6-luna", { DOCSLURP_VISION_FALLBACK_MODEL: "off" })).toBeNull();
+    const on = { DOCSLURP_VISION_POOL_FALLBACK: "on" };
+    expect(defaultVisionFallbackModel("llm://openrouter/openai/gpt-6-luna", {})).toBeNull();
+    expect(defaultVisionFallbackModel("llm://openrouter/openai/gpt-6-luna", on)).toBe("llm://openrouter/z-ai/glm-5.3-flash");
+    expect(defaultVisionFallbackModel("llm://openrouter/z-ai/glm-5.3-flash", on)).toBeNull();
+    expect(defaultVisionFallbackModel("llm://openrouter/other/model", on)).toBeNull();
+    expect(defaultVisionFallbackModel("llm://openrouter/openai/gpt-6-luna", { ...on, DOCSLURP_VISION_FALLBACK_MODEL: "off" })).toBeNull();
+  });
+
+  it("refuses to start when any vision profile may route a page to a host with no stated US or EU region", () => {
+    const profiles = VISION_MODEL_PROFILES as Record<string, unknown>;
+    profiles["acme/unproven"] = { openRouterProvider: { only: ["fireworks", "parasail"], sort: "price", allow_fallbacks: true } };
+    try {
+      expect(() => initializeCapabilityPools({}, quiet.log)).toThrow(/acme\/unproven may route to parasail/);
+      profiles["acme/unproven"] = { openRouterProvider: { order: ["fireworks"], allow_fallbacks: true } };
+      expect(() => initializeCapabilityPools({}, quiet.log)).toThrow(/acme\/unproven has no host allowlist/);
+    } finally {
+      delete profiles["acme/unproven"];
+    }
+    expect(() => initializeCapabilityPools({}, quiet.log)).not.toThrow();
+  });
+
+  it("refuses at call time a project-chosen route that can reach an unproven host (primary or fallback)", () => {
+    expect(visionPageRouteRegionProblem("llm://openrouter/openai/gpt-6-luna")).toBeNull();
+    expect(visionPageRouteRegionProblem("llm://openrouter/deepseek/deepseek-v4.1-flash-1017")).toBeNull();
+    expect(visionPageRouteRegionProblem("llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct")).toBeNull();
+    // No allowlist (any host), a global direct provider: refused.
+    expect(visionPageRouteRegionProblem("llm://openrouter/anthropic/claude-haiku-5.5")).toMatch(/no host allowlist/);
+    expect(visionPageRouteRegionProblem("llm://openrouter/google/gemini-3.1-flash-lite")).toMatch(/no host allowlist/);
+    expect(visionPageRouteRegionProblem("llm://openai/gpt-4.1-mini")).toMatch(/openai/);
+    // The deployment's own operator route and local runtimes send pages to no third party.
+    expect(visionPageRouteRegionProblem("llm://private/reader/model")).toBeNull();
+  });
+
+  it("refuses one backend id serving two registrations", () => {
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "pdf-vm", sandboxedPdf: pdfProvider("pdf-vm", async () => ok("a")),
+      poolMembers: [textMember("pdf-vm", "vm-pdf")] });
+    expect(() => registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "other", sandboxedPdf: pdfProvider("pdf-vm", async () => ok("b")),
+      poolMembers: [textMember("pdf-vm", "vm-pdf-b")] })).toThrow(/already registered|registered twice/);
   });
 
   it("keeps the vision profiles' host allowlists equal to the pool members' stated-region hosts", () => {
@@ -92,7 +126,7 @@ describe("text capability pool: failover across sandboxed PDF providers", () => 
     registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "plugin-b", sandboxedPdf: b, poolMembers: [textMember("pdf-b", "vm-pdf-b", { priority: 2, automaticFailover: secondFailover })] });
     initializeCapabilityPools({ DOCSLURP_PDF_MODE: "vm" }, quiet.log);
     // Startup binds the telemetry hooks to the meter; the test watches them instead.
-    setTextPoolTelemetry({ served: (id) => events.push(`served ${id}`), failover: (from, to, reason) => events.push(`failover ${from}>${to ?? "none"} ${reason}`) });
+    setTextPoolTelemetry({ served: (id, pages) => events.push(`served ${id} pages=${pages}`), failover: (from, to, reason) => events.push(`failover ${from}>${to ?? "none"} ${reason}`) });
     return { a, b, pool: sandboxedPdfProvider()! };
   }
   const job = (output: string): SandboxedPdfJob => ({ input: "/in.pdf", output });
@@ -108,14 +142,50 @@ describe("text capability pool: failover across sandboxed PDF providers", () => 
     expect(await pool.run(job("/out-1"), context)).toMatchObject({ poolMemberId: "text.service.vm-pdf-a.us" });
     expect(a.run).toHaveBeenCalledTimes(1);
     expect(b.run).not.toHaveBeenCalled();
-    expect(events).toEqual(["served text.service.vm-pdf-a.us"]);
+    expect(events).toEqual(["served text.service.vm-pdf-a.us pages=3"]);
   });
 
-  it("fails over when the first member is unavailable, and records the failover", async () => {
-    const { b, pool } = twoProviders(async () => { throw new Error("VM capacity"); }, async () => ok("b"));
+  it("fails over when the first member says it could not start the job, and records the failover", async () => {
+    const { b, pool } = twoProviders(async () => { throw Object.assign(new Error("VM capacity"), { [TEXT_POOL_UNAVAILABLE]: true }); }, async () => ok("b"));
     expect(await pool.run(job("/out-2"), context)).toMatchObject({ poolMemberId: "text.service.vm-pdf-b.us" });
     expect(b.run).toHaveBeenCalledTimes(1);
-    expect(events).toEqual(["failover text.service.vm-pdf-a.us>text.service.vm-pdf-b.us unavailable", "served text.service.vm-pdf-b.us"]);
+    expect(events).toEqual(["failover text.service.vm-pdf-a.us>text.service.vm-pdf-b.us unavailable", "served text.service.vm-pdf-b.us pages=3"]);
+  });
+
+  it("never resends a file after a VM crash, OOM or guest error the file could have caused (no unavailable marker)", async () => {
+    for (const crash of [new Error("guest exited 137"), Object.assign(new Error("out of memory"), { name: "SandboxRunError" })]) {
+      resetExtractorPluginsForTest();
+      resetActiveCapabilityPoolsForTests();
+      const { b, pool } = twoProviders(async () => { throw crash; }, async () => ok("b"));
+      await expect(pool.run(job("/out-crash"), context)).rejects.toBe(crash);
+      expect(b.run).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reports a member that cannot do the job as unsupported", async () => {
+    const a = pdfProvider("pdf-a", async () => ok("a"));
+    const b = pdfProvider("pdf-b", async () => ok("b"), { pageCount: async () => ({ pages: 7 }) });
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "plugin-a", sandboxedPdf: a, poolMembers: [textMember("pdf-a", "vm-pdf-a", { priority: 1 })] });
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "plugin-b", sandboxedPdf: b, poolMembers: [textMember("pdf-b", "vm-pdf-b", { priority: 2 })] });
+    initializeCapabilityPools({}, quiet.log);
+    setTextPoolTelemetry({ served: (id, pages) => events.push(`served ${id} pages=${pages}`), failover: (from, to, reason) => events.push(`failover ${from}>${to ?? "none"} ${reason}`) });
+    expect(await sandboxedPdfProvider()!.pageCount!({ input: "/in.pdf" })).toEqual({ pages: 7 });
+    expect(events[0]).toBe("failover text.service.vm-pdf-a.us>text.service.vm-pdf-b.us unsupported");
+  });
+
+  it("serves startup checks before the pools are resolved, then runs in pool order once they are", async () => {
+    const a = pdfProvider("pdf-a", async () => ok("a"), { figures: { producerId: "figs" } });
+    const b = pdfProvider("pdf-b", async () => ok("b"));
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "plugin-b", sandboxedPdf: b, poolMembers: [textMember("pdf-b", "vm-pdf-b", { priority: 2 })] });
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "plugin-a", sandboxedPdf: a, poolMembers: [textMember("pdf-a", "vm-pdf-a", { priority: 1 })] });
+    // Before initialization (extractor plugin configuration checks): features read without throwing; a job is refused.
+    const provider = sandboxedPdfProvider()!;
+    expect(provider.id).toBe("pdf-b");
+    await expect(provider.run(job("/early"), context)).rejects.toThrow(/before worker startup resolved/);
+    initializeCapabilityPools({}, quiet.log);
+    expect(provider.id).toBe("pdf-a");
+    expect(provider.figures).toEqual({ producerId: "figs" });
+    expect(await provider.run(job("/later"), context)).toMatchObject({ poolMemberId: "text.service.vm-pdf-a.us" });
   });
 
   it("never fails over a refusal of the input itself (it would only be refused and billed again)", async () => {
@@ -125,7 +195,7 @@ describe("text capability pool: failover across sandboxed PDF providers", () => 
   });
 
   it("never fails over to a member without automatic failover", async () => {
-    const { b, pool } = twoProviders(async () => { throw new Error("VM capacity"); }, async () => ok("b"), false);
+    const { b, pool } = twoProviders(async () => { throw Object.assign(new Error("VM capacity"), { [TEXT_POOL_UNAVAILABLE]: true }); }, async () => ok("b"), false);
     await expect(pool.run(job("/out-4"), context)).rejects.toThrow("VM capacity");
     expect(b.run).not.toHaveBeenCalled();
   });

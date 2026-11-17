@@ -32,7 +32,8 @@ describe("capability pools: resolution and order", () => {
       expect(member.id).toMatch(/^[a-z]+\.(llm|service)\.[a-z0-9.+-]+\.(us|eu|eu\+us|local)$/);
       expect(member.id.length).toBeLessThanOrEqual(48);
       expect(member.id).not.toMatch(/usd|margin|credit|price|\d\.\d{2}/i);
-      const { escalationRoute: _route, ...fields } = member as LlmPoolMember;
+      // Provider price ceilings (escalationRoute, priceCeiling) are routing constraints, not pricing mechanics.
+      const { escalationRoute: _route, priceCeiling: _ceiling, ...fields } = member as LlmPoolMember;
       // Names its admission check ("margin-gate") but carries no price, credit or multiplier.
       expect(JSON.stringify(fields)).not.toMatch(/usd|credit|price|multiplier/i);
     }
@@ -131,7 +132,10 @@ describe("capability pools: admission per member", () => {
     const [wafer, morph, qwen] = pools.ocr as LlmPoolMember[];
     expect(poolMemberAutomaticRoute(wafer!).hosts).toEqual(["wafer/us"]);
     expect(poolMemberAutomaticRoute(morph!).hosts).toEqual(["morph/fp8"]);
-    expect(poolMemberAutomaticRoute(pools.vision[1] as LlmPoolMember).hosts).toEqual(["wafer/us", "friendli", "inference-net/us"]);
+    // The vision fallback is priced on its own ceiling and hosts (the second read's GLM hosts), not GLM's widest profile.
+    expect(poolMemberAutomaticRoute(pools.vision[1] as LlmPoolMember)).toMatchObject({ hosts: ["wafer/us", "morph/fp8"], capImageUsd: 0 });
+    // A member whose hosts fall outside its model's catalog route is refused, never widened.
+    expect(() => poolMemberAutomaticRoute({ ...(pools.vision[1] as LlmPoolMember), priceCeiling: null, hosts: ["somewhere/us"] })).toThrow(/outside the model's catalog route/);
     installTestPricing({ ...DISTINCT_TEST_PRICING, automaticCallValueUsd: () => 0.002 });
     const now = Date.parse("2026-11-17T12:00:00Z");
     const decisions = [wafer!, morph!, qwen!].map((member) => poolMemberAdmission(member, "escalation", { env: {}, now })!);
