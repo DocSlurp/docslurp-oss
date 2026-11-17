@@ -144,7 +144,7 @@ async function guide(options: { resetCaches?: boolean } = {}) {
   vi.stubEnv("DOCSLURP_SUMMARY_TREE_SERVE", "on");
   const response = await search.hybridSearch("qqqzzz", "u", {
     limit: 10, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false, parentRetrieval: false,
-    useContextualCompression: false, useHyDE: false, stepback: false, iterativeMultiHop: false, useMmr: false,
+    useHyDE: false, stepback: false, iterativeMultiHop: false, useMmr: false,
     enableGraphExpansion: false, enableCommunityExpansion: false, queryVector: QUERY,
     summaryTree: "guide", filters: { projectId: "w" },
   } as never, SCOPE as never);

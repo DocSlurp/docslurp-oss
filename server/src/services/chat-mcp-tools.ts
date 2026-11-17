@@ -498,7 +498,7 @@ export function createChatMcpTools(args: {
   const searchDefaults = defaults ? {
     limit, hyde: defaults.useHyDE, rerank: defaults.useRerank, mmr: defaults.useMmr,
     candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
-    compression: defaults.useContextualCompression, mmrLambda: defaults.mmrLambda,
+    mmrLambda: defaults.mmrLambda,
     minScore: defaults.minScore, parentRetrieval: defaults.parentRetrieval,
     summarySeed: defaults.summarySeed, queryRewrite: defaults.queryRewrite,
     queryDecompose: defaults.queryDecompose, stepback: defaults.stepback,

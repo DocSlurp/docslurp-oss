@@ -1597,8 +1597,6 @@ async function chatProjectTurn(
     candidateDepth: searchSettings.retrievalDefaults.candidateDepth,
     resultOrder: searchSettings.retrievalDefaults.resultOrder,
     useMmr: searchSettings.retrievalDefaults.useMmr,
-    useContextualCompression:
-      searchSettings.retrievalDefaults.useContextualCompression,
     mmrLambda: searchSettings.retrievalDefaults.mmrLambda,
     parentRetrieval: searchSettings.retrievalDefaults.parentRetrieval,
     queryRewrite: searchSettings.retrievalDefaults.queryRewrite,

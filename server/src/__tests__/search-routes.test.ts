@@ -413,7 +413,7 @@ describe("searchRoutes", () => {
       aggregateProjectRagSearch.mockResolvedValueOnce(empty);
       expect((await aggregate(keyActor(["search:deep"]), {})).status).toBe(200);
       expect(aggregateProjectRagSearch).toHaveBeenCalledWith(expect.objectContaining({
-        request: expect.objectContaining({ generateAnswer: false, queryRewrite: false, selfQuery: false, hyde: false, compression: false, queryDecompose: false, stepback: false }),
+        request: expect.objectContaining({ generateAnswer: false, queryRewrite: false, selfQuery: false, hyde: false, queryDecompose: false, stepback: false }),
       }));
     });
 

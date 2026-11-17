@@ -209,7 +209,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        // Search helpers (rewrites, HyDE, planning, compression) never need reasoning: force each model's floor.
+        // Search helpers (rewrites, HyDE, planning) never need reasoning: force each model's floor.
         fetch: createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch), { restrictedFallback: (args.model ?? SEARCH_OPENROUTER_MODEL) === SEARCH_OPENROUTER_MODEL }), args.providerPreferences), "none"),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,

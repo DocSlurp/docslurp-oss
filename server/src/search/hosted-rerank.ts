@@ -5,6 +5,13 @@ import type { SearchSessionJournal } from "./session.js";
 
 export const HOSTED_RERANK_MODEL = "Qwen/Qwen3-Reranker-0.6B";
 const endpoint = "https://api.deepinfra.com/v1/inference/Qwen/Qwen3-Reranker-0.6B";
+/**
+ * Most candidates one reranker call (a search, or each of its sub-searches) sends to the hosted reranker. Each is billed by
+ * the token, so the cap bounds each call's cost; candidates below it keep their fused rank.
+ */
+export const HOSTED_RERANK_MAX_CANDIDATES = 50;
+/** Usage metric of one hosted reranker call; the search charge finds the reranker's provider cost by it. */
+export const HOSTED_RERANK_USAGE_METRIC = "rerank-tokens";
 // Verified native DeepInfra default-tier rate, 2026-10-17. No priority tier.
 const inputUsdPerMillion = 0.01;
 
@@ -58,7 +65,7 @@ export async function rerankHosted(args: {
     const { apiKey, scope } = args;
     if (!apiKey || !scope?.orgId || !scope.projectId) throw Error();
     reason = "invalid_input";
-    if (!args.query.trim() || args.chunks.length > 200 || new Set(args.chunks.map(c => c.id)).size !== args.chunks.length
+    if (!args.query.trim() || args.chunks.length > HOSTED_RERANK_MAX_CANDIDATES || new Set(args.chunks.map(c => c.id)).size !== args.chunks.length
       || args.chunks.some(c => !c.id || !c.text.trim() || Buffer.byteLength(args.query) + Buffer.byteLength(c.text) > 30_000)) throw Error();
     const signal = AbortSignal.timeout(limits.timeoutMs);
     const ranked = new Array<RankedChunk>(args.chunks.length);
@@ -95,7 +102,7 @@ export async function rerankHosted(args: {
           batchReason = "usage_recording_failed";
           try {
             args.session.record({ provider: "deepinfra", model: HOSTED_RERANK_MODEL,
-              metric: "rerank-tokens", inputTokens: data.input_tokens!, logOutputTokens: false,
+              metric: HOSTED_RERANK_USAGE_METRIC, inputTokens: data.input_tokens!, logOutputTokens: false,
               costCents: data.input_tokens! * inputUsdPerMillion / 1e6 * 100,
               metadata: { usageSource: "provider", candidateCount: batch.length, offset,
                 verifiedInputUsdPerMTok: inputUsdPerMillion } });

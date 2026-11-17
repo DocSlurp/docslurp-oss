@@ -45,7 +45,7 @@ let chatContext: typeof import("../lib/chat-agent-context.js");
 
 const options = {
   queryVector: [1, 0, 0], limit: 5, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false,
-  parentRetrieval: false, useContextualCompression: false, useHyDE: false, stepback: false,
+  parentRetrieval: false, useHyDE: false, stepback: false,
   iterativeMultiHop: false, enableGraphExpansion: false, enableCommunityExpansion: false,
 };
 // A tag nothing carries: retrieval and the whole-corpus fallback both come back empty.
