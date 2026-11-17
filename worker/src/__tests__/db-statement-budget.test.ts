@@ -239,11 +239,12 @@ const STATEMENTS_PER_PAGE_BUDGET = 24;
 // page count. Measured: 210 flights, 245 statements for this 10-page run. The per-page slope is unchanged.
 // 2026-11-16: the run's page-class pin (pipeline/ocr-page-class.ts) asks once per run whether every live worker
 // advertises the OCR page class: +1 flight, +1 statement whatever the page count. Measured: 211 flights, 246 statements.
-// 2026-11-16: page extract records (pipeline/page-extracts.ts) add one pipelined multi-row upsert to the extraction
-// checkpoint and one tag merge to the routing checkpoint: +2 statements per document whatever its page count (2,000 pages
-// per statement), +0 round trips (they ride checkpoints that already run). Measured: 211 flights, 248 statements.
+// 2026-11-16: page extract records (pipeline/page-extracts.ts): one pipelined multi-row upsert per 2,000 records in the
+// extraction checkpoint, one tag merge per 2,000 merges in the routing checkpoint, and one finalization statement each in
+// the document's index completion and the run completion, all pipelined beside statements that already run: +4
+// statements for this 10-page document, +0 round trips. Measured: 211 flights, 250 statements.
 const TERMINAL_ROUND_TRIP_ALLOWANCE = 11;
-const TERMINAL_STATEMENT_ALLOWANCE = 8;
+const TERMINAL_STATEMENT_ALLOWANCE = 10;
 const TERMINAL_NOTIFY_STATEMENT_ALLOWANCE = 3;
 // The same stages as one stage group: 14.9 after.
 const GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET = 16.5;
@@ -291,7 +292,7 @@ describe("database statement budget per page", () => {
       const stamped = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
       const [run] = await stamped<{ ingest_version: number }[]>`select ingest_version from project_runs where id = 'run-1'`;
       expect(run!.ingest_version).toBe(CURRENT_INGEST_VERSION);
-      // The page extract records landed with the checkpoints: one final row per page, tags merged.
+      // The page extract records landed with the checkpoints and were finalized at completion: one final row per page.
       const extracts = await stamped<{ n: number; tagged: number }[]>`
         select count(*)::int as n, count(*) filter (where cardinality(tags) > 0)::int as tagged
         from document_page_extracts where run_id = 'run-1' and is_final`;

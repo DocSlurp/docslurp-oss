@@ -69,7 +69,7 @@ import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
-import { pageExtractStatements } from "../pipeline/page-extracts.js";
+import { finalizePageExtracts, pageExtractStatements } from "../pipeline/page-extracts.js";
 import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
@@ -1221,7 +1221,12 @@ export class Store {
         state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
-        const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
+        // Documents completed here (pipelines without an index stage) get their page extract records' finals too; sent
+        // beside the supersede lookup (one pipelined flight, no extra round trip).
+        const [replacements] = await Promise.all([
+          supersededInThisTransaction(client, completed.filter(id => !adopted.has(id))),
+          completed.length > 0 ? finalizePageExtracts(client, { orgId: owner.orgId, runId: state.run.id, documentIds: completed }) : null,
+        ]);
         await this.announceReplacements(state, replacements, client, logicalId);
         // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
         const stamps = runStampsIngestVersion(state.run.kind);
@@ -1810,6 +1815,8 @@ export class Store {
                   ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
                   : client``}
             where d.id = ${documentId}`,
+          // The document's page extract records get their one final row per page, in the transaction that publishes it.
+          ...(state.run.orgId ? [finalizePageExtracts(client, { orgId: state.run.orgId, runId: state.run.id, documentIds: [documentId] })] : []),
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);

@@ -2,8 +2,8 @@
 
 Every page gets durable, labelled provenance of how its text was produced (docs/extraction/page-extract-records.md).
 
-- Migration 0187 `document_page_extracts`: one org-scoped row per (document, page, run, pass) with method, engine route, capability-pool member and region, billed class, closed tags, OCR confidence or plausibility, text bytes, finish reason, timing, `is_final` and `superseded_by_pass`. Labels only.
-- Written in the checkpoint transaction (one pipelined multi-row upsert per checkpoint, no extra round trip) by extract-markdown (extractor, scan-fill OCR, escalation and page-reader second reads, self-critique), vision-extract (vision, OCR of mixed scans, page reader; rejected and unread pages non-final), and classify-route (table, math, garbled layer, drawn, yield-deficit, scanned, blank tags).
+- Migration 0187 `document_page_extracts`: one org-scoped row per (document, page, run, pass) with method, engine route, capability-pool member and region, billed class, closed tags, OCR confidence or plausibility, text bytes, finish reason, timing, `adopted`, `is_final` and `superseded_by_pass`. Labels only. Finals are set when a document completes in its current run (or a query-time read publishes pages), never by an older run.
+- Written in the checkpoint transaction (one pipelined multi-row upsert per 2,000 records, no extra round trip) by extract-markdown (extractor, scan-fill OCR, escalation and page-reader second reads, self-critique, audio/video transcripts), query-time materialization, vision-extract (vision, OCR of mixed scans, page reader; rejected and unread pages non-final), and classify-route (table, math, garbled layer, drawn, yield-deficit, scanned, blank tags).
 - Read: `GET /v1/documents/:id/page-extracts` (org and project scoped, API keys need `artifacts`), ingest report page views (`extractMethod`, `finalPass`, `extractTags`), telemetry `docslurp.pages.extracts` and `docslurp.pages.extract_tags`.
 
 ## Compute reuse across organizations (2026-11-16)

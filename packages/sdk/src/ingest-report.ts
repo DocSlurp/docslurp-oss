@@ -25,6 +25,8 @@ export type IngestReportPage = {
   finalPass?: string | null;
   /** Page tags (`scanned`, `table`, `math`, `garbled-text-layer`, `low-confidence`, ...). */
   extractTags?: string[];
+  /** `ok`, `missing` (no final record on a completed document) or `duplicate` (more than one); null without records. */
+  extractRecordStatus?: "ok" | "missing" | "duplicate" | null;
 };
 export type IngestReportRecommendation = {
   id: string; severity: "high" | "medium" | "info"; title: string; reason: string; effect: string;

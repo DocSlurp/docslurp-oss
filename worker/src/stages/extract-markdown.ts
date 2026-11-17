@@ -1085,7 +1085,7 @@ export class ExtractMarkdownStage implements Stage {
                   await this.recordDocumentTitle(state, document, format, tempFile, winningText);
 
                   // Page extract records: how each page's text was produced (labels only), written with this stage's
-                  // checkpoint. Exactly one pass per page is final.
+                  // checkpoint; the page's final row is set when the document completes.
                   recordPageExtracts(state, document, extractionPageRecords({
                     pageCount: document.pageCount,
                     finalPages: splitTextIntoPagesStrict(winningText, document.pageCount),
@@ -1098,6 +1098,7 @@ export class ExtractMarkdownStage implements Stage {
                     ocrPageClass: runUsesOcrPageClass(state.artifactLedger),
                     plausibility: plausibilityScore,
                     extractMs: Date.now() - extractionStartedAt,
+                    readsPages: qualityAllowsPageReading(state.run.pipeline.quality),
                   }));
 
                   state.pendingPerformance.push({

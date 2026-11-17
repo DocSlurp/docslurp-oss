@@ -45,6 +45,7 @@ import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-
 import { DocumentNotFoundError } from "../db/missing-document.js";
 import { billLockedMaterializedPages, lockPageRows } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
+import { finalizePageExtracts, materializedPageRecords, pageExtractStatements, recordPageExtracts, type PageExtractState } from "../pipeline/page-extracts.js";
 
 /** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
 export const KEPT_AS_IMAGE_REASON = "kept-as-image";
@@ -701,6 +702,21 @@ export async function materializePageRange(
       const ownedReleased = released.filter((page) => held.has(page));
       if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
       owned = moved.sort((a, b) => a - b);
+      // Page extract records for the pages this run holds, and their final rows: the query-time read publishes them now.
+      if (run.orgId) {
+        const extracts: PageExtractState = { run: { id: claimedBy, orgId: run.orgId, projectId: run.projectId },
+          pendingPageExtracts: [], pendingPageExtractTags: [] };
+        recordPageExtracts(extracts, document, materializedPageRecords({
+          published: owned, modelRead: (page) => modelReads.has(page) || storedReads.has(page),
+          blocked: ownedBlocked, failed: [...failed].filter(([page]) => held.has(page) && !released.includes(page)),
+          keptAsImageReason: KEPT_AS_IMAGE_REASON,
+        }));
+        if (extracts.pendingPageExtracts.length > 0) {
+          for (const statement of pageExtractStatements(client as unknown as Sql<Record<string, unknown>>, extracts.pendingPageExtracts, [])) await statement;
+          await finalizePageExtracts(client as unknown as Sql<Record<string, unknown>>, { orgId: run.orgId, runId: claimedBy, documentIds: [documentId],
+            pages: extracts.pendingPageExtracts.map((row) => row.page_number) });
+        }
+      }
       // markPages cleared the kept reads of pages it indexed or blocked.
 
       const lost = rangePages.filter((page) => !held.has(page));

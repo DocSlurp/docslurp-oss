@@ -1,11 +1,17 @@
 -- Page extract records (docs/extraction/page-extract-records.md): durable, labelled provenance of how each page's text was
 -- produced. One row per (document, page, run, pass): the pass that wrote or replaced the page's text in that run, its
 -- method, the engine route and serving member, the billed page class, closed-vocabulary tags, bounded quality signals
--- and its timing. `is_final` marks the pass whose text the page was indexed with; a later pass that replaces the text
--- clears it on the earlier row and names itself in `superseded_by_pass`.
+-- and its timing. `adopted` says the pass's text was taken for the page in its run (a later pass of the run may replace
+-- it; a retry may withdraw it). `is_final` marks the one row whose text the page is published with: it is set only when
+-- the document completes in its current run (or a query-time materialization publishes the page), from the highest
+-- adopted pass of that run, and never over a final a newer run set (pipeline/page-extracts.ts
+-- finalizePageExtracts). `superseded_by_pass` names the final pass on the page's other adopted rows.
+--
+-- Retention: rows are labels only and stay with their document (removed by the document's cascade); nothing prunes old
+-- runs' rows yet. A later retention job may drop non-final rows of runs whose artifacts were purged.
 --
 -- Written by the worker in its checkpoint transaction (worker/src/pipeline/page-extracts.ts: one multi-row statement per
--- checkpoint, pipelined with the rest of the checkpoint, so no extra round trip and no per-page statement); read by
+-- 2,000 rows, pipelined with the rest of the checkpoint, so no extra round trip and no per-page statement); read by
 -- server/src/services/document-page-extracts.ts and the ingest report.
 --
 -- Labels only: no page text, no document-supplied value and no model or vendor id is stored. Every text column is a
@@ -16,6 +22,8 @@
 -- document or run. Reads filter by org_id.
 --
 -- Safe on a live database: a new, empty table; nothing existing is rewritten, locked for long or reshaped.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS document_page_extracts (
   document_id text NOT NULL,
   org_id text NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -25,7 +33,7 @@ CREATE TABLE IF NOT EXISTS document_page_extracts (
   -- The step that wrote the page's text: the primary extractor, OCR of pages without words inside extraction, the
   -- self-critique correction, the vision stage (vision model, OCR in the vision stage, page reader), or a human correction.
   pass text NOT NULL CHECK (pass IN ('extract', 'scan-ocr', 'critique', 'vision', 'human')),
-  method text NOT NULL CHECK (method IN ('text-layer', 'ocr', 'ocr-second-read', 'vision', 'correction', 'kept-as-image', 'none')),
+  method text NOT NULL CHECK (method IN ('text-layer', 'ocr', 'ocr-second-read', 'vision', 'transcription', 'correction', 'kept-as-image', 'none')),
   -- The engine route (an extractor id or a route word such as vision-model, page-ocr, gpu-page-reader); never a model id.
   engine text CHECK (engine ~ '^[a-z0-9][a-z0-9._+-]{0,47}$'),
   -- The capability-pool member that served the page, and its region, when one did.
@@ -43,6 +51,7 @@ CREATE TABLE IF NOT EXISTS document_page_extracts (
   text_bytes integer CHECK (text_bytes BETWEEN 0 AND 268435456),
   finish_reason text CHECK (finish_reason IN ('stop', 'length', 'refused', 'error', 'empty', 'other')),
   duration_ms integer CHECK (duration_ms BETWEEN 0 AND 86400000),
+  adopted boolean NOT NULL DEFAULT false,
   is_final boolean NOT NULL DEFAULT false,
   superseded_by_pass text CHECK (superseded_by_pass IN ('extract', 'scan-ocr', 'critique', 'vision', 'human')),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -53,7 +62,7 @@ CREATE TABLE IF NOT EXISTS document_page_extracts (
     REFERENCES documents (id, project_id, org_id) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT document_page_extracts_run_scope_fkey FOREIGN KEY (run_id, project_id, org_id)
     REFERENCES project_runs (id, project_id, org_id) ON DELETE CASCADE,
-  CONSTRAINT document_page_extracts_final_check CHECK (NOT (is_final AND superseded_by_pass IS NOT NULL))
+  CONSTRAINT document_page_extracts_final_check CHECK (NOT (is_final AND (superseded_by_pass IS NOT NULL OR NOT adopted)))
 );
 --> statement-breakpoint
 -- Deleting a run cascades through this index; reads go through the primary key (document, page).

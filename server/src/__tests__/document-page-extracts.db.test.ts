@@ -30,18 +30,23 @@ beforeAll(async () => {
   await sql`insert into projects(id, org_id, user_id, name, is_default) values
     ('proj-a', 'org-a', 'ua', 'A', true), ('proj-a2', 'org-a', 'ua', 'A2', false), ('proj-b', 'org-b', 'ub', 'B', true)`;
   await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
+    ('run-old', 'org-a', 'ua', 'proj-a', 'upload', 'completed', 'completed', '{}'),
     ('run-a', 'org-a', 'ua', 'proj-a', 'upload', 'completed', 'completed', '{}'), ('run-b', 'org-b', 'ub', 'proj-b', 'upload', 'completed', 'completed', '{}')`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
     ('doc-a', 'org-a', 'ua', 'proj-a', 'run-a', 'a.pdf', 'application/pdf', 'ka', 'completed', 3),
     ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'completed', 3)`;
   await sql`insert into document_page_extracts (document_id, org_id, project_id, run_id, page_number, pass, method, engine, billed_class, tags,
-      confidence, text_bytes, is_final, superseded_by_pass) values
-    ('doc-a', 'org-a', 'proj-a', 'run-a', 1, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 120, true, null),
-    ('doc-a', 'org-a', 'proj-a', 'run-a', 2, 'extract', 'none', 'vm-pdf', null, '{scanned}', null, null, false, 'scan-ocr'),
-    ('doc-a', 'org-a', 'proj-a', 'run-a', 2, 'scan-ocr', 'ocr', 'page-ocr', 'ocr', '{scanned}', 0.91, 80, true, null),
-    ('doc-a', 'org-a', 'proj-a', 'run-a', 3, 'extract', 'text-layer', 'vm-pdf', 'fast', '{table}', null, 300, false, 'vision'),
-    ('doc-a', 'org-a', 'proj-a', 'run-a', 3, 'vision', 'vision', 'vision-model', 'rich', '{table}', null, 280, true, null),
-    ('doc-b', 'org-b', 'proj-b', 'run-b', 1, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 50, true, null)`;
+      confidence, text_bytes, adopted, is_final, superseded_by_pass) values
+    ('doc-a', 'org-a', 'proj-a', 'run-old', 1, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 100, true, false, 'extract'),
+    ('doc-a', 'org-a', 'proj-a', 'run-a', 1, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 120, true, true, null),
+    ('doc-a', 'org-a', 'proj-a', 'run-a', 2, 'extract', 'none', 'vm-pdf', null, '{scanned}', null, null, true, false, 'scan-ocr'),
+    ('doc-a', 'org-a', 'proj-a', 'run-a', 2, 'scan-ocr', 'ocr', 'page-ocr', 'ocr', '{scanned}', 0.91, 80, true, true, null),
+    ('doc-a', 'org-a', 'proj-a', 'run-a', 3, 'extract', 'text-layer', 'vm-pdf', 'fast', '{table}', null, 300, true, false, 'vision'),
+    ('doc-a', 'org-a', 'proj-a', 'run-a', 3, 'vision', 'vision', 'vision-model', 'rich', '{table}', null, 280, true, true, null),
+    ('doc-b', 'org-b', 'proj-b', 'run-b', 1, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 50, true, true, null),
+    ('doc-b', 'org-b', 'proj-b', 'run-b', 2, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 50, true, true, null),
+    ('doc-b', 'org-b', 'proj-b', 'run-b', 2, 'vision', 'vision', 'vision-model', 'rich', '{}', null, 50, true, true, null),
+    ('doc-b', 'org-b', 'proj-b', 'run-b', 3, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 50, true, false, null)`;
   await sql`insert into document_page_states (document_id, page_number, state) values ('doc-a', 3, 'blocked-pii')`;
   service = await import("../services/document-page-extracts.js");
   keys = await import("../services/api-keys.js");
@@ -69,7 +74,7 @@ afterAll(async () => {
 });
 
 describe("getDocumentPageExtracts", () => {
-  it("returns every pass in page order, finals marked, PII-withheld pages tagged", async () => {
+  it("returns the current run's passes in page order, finals marked, PII-withheld pages tagged without a size", async () => {
     const view = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" });
     expect(view?.records.map((r) => [r.pageNumber, r.pass, r.method, r.isFinal, r.supersededByPass])).toEqual([
       [1, "extract", "text-layer", true, null],
@@ -79,17 +84,29 @@ describe("getDocumentPageExtracts", () => {
       [3, "vision", "vision", true, null],
     ]);
     expect(view?.records.at(-1)?.tags).toEqual(["table", "pii-withheld"]);
+    expect(view?.records.at(-1)?.textBytes).toBeNull();
     expect(view?.records[2]?.confidence).toBeCloseTo(0.91, 5);
-    expect(view?.nextAfterPage).toBeNull();
+    expect(view?.records[0]).not.toHaveProperty("memberId");
+    expect(view?.records[0]).not.toHaveProperty("region");
+    expect(view?.nextCursor).toBeNull();
+    const all = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { run: "all" });
+    expect(all?.records.map((r) => r.runId)).toContain("run-old");
+    const old = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { run: "run-old" });
+    expect(old?.records.map((r) => [r.pageNumber, r.runId, r.isFinal])).toEqual([[1, "run-old", false]]);
   });
 
-  it("pages by page window and filters finals", async () => {
-    const first = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { limit: 2, finalOnly: true });
-    expect(first?.records.map((r) => r.pageNumber)).toEqual([1, 2]);
-    expect(first?.nextAfterPage).toBe(2);
-    const next = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { limit: 2, afterPage: 2, finalOnly: true });
-    expect(next?.records.map((r) => [r.pageNumber, r.pass])).toEqual([[3, "vision"]]);
+  it("pages by (page, pass, run) cursor and filters finals; refuses a forged cursor", async () => {
+    const first = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { limit: 2 });
+    expect(first?.records.map((r) => [r.pageNumber, r.pass])).toEqual([[1, "extract"], [2, "extract"]]);
+    expect(first?.nextCursor).toEqual(expect.any(String));
+    const next = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { limit: 2, after: first!.nextCursor! });
+    expect(next?.records.map((r) => [r.pageNumber, r.pass])).toEqual([[2, "scan-ocr"], [3, "extract"]]);
+    const finals = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { finalOnly: true });
+    expect(finals?.records.map((r) => [r.pageNumber, r.pass])).toEqual([[1, "extract"], [2, "scan-ocr"], [3, "vision"]]);
     await expect(service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { limit: 0 })).rejects.toThrow(service.DocumentPageExtractQueryError);
+    const forged = Buffer.from("1:extract:run-a", "utf8").toString("base64url") + "x";
+    await expect(service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { after: forged })).rejects.toThrow(service.DocumentPageExtractQueryError);
+    await expect(service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { run: "bad run" })).rejects.toThrow(service.DocumentPageExtractQueryError);
   });
 
   it("reads another organization's or project's document as missing, and refuses an unscoped read", async () => {
@@ -141,5 +158,12 @@ describe("ingest report page views", () => {
       [2, "ocr", "scan-ocr", ["scanned"]],
       [3, "vision", "vision", ["table", "pii-withheld"]],
     ]);
+    expect((report.focus ?? []).map((page) => page.extractRecordStatus)).toEqual(["ok", "ok", "ok"]);
+  });
+
+  it("shows a duplicate or missing final instead of hiding it", async () => {
+    const { loadIngestReport } = await import("../services/ingest-report.js");
+    const report = await loadIngestReport({ project: { id: "proj-b", name: "B", pipeline: defaultPipelineFeatures }, canEdit: false, documentIds: ["doc-b"], focusPages: [1, 2, 3] });
+    expect((report.focus ?? []).map((page) => [page.pageNumber, page.extractRecordStatus])).toEqual([[1, "ok"], [2, "duplicate"], [3, "missing"]]);
   });
 });

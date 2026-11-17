@@ -74,6 +74,11 @@ export const ingestReportPageSchema = z.object({
   extractMethod: z.enum(PAGE_EXTRACT_METHODS).nullable().default(null),
   finalPass: z.enum(PAGE_EXTRACT_PASSES).nullable().default(null),
   extractTags: z.array(z.enum(PAGE_EXTRACT_TAGS)).default([]),
+  /**
+   * Whether the page's extract records are consistent: `ok` (one final row), `missing` (records but no final row on a
+   * completed document), `duplicate` (more than one final row). Null without records or while processing.
+   */
+  extractRecordStatus: z.enum(["ok", "missing", "duplicate"]).nullable().default(null),
 });
 export type IngestReportPage = z.infer<typeof ingestReportPageSchema>;
 

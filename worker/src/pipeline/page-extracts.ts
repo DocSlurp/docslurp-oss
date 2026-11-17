@@ -9,11 +9,12 @@
  * records nothing: a row is always scoped to its organization.
  *
  * Idempotent: the primary key is (document, page, run, pass) and the write is an upsert, so a retried stage or checkpoint
- * rewrites the same rows. A final record clears `is_final` on the page's other passes (of any run) and names itself in
- * their `superseded_by_pass`.
+ * rewrites the same rows. Stages record which passes they adopted; the one final row per page is set only when the
+ * document completes in its current run (finalizePageExtracts), never by a stale run.
  */
 import {
   normalizePageExtractTags,
+  PAGE_EXTRACT_PASSES,
   PAGE_EXTRACT_ENGINE_PATTERN,
   PAGE_EXTRACT_FINISH_REASONS,
   PAGE_EXTRACT_MEMBER_PATTERN,
@@ -44,8 +45,8 @@ export interface PageExtractInput {
   textBytes?: number | null;
   finishReason?: string | null;
   durationMs?: number | null;
-  /** This pass's text is what the page is indexed with (default true). */
-  isFinal?: boolean;
+  /** This pass's text was taken for the page in this run (default true); false records a pass that gave nothing usable. */
+  adopted?: boolean;
 }
 
 export interface PageExtractRow {
@@ -66,8 +67,7 @@ export interface PageExtractRow {
   text_bytes: number | null;
   finish_reason: PageExtractFinishReason | null;
   duration_ms: number | null;
-  is_final: boolean;
-  superseded_by_pass: PageExtractPass | null;
+  adopted: boolean;
 }
 
 export interface PageExtractTagMerge {
@@ -118,8 +118,10 @@ function scope(state: PageExtractState, document: { id: string; projectId?: stri
 }
 
 /**
- * Queues one document's records for the next checkpoint. A record for a key already queued replaces it (a stage that
- * revises a page in the same attempt); a final record clears `is_final` on the page's other queued passes.
+ * Queues one document's records for the next checkpoint: O(1) per record (a 20,000-page document queues in
+ * milliseconds; nothing here scans the queue). A record for a key queued twice is written once, the later one winning
+ * (pageExtractStatements). `adopted` says the pass's text was taken for the page in this run; which row is final is
+ * decided only when the document completes (finalizePageExtracts).
  */
 export function recordPageExtracts(
   state: PageExtractState,
@@ -129,8 +131,13 @@ export function recordPageExtracts(
   const owner = scope(state, document);
   if (!owner || inputs.length === 0) return;
   const pending = state.pendingPageExtracts;
-  const index = new Map<string, number>();
-  pending.forEach((row, at) => index.set(`${row.document_id}\u0000${row.page_number}\u0000${row.run_id}\u0000${row.pass}`, at));
+  const counts = new Map<string, { labels: Record<string, string>; n: number }>();
+  const count = (name: string, labels: Record<string, string>) => {
+    const key = `${name}\u0000${Object.values(labels).join("\u0000")}`;
+    const entry = counts.get(key);
+    if (entry) entry.n += 1;
+    else counts.set(key, { labels: { ...labels, metric: name }, n: 1 });
+  };
   for (const input of inputs) {
     if (!Number.isSafeInteger(input.pageNumber) || input.pageNumber < 1 || input.pageNumber > MAX_PAGE) continue;
     const row: PageExtractRow = {
@@ -151,28 +158,15 @@ export function recordPageExtracts(
       text_bytes: bounded(input.textBytes, MAX_TEXT_BYTES),
       finish_reason: pageExtractFinishReason(input.finishReason),
       duration_ms: bounded(input.durationMs, MAX_DURATION_MS),
-      is_final: input.isFinal ?? true,
-      superseded_by_pass: null,
+      adopted: input.adopted ?? true,
     };
-    if (row.is_final) {
-      for (const other of pending) {
-        if (other.document_id === row.document_id && other.page_number === row.page_number && other.is_final
-            && (other.pass !== row.pass || other.run_id !== row.run_id)) {
-          other.is_final = false;
-          other.superseded_by_pass = row.pass;
-        }
-      }
-    }
-    const key = `${row.document_id}\u0000${row.page_number}\u0000${row.run_id}\u0000${row.pass}`;
-    const at = index.get(key);
-    if (at === undefined) {
-      index.set(key, pending.length);
-      pending.push(row);
-    } else {
-      pending[at] = row;
-    }
-    recordPageExtractTelemetry(row);
+    pending.push(row);
+    count("pages.extracts", { method: row.method, pass: row.pass, adopted: row.adopted ? "true" : "false",
+      member: row.member_id ? "pool" : "none", class: row.billed_class ?? "none" });
+    for (const tag of row.tags) count("pages.extract_tags", { tag, method: row.method });
   }
+  // One counter add per label set, not per page.
+  for (const { labels: { metric, ...labels }, n } of counts.values()) recordPipelineTelemetry(metric!, n, labels);
 }
 
 /**
@@ -186,73 +180,64 @@ export function tagPageExtracts(
 ): void {
   const owner = scope(state, document);
   if (!owner) return;
+  const counts = new Map<string, number>();
   for (const [pageNumber, raw] of pageTags) {
     if (!Number.isSafeInteger(pageNumber) || pageNumber < 1 || pageNumber > MAX_PAGE) continue;
     const tags = normalizePageExtractTags(raw);
     if (tags.length === 0) continue;
     state.pendingPageExtractTags.push({ document_id: document.id, org_id: owner.orgId, run_id: state.run.id, page_number: pageNumber, tags });
-    for (const tag of tags) recordPipelineTelemetry("pages.extract_tags", 1, { tag, source: "routing" });
+    for (const tag of tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
   }
-}
-
-/** `docslurp.pages.extracts` and `docslurp.pages.extract_tags`: bounded labels only (no organization, project or document). */
-function recordPageExtractTelemetry(row: PageExtractRow): void {
-  recordPipelineTelemetry("pages.extracts", 1, {
-    method: row.method, pass: row.pass, final: row.is_final ? "true" : "false", member: row.member_id ? "pool" : "none",
-    ...(row.billed_class ? { class: row.billed_class } : {}),
-  });
-  for (const tag of row.tags) recordPipelineTelemetry("pages.extract_tags", 1, { tag, method: row.method });
+  for (const [tag, n] of counts) recordPipelineTelemetry("pages.extract_tags", n, { tag, source: "routing" });
 }
 
 /** Rows per statement: well under the 65,535 bind limit (the payload is one jsonb parameter anyway). */
 const ROWS_PER_STATEMENT = 2_000;
 
+function rowKey(row: { document_id: string; page_number: number; run_id: string; pass: string }): string {
+  return `${row.document_id}\u0000${row.page_number}\u0000${row.run_id}\u0000${row.pass}`;
+}
+
 /**
- * The checkpoint's statements for the queued records and tag merges (none when nothing is queued). Each upsert clears
- * `is_final` on the same page's other passes it supersedes; rows of the same batch were already resolved in memory and are
- * left alone (a row is never updated twice by one statement). Every write is filtered by organization.
+ * The checkpoint's statements for the queued records and tag merges (none when nothing is queued): one upsert per 2,000
+ * records (a key queued twice is written once, the later record winning, so no statement updates a row twice) and one
+ * tag merge per 2,000 merges. Every write is filtered by organization. These never touch `is_final`.
  */
 export function pageExtractStatements(
   client: Sql<Record<string, unknown>>,
-  rows: readonly PageExtractRow[],
+  queued: readonly PageExtractRow[],
   tagMerges: readonly PageExtractTagMerge[],
 ): PendingQuery<any>[] {
+  const latest = new Map<string, PageExtractRow>();
+  for (const row of queued) {
+    const key = rowKey(row);
+    latest.delete(key);
+    latest.set(key, row);
+  }
+  const rows = [...latest.values()];
   const statements: PendingQuery<any>[] = [];
   for (let start = 0; start < rows.length; start += ROWS_PER_STATEMENT) {
     const batch = rows.slice(start, start + ROWS_PER_STATEMENT);
     statements.push(client`
-      with r as (
-        select * from jsonb_to_recordset(${client.json(batch as never)}::jsonb) as r(
-          document_id text, org_id text, project_id text, run_id text, page_number integer, pass text, method text,
-          engine text, member_id text, region text, billed_class text, tags text[], confidence real, plausibility real,
-          text_bytes integer, finish_reason text, duration_ms integer, is_final boolean, superseded_by_pass text)
-      ),
-      ins as (
-        insert into document_page_extracts as t (document_id, org_id, project_id, run_id, page_number, pass, method, engine,
-          member_id, region, billed_class, tags, confidence, plausibility, text_bytes, finish_reason, duration_ms, is_final,
-          superseded_by_pass)
-        select document_id, org_id, project_id, run_id, page_number, pass, method, engine, member_id, region, billed_class,
-          array(select distinct x from unnest(coalesce(tags, '{}')) as x order by x), confidence, plausibility, text_bytes, finish_reason, duration_ms, is_final, superseded_by_pass
-        from r
-        on conflict (document_id, page_number, run_id, pass) do update set
-          method = excluded.method, engine = excluded.engine, member_id = excluded.member_id, region = excluded.region,
-          billed_class = excluded.billed_class,
-          -- Tags merged by a later stage (routing) survive a retried write of the same pass.
-          tags = array(select distinct x from unnest(t.tags || excluded.tags) as x order by x),
-          confidence = excluded.confidence, plausibility = excluded.plausibility, text_bytes = excluded.text_bytes,
-          finish_reason = excluded.finish_reason, duration_ms = excluded.duration_ms, is_final = excluded.is_final,
-          superseded_by_pass = excluded.superseded_by_pass, updated_at = now()
-        where t.org_id = excluded.org_id
-        returning t.document_id, t.org_id, t.page_number, t.run_id, t.pass, t.is_final
-      )
-      update document_page_extracts o
-      set is_final = false, superseded_by_pass = ins.pass, updated_at = now()
-      from ins
-      where ins.is_final and o.is_final
-        and o.document_id = ins.document_id and o.page_number = ins.page_number and o.org_id = ins.org_id
-        and (o.run_id <> ins.run_id or o.pass <> ins.pass)
-        and not exists (select 1 from r where r.document_id = o.document_id and r.page_number = o.page_number
-          and r.run_id = o.run_id and r.pass = o.pass)
+      insert into document_page_extracts as t (document_id, org_id, project_id, run_id, page_number, pass, method, engine,
+        member_id, region, billed_class, tags, confidence, plausibility, text_bytes, finish_reason, duration_ms, adopted)
+      select document_id, org_id, project_id, run_id, page_number, pass, method, engine, member_id, region, billed_class,
+        array(select distinct x from unnest(coalesce(tags, '{}')) as x order by x), confidence, plausibility, text_bytes,
+        finish_reason, duration_ms, adopted
+      from jsonb_to_recordset(${client.json(batch as never)}::jsonb) as r(
+        document_id text, org_id text, project_id text, run_id text, page_number integer, pass text, method text,
+        engine text, member_id text, region text, billed_class text, tags text[], confidence real, plausibility real,
+        text_bytes integer, finish_reason text, duration_ms integer, adopted boolean)
+      on conflict (document_id, page_number, run_id, pass) do update set
+        method = excluded.method, engine = excluded.engine, member_id = excluded.member_id, region = excluded.region,
+        billed_class = excluded.billed_class,
+        -- Tags merged by a later stage (routing) survive a retried write of the same pass.
+        tags = array(select distinct x from unnest(t.tags || excluded.tags) as x order by x),
+        confidence = excluded.confidence, plausibility = excluded.plausibility, text_bytes = excluded.text_bytes,
+        finish_reason = excluded.finish_reason, duration_ms = excluded.duration_ms, adopted = excluded.adopted,
+        -- A withdrawn pass (a retry that rejected it) can no longer be final; finalization picks the next adopted one.
+        is_final = t.is_final and excluded.adopted, updated_at = now()
+      where t.org_id = excluded.org_id
     `);
   }
   for (let start = 0; start < tagMerges.length; start += ROWS_PER_STATEMENT) {
@@ -272,6 +257,65 @@ export function pageExtractStatements(
     `);
   }
   return statements;
+}
+
+/** Pass order within a run is PAGE_EXTRACT_PASSES order: a later pass that adopted a page's text replaces an earlier one. */
+/**
+ * Sets each page's one final row for documents that completed in `runId` (`pages` absent), or for the pages a query-time
+ * materialization of `runId` just published (`pages` given). In one statement:
+ * - the page's final is the highest-ranked adopted pass of `runId` (so a retry that withdrew a pass restores the one
+ *   before it), and every other row of the page, of any run, stops being final, naming that pass as its replacement;
+ * - a page `runId` has no adopted row for (beyond a shorter reprocess's page count, or never read) is left with no final
+ *   from an older run;
+ * - nothing changes on a page a newer run (by creation time) already finalized: an older run's late or retried
+ *   completion never overrides it;
+ * - for whole documents, only documents whose current run is `runId` (documents.run_id): a failed or stale run never
+ *   finalizes, so a failed reprocess leaves the previous run's finals in place.
+ * Callers run it in the transaction that publishes the content (it holds the documents' row locks), so two finalizations
+ * of one document serialize.
+ */
+export function finalizePageExtracts(
+  client: Sql<Record<string, unknown>>,
+  scope: { orgId: string; runId: string; documentIds: readonly string[]; pages?: readonly number[] },
+): PendingQuery<any> {
+  const pagesOnly = scope.pages !== undefined;
+  const pages = [...(scope.pages ?? [])];
+  const passes = client.array([...PAGE_EXTRACT_PASSES]);
+  // One pass over the document's rows (window functions per page, no join between derived row sets), then a primary-key
+  // update of the rows that change: linear in the document's rows, whatever its page count.
+  return client`
+    with me as (select created_at from project_runs where id = ${scope.runId} and org_id = ${scope.orgId}),
+    ranked as (
+      select e.document_id, e.page_number, e.run_id, e.pass, e.adopted, e.is_final, e.superseded_by_pass,
+        array_position(${passes}::text[], e.pass) as rank,
+        max(case when e.run_id = ${scope.runId} and e.adopted and e.page_number <= greatest(d.page_count, 1)
+          then array_position(${passes}::text[], e.pass) end) over page as final_rank,
+        bool_or(e.is_final and e.run_id <> ${scope.runId} and coalesce(nr.created_at > me.created_at, false)) over page as held
+      from document_page_extracts e
+      join documents d on d.id = e.document_id and d.org_id = ${scope.orgId}
+        ${pagesOnly ? client`` : client`and d.run_id = ${scope.runId}`}
+      cross join me
+      left join project_runs nr on nr.id = e.run_id
+      where e.document_id = any(${client.array([...scope.documentIds])}::text[]) and e.org_id = ${scope.orgId}
+        ${pagesOnly ? client`and e.page_number = any(${pages}::int[])` : client``}
+      window page as (partition by e.document_id, e.page_number)
+    ),
+    target as (
+      select document_id, page_number, run_id, pass,
+        (final_rank is not null and run_id = ${scope.runId} and rank = final_rank) as next_final,
+        case when final_rank is not null and adopted and not (run_id = ${scope.runId} and rank = final_rank)
+          then (${passes}::text[])[final_rank] end as next_superseded,
+        is_final, superseded_by_pass
+      from ranked
+      where not held
+    )
+    update document_page_extracts t
+    set is_final = x.next_final, superseded_by_pass = x.next_superseded, updated_at = now()
+    from target x
+    where t.document_id = x.document_id and t.page_number = x.page_number and t.run_id = x.run_id and t.pass = x.pass
+      and t.org_id = ${scope.orgId}
+      and (x.is_final is distinct from x.next_final or x.superseded_by_pass is distinct from x.next_superseded)
+  `;
 }
 
 /** OCR reader labels (ocr/read-document.ts `reader`) as a method and route. Model ids after the prefix are never kept. */
@@ -319,7 +363,7 @@ function ocrTags(read: { confidence: number | null; escalationHeld?: "capped" | 
  * - `scan-ocr`: the pages without words the OCR engine then read (`ocr`, or `ocr-second-read` when the page reader or an
  *   escalation read replaced the first read), superseding `extract`;
  * - `critique`: the pages self-critique corrected (`correction`), superseding the pass before it.
- * Records come in pass order per page; recordPageExtracts leaves exactly one final, naming the superseding pass.
+ * Every pass that gave the page its text is adopted; finalization keeps the highest-ranked one per page.
  */
 export function extractionPageRecords(args: {
   pageCount: number;
@@ -335,6 +379,8 @@ export function extractionPageRecords(args: {
   ocrPageClass: boolean;
   plausibility: number | null;
   extractMs: number | null;
+  /** The run's quality reads pages without a text layer; false (Fast) keeps them as page images. */
+  readsPages?: boolean;
 }): PageExtractInput[] {
   const pageCount = Math.min(MAX_PAGE, Math.max(1, Math.trunc(args.pageCount) || 1));
   const winnerOcr = new Set(args.winnerOcrPages);
@@ -350,7 +396,7 @@ export function extractionPageRecords(args: {
     const ocrByWinner = args.imageOcr || winnerOcr.has(pageNumber);
     const empty = text !== undefined && !HAS_WORDS.test(text);
     // The extract pass: what the winner gave this page before any later pass replaced it.
-    const keptAsImage = args.extractor === "image-textless";
+    const keptAsImage = args.extractor === "image-textless" || (args.readsPages === false && empty && !scan && !ocrByWinner);
     const extractMethod: PageExtractMethod = keptAsImage ? "kept-as-image" : scan ? "none" : ocrByWinner ? "ocr" : empty ? "none" : "text-layer";
     const extractTags: PageExtractTag[] = keptAsImage ? ["image-only"] : [];
     if (scan || ocrByWinner || failed) extractTags.push("scanned");
@@ -360,8 +406,8 @@ export function extractionPageRecords(args: {
     records.push({
       pageNumber, pass: "extract", method: extractMethod, engine: args.extractor,
       billedClass: extractMethod === "ocr" ? ocrClass(args.ocrPageClass) : extractMethod === "text-layer" ? "fast" : null,
-      // Written final; a later pass of this page supersedes it in recordPageExtracts (superseded_by_pass).
-      tags: extractTags, plausibility: args.plausibility, durationMs: perPageMs, isFinal: true,
+      // Adopted; a later adopted pass of this page outranks it when the document is finalized.
+      tags: extractTags, plausibility: args.plausibility, durationMs: perPageMs, adopted: true,
       // Only the final pass's size is the page's text; an earlier pass is not re-measured.
       textBytes: extractFinal ? textBytes : null,
     });
@@ -371,14 +417,14 @@ export function extractionPageRecords(args: {
       records.push({
         pageNumber, pass: "scan-ocr", method: route.method, engine: route.engine,
         billedClass: route.method === "ocr" ? ocrClass(args.ocrPageClass) : "rich",
-        tags: ocrTags(scan), confidence: scan.confidence, durationMs: scan.durationMs, isFinal: true,
+        tags: ocrTags(scan), confidence: scan.confidence, durationMs: scan.durationMs, adopted: true,
         textBytes: scanFinal ? textBytes : null,
       });
     }
     if (corrected) {
       records.push({
         pageNumber, pass: "critique", method: "correction", engine: "self-critique",
-        tags: scan ? ["scanned"] : [], plausibility: args.plausibility, isFinal: true, textBytes,
+        tags: scan ? ["scanned"] : [], plausibility: args.plausibility, adopted: true, textBytes,
       });
     }
   }
@@ -424,14 +470,14 @@ export function visionPageRecords(args: {
       pageNumber: output.pageNumber, pass: "vision", method: ocr ? "ocr" : "vision", engine,
       billedClass: ocr ? ocrClass(args.ocrPageClass) : "rich", tags,
       finishReason: output.finishReason ?? (output.text.trim() ? null : "empty"),
-      durationMs: output.latencyMs, textBytes: final ? pageTextBytes(output.text) : null, isFinal: final,
+      durationMs: output.latencyMs, textBytes: final ? pageTextBytes(output.text) : null, adopted: final,
     });
   }
   for (const skip of args.skips) {
     if (seen.has(skip.pageNumber)) continue;
     seen.add(skip.pageNumber);
     const tag = VISION_SKIP_TAGS[skip.outcome] ?? "failed";
-    records.push({ pageNumber: skip.pageNumber, pass: "vision", method: "none", engine: "vision-model", tags: [tag], isFinal: false });
+    records.push({ pageNumber: skip.pageNumber, pass: "vision", method: "none", engine: "vision-model", tags: [tag], adopted: false });
   }
   return records;
 }
@@ -469,4 +515,31 @@ export function routingPageTags(
     if (tags.length) out.set(page.pageNumber, tags);
   }
   return out;
+}
+
+/**
+ * The records a query-time materialization writes for the pages it held (deferred/materialize-pages.ts): a published page
+ * is its text layer (`extract`) or a model read (`vision`), a page Fast keeps unread is `kept-as-image`; pages the PII
+ * policy blocked and pages that failed are recorded, not adopted.
+ */
+export function materializedPageRecords(args: {
+  published: readonly number[];
+  modelRead: (page: number) => boolean;
+  blocked: readonly number[];
+  failed: ReadonlyArray<readonly [number, string]>;
+  keptAsImageReason: string;
+}): PageExtractInput[] {
+  const records: PageExtractInput[] = [];
+  for (const page of args.published) {
+    records.push(args.modelRead(page)
+      ? { pageNumber: page, pass: "vision", method: "vision", engine: "vision-model", billedClass: "rich" }
+      : { pageNumber: page, pass: "extract", method: "text-layer", engine: "page-text", billedClass: "fast" });
+  }
+  for (const page of args.blocked) records.push({ pageNumber: page, pass: "extract", method: "none", tags: ["pii-withheld"], adopted: false });
+  for (const [page, reason] of args.failed) {
+    records.push(reason === args.keptAsImageReason
+      ? { pageNumber: page, pass: "extract", method: "kept-as-image", tags: ["image-only"] }
+      : { pageNumber: page, pass: "extract", method: "none", tags: ["failed"], adopted: false });
+  }
+  return records;
 }

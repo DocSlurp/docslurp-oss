@@ -16,11 +16,12 @@ export type PageExtractPass = (typeof PAGE_EXTRACT_PASSES)[number];
  * - `ocr`: the OCR engine's read of the page image;
  * - `ocr-second-read`: a second read of a page OCR read poorly (the page reader or an escalation read);
  * - `vision`: a vision model read of the page;
+ * - `transcription`: speech (and sampled frames) of an audio or video file, transcribed;
  * - `correction`: a correction of earlier text (self-critique or a human);
  * - `kept-as-image`: no text read; the page is kept as its image;
  * - `none`: no text (blank, or a read that failed).
  */
-export const PAGE_EXTRACT_METHODS = ["text-layer", "ocr", "ocr-second-read", "vision", "correction", "kept-as-image", "none"] as const;
+export const PAGE_EXTRACT_METHODS = ["text-layer", "ocr", "ocr-second-read", "vision", "transcription", "correction", "kept-as-image", "none"] as const;
 export type PageExtractMethod = (typeof PAGE_EXTRACT_METHODS)[number];
 
 /** Closed page tags. */
@@ -62,8 +63,6 @@ export const pageExtractRecordSchema = z.object({
   pass: z.enum(PAGE_EXTRACT_PASSES),
   method: z.enum(PAGE_EXTRACT_METHODS),
   engine: z.string().nullable(),
-  memberId: z.string().nullable(),
-  region: z.string().nullable(),
   billedClass: z.enum(PAGE_EXTRACT_BILLED_CLASSES).nullable(),
   tags: z.array(z.enum(PAGE_EXTRACT_TAGS)),
   confidence: z.number().min(0).max(1).nullable(),
@@ -71,6 +70,9 @@ export const pageExtractRecordSchema = z.object({
   textBytes: z.number().int().nonnegative().nullable(),
   finishReason: z.enum(PAGE_EXTRACT_FINISH_REASONS).nullable(),
   durationMs: z.number().int().nonnegative().nullable(),
+  /** This pass's text was taken for the page in its run. */
+  adopted: z.boolean(),
+  /** The page is published with this row's text (exactly one per page once its document completes). */
   isFinal: z.boolean(),
   supersededByPass: z.enum(PAGE_EXTRACT_PASSES).nullable(),
   createdAt: z.string(),
@@ -79,8 +81,9 @@ export type PageExtractRecordView = z.infer<typeof pageExtractRecordSchema>;
 
 export const documentPageExtractsSchema = z.object({
   documentId: z.string(),
-  /** Records ordered by page, then creation; `nextAfterPage` continues past the last page returned. */
+  /** Records ordered by page, run and pass. */
   records: z.array(pageExtractRecordSchema),
-  nextAfterPage: z.number().int().positive().nullable(),
+  /** Pass as `after` for the next page of records; null on the last. */
+  nextCursor: z.string().nullable(),
 });
 export type DocumentPageExtractsView = z.infer<typeof documentPageExtractsSchema>;
