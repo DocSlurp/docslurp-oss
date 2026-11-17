@@ -1,4 +1,4 @@
-import { cp, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,5 +50,10 @@ describe("readDopplerFigureDir on an overlay root (files on another st_dev than 
   it("still refuses an extra file", async () => {
     await writeFile(path.join(dir, "notes.txt"), "x");
     await expect(readDopplerFigureDir(dir, { pageCount: 10 })).rejects.toBeInstanceOf(DopplerFigureRejection);
+  });
+
+  it("still refuses a hard-linked figure (reaches openFolderFile)", async () => {
+    await link(path.join(dir, "p3.1.webp"), path.join(work, "alias.webp"));
+    await expect(readDopplerFigureDir(dir, { pageCount: 10 })).rejects.toMatchObject({ rule: "hard-link" });
   });
 });
