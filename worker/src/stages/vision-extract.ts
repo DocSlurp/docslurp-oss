@@ -1551,7 +1551,7 @@ export class VisionExtractStage implements Stage {
         }
         if (!shouldFailOpenVisionError(error)) return { output: null, error, skip: null };
         // Fail open: the page keeps its native or OCR text, never the rejected model text.
-        return { output: null, error, skip: skip(page.pageNumber, findVisionOutputRejected(error) ? "rejected" : "failed") };
+        return { output: null, error, skip: skip(page.pageNumber, findVisionOutputRejected(error) ? "rejected" : isVisionModelRefusal(error) ? "model-refused" : "failed") };
       } finally {
         await cleanupTempFile(imagePath);
       }
@@ -1855,6 +1855,8 @@ export class VisionExtractStage implements Stage {
           outputSchema: state.run.pipeline.outputSchema,
           signal,
           gate,
+          // A page read of the vision capability: region-checked routes, pool serves and the pool default fallback.
+          pageRead: true,
         });
       } catch (caught) {
         // Recorded here, once, for every caller (whole page, routed region and their fallbacks). A
@@ -2570,6 +2572,15 @@ export function buildFailedVisionAttemptUsage(args: {
   };
 }
 
+/** A refusal of the run's vision route before anything was sent: an unadmitted or unpriced model, or an unproven host region. */
+export function isVisionModelRefusal(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
+    const name = (current as { name?: unknown }).name;
+    if (name === "VisionRouteRegionError" || name === "UnpricedVisionRouteError") return true;
+  }
+  return false;
+}
+
 export function shouldFailOpenVisionError(error: unknown): boolean {
   // Throttling (429/5xx after retries) is transient: fail the page task so
   // Temporal retries it, rather than silently dropping the page's content.
@@ -2580,6 +2591,9 @@ export function shouldFailOpenVisionError(error: unknown): boolean {
   if (findVisionOutputRejected(error)) return true;
   // The run's vision attempt guard refused the request: it was never sent.
   if (findVisionGuardStop(error)) return true;
+  // The run's vision model is refused (not admitted, or no host with a stated US or EU region): nothing was sent, and a
+  // stored setting naming it must not fail the document. The page keeps its own text.
+  if (isVisionModelRefusal(error)) return true;
   const message = toError(error).message.toLowerCase();
 
   return [

@@ -75,7 +75,7 @@ describe("managed pipeline models", () => {
   });
 
   it("applies an admin vision override, keeps it across customer saves, and records an audit row", async () => {
-    const override = "llm://openrouter/google/gemini-2.5-flash-lite";
+    const override = "llm://openrouter/z-ai/glm-5.3-flash";
     await managedModels.setProjectManagedModels("w", { pipeline: { vision: { modelUri: override } } }, { userId: "u1" });
     expect((await storedPipeline()).vision.modelUri).toBe(override);
     const current = await projects.getProject("w", "u1");
@@ -87,13 +87,13 @@ describe("managed pipeline models", () => {
   });
 
   it("rolls back to a pre-0158 snapshot without restoring its model choices, and keeps a removed override removed", async () => {
-    await managedModels.setProjectManagedModels("w", { pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } }, { userId: "u1" });
+    await managedModels.setProjectManagedModels("w", { pipeline: { vision: { modelUri: "llm://openrouter/z-ai/glm-5.3-flash" } } }, { userId: "u1" });
     await managedModels.setProjectManagedModels("w", { pipeline: null }, { userId: "u1" });
     await sql`insert into audit_log(id, org_id, user_id, project_id, action, resource_type, metadata) values (
       'v-old', 'o1', 'u1', 'w', 'project.updated', 'project',
       ${sql.json({ snapshot: { name: "W", templateKey: null, systemPrompt: null, pipeline: {
         ...legacyPipeline,
-        vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/google/gemini-2.5-flash-lite", target: "hosted", remoteFallbackModelUri: null },
+        vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/z-ai/glm-5.3-flash", target: "hosted", remoteFallbackModelUri: null },
         structuredExtraction: { model: "openai/gpt-6.1-sol", supportingPrompt: null, maxOutputTokens: 4096 },
       } } } as never)})`;
     const restored = await projects.rollbackProjectVersion("w", "u1", "v-old");
@@ -104,9 +104,9 @@ describe("managed pipeline models", () => {
   });
 
   it("drops an admin hosted fallback when the customer switches to local-only, and the stored pipeline stays valid", async () => {
-    await managedModels.setProjectManagedModels("w", { pipeline: { vision: { remoteFallbackModelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } }, { userId: "u1" });
+    await managedModels.setProjectManagedModels("w", { pipeline: { vision: { remoteFallbackModelUri: "llm://openrouter/z-ai/glm-5.3-flash" } } }, { userId: "u1" });
     const current = await projects.getProject("w", "u1");
-    expect(current!.pipeline.vision.remoteFallbackModelUri).toBe("llm://openrouter/google/gemini-2.5-flash-lite");
+    expect(current!.pipeline.vision.remoteFallbackModelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
     await projects.updateProject("w", "u1", { pipeline: {
       ...current!.pipeline, privacyMode: "local-only", vision: { profile: "cheapest-local" } as never, embedding: { profile: "cheapest-local" } as never,
       visionFallback: false,

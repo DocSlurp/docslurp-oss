@@ -198,29 +198,21 @@ describe("max_price on OpenRouter bodies", () => {
   });
 
   it("is never sent to non-OpenRouter routes", async () => {
-    const { bodies } = await read({ modelUri: "llm://openai/gpt-4.1-mini" });
+    const { bodies } = await read({ modelUri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" });
     expect(bodies[0]!.provider).toBeUndefined();
   });
 });
 
 describe("image-token bounds from each provider's own formula", () => {
-  it("gpt-4.1-mini: OpenAI 32-px patches times 1.62, a 2048x2048 page at least 6,636 tokens", () => {
-    const patches = (2_048 / 32) * (2_048 / 32);
-    expect(Math.ceil(patches * 1.62)).toBe(6_636);
-    expect(visionImageTokenBound({ widthPx: 2_048, heightPx: 2_048 }, "gpt-4.1-mini")).toBeGreaterThanOrEqual(6_636);
-    // The request's input bound covers the image and the prompt.
-    expect(visionInputTokenBound({ widthPx: 2_048, heightPx: 2_048 }, "x".repeat(500), "gpt-4.1-mini")).toBeGreaterThanOrEqual(6_636 + 500);
-    // Odd sizes round each side up to whole patches: 1000x1400 is 32 x 44 patches.
-    expect(visionImageTokenBound({ widthPx: 1_000, heightPx: 1_400 }, "gpt-4.1-mini")).toBeGreaterThanOrEqual(Math.ceil(32 * 44 * 1.62));
+  it("gpt-4.1-mini and Gemini 2.5 Flash Lite are refused (no stated US or EU region): no bound is admitted for them", () => {
+    for (const model of ["gpt-4.1-mini", "google/gemini-2.5-flash-lite"]) {
+      expect(visionModelRefusal(model), model).toMatch(/stated US or EU hosting region/);
+      expect(visionImageTokens(model, null), model).toBeNull();
+    }
   });
 
   it("Gemini 3.1 Flash Lite: at least the default 1,120 tokens per image, up to ultra_high's 2,240", () => {
     expect(visionImageTokenBound({ widthPx: 1_000, heightPx: 1_400 }, "google/gemini-3.1-flash-lite")).toBeGreaterThanOrEqual(2_240);
-  });
-
-  it("Gemini 2.5 Flash Lite: at least 258 tokens per 768-px tile", () => {
-    const tiles = Math.ceil(2_048 / 768) * Math.ceil(2_048 / 768);
-    expect(visionImageTokenBound({ widthPx: 2_048, heightPx: 2_048 }, "google/gemini-2.5-flash-lite")).toBeGreaterThanOrEqual(tiles * 258);
   });
 
   it("open-weights models: their processor's per-image maximum at every size, tiny images included", () => {
@@ -364,10 +356,8 @@ describe("hosted vision is limited to the priced catalog", () => {
     expect(local.sends[0]!.authorization).toBeNull();
   });
 
-  it("sends the OpenAI key to the OpenAI base URL and the OpenRouter key to OpenRouter", async () => {
-    const openai = await read({ modelUri: "llm://openai/gpt-4.1-mini" });
-    expect(openai.sends[0]!.url).toBe("https://api.openai.com/v1/chat/completions");
-    expect(openai.sends[0]!.authorization).toBe("Bearer sk-test");
+  it("refuses the direct OpenAI route (no stated US or EU region) before sending, and sends the OpenRouter key to OpenRouter", async () => {
+    expect(() => visionConfigSchema.parse({ modelUri: "llm://openai/gpt-4.1-mini" })).toThrow(/no endpoint with a stated US or EU hosting region/);
     backend = new MemoryVisionAttemptBackend();
     const openrouter = await read({ modelUri: `llm://openrouter/${MODEL}` });
     expect(openrouter.sends[0]!.url).toBe("https://openrouter.ai/api/v1/chat/completions");

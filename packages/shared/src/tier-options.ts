@@ -36,17 +36,21 @@ export const TIER_OPTIONS: readonly TierOption[] = defineTierOptions([
   {
     id: "page-ocr/glm-5.3-flash",
     capability: "page-ocr",
-    pool: [`${GLM}?_provider=wafer/nvfp4&_sort=price`, `${GLM}?_provider=friendli`, `${GLM}?_provider=inference-net/fp4`],
+    // Hosts with a stated US region only (capability-pools.ts VISION_GLM_HOSTS, 2026-11-17).
+    pool: [`${GLM}?_provider=wafer/us&_sort=price`, `${GLM}?_provider=friendli`, `${GLM}?_provider=inference-net/us`],
     tiers: ["fastest", "balanced", "smart"],
     // Tier benchmark v1, development page OCR (67 items), production pool: composite 0.934 (tolerant text 0.919,
-    // tables 0.930, math 1.000).
+    // tables 0.930, math 1.000). Pinned hosts of this pool: wafer/us 0.932, friendli 0.932, inference-net/us 0.927
+    // (dev-page-ocr-20261116-glm-wafer, dev-page-ocr-20261117-pool-candidates).
     evalScore: 0.934,
     evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261112-r2",
   },
   {
     id: "page-ocr/mimo-v2.6-flash",
     capability: "page-ocr",
-    pool: [`${MIMO}?_provider=relace&_sort=order&_fallbacks=true`, `${MIMO}?_provider=deepinfra`],
+    // A stated-US host only (2026-11-17). Unscored: the worker refuses MiMo until its image-token bound is proven, so
+    // "smart" must not rank it (it measured 0.936 in a scratch harness, dev-page-ocr-20261117-pool-candidates).
+    pool: [`${MIMO}?_provider=gmicloud/bf16&_sort=price`],
     tiers: ["fastest", "balanced", "smart"],
     evalScore: null,
     evalRef: null,
@@ -133,7 +137,17 @@ export const OCR_ROUTE_OPTIONS: readonly OcrRouteOption[] = Object.freeze([
     evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261112-r2",
   },
   {
-    // The second escalation reader, tried when the first is refused or no host can serve it.
+    // The default escalation reader's second host (ocr-escalation-routes.ts), tried when Wafer refuses or cannot serve.
+    id: "scan-ocr/hosted-escalation-glm-morph",
+    reader: "hosted-escalation",
+    model: "llm://openrouter/z-ai/glm-5.3-flash",
+    tiers: ["balanced", "smart"],
+    // Pinned morph/fp8, escalation prompt: composite 0.927 (tolerant text 0.907, tables 0.931, math 1.000).
+    evalScore: 0.927,
+    evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261117-pool-candidates",
+  },
+  {
+    // The last escalation reader, tried when both GLM hosts are refused or cannot serve.
     id: "scan-ocr/hosted-escalation",
     reader: "hosted-escalation",
     model: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct",

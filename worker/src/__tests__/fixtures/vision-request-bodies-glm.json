@@ -36,9 +36,9 @@
         "request": 0
       },
       "only": [
-        "wafer/nvfp4",
+        "wafer/us",
         "friendli",
-        "inference-net/fp4"
+        "inference-net/us"
       ],
       "sort": "price"
     },
