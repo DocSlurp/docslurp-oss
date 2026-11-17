@@ -1,7 +1,4 @@
-import { computeAllocationAdmission } from "./compute-fleet-store.js";
-import { computeJobAdmission } from "./compute-job-store.js";
 import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneHit } from "../pipeline/run-milestones.js";
-import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation, type ComputeObservations, type ComputePriceObservation, type ComputeCalibrationObservation } from "@docslurp/shared";
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
@@ -15,7 +12,7 @@ import { type WorkerCapability, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT } from "@d
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { PageTaskStore } from "./page-task-store.js";
-import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
+import { WorkerSlotStore, resolveWorkerSlotOptions, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
@@ -35,9 +32,6 @@ import type {
 } from "../models.js";
 import type { WorkflowState, VectorIndex } from "../pipeline/pipeline.js";
 import { insertProjectRunEvents, RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
-import { queryWorkerScalerSnapshot, type ScalerSql, type WorkerScalerQueryParams, type WorkerScalerSnapshot } from "@docslurp/shared";
-import { runGraphJobs, type GraphJobRunnerOptions } from "../graph/rebuild-job.js";
-import { runSummaryTreeJobs, type SummaryTreeJobRunnerOptions } from "../summary-tree/backfill-job.js";
 import { PostgresPageBasisLedger } from "./page-basis-ledger.js";
 import { batchedRows, TableExistence } from "./sql-helpers.js";
 import { PostgresDocumentContent } from "./document-content.js";
@@ -62,7 +56,6 @@ import {
 } from "./worker-capabilities.js";
 import {
   debitRunUsageCredits,
-  flushPendingCreditDebits,
   persistRunUsageEvents,
   runUsageEventStatements,
 } from "./usage-event-store.js";
@@ -540,39 +533,6 @@ export class Store {
    * document, run, user or org identifiers, so one tenant's plan cannot learn anything about another's content.
    * Served by performance_log_shard_timing_idx (0098).
    */
-  computeAllocationAdmission(): import("@docslurp/shared").ComputeAllocationAdmission { return computeAllocationAdmission(this.sql); }
-  computeJobAdmission(): import("@docslurp/shared").ComputeJobAdmission { return computeJobAdmission(this.sql); }
-
-  async authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
-    for (const value of [scope.orgId, scope.projectId, scope.runId, scope.documentId]) {
-      if (!value || value.length > 200) throw new Error("Invalid compute execution scope");
-    }
-    const [row] = await this.sql<{ cohort_id: string | null; valid_until: Date }[]>`
-      select * from public.authorize_compute_cohort(${scope.orgId}, ${scope.projectId}, ${scope.runId}, ${scope.documentId}, ${scope.executionGeneration})`;
-    // A row exists only when the run belongs to scope.orgId (authorize_compute_cohort's `r.org_id = p_org`).
-    return row ? { cohortId: row.cohort_id, validUntil: new Date(row.valid_until).toISOString(), orgId: scope.orgId } : null;
-  }
-
-  async computeObservations(profileIds: readonly string[]): Promise<ComputeObservations> {
-    if (profileIds.length > 100 || profileIds.some((id) => !id || id.length > 200)) throw new Error("Invalid compute profile selection");
-    if (!profileIds.length) return { prices: [], calibrations: [] };
-    const calibrations = await this.sql`
-      select distinct on (profile_id) * from compute_calibration_observations
-      where profile_id = any(${[...profileIds]}) and observed_at <= now() and valid_until > now()
-        and observed_at > now() - interval '7 days'
-      order by profile_id, observed_at desc, id desc`;
-    const offers = calibrations.map((row) => String(row.offer_id));
-    const prices = offers.length ? await this.sql`
-      select distinct on (offer_id) * from compute_price_observations
-      where offer_id = any(${offers}) and observed_at <= now() and valid_until > now()
-      order by offer_id, observed_at desc, id desc` : [];
-    const valid = new Set(prices.map((row) => row.offer_id));
-    return {
-      prices: prices.map((row) => decodeComputeObservation<ComputePriceObservation>(row, computePriceColumns)),
-      calibrations: calibrations.filter((row) => valid.has(row.offer_id)).map((row) => decodeComputeObservation<ComputeCalibrationObservation>(row, computeCalibrationColumns)),
-    };
-  }
-
   async loadShardObservations(profileKey: string, limit = 200): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>> {
     const rows = await this.sql<Array<{ ms: string | number; pages: string | number | null; max_rss_mib: string | number | null }>>`
       select perf.value as ms,
@@ -951,14 +911,6 @@ export class Store {
       `);
   }
 
-  private async insertPerformanceRows(
-    client: Sql<Record<string, unknown>>,
-    state: WorkflowState,
-    performance: WorkflowState["pendingPerformance"],
-  ): Promise<void> {
-    for (const statement of this.performanceRowStatements(client, state, performance)) await statement;
-  }
-
   private parserEvaluationStatements(
     client: Sql<Record<string, unknown>>,
     parserEvaluations: WorkflowState["pendingParserEvaluations"],
@@ -1001,13 +953,6 @@ export class Store {
           "metadata",
         )}
       `);
-  }
-
-  private async insertParserEvaluationRows(
-    client: Sql<Record<string, unknown>>,
-    parserEvaluations: WorkflowState["pendingParserEvaluations"],
-  ): Promise<void> {
-    for (const statement of this.parserEvaluationStatements(client, parserEvaluations)) await statement;
   }
 
   async completeRun(state: WorkflowState, owner: ExecutionOwner = { runId: state.run.id, orgId: state.run.orgId!, projectId: state.run.projectId! }): Promise<void> {
@@ -1852,10 +1797,6 @@ export class Store {
     await this.runEvents.flush();
   }
 
-  private async insertVectorIndex(vector: VectorIndex): Promise<void> {
-    await this.insertVectorIndexes([vector]);
-  }
-
   private vectorIndexStatements(
     vectors: VectorIndex[],
     client: Sql<Record<string, unknown>> = this.sql,
@@ -1900,20 +1841,8 @@ export class Store {
     return statements;
   }
 
-  private async insertVectorIndexes(
-    vectors: VectorIndex[],
-    client: Sql<Record<string, unknown>> = this.sql,
-  ): Promise<void> {
-    for (const statement of this.vectorIndexStatements(vectors, client)) await statement;
-  }
-
   get pageTasks(): PageTaskStore { return new PageTaskStore(this.sql, this.creditLeases); }
   get workerSlots(): WorkerSlotStore { return new WorkerSlotStore(this.sql, this.workerSlotOptions); }
-  /** Queue state and per-org slot demand for the autoscaler target (shared with the app). */
-  async readWorkerScalerSnapshot(params: WorkerScalerQueryParams): Promise<WorkerScalerSnapshot> {
-    return queryWorkerScalerSnapshot(this.sql as unknown as ScalerSql, params);
-  }
-
   /**
    * This worker's row in the capability registry (worker-capabilities.ts):
    * what its build supports, with credit leases and early lexical search
@@ -1933,15 +1862,6 @@ export class Store {
       }),
       config: () => advertisedWorkerConfig(),
     });
-  }
-
-  async tryMaintenanceLease(name: string, holder: string, ttlMs: number): Promise<boolean> {
-    return tryMaintenanceLease(this.sql, { name, holder, ttlMs });
-  }
-
-  /** Applies pending credit debits to org pools (maintenance leader, every few seconds). */
-  async flushPendingCreditDebits(): Promise<{ orgs: number; debits: number; credits: number }> {
-    return flushPendingCreditDebits(this.sql);
   }
 
   /** Stamps a run milestone the first time it happens; null when it was already stamped (pipeline/run-milestones.ts). */
@@ -2188,34 +2108,6 @@ export class Store {
   /** Records blocked hosted AI attempts for strict-privacy projects. */
   async recordPrivacyAudit(entries: readonly PrivacyAuditEntry[]): Promise<void> {
     await insertPrivacyAuditRows(this.sql, entries);
-  }
-
-  /** Claims and runs queued figure resumes (figures/resume-runner.ts); a no-op while DOCSLURP_FIGURE_RESUME is off. */
-  async runFigureResumes(deps: Omit<import("../figures/resume-runner.js").FigureResumeDeps, "sql">): Promise<number> {
-    const { runFigureResumes } = await import("../figures/resume-runner.js");
-    return await runFigureResumes({ ...deps, sql: this.sql });
-  }
-
-  /** Orphan GC and the stored-figure audit (figures/resume-runner.ts). */
-  async auditFigureStorage(deps: { storage: import("../figures/resume-runner.js").FigureResumeStorage; limit?: number }) {
-    const { auditFigureStorage } = await import("../figures/resume-runner.js");
-    return await auditFigureStorage({ ...deps, sql: this.sql });
-  }
-
-  /** The resume backlog gauges (emitted on the OTel meter by figureResumeBacklog). */
-  async figureResumeBacklog() {
-    const { figureResumeBacklog } = await import("../figures/resume-runner.js");
-    return await figureResumeBacklog(this.sql);
-  }
-
-  /** Claims and runs one queued, parked or lease-expired summary tree backfill job (see summary-tree/backfill-job.ts). */
-  async runSummaryTreeJobs(options: SummaryTreeJobRunnerOptions): Promise<number> {
-    return await runSummaryTreeJobs(this.sql, options);
-  }
-
-  /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */
-  async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
-    return await runGraphJobs(this.sql, options);
   }
 
   private toJson(value: unknown) {

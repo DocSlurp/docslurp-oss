@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
+import { flushPendingCreditDebits } from "../db/usage-event-store.js";
 import { completeDocumentPages, emitDocumentPageProgress, runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { createStageExecution } from "../pipeline/stage-execution.js";
@@ -290,7 +291,7 @@ describe("database statement budget per page", () => {
       const before = await read();
       expect(before.pending).toBeGreaterThan(0);
       expect(before.pending).toBeCloseTo(before.cost, 9);
-      const flushed = await store.flushPendingCreditDebits();
+      const flushed = await flushPendingCreditDebits(store.stageSql);
       expect(flushed.credits).toBeCloseTo(before.pending, 9);
       const after = await read();
       expect(after.pending).toBe(0);

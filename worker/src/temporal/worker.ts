@@ -27,6 +27,13 @@ import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security
 import { fromEnv } from "../config.js";
 import { Store } from "../db/store.js";
 import { Maintenance } from "../db/maintenance.js";
+import { authorizeComputeCohort, computeAllocationAdmission, loadComputeObservations } from "../db/compute-fleet-store.js";
+import { computeJobAdmission } from "../db/compute-job-store.js";
+import { flushPendingCreditDebits } from "../db/usage-event-store.js";
+import { tryMaintenanceLease } from "../db/worker-slot-store.js";
+import { runGraphJobs as claimGraphJobs } from "../graph/rebuild-job.js";
+import { runSummaryTreeJobs as claimSummaryTreeJobs } from "../summary-tree/backfill-job.js";
+import { queryWorkerScalerSnapshot, type ScalerSql } from "@docslurp/shared";
 import { assertVisionLedgerSchemaWithRetry, VisionLedgerSchemaError } from "../db/vision-attempt-store.js";
 import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
@@ -165,10 +172,10 @@ async function main(): Promise<void> {
   // configuration that selects the VM PDF extractor without a provider, refuses to start.
   // Providers check batch ownership against the database themselves (ExtractorPluginHost.documentOwners).
   setExtractorDocumentOwners((documentIds) => store.records.documentScopes(documentIds));
-  setExtractorComputeObservations((profileIds) => store.computeObservations(profileIds));
-  setExtractorComputeCohortAuthorizer((scope) => store.authorizeComputeCohort(scope));
-  setExtractorComputeAllocationAdmission(store.computeAllocationAdmission());
-  setExtractorComputeJobAdmission(store.computeJobAdmission());
+  setExtractorComputeObservations((profileIds) => loadComputeObservations(store.stageSql, profileIds));
+  setExtractorComputeCohortAuthorizer((scope) => authorizeComputeCohort(store.stageSql, scope));
+  setExtractorComputeAllocationAdmission(computeAllocationAdmission(store.stageSql));
+  setExtractorComputeJobAdmission(computeJobAdmission(store.stageSql));
   await loadExtractorPlugins(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
@@ -378,7 +385,7 @@ async function main(): Promise<void> {
   const scalerParams = resolveWorkerScalerQueryParams();
   const scaler = new ScalerPublisher({
     isLeader: () => maintenanceLeader,
-    read: () => store.readWorkerScalerSnapshot(scalerParams),
+    read: () => queryWorkerScalerSnapshot(store.stageSql as unknown as ScalerSql, scalerParams),
     config: resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency),
     params: scalerParams,
     keepAliveUrl: readOptionalEnv("WORKER_APP_KEEPALIVE_URL"),
@@ -447,7 +454,7 @@ async function main(): Promise<void> {
   const refreshMaintenanceLeadership = async () => {
     if (cfg.workerRunMaintenance !== "auto") return;
     const leader = await withBackgroundSpan("worker.maintenance-lease", () =>
-      store.tryMaintenanceLease("worker-maintenance", workerIdentity, maintenanceLeaseMs))
+      tryMaintenanceLease(store.stageSql, { name: "worker-maintenance", holder: workerIdentity, ttlMs: maintenanceLeaseMs }))
       .catch((err) => {
         console.warn(`[temporal-worker] maintenance lease check failed: ${err instanceof Error ? err.message : String(err)}`);
         return false;
@@ -512,7 +519,7 @@ async function main(): Promise<void> {
   const flushCreditDebits = () => {
     if (creditFlushRunning) return;
     creditFlushRunning = true;
-    withBackgroundSpan("worker.credit-debit-flush", () => store.flushPendingCreditDebits())
+    withBackgroundSpan("worker.credit-debit-flush", () => flushPendingCreditDebits(store.stageSql))
       .then((result) => {
         if (result.debits > 0) {
           console.log(`[billing] credit-debit-flush orgs=${result.orgs} debits=${result.debits} credits=${result.credits.toFixed(6)}`);
@@ -550,7 +557,7 @@ async function main(): Promise<void> {
   const runGraphJobs = () => {
     if (graphJobRunning) return;
     graphJobRunning = true;
-    withBackgroundSpan("worker.graph-jobs", () => store.runGraphJobs({
+    withBackgroundSpan("worker.graph-jobs", () => claimGraphJobs(store.stageSql, {
       workerId: workerIdentity,
       config: cfg,
       concurrency: cfg.graphJobConcurrency,
@@ -578,7 +585,7 @@ async function main(): Promise<void> {
   const runSummaryTreeJobs = () => {
     if (summaryTreeJobRunning) return;
     summaryTreeJobRunning = true;
-    withBackgroundSpan("worker.summary-tree-jobs", () => store.runSummaryTreeJobs({
+    withBackgroundSpan("worker.summary-tree-jobs", () => claimSummaryTreeJobs(store.stageSql, {
       workerId: workerIdentity,
       config: cfg,
       storage,
@@ -614,14 +621,14 @@ async function main(): Promise<void> {
   const runFigureResumes = () => {
     if (figureResumeRunning) return;
     figureResumeRunning = true;
-    withBackgroundSpan("figure-resume", () => store.runFigureResumes({ storage, provider: figureProvider(), workerId: workerIdentity }))
+    withBackgroundSpan("figure-resume", async () => (await import("../figures/resume-runner.js")).runFigureResumes({ storage, provider: figureProvider(), workerId: workerIdentity, sql: store.stageSql }))
       .catch((err) => console.error(`[doppler-figures] resume sweep failed: ${err instanceof Error ? err.name : typeof err}`))
       .finally(() => { figureResumeRunning = false; });
   };
   const figureResumeTimer = setInterval(runFigureResumes, 30_000);
   figureResumeTimer.unref();
   const figureBacklogTimer = setInterval(onLeader(() => {
-    void withBackgroundSpan("figure-resume-backlog", () => store.figureResumeBacklog())
+    void withBackgroundSpan("figure-resume-backlog", async () => (await import("../figures/resume-runner.js")).figureResumeBacklog(store.stageSql))
       .catch((err) => console.error(`[doppler-figures] backlog gauge failed: ${err instanceof Error ? err.name : typeof err}`));
   }), 60_000);
   figureBacklogTimer.unref();
@@ -629,7 +636,7 @@ async function main(): Promise<void> {
   const figureAuditTimer = setInterval(onLeader(() => {
     if (figureAuditRunning) return;
     figureAuditRunning = true;
-    withBackgroundSpan("figure-audit", () => store.auditFigureStorage({ storage, limit: 50 }))
+    withBackgroundSpan("figure-audit", async () => (await import("../figures/resume-runner.js")).auditFigureStorage({ storage, limit: 50, sql: store.stageSql }))
       .catch((err) => console.error(`[figure-audit] sweep failed: ${err instanceof Error ? err.name : typeof err}`))
       .finally(() => { figureAuditRunning = false; });
   }), 30 * 60_000);
