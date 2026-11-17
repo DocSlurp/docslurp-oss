@@ -42,6 +42,8 @@
 ## Device login pages lose their HTML on errors (2026-11-17)
 
 - [ ] `/oauth/mcp/device` renders HTML pages with 400, 403 and 429 statuses (wrong or expired code, form sent from another site, too many attempts), but the public error filter (`safeErrorResponse`) replaces every 4xx body with the JSON envelope, so the visitor sees a raw error. The signed-out case now redirects to sign-in instead; the others need either 200 pages or a way for first-party HTML to pass the filter.
+- [ ] `GET /oauth/mcp/authorize` redirects a visitor whose session is not usable yet (second factor pending, organization MFA policy not met) to the app's sign-in page, which sends them straight back: a redirect loop. The device page now renders a page for that case; do the same here, or have the app's page not resume while two-factor is pending.
+- [ ] Magic-link and MFA-interrupted sign-ins started from the device or consent page return to `/app` instead of the page that sent them (app side: the return path only accepts `/app…`).
 
 ## Host-only cookie follow-ups (2026-11-17 council on the `__Host-` cookie change)
 
