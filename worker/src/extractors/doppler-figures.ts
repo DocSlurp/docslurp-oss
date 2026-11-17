@@ -262,7 +262,9 @@ async function openFolderFile(root: FolderRoot, relative: string, expected: numb
     const info = await handle.stat();
     if (!info.isFile()) throw new DopplerFigureRejection("not-a-regular-file");
     if (info.nlink !== 1) throw new DopplerFigureRejection("hard-link");
-    if (info.dev !== root.dev) throw new DopplerFigureRejection("path-escapes-folder");
+    // No file-vs-folder device comparison: an overlay root filesystem reports a directory and its files on different
+    // devices, so it refused every folder. Containment holds without it: directories are device-checked above, files
+    // are opened O_NOFOLLOW, have one link, and must realpath to themselves under the root.
     if (info.size > cap) throw new DopplerFigureRejection("oversized-file");
     if (expected !== null && info.size !== expected) throw new DopplerFigureRejection("size-mismatch");
     await assertContained(root, relative);
