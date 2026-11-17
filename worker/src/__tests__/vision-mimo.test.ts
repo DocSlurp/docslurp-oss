@@ -65,8 +65,8 @@ describe("MiMo vision profile", () => {
     expect(VISUAL_RELATIONSHIP_INSTRUCTIONS.length).toBeLessThan(1_200);
   });
 
-  it("prefers the fast endpoints with fallbacks allowed, and only for MiMo", () => {
-    expect(openRouterProviderParams(MIMO_VISION_MODEL)).toEqual({ provider: { order: ["relace", "deepinfra"], allow_fallbacks: true } });
+  it("routes only to a host with a stated US region (no open-ended fallback), and only for MiMo", () => {
+    expect(openRouterProviderParams(MIMO_VISION_MODEL)).toEqual({ provider: { only: ["gmicloud/bf16"], sort: "price", allow_fallbacks: true } });
     expect(openRouterProviderParams("deepseek/deepseek-v4.1-flash")).toEqual({});
     expect(openRouterProviderParams(undefined)).toEqual({});
   });

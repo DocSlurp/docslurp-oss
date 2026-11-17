@@ -735,7 +735,7 @@ export const visionModelCatalog = [
       outputUsdPerMillion: 0.55,
       checked: "2026-11-13",
       basis: "pinned-route",
-      providers: ["openai", "amazon-bedrock/us-east-1", "azure/us"],
+      providers: ["amazon-bedrock/us-east-1", "azure/us"],
       // OpenAI caches prompts of 1,024+ tokens automatically and the route reports a cache write of about the whole
       // prompt on each call (2026-11-13): input is billed at the write rate, 1.25x base, $0.1375 at the dearest host.
       promptCacheWriteUsdPerMillion: 0.1375,
@@ -771,14 +771,14 @@ export const visionModelCatalog = [
       "Open-weights (MIT) Z.ai GLM multimodal model on OpenRouter; opt-in page extraction.",
     // Computed, not measured: ~3,000 input + 560 output tokens at current list price = 0.073 cents.
     estimatedCostPerPageCents: 0.073,
-    // Priced at the most expensive host its vision profile allows (`only`: Wafer, Friendli, InferenceNet; Friendli lists
-    // $0.15/$0.50 per 1M), so the guard weight and max_price hold on every host it can route to.
+    // Priced at the most expensive host its vision profile allows (`only`: Wafer us, Friendli, InferenceNet us; Friendli
+    // lists $0.15/$0.50 per 1M), so the guard weight and max_price hold on every host it can route to.
     tokenPricing: {
       inputUsdPerMillion: 0.15,
       outputUsdPerMillion: 0.5,
       checked: "2026-11-12",
       basis: "pinned-route",
-      providers: ["wafer/nvfp4", "friendli", "inference-net/fp4"],
+      providers: ["wafer/us", "friendli", "inference-net/us"],
     },
     imageTokens: { kind: "fixed", tokens: 8_002, basis: "processor-max:glm5-next" },
   },

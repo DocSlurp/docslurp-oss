@@ -86,7 +86,7 @@ describe("GPT-6 Luna vision profile", () => {
     expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "provider", "reasoning", "stream", "stream_options", "temperature"]);
     // Only the price cap the guard weighed the request at.
     // Pinned to OpenAI and the content-filter retry hosts, never OpenAI Flex; max_price at the route price admits them all.
-    expect(body.provider).toEqual({ only: ["openai", "amazon-bedrock/us-east-1", "azure/us"], ignore: ["openai/flex"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
+    expect(body.provider).toEqual({ only: ["amazon-bedrock/us-east-1", "azure/us"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
     expect(visionMaxPrice(LUNA)).toMatchObject({ prompt: 0.11, completion: 0.55 });
   });
 
@@ -119,7 +119,7 @@ describe("GPT-6 Luna vision profile", () => {
       { provider: "Amazon Bedrock", choices: [{ message: { content: "# Full page" }, finish_reason: "stop" }], usage: { prompt_tokens: 2000, completion_tokens: 600, cost: 0.00055 } },
     ]);
     expect(bodies).toHaveLength(2);
-    expect(bodies[0]!.provider).toEqual({ only: ["openai", "amazon-bedrock/us-east-1", "azure/us"], ignore: ["openai/flex"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
+    expect(bodies[0]!.provider).toEqual({ only: ["amazon-bedrock/us-east-1", "azure/us"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
     // The retry goes to the preferred hosts only (order, no fallbacks), under the same max_price, which admits them.
     expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false, max_price: visionMaxPrice(LUNA) });
     expect(result).toMatchObject({ text: "# Full page", finishReason: "stop", inputTokens: 2400, outputTokens: 600, attempts: 2 });

@@ -153,3 +153,4 @@ export type { ComputeExecutionScope, ComputeCohortGrant } from "./compute-observ
 
 export type { ComputeAllocationAdmission, ComputeAllocationPending, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "./compute-observations.js";
 export * from "./ocr-escalation-routes.js";
+export * from "./capability-pools.js";

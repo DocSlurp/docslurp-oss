@@ -3,7 +3,8 @@ import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed, AutomaticCallRefusedError, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
-import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
+import { findProviderRoutingExclusion, ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
+import { defaultVisionFallbackModel, recordPoolFailover, recordPoolServed, visionPoolMemberId } from "../lib/capability-pools.js";
 import {
   VISUAL_RELATIONSHIP_INSTRUCTIONS,
   MARKDOWN_LATEX_VISION_PROMPT,
@@ -217,6 +218,11 @@ export interface VisionExecutionResult {
   baseUrl: string | null;
   fallbackUsed: boolean;
   fallbackReason: string | null;
+  /**
+   * The vision capability pool member that served the page (capability-pools.ts poolMemberId), when the served model is
+   * a pool member: the fallback's when `fallbackUsed`. For per-page records.
+   */
+  poolMemberId?: string;
   /** Provider finish reason of the (first) choice; undefined for local runtimes. */
   finishReason?: string | null;
   /** Model id the provider reports having served (`payload.model`); undefined when the runtime omits it. */
@@ -294,6 +300,12 @@ export async function executeVisionRuntime(args: {
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   /**
+   * A page read of the run's vision route: when the project names no fallback model, the deployment's default (the vision
+   * capability pool's next automatic member, or DOCSLURP_VISION_FALLBACK_MODEL) is the fallback. Chart calls and OCR
+   * second reads leave it unset: they never fall back to a page model.
+   */
+  poolFallback?: boolean;
+  /**
    * The run's vision attempt guard (lib/vision-attempt-guard.ts), admitting every request this call
    * sends, the fallback route's included. Required so no call path can skip it; null only outside a
    * run (benchmarks).
@@ -350,40 +362,53 @@ export async function executeVisionRuntime(args: {
   args = { ...args, requestText: schemaLabelsRequestText(selected.prompt), cacheOrderedPrompt: args.promptText === undefined };
   // Request profiles describe plain page transcription only; the fallback route is judged the same way.
   const routeArgs: RouteRequestArgs = { ...args, transcription: isPageTranscription(args) };
+  const primaryMember = visionPoolMemberId(selected.modelUri);
+  // The project's fallback, else (page reads in a run only) the deployment's pool default.
+  const fallbackUri = selected.remoteFallbackModelUri
+    ?? (args.poolFallback && args.gate && selected.runtime !== "remote-openai" ? defaultVisionFallbackModel(selected.modelUri) : null);
   try {
-    return await runRouteVisionRequest(selected, selected.prompt, routeArgs);
+    const served = await runRouteVisionRequest(selected, selected.prompt, routeArgs);
+    if (primaryMember) recordPoolServed("vision", primaryMember);
+    return primaryMember ? { ...served, poolMemberId: primaryMember } : served;
   } catch (error) {
     // A refused request is not a route failure: the fallback route would be refused the same way. A route refused
     // for billing above its bound is the exception: the fallback is a different route with its own count.
     const stop = findVisionGuardStop(error);
     if (stop && stop.reason !== "route-overrun") throw error;
-    if (!selected.remoteFallbackModelUri || selected.runtime === "remote-openai") {
+    if (!fallbackUri || selected.runtime === "remote-openai") {
       throw error;
     }
+    const fallbackMember = visionPoolMemberId(fallbackUri);
+    const failoverReason = findProviderRoutingExclusion(error) ? "routing" : "unavailable";
     // The fallback is an automatic call: besides the call-time policy it must keep the margin at the fallback route's
     // current price (automatic-call-margin.ts). Refused: the primary's error stands and no fallback request is sent.
     let fallbackDecision: ReturnType<typeof assertAutomaticModelCallAllowed> = null;
     if (args.gate) {
-      const fallbackRoute = visionAutomaticRoute(selected.remoteFallbackModelUri);
+      const fallbackRoute = visionAutomaticRoute(fallbackUri);
       await prepareAutomaticCallPrices("page-transcription", [fallbackRoute]);
       try {
-        fallbackDecision = assertAutomaticModelCallAllowed(selected.remoteFallbackModelUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute, role: "fallback" });
+        fallbackDecision = assertAutomaticModelCallAllowed(fallbackUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute, role: "fallback" });
       } catch (refusal) {
-        if (refusal instanceof AutomaticCallRefusedError) throw error;
+        if (refusal instanceof AutomaticCallRefusedError) {
+          recordPoolFailover("vision", primaryMember, null, "margin");
+          throw error;
+        }
         throw refusal;
       }
     }
     const fallbackProvider = (() => {
       try {
-        return new URL(selected.remoteFallbackModelUri).hostname.toLowerCase();
+        return new URL(fallbackUri).hostname.toLowerCase();
       } catch {
         return "unknown";
       }
     })();
     // Never fail over to a hosted model when the project forbids it.
-    if (!isProviderCallAllowed(args.privacyMode, { provider: fallbackProvider, model: "", modelUri: selected.remoteFallbackModelUri, capability: "vision" })) {
+    if (!isProviderCallAllowed(args.privacyMode, { provider: fallbackProvider, model: "", modelUri: fallbackUri, capability: "vision" })) {
+      recordPoolFailover("vision", primaryMember, null, "privacy");
       throw error;
     }
+    recordPoolFailover("vision", primaryMember, fallbackMember, failoverReason);
 
     const fallbackReason = error instanceof Error ? error.message : String(error);
     // The primary's requests may have been billed (a rejected output, a stream cut off): kept for the caller to
@@ -397,8 +422,8 @@ export async function executeVisionRuntime(args: {
       // Inside the try: a fallback refused at setup still carries the primary's billed failure to the caller.
       const fallbackConfig = normalizeVisionConfig({
         ...args.vision,
-        target: inferModelTarget(selected.remoteFallbackModelUri),
-        modelUri: selected.remoteFallbackModelUri,
+        target: inferModelTarget(fallbackUri),
+        modelUri: fallbackUri,
         remoteFallbackModelUri: null,
       }, args.cfg, args.outputSchema);
       assertProviderAllowed(args.privacyMode, visionCall(fallbackConfig));
@@ -408,6 +433,7 @@ export async function executeVisionRuntime(args: {
       throw fallbackError;
     }
 
+    if (fallbackMember) recordPoolServed("vision", fallbackMember);
     if (fallbackDecision) {
       reportAutomaticCallOutcome(fallbackDecision, {
         costUsd: fallback.costCents !== undefined ? fallback.costCents / 100 : null,
@@ -418,6 +444,7 @@ export async function executeVisionRuntime(args: {
     return {
       ...fallback,
       ...(primaryFailure ? { primaryFailure } : {}),
+      ...(fallbackMember ? { poolMemberId: fallbackMember } : {}),
       fallbackUsed: true,
       fallbackReason
     };

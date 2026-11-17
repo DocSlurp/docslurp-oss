@@ -59,7 +59,7 @@ describe("GLM 5.3 Flash vision profile", () => {
   });
 
   it("routes only to endpoints measured to read the image, with failover confined to those endpoints", () => {
-    expect(openRouterProviderParams(GLM)).toEqual({ provider: { only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true } });
+    expect(openRouterProviderParams(GLM)).toEqual({ provider: { only: ["wafer/us", "friendli", "inference-net/us"], sort: "price", allow_fallbacks: true } });
   });
 
   it("caps output at 8k and never raises a smaller shared cap", () => {
@@ -98,7 +98,7 @@ describe("GLM 5.3 Flash vision profile", () => {
   it("keeps an explicitly chosen template but still sends the profile routing, reasoning and cap", async () => {
     const body = await requestBody(GLM, "layout");
     expect(body.messages[1].content[0].text).toBe(visionPromptTemplates.layout);
-    expect(body.provider).toEqual({ only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(GLM) });
+    expect(body.provider).toEqual({ only: ["wafer/us", "friendli", "inference-net/us"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(GLM) });
     expect(body.reasoning).toEqual({ effort: "minimal" });
     expect(body.max_tokens).toBe(8_192);
   });
