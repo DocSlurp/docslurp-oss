@@ -1,23 +1,16 @@
-import { createHmac, hkdfSync, randomBytes } from "node:crypto";
+import { hkdfSync, randomBytes } from "node:crypto";
 
 /**
- * Per-organization salt for hosted and shared-endpoint model prompts that carry tenant content. This is the one salt
- * helper for server and worker (the server's `chatSystemSaltLine` is `orgPromptSaltLine`).
+ * Server secret subkeys (HKDF of `EVIDENCE_TAG_KEY`, else `BETTER_AUTH_SECRET`), used for chat evidence tags, and the
+ * message layout of private-endpoint chat calls.
  *
- * Every organization shares DocSlurp's provider accounts, and providers (and shared vLLM endpoints) cache repeated
- * prompt prefixes automatically. A prompt whose prefix is tenant content (a document, a page image, chunks, a query,
- * project instructions) would let one organization detect, by latency or a cache discount, that another recently sent
- * the same content. Starting every such prompt with a value keyed by the organization (HMAC under a server secret, so
- * it cannot be computed from an org id) keeps provider cache reuse inside one organization. Requests that cannot carry
- * a leading line send the same value as the endpoint's cache-isolation field (vLLM `cache_salt`).
- *
- * Without an organization the salt is random, so nothing is shared.
+ * Model prompts carry no per-organization salt: provider prefix caches are shared across organizations so fixed
+ * prefixes stay cache hits (cost and latency). Organization isolation covers data DocSlurp stores and serves, not
+ * provider-side prompt caches.
  */
 
 /** Minimum length of an explicit `EVIDENCE_TAG_KEY`; production refuses a shorter one (server config, worker startup, here). */
 export const SERVER_SECRET_KEY_MIN_LENGTH = 32;
-
-const ORG_PROMPT_SALT_LABEL = "docslurp-org-prompt-salt-v1";
 
 const derivedKeys = new Map<string, Buffer>();
 let warnedShortKey = false;
@@ -60,42 +53,19 @@ export function resetServerSecretKeysForTests(): void {
   warnedShortKey = false;
 }
 
-/** Test seam (alias of {@link resetServerSecretKeysForTests}). */
-export const resetOrgPromptSaltKeyForTests = resetServerSecretKeysForTests;
-
-/** The org's 16-hex salt (stable per org and key), or a fresh random one when there is no organization. */
-export function orgPromptSalt(orgId: string | null | undefined): string {
-  const org = typeof orgId === "string" ? orgId.trim() : "";
-  return org
-    ? createHmac("sha256", serverSecretKey(ORG_PROMPT_SALT_LABEL)).update("org-prompt").update("\0").update(org).digest("hex").slice(0, 16)
-    : randomBytes(8).toString("hex");
-}
-
-/** The org's salt line: the first line of a prompt that carries tenant content. */
-export function orgPromptSaltLine(orgId: string | null | undefined): string {
-  return `Workspace ${orgPromptSalt(orgId)}.`;
-}
-
-/** `system` with the org salt line first. */
-export function withOrgPromptSalt(orgId: string | null | undefined, system: string | undefined): string {
-  return [orgPromptSaltLine(orgId), system].filter(Boolean).join("\n\n");
-}
-
 /**
- * The message layout of a private-endpoint chat call for one organization.
+ * The message layout of a private-endpoint chat call.
  *
- * - Default: the salt line opens the system message, before any instructions.
+ * - Default: the instructions are the system message.
  * - A model registered with `systemMessage: false` (its chat template rejects or misreads the system role) gets no
- *   system message: the instructions open the user turn, and the salt goes as `cache_salt` (pass
- *   `orgPromptSalt(orgId)` as `cacheSalt` to `authorizePrivateModelCall`), which keys vLLM's prefix cache per
- *   organization without adding a token. Such an endpoint must accept `cache_salt` (vLLM does).
+ *   system message: the instructions open the user turn.
  */
 export function privateChatLayout(
   model: { systemMessage?: boolean } | null | undefined,
-  args: { orgId: string | null | undefined; system?: string; prompt: string },
+  args: { system?: string; prompt: string },
 ): { system?: string; prompt: string } {
   if (model?.systemMessage === false) {
     return { prompt: args.system ? `${args.system}\n\n${args.prompt}` : args.prompt };
   }
-  return { system: withOrgPromptSalt(args.orgId, args.system), prompt: args.prompt };
+  return { system: args.system || undefined, prompt: args.prompt };
 }

@@ -1,4 +1,14 @@
-## Organization isolation follow-ups (2026-11-16)
+## Data-plane isolation relaxed for performance (2026-11-16)
+
+Owner decision: isolation keeps everything that stops one organization reading another's data (org in every cache and storage key, org predicates, per-run job authorization, chat and search scoping, per-org quarantine), and drops measures that only cost latency, throughput or money.
+
+- Removed the per-organization provider prompt salt everywhere (worker text and Anthropic calls, vision page reads, media frame descriptions, server search helpers, chat answers and the chat agent, private-endpoint calls, Llama Guard moderation) and vLLM `cache_salt`, so fixed prompt prefixes are provider cache hits again. Vision request bodies are byte-identical to before #450 (golden tests).
+- Removed `ROUTING_DECISION_STATE_SALT`, the per-org OpenRouter `user` field and `tenantFree` on page-router decision calls (back to the pre-#452 request).
+- Query-embedding, vector-result and search response caches are one shared bounded LRU each, with the organization in the key (the response cache also compares the stored org key on read); no per-org partitions or caps, so one organization can use the whole cache again (1000 embedding entries, 500 responses).
+- `recordJobMeta` no longer runs an extra organization-count query per job; `GET /v1/jobs/:id` still authorizes every run.
+- `systemMessage: false` private text models keep their layout (instructions in the user turn) without a salt.
+
+## Organization isolation follow-ups (2026-11-16; prompt salts and cache partitions later removed, see above)
 
 - Llama Guard output moderation opens the user turn with the per-org salt line (its template takes no system role; a system message changed a verdict category). Verdicts and categories were identical with and without the line on 12 safe and unsafe pairs.
 - Page-router decision calls send OpenRouter a per-org `user` (an HMAC), but their states remain unsalted (open gap, `TODO.md`): a salt part changed calibrated answers. `ROUTING_DECISION_STATE_SALT=1` turns the state salt on once a policy pack is fit with it; only the fixed health-canary state may skip it.

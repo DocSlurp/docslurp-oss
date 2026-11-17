@@ -42,14 +42,8 @@ beforeEach(async () => {
 const meta = (id: string) => jobs.jobMetaFor(id, "reprocess", { estimate: null });
 
 describe("job organization isolation", () => {
-  it("refuses to stamp one job id on runs of two organizations", async () => {
-    await expect(jobs.recordJobMeta(["run-a", "run-b"], meta("run-a"))).rejects.toThrow(/one organization/);
-    const rows = await sql<{ id: string; job_id: string | null }[]>`select id, job_id from project_runs order by id`;
-    expect(rows.every((row) => row.job_id === null)).toBe(true);
-  });
-
   it("never reports another organization's run under a shared job id, even if one exists", async () => {
-    // A row shape the writer now refuses (both runs carry org A's job id): the read still isolates.
+    // Both runs carry org A's job id: the read authorizes every run, so each org sees only its own.
     await sql`update project_runs set job_id = 'run-a'`;
     const forA = await jobs.getJobStatus("run-a", "u-a");
     expect(forA?.runIds).toEqual(["run-a"]);

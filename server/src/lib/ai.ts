@@ -2,11 +2,10 @@ import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, createOpenRouterPromptCacheFetch, needsExplicitPromptCache, chatModelPromptAddendum, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { createHmac, randomBytes } from "node:crypto";
-import { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, evidenceTagKeyBytes, resetEvidenceTagKeyForTests } from "./chat-prompt-salt.js";
-import { currentRequestOrgId } from "./request-context.js";
-import { orgPromptSalt, privateChatLayout } from "@docslurp/shared/org-prompt-salt";
+import { EVIDENCE_TAG_KEY_MIN_LENGTH, evidenceTagKeyBytes, resetEvidenceTagKeyForTests } from "./chat-prompt-salt.js";
+import { privateChatLayout } from "@docslurp/shared/org-prompt-salt";
 
-export { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, resetEvidenceTagKeyForTests };
+export { EVIDENCE_TAG_KEY_MIN_LENGTH, resetEvidenceTagKeyForTests };
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -54,10 +53,8 @@ const PRIVATE_ENDPOINT_API_KEY = "private-endpoint";
 async function generatePrivateEndpointText(args: {
   operation: string;
   modelUri: string;
-  /** Instructions, without the salt: the org salt is added here (a system line, or cache_salt for a model without the system role). */
+  /** Instructions: a system message, or the start of the user turn for a model registered without the system role. */
   system?: string;
-  /** The tenant whose content is sent; null gives a random salt (nothing shared). */
-  orgId: string | null | undefined;
   prompt: string;
   maxOutputTokens: number;
   privacyMode: PrivacyMode;
@@ -72,10 +69,8 @@ async function generatePrivateEndpointText(args: {
     capability: "text",
     operation: args.operation,
     auditScope: args.auditScope,
-    cacheSalt: orgPromptSalt(args.orgId),
   });
-  // A shared private endpoint may prefix-cache (vLLM does by default): the org salt goes first (privateChatLayout).
-  const layout = privateChatLayout(call.route.model, { orgId: args.orgId, system: args.system, prompt: args.prompt });
+  const layout = privateChatLayout(call.route.model, { system: args.system, prompt: args.prompt });
   return withObservation(
     {
       name: args.operation,
@@ -191,17 +186,10 @@ export async function generateOpenRouterText(args: {
    * organization's China-provider restriction is still added on top.
    */
   providerPreferences?: Record<string, unknown>;
-  /**
-   * The tenant whose content or query is sent; defaults to the request's organization. The prompt goes after that
-   * org's salt line, so provider prefix caches never match across organizations (random line without an org).
-   */
-  orgId?: string | null;
 }): Promise<{ text: string; usage: TextGenerationUsage }> {
-  const orgId = args.orgId ?? currentRequestOrgId();
-  const saltLine = chatSystemSaltLine(orgId);
   // `llm://private/<alias>/<model>` routes go to the operator-registered endpoint.
   if (isPrivateModelUri(args.model)) {
-    const generated = await generatePrivateEndpointText({ ...args, system: undefined, orgId, operation: args.operation ?? "api.text.private", modelUri: args.model });
+    const generated = await generatePrivateEndpointText({ ...args, operation: args.operation ?? "api.text.private", modelUri: args.model });
     return { text: generated.text, usage: generated.usage };
   }
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: args.operation ?? "api.text.openrouter", target: "hosted" });
@@ -242,7 +230,6 @@ export async function generateOpenRouterText(args: {
           context: args.observability,
         }),
         model: provider(model),
-        system: saltLine,
         prompt: args.prompt,
         maxOutputTokens: args.maxOutputTokens,
         abortSignal: args.signal,
@@ -362,11 +349,8 @@ export async function generateOpenRouterDocumentText(args: {
     const generated = await generatePrivateEndpointText({
       operation: "api.chat.documents",
       modelUri: args.model,
-      // A shared private endpoint may prefix-cache (vLLM does by default): the org salt goes first, before the project's
-      // instructions (generatePrivateEndpointText). Private routes keep the question-first order and a random per-call
-      // evidence tag.
+      // Private routes keep the question-first order and a random per-call evidence tag.
       system: args.system,
-      orgId: args.evidenceScope,
       prompt: `${withoutEvidenceTags(args.prompt)}\n\nProject evidence:\n\n${inlineDocuments}`,
       maxOutputTokens: args.maxOutputTokens,
       privacyMode: args.privacyMode,
@@ -447,8 +431,7 @@ export async function generateOpenRouterDocumentText(args: {
           // Chat Completions for models that cache only at explicit markers (OpenRouter ignores part markers on the
           // Responses API); the Responses API for the rest, as before.
           model: needsExplicitPromptCache(model) ? provider.chat(model) : provider(model),
-          // The org salt comes first: nothing tenant-specific precedes it in the cached prefix.
-          system: [chatSystemSaltLine(args.evidenceScope), args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n"),
+          system: [args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n"),
           // Stable first, per-request last: the evidence (byte-identical when a follow-up retrieves the same
           // documents, within one org) before the history and question, so providers with automatic prefix caching
           // can reuse it. Claude marks only the system prompt (openrouter-prompt-cache.ts).
