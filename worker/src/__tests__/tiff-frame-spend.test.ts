@@ -1,6 +1,6 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { defaultPipelineFeatures, installTestPricing, OPEN_PRICING, pricing, TEST_PAGE_CREDITS } from "@docslurp/shared";
+import { defaultPipelineFeatures, PAGE_READ_METRICS, installTestPricing, OPEN_PRICING, pricing, TEST_PAGE_CREDITS } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { enforceRunSpendForCharge, setSpendCheckConfig, SpendCheckUnavailableError } from "../db/spend-check.js";
@@ -152,8 +152,9 @@ describe("TIFF frame-count spend check", () => {
     // tiff-a's frames are counted but not yet charged (its activity has not checkpointed): tiff-b sees them.
     await expect(authorizeImageFrames(await stateFor("run-ten", "tiff-b"), "tiff-b", "extract-markdown", 30)).rejects.toMatchObject({ reason: "spend-paused" });
     expect((await control("run-ten"))!.control_state).toBe("paused");
-    expect((await store.pageBasisLedger.countedImageFrames("run-ten")).map((row) => [row.documentId, row.pageCount, row.chargedPages]).sort()).toEqual([["tiff-a", 30, 0], ["tiff-b", 30, 0]]);
+    // Both TIFFs' 29 uncharged frames past intake are in the run's one measured sum.
+    expect(await store.pageBasisLedger.runMeasurements("run-ten", "none", PAGE_READ_METRICS)).toEqual({ fastPages: 0, ocrFrames: 58, documentChargedPages: 0 });
     // Scoped to its run.
-    expect((await store.pageBasisLedger.countedImageFrames("run-low")).map((row) => row.documentId)).toEqual(["tiff-40"]);
+    expect((await store.pageBasisLedger.runMeasurements("run-low", "none", PAGE_READ_METRICS)).ocrFrames).toBe(39);
   }, 60_000);
 });

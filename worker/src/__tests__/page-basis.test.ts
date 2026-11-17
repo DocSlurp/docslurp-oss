@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { extraCreditsForMeasuredPages } from "../lib/office-page-count.js";
+import { reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
 import type { Document, ProjectRun } from "../models.js";
-import { PageBasis, PageBasisUnboundError, UnfundedPagesError, type PageBasisLedger, type PageCharge, type PageMeasurement } from "../pipeline/page-basis.js";
+import { PageBasis, PageBasisInvariantError, PageBasisUnboundError, UnfundedPagesError, type PageBasisLedger, type PageCharge, type PageMeasurement } from "../pipeline/page-basis.js";
 import { MemoryPageBasisLedger, bindMemoryPageBasis, memoryPageBasis } from "../pipeline/page-basis-memory.js";
 import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
 
@@ -186,6 +187,96 @@ describe("spend: pause, refuse, and the run-wide sum", () => {
     charged.ledger.documents.get("a")!.chargedPages = 30;
     await expect(charged.pageBasis.record(b2, { kind: "image-frames", frames: 30 })).resolves.toBeDefined();
     expect(charged.ledger.paused).toBeNull();
+  });
+});
+
+describe("council #469: every check weighs one run-wide sum, on every attempt", () => {
+  it("a text raise then an Office count, each funded alone, pause the run together (order does not matter)", async () => {
+    for (const order of ["text-first", "docx-first"] as const) {
+      const text = doc("t", { mimeType: "text/plain" });
+      const docx = doc("w", { mimeType: DOCX });
+      const N = 5_000;
+      const textOwes = pageCredits("fast", N - 1);
+      const docxOwes = extraCreditsForMeasuredPages(pipeline, 1, N, "text-rule");
+      const { pageBasis, ledger } = basis([text, docx], { balance: Math.max(textOwes, docxOwes) * 1.5 });
+      const steps = [
+        () => pageBasis.record(text, { kind: "page-count", pages: N }),
+        () => pageBasis.record(docx, { kind: "billing-pages", pages: N, method: "text-rule", format: "office-word" }),
+      ];
+      if (order === "docx-first") steps.reverse();
+      await steps[0]!();
+      await expect(steps[1]!(), order).rejects.toBeInstanceOf(UnfundedPagesError);
+      expect(ledger.paused, order).not.toBeNull();
+    }
+  });
+
+  it("uncharged TIFF frames and Fast pages are one sum: a frame count then a text raise pause the run", async () => {
+    const tiff = doc("i", { mimeType: "image/tiff" });
+    const text = doc("t", { mimeType: "text/plain" });
+    const framesOwe = extraCreditsForMeasuredPages(pipeline, 1, 1_000, null, { mode: "ocr" });
+    const textOwes = pageCredits("fast", 19_999);
+    const { pageBasis, ledger } = basis([tiff, text], { balance: Math.max(framesOwe, textOwes) * 1.2 });
+    await pageBasis.record(tiff, { kind: "image-frames", frames: 1_000 });
+    await expect(pageBasis.record(text, { kind: "page-count", pages: 20_000 })).rejects.toBeInstanceOf(UnfundedPagesError);
+    expect(ledger.paused).not.toBeNull();
+  });
+
+  it("a raised count found already persisted on a retry (the in-memory count matches) is checked again", async () => {
+    const d = doc("p", { pageCount: 10, intakePageCount: 10, pageCountSource: "counted" });
+    const { pageBasis, ledger } = basis([d], { balance: 0.0001 });
+    ledger.failNext = "balance";
+    await expect(pageBasis.record(d, { kind: "page-count", pages: 5_000 })).rejects.toBeInstanceOf(SpendCheckUnavailableError);
+    // The retried activity loads the persisted count.
+    const retried = doc("p", { pageCount: 5_000, intakePageCount: 10, pageCountSource: "counted" });
+    await expect(pageBasis.record(retried, { kind: "page-count", pages: 5_000 })).rejects.toMatchObject({ name: "RunPolicyError", paused: true });
+  });
+
+  it("reconcile: an under-claimed PDF paused once is checked again after resume, though the reloaded count shows no mismatch", async () => {
+    const mk = (pageCount: number) => doc("p", { pageCount, pageCountSource: "counted", intakePageCount: 1 });
+    const run = { id: "run-1", orgId: "org-1", userId: "user-1", pagesTotal: 1, pipeline, stats: {}, artifacts: {} } as unknown as ProjectRun;
+    const ledger = new MemoryPageBasisLedger({ balance: 1 }).seed([mk(1)]);
+    const first = WorkflowState.create({ ...run }, [mk(1)]);
+    first.pageBasis = new PageBasis(first, ledger);
+    await expect(reconcileProcessedPdfPages(first, first.documents[0]!, 20_000)).rejects.toBeInstanceOf(UnfundedPagesError);
+    // The sweep resumes the run; the retried activity reloads the document with the raised count.
+    ledger.paused = null;
+    const second = WorkflowState.create({ ...run }, [mk(ledger.documents.get("p")!.pageCount)]);
+    second.pageBasis = new PageBasis(second, ledger);
+    await expect(reconcileProcessedPdfPages(second, second.documents[0]!, 20_000)).rejects.toBeInstanceOf(UnfundedPagesError);
+    expect(ledger.checks).toHaveLength(2);
+    expect(ledger.paused).not.toBeNull();
+  });
+
+  it("refuses counts and charges that are not finite, before anything moves", async () => {
+    for (const pages of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+      const d = doc("p");
+      const { pageBasis, run } = basis([d], { balance: 0 });
+      await expect(pageBasis.record(d, { kind: "page-count", pages })).rejects.toBeInstanceOf(PageBasisInvariantError);
+      expect(run.pagesTotal).toBe(1);
+    }
+    for (const frames of [Number.NaN, 0, -5, 1e20]) {
+      const d = doc("i", { mimeType: "image/tiff" });
+      const { pageBasis, run, ledger } = basis([d], { balance: 0 });
+      await expect(pageBasis.record(d, { kind: "image-frames", frames })).rejects.toBeInstanceOf(PageBasisInvariantError);
+      expect(run.pagesTotal).toBe(1);
+      expect(d.pageCount).toBe(1);
+      expect(ledger.pageCountWrites).toEqual([]);
+    }
+    for (const pages of [Number.NaN, -3, Number.POSITIVE_INFINITY]) {
+      const d = doc("w", { mimeType: DOCX });
+      const { pageBasis } = basis([d], { balance: 0 });
+      await expect(pageBasis.record(d, { kind: "billing-pages", pages, method: "text-rule", format: "office-word" })).rejects.toBeInstanceOf(PageBasisInvariantError);
+      expect(d.billingPages ?? null).toBeNull();
+    }
+    const ledger = new MemoryPageBasisLedger({ balance: 100 });
+    await expect(ledger.checkCharge({ id: "r", orgId: "o", userId: "u" }, Number.NaN)).rejects.toBeInstanceOf(SpendCheckUnavailableError);
+    expect(await ledger.largestFundedCharge({ id: "r", orgId: "o", userId: "u" }, 3, () => Number.NaN)).toBe(0);
+  });
+
+  it("a run without a pipeline is refused with a typed invariant error, never priced as free", async () => {
+    const d = doc("w", { mimeType: DOCX });
+    const { pageBasis } = basis([d], { run: { pipeline: undefined as never } });
+    await expect(pageBasis.record(d, { kind: "billing-pages", pages: 400, method: "text-rule", format: "office-word" })).rejects.toBeInstanceOf(PageBasisInvariantError);
   });
 });
 

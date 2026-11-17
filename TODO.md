@@ -1,6 +1,11 @@
 # TODO
 - [ ] Parked Modal VMs (compute reuse, #459): hand a session's idle VM to a session waiting at the worker VM cap (park instead of terminate in the budget reaper, and let `createVm`'s wait adopt a parked VM) so capacity pressure does not force a 2 s cold start; consider a full wipe at park time so a crash between park and adoption leaves no previous-document inputs in a parked VM until its lifetime ends (council M3/M4).
 
+- Page basis follow-ups (council, PR #469, 2026-11-17):
+  - Organization-wide measured-page overdraw: every page-basis sum (`run_measured_pages`, migration 0187) is per run, so concurrent runs of one organization each check their own measured pages against the whole balance. Repro: three runs in an organization with 3 credits each measure one DOCX at 500 pages (about 2.5 credits each); none pauses, and together they owe about 7.5 at completion. Sum measured-but-uncharged pages across the organization's active runs (or hold them as reservations like credit leases) without adding a round trip per check.
+  - The page-task overdraft bound grows with page tasks in flight: each task checks the balance before its read (`authorizeOcrRead`), so the run can go over by up to one batch per concurrent task before the pause lands, the same in-flight bound `worker/src/db/spend-check.ts` documents for checkpoints.
+  - Image page equivalents (an uploaded image's decoded area above one page, `billing_pages`) are not in the run-wide measured sum, which prices only Fast pages of paged documents and uncharged image frames; price them there once their billing class is settled.
+
 - Organization isolation follow-ups (council, PR #450, 2026-11-16):
   - Contract step for #451: drop `quarantined_sources` (0101) once no release reads it (now `org_quarantined_sources`, 0184), and its roles.mjs entry.
   - Source quarantine is per organization since #451, so one hostile file can cost one worker per uploading organization (bounded per org by the teardown breaker, not fleet-wide). Add a fleet-wide signal used for routing only (a hash listed by any org runs elsewhere on a single-use VM in a capped lane, indistinguishable to the uploader) and an alert on distinct orgs per hash and fleet teardowns per hour (council #451 M2).

@@ -7,7 +7,8 @@ import { DOCUMENT_FAILURE_MARKERS, IMAGE_MAX_FRAMES } from "@docslurp/shared";
 
 import { RunPolicyError } from "../lib/document-failure.js";
 import { emitDocumentPageProgress, isCostCapExceeded } from "../pipeline/checkpoints.js";
-import { UnfundedPagesError } from "../pipeline/page-basis.js";
+import { PageBasisInvariantError, UnfundedPagesError } from "../pipeline/page-basis.js";
+import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { OcrRefusedError } from "./mode.js";
 
@@ -45,7 +46,7 @@ export async function authorizeOcrRead(state: WorkflowState, documentId: string,
   const decision = await state.pageBasis.fund({ kind: "page-read", mode: "ocr", pages });
   if (!decision.funded) {
     console.warn(`[ocr] ${label} run=${state.run.id} document=${documentId} pages=${pages} reason=unfunded credits=${decision.credits.toFixed(2)}`);
-    throw new RunPolicyError(`Credits do not cover the OCR read of ${subject}; run paused`);
+    throw new UnfundedPagesError(`Credits do not cover the OCR read of ${subject}; run ${decision.paused ? "paused" : "stopped"}`, decision.paused, decision.credits, 0);
   }
 }
 
@@ -56,9 +57,7 @@ export async function authorizeOcrRead(state: WorkflowState, documentId: string,
  * already covered the first frame) and at most `max`.
  */
 export async function affordableImageFrames(state: WorkflowState, documentId: string, max: number): Promise<number> {
-  const document = state.documents.find((candidate) => candidate.id === documentId);
-  if (!document) throw new Error(`image ${documentId} is not a document of run ${state.run.id}`);
-  return await state.pageBasis.affordable({ kind: "image-frames", document }, max);
+  return await state.pageBasis.affordable({ kind: "image-frames", document: imageDocument(state, documentId) }, max);
 }
 
 /**
@@ -68,8 +67,7 @@ export async function affordableImageFrames(state: WorkflowState, documentId: st
  * the image is refused before anything is charged. The count itself needs the boundary's read: the host never parses the file.
  */
 export async function authorizeImageFrames(state: WorkflowState, documentId: string, stageName: string, frames: number): Promise<void> {
-  const document = state.documents.find((candidate) => candidate.id === documentId);
-  if (!document) return;
+  const document = imageDocument(state, documentId);
   const recorded = Math.max(1, Math.trunc(document.pageCount) || 1);
   let failure: unknown = null;
   try {
@@ -83,6 +81,13 @@ export async function authorizeImageFrames(state: WorkflowState, documentId: str
     throw unfundedFramesError(state, documentId, frames, failure.paused, `owes=${failure.credits.toFixed(2)} intake=${failure.intakePages}`);
   }
   if (failure) throw failure;
+}
+
+/** The run's own image being read: an image that is not one of the run's documents is an invariant failure, never a skipped check. */
+function imageDocument(state: WorkflowState, documentId: string): Document {
+  const document = state.documents.find((candidate) => candidate.id === documentId);
+  if (!document) throw new PageBasisInvariantError(`image ${documentId} is not a document of run ${state.run.id}`);
+  return document;
 }
 
 /**

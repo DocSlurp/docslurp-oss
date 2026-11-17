@@ -9,6 +9,7 @@ const waitFor = async (predicate: () => boolean) => {
 const tick = (ms = 1) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 class SlotDenied extends Error {}
+class SpendPaused extends Error {}
 
 describe("runPageFanOut", () => {
   it("never exceeds the run's fan-out cap and processes every bundle", async () => {
@@ -54,6 +55,55 @@ describe("runPageFanOut", () => {
     expect(stats.slotDenials).toBeLessThan(40);
     expect(stats.minWindow).toBeLessThanOrEqual(orgSlots);
     expect(sleeps.every((ms) => ms >= 1_000)).toBe(true);
+  });
+
+  it("requeues a bundle refused for funds, waits for the pause and the resume, then redispatches it", async () => {
+    let paused = false;
+    let refusals = 0;
+    const done: number[] = [];
+    const sleeps: number[] = [];
+    const run = runPageFanOut({
+      bundles: [1, 2, 3],
+      concurrency: 1,
+      run: async (page) => {
+        if (page === 2 && refusals === 0) { refusals++; paused = true; throw new SpendPaused(); }
+        done.push(page);
+        return zero;
+      },
+      onUsage: () => {}, isSlotUnavailable: () => false, isSpendPaused: (error) => error instanceof SpendPaused,
+      waitFor, sleep: async (ms) => { sleeps.push(ms); await new Promise(() => undefined); }, now: Date.now, random: () => 0.5,
+      isPaused: () => paused, isCancelled: () => false,
+    });
+    await tick(5);
+    // Paused: nothing more is dispatched until the resume.
+    expect(done).toEqual([1]);
+    paused = false;
+    const stats = await run;
+    expect(done).toEqual([1, 2, 3]);
+    expect(stats.spendPauses).toBe(1);
+  });
+
+  it("retries a spend-paused bundle after the wait when no pause signal arrives", async () => {
+    let refusals = 0;
+    const done: number[] = [];
+    const stats = await runPageFanOut({
+      bundles: [1],
+      concurrency: 1,
+      run: async (page) => { if (refusals++ < 2) throw new SpendPaused(); done.push(page); return zero; },
+      onUsage: () => {}, isSlotUnavailable: () => false, isSpendPaused: (error) => error instanceof SpendPaused,
+      waitFor, sleep: async () => { await tick(); }, now: Date.now, random: () => 0.5,
+      isPaused: () => false, isCancelled: () => false,
+    });
+    expect(done).toEqual([1]);
+    expect(stats.spendPauses).toBe(2);
+  });
+
+  it("without the spend-pause rule a refusal for funds fails the fan-out as before", async () => {
+    await expect(runPageFanOut({
+      bundles: [1], concurrency: 1, run: async () => { throw new SpendPaused(); },
+      onUsage: () => {}, isSlotUnavailable: () => false, waitFor, sleep: tick, now: Date.now, random: () => 0.5,
+      isPaused: () => false, isCancelled: () => false,
+    })).rejects.toBeInstanceOf(SpendPaused);
   });
 
   it("propagates a real failure after draining in-flight pages", async () => {

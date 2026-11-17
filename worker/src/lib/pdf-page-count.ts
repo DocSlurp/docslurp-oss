@@ -200,7 +200,9 @@ export const PDF_WALKED_PAGES_SLOT = "pdf-walked-pages";
  * - processed below walked (the reader stopped short, e.g. a /Count that under-claims the kids): the page count is lowered to
  *   what was processed, so only extracted pages bill, and the file is flagged `pdf-partially-extracted` (N of M pages) in the
  *   ingest report (owner decision 2026-11-05).
- * The walked count is kept in the run ledger so a retried stage reports the same N of M.
+ * The walked count is kept in the run ledger so a retried stage reports the same N of M. Every attempt ends with the page
+ * count authorized against the balance (a retry after a pause or a failed check finds the raised count already persisted and
+ * sees no mismatch, and is still checked): recording authorizes, and an attempt that records nothing authorizes explicitly.
  */
 export async function reconcileProcessedPdfPages(
   state: WorkflowState,
@@ -210,10 +212,13 @@ export async function reconcileProcessedPdfPages(
   const current = Math.max(1, Math.trunc(Number(document.pageCount)) || 1);
   const walked = Number(state.artifactLedger.readDocument(document.id, PDF_WALKED_PAGES_SLOT));
   const measured = Number.isSafeInteger(walked) && walked > current ? walked : current;
-  if (!Number.isSafeInteger(processed) || processed < 1) return { measured, processed, mismatch: "none" };
+  if (!Number.isSafeInteger(processed) || processed < 1) {
+    await state.pageBasis.authorize(document);
+    return { measured, processed, mismatch: "none" };
+  }
   if (processed > measured) {
     console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} pages, the page tree reported ${measured}: billing and authorizing ${processed}`);
-    // Recorded and authorized by the page basis (a raise).
+    // Recorded and authorized by the page basis.
     await state.pageBasis.record(document, { kind: "page-count", pages: processed });
     return { measured, processed, mismatch: "processed-above-measured" };
   }
@@ -221,10 +226,10 @@ export async function reconcileProcessedPdfPages(
     // Bill what was extracted: lower the page count to the pages processed, and keep the walked count for the report.
     console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} of ${measured} walked pages: billing ${processed}`);
     state.artifactLedger.recordDocument(document.id, PDF_WALKED_PAGES_SLOT, String(measured));
-    if (current > processed) {
-      await state.pageBasis.record(document, { kind: "page-count", pages: processed });
-    }
+    if (current > processed) await state.pageBasis.record(document, { kind: "page-count", pages: processed });
+    else await state.pageBasis.authorize(document);
     return { measured, processed, mismatch: "processed-below-measured" };
   }
+  await state.pageBasis.authorize(document);
   return { measured, processed, mismatch: "none" };
 }

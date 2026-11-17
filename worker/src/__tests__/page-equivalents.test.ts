@@ -476,11 +476,11 @@ describe("rendered-area equivalents are authorized like every measured page (cou
 
   it("a retry after a failed authorization authorizes again, though the count is already stored", async () => {
     // Each authorization reads the run's measured pages first; the first read fails, as a dropped connection would.
-    const readMeasured = store.pageBasisLedger.measuredPagesAboveIntake.bind(store.pageBasisLedger);
+    const readMeasured = store.pageBasisLedger.runMeasurements.bind(store.pageBasisLedger);
     let failNext = true;
-    const authorize = vi.spyOn(store.pageBasisLedger, "measuredPagesAboveIntake").mockImplementation(async (runId: string) => {
+    const authorize = vi.spyOn(store.pageBasisLedger, "runMeasurements").mockImplementation(async (...args) => {
       if (failNext) { failNext = false; throw new Error("spend check unavailable"); }
-      return await readMeasured(runId);
+      return await readMeasured(...args);
     });
     configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
@@ -499,7 +499,7 @@ describe("rendered-area equivalents are authorized like every measured page (cou
   });
 
   it("a cached render was authorized when it was cached: a hit measures and authorizes nothing again", async () => {
-    const authorize = vi.spyOn(store.pageBasisLedger, "measuredPagesAboveIntake");
+    const authorize = vi.spyOn(store.pageBasisLedger, "runMeasurements");
     configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
     const { calls, cache } = rasterHarness();
