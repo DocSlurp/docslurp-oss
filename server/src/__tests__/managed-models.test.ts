@@ -84,11 +84,11 @@ describe("platform-admin managed model route", () => {
 
   it("stores pipeline overrides in managed_models and rewrites the stored pipeline", async () => {
     sqlMock.mockResolvedValueOnce(projectRow()).mockResolvedValue([]);
-    const ok = await put(adminSession, { pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" }, textGeneration: { model: "qwen/qwen3.5-flash-02-23" } } });
+    const ok = await put(adminSession, { pipeline: { vision: { modelUri: "llm://openrouter/z-ai/glm-5.3-flash" }, textGeneration: { model: "qwen/qwen3.5-flash-02-23" } } });
     expect(ok.status, await ok.clone().text()).toBe(200);
     const update = sqlMock.mock.calls.find((call: unknown[]) => String((call[0] as string[]).join("?")).includes("update projects set managed_models"));
-    expect(update?.[1]).toEqual({ chat: {}, pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" }, textGeneration: { model: "qwen/qwen3.5-flash-02-23" } } });
-    expect((update?.[2] as { vision: { modelUri: string } }).vision.modelUri).toBe("llm://openrouter/google/gemini-2.5-flash-lite");
+    expect(update?.[1]).toEqual({ chat: {}, pipeline: { vision: { modelUri: "llm://openrouter/z-ai/glm-5.3-flash" }, textGeneration: { model: "qwen/qwen3.5-flash-02-23" } } });
+    expect((update?.[2] as { vision: { modelUri: string } }).vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
   });
 
   it("refuses Pro/Ultra (with a ? suffix), unpriced and uncatalogued pipeline models, and embedding changes once documents exist", async () => {
