@@ -2853,7 +2853,7 @@ export class Store {
   async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
     const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
     const vision = rows.filter((row) => row.visionStatus !== undefined);
-    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null);
+    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null || row.mathBits != null);
     for (const batch of batchedRows(source)) {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
@@ -2901,18 +2901,26 @@ export class Store {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
         text_layer: row.textLayer ?? null, scan_class: row.scanClass ?? null,
+        // Doppler's encoding words (migration 0186): all three or none, so one write never mixes two runs' words.
+        ...(row.mathBits != null && row.tableBits != null && row.encodingCounts != null
+          ? { math_bits: row.mathBits, table_bits: row.tableBits, encoding_counts: row.encodingCounts }
+          : { math_bits: null, table_bits: null, encoding_counts: null }),
       }));
       await this.sql`
-        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class)
-        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class
+        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class, math_bits, table_bits, encoding_counts)
+        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class, r.math_bits, r.table_bits, r.encoding_counts
         from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
-          document_id text, page_number integer, run_id text, text_layer text, scan_class text
+          document_id text, page_number integer, run_id text, text_layer text, scan_class text, math_bits bigint, table_bits bigint,
+          encoding_counts bigint
         )
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
             text_layer = coalesce(excluded.text_layer, document_page_facts.text_layer),
             scan_class = coalesce(excluded.scan_class, document_page_facts.scan_class),
+            math_bits = case when excluded.encoding_counts is null then document_page_facts.math_bits else excluded.math_bits end,
+            table_bits = case when excluded.encoding_counts is null then document_page_facts.table_bits else excluded.table_bits end,
+            encoding_counts = coalesce(excluded.encoding_counts, document_page_facts.encoding_counts),
             updated_at = now()
       `;
     }

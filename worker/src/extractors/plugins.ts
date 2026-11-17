@@ -33,8 +33,8 @@ import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
 import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
-import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
-import { settleUnknownGrids } from "../lib/doppler-page-facts-layout.js";
+import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout, sandboxedPdfPageFactsMathRead } from "./sandboxed-pdf-page-facts.js";
+import { settleUnknownGrids, withEncodingRoutes } from "../lib/doppler-page-facts-layout.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -829,7 +829,10 @@ function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
       base.set(page, { ...UNKNOWN_PAGE });
       filled += 1;
     }
-    const { layout, fromFacts, unknown } = settleUnknownGrids(base, facts);
+    const { layout: gridsSettled, fromFacts, unknown } = settleUnknownGrids(base, facts);
+    // Doppler's math and table encodings for each page (absent where unknown); classify-route reads them only with
+    // DOCSLURP_ENCODING_FACTS_ROUTING on.
+    const { layout } = withEncodingRoutes(gridsSettled, facts, { mathRead: sandboxedPdfPageFactsMathRead(job) });
     settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts, unknown, filled, walker: walkerPages(reported) };
   }
   settledLayouts.set(job, settled);

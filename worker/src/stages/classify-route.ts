@@ -41,6 +41,8 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
+import { encodingMathVisionFlags, TEXT_LAYER_TABLE_FLAGS, VISION_TABLE_FLAGS, type PageEncodingRoute } from "../lib/doppler-encoding-facts.js";
+import { readEncodingFactsRouting } from "../routing/flags.js";
 import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence, type PageTextLayerEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
 import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from "../lib/vision-routing-v2.js";
@@ -382,6 +384,11 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   /** Legacy vision routing v2 (lib/vision-routing-v2.ts). Off reproduces v1 routing. */
   routingV2?: boolean;
   /**
+   * Read Doppler's math and table encoding facts (`pageLayout` pages' `encodings`) in evidence routing. Omitted: the
+   * DOCSLURP_ENCODING_FACTS_ROUTING setting (routing/flags.ts readEncodingFactsRouting).
+   */
+  encodingRouting?: boolean;
+  /**
    * The parser VM's scans of the page texts' HTML tables (ClassifyRouteStage). Omitted, the tables are scanned
    * in-process, which the service profile refuses on the host.
    */
@@ -498,10 +505,12 @@ function buildEvidencePages(
   }
   const documentWithoutText = allPagesKnown && nativeWordTotal / pageCount < DRAWN_TEXT_MAX_WORDS_PER_PAGE;
   const drawnBytes = args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
+  const encodingRouting = args.encodingRouting ?? readEncodingFactsRouting();
   return texts.map((text, index) => {
     const pageNumber = index + 1;
     const layout = args.pageLayout?.get(pageNumber);
-    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
+    const encodings = encodingRouting ? layout?.encodings ?? null : null;
+    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, encodings, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
     const complexity = args.structuredComplexity?.get(pageNumber);
     const imageEvidence = evidence?.get(pageNumber);
     const layoutKnown = layout !== undefined && layout.images !== null;
@@ -539,7 +548,7 @@ function buildEvidencePages(
             `text-yield:expected-chars=${yieldEvidence!.expectedCharacters}:actual-chars=${yieldEvidence!.actualCharacters}:actual-utf8-bytes=${yieldEvidence!.actualTextBytes}`,
           ],
         }
-      : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
+      : encodingReadDecision({ authorized: decision.read, confidence: decision.confidence, signals: decision.signals }, encodings);
     // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
     // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
     // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
@@ -575,6 +584,39 @@ function buildEvidencePages(
 
 const UNCAPPED = Symbol("table-leak-uncapped");
 
+/** Signals of encoding routing (Doppler math and table encoding facts, DOCSLURP_ENCODING_FACTS_ROUTING). */
+export const ENCODING_NO_TABLE_SIGNAL = "encoding-no-table";
+export const ENCODING_MATH_GRID_SIGNAL = "encoding-math-grid";
+export const ENCODING_RASTER_TABLE_SIGNAL = "encoding-table-raster-candidate";
+export const ENCODING_MATH_READ_SIGNAL = "ocr-authorized:encoding-math-unreadable";
+export const ENCODING_TABLE_READ_SIGNAL = "ocr-authorized:encoding-table-outlines";
+
+/** `encoding-table:<flags>`: the table encodings that put a page on the table path. */
+function encodingTableSignal(encodings: PageEncodingRoute): string {
+  const flags = encodings.tableFlags.filter((flag) => TEXT_LAYER_TABLE_FLAGS.includes(flag) || VISION_TABLE_FLAGS.includes(flag));
+  return `encoding-table:${flags.join("+")}`;
+}
+
+/**
+ * The page-image decision with Doppler's encoding facts added (evidence routing; `encodings` only when encoding routing is
+ * on and the page's encodings are known). Facts can add a read, never remove one:
+ * - math only a read recovers (raster strips, glyph outlines, Type 3 bitmap fonts; unmapped math glyphs when the run did
+ *   not read math and the page has no TeX or MathML source): the page is read;
+ * - a table drawn as glyph outlines: the page is read;
+ * - a raster image shaped like a table is a candidate only (charts and logos match too): a signal, no read.
+ * Executors read whole pages here; Doppler's math regions (full level) are not yet a read scope.
+ */
+export function encodingReadDecision(decision: AdaptiveOcrDecision, encodings: PageEncodingRoute | null): AdaptiveOcrDecision {
+  if (!encodings || decision.authorized) return decision;
+  if (encodings.math === "vision") {
+    return { authorized: true, confidence: Math.max(decision.confidence, 0.75), signals: [...decision.signals, ENCODING_MATH_READ_SIGNAL, `encoding-math-read:${encodingMathVisionFlags(encodings).join("+")}`] };
+  }
+  if (encodings.table === "vision") {
+    return { authorized: true, confidence: Math.max(decision.confidence, 0.72), signals: [...decision.signals, ENCODING_TABLE_READ_SIGNAL, encodingTableSignal(encodings)] };
+  }
+  return decision;
+}
+
 /**
  * At most tableLeakPageCap(pageCount) pages of a document are read for leak signals alone (TABLE_LEAK_PAGE_CAP): the
  * pages with the most leak signals first, then in page order. The rest keep the decision they had without the signal.
@@ -597,13 +639,14 @@ function capTableLeakPages(pages: AdaptivePageRoutingEntry[], pageCount: number)
 export { DRAWN_CONTENT_SIGNAL };
 
 /** Why a page was sent to a vision/OCR read, from the signals of its routing decision. */
-export type PageReadReason = "raster" | "garbled" | "drawn" | "yield-deficit" | "other";
+export type PageReadReason = "raster" | "garbled" | "drawn" | "yield-deficit" | "encoding" | "other";
 
 export function pageReadReason(signals: readonly string[]): PageReadReason {
   if (signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || signals.includes(TEXT_LAYER_DISAGREES_SIGNAL) ||
       signals.includes("ocr-authorized:complexity-and-plausibility-failure")) return "garbled";
   if (signals.includes(DRAWN_CONTENT_SIGNAL)) return "drawn";
   if (signals.includes("ocr-authorized:structured-text-yield-deficit")) return "yield-deficit";
+  if (signals.includes(ENCODING_MATH_READ_SIGNAL) || signals.includes(ENCODING_TABLE_READ_SIGNAL)) return "encoding";
   if (signals.some((signal) => signal.startsWith("ocr-authorized:"))) return "raster";
   return "other";
 }
@@ -618,7 +661,7 @@ export function summarizeRoutingDecisions(
   pages: readonly AdaptivePageRoutingEntry[],
   args: { intakePageCount: number; measuredPages: number; imageEvidence?: ReadonlyMap<number, PageImageEvidence> },
 ) {
-  const pagesReadByReason: Record<PageReadReason, number> = { raster: 0, garbled: 0, drawn: 0, "yield-deficit": 0, other: 0 };
+  const pagesReadByReason: Record<PageReadReason, number> = { raster: 0, garbled: 0, drawn: 0, "yield-deficit": 0, encoding: 0, other: 0 };
   let pagesRead = 0;
   let blankPages = 0;
   for (const page of pages) {
@@ -1102,9 +1145,19 @@ function withoutHtmlTables(normalized: string, shift: number, tableScan: HtmlTab
 export function classifyAdaptivePage(
   pageNumber: number,
   text: string,
-  options: RoutingVersionOptions & { layout?: PageLayoutFacts | null; tableScans?: PageTableScans } = {},
+  options: RoutingVersionOptions & {
+    layout?: PageLayoutFacts | null;
+    tableScans?: PageTableScans;
+    /** Doppler's encoding route for the page, when encoding routing is on and the page's encodings are known. */
+    encodings?: PageEncodingRoute | null;
+  } = {},
 ): AdaptivePageRoutingEntry {
   const routingV2 = options.routingV2 === true;
+  const encodings = options.encodings ?? null;
+  // Encodings that name no table at all (complete, not truncated): a ruled grid the walker could not settle is not a table.
+  const encodingsNameNoTable = encodings !== null && encodings.table === "none";
+  // A grid of math glyphs (a matrix) is never a table: its grids leave the table count when no table encoding is named.
+  const tableLayout = options.layout && encodings?.mathGrid === true && encodingsNameNoTable ? { ...options.layout, grids: [] } : options.layout;
   const tableScan = tableScanOf(text, options.tableScans);
   const normalized = text.trim();
   const charCount = normalized.length;
@@ -1186,14 +1239,22 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (options.layout?.gridsUnknown === true) {
+  } else if (encodings?.table === "vision") {
+    // A table drawn as glyph outlines (Doppler `outlined-text-grid`): no text layer holds it, whatever its size.
+    route = "table-heavy";
+    extractorHint = "vision-rescue";
+    confidence = 0.72;
+    signals.push(encodingTableSignal(encodings));
+  } else if (options.layout?.gridsUnknown === true && !encodingsNameNoTable) {
     // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
-    // path, never a guessed "no table" a document could steer its own pages into.
+    // path, never a guessed "no table" a document could steer its own pages into. Doppler's encoding facts, when known,
+    // name the table encodings the text layer holds (`encoding-table:*`) or settle that there are none (next branches).
     route = "table-heavy";
     extractorHint = "layout-aware";
-    confidence = 0.6;
+    confidence = encodings?.table === "text-layer" ? 0.74 : 0.6;
     signals.push("grids-unknown");
-  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
+    if (encodings?.table === "text-layer") signals.push(encodingTableSignal(encodings));
+  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: tableLayout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
@@ -1210,6 +1271,20 @@ export function classifyAdaptivePage(
     signals.push("image-markers");
   } else {
     signals.push("dense-prose");
+  }
+  if (encodings) {
+    if (options.layout?.gridsUnknown === true && encodingsNameNoTable) signals.push(ENCODING_NO_TABLE_SIGNAL);
+    if (encodings.mathGrid) signals.push(ENCODING_MATH_GRID_SIGNAL);
+    if (encodings.rasterTableCandidate) signals.push(ENCODING_RASTER_TABLE_SIGNAL);
+    if (encodings.math !== "none") {
+      signals.push(`encoding-math:${encodings.math}`);
+      // Typeset math the text layer, its source or a read holds: label the page a formula page when nothing else did.
+      if (route === "straightforward-text") {
+        route = "formula-heavy";
+        extractorHint = "syntax-preserving";
+        confidence = Math.max(confidence, 0.7);
+      }
+    }
   }
 
   if (digitCount > Math.max(12, charCount * 0.18)) {

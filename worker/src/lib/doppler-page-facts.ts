@@ -16,6 +16,11 @@
  * `pageCount`, which is kept as `reportedPageCount` for diagnostics.
  */
 
+import {
+  DOPPLER_ENCODING_COUNTS_MAX, DOPPLER_FLAG_WORD_MAX, DOPPLER_MATH_FLAGS, DOPPLER_TABLE_FLAGS, decodeDopplerFlags, dopplerEncodingNibble,
+  type DopplerMathFlag, type DopplerTableFlag,
+} from "./doppler-encoding-facts.js";
+
 export const DOPPLER_PAGE_FACTS_SCHEMA = "doppler-page-facts/1";
 
 /** Byte budget: a base for the doc and run lines plus a per-page allowance (a full-level page with 32 image items is ~10 KB), under an absolute ceiling. */
@@ -37,7 +42,7 @@ export function dopplerPageFactsByteBudget(pageCount: number): number {
 
 // ── Vocabularies (closed sets; unknown values are dropped) ──
 
-const FAMILIES = ["fonts", "oddtext", "images-detail", "vectors", "forms", "annots", "ocg", "structure"] as const;
+const FAMILIES = ["fonts", "oddtext", "images-detail", "vectors", "forms", "annots", "ocg", "structure", "mathtables"] as const;
 const FEATURES = [
   "acroform-empty", "acroform-filled", "annotation-freetext", "annotation-highlight", "annotation-other", "annotation-text",
   "drawing-limit", "embedded-files", "encrypted-empty-password", "encrypted-user-password", "huge-page", "javascript-present",
@@ -73,6 +78,12 @@ export type DopplerAnnotSubtype = (typeof ANNOT_SUBTYPES)[number];
 
 export type Box = [number, number, number, number];
 
+/** `fonts.mathClasses` keys (glyph counts by font class; a fixed vocabulary, never a font name). */
+const MATH_FONT_CLASSES = ["texType1", "otfMath", "officeMath", "webMath", "symbol", "type3Bitmap", "text"] as const;
+export type DopplerMathFontClass = (typeof MATH_FONT_CLASSES)[number];
+const MATH_REGION_KINDS = ["text", "outline", "raster"] as const;
+const RULE_TABLE_STYLES = ["booktabs", "open"] as const;
+
 // ── Typed facts (field names as on the wire; a family that was not computed or did not validate is absent) ──
 
 export interface DopplerGeometry {
@@ -103,6 +114,18 @@ export interface DopplerTextFacts {
   rotatedTextRatio?: number;
   textOverImageRatio?: number;
   invisibleOverFullPageImage?: boolean;
+  /** `oddtext`/`mathtables`: characters by Unicode math block, and the share of them drawn by text fonts (added within /1). */
+  unicodeMath?: DopplerUnicodeMath;
+}
+
+export interface DopplerUnicodeMath {
+  greek: number;
+  scripts: number;
+  operators: number;
+  mathAlphanumeric: number;
+  arrows: number;
+  letterlike: number;
+  plainRatio: number;
 }
 
 export interface DopplerFontFacts {
@@ -116,6 +139,8 @@ export interface DopplerFontFacts {
   unmappedGlyphRatio?: number;
   ocrFontHint: boolean;
   truncated: boolean;
+  /** `fonts`/`mathtables`: glyphs drawn by font class (added within /1). */
+  mathClasses?: Record<DopplerMathFontClass, number>;
 }
 
 export interface DopplerImageItem {
@@ -154,6 +179,9 @@ export interface DopplerImageItem {
    * and for external (/F) data.
    */
   bytesPerPixel?: number;
+  /** `mathtables`: a formula-strip shape, and whether it sits in the text flow (added within /1). */
+  stripLike?: boolean;
+  inTextFlow?: boolean;
 }
 
 export interface DopplerImageFacts {
@@ -170,6 +198,8 @@ export interface DopplerImageFacts {
   items?: DopplerImageItem[];
   itemsTruncated?: boolean;
   truncated: boolean;
+  /** `mathtables`: images (all, not only those listed) that are formula strips in the text flow (added within /1). */
+  mathStrips?: number;
 }
 
 export interface DopplerVectorCluster {
@@ -225,7 +255,47 @@ export interface DopplerVectorFacts {
    * builds and when the thin-rule search was incomplete. Present only with `grids`; required when any grid has counts.
    */
   unlistedRuledGrids?: number;
+  /** `mathtables`: drawing clusters shaped like glyph outlines in the text flow (formulas drawn as outlines; added within /1). */
+  glyphOutlineClusters?: number;
+  /** `mathtables`: tables ruled only horizontally, at most 64 (added within /1). Absent when the list did not validate. */
+  ruleTables?: DopplerRuleTable[];
+  ruleTablesTruncated?: boolean;
   limitHit: boolean;
+}
+
+/** A table ruled only horizontally (Doppler's `vectors.ruleTables`). */
+export interface DopplerRuleTable {
+  bbox: Box;
+  rows: number;
+  columns: number;
+  hRules: number;
+  style: (typeof RULE_TABLE_STYLES)[number];
+}
+
+/** The page's tagged structure (`structure`/`mathtables`, added within /1). Counts are lower bounds when `truncated`. */
+export interface DopplerStructureFacts {
+  formulas: number;
+  tables: number;
+  tableRows: number;
+  tableCells: number;
+  spannedCells: number;
+  mathml: number;
+  mathmlFiles: number;
+  altText: number;
+  altTextTexLike: number;
+  actualText: number;
+  actualTextTexLike: number;
+  markedActualText: number;
+  markedActualTextTexLike: number;
+  truncated: boolean;
+  /** Part of the structure could not be read: the counts are not a definite 0. */
+  unknown: boolean;
+}
+
+/** A math region (`full` level): text (math-font words), outline (glyph outlines) or raster (formula strips). */
+export interface DopplerMathRegion {
+  kind: (typeof MATH_REGION_KINDS)[number];
+  bbox: Box;
 }
 
 export interface DopplerFormFacts {
@@ -274,6 +344,23 @@ export interface DopplerPageFacts {
   forms?: DopplerFormFacts;
   annots?: DopplerAnnotFacts;
   layers?: DopplerLayerFacts;
+  /** `structure`/`mathtables`: the page's tagged structure (added within /1). */
+  structure?: DopplerStructureFacts;
+  /**
+   * `mathtables` (any level): the packed router words (lib/doppler-encoding-facts.ts decodes them). All three or none; a
+   * set that contradicts its own names (`mathFlags`/`tableFlags`) or counts is unknown (absent).
+   */
+  mathBits?: number;
+  tableBits?: number;
+  encodingCounts?: number;
+  /** `full`: the words as names, in bit order (only names this build knows; the words are the source of truth). */
+  mathFlags?: DopplerMathFlag[];
+  tableFlags?: DopplerTableFlag[];
+  /** `full`: math regions, top to bottom, at most 64; absent when the list did not validate or a box is off the page. */
+  mathRegions?: DopplerMathRegion[];
+  mathRegionsTruncated?: boolean;
+  mathLayout?: Partial<Record<"readableGlyphs" | "unreadableGlyphs" | "stackedRegions" | "fractionBars" | "matrixRegions", number>>;
+  tableLayout?: Partial<Record<"ruledGrids" | "whitespaceTables" | "shadedRowTables" | "rasterTableLike" | "outlinedTextGrids" | "mathGrids", number>>;
   parseWarnings: DopplerParseWarning[];
   unusualFeatures: DopplerUnusualFeature[];
   factsMs?: number;
@@ -308,6 +395,8 @@ export interface DopplerDocFacts {
   xfa?: "none" | "static" | "dynamic";
   ocgCount?: number;
   ocgOffByDefault?: number;
+  /** `structure`/`mathtables`: MathML files the catalog's /AF associates with the whole document (added within /1). */
+  mathmlFiles?: number;
   unusualFeatures: DopplerUnusualFeature[];
 }
 
@@ -423,6 +512,9 @@ function text(value: unknown): DopplerTextFacts | undefined {
   }, {
     clippedCharCount: count, controlCharRatio: ratio, privateUseRatio: ratio, replacementCharRatio: ratio, mathGlyphRatio: ratio,
     verticalCharRatio: ratio, rotatedTextRatio: ratio, textOverImageRatio: ratio, invisibleOverFullPageImage: bool,
+    unicodeMath: (v) => family<DopplerUnicodeMath>(v, {
+      greek: count, scripts: count, operators: count, mathAlphanumeric: count, arrows: count, letterlike: count, plainRatio: ratio,
+    }),
   });
   // Counts that contradict each other are not facts.
   if (!facts) return undefined;
@@ -438,7 +530,10 @@ function fonts(value: unknown): DopplerFontFacts | undefined {
   return family<DopplerFontFacts>(value, {
     count: (v) => count(v, 256), type3: count, nonEmbedded: count, cid: count, noToUnicode: count, glyphCount: count,
     ocrFontHint: bool, truncated: bool,
-  }, { smallestPt: (v) => nonNegative(v, 1e9), unmappedGlyphRatio: ratio });
+  }, {
+    smallestPt: (v) => nonNegative(v, 1e9), unmappedGlyphRatio: ratio,
+    mathClasses: (v) => family<Record<DopplerMathFontClass, number>>(v, Object.fromEntries(MATH_FONT_CLASSES.map((key) => [key, count]))),
+  });
 }
 
 const MAX_ITEMS = 32;
@@ -457,6 +552,7 @@ function imageItem(value: unknown): DopplerImageItem | undefined {
     visibleWordsInside: (v) => count(v), invisibleWordsInside: (v) => count(v),
     visibleWordsCentredInside: (v) => count(v), invisibleWordsCentredInside: (v) => count(v),
     bytesPerPixel: (v) => nonNegative(v, 1e9),
+    stripLike: bool, inTextFlow: bool,
   });
   if (!item) return undefined;
   // Words inside come as pairs: one alone is not a count of the words inside.
@@ -501,7 +597,7 @@ function images(value: unknown): DopplerImageFacts | undefined {
     truncated: bool,
   }, {
     scanImage: (v) => count(v) !== undefined && (v as number) >= 1 ? v : undefined, maskCount: count, inlineCount: count,
-    items: (v) => list(v, MAX_ITEMS, imageItem), itemsTruncated: bool,
+    items: (v) => list(v, MAX_ITEMS, imageItem), itemsTruncated: bool, mathStrips: count,
   });
   if (!facts) return undefined;
   if (facts.items && facts.items.length > facts.imageCount) delete facts.items;
@@ -537,6 +633,16 @@ function grid(value: unknown): DopplerVectorGrid | undefined {
   return out;
 }
 
+/** Doppler's cap on rule tables per page; rows and columns are bands between at most 4,096 rules a direction. */
+const MAX_RULE_TABLES = 64;
+
+function ruleTable(value: unknown): DopplerRuleTable | undefined {
+  const band = (min: number) => (v: unknown) => count(v, MAX_GRID_BANDS) !== undefined && (v as number) >= min ? v : undefined;
+  return family<DopplerRuleTable>(value, {
+    bbox: box, rows: band(2), columns: band(2), hRules: band(2), style: (v) => oneOf(RULE_TABLE_STYLES, v),
+  });
+}
+
 function vectors(value: unknown): DopplerVectorFacts | undefined {
   const facts = family<DopplerVectorFacts>(value, {
     paths: (v) => count(v, 100_000), filled: count, stroked: count, coverage: ratio, hRules: count, vRules: count,
@@ -545,6 +651,7 @@ function vectors(value: unknown): DopplerVectorFacts | undefined {
   }, {
     uncoveredRatio: ratio, grids: (v) => list(v, MAX_GRIDS, grid), gridsTruncated: bool,
     unlistedRuledGrids: (v) => count(v, MAX_UNLISTED_GRIDS),
+    glyphOutlineClusters: count, ruleTables: (v) => list(v, MAX_RULE_TABLES, ruleTable), ruleTablesTruncated: bool,
   });
   if (!facts || !isObj(value)) return undefined;
   // Grids decide table routing: a list (or flag) on the wire that does not validate, or a list without its truncation flag,
@@ -598,7 +705,86 @@ function layers(value: unknown): DopplerLayerFacts | undefined {
   return family<DopplerLayerFacts>(value, { hiddenContent: bool, visibleContent: bool, hiddenOps: count, visibleOps: count });
 }
 
-const PAGE_FAMILIES = { geometry, text, fonts, images, vectors, forms, annots, layers } as const;
+function structure(value: unknown): DopplerStructureFacts | undefined {
+  return family<DopplerStructureFacts>(value, {
+    formulas: count, tables: count, tableRows: count, tableCells: count, spannedCells: count, mathml: count, mathmlFiles: count,
+    altText: count, altTextTexLike: count, actualText: count, actualTextTexLike: count, markedActualText: count,
+    markedActualTextTexLike: count, truncated: bool, unknown: bool,
+  });
+}
+
+const PAGE_FAMILIES = { geometry, text, fonts, images, vectors, forms, annots, layers, structure } as const;
+
+/** Doppler's cap on listed math regions per page. */
+const MAX_MATH_REGIONS = 64;
+
+function mathRegion(value: unknown): DopplerMathRegion | undefined {
+  return family<DopplerMathRegion>(value, { kind: (v) => oneOf(MATH_REGION_KINDS, v), bbox: box });
+}
+
+/** Optional counts of a full-level layout object; a malformed value drops that count only. */
+function layoutCounts<K extends string>(value: unknown, keys: readonly K[]): Partial<Record<K, number>> | undefined {
+  return family<Partial<Record<K, number>>>(value, {}, Object.fromEntries(keys.map((key) => [key, count])));
+}
+
+/**
+ * The page's packed encoding words (`mathtables`), copied onto `out` only when all three validate and agree with what the
+ * page says about them elsewhere:
+ * - each word in range (32-bit flag words, a 52-bit count word);
+ * - the full level's names (`mathFlags`, `tableFlags`), when present, name exactly the word's known bits;
+ * - a flag defined by a count agrees with its nibble: `raster-strips` (mathStrips), `glyph-outlines`
+ *   (glyphOutlineClusters), `formula-struct` (formulas), `tagged-table` (structure tables).
+ * Anything else leaves all three absent: the page's encodings are unknown (the router keeps today's route), never zero.
+ */
+function encodingWords(value: Obj, out: DopplerPageFacts): void {
+  const onWire = ["mathBits", "tableBits", "encodingCounts"].filter((key) => has(value, key)).length;
+  if (onWire === 0) return;
+  const mathBits = count(value.mathBits, DOPPLER_FLAG_WORD_MAX);
+  const tableBits = count(value.tableBits, DOPPLER_FLAG_WORD_MAX);
+  const encodingCounts = count(value.encodingCounts, DOPPLER_ENCODING_COUNTS_MAX);
+  if (mathBits === undefined || tableBits === undefined || encodingCounts === undefined) return;
+  const math = decodeDopplerFlags(mathBits, DOPPLER_MATH_FLAGS).flags;
+  const table = decodeDopplerFlags(tableBits, DOPPLER_TABLE_FLAGS).flags;
+  // Names on the wire (full level) must be the words' known names: unknown names are dropped as the contract asks, so a
+  // newer name is not a disagreement, but a known name the word lacks (or the reverse) is.
+  const sameNames = <T extends string>(wire: unknown, vocabulary: readonly T[], decoded: T[]) => {
+    if (wire === undefined) return true;
+    const names = vocabulary_(vocabulary, wire);
+    return names !== undefined && names.length === decoded.length && decoded.every((name) => names.includes(name));
+  };
+  if (!sameNames(value.mathFlags, DOPPLER_MATH_FLAGS, math) || !sameNames(value.tableFlags, DOPPLER_TABLE_FLAGS, table)) return;
+  const agrees = (flag: boolean, nibble: number) => flag === (nibble > 0);
+  if (!agrees(math.includes("raster-strips"), dopplerEncodingNibble(encodingCounts, "mathStrips")) ||
+      !agrees(math.includes("glyph-outlines"), dopplerEncodingNibble(encodingCounts, "glyphOutlineClusters")) ||
+      !agrees(math.includes("formula-struct"), dopplerEncodingNibble(encodingCounts, "formulas")) ||
+      !agrees(table.includes("tagged-table"), dopplerEncodingNibble(encodingCounts, "structureTables"))) return;
+  out.mathBits = mathBits;
+  out.tableBits = tableBits;
+  out.encodingCounts = encodingCounts;
+  if (value.mathFlags !== undefined) out.mathFlags = math;
+  if (value.tableFlags !== undefined) out.tableFlags = table;
+}
+
+/** The order-preserving known names of a list (as `vocabulary`, without sorting), or undefined when it is not a list. */
+function vocabulary_<T extends string>(set: readonly T[], value: unknown): T[] | undefined {
+  if (!Array.isArray(value) || value.length > 32) return undefined;
+  return value.filter((item): item is T => (set as readonly unknown[]).includes(item));
+}
+
+/** The math and table fields of a page line (`mathtables`): the packed words, and the full level's readable fields. */
+function mathTableFields(value: Obj, out: DopplerPageFacts): void {
+  encodingWords(value, out);
+  if (has(value, "mathRegions")) {
+    const regions = list(value.mathRegions, MAX_MATH_REGIONS, mathRegion);
+    if (regions) out.mathRegions = regions;
+  }
+  const truncated = bool(value.mathRegionsTruncated);
+  if (truncated !== undefined) out.mathRegionsTruncated = truncated;
+  const mathLayout = layoutCounts(value.mathLayout, ["readableGlyphs", "unreadableGlyphs", "stackedRegions", "fractionBars", "matrixRegions"] as const);
+  if (mathLayout) out.mathLayout = mathLayout;
+  const tableLayout = layoutCounts(value.tableLayout, ["ruledGrids", "whitespaceTables", "shadedRowTables", "rasterTableLike", "outlinedTextGrids", "mathGrids"] as const);
+  if (tableLayout) out.tableLayout = tableLayout;
+}
 
 /** Slack for a box against the page's sides, as the contract allows a word box to pass an image's (1 pt). */
 const PAGE_SLACK_PT = 1;
@@ -639,6 +825,12 @@ function crossCheckPage(out: DopplerPageFacts): void {
     const extent = pageExtent(out.geometry);
     if (!extent || !grids.every((g) => boxOnPage(g.bbox, extent))) delete out.vectors;
   }
+  // Math regions and rule tables are boxes a crop could be cut from: off the page (or with no page to bound them), the
+  // list is unknown. Neither decides a route on its own (the packed words do), so only the list is dropped.
+  const extent = pageExtent(out.geometry);
+  if (out.mathRegions && out.mathRegions.length > 0 && (!extent || !out.mathRegions.every((r) => boxOnPage(r.bbox, extent)))) delete out.mathRegions;
+  const ruleTables = out.vectors?.ruleTables;
+  if (ruleTables && ruleTables.length > 0 && (!extent || !ruleTables.every((t) => boxOnPage(t.bbox, extent)))) delete out.vectors!.ruleTables;
   for (const item of out.images?.items ?? []) {
     const text = out.text;
     if (item.visibleWordsInside !== undefined && item.invisibleWordsInside !== undefined &&
@@ -686,6 +878,7 @@ export function validateDopplerPage(value: unknown, pageCount: number): DopplerP
     const parsed = check(value[name]);
     if (parsed !== undefined) (out as unknown as Obj)[name] = parsed;
   }
+  mathTableFields(value, out);
   crossCheckPage(out);
   const ms = nonNegative(value.factsMs, 86_400_000);
   if (ms !== undefined) out.factsMs = ms;
@@ -764,6 +957,7 @@ export function validateDopplerDoc(value: unknown): DopplerDocFacts | null {
   pick("xfa", "xfa", (v) => oneOf(["none", "static", "dynamic"] as const, v));
   pick("ocgCount", "ocgCount", (v) => count(v));
   pick("ocgOffByDefault", "ocgOffByDefault", (v) => count(v));
+  pick("mathmlFiles", "mathmlFiles", (v) => count(v));
   return out;
 }
 
