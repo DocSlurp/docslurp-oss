@@ -1,5 +1,17 @@
 import type { JSONValue, Sql } from "postgres";
 
+const BULK_WRITE_BATCH_SIZE = 1000;
+
+/** Rows in batches of at most 1000 per bulk insert. */
+export function batchedRows<T>(rows: T[], batchSize = BULK_WRITE_BATCH_SIZE): T[][] {
+  const batches: T[][] = [];
+  for (let index = 0; index < rows.length; index += batchSize) {
+    batches.push(rows.slice(index, index + batchSize));
+  }
+  return batches;
+}
+
+
 /** A JSON parameter as the worker's modules write it: round-tripped through JSON so undefined and class instances drop out. */
 export function sqlJson(sql: Sql<Record<string, unknown>>, value: unknown) {
   return sql.json(JSON.parse(JSON.stringify(value ?? {})) as JSONValue);

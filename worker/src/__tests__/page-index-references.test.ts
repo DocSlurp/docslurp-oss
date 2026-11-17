@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import { normalizePipelineFeatures } from "@docslurp/shared";
 
 import { applyPageImageReferences } from "../lib/page-image-references.js";
@@ -46,11 +47,9 @@ describe("page-index: Fast page-image references", () => {
     expect(String(objects.get(state.artifactLedger.readDocument("doc", "markdown")!.replace("s3://bucket/", "")))).toContain("images/page-0002.png");
 
     const inserted: Array<{ pageNumber: number; text: string }> = [];
-    const known: Record<string, unknown> = {
-      getCompletedPages: async () => new Set<number>(),
-      insertPages: async (rows: Array<{ pageNumber: number; text: string }>) => void inserted.push(...rows),
-    };
-    (state as unknown as { store: unknown }).store = new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) });
+    const store = memoryCheckpointStore();
+    store.content.insertPages = async (rows) => void inserted.push(...rows);
+    state.store = store;
 
     await new PageIndexStage({} as CommandRunner, storage).run(state);
 

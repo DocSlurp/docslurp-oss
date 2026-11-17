@@ -10,39 +10,13 @@ import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import type { CommunityRefreshResult, CommunitySummaryContext } from "../graph/communities.js";
 import { extractDocumentGraph, type GraphChunk } from "../graph/extract.js";
-import type { ReplaceDocumentGraphInput } from "../graph/graph-store.js";
 import type { EmbeddingArtifact } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { chargeFeatureForTextRead, textReadPages } from "../pipeline/feature-charges.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
-
-/** Store surface graph enrichment writes through (the Postgres `Store`). */
-export interface KnowledgeGraphStore {
-  /** Current relational chunks; reused embedding artifacts can contain old document IDs. */
-  loadDocumentGraphChunks(projectId: string, documentId: string): Promise<GraphChunk[]>;
-  replaceDocumentGraph(input: ReplaceDocumentGraphInput): Promise<{ nodes: number; edges: number }>;
-  refreshProjectCommunities(args: {
-    projectId: string;
-    userId: string;
-    runId: string | null;
-    context: CommunitySummaryContext;
-  }): Promise<CommunityRefreshResult>;
-  /** Documents already extracted with this config; a re-run (e.g. retrying failed Documents) skips them. */
-  documentsWithGraph?(projectId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>>;
-  /** The project's own definition, used as scope when no domain is set. */
-  projectGraphScope(projectId: string): Promise<string>;
-}
-
-function graphStoreOf(state: WorkflowState): KnowledgeGraphStore | null {
-  const store = state.store as unknown;
-  return store && typeof store === "object" && "replaceDocumentGraph" in store
-    ? (store as KnowledgeGraphStore)
-    : null;
-}
 
 /**
  * Builds the project knowledge graph progressively: each document is
@@ -64,7 +38,8 @@ export class GraphEnrichStage implements Stage {
     if (!pipeline.graphRag && !pipeline.entityIndex && !pipeline.graphCommunitySummaries) return;
     if (!state.run.projectId) return;
 
-    const graphStore = graphStoreOf(state);
+    // Unbound states (unit tests) have no graph to write: heuristics and the artifact only.
+    const graphStore = state.store?.graph ?? null;
     const graphModel = resolveAllowedPipelineTextModel(pipeline, "graph-extraction", this.config.textGenerationModel);
     const communityModel = resolveAllowedPipelineTextModel(pipeline, "community-summary", this.config.textGenerationModel);
     const graphConfig: GraphConfig = { ...defaultGraphConfig, ...(pipeline.graph ?? {}) };
@@ -95,7 +70,7 @@ export class GraphEnrichStage implements Stage {
     const projectId = state.run.projectId;
 
     // A failed model extraction records a fallback hash, so it is not skipped here.
-    const alreadyExtracted = graphStore?.documentsWithGraph
+    const alreadyExtracted = graphStore
       ? await graphStore.documentsWithGraph(projectId, configHash, documentIds)
       : new Set<string>();
     const pending = indexableDocuments(state).filter((document) => !alreadyExtracted.has(document.id));

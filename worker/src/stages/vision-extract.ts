@@ -379,7 +379,7 @@ export class VisionExtractStage implements Stage {
               totalCost: runSpentCents(state),
             },
           });
-          await recordPageFacts(state.store, buildVisionPageFacts({
+          await recordPageFacts(state.store?.content, buildVisionPageFacts({
             documentId: document.id, runId: state.run.id, pageCount: maxInt(1, document.pageCount),
             selected: [], processed: [], costCapped: true,
           }));
@@ -458,7 +458,7 @@ export class VisionExtractStage implements Stage {
                 ...(needsVision.ladder ? { ladder: needsVision.ladder } : {}),
               });
 
-              await recordPageFacts(state.store, buildVisionPageFacts({
+              await recordPageFacts(state.store?.content, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
                 selected: [], processed: [],
               }));
@@ -540,7 +540,7 @@ export class VisionExtractStage implements Stage {
                 },
               });
 
-              await recordPageFacts(state.store, buildVisionPageFacts({
+              await recordPageFacts(state.store?.content, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
                 selected: needsVision.selectedPages, processed: [],
               }));
@@ -666,7 +666,7 @@ export class VisionExtractStage implements Stage {
               },
             });
 
-            await recordPageFacts(state.store, buildVisionPageFacts({
+            await recordPageFacts(state.store?.content, buildVisionPageFacts({
               documentId: document.id, runId: state.run.id, pageCount: pages,
               selected: needsVision.selectedPages, processed: outputs,
               costCapped: isCostCapExceeded(state),
@@ -2331,7 +2331,7 @@ export class VisionExtractStage implements Stage {
       recordUsage: (event) => { state.usageLedger.enqueue(event); },
       // The per-org hourly cap on free-tier VM runs, shared by every worker. No store or no org: refused (fail closed).
       reserveFreeVmRun: async () => {
-        const reserve = state.store?.reserveChartExportFreeVmRun?.bind(state.store);
+        const reserve = state.store?.budgets.reserveChartExportFreeVmRun.bind(state.store.budgets);
         if (!reserve || !state.run.orgId) return false;
         try {
           return await reserve({ orgId: state.run.orgId, runId: state.run.id, documentId: document.id, perHour: chartExportFreeVmCap() });

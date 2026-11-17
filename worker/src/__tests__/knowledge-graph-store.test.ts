@@ -125,7 +125,7 @@ function documentGraph(documentId: string, supplier: string, customers: string[]
 }
 
 const write = (documentId: string, graph: DocumentGraph, configHash = "g1-test") =>
-  store.replaceDocumentGraph({ projectId: "w", userId: "u1", runId: `run-${documentId}`, documentId, configHash, graph });
+  store.graph.replaceDocumentGraph({ projectId: "w", userId: "u1", runId: `run-${documentId}`, documentId, configHash, graph });
 
 const nodes = () =>
   sql<{ name: string; mentions: number; documents: number }[]>`
@@ -433,11 +433,11 @@ describe("project knowledge graph persistence", () => {
 
     // The fallback graph is stored and searchable, but never counts as current.
     expect(await nodes()).toContainEqual({ name: "hooli", mentions: 1, documents: 1 });
-    expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1"]));
+    expect(await store.graph.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1"]));
     expect(await countGraphJobDocuments(sql, { projectId: "w", mode: "stale", configHash })).toBe(1);
 
     await write("d2", documentGraph("d2", "Acme", ["Hooli"]), configHash);
-    expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1", "d2"]));
+    expect(await store.graph.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1", "d2"]));
   });
 });
 

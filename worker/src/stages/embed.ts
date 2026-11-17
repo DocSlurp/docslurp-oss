@@ -19,7 +19,6 @@ import { projectVectorLocation } from "./lancedb-location.js";
 import { detectLanguage, detectScript, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
 import { chunkTokenBudget, embeddingInputTokenLimit } from "../embeddings/input-limits.js";
 import {
-  asEmbeddingReuseStore,
   documentContextKey,
   EMBEDDING_REUSE_KEY_VERSION,
   embeddingInputKey,
@@ -44,30 +43,6 @@ import {
   type EmbeddingArtifact
 } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
-
-type ChunkInsertStore = {
-  insertChunks: (chunks: Array<{
-    id: string;
-    documentId: string;
-    runId: string;
-    userId: string;
-    chunkIndex: number;
-    text: string;
-    headingPath: string[];
-    pageNumber?: number;
-    tokenEstimate: number;
-    metadata: Record<string, unknown>;
-    contentHash?: string;
-    pipelineVersion?: string;
-  }>) => Promise<void>;
-  /** The document's chunk ids outside the replacement set (a retry that produced fewer chunks). */
-  staleDocumentChunkIds?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[]>;
-  /** Drops the document's chunk rows outside the replacement set; returns their ids. */
-  deleteStaleDocumentChunks?: (documentId: string, keepChunkIds: readonly string[]) => Promise<string[] | void>;
-  markDocumentLexicalSearchable?: (documentId: string) => Promise<void>;
-  /** deleteStaleDocumentChunks and markDocumentLexicalSearchable as one transaction in one round trip. */
-  finalizeDocumentChunks?: (documentId: string, keepChunkIds: readonly string[], markSearchable: boolean) => Promise<void>;
-};
 
 const DEFAULT_MAX_EMBED_WINDOW_PAGES = 100;
 const DEFAULT_MAX_EMBED_WINDOW_CHUNKS = 128;
@@ -151,7 +126,7 @@ export class EmbedStage implements Stage {
           const chunkMaxTokens = chunkTokenBudget(profile.modelUri);
           const lateChunkingEnabled = embeddingConfig.lateChunking === true;
           const lateChunkingWindow = Math.max(1, embeddingConfig.lateChunkingWindow ?? 2);
-          const reuseStore = asEmbeddingReuseStore(state.store);
+          const reuseStore = state.store?.content;
           const reuseLookup = new EmbeddingReuseLookup({
             storage: this.storage,
             store: reuseStore,
@@ -490,7 +465,7 @@ export class EmbedStage implements Stage {
             if (stopped) throw stopError;
             progress?.check();
             if (isCostCapExceeded(state)) throw new RunPolicyError("Embedding cost cap reached before sending an embedding batch");
-            if (progress && state.store?.creditLeaseWouldExhaust?.(state)) {
+            if (progress && state.store?.creditLeaseWouldExhaust(state)) {
               leaseFlush ??= progress.flush().finally(() => { leaseFlush = null; });
               await leaseFlush;
               if (stopped) throw stopError;
@@ -850,7 +825,7 @@ export class EmbedStage implements Stage {
     chunks: EmbeddingArtifact["chunks"],
     documentContextKey: string | undefined,
   ): Promise<void> {
-    const store = asEmbeddingReuseStore(state.store);
+    const store = state.store?.content;
     if (!store || !state.run.orgId) return;
     const refs: EmbeddingReuseRef[] = [];
     for (const chunk of chunks) {
@@ -954,7 +929,8 @@ export class EmbedStage implements Stage {
     /** The embedding space the document's LanceDB rows live in. */
     vectorSpace?: { model: string; dimensions: number };
   }): Promise<void> {
-    if (!args.state.store || !("insertChunks" in args.state.store)) {
+    // Unbound states (unit tests, a page task) persist no chunks; every stage activity's state is bound (loadRunState).
+    if (!args.state.store) {
       return;
     }
 
@@ -972,7 +948,7 @@ export class EmbedStage implements Stage {
       contentHash: args.contentHash,
       pipelineVersion: args.pipelineVersion
     }));
-    const store = args.state.store as ChunkInsertStore;
+    const store = args.state.store.content;
     // Ids are `<document>-<index>`, so a retry with fewer or zero chunks leaves the old
     // tail behind; drop it before the marker makes the set servable.
     const keep = dbChunks.map((chunk) => chunk.id);
@@ -984,7 +960,7 @@ export class EmbedStage implements Stage {
     const [, stale] = await Promise.all([
       store.insertChunks(dbChunks),
       args.vectorSpace && args.state.run.orgId
-        ? store.staleDocumentChunkIds?.(args.document.id, keep).then((ids) => ids ?? [])
+        ? store.staleDocumentChunkIds(args.document.id, keep)
         : undefined,
     ]).then(([inserted, ids]) => [inserted, ids ?? []] as const);
     if (stale.length > 0 && args.vectorSpace && args.state.run.orgId) {
@@ -993,16 +969,8 @@ export class EmbedStage implements Stage {
       args.state.staleVectorIds.set(args.document.id, stale);
     }
     // Keyword search can serve the chunks from here on, ahead of the index stage.
-    if (store.finalizeDocumentChunks) {
-      await store.finalizeDocumentChunks(args.document.id, keep, dbChunks.length > 0);
-      if (dbChunks.length > 0) recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
-      return;
-    }
-    await store.deleteStaleDocumentChunks?.(args.document.id, keep);
-    if (dbChunks.length > 0) {
-      await store.markDocumentLexicalSearchable?.(args.document.id);
-      recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
-    }
+    await store.finalizeDocumentChunks(args.document.id, keep, dbChunks.length > 0);
+    if (dbChunks.length > 0) recordDocumentMilestone(args.state.run, "lexical_searchable", args.document.pageCount);
   }
 }
 

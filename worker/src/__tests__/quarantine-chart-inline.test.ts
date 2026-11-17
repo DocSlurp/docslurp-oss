@@ -4,12 +4,13 @@ import { join } from "node:path";
 
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 import { genericBar } from "../chart-export/extractors/__tests__/fixtures.js";
 import { extractDeterministicVisuals } from "../chart-export/extractors/index.js";
 import type { Config } from "../config.js";
 import type { Document, ProjectRun } from "../models.js";
-import { type CheckpointStore, WorkflowState } from "../pipeline/pipeline.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import { sha256Bytes } from "../sandbox/source-integrity.js";
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import { QuarantineStage } from "../stages/quarantine.js";
@@ -44,14 +45,12 @@ async function fixture(pipeline: Record<string, unknown>, extra: Array<[string, 
     totalDocuments: documents.length, processedDocuments: 0, pagesTotal: documents.length, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, ...pipeline }, error: null, stats: {}, artifacts: {}, claimId: null, createdAt: now, updatedAt: now };
   const state = WorkflowState.create(run, documents);
-  state.store = {
-    startDocumentStage: vi.fn(async () => {}), completeDocumentStage: vi.fn(async () => {}), failDocumentStage: vi.fn(async () => {}),
-    updateProgress: vi.fn(async () => {}), startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
-    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()),
-    setDocumentFileFacts: vi.fn(async () => {}), setDocumentParseSource: vi.fn(async () => true),
-    // The org's free-VM cap grants every free-tier inline step here (council #387 M2; its refusal is tested in inline.test.ts).
-    reserveChartExportFreeVmRun: vi.fn(async () => true),
-  } as unknown as CheckpointStore;
+  const store = memoryCheckpointStore();
+  store.records.setDocumentFileFacts = vi.fn(async () => true);
+  store.records.setDocumentParseSource = vi.fn(async () => true);
+  // The org's free-VM cap grants every free-tier inline step here (council #387 M2; its refusal is tested in inline.test.ts).
+  store.budgets.reserveChartExportFreeVmRun = vi.fn(async () => true);
+  state.store = store;
   const artifacts = new Map<string, Record<string, unknown>>();
   let sequence = 0;
   const storage = {

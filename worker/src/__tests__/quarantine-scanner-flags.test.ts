@@ -9,12 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../config.js";
 import type { Document, ProjectRun } from "../models.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
-import { type CheckpointStore, WorkflowState } from "../pipeline/pipeline.js";
-import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import { sha256Bytes } from "../sandbox/source-integrity.js";
 import { QuarantineStage } from "../stages/quarantine.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 // Authored EICAR test string: the industry-standard harmless test file every engine reports as infected.
 const EICAR = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
@@ -38,11 +38,11 @@ async function fixture(extra: Document[] = []) {
     pipeline: { ...defaultPipelineFeatures }, error: null, stats: {}, artifacts: {}, claimId: null, createdAt: now, updatedAt: now };
   const state = WorkflowState.create(run, documents);
   state.docConcurrency = 2;
-  const store: CheckpointStore = {
+  const store = memoryCheckpointStore({
     startDocumentStage: vi.fn(async () => {}), completeDocumentStage: vi.fn(async () => {}), failDocumentStage: vi.fn(async () => {}),
-    updateProgress: vi.fn(async () => {}), startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
-    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()), pageBasisLedger: new MemoryPageBasisLedger(),
-  };
+    updateProgress: vi.fn(async () => {}), appendEvent: vi.fn(async () => {}),
+  });
+  for (const document of documents) store.records.add(document.id, { runId: run.id, orgId: run.orgId });
   state.bindStore(store);
   let sequence = 0;
   const storage = {

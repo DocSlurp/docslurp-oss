@@ -491,7 +491,7 @@ describe("R8-L1: an 'original' decision binds parsers to the bytes quarantine sc
     await sql`update documents set source_sha256 = null, parse_source_sha256 = null, parse_source_scan_version = null where id = 'swap'`;
     await expect(sql`update documents set parse_source_scan_version = 1 where id = 'swap'`).rejects.toThrow(/documents_parse_source_hash_check/);
     await expect(sql`update documents set parse_source_scan_version = 1, parse_source_sha256 = 'not-a-hash' where id = 'swap'`).rejects.toThrow(/documents_parse_source_hash_check/);
-    await expect(store.setDocumentParseSource("run-swap", "swap", { copy: null, scannedSha256: "" })).rejects.toThrow(/sha256 of the bytes it scanned/);
+    await expect(store.records.setDocumentParseSource("run-swap", "swap", { copy: null, scannedSha256: "" })).rejects.toThrow(/sha256 of the bytes it scanned/);
   });
 });
 

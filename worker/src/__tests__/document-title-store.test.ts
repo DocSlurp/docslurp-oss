@@ -39,12 +39,12 @@ afterAll(async () => {
 describe("Store.setDocumentTitleIfAbsent", () => {
   it("adds the title beside existing metadata only when none is present", async () => {
     await db.exec(`update documents set metadata = '{"mapTitle": "Outline Title"}' where id = 'd1'`);
-    expect(await store.setDocumentTitleIfAbsent("d1", { title: "Board Update", source: "heading" })).toBe(true);
+    expect(await store.records.setDocumentTitleIfAbsent("d1", { title: "Board Update", source: "heading" })).toBe(true);
     // A re-run with a different derivation does not churn the stored title.
-    expect(await store.setDocumentTitleIfAbsent("d1", { title: "Something Else", source: "metadata" })).toBe(false);
+    expect(await store.records.setDocumentTitleIfAbsent("d1", { title: "Something Else", source: "metadata" })).toBe(false);
     // A title already present (e.g. a user rename) wins.
-    expect(await store.setDocumentTitleIfAbsent("d2", { title: "Derived", source: "heading" })).toBe(false);
-    expect(await store.setDocumentTitleIfAbsent("missing", { title: "Derived", source: "heading" })).toBe(false);
+    expect(await store.records.setDocumentTitleIfAbsent("d2", { title: "Derived", source: "heading" })).toBe(false);
+    expect(await store.records.setDocumentTitleIfAbsent("missing", { title: "Derived", source: "heading" })).toBe(false);
     const rows = (await db.query(`select id, metadata from documents order by id`)).rows;
     expect(rows).toEqual([
       { id: "d1", metadata: { mapTitle: "Outline Title", title: "Board Update", titleSource: "heading" } },
@@ -54,6 +54,6 @@ describe("Store.setDocumentTitleIfAbsent", () => {
 
   it("fills a blank title", async () => {
     await db.exec(`update documents set metadata = '{"title": "  "}' where id = 'd2'`);
-    expect(await store.setDocumentTitleIfAbsent("d2", { title: "Derived Title", source: "heading" })).toBe(true);
+    expect(await store.records.setDocumentTitleIfAbsent("d2", { title: "Derived Title", source: "heading" })).toBe(true);
   }, 60_000);
 });

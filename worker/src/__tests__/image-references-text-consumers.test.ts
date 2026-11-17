@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import { imageAnchorsToAltText, normalizePipelineFeatures } from "@docslurp/shared";
 
 import { fromEnv } from "../config.js";
@@ -38,11 +39,9 @@ function harness() {
   } as unknown as ProjectRun, [document]);
   state.artifactLedger.recordDocument("doc", "markdown", "s3://bucket/extract/doc.md");
   const inserted: Array<{ pageNumber: number; text: string }> = [];
-  const known: Record<string, unknown> = {
-    getCompletedPages: async () => new Set<number>(),
-    insertPages: async (rows: Array<{ pageNumber: number; text: string }>) => void inserted.push(...rows),
-  };
-  (state as unknown as { store: unknown }).store = new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) });
+  const store = memoryCheckpointStore();
+  store.content.insertPages = async (rows) => void inserted.push(...rows);
+  state.store = store;
   return { state, storage, inserted };
 }
 

@@ -164,12 +164,9 @@ export class PropositionIndexStage implements Stage {
               tokenEstimate: estimateTokens(prop.text),
             }));
 
-            if (state.store && "insertPropositions" in state.store) {
-              await (
-                state.store as {
-                  insertPropositions: (props: typeof rows) => Promise<void>;
-                }
-              ).insertPropositions(rows);
+            // Unbound states (unit tests) persist no rows; every stage activity's state is bound (loadRunState).
+            if (state.store) {
+              await state.store.content.insertPropositions(rows);
             }
 
             const key = `${runArtifactRoot(state.run, document.userId)}/propositions/${document.id}.json`;

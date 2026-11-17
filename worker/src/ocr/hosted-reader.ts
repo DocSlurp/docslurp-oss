@@ -177,10 +177,10 @@ export function createHostedOcrReader(args: {
       // Escalation reads are persisted as each call returns (ocr_escalation_reads). A retried activity reuses the page's
       // completed read instead of calling the provider again, and re-buffers every earlier call's usage under its own id, so
       // its provider cost is recorded exactly once even when the activity that made it never reached its checkpoint.
-      const store = state.store;
-      const durable = purpose === "ocr-escalation" && store?.ocrEscalationReads && store.recordOcrEscalationRead ? store : null;
+      // A state without a store (a page task leaves state.store unset) has no durable log: escalation is then skipped (below).
+      const durable = purpose === "ocr-escalation" && state.store ? state.store.ocrEscalation : null;
       if (durable) {
-        const prior = await durable.ocrEscalationReads!(state.run.id, page.documentId, page.pageNumber);
+        const prior = await durable.ocrEscalationReads(state.run.id, page.documentId, page.pageNumber);
         const pending = new Set(state.usageLedger.snapshot().map((event) => event.id));
         for (const row of prior) for (const event of row.usageEvents) if (event.id && !pending.has(event.id)) state.usageLedger.enqueue(event);
         const done = prior.find((row) => row.status === "completed" && row.text !== null);
@@ -198,7 +198,7 @@ export function createHostedOcrReader(args: {
       const callId = `${purpose}:${state.run.id}:${page.documentId}:${page.pageNumber}:${randomUUID()}`;
       const persist = async (status: "completed" | "failed", text: string | null, model: string, events: Array<UsageEvent | null>) => {
         if (!durable) return;
-        await durable.recordOcrEscalationRead!({
+        await durable.recordOcrEscalationRead({
           runId: state.run.id, documentId: page.documentId, pageNumber: page.pageNumber, status, text, model,
           usageEvents: events.filter((event): event is UsageEvent => event !== null),
         });

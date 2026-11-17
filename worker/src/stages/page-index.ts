@@ -76,12 +76,10 @@ export class PageIndexStage implements Stage {
             tokenEstimate: estimateTokens(text),
           }));
 
-          if (state.store && "insertPages" in state.store) {
-            await (state.store as { insertPages: (pages: typeof pageRows) => Promise<void> }).insertPages(pageRows);
-          }
-
-          if (state.store && "linkChunksToPages" in state.store) {
-            await (state.store as { linkChunksToPages: (documentId: string, runId: string) => Promise<void> }).linkChunksToPages(document.id, state.run.id);
+          // Unbound states (unit tests) persist no page rows; every stage activity's state is bound (loadRunState).
+          if (state.store) {
+            await state.store.content.insertPages(pageRows);
+            await state.store.content.linkChunksToPages(document.id, state.run.id);
           }
 
           if (this.sql && deferredProfilesEnabled()) {

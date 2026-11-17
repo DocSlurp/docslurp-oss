@@ -1240,31 +1240,58 @@ export async function markAssetsLost(
 }
 
 /**
- * The ledger beside a figure upload: pending rows before each upload step and stored after it, through the run's store
- * under the run's organization and project, so figures are kept whatever later fails (the Markdown, a later stage, the run,
- * the worker). The checkpoint's write then completes the level. None without a store that has them, or for a run without
- * a scope (the checkpoint's write is then the only record).
+ * The document asset ledger port stages write figures through (pipeline CheckpointStore.assets): pending rows before each
+ * upload step and stored after it, the repair of an unvouched object, and the pages whose image the host renders. Every
+ * call is scoped to one organization's document.
+ */
+export interface DocumentAssets {
+  markAssetsPending(args: Parameters<typeof markAssetsPending>[1]): Promise<{ pending: number }>;
+  markAssetsStored(args: Parameters<typeof markAssetsStored>[1]): Promise<{ stored: number }>;
+  replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void>;
+  listHostPageImagePages(scope: { orgId: string; documentId: string }): Promise<number[]>;
+}
+
+/** The asset ledger over one database. */
+export function postgresDocumentAssets(sql: Sql<Record<string, unknown>>): DocumentAssets {
+  return {
+    markAssetsPending: (args) => markAssetsPending(sql, args),
+    markAssetsStored: (args) => markAssetsStored(sql, args),
+    replaceUnvouchedObject: (args) => replaceUnvouchedObject(sql, args),
+    listHostPageImagePages: (scope) => listHostPageImagePages(sql, scope),
+  };
+}
+
+/**
+ * What a figure upload writes through: pending and stored rows, and the repair of an unvouched object where the caller
+ * offers one (null: a conflicting object fails the upload instead of being repaired).
+ */
+export type FigureAssetLedger = Pick<DocumentAssets, "markAssetsPending" | "markAssetsStored"> & {
+  replaceUnvouchedObject: DocumentAssets["replaceUnvouchedObject"] | null;
+};
+
+/**
+ * The ledger beside a figure upload: pending rows before each upload step and stored after it, through the run's asset
+ * ledger under the run's organization and project, so figures are kept whatever later fails (the Markdown, a later stage,
+ * the run, the worker). The checkpoint's write then completes the level. None for a state without a store (a unit test's)
+ * or a run without a scope (the checkpoint's write is then the only record).
  */
 export function figureLedgerHooks(
   state: {
-    store?: {
-      markAssetsPending?(args: Parameters<typeof markAssetsPending>[1]): Promise<unknown>;
-      markAssetsStored?(args: Parameters<typeof markAssetsStored>[1]): Promise<unknown>;
-      replaceUnvouchedObject?(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void>;
-    };
+    store?: { readonly assets: FigureAssetLedger };
     run: { id: string; orgId: string | null; projectId?: string | null };
   },
   documentId: string,
   /** The resume runner's lease token: every hook write is fenced by it. */
   lease?: string,
 ): DopplerFigureLedgerHooks | undefined {
-  const store = state.store;
-  if (!store?.markAssetsPending || !store.markAssetsStored || !state.run.orgId || !state.run.projectId) return undefined;
+  const assets = state.store?.assets;
+  if (!assets || !state.run.orgId || !state.run.projectId) return undefined;
   const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id, ...(lease ? { lease } : {}) };
+  const replace = assets.replaceUnvouchedObject;
   return {
-    pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
-    stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
-    ...(store.replaceUnvouchedObject ? { replace: figureRepairHook(store.replaceUnvouchedObject.bind(store), scope) } : {}),
+    pending: async (rows) => { await assets.markAssetsPending({ scope, rows }); },
+    stored: async (files) => { await assets.markAssetsStored({ scope, files }); },
+    ...(replace ? { replace: figureRepairHook(replace, scope) } : {}),
   };
 }
 

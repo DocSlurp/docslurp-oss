@@ -84,7 +84,7 @@ export class RenderImagesStage implements Stage {
           const keptSet = new Set(referencedPages);
           const unread = [...new Set([...unreadPages, ...keptAsImage.filter((pageNumber) => !keptSet.has(pageNumber))])];
           if (referencedPages.length > 0 || unread.length > 0) {
-            await recordPageFacts(state.store, [
+            await recordPageFacts(state.store?.content, [
               ...referencedPages.map((pageNumber) => ({
                 documentId: document.id, runId: state.run.id, pageNumber, visionStatus: "kept-as-image" as const,
               })),
@@ -182,7 +182,7 @@ export class RenderImagesStage implements Stage {
       });
       // The per-run cap is a Postgres reservation shared by every worker (db/fast-page-image-budget.ts). Without a
       // store to reserve from, nothing renders (fail closed).
-      const reserve = state.store?.reserveFastPageImageRenders?.bind(state.store);
+      const reserve = state.store?.budgets.reserveFastPageImageRenders.bind(state.store.budgets);
       const granted = selection.kept.length === 0 || !reserve
         ? 0
         : await reserve({ runId: state.run.id, documentId: document.id, wanted: selection.kept.length, perRun: caps.perRun });
@@ -247,7 +247,7 @@ export class RenderImagesStage implements Stage {
       const textless = new Set(pagesKeptAsImage({ canonicalDocument: await this.loadCanonicalDocument(state, document.id), pageCount: Math.max(1, document.pageCount), isImage: false, routing: request }).kept);
       const candidates = ladder.keepAsImage.filter((page) => textless.has(page)).sort((a, b) => a - b);
       const wanted = candidates.slice(0, caps.perDocument);
-      const reserve = state.store?.reserveFastPageImageRenders?.bind(state.store);
+      const reserve = state.store?.budgets.reserveFastPageImageRenders.bind(state.store.budgets);
       const granted = wanted.length === 0 || !reserve
         ? 0
         : await reserve({ runId: state.run.id, documentId: document.id, wanted: wanted.length, perRun: caps.perRun });
@@ -284,7 +284,7 @@ export class RenderImagesStage implements Stage {
       const pending = state.pendingAssetLedger?.get(document.id);
       const pages = pending
         ? await hostPageImagePagesOf(pending.assets)
-        : state.store?.listHostPageImagePages ? await state.store.listHostPageImagePages({ orgId, documentId: document.id }) : [];
+        : state.store ? await state.store.assets.listHostPageImagePages({ orgId, documentId: document.id }) : [];
       return pages.filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber >= 1 && pageNumber <= pageCount);
     } catch (error) {
       console.warn(`[render-images] host page images unavailable document=${document.id} error=${error instanceof Error ? error.message : String(error)}`);

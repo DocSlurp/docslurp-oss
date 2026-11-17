@@ -150,7 +150,7 @@ function stages(): Stage[] {
     perDocument("embed", async (_state, document) => {
       if (embedHold?.ids.has(document.id)) await embedHold.until;
       seen.push({ stage: "embed", documentId: document.id });
-      await store.markDocumentLexicalSearchable(document.id);
+      await store.content.markDocumentLexicalSearchable(document.id);
     }),
     perDocument("index", async (_state, document) => {
       seen.push({ stage: "index", documentId: document.id });

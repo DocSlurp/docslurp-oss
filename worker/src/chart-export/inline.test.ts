@@ -612,26 +612,26 @@ describe("inline chart plan and host validation", () => {
     // An image without the capability (an older parser-vm@5): refused, counted, for every tier, before any reservation.
     const store = grant(true);
     for (const pipeline of [free, models]) {
-      expect(await inlineChartAdmission({ ...base, pipeline, store, hasCapability: () => false })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
+      expect(await inlineChartAdmission({ ...base, pipeline, budgets: store, hasCapability: () => false })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
     }
     expect(store.reserveChartExportFreeVmRun).not.toHaveBeenCalled();
     // No sandbox known yet: refused the same way, and the log says the sandbox is not ready rather than blaming the image.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(await inlineChartAdmission({ ...base, pipeline: free, store, hasCapability: () => "sandbox-not-ready" })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
+    expect(await inlineChartAdmission({ ...base, pipeline: free, budgets: store, hasCapability: () => "sandbox-not-ready" })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
     expect(warn.mock.calls.flat().join(" ")).toMatch(/parser sandbox not ready/);
     expect(warn.mock.calls.flat().join(" ")).not.toMatch(/image does not report/);
     warn.mockRestore();
     // Free: one reservation against the org's hourly cap (the grant a standalone fallback reuses); granted goes ahead.
     const ok = grant(true);
-    expect(await inlineChartAdmission({ ...base, pipeline: free, store: ok })).toBeNull();
+    expect(await inlineChartAdmission({ ...base, pipeline: free, budgets: ok })).toBeNull();
     expect(ok.reserveChartExportFreeVmRun).toHaveBeenCalledWith({ orgId: "o1", runId: "r1", documentId: "d1", perHour: 7 });
     // Over the cap, a failed reservation, no store or no org: refused, counted (fail closed).
-    for (const args of [{ store: grant(false) }, { store: grant(new Error("db down")) }, { store: undefined }, { store: grant(true), orgId: null }]) {
+    for (const args of [{ budgets: grant(false) }, { budgets: grant(new Error("db down")) }, { budgets: undefined }, { budgets: grant(true), orgId: null }]) {
       expect(await inlineChartAdmission({ ...base, pipeline: free, ...args })).toEqual({ status: "refused", reason: "free-vm-cap", ms: 0 });
     }
     // Models is billed and passes spend admission instead: no free-VM reservation.
     const billed = grant(false);
-    expect(await inlineChartAdmission({ ...base, pipeline: models, store: billed })).toBeNull();
+    expect(await inlineChartAdmission({ ...base, pipeline: models, budgets: billed })).toBeNull();
     expect(billed.reserveChartExportFreeVmRun).not.toHaveBeenCalled();
     // The admission refusals are valid, counted answers.
     for (const reason of ["image-unsupported", "free-vm-cap"]) expect(inlineHasWork(validateInlineCharts({ status: "refused", reason, ms: 0 }))).toBe(true);

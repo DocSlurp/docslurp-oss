@@ -5,7 +5,7 @@ import { computePriceColumns, computeCalibrationColumns, decodeComputeObservatio
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
-import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
+import { type GeoFinalSource } from "./geo-final-source.js";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
@@ -14,15 +14,13 @@ import { PostgresMediaJournal } from "../media/journal.js";
 import { type WorkerCapability, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
-import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
-import { reserveChartExportFreeVmRun } from "./chart-export-free-vm-cap.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
-import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
+import { flushAssetLedger, postgresDocumentAssets, writeDocumentAssetLedger, type DocumentAssets } from "./document-asset-ledger.js";
+import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
 import { advertisedWorkerConfig } from "../lib/vm-only-parsing.js";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -36,21 +34,17 @@ import type {
   StageState,
 } from "../models.js";
 import type { WorkflowState, VectorIndex } from "../pipeline/pipeline.js";
-import type { PageFactUpsert } from "../pipeline/page-facts.js";
-import type { EmbeddingReuseRef } from "../embeddings/embedding-reuse.js";
 import { insertProjectRunEvents, RunEventPublisher, resolveRunEventPublisherOptions, type RunEventPublisherOptions } from "./run-event-store.js";
-import { graphFallbackScope, projectTemplates } from "@docslurp/shared";
 import { queryWorkerScalerSnapshot, type ScalerSql, type WorkerScalerQueryParams, type WorkerScalerSnapshot } from "@docslurp/shared";
-import {
-  refreshProjectCommunities,
-  type CommunityRefreshResult,
-  type CommunitySummaryContext,
-} from "../graph/communities.js";
-import { replaceDocumentGraph, type ReplaceDocumentGraphInput } from "../graph/graph-store.js";
 import { runGraphJobs, type GraphJobRunnerOptions } from "../graph/rebuild-job.js";
 import { runSummaryTreeJobs, type SummaryTreeJobRunnerOptions } from "../summary-tree/backfill-job.js";
 import { PostgresPageBasisLedger } from "./page-basis-ledger.js";
-import { TableExistence } from "./sql-helpers.js";
+import { batchedRows, TableExistence } from "./sql-helpers.js";
+import { PostgresDocumentContent } from "./document-content.js";
+import { PostgresDocumentRecords } from "./document-records.js";
+import { postgresFleetBudgets, type FleetBudgets } from "./fleet-budgets.js";
+import { PostgresOcrEscalationReads } from "./ocr-escalation-reads.js";
+import { PostgresKnowledgeGraph } from "../graph/knowledge-graph-store.js";
 import { RunNotifications, type CanonicalReplacement } from "./run-notifications.js";
 import type { PageBasisLedger } from "../pipeline/page-basis.js";
 import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
@@ -58,7 +52,7 @@ import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
-import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
+import { bindDocumentUpload, resolveDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   ocrPageClassSettlementProbe,
@@ -162,16 +156,7 @@ type HistoricalStagePerformanceRow = {
   p50_ms_per_page: number | null;
 };
 
-const BULK_WRITE_BATCH_SIZE = 1000;
 const HISTORICAL_PERFORMANCE_TTL_MS = 5 * 60_000;
-
-function batchedRows<T>(rows: T[], batchSize = BULK_WRITE_BATCH_SIZE): T[][] {
-  const batches: T[][] = [];
-  for (let index = 0; index < rows.length; index += batchSize) {
-    batches.push(rows.slice(index, index + batchSize));
-  }
-  return batches;
-}
 
 /** A newer canonical version that took over search from older ones. */
 
@@ -336,10 +321,6 @@ async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId:
 export class Store {
   /** Use inside the transaction that performs init or terminal writes. */
   readonly assertExecutionOwnership = assertExecutionOwnership;
-  async beginGeoAttempt(state: WorkflowState, documentId: string, schema: Record<string, unknown>) {
-    if (!state.run.projectId || !state.run.orgId) throw new Error("Geo extraction requires tenant scope");
-    return beginGeoAttempt(this.sql, {documentId, projectId:state.run.projectId, orgId:state.run.orgId, runId:state.run.id}, schema);
-  }
   private readonly sql: Sql<Record<string, unknown>>;
   capacityLeaseStore(providerIds: string[]) { return new PostgresCapacityLeaseStore(this.sql, (id) => this.loadRun(id).catch(() => null), providerIds); }
   /** Raw client for stages that write their own tables (deferred indexing). */
@@ -354,6 +335,18 @@ export class Store {
   private readonly runEvents: RunEventPublisher;
   /** Webhook outbox rows and notification deliveries (run-notifications.ts). */
   readonly notifications: RunNotifications;
+  /** Pages, chunks, propositions, summaries, page facts and embedding reuse refs (document-content.ts). */
+  readonly content: PostgresDocumentContent;
+  /** File facts, parse source, title, PII withheld list, geo attempts and document scopes (document-records.ts). */
+  readonly records: PostgresDocumentRecords;
+  /** Figure rows and host-rendered pages (document-asset-ledger.ts). */
+  readonly assets: DocumentAssets;
+  /** The project knowledge graph (graph/knowledge-graph-store.ts). */
+  readonly graph: PostgresKnowledgeGraph;
+  /** Reservations against fleet-wide caps (fleet-budgets.ts). */
+  readonly budgets: FleetBudgets;
+  /** OCR escalation calls, persisted as they return (ocr-escalation-reads.ts). */
+  readonly ocrEscalation: PostgresOcrEscalationReads;
   /** This process's view of run credit leases (credit-lease.ts), shared with page tasks. */
   readonly creditLeases: RunCreditLeases;
   /** The page basis port over this database (db/page-basis-ledger.ts); bindStore gives every hydrated state a PageBasis over it. */
@@ -387,6 +380,12 @@ export class Store {
     }), databaseUrl, { onStatement: dbTraceStatementHook() });
     this.pageBasisLedger = new PostgresPageBasisLedger(this.sql);
     this.tables = new TableExistence(this.sql);
+    this.content = new PostgresDocumentContent(this.sql);
+    this.records = new PostgresDocumentRecords(this.sql);
+    this.assets = postgresDocumentAssets(this.sql);
+    this.graph = new PostgresKnowledgeGraph(this.sql);
+    this.budgets = postgresFleetBudgets(this.sql);
+    this.ocrEscalation = new PostgresOcrEscalationReads(this.sql);
     this.plausibilityWarningThreshold =
       options?.plausibilityWarningThreshold ?? 0.3;
     this.notifications = new RunNotifications(this.sql, this.plausibilityWarningThreshold);
@@ -660,7 +659,7 @@ export class Store {
     // The asset ledger goes after the checkpoint commits: it may only describe Markdown and slots that are durable.
     const next = previous.then(async () => {
       const written = await this.writeProgressGuarded(state, prelude, options);
-      if (state.pendingAssetLedger.size > 0) await flushAssetLedger(state, (write) => this.writeDocumentAssetLedger(write));
+      if (state.pendingAssetLedger.size > 0) await flushAssetLedger(state, (write) => writeDocumentAssetLedger(this.sql, write));
       return written;
     });
     const tail = next.catch(() => undefined);
@@ -1999,118 +1998,6 @@ export class Store {
     return new Set(rows.map((r) => r.page_number));
   }
 
-  async insertChunks(
-    chunks: Array<{
-      id: string;
-      documentId: string;
-      runId: string;
-      userId: string;
-      chunkIndex: number;
-      text: string;
-      headingPath: string[];
-      pageNumber?: number;
-      tokenEstimate: number;
-      metadata: Record<string, unknown>;
-      contentHash?: string;
-      pipelineVersion?: string;
-    }>,
-  ): Promise<void> {
-    if (chunks.length === 0) {
-      return;
-    }
-
-    const rows = chunks.map((chunk) => ({
-      id: chunk.id,
-      document_id: chunk.documentId,
-      run_id: chunk.runId,
-      user_id: chunk.userId,
-      chunk_index: chunk.chunkIndex,
-      text: chunk.text,
-      heading_path: chunk.headingPath,
-      page_number: chunk.pageNumber ?? null,
-      token_estimate: chunk.tokenEstimate,
-      metadata: this.toJson(chunk.metadata),
-      content_hash: chunk.contentHash ?? null,
-      pipeline_version: chunk.pipelineVersion ?? null,
-    }));
-
-    for (const batch of batchedRows(rows)) {
-      await this.sql`
-        insert into document_chunks ${this.sql(
-          batch,
-          "id",
-          "document_id",
-          "run_id",
-          "user_id",
-          "chunk_index",
-          "text",
-          "heading_path",
-          "page_number",
-          "token_estimate",
-          "metadata",
-          "content_hash",
-          "pipeline_version",
-        )}
-        on conflict (id) do update
-        set
-          document_id = excluded.document_id,
-          run_id = excluded.run_id,
-          user_id = excluded.user_id,
-          chunk_index = excluded.chunk_index,
-          text = excluded.text,
-          heading_path = excluded.heading_path,
-          page_number = excluded.page_number,
-          token_estimate = excluded.token_estimate,
-          metadata = excluded.metadata,
-          content_hash = excluded.content_hash,
-          pipeline_version = excluded.pipeline_version
-      `;
-    }
-  }
-
-  /** Content-addressed embedding reuse (embeddings/embedding-reuse.ts); always org-scoped. */
-  async findEmbeddingReuseRefs(orgId: string, keys: readonly string[]): Promise<EmbeddingReuseRef[]> {
-    const refs: EmbeddingReuseRef[] = [];
-    for (const batch of batchedRows([...new Set(keys)])) {
-      const rows = await this.sql<{ embed_key: string; artifact_uri: string; chunk_index: number }[]>`
-        select embed_key, artifact_uri, chunk_index
-        from embedding_reuse_refs
-        where org_id = ${orgId} and embed_key = any(${batch}::text[])
-      `;
-      refs.push(...rows.map((row) => ({ key: row.embed_key, artifactUri: row.artifact_uri, chunkIndex: row.chunk_index })));
-    }
-    return refs;
-  }
-
-  /** Points each key at its newest artifact, which outlives older purged versions. */
-  async recordEmbeddingReuseRefs(orgId: string, refs: readonly EmbeddingReuseRef[]): Promise<void> {
-    // One row per key (an upsert cannot touch a row twice), in key order so
-    // concurrent writers lock rows in the same order.
-    const unique = [...new Map(refs.map((ref) => [ref.key, ref])).values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    for (const batch of batchedRows(unique)) {
-      await this.sql`
-        insert into embedding_reuse_refs (org_id, embed_key, artifact_uri, chunk_index)
-        select ${orgId}, ref.embed_key, ref.artifact_uri, ref.chunk_index
-        from unnest(${batch.map((ref) => ref.key)}::text[], ${batch.map((ref) => ref.artifactUri)}::text[], ${batch.map((ref) => ref.chunkIndex)}::int[])
-          as ref(embed_key, artifact_uri, chunk_index)
-        on conflict (org_id, embed_key) do update
-        set artifact_uri = excluded.artifact_uri, chunk_index = excluded.chunk_index, updated_at = now()
-        where embedding_reuse_refs.artifact_uri is distinct from excluded.artifact_uri
-          or embedding_reuse_refs.chunk_index is distinct from excluded.chunk_index
-      `;
-    }
-  }
-
-  /** Drops refs whose artifact no longer holds the keyed vector (purged or rewritten). */
-  async forgetEmbeddingReuseRefs(orgId: string, artifactUri: string, keys: readonly string[]): Promise<void> {
-    for (const batch of batchedRows([...new Set(keys)])) {
-      await this.sql`
-        delete from embedding_reuse_refs
-        where org_id = ${orgId} and artifact_uri = ${artifactUri} and embed_key = any(${batch}::text[])
-      `;
-    }
-  }
-
   private visionAttemptBackend: PostgresVisionAttemptBackend | null = null;
 
   /** The shared vision attempt ledger every vision request of a run is admitted against (lib/vision-attempt-guard.ts). */
@@ -2125,198 +2012,6 @@ export class Store {
   get pageReaderBudget(): PostgresPageReaderOrgBudget {
     this.pageReaderBudgetBackend ??= new PostgresPageReaderOrgBudget(this.sql);
     return this.pageReaderBudgetBackend;
-  }
-
-  /** Reserves a document's share of the run's Fast page-image render budget, shared by every worker (fast-page-image-budget.ts). */
-  async reserveFastPageImageRenders(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number> {
-    return await reserveFastPageImageRenders(this.sql, args);
-
-  }
-
-  /** Reserves one free-tier chart-export VM run against the org's hourly cap, shared by every worker (chart-export-free-vm-cap.ts). */
-  async reserveChartExportFreeVmRun(args: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> {
-    return await reserveChartExportFreeVmRun(this.sql, args);
-  }
-
-  /** Document asset ledger (db/document-asset-ledger.ts): one org-scoped transaction for a document's images and level. */
-  async listHostPageImagePages(scope: { orgId: string; documentId: string }): Promise<number[]> {
-    return await listHostPageImagePages(this.sql, scope);
-  }
-
-  async writeDocumentAssetLedger(write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
-    return await writeDocumentAssetLedger(this.sql, write);
-  }
-
-  /** Figure uploads in progress (document-asset-ledger.ts): pending rows before an upload step, stored once it landed. */
-  async markAssetsPending(args: Parameters<typeof markAssetsPending>[1]): Promise<{ pending: number }> {
-    return await markAssetsPending(this.sql, args);
-  }
-
-  async markAssetsStored(args: Parameters<typeof markAssetsStored>[1]): Promise<{ stored: number }> {
-    return await markAssetsStored(this.sql, args);
-  }
-
-  /** The adopt pass: pending rows checked against storage (streamed SHA-256), no VM. */
-  async adoptPendingAssets(reader: FigureObjectReader, args: Parameters<typeof adoptPendingAssets>[2]) {
-    return await adoptPendingAssets(this.sql, reader, args);
-  }
-
-  async markAssetsLost(args: Parameters<typeof markAssetsLost>[1]): Promise<{ lost: number }> {
-    return await markAssetsLost(this.sql, args);
-  }
-
-  /** Repair a figure object of other bytes under the document's ledger lock (document-asset-ledger.ts). */
-  async replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void> {
-    await replaceUnvouchedObject(this.sql, args);
-  }
-
-  /**
-   * Whether the document's PII outcome withholds artifacts (`documents.metadata.pii`: it redacted or blocked, so it keeps
-   * a withheld list). A missing document withholds (fail closed).
-   */
-  async documentPiiWithholds(documentId: string): Promise<boolean> {
-    const [row] = await this.sql<{ withholds: boolean }[]>`
-      select coalesce((metadata->'pii'->>'blocked')::boolean, false)
-        or coalesce((metadata->'pii'->>'redacted')::boolean, false)
-        or coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
-          then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
-      from documents where id = ${documentId}`;
-    return row?.withholds ?? true;
-  }
-
-  /**
-   * Add URIs to the document's PII withheld list (`documents.metadata.pii.withheldArtifactUris`), for artifacts written
-   * after its PII stage. Throws when the document has no PII outcome to add to, so a caller never records the artifacts
-   * as servable on a write that did not land.
-   */
-  async appendWithheldArtifactUris(documentId: string, uris: readonly string[]): Promise<void> {
-    if (uris.length === 0) return;
-    const updated = await this.sql`
-      update documents d
-      set metadata = jsonb_set(d.metadata, '{pii,withheldArtifactUris}', (
-            select coalesce(jsonb_agg(u order by u), '[]'::jsonb) from (
-              select jsonb_array_elements_text(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
-                then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end) as u
-              union
-              select unnest(${this.sql.array([...uris])}::text[])
-            ) withheld), true),
-          updated_at = now()
-      where d.id = ${documentId} and jsonb_typeof(d.metadata->'pii') = 'object'
-      returning 1`;
-    if (updated.length !== 1) throw new Error("PII withheld list not updated: the document has no PII outcome");
-  }
-
-  /**
-   * Ingest report page facts. Source facts (text layer, images) and vision
-   * outcomes come from different stages, so each write only touches its own
-   * columns and never clears the other stage's values.
-   */
-  async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
-    const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
-    const vision = rows.filter((row) => row.visionStatus !== undefined);
-    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null);
-    for (const batch of batchedRows(source)) {
-      const payload = batch.map((row) => ({
-        document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
-        text_bytes: row.textBytes ?? null, word_count: row.wordCount ?? null,
-        image_count: row.imageCount ?? null, facts_source: row.factsSource ?? null,
-      }));
-      await this.sql`
-        insert into document_page_facts (document_id, page_number, run_id, text_bytes, word_count, image_count, facts_source)
-        select r.document_id, r.page_number, r.run_id, r.text_bytes, r.word_count, r.image_count, r.facts_source
-        from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
-          document_id text, page_number integer, run_id text, text_bytes integer, word_count integer,
-          image_count integer, facts_source text
-        )
-        join documents d on d.id = r.document_id
-        on conflict (document_id, page_number) do update
-        set run_id = excluded.run_id,
-            text_bytes = excluded.text_bytes,
-            word_count = excluded.word_count,
-            image_count = excluded.image_count,
-            facts_source = excluded.facts_source,
-            updated_at = now()
-      `;
-    }
-    for (const batch of batchedRows(vision)) {
-      const payload = batch.map((row) => ({
-        document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
-        vision_status: row.visionStatus ?? null, vision_text_bytes: row.visionTextBytes ?? null,
-      }));
-      await this.sql`
-        insert into document_page_facts (document_id, page_number, run_id, vision_status, vision_text_bytes)
-        select r.document_id, r.page_number, r.run_id, r.vision_status, r.vision_text_bytes
-        from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
-          document_id text, page_number integer, run_id text, vision_status text, vision_text_bytes integer
-        )
-        join documents d on d.id = r.document_id
-        on conflict (document_id, page_number) do update
-        set run_id = excluded.run_id,
-            vision_status = excluded.vision_status,
-            vision_text_bytes = excluded.vision_text_bytes,
-            updated_at = now()
-      `;
-    }
-    // Routing facts (migration 0141): a value the write does not know keeps the stored one.
-    for (const batch of batchedRows(routing)) {
-      const payload = batch.map((row) => ({
-        document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
-        text_layer: row.textLayer ?? null, scan_class: row.scanClass ?? null,
-      }));
-      await this.sql`
-        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class)
-        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class
-        from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
-          document_id text, page_number integer, run_id text, text_layer text, scan_class text
-        )
-        join documents d on d.id = r.document_id
-        on conflict (document_id, page_number) do update
-        set run_id = excluded.run_id,
-            text_layer = coalesce(excluded.text_layer, document_page_facts.text_layer),
-            scan_class = coalesce(excluded.scan_class, document_page_facts.scan_class),
-            updated_at = now()
-      `;
-    }
-  }
-
-  /**
-   * The organization and run each document belongs to, read from the database (never from a request or a provider): what a
-   * sandboxed PDF batch is checked against before any VM work (assertSingleScopeBatch).
-   */
-  async documentScopes(documentIds: readonly string[]): Promise<Map<string, { orgId: string | null; runId: string; bytes: number }>> {
-    if (documentIds.length === 0) return new Map();
-    const rows = await this.sql<{ id: string; org_id: string | null; run_id: string; file_size: string | number }[]>`
-      select id, org_id, run_id, file_size from documents where id = any(${this.sql.array([...documentIds])}::text[])
-    `;
-    return new Map(rows.map((row) => [row.id, { orgId: row.org_id, runId: row.run_id, bytes: Number(row.file_size) || 0 }]));
-  }
-
-  async ocrEscalationReads(runId: string, documentId: string, pageNumber: number): Promise<import("../pipeline/pipeline.js").OcrEscalationReadRow[]> {
-    const rows = await this.sql<{ attempt: number; status: "completed" | "failed"; text: string | null; model: string; usage_events: unknown }[]>`
-      select attempt, status, text, model, usage_events from ocr_escalation_reads
-      where run_id = ${runId} and document_id = ${documentId} and page_number = ${pageNumber}
-      order by attempt`;
-    return rows.map((row) => ({
-      attempt: Number(row.attempt), status: row.status, text: row.text, model: row.model,
-      usageEvents: Array.isArray(row.usage_events) ? row.usage_events as import("../models.js").UsageEvent[] : [],
-    }));
-  }
-
-  async recordOcrEscalationRead(row: Omit<import("../pipeline/pipeline.js").OcrEscalationReadRow, "attempt"> & { runId: string; documentId: string; pageNumber: number }): Promise<number> {
-    const events = this.sql.json(JSON.parse(JSON.stringify(row.usageEvents)));
-    // The next attempt number in the same statement as the insert; a concurrent call that took it first makes this insert a
-    // no-op, and the loop takes the one after. Each call's usage events carry their own unique ids, so none is lost either way.
-    for (let tries = 0; tries < 16; tries += 1) {
-      const inserted = await this.sql<{ attempt: number }[]>`
-        insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
-        select ${row.runId}, ${row.documentId}, ${row.pageNumber},
-          coalesce((select max(attempt) from ocr_escalation_reads where run_id = ${row.runId} and document_id = ${row.documentId} and page_number = ${row.pageNumber}), 0) + 1,
-          ${row.status}, ${row.text}, ${row.model}, ${events}
-        on conflict (run_id, document_id, page_number, attempt) do nothing
-        returning attempt`;
-      if (inserted.length > 0) return Number(inserted[0]!.attempt);
-    }
-    throw new Error(`could not persist an OCR escalation read for ${row.documentId} page ${row.pageNumber}: attempt numbers kept colliding`);
   }
 
   /**
@@ -2337,227 +2032,6 @@ export class Store {
       console.warn(`[worker-capabilities] fleet check for ${capability} failed: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
-  }
-
-  async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {
-    const rows = await this.sql`
-      update documents set file_facts = ${this.sql.json(JSON.parse(JSON.stringify(facts)))}, mime_type = ${facts.mimeType}, updated_at = now()
-      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
-      returning id
-    `;
-    return rows.length > 0;
-  }
-
-  /**
-   * Record quarantine's parse decision for this run's own document (lib/parse-source.ts, migrations 0134-0135): `{ copy }`
-   * parses the scanned copy (an encrypted PDF's), `{ copy: null }` the upload it scanned, and null clears the decision
-   * (refused: nothing may parse it). Either decision stores the sha256 of the bytes parsers read: the copy's, or the
-   * upload's as the scan read it (`scannedSha256`, council R8-L1), so a later swap of the object is refused whether or not
-   * the row has a server hash. Stamped with this build's scan version; false when no row matched.
-   */
-  async setDocumentParseSource(runId: string, documentId: string, decision: ParseSourceDecisionRecord | null): Promise<boolean> {
-    const copy = decision?.copy ?? null;
-    const sha = decision ? assertParseSourceRecord(decision) : null;
-    const rows = await this.sql`
-      update documents set parse_source_key = ${copy?.key ?? null}, parse_source_sha256 = ${sha},
-        parse_source_scan_version = ${decision ? PARSE_SOURCE_SCAN_VERSION : null}, updated_at = now()
-      where id = ${documentId} and run_id = ${runId}
-      returning id
-    `;
-    return rows.length > 0;
-  }
-
-  async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
-    const rows = await this.sql`
-      update documents
-      set metadata = coalesce(metadata, '{}'::jsonb)
-        || jsonb_build_object('title', ${title.title}::text, 'titleSource', ${title.source}::text)
-      where id = ${documentId}
-        and nullif(btrim(metadata ->> 'title'), '') is null
-      returning id
-    `;
-    return rows.length > 0;
-  }
-
-  async insertPages(
-    pages: Array<{
-      id: string;
-      documentId: string;
-      runId: string;
-      userId: string;
-      pageNumber: number;
-      text: string;
-      tokenEstimate: number;
-    }>,
-  ): Promise<void> {
-    if (pages.length === 0) {
-      return;
-    }
-
-    const rows = pages.map((page) => ({
-      id: page.id,
-      document_id: page.documentId,
-      run_id: page.runId,
-      user_id: page.userId,
-      page_number: page.pageNumber,
-      text: page.text,
-      token_estimate: page.tokenEstimate,
-    }));
-
-    for (const batch of batchedRows(rows)) {
-      await this.sql`
-        insert into document_pages ${this.sql(
-          batch,
-          "id",
-          "document_id",
-          "run_id",
-          "user_id",
-          "page_number",
-          "text",
-          "token_estimate",
-        )}
-        on conflict (id) do update
-        set run_id = excluded.run_id,
-            user_id = excluded.user_id,
-            page_number = excluded.page_number,
-            text = excluded.text,
-            token_estimate = excluded.token_estimate
-      `;
-    }
-  }
-
-  /**
-   * The document's chunks are replaced by `keepChunkIds`; rows an earlier attempt
-   * wrote beyond them are stale. Scoped to this document only.
-   */
-  async staleDocumentChunkIds(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
-    const rows = await this.sql<{ id: string }[]>`
-      select id from document_chunks
-      where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
-    `;
-    return rows.map((row) => row.id);
-  }
-
-  async deleteStaleDocumentChunks(documentId: string, keepChunkIds: readonly string[]): Promise<string[]> {
-    const rows = await this.sql<{ id: string }[]>`
-      delete from document_chunks
-      where document_id = ${documentId} and id <> all(${this.sql.array([...keepChunkIds])}::text[])
-      returning id
-    `;
-    return rows.map((row) => row.id);
-  }
-
-  /**
-   * deleteStaleDocumentChunks, then (when the replacement set is non-empty) markDocumentLexicalSearchable,
-   * in one transaction and one round trip: the marker never precedes the tail drop.
-   */
-  async finalizeDocumentChunks(documentId: string, keepChunkIds: readonly string[], markSearchable: boolean): Promise<void> {
-    await pipelineTransaction(this.sql, (client) => [
-      client`
-        delete from document_chunks
-        where document_id = ${documentId} and id <> all(${client.array([...keepChunkIds])}::text[])
-      `,
-      ...(markSearchable ? [client`
-        update documents
-        set lexical_searchable_at = coalesce(lexical_searchable_at, now())
-        where id = ${documentId}
-      `] : []),
-    ]);
-  }
-
-  /**
-   * Every chunk row of the document is written: keyword search may serve it
-   * before the index stage completes (server/src/search/eligibility.ts).
-   * Called after the last insertChunks batch, so a reader never sees a
-   * half-materialized chunk set behind the marker.
-   */
-  async markDocumentLexicalSearchable(documentId: string): Promise<void> {
-    await this.sql`
-      update documents
-      set lexical_searchable_at = coalesce(lexical_searchable_at, now())
-      where id = ${documentId}
-    `;
-  }
-
-  async linkChunksToPages(documentId: string, runId: string): Promise<void> {
-    await this.sql`
-      update document_chunks c
-      set parent_page_id = p.id
-      from document_pages p
-      where c.document_id = ${documentId}
-        and c.run_id = ${runId}
-        and p.document_id = ${documentId}
-        and p.run_id = ${runId}
-        and c.page_number = p.page_number
-        and c.parent_page_id is null
-    `;
-  }
-
-  async insertPropositions(
-    propositions: Array<{
-      id: string;
-      documentId: string;
-      runId: string;
-      userId: string;
-      chunkIndex: number;
-      text: string;
-      sourceParagraph: string;
-      tokenEstimate: number;
-    }>,
-  ): Promise<void> {
-    if (propositions.length === 0) {
-      return;
-    }
-
-    const rows = propositions.map((prop) => ({
-      id: prop.id,
-      document_id: prop.documentId,
-      run_id: prop.runId,
-      user_id: prop.userId,
-      chunk_index: prop.chunkIndex,
-      text: prop.text,
-      source_paragraph: prop.sourceParagraph,
-      token_estimate: prop.tokenEstimate,
-    }));
-
-    for (const batch of batchedRows(rows)) {
-      await this.sql`
-        insert into document_propositions ${this.sql(
-          batch,
-          "id",
-          "document_id",
-          "run_id",
-          "user_id",
-          "chunk_index",
-          "text",
-          "source_paragraph",
-          "token_estimate",
-        )}
-        on conflict (id) do nothing
-      `;
-    }
-  }
-
-  async insertSummary(summary: {
-    id: string;
-    documentId: string;
-    runId: string;
-    userId: string;
-    summary: string;
-  }): Promise<void> {
-    await this.sql`
-      insert into document_summaries (
-        id, document_id, run_id, user_id, summary
-      )
-      values (
-        ${summary.id},
-        ${summary.documentId},
-        ${summary.runId},
-        ${summary.userId},
-        ${summary.summary}
-      )
-      on conflict (id) do nothing
-    `;
   }
 
   /**
@@ -2716,52 +2190,6 @@ export class Store {
     await insertPrivacyAuditRows(this.sql, entries);
   }
 
-  /** Read graph evidence from current document rows, never reused artifact identities. */
-  async loadDocumentGraphChunks(projectId: string, documentId: string) {
-    const rows = await this.sql<{ id: string; text: string; page_number: number | null }[]>`
-      select c.id, c.text, c.page_number
-      from document_chunks c join documents d on d.id = c.document_id
-      where c.document_id = ${documentId} and d.project_id = ${projectId}
-      order by c.chunk_index
-    `;
-    return rows.map((row) => ({ id: row.id, text: row.text, pageNumber: row.page_number }));
-  }
-
-  async replaceDocumentGraph(input: ReplaceDocumentGraphInput): Promise<{ nodes: number; edges: number }> {
-    return await replaceDocumentGraph(this.sql, input);
-  }
-
-  /** Documents whose graph was already extracted with this config (a re-run skips them). */
-  async documentsWithGraph(projectId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>> {
-    if (documentIds.length === 0) return new Set();
-    const rows = await this.sql<{ document_id: string }[]>`
-      select document_id from kg_document_state
-      where project_id = ${projectId} and config_hash = ${configHash}
-        and document_id = any(${this.sql.array([...documentIds])})
-    `;
-    return new Set(rows.map((row) => row.document_id));
-  }
-
-  async refreshProjectCommunities(args: {
-    projectId: string;
-    userId: string;
-    runId: string | null;
-    context: CommunitySummaryContext;
-  }): Promise<CommunityRefreshResult> {
-    return await refreshProjectCommunities({ sql: this.sql, ...args });
-  }
-
-  async projectGraphScope(projectId: string): Promise<string> {
-    const [project] = await this.sql<{ name: string; template_key: string | null }[]>`
-      select name, template_key from projects where id = ${projectId}
-    `;
-    if (!project) return "Project";
-    return graphFallbackScope({
-      name: project.name,
-      templateDescription: projectTemplates.find((template) => template.key === project.template_key)?.description,
-    });
-  }
-
   /** Claims and runs queued figure resumes (figures/resume-runner.ts); a no-op while DOCSLURP_FIGURE_RESUME is off. */
   async runFigureResumes(deps: Omit<import("../figures/resume-runner.js").FigureResumeDeps, "sql">): Promise<number> {
     const { runFigureResumes } = await import("../figures/resume-runner.js");
@@ -2810,7 +2238,6 @@ export class Store {
   private tableExists(tableName: string): Promise<boolean> {
     return this.tables.exists(tableName);
   }
-
 
 }
 
@@ -2892,22 +2319,6 @@ function mapStageState(row: StageStateRow): StageState {
 
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
-}
-
-/**
- * The parse source of one document for a reader outside the stage pipeline (the figure resume runner): the loader's own
- * resolution (lib/parse-source.ts resolveDocumentSource), so it is quarantine's decision and never the upload's key unless
- * the scan read the upload itself. Org-scoped; null when the document is not the organization's. Only this module reads
- * the upload's key (quarantine-council-r6 tripwire). Read for the claimed run only, and only while the document is completed
- * (a reprocess or a failure since the claim reads nothing).
- */
-export async function documentParseSource(
-  sql: Sql<Record<string, unknown>>, scope: { orgId: string; documentId: string; runId: string }, env: NodeJS.ProcessEnv = process.env,
-): Promise<ResolvedDocumentSource | null> {
-  const [row] = await sql<Array<{ id: string; source_key: string; source_sha256: string | null; parse_source_key: string | null; parse_source_sha256: string | null; parse_source_scan_version: number | null }>>`
-    select id, source_key, source_sha256, parse_source_key, parse_source_sha256, parse_source_scan_version
-    from documents where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId} and status = 'completed'`;
-  return row ? resolveDocumentSource(row, env) : null;
 }
 
 /**

@@ -58,6 +58,8 @@ class FakeStore implements StageExecutionStore {
     for (const checkpoint of this.checkpoints) state.setRunStage(checkpoint);
   }
   async renewHeartbeat() { this.calls.push("renewHeartbeat"); }
+  async markRunMilestone() { return null; }
+  async fleetAdvertises() { return false; }
   async startRunStage(_state: WorkflowState, stage: string) { this.stageStatus.set(stage, "processing"); }
   async completeRunStage(_state: WorkflowState, stage: string) { this.stageStatus.set(stage, "completed"); }
   shardsFinished: string[][] = [];

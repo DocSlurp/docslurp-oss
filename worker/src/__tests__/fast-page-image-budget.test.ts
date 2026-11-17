@@ -55,7 +55,7 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
   it("never grants more than the per-run cap across concurrent workers", { timeout: 60_000 }, async () => {
     const workers = [worker(), worker(), worker()];
     const grants = await Promise.all(Array.from({ length: DOCUMENTS }, (_, index) =>
-      workers[index % workers.length]!.reserveFastPageImageRenders({ runId: "run", documentId: `d${index}`, wanted: 10, perRun: 45 })));
+      workers[index % workers.length]!.budgets.reserveFastPageImageRenders({ runId: "run", documentId: `d${index}`, wanted: 10, perRun: 45 })));
     expect(grants.reduce((sum, granted) => sum + granted, 0)).toBe(45);
     expect(grants.every((granted) => granted >= 0 && granted <= 10)).toBe(true);
     const { rows } = await db.query<{ used: number }>(`select used from run_fast_page_image_budgets where run_id = 'run'`);
@@ -63,7 +63,7 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
 
     // Shards and retries of a document on any worker get its grant back without spending more.
     for (const [index, granted] of grants.entries()) {
-      expect(await workers[(index + 1) % workers.length]!.reserveFastPageImageRenders({ runId: "run", documentId: `d${index}`, wanted: 10, perRun: 45 }))
+      expect(await workers[(index + 1) % workers.length]!.budgets.reserveFastPageImageRenders({ runId: "run", documentId: `d${index}`, wanted: 10, perRun: 45 }))
         .toBe(granted);
     }
     expect((await db.query<{ used: number }>(`select used from run_fast_page_image_budgets where run_id = 'run'`)).rows[0]?.used).toBe(45);
@@ -80,10 +80,10 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
 
     const restarted = worker();
     // The restarted worker sees the stored grant, and a document new to it finds the budget already spent.
-    expect(await restarted.reserveFastPageImageRenders({ runId: "run", documentId: granted.document_id, wanted: 10, perRun: 45 })).toBe(granted.granted);
+    expect(await restarted.budgets.reserveFastPageImageRenders({ runId: "run", documentId: granted.document_id, wanted: 10, perRun: 45 })).toBe(granted.granted);
     await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('late', 'o1', 'u1', 'w', 'run', 'late.pdf', 'application/pdf', 'raw/late', 'processing', 5)`);
-    expect(await restarted.reserveFastPageImageRenders({ runId: "run", documentId: "late", wanted: 5, perRun: 45 })).toBe(0);
+    expect(await restarted.budgets.reserveFastPageImageRenders({ runId: "run", documentId: "late", wanted: 5, perRun: 45 })).toBe(0);
   });
 
   describe("refuses a document that is not the run's own (M2)", () => {
@@ -108,9 +108,9 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
     it("cross-tenant pairs: another org's document on this run, and this run's document on another org's run", async () => {
       const store = worker();
       const usedBefore = await budgetOf("run");
-      await expect(store.reserveFastPageImageRenders({ runId: "run", documentId: "foreign", wanted: 3, perRun: 1000 }))
+      await expect(store.budgets.reserveFastPageImageRenders({ runId: "run", documentId: "foreign", wanted: 3, perRun: 1000 }))
         .rejects.toThrow(/does not belong to run/);
-      await expect(store.reserveFastPageImageRenders({ runId: "other-run", documentId: "d0", wanted: 3, perRun: 1000 }))
+      await expect(store.budgets.reserveFastPageImageRenders({ runId: "other-run", documentId: "d0", wanted: 3, perRun: 1000 }))
         .rejects.toThrow(/does not belong to run/);
       expect(await budgetOf("run")).toBe(usedBefore);
       expect(await budgetOf("other-run")).toBeNull();
@@ -120,11 +120,11 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
 
     it("refuses another run's document in the same org, and a document whose project differs from the run's", async () => {
       const store = worker();
-      await expect(store.reserveFastPageImageRenders({ runId: "fresh", documentId: "d1", wanted: 3, perRun: 1000 }))
+      await expect(store.budgets.reserveFastPageImageRenders({ runId: "fresh", documentId: "d1", wanted: 3, perRun: 1000 }))
         .rejects.toThrow(/does not belong to run/);
-      await expect(store.reserveFastPageImageRenders({ runId: "fresh", documentId: "moved", wanted: 3, perRun: 1000 }))
+      await expect(store.budgets.reserveFastPageImageRenders({ runId: "fresh", documentId: "moved", wanted: 3, perRun: 1000 }))
         .rejects.toThrow(/does not belong to run/);
-      await expect(store.reserveFastPageImageRenders({ runId: "fresh", documentId: "missing", wanted: 3, perRun: 1000 }))
+      await expect(store.budgets.reserveFastPageImageRenders({ runId: "fresh", documentId: "missing", wanted: 3, perRun: 1000 }))
         .rejects.toThrow(/does not belong to run/);
       expect(await budgetOf("fresh")).toBeNull();
       expect(await grantsOf("fresh")).toBe(0);

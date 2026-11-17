@@ -164,7 +164,7 @@ async function main(): Promise<void> {
   // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a
   // configuration that selects the VM PDF extractor without a provider, refuses to start.
   // Providers check batch ownership against the database themselves (ExtractorPluginHost.documentOwners).
-  setExtractorDocumentOwners((documentIds) => store.documentScopes(documentIds));
+  setExtractorDocumentOwners((documentIds) => store.records.documentScopes(documentIds));
   setExtractorComputeObservations((profileIds) => store.computeObservations(profileIds));
   setExtractorComputeCohortAuthorizer((scope) => store.authorizeComputeCohort(scope));
   setExtractorComputeAllocationAdmission(store.computeAllocationAdmission());

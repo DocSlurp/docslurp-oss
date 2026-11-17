@@ -3,7 +3,7 @@ import { reportException, initializeWorkerErrorReporting } from "@docslurp/share
 import type { PreloadedRunState } from "../db/store.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
 import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
-import { noteRunMilestone, noteRunOutcome, workerStartKind, type RunMilestoneStore } from "./run-milestones.js";
+import { noteRunMilestone, noteRunOutcome, workerStartKind } from "./run-milestones.js";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
 
@@ -77,11 +77,12 @@ export type StageExecutionStore = Pick<
   | "seedReusedStageOutputs"
   | "finishShard"
   | "pageBasisLedger"
+  | "markRunMilestone"
 > & {
   readonly pageTasks: Pick<Store["pageTasks"], "completed">;
   readonly notifications: Pick<Store["notifications"], "triggerRunEmails">;
-  /** Whether every live worker advertises `capability` (Store.fleetAdvertises); absent: no (the old behaviour). */
-  fleetAdvertises?: Store["fleetAdvertises"];
+  /** Whether every live worker advertises `capability` (Store.fleetAdvertises): a run's billing rules are pinned from it. */
+  fleetAdvertises: Store["fleetAdvertises"];
 };
 
 /** Orchestrator hooks injected per stage execution. */
@@ -269,7 +270,7 @@ export function createStageExecution(deps: {
     // completion charge for image files and scanned pages (db/page-base-fee.ts).
     const pageBillingRules = pinRunPageBillingRules(state);
     // The OCR page class, pinned the same way: on only when every live worker advertises it (pipeline/ocr-page-class.ts).
-    const ocrPageClass = await pinRunOcrPageClass(state, async () => (await store.fleetAdvertises?.("billing.ocr-page-class")) === true);
+    const ocrPageClass = await pinRunOcrPageClass(state, async () => (await store.fleetAdvertises("billing.ocr-page-class")) === true);
 
     // Mark run as processing
     state.run.status = "processing";
@@ -306,7 +307,7 @@ export function createStageExecution(deps: {
     }
 
     // First pickup only (the stamp is conditional): start latency, split by whether this worker was already running.
-    await noteRunMilestone(store as RunMilestoneStore, run.id, "worker_started", { start: workerStartKind() });
+    await noteRunMilestone(store, run.id, "worker_started", { start: workerStartKind() });
 
     // Log start event
     await store.appendEvent(
@@ -744,7 +745,7 @@ export function createStageExecution(deps: {
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
       await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
-      await noteRunOutcome(store as RunMilestoneStore, state.run, "failed", first?.[0] ?? state.stage);
+      await noteRunOutcome(store, state.run, "failed", first?.[0] ?? state.stage);
       await notifyTerminal(input.runId, "run.failed");
       return;
     }
@@ -753,7 +754,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
     );
     await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
-    await noteRunOutcome(store as RunMilestoneStore, state.run, failed.length > 0 ? "completed_with_failures" : "completed");
+    await noteRunOutcome(store, state.run, failed.length > 0 ? "completed_with_failures" : "completed");
 
     await notifyTerminal(input.runId, "run.completed");
   }
@@ -776,7 +777,7 @@ export function createStageExecution(deps: {
     await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration },
       // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
       { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
-    await noteRunOutcome(store as RunMilestoneStore, state.run, "failed", stage);
+    await noteRunOutcome(store, state.run, "failed", stage);
 
     await notifyTerminal(input.runId, "run.failed");
   }

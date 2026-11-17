@@ -88,7 +88,7 @@ export class QuarantineStage implements Stage {
               // Inline charts need an image whose guest charges them against this command's budget, and (free tier) a grant
               // from the org's free-VM cap. Either missing: no chart request; a counted refusal stands in for the answer.
               const wanted = inlineChartRequest(state.run.pipeline, document.mimeType, process.env);
-              const inlineRefusal = wanted ? await inlineChartAdmission({ pipeline: state.run.pipeline, documentId: document.id, runId: state.run.id, orgId: state.run.orgId ?? null, store: state.store }) : null;
+              const inlineRefusal = wanted ? await inlineChartAdmission({ pipeline: state.run.pipeline, documentId: document.id, runId: state.run.id, orgId: state.run.orgId ?? null, budgets: state.store?.budgets }) : null;
               const charts = inlineRefusal ? null : wanted;
               const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(charts ? { charts } : {}), ...(signal ? { signal } : {}) });
               const verified = verifyIntakeFileFacts(document, inspection);
@@ -124,13 +124,13 @@ export class QuarantineStage implements Stage {
               // parses a document without one (lib/parse-source.ts).
               const accepted = artifact.decision === "accepted";
               const decision = { copy: parseCopy, scannedSha256 };
-              if (state.store?.setDocumentParseSource) {
-                if (!(await state.store.setDocumentParseSource(state.run.id, document.id, accepted ? decision : null))) {
+              if (state.store) {
+                if (!(await state.store.records.setDocumentParseSource(state.run.id, document.id, accepted ? decision : null))) {
                   throw new Error(`parse decision of document ${document.id} was not recorded`);
                 }
               } else if (parseCopy || (document.parseSourceDecision !== undefined && document.parseSourceDecision !== "unscanned-allowed")) {
                 // A loaded document (or a copy to point at) needs the decision persisted: later activities reload it.
-                throw new Error("parse decision cannot be recorded: the store cannot persist it");
+                throw new Error("parse decision cannot be recorded: the state has no store");
               }
               if (accepted) applyParseSource(document, decision);
               else clearParseSource(document);
@@ -160,8 +160,8 @@ export class QuarantineStage implements Stage {
               else if (state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT)) state.artifactLedger.recordDocument(document.id, CHART_INLINE_SLOT, chartInlineSlotValue(artifactUri, false));
               if (verified && !verified.refused) {
                 // Persist what the bytes are over the API's provisional record; format-detect and routing read it.
-                if (!state.store?.setDocumentFileFacts) throw new Error("file facts verified but the store cannot persist them");
-                await state.store.setDocumentFileFacts(state.run.id, document.id, verified.facts);
+                if (!state.store) throw new Error("file facts verified but the state has no store to persist them");
+                await state.store.records.setDocumentFileFacts(state.run.id, document.id, verified.facts);
                 document.fileFacts = verified.facts;
                 document.mimeType = verified.facts.mimeType;
               }
@@ -203,7 +203,8 @@ export async function inlineChartAdmission(args: {
   documentId: string;
   runId: string;
   orgId: string | null;
-  store: { reserveChartExportFreeVmRun?(a: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> } | undefined;
+  /** The fleet budgets of the run's store; none (an unbound state) refuses a free run (fail closed). */
+  budgets: Pick<import("../db/fleet-budgets.js").FleetBudgets, "reserveChartExportFreeVmRun"> | undefined;
   env?: Readonly<Record<string, string | undefined>>;
   hasCapability?: (capability: string) => boolean | "present" | "missing" | "sandbox-not-ready";
 }): Promise<InlineCharts | null> {
@@ -221,7 +222,7 @@ export async function inlineChartAdmission(args: {
     return { status: "refused", reason: "image-unsupported", ms: 0 };
   }
   if (chartExportModelsActive(args.pipeline, env)) return null;
-  const reserve = args.store?.reserveChartExportFreeVmRun?.bind(args.store);
+  const reserve = args.budgets?.reserveChartExportFreeVmRun.bind(args.budgets);
   let granted = false;
   if (reserve && args.orgId) {
     try {

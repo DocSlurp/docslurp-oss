@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
@@ -44,7 +45,7 @@ class MemoryStore implements StageExecutionStore {
     } as ProjectRun;
   }
 
-  private checkpoints: CheckpointStore = {
+  private checkpoints = memoryCheckpointStore({
     startDocumentStage: async () => undefined,
     completeDocumentStage: async (_state: WorkflowState, documentId: string, stageName: string) => {
       this.docStages.set(`${documentId}:${stageName}`, { documentId, stageName, status: "completed" } as StageState);
@@ -61,7 +62,7 @@ class MemoryStore implements StageExecutionStore {
     appendEvent: async (event: ProjectRunEvent) => { this.documentEvents.push(event); },
     setPageStageComplete: async () => undefined,
     getCompletedPages: async () => new Set<number>(),
-  } as unknown as CheckpointStore;
+  });
 
   async loadRun() { return structuredClone(this.run); }
   async loadDocumentsForRun() { return structuredClone(this.documents); }
@@ -69,6 +70,8 @@ class MemoryStore implements StageExecutionStore {
     state.store = this.checkpoints;
     for (const stage of this.docStages.values()) state.setDocumentStage({ ...stage });
   }
+  async markRunMilestone() { return null; }
+  async fleetAdvertises() { return false; }
   async renewHeartbeat() {}
   async startRunStage() {}
   async completeRunStage() {}

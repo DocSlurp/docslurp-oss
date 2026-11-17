@@ -130,7 +130,7 @@ function recordingStages(options: { scannedCopy?: boolean } = {}) {
           if (name === "quarantine") {
             const copy = options.scannedCopy ? { key: `u1/${state.run.id}/quarantine/${document.id}.scanned.pdf`, sha256: "c".repeat(64) } : null;
             const decision = { copy, scannedSha256: "a".repeat(64) };
-            await state.store!.setDocumentParseSource!(state.run.id, document.id, decision);
+            await state.store!.records.setDocumentParseSource(state.run.id, document.id, decision);
             applyParseSource(document, decision);
           }
           if (name === "embed") {

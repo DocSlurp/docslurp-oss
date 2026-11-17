@@ -284,10 +284,10 @@ export function buildVisionPageFacts(args: {
 
 /** Best-effort write; a failure is logged and never fails the stage. */
 export async function recordPageFacts(
-  store: { upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void> } | undefined,
+  store: { upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> } | undefined,
   rows: readonly PageFactUpsert[],
 ): Promise<void> {
-  if (rows.length === 0 || !store?.upsertPageFacts || !pageFactsEnabled()) return;
+  if (rows.length === 0 || !store || !pageFactsEnabled()) return;
   try {
     await store.upsertPageFacts(rows);
   } catch (error) {

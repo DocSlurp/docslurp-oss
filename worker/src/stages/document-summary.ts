@@ -141,18 +141,9 @@ export class DocumentSummaryStage implements Stage {
 
             const vector = embedded.vectors[0] ?? [];
 
-            if (state.store && "insertSummary" in state.store) {
-              await (
-                state.store as {
-                  insertSummary: (s: {
-                    id: string;
-                    documentId: string;
-                    runId: string;
-                    userId: string;
-                    summary: string;
-                  }) => Promise<void>;
-                }
-              ).insertSummary({
+            // Unbound states (unit tests) persist no row; every stage activity's state is bound (loadRunState).
+            if (state.store) {
+              await state.store.content.insertSummary({
                 id: `${document.id}-summary`,
                 documentId: document.id,
                 runId: state.run.id,
