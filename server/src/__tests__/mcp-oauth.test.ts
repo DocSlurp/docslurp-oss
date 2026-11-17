@@ -81,8 +81,13 @@ describe("MCP OAuth", () => {
       expect(consent.status).toBe(303);
       expect(consent.headers.get("location")).toBe("/app/mcp/authorize?request=consent_1");
       expect((await post("/oauth/mcp/grants/grant/revoke", browser)).status).toBe(401);
+      // Signed out: sent to the app's sign-in page, which returns here afterwards.
       const device = await post("/oauth/mcp/device", browser);
-      expect(await device.text()).toContain("Sign in to connect a device");
+      expect(device.status).toBe(303);
+      expect(device.headers.get("location")).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
+      const page = await app.request(`${browser}/oauth/mcp/device`);
+      expect(page.status).toBe(302);
+      expect(page.headers.get("location")).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
     });
     it("keeps the issuer and every discovery endpoint on the MCP origin", async () => {
       const metadata = await (await app.request(`${url}/.well-known/oauth-authorization-server`)).json() as Record<string, unknown>;
@@ -122,8 +127,9 @@ describe("MCP OAuth", () => {
       // On the browser origin, and on any other host, it is served (no loop, no redirect built from the request).
       for (const host of [browser, "http://evil.example", "http://localhost:9999"]) {
         const served = await app.request(`${host}/oauth/mcp/device`);
-        expect(served.status, host).toBe(403);
-        expect(served.headers.get("location"), host).toBeNull();
+        // Signed out: a same-host path to sign-in, never an absolute URL built from the request.
+        expect(served.status, host).toBe(302);
+        expect(served.headers.get("location"), host).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
         const page = await app.request(`${host}/oauth/mcp/authorize?client_id=unknown`);
         expect(page.status, host).toBe(400);
       }
@@ -134,7 +140,7 @@ describe("MCP OAuth", () => {
       expect((await post("/oauth/mcp/authorize", url)).status).toBe(303);
       expect((await post("/oauth/mcp/authorize", browser)).status).toBe(403);
       // And no page load is redirected.
-      expect((await app.request(`${url}/oauth/mcp/device`)).status).toBe(403);
+      expect((await app.request(`${url}/oauth/mcp/device`)).headers.get("location")).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
       expect((await app.request(`${url}/oauth/mcp/authorize?client_id=unknown`)).status).toBe(400);
     });
   });

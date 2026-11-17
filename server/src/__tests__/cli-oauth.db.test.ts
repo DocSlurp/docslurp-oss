@@ -459,9 +459,9 @@ describe("device authorization grant", () => {
 
     // Signed-out visitors get a sign-in link that returns to the page; a code in the query is never prefilled.
     const crafted = `${started.verification_uri}?user_code=${encodeURIComponent(started.user_code)}`;
-    const signedOut = await fetch(crafted);
-    expect(signedOut.status).toBe(403);
-    expect(await signedOut.text()).toContain(`/app/mcp/authorize?authorize=${encodeURIComponent("/oauth/mcp/device")}`);
+    const signedOut = await fetch(crafted, { redirect: "manual" });
+    expect(signedOut.status).toBe(302);
+    expect(signedOut.headers.get("location")).toBe(`/app/mcp/authorize?authorize=${encodeURIComponent("/oauth/mcp/device")}`);
     const opened = await fetch(crafted, { headers: { cookie: cookie("owner") } });
     expect(opened.headers.get("x-frame-options")).toBe("DENY");
     // same-origin, so the browser sends a real Origin on the form POST (no-referrer sends `Origin: null`).

@@ -92,9 +92,9 @@ async function sessionOrSignIn(c: Context): Promise<SessionRequestActor | Respon
   if (actor) return actor;
   // The app's sign-in page resumes /oauth/mcp/device after login (app lib/mcp-login-return.ts).
   const signIn = `/app/mcp/authorize?authorize=${encodeURIComponent("/oauth/mcp/device")}`;
-  return page(c, "Sign in", `<h1>Sign in to connect a device</h1>
-<p>Sign in to DocSlurp in this browser. You will come back here to enter the code shown in your terminal.</p>
-<div class="row"><a href="${escapeHtml(signIn)}"><button class="primary" type="button">Sign in</button></a></div>`, 403);
+  // A redirect, not a 403 page: the public error filter replaces every 4xx body with a JSON envelope, which showed a
+  // signed-out visitor a raw error instead of a way to sign in. 303 after a form post, so the browser GETs the page.
+  return c.redirect(signIn, c.req.method === "GET" ? 302 : 303);
 }
 
 function codeForm(message = "") {
