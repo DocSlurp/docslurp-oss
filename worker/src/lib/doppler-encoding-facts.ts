@@ -122,7 +122,11 @@ export const UNMAPPED_MATH_READ_MIN_BUCKET = 5;
  * page carries no TeX or MathML source, and at least UNMAPPED_MATH_READ_MIN_BUCKET's worth of glyphs are unreadable.
  */
 export const UNMAPPED_MATH_FLAGS: readonly DopplerMathFlag[] = ["math-font-no-unicode"];
-/** The page carries the formula's source (TeX in ActualText or Alt, MathML): copy it, keep the text layer. */
+/**
+ * The page carries the formula's source (TeX in ActualText or Alt, MathML): copy it, keep the text layer. Current Doppler
+ * sets only `actualtext-tex`; `alt-tex` and `mathml` (like `formula-struct` and `tagged-table`) are reserved and never set,
+ * and are read here as positive-only signals.
+ */
 export const SOURCE_MATH_FLAGS: readonly DopplerMathFlag[] = ["actualtext-tex", "alt-tex", "mathml"];
 /** Math the text layer holds as text. */
 export const TEXT_MATH_FLAGS: readonly DopplerMathFlag[] = ["text-math", "stacked-math", "plain-unicode-math", "formula-struct", "math-matrix"];

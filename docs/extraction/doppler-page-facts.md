@@ -206,14 +206,14 @@ page: the cheap router form.
 | 0 | `text-math` | text layer |
 | 1 | `stacked-math` | text layer (2D math: the math reader's to lay out) |
 | 2 | `actualtext-tex` | source (keep the text layer) |
-| 3 | `alt-tex` | source |
-| 4 | `mathml` | source |
+| 3 | `alt-tex` | source (reserved: current Doppler never sets it) |
+| 4 | `mathml` | source (reserved: current Doppler never sets it) |
 | 5 | `raster-strips` | read the page |
 | 6 | `glyph-outlines` | read the page |
-| 7 | `type3-bitmap-font` | read the page |
+| 7 | `type3-bitmap-font` | read the page: Type 3 glyphs the text layer cannot read (no usable Unicode) |
 | 8 | `math-font-no-unicode` | read the page only when the run did not read math (`--math` reads glyph names), the page has no source, and 16 or more glyphs are unreadable |
 | 9 | `plain-unicode-math` | text layer |
-| 10 | `formula-struct` | text layer |
+| 10 | `formula-struct` | text layer (reserved: current Doppler never sets it) |
 | 11 | `math-matrix` | text layer |
 | 12 | `analysis-truncated` | unknown |
 
@@ -226,7 +226,7 @@ page: the cheap router form.
 | 2 | `booktabs` | text-layer table |
 | 3 | `whitespace` | text-layer table |
 | 4 | `shaded-rows` | text-layer table |
-| 5 | `tagged-table` | text-layer table |
+| 5 | `tagged-table` | text-layer table (reserved: current Doppler never sets it) |
 | 6 | `raster-table-like` | candidate only: a lossless image shaped like a table (charts and logos match too), never a read on its own |
 | 7 | `outlined-text-grid` | read the page: a table drawn as glyph outlines has no text layer |
 | 8 | `math-grid` | signal only (a ruled notation table can carry it too) |
@@ -235,6 +235,14 @@ page: the cheap router form.
 `encodingCounts` nibbles, in order: math-font characters with a Unicode value, plain Unicode math, unreadable math glyphs,
 math strips, glyph-outline clusters, formulas, TeX sources, MathML, ruled grids, rule tables, whitespace tables, structure
 tables, math regions. A test pins every position (`worker/src/lib/doppler-encoding-facts.test.ts`).
+
+**Reserved bits.** Current Doppler (from DocSlurp/doppler#51) never sets `alt-tex`, `mathml`, `formula-struct` or
+`tagged-table`, nor the `encodingCounts` nibbles 5 (formulas), 7 (MathML) and 11 (structure tables): the structure-tree
+walk that fed them was removed for memory safety. Their positions stay reserved and core keeps reading them as positive-only
+signals (a set bit would still route as the tables above; an unset one is no evidence). In practice a page that carries its
+formula's source is known only through `actualtext-tex` (TeX in an `/ActualText` span), and a tagged table only through the
+other table bits. Font classes are by name: `fonts.mathClasses.otfMath` is a font whose name says Math (Cambria Math and
+the like are `officeMath`), not a check of the program's `MATH` table.
 
 **Unknown is never "none".** `pageEncodingRoute` reads a page's encodings as unknown, and routing keeps today's behaviour
 for it, when the words are absent (an older build, or the family was not asked for), the page failed or is low confidence
@@ -259,7 +267,8 @@ evidence against a table. Exactly what they can change:
   (`encoding-table:<flags>`). A page with an unknown grid stays on the table path as before, with the same signal added.
 - **Add a page read:** a table drawn as glyph outlines (`ocr-authorized:encoding-table-outlines`), or math only a read
   recovers (`ocr-authorized:encoding-math-unreadable`): raster strips, glyph outlines, Type 3 bitmap fonts, and unmapped
-  math glyphs when the run did not read math, the page has no TeX or MathML source and at least 16 glyphs are unreadable
+  math glyphs when the run did not read math, the page has no TeX or MathML source (today only `actualtext-tex`; the other
+  source bits are reserved) and at least 16 glyphs are unreadable
   (`encodingCounts` bucket 5). Read reason `encoding`.
 - **Cap those reads:** at most `encodingReadPageCap(pages)` pages a document (the table-leak cap's shape: 3 plus 5% of the
   pages, at most 20) are read because of the encodings: their own reads, and table-unreliable reads on a table route only
