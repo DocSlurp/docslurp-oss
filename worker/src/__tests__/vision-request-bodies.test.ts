@@ -40,11 +40,6 @@ async function requestBody(model: string, prompt?: string, reasoning?: { effort:
   }));
   const body = bodies[0]!;
   body.messages[1].content[1].image_url.url = "<image>";
-  // The per-organization salt line (organization isolation) follows the fixed instruction; the golden bodies omit it.
-  if (typeof body.messages[0].content === "string") {
-    if (!/\nWorkspace [0-9a-f]{16}\.$/.test(body.messages[0].content)) throw new Error("vision system message lacks the org salt line");
-    body.messages[0].content = body.messages[0].content.replace(/\nWorkspace [0-9a-f]{16}\.$/, "");
-  }
   return body;
 }
 

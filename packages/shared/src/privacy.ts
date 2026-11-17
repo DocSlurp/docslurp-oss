@@ -237,12 +237,6 @@ export async function authorizePrivateModelCall(args: {
   operation: string;
   auditScope?: PrivateCallAuditScope;
   baseFetch?: typeof fetch;
-  /**
-   * The organization's prompt salt (`orgPromptSalt`). Sent as `cache_salt` only to a text model registered with
-   * `systemMessage: false`, whose prompt cannot open with the salt line (`privateChatLayout`); other routes carry the
-   * salt as their first system line and the field is not sent, so servers without `cache_salt` support never see it.
-   */
-  cacheSalt?: string;
 }): Promise<AuthorizedPrivateCall> {
   const mode = args.privacyMode ?? "standard";
   const descriptor: ProviderCallDescriptor = {
@@ -261,18 +255,13 @@ export async function authorizePrivateModelCall(args: {
     throw new PrivateEndpointResolutionError(lookup.reason);
   }
   const route = lookup.route;
-  if (route.capability === "text" && route.model.systemMessage === false && !args.cacheSalt?.trim()) {
-    // Fail closed: without a system line or a cache salt, tenant text would open the prompt on a shared prefix cache.
-    throw new PrivateEndpointResolutionError(`model '${route.model.id}' on private endpoint '${route.alias}' has no system role; the call needs the organization's cache salt`);
-  }
   // Resolve credentials before auditing so a missing token never logs a call that cannot happen.
   privateEndpointAuthHeaders(route.endpoint);
   const boundFetch = createPrivateEndpointFetch(route, {
     baseFetch: args.baseFetch,
     chatTemplateKwargs: route.model.chatTemplateKwargs,
-    // A text model registered without the system role never receives one, whichever caller built the request, and
-    // keeps its prefix cache per organization through cache_salt instead of a salt line.
-    ...(route.capability === "text" && route.model.systemMessage === false ? { systemMessage: false, cacheSalt: args.cacheSalt } : {}),
+    // A text model registered without the system role never receives one, whichever caller built the request.
+    ...(route.capability === "text" && route.model.systemMessage === false ? { systemMessage: false } : {}),
   });
   const scope = { ...privateCallAudit?.currentScope?.(), ...stripUndefined(args.auditScope) };
   if (privacyModeAuditsPrivateCalls(mode)) {

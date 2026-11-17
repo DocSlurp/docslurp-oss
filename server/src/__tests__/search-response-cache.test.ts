@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * The response cache on its own: strict-privacy anywhere in scope, or any
  * lookup that cannot answer in time, means no ticket (no cache read or write);
- * writes re-check privacy and invalidation; memory is bounded per organization.
+ * writes re-check privacy and invalidation; memory is bounded by one shared LRU.
  */
 
 type Access = { projectId: string; orgId: string; pipeline: unknown } | Error | "slow";
@@ -173,56 +173,48 @@ describe("storeResponse", () => {
     expect(cache.searchResponseCacheStatsForTests().entries).toBe(0);
   });
 
-  it("caps each organization so one tenant cannot evict another's entries", async () => {
-    cache.configureSearchResponseCacheLimitsForTests({ perOrgMaxEntries: 3, maxEntries: 5 });
-    const victim = (await ticket(["ws-other"]))!;
-    await cache.storeResponse(victim, data("victim"), "ws-other");
-    for (let i = 0; i < 20; i += 1) {
-      await cache.storeResponse((await ticket(["ws-a"], { request: { q: `flood ${i}` } }))!, data(`f${i}`), "ws-a");
+  it("one shared LRU: a single organization may use the whole cache, and the global caps hold", async () => {
+    cache.configureSearchResponseCacheLimitsForTests({ maxEntries: 5 });
+    const tickets: NonNullable<Awaited<ReturnType<typeof ticket>>>[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      const t = (await ticket(["ws-a"], { request: { q: `q ${i}` } }))!;
+      await cache.storeResponse(t, data(`f${i}`), "ws-a");
+      tickets.push(t);
     }
-    expect(cache.searchResponseCacheStatsForTests().byOrg).toEqual({ "org-1": 3, "org-2": 1 });
-    expect(cache.readCachedResponse(victim, 60_000)).toEqual(data("victim"));
+    expect(cache.searchResponseCacheStatsForTests().entries).toBe(5);
+    expect(cache.readCachedResponse(tickets[0]!, 60_000)).toBeUndefined();
+    expect(cache.readCachedResponse(tickets[7]!, 60_000)).toEqual(data("f7"));
   });
 
-  it("under global byte pressure the writer evicts only its own answers", async () => {
+  it("a read refreshes recency, and another organization's identical request gets its own key and misses", async () => {
+    cache.configureSearchResponseCacheLimitsForTests({ maxEntries: 2 });
+    const first = (await ticket(["ws-a"], { request: { q: "first" } }))!;
+    const second = (await ticket(["ws-a"], { request: { q: "second" } }))!;
+    await cache.storeResponse(first, data("1"), "ws-a");
+    await cache.storeResponse(second, data("2"), "ws-a");
+    expect(cache.readCachedResponse(first, 60_000)).toEqual(data("1"));
+    await cache.storeResponse((await ticket(["ws-a"], { request: { q: "third" } }))!, data("3"), "ws-a");
+    expect(cache.readCachedResponse(first, 60_000)).toEqual(data("1"));
+    expect(cache.readCachedResponse(second, 60_000)).toBeUndefined();
+    set("ws-same", "org-2");
+    const other = (await ticket(["ws-same"], { request: { q: "first" } }))!;
+    expect(other.key).not.toBe(first.key);
+    expect(cache.readCachedResponse(other, 60_000)).toBeUndefined();
+  });
+
+  it("under global byte pressure evicts the least recently used answers", async () => {
     cache.configureSearchResponseCacheLimitsForTests({ maxBytes: 400 });
-    const victim = (await ticket(["ws-other"]))!;
-    await cache.storeResponse(victim, data("victim"), "ws-other");
     for (let i = 0; i < 30; i += 1) {
       await cache.storeResponse((await ticket(["ws-a"], { request: { q: `flood ${i}` } }))!, data(`f${i}`), "ws-a");
     }
     expect(cache.searchResponseCacheStatsForTests().bytes).toBeLessThanOrEqual(400);
-    expect(cache.readCachedResponse(victim, 60_000)).toEqual(data("victim"));
   });
 
-  it("a busy organization at or above its equal share evicts its own answers, not a larger organization's", async () => {
-    cache.configureSearchResponseCacheLimitsForTests({ perOrgMaxEntries: 6, maxEntries: 10 });
-    const held: Awaited<ReturnType<typeof ticket>>[] = [];
-    for (let i = 0; i < 6; i += 1) {
-      const t = (await ticket(["ws-other"], { request: { q: `held ${i}` } }))!;
-      await cache.storeResponse(t, data(`h${i}`), "ws-other");
-      held.push(t);
-    }
-    for (let i = 0; i < 30; i += 1) {
-      await cache.storeResponse((await ticket(["ws-a"], { request: { q: `flood ${i}` } }))!, data(`f${i}`), "ws-a");
-    }
-    expect(cache.searchResponseCacheStatsForTests().byOrg).toEqual({ "org-1": 4, "org-2": 6 });
-    for (const t of held) expect(cache.readCachedResponse(t!, 60_000)).toBeDefined();
-  });
-
-  it("never evicts another organization's answer, even when many busy organizations fill the cache", async () => {
-    // Six organizations each at the per-org cap would hold 18 entries in a 10-entry cache. The small org (1 entry, under
-    // its equal share of 10 / 6) keeps its answer; the global cap still holds.
-    cache.configureSearchResponseCacheLimitsForTests({ perOrgMaxEntries: 3, maxEntries: 10 });
-    const victim = (await ticket(["ws-other"]))!;
-    await cache.storeResponse(victim, data("victim"), "ws-other");
-    for (let org = 0; org < 5; org += 1) {
-      set(`ws-busy-${org}`, `org-busy-${org}`);
-      for (let i = 0; i < 10; i += 1) {
-        await cache.storeResponse((await ticket([`ws-busy-${org}`], { request: { q: `flood ${org} ${i}` } }))!, data(`f${org}-${i}`), `ws-busy-${org}`);
-      }
-    }
-    expect(cache.searchResponseCacheStatsForTests().entries).toBeLessThanOrEqual(10);
-    expect(cache.readCachedResponse(victim, 60_000)).toEqual(data("victim"));
+  it("never serves an organization another organization's answer under an identical request", async () => {
+    const a = (await ticket(["ws-a"]))!;
+    await cache.storeResponse(a, data("a"), "ws-a");
+    const forged = { ...a, orgKey: "org-2" };
+    expect(cache.readCachedResponse(forged, 60_000)).toBeUndefined();
+    expect(cache.readCachedResponse(a, 60_000)).toEqual(data("a"));
   });
 });

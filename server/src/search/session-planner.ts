@@ -439,7 +439,7 @@ export async function embedQuery(
   const bypassReason = embeddingCacheBypassReason(privacyMode, orgId);
   const cacheKey = queryEmbeddingCacheKey(query, embedding, privacyMode, orgId);
   if (cache.enabled) {
-    const cached = cacheKey && orgId ? cache.get(orgId, cacheKey) : undefined;
+    const cached = cacheKey ? cache.get(cacheKey) : undefined;
     startDependencySpan("embed.cache", {
       "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
       "docslurp.dependency.operation": "embedding_cache", "docslurp.dependency.phase": "adapter",
@@ -499,7 +499,7 @@ export async function embedQuery(
       inputTokens: result.usage.inputTokens,
       logOutputTokens: false,
     });
-    if (cacheKey && orgId) cache.set(orgId, cacheKey, result.embedding.slice());
+    if (cacheKey) cache.set(cacheKey, result.embedding.slice());
     return result.embedding;
   } catch (error) {
     if (METERED_EMBEDDING_PROVIDERS.has(provider)) throw error;
