@@ -61,6 +61,7 @@ import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "../services/pii-artifact-guard.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
+import { DocumentPageExtractQueryError, getDocumentPageExtracts } from "../services/document-page-extracts.js";
 import { redactOperatorRun } from "../services/progress-snapshot.js";
 
 const bulkSchema = z.object({
@@ -398,6 +399,38 @@ export const documentsRoutes = new Hono()
     }
     if (!ledger) return apiStatusError(c, 404, "Document not found");
     return c.json(ledger);
+  })
+  // Page extract records: how each page got its text (method, pass, route, tags, quality signals), as labels only. API keys
+  // need `artifacts` (checked here as well as in the middleware) and a key that may use the document's project; anything
+  // outside the caller's scope is the same 404 as a missing document. `after` (cursor), `limit` (records, 1..2000),
+  // `final=true` (each page's final record) and `run` (`current`, `all` or a run id).
+  .get("/:docId/page-extracts", async (c) => {
+    const userId = c.get("sessionUser").id;
+    const docId = c.req.param("docId");
+    const apiKey = c.get("apiKey");
+    if (apiKey && !apiKeyHasAnyScope(apiKey, ["artifacts"])) return apiStatusError(c, 403, "Forbidden");
+    const rawLimit = c.req.query("limit");
+    const limit = rawLimit === undefined ? undefined : /^[1-9][0-9]{0,3}$/.test(rawLimit) ? Number(rawLimit) : null;
+    const final = c.req.query("final");
+    if (limit === null || (final !== undefined && final !== "true" && final !== "false")) {
+      return apiStatusError(c, 400, "Invalid page extract parameters");
+    }
+    const [owner] = await listDocumentOwners([docId], userId);
+    if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
+    const after = c.req.query("after");
+    const run = c.req.query("run");
+    let records;
+    try {
+      records = await getDocumentPageExtracts({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId }, {
+        ...(limit === undefined ? {} : { limit }), ...(after === undefined ? {} : { after }), ...(run === undefined ? {} : { run }),
+        finalOnly: final === "true",
+      });
+    } catch (error) {
+      if (error instanceof DocumentPageExtractQueryError) return apiStatusError(c, 400, "Invalid page extract parameters");
+      throw error;
+    }
+    if (!records) return apiStatusError(c, 404, "Document not found");
+    return c.json(records);
   })
   // Finish the figures a pass left resumable (figure-resume.ts): only queues, under the runner's own caps. Server keys
   // with `ingest` or a session that may edit the project; anything outside the caller's scope is the same 404.
@@ -745,4 +778,6 @@ acceptApiKeys(documentsRoutes, [
   "GET /:docId/versions",
   "GET /:docId/changelog",
   "GET /:docId/correction-workbench",
+  // Page extract records: the handler requires the `artifacts` scope and the key's project access.
+  "GET /:docId/page-extracts",
 ]);

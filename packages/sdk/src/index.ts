@@ -1023,6 +1023,17 @@ export type DeletedDocument = JsonObject & {
 export type FigureResumeBlockReason = "attempts" | "vm-budget" | "no-progress" | "figures-off" | "resume-off" | "stale" | "refused" | "unscanned";
 
 /** Answer of {@link DocSlurpClient.resumeDocumentFigures}. */
+/** One page extract record (GET /v1/documents/{id}/page-extracts). */
+export type PageExtractRecord = {
+  pageNumber: number; runId: string;
+  pass: "extract" | "scan-ocr" | "critique" | "vision" | "human";
+  method: "text-layer" | "ocr" | "ocr-second-read" | "vision" | "transcription" | "correction" | "kept-as-image" | "none";
+  engine: string | null; billedClass: "fast" | "ocr" | "rich" | null; tags: string[];
+  confidence: number | null; plausibility: number | null; textBytes: number | null; finishReason: string | null; durationMs: number | null;
+  adopted: boolean; isFinal: boolean; supersededByPass: string | null; createdAt: string;
+};
+export type DocumentPageExtracts = { documentId: string; records: PageExtractRecord[]; nextCursor: string | null };
+
 export type FigureResumeRequest = {
   documentId: string;
   status: "queued" | "already-queued" | "not-resumable" | "capped" | "off";
@@ -2771,6 +2782,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
+    },
+
+    /**
+     * How each page of a document got its text: method (`text-layer`, `ocr`, `ocr-second-read`, `vision`, `transcription`,
+     * `correction`, `kept-as-image`, `none`), pass, billed class, tags and quality signals. Labels only. Server keys need
+     * `artifacts`. Page through with `after` (the previous `nextCursor`); `final: true` keeps each page's final record.
+     */
+    getDocumentPageExtracts(documentId: string, input: { after?: string; limit?: number; final?: boolean; run?: string } = {},
+      requestOptions?: RequestOptions): Promise<DocumentPageExtracts> {
+      const query = new URLSearchParams();
+      if (input.after !== undefined) query.set("after", input.after);
+      if (input.limit !== undefined) query.set("limit", String(input.limit));
+      if (input.final !== undefined) query.set("final", String(input.final));
+      if (input.run !== undefined) query.set("run", input.run);
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      return request<DocumentPageExtracts>(`/v1/documents/${encodeURIComponent(documentId)}/page-extracts${suffix}`, {}, requestOptions, true);
     },
 
     /** The ingest version this deployment produces; a document whose `ingestVersion` is lower can be reprocessed to update it. */
