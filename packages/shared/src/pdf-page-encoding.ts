@@ -38,7 +38,7 @@ export const PDF_PAGE_ENCODING_BITS = {
   taggedFormula: 11,
   /** A table-shaped image in a page of text: lossless, wide, at least `tableImageMinHeightPt` tall. A short one is also a formula strip by shape, and a chart in a PNG looks the same. */
   tableImage: 12,
-  /** A matrix-like grid of math-font glyphs: two or more rows with two or more aligned columns (not a table). */
+  /** A matrix-like grid of math-font glyphs: text-size rows with two or more aligned columns and a delimiter on both sides (not a table, aligned equations or big-operator limits). Conservative: single-glyph brackets are not seen. */
   mathGrid: 13,
   /** The page was not read to the end, or one of its caps was reached: its bits are a lower bound. */
   partial: 15,
@@ -122,12 +122,19 @@ export function unpackPdfPageStatCounts(counts: number): Record<(typeof PDF_PAGE
   return Object.fromEntries(PDF_PAGE_STAT_COUNTS.map((name, index) => [name, Math.floor(counts / 16 ** index) % 16])) as Record<(typeof PDF_PAGE_STAT_COUNTS)[number], number>;
 }
 
-/** Distinct masks a histogram holds at most: one per sampled page, so it is never lossy. */
-export const PDF_PAGE_ENCODING_MAX_ENTRIES = 24;
-
-/** Sampled pages whose mask carries `encoding`, from a `pageEncodings` histogram. */
-export function pdfPageEncodingPages(histogram: readonly (readonly [number, number])[] | undefined, encoding: PdfPageEncoding): number | undefined {
+/**
+ * Sampled pages whose mask carries `encoding`, from a `pageEncodings` histogram, and the pages without it whose mask is
+ * `partial` (the distinction may be there, unseen). `pages` is a lower bound; `pages + partialPages` an upper one.
+ */
+export function pdfPageEncodingPages(histogram: readonly (readonly [number, number])[] | undefined, encoding: PdfPageEncoding): { pages: number; partialPages: number } | undefined {
   if (!histogram) return undefined;
   const bit = 1 << PDF_PAGE_ENCODING_BITS[encoding];
-  return histogram.reduce((total, [mask, pages]) => total + ((mask & bit) !== 0 ? pages : 0), 0);
+  const partial = 1 << PDF_PAGE_ENCODING_BITS.partial;
+  let pages = 0;
+  let partialPages = 0;
+  for (const [mask, count] of histogram) {
+    if ((mask & bit) !== 0) pages += count;
+    else if ((mask & partial) !== 0) partialPages += count;
+  }
+  return { pages, partialPages };
 }

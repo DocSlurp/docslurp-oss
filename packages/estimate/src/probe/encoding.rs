@@ -5,7 +5,6 @@
 //! bits and never leave this module.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
@@ -22,22 +21,23 @@ pub const FONT_UNMAPPED: u8 = 8;
 pub const FONT_UNKNOWN: u8 = 16;
 
 /// Runs, outline paths and images kept per page; past them the page's mask is partial.
-const MAX_RUNS: usize = 2_048;
+const MAX_RUNS: usize = 8_192;
 const MAX_OUTLINE_PATHS: usize = 4_096;
 const MAX_IMAGES: usize = 64;
 /// Box comparisons when clustering a page's outline paths.
 const MAX_OUTLINE_COMPARISONS: usize = 4_000_000;
 /// Type 3 glyph procedures and decoded bytes of each read to tell a bitmap font (an image is painted at the start of a
-/// procedure), and bytes of a font program's head (its table directory).
+/// procedure), and bytes of a font program's head (its table directory, up to 63 tables).
 const TYPE3_PROCS_READ: usize = 256;
 const TYPE3_PROC_BYTES: u64 = 4 * 1024;
-const FONT_HEAD_BYTES: u64 = 4 * 1024;
+const FONT_HEAD_BYTES: u64 = 12 + 16 * 63;
 /// Compressed bytes read from any stream: a Flate stream of empty blocks decodes to nothing however long it is.
 const MAX_COMPRESSED_READ: usize = 64 * 1024;
 /// Bytes of a text string (ActualText, Alt) or a file name looked at, and ActualText strings checked per page.
 const TEXT_PREFIX_BYTES: usize = 4 * 1024;
 const NAME_PREFIX_BYTES: usize = 256;
-const MAX_TEXT_CHECKS_PER_PAGE: u32 = 256;
+/// Bytes of ActualText prefixes checked per page; past them the page is partial.
+const MAX_TEXT_BYTES_PER_PAGE: usize = 1024 * 1024;
 /// Work units (comparisons) the page-level geometry may spend per page; past it the page is partial.
 const PAGE_WORK: usize = 4_000_000;
 
@@ -106,8 +106,8 @@ pub struct PageEncoding {
     pub type3_bitmap: bool,
     pub actual_text: bool,
     pub tex_source: bool,
-    /// ActualText strings checked for TeX-like source on the page.
-    pub text_checks: u32,
+    /// Bytes of ActualText prefixes checked for TeX-like source on the page.
+    pub text_checked: usize,
     /// A fact on the page could not be decided (a font class, a capped check): the mask is partial.
     pub unknown: bool,
 }
@@ -129,13 +129,15 @@ impl PageEncoding {
     }
 
     /// A painted path: kept for outline clustering when it is filled, has curves and is small.
-    /// Replacement text marked on the page: TeX-like text is a recoverable source. At most
-    /// `MAX_TEXT_CHECKS_PER_PAGE` strings are checked, a bounded prefix of each; past that the page is partial.
+    /// Replacement text marked on the page: TeX-like text is a recoverable source. A bounded prefix of each string is
+    /// checked, `MAX_TEXT_BYTES_PER_PAGE` of them a page (short ligature texts barely count); past that the page is
+    /// partial.
     pub fn actual_text(&mut self, text: &[u8]) {
         self.actual_text = true;
         if self.tex_source { return; }
-        if self.text_checks >= MAX_TEXT_CHECKS_PER_PAGE { self.unknown = true; return; }
-        self.text_checks += 1;
+        let prefix = text.len().min(TEXT_PREFIX_BYTES);
+        if self.text_checked + prefix > MAX_TEXT_BYTES_PER_PAGE { self.unknown = true; return; }
+        self.text_checked += prefix;
         self.tex_source = tex_like(text);
     }
 
@@ -240,8 +242,11 @@ pub fn page_mask(rules: &PageEncodingRules, page: &PageEncoding, view: &PageView
     set(bits.rule_grid, view.grids.is_some_and(|grids| grids > 0));
     let rule_table = if view.words_known && view.rules_known { horizontal_rule_table(rules, view, &mut work) } else { false };
     set(bits.horizontal_rule_table, rule_table);
+    // Unknown words matter only where a horizontal-rule table could be: enough long horizontal rules.
+    let table_rules = view.rules.iter().filter(|r| r[3] - r[1] <= view.rule_thickness && r[2] - r[0] >= rules.rule_table_min_rule_length_pt).count();
+    let words_matter = table_rules >= rules.rule_table_min_rules as usize;
     let partial = view.exhausted || page.runs_overflow || page.outlines_overflow || page.images_overflow || !clusters_known
-        || !view.words_known || !view.rules_known || view.grids.is_none() || page.unknown || !work.1;
+        || (!view.words_known && words_matter) || !view.rules_known || view.grids.is_none() || page.unknown || !work.1;
     set(bits.partial, partial);
     // A document-level MathML file is the source of the math this page shows.
     let math_bits: u16 = (1 << bits.math_font) | (1 << bits.unmapped_math_font) | (1 << bits.formula_strip) | (1 << bits.glyph_outlines) | (1 << bits.type3_bitmap_font);
@@ -348,7 +353,12 @@ fn math_grid(runs: &[&Run], all: &[Run], rules: &[[f64; 4]], thin: f64, outlines
         }
         if rows.len() > 256 { break; }
     }
-    rows.retain(|row| row.2.len() >= 2);
+    // Script-size rows (limits and indices beside a big operator, pieces of a drawn bracket) are not matrix rows:
+    // entries are set at about the page's usual text size.
+    let sizes = sorted_keys(all.iter().map(|run| run.size));
+    if sizes.is_empty() { return false; }
+    let usual = sizes[sizes.len() / 2].0;
+    rows.retain(|row| row.2.len() >= 2 && row.1 >= 0.8 * usual);
     let order = sorted_keys(rows.iter().map(|row| row.0));
     for (k, first) in order.iter().enumerate() {
         for second in &order[k + 1..] {
@@ -366,18 +376,31 @@ fn math_grid(runs: &[&Run], all: &[Run], rules: &[[f64; 4]], thin: f64, outlines
             let right = *columns.last().unwrap_or(&left);
             // A horizontal rule between the rows under the columns is a fraction bar: stacked fractions, not a grid.
             if rules.iter().any(|r| r[3] - r[1] <= thin && r[2] - r[0] >= 0.5 * em && r[1] > top && r[3] < bottom && r[2] > left - em && r[0] < right + em) { continue; }
-            let beside = |x: f64| x >= left - 3.0 * em && x <= left - 0.2 * em;
             let span = bottom - top;
-            let pieces: Vec<&Run> = all.iter().filter(|run| beside((run.x0 + run.x1) / 2.0)).collect();
-            if !work.spend(pieces.len() * pieces.len()) { return false; }
-            let stacked = pieces.iter().any(|p| {
-                let column: Vec<f64> = pieces.iter().filter(|q| (q.x0 - p.x0).abs() <= 0.3 * em).map(|q| q.y).collect();
-                column.len() >= 2 && column.iter().copied().fold(f64::INFINITY, f64::min) <= top && column.iter().copied().fold(f64::NEG_INFINITY, f64::max) >= bottom - 0.3 * em
-            });
-            let tall = pieces.iter().any(|p| p.size >= 1.6 * em && p.y >= top && p.y <= bottom + p.size);
-            let ruled = rules.iter().any(|r| r[2] - r[0] <= thin && beside((r[0] + r[2]) / 2.0) && r[1] <= top && r[3] >= bottom - 0.5 * em && r[3] - r[1] <= span + 4.0 * em);
-            let drawn = outlines.iter().any(|(o, _)| beside((o[0] + o[2]) / 2.0) && o[1] <= top && o[3] >= bottom - 0.5 * em && o[3] - o[1] <= span + 4.0 * em);
-            if stacked || tall || ruled || drawn { return true; }
+            // A delimiter in the window `[from, to]` spanning both rows: extension pieces of one tall glyph (at one x,
+            // baselines at most 1.2 em apart, chained from the first row to the second; a column of "=" signs starting
+            // aligned lines sits a line apart), one glyph set large, a short vertical rule, or a tall filled path.
+            let mut delimiter = |from: f64, to: f64| -> Option<bool> {
+                let beside = |x: f64| x >= from && x <= to;
+                let pieces: Vec<&Run> = all.iter().filter(|run| beside((run.x0 + run.x1) / 2.0) && run.y >= top - 3.0 * em && run.y <= bottom + 3.0 * em).collect();
+                if !work.spend(pieces.len() * pieces.len() + rules.len() + outlines.len()) { return None; }
+                let stacked = pieces.iter().any(|p| {
+                    let column: Vec<f64> = sorted_keys(pieces.iter().filter(|q| (q.x0 - p.x0).abs() <= 0.3 * em).map(|q| q.y)).into_iter().map(|(y, _)| y).collect();
+                    let mut start = f64::NAN;
+                    column.iter().enumerate().any(|(i, y)| {
+                        if i == 0 || *y - column[i - 1] > 1.2 * em { start = *y; }
+                        i > 0 && start != *y && start <= top && *y >= bottom - 0.3 * em
+                    })
+                });
+                let tall = pieces.iter().any(|p| p.math && p.size >= 1.6 * em && p.y >= top && p.y <= bottom + p.size);
+                let ruled = rules.iter().any(|r| r[2] - r[0] <= thin && beside((r[0] + r[2]) / 2.0) && r[1] <= top && r[3] >= bottom - 0.5 * em && r[3] - r[1] <= span + 4.0 * em);
+                let drawn = outlines.iter().any(|(o, _)| beside((o[0] + o[2]) / 2.0) && o[1] <= top && o[3] >= bottom - 0.5 * em && o[3] - o[1] <= span + 4.0 * em);
+                Some(stacked || tall || ruled || drawn)
+            };
+            // Delimiters on both sides: a big operator's limits (an integral sign left, the integrand right) or aligned
+            // lines are not a matrix.
+            let (Some(opens), Some(closes)) = (delimiter(left - 3.0 * em, left - 0.2 * em), delimiter(right + 0.2 * em, right + 3.0 * em)) else { return false };
+            if opens && closes { return true; }
         }
     }
     false
@@ -508,14 +531,17 @@ pub fn has_math_table(head: &[u8]) -> bool {
 /// Whether a Type 3 font's glyph procedures paint images: an inline image, or an image XObject from the font's own
 /// resources (a procedure drawing a form is vector drawing). None when a procedure could not be read or there were more
 /// than `TYPE3_PROCS_READ` and none painted an image.
-fn type3_paints_images(document: &Document, font: &Dictionary, budget: &mut Budget) -> Option<bool> {
-    let resolve = |object: &Object| document.dereference(object).ok().map(|(_, value)| value).and_then(|value| match value {
-        Object::Dictionary(dict) => Some(dict.clone()),
-        Object::Stream(stream) => Some(stream.dict.clone()),
-        _ => None,
-    });
-    let images = font.get(b"Resources").ok().and_then(resolve).and_then(|resources| resources.get(b"XObject").ok().and_then(resolve))
-        .is_some_and(|xobjects| xobjects.iter().take(64).any(|(_, x)| resolve(x).is_some_and(|dict| matches!(dict.get(b"Subtype"), Ok(Object::Name(kind)) if kind == b"Image"))));
+fn type3_paints_images<'a>(document: &'a Document, font: &'a Dictionary, budget: &mut Budget) -> Option<bool> {
+    // Borrowed, never copied: many fonts may share one huge resource dictionary; 64 entries are looked at.
+    let dict_of = |object: &'a Object| -> Option<&'a Dictionary> {
+        match document.dereference(object).ok()?.1 {
+            Object::Dictionary(dict) => Some(dict),
+            Object::Stream(stream) => Some(&stream.dict),
+            _ => None,
+        }
+    };
+    let images = font.get(b"Resources").ok().and_then(|resources| dict_of(resources)).and_then(|resources| resources.get(b"XObject").ok()).and_then(|xobjects| dict_of(xobjects))
+        .is_some_and(|xobjects| xobjects.iter().take(64).any(|(_, x)| dict_of(x).is_some_and(|dict| matches!(dict.get(b"Subtype"), Ok(Object::Name(kind)) if kind == b"Image"))));
     let Some((_, Object::Dictionary(procs))) = font.get(b"CharProcs").ok().and_then(|o| document.dereference(o).ok()) else { return Some(false) };
     for (_, proc) in procs.iter().take(TYPE3_PROCS_READ) {
         if let Some((_, Object::Stream(stream))) = document.dereference(proc).ok() {
@@ -542,15 +568,35 @@ pub fn stream_head(stream: &lopdf::Stream, max: u64, budget: &mut Budget) -> Opt
         Some(Object::Array(filters)) if filters.len() == 1 && matches!(&filters[0], Object::Name(name) if flate(name)) => true,
         _ => return None,
     };
-    let input = &stream.content[..stream.content.len().min(if compressed { MAX_COMPRESSED_READ } else { max as usize })];
-    if !budget.take(input.len()) { return None; }
-    let mut out = Vec::new();
-    if compressed {
-        let _ = flate2::read::ZlibDecoder::new(input).take(max).read_to_end(&mut out);
-        if !budget.take(out.len()) { return None; }
-    } else {
-        out.extend_from_slice(input);
+    if !compressed {
+        let head = &stream.content[..stream.content.len().min(max as usize)];
+        return budget.take(head.len()).then(|| head.to_vec());
     }
+    let input = &stream.content[..stream.content.len().min(MAX_COMPRESSED_READ)];
+    // Refuse before decoding once the budget cannot hold the output; the input consumed is charged after (a decode
+    // reads at most the capped slice).
+    if budget.left < max as usize { budget.take(usize::MAX); return None; }
+    // Fed 1 KiB at a time, so the decoder consumes about the input the output needs (it would otherwise fill its
+    // whole window from a larger slice), and stops at `max` bytes or the end of the stream.
+    let mut decoder = flate2::Decompress::new(true);
+    let mut out = Vec::with_capacity(max as usize);
+    let mut ended = false;
+    while out.len() < max as usize && (decoder.total_in() as usize) < input.len() {
+        let at = decoder.total_in() as usize;
+        let chunk = &input[at..input.len().min(at + 1024)];
+        let before = (decoder.total_in(), out.len());
+        match decoder.decompress_vec(chunk, &mut out, flate2::FlushDecompress::None) {
+            Ok(flate2::Status::StreamEnd) => { ended = true; break; }
+            Ok(_) if (decoder.total_in(), out.len()) == before => break,
+            Ok(_) => {}
+            Err(_) => { budget.take(decoder.total_in() as usize + out.len()); return None; }
+        }
+    }
+    // Charge what was consumed and produced, not the slice offered.
+    if !budget.take(decoder.total_in() as usize + out.len()) { return None; }
+    // A stream cut by the compressed cap (or stalled) before `max` bytes or its end is unknown, not empty.
+    if out.len() < max as usize && !ended { return None; }
+    out.truncate(max as usize);
     Some(out)
 }
 
@@ -582,6 +628,8 @@ pub fn tex_like(bytes: &[u8]) -> bool {
                 }
                 if length == 0 { continue; }
                 let follows = at(index + 1 + length);
+                // A path segment (`C:\Program Files\beta\x`) continues with a separator or an extension.
+                if matches!(follows, Some(b'\\' | b'/' | b'.' | b':')) || (index >= 1 && at(index - 1) == Some(b':')) { continue; }
                 if TEX_COMMANDS.contains(&&word[..length]) || follows == Some(b'{') { return true; }
             }
             _ => {}
@@ -613,15 +661,24 @@ pub fn struct_facts<'a>(document: &'a Document, rules: &PageEncodingRules, sampl
     let resolve = |object: &'a Object| -> Option<&'a Object> { document.dereference(object).ok().map(|(_, value)| value) };
     let mut files = Associated::default();
     let catalog = document.catalog().ok();
-    facts.document_mathml = catalog.is_some_and(|catalog| files.mathml(document, catalog, budget) == Some(true));
+    // An associated file that could not be read leaves the answer unknown: the tree's facts are then lower bounds.
+    let mut unknown = false;
+    let found = catalog.map_or(Some(false), |catalog| files.mathml(document, catalog, budget));
+    facts.document_mathml = found == Some(true);
+    unknown |= found.is_none();
     // A sampled page's own MathML associated file.
     for id in sampled {
         if let Ok(page) = document.get_dictionary(*id) {
-            if files.mathml(document, page, budget) == Some(true) { facts.pages.push((*id, 1 << rules.bits.math_source)); }
+            match files.mathml(document, page, budget) {
+                Some(true) => facts.pages.push((*id, 1 << rules.bits.math_source)),
+                Some(false) => {}
+                None => unknown = true,
+            }
         }
     }
+    facts.truncated |= unknown;
     let Some(root_entry) = catalog.and_then(|catalog| catalog.get(b"StructTreeRoot").ok()) else {
-        facts.truncated = budget.refused;
+        facts.truncated |= budget.refused;
         return facts;
     };
     // A root that is named but does not resolve is unknown, not untagged.
@@ -630,16 +687,18 @@ pub fn struct_facts<'a>(document: &'a Document, rules: &PageEncodingRules, sampl
         return facts;
     };
     let role_map = root.get(b"RoleMap").ok().and_then(resolve).and_then(|o| o.as_dict().ok());
-    let role = |name: &[u8]| -> Vec<u8> {
+    // The standard type a custom one maps to, and whether the map went on past 8 hops (unknown).
+    let role = |name: &[u8]| -> (Vec<u8>, bool) {
         let mut current = name[..name.len().min(NAME_PREFIX_BYTES)].to_vec();
         for _ in 0..8 {
-            if matches!(current.as_slice(), b"Formula" | b"Table" | b"math") { break; }
+            if matches!(current.as_slice(), b"Formula" | b"Table" | b"math") { return (current, false); }
             match role_map.and_then(|map| map.get(&current).ok()).and_then(resolve) {
                 Some(Object::Name(next)) if *next != current => current = next[..next.len().min(NAME_PREFIX_BYTES)].to_vec(),
-                _ => break,
+                _ => return (current, false),
             }
         }
-        current
+        let more = !matches!(current.as_slice(), b"Formula" | b"Table" | b"math") && role_map.is_some_and(|map| map.get(&current).is_ok());
+        (current, more)
     };
     let bits = &rules.bits;
     let mut visited: HashSet<ObjectId> = HashSet::new();
@@ -674,7 +733,10 @@ pub fn struct_facts<'a>(document: &'a Document, rules: &PageEncodingRules, sampl
                 if visits > rules.struct_max_elements { facts.truncated = true; break; }
                 let own_page = match element.get(b"Pg") { Ok(Object::Reference(id)) => Some(*id), _ => None };
                 let page = own_page.or(page);
-                let kind = match element.get(b"S").ok().and_then(resolve) { Some(Object::Name(name)) => role(name), _ => Vec::new() };
+                let kind = match element.get(b"S").ok().and_then(resolve) {
+                    Some(Object::Name(name)) => { let (kind, unresolved) = role(name); facts.truncated |= unresolved; kind }
+                    _ => Vec::new(),
+                };
                 let mut page_bits = 0u16;
                 let mut formula = formula;
                 match kind.as_slice() {
@@ -682,7 +744,9 @@ pub fn struct_facts<'a>(document: &'a Document, rules: &PageEncodingRules, sampl
                         facts.formulas += 1;
                         formula = Some(facts.formulas);
                         page_bits |= 1 << bits.tagged_formula;
-                        if element_source(document, element, &mut files, budget) {
+                        let source = element_source(document, element, &mut files, budget);
+                        facts.truncated |= source.is_none();
+                        if source == Some(true) {
                             mark(&mut sourced, facts.formulas);
                             facts.sources += 1;
                             page_bits |= 1 << bits.math_source;
@@ -728,13 +792,14 @@ fn mark(sourced: &mut Vec<bool>, ordinal: u32) -> bool {
 
 /// A formula element whose source is recoverable: TeX-like Alt or ActualText (a bounded prefix, charged to the
 /// budget), or an associated MathML file.
-fn element_source<'a>(document: &'a Document, element: &'a Dictionary, files: &mut Associated, budget: &mut Budget) -> bool {
+fn element_source<'a>(document: &'a Document, element: &'a Dictionary, files: &mut Associated, budget: &mut Budget) -> Option<bool> {
     for key in [&b"Alt"[..], b"ActualText"] {
         if let Some(Object::String(bytes, _)) = element.get(key).ok().and_then(|o| document.dereference(o).ok()).map(|(_, v)| v) {
-            if budget.take(bytes.len().min(TEXT_PREFIX_BYTES)) && tex_like(bytes) { return true; }
+            if !budget.take(bytes.len().min(TEXT_PREFIX_BYTES)) { return None; }
+            if tex_like(bytes) { return Some(true); }
         }
     }
-    files.mathml(document, element, budget) == Some(true)
+    files.mathml(document, element, budget)
 }
 
 /// Associated-file answers by object (an /AF array, a file specification or an embedded file), so a file many
@@ -748,9 +813,10 @@ impl Associated {
     /// A dictionary's associated files (/AF) include a MathML file: by its name (`.mml`, "mathml") or its embedded
     /// stream's subtype or namespace. At most 16 are looked at. None when a read was refused.
     fn mathml(&mut self, document: &Document, holder: &Dictionary, budget: &mut Budget) -> Option<bool> {
-        let entry = holder.get(b"AF").ok()?;
+        let Ok(entry) = holder.get(b"AF") else { return Some(false) };
         let id = match entry { Object::Reference(id) => Some(*id), _ => None };
-        if let Some(answer) = id.and_then(|id| self.known.get(&id)) { return Some(*answer == 1); }
+        if let Some(answer) = id.and_then(|id| self.known.get(&id)) { return Self::answer(*answer); }
+        if budget.refused { return None; }
         let files: Vec<&Object> = match document.dereference(entry).ok().map(|(_, v)| v) {
             Some(Object::Array(items)) => items.iter().take(16).collect(),
             Some(_) => vec![entry],
@@ -764,32 +830,38 @@ impl Associated {
                 None => answer = None,
             }
         }
-        if let (Some(id), Some(found)) = (id, answer) { self.remember(id, found); }
+        if let Some(id) = id { self.remember(id, answer); }
         answer
     }
 
-    fn remember(&mut self, id: ObjectId, found: bool) {
-        if self.known.len() < 4_096 { self.known.insert(id, usize::from(found)); }
+    /// Remembered answers: 0 no, 1 yes, 2 unknown (an unreadable file stays unknown, and is not read again).
+    fn remember(&mut self, id: ObjectId, answer: Option<bool>) {
+        if self.known.len() < 4_096 { self.known.insert(id, answer.map_or(2, usize::from)); }
+    }
+
+    fn answer(known: usize) -> Option<bool> {
+        (known != 2).then_some(known == 1)
     }
 
     /// One associated file: a file specification (its names, then its embedded file) or an embedded file stream.
     fn file(&mut self, document: &Document, file: &Object, budget: &mut Budget) -> Option<bool> {
         let id = match file { Object::Reference(id) => Some(*id), _ => None };
-        if let Some(answer) = id.and_then(|id| self.known.get(&id)) { return Some(*answer == 1); }
+        if let Some(answer) = id.and_then(|id| self.known.get(&id)) { return Self::answer(*answer); }
         let answer = match document.dereference(file).ok().map(|(_, v)| v) {
             Some(Object::Stream(stream)) => mathml_stream(document, stream, budget),
             Some(Object::Dictionary(spec)) => {
                 let named = [&b"UF"[..], b"F"].iter().any(|key| matches!(spec.get(key).ok().and_then(|o| document.dereference(o).ok()).map(|(_, v)| v), Some(Object::String(name, _)) if mathml_name(name)));
                 if named { Some(true) } else {
-                    match spec.get(b"EF").ok().and_then(|o| document.dereference(o).ok()).and_then(|(_, v)| v.as_dict().ok()).and_then(|ef| ef.get(b"F").ok()) {
-                        Some(embedded) => self.file(document, embedded, budget),
-                        None => Some(false),
+                    // The embedded file must be a stream: nothing is followed further (no cycles, no chains).
+                    match spec.get(b"EF").ok().and_then(|o| document.dereference(o).ok()).and_then(|(_, v)| v.as_dict().ok()).and_then(|ef| ef.get(b"F").ok()).and_then(|o| document.dereference(o).ok()).map(|(_, v)| v) {
+                        Some(Object::Stream(stream)) => mathml_stream(document, stream, budget),
+                        _ => Some(false),
                     }
                 }
             }
             _ => Some(false),
         };
-        if let (Some(id), Some(found)) = (id, answer) { self.remember(id, found); }
+        if let Some(id) = id { self.remember(id, answer); }
         answer
     }
 }

@@ -33,11 +33,11 @@ describe("PDF page encoding masks", () => {
   });
 
   it("count the pages with a distinction from the histogram", () => {
-    const histogram: [number, number][] = [[0, 10], [0b11, 3], [0b1, 2], [1 << 9, 1]];
-    expect(pdfPageEncodingPages(histogram, "mathFont")).toBe(5);
-    expect(pdfPageEncodingPages(histogram, "stackedMath")).toBe(3);
-    expect(pdfPageEncodingPages(histogram, "horizontalRuleTable")).toBe(1);
-    expect(pdfPageEncodingPages(histogram, "partial")).toBe(0);
+    const histogram: [number, number][] = [[0, 10], [0b11, 3], [0b1, 2], [1 << 9, 1], [1 << 15, 4]];
+    expect(pdfPageEncodingPages(histogram, "mathFont")).toEqual({ pages: 5, partialPages: 4 });
+    expect(pdfPageEncodingPages(histogram, "stackedMath")).toEqual({ pages: 3, partialPages: 4 });
+    expect(pdfPageEncodingPages(histogram, "horizontalRuleTable")).toEqual({ pages: 1, partialPages: 4 });
+    expect(pdfPageEncodingPages(histogram, "partial")).toEqual({ pages: 4, partialPages: 0 });
     expect(pdfPageEncodingPages(undefined, "mathFont")).toBeUndefined();
   });
 });

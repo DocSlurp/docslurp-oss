@@ -58,6 +58,7 @@ fn timed(label: &str, bytes: &[u8]) -> FileProfile {
     let started = Instant::now();
     let result = probe(Rules::bundled(), &ProbeInput::whole("hostile.pdf", None, bytes));
     let elapsed = started.elapsed();
+    eprintln!("{label}: {elapsed:?}");
     assert!(elapsed < LIMIT, "{label}: {elapsed:?}");
     result
 }
@@ -116,8 +117,10 @@ fn c_a_font_whose_class_cannot_be_read_makes_the_page_partial() {
     let mut document = Document::with_version("1.7");
     let mut fonts = Dictionary::new();
     let mut content = String::new();
+    // Fonts that need their program read to be classified; past the cache only names are read.
+    let program = document.add_object(Stream::new(Dictionary::new(), b"\x00\x01\x00\x00\x00\x00".to_vec()));
     for i in 0..4_200 {
-        fonts.set(format!("F{i}"), helvetica());
+        fonts.set(format!("F{i}"), dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Plain", "FontDescriptor" => dictionary! { "FontFile2" => program } });
         content.push_str(&format!("BT /F{i} 1 Tf 72 700 Td (x) Tj ET "));
     }
     let bytes = build(&mut document, fonts, Dictionary::new(), content.as_bytes(), 1, Dictionary::new());
@@ -126,7 +129,8 @@ fn c_a_font_whose_class_cannot_be_read_makes_the_page_partial() {
 
 #[test]
 fn d_huge_shared_actual_text_is_read_by_a_bounded_prefix_and_a_capped_count() {
-    // 20,000 marked spans sharing a 1 MB ActualText without TeX: 256 are checked, then the page is partial.
+    // 20,000 marked spans sharing a 1 MB ActualText without TeX: 4 KB of each is checked until 1 MB of prefixes, then
+    // the page is partial.
     let mut document = Document::with_version("1.7");
     let text = document.add_object(Object::String(vec![b'a'; 1 << 20], lopdf::StringFormat::Literal));
     let properties = dictionary! { "P0" => dictionary! { "ActualText" => text } };
@@ -174,4 +178,122 @@ fn g_dangling_structure_is_unknown_not_untagged() {
     let root = document.add_object(dictionary! { "Type" => "StructTreeRoot", "K" => kids });
     let bytes = build(&mut document, dictionary! { "F1" => helvetica() }, Dictionary::new(), b"BT /F1 10 Tf 72 700 Td (hello) Tj ET", 1, dictionary! { "StructTreeRoot" => root });
     assert_eq!(timed("dangling kids", &bytes).pdf.unwrap().tagged_truncated, Some(true));
+}
+
+#[test]
+fn h_type3_fonts_sharing_a_huge_xobject_dictionary_are_not_copied() {
+    // 4,000 Type 3 fonts sharing one resource dictionary of 20,000 XObject entries.
+    let mut document = Document::with_version("1.7");
+    let form = document.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 1.into(), 1.into()] }, b"0 0 1 1 re f".to_vec()));
+    let mut xobjects = Dictionary::new();
+    for i in 0..20_000 { xobjects.set(format!("X{i}"), form); }
+    let shared = document.add_object(dictionary! { "XObject" => xobjects });
+    let proc_id = document.add_object(Stream::new(Dictionary::new(), b"1 0 0 0 1 1 d1 /X0 Do".to_vec()));
+    let mut fonts = Dictionary::new();
+    let mut content = String::new();
+    for i in 0..4_000 {
+        let mut font = type3(dictionary! { "a" => proc_id });
+        font.set("Resources", shared);
+        fonts.set(format!("T{i}"), font);
+        content.push_str(&format!("BT /T{i} 1 Tf 72 700 Td (x) Tj ET "));
+    }
+    timed("4,000 Type 3 fonts sharing 20,000 XObjects", &build(&mut document, fonts, Dictionary::new(), content.as_bytes(), 1, Dictionary::new()));
+}
+
+#[test]
+fn i_embedded_file_cycles_and_chains_are_not_followed() {
+    // A file specification whose embedded file is itself, two that point at each other on a formula, and a chain of
+    // 30,000: each answered without following /EF /F past one step.
+    let mut document = Document::with_version("2.0");
+    let spec = document.new_object_id();
+    document.objects.insert(spec, Object::Dictionary(dictionary! { "Type" => "Filespec", "F" => Object::string_literal("a.bin"), "EF" => dictionary! { "F" => spec } }));
+    let (x, y) = (document.new_object_id(), document.new_object_id());
+    document.objects.insert(x, Object::Dictionary(dictionary! { "Type" => "Filespec", "EF" => dictionary! { "F" => y } }));
+    document.objects.insert(y, Object::Dictionary(dictionary! { "Type" => "Filespec", "EF" => dictionary! { "F" => x } }));
+    let mut next = document.add_object(dictionary! { "Type" => "Filespec" });
+    for _ in 0..30_000 { next = document.add_object(dictionary! { "Type" => "Filespec", "EF" => dictionary! { "F" => next } }); }
+    let root = document.add_object(dictionary! { "Type" => "StructTreeRoot", "K" => vec![
+        Object::Dictionary(dictionary! { "S" => "Formula", "AF" => vec![Object::Reference(x)] }),
+        Object::Dictionary(dictionary! { "S" => "Formula", "AF" => vec![Object::Reference(next)] }),
+    ] });
+    let bytes = build(&mut document, dictionary! { "F1" => helvetica() }, Dictionary::new(), b"BT /F1 10 Tf 72 700 Td (hello) Tj ET", 1,
+        dictionary! { "AF" => vec![Object::Reference(spec)], "StructTreeRoot" => root });
+    let pdf = timed("embedded-file cycles and chains", &bytes).pdf.unwrap();
+    assert_eq!((pdf.tagged_formulas, pdf.tagged_math_sources), (Some(2), Some(0)));
+}
+
+#[test]
+fn j_a_math_font_in_a_form_or_a_saved_state_does_not_make_later_text_math() {
+    let cmmi = || dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "CMMI10" };
+    let body: String = (0..20).map(|i| format!("BT /F1 10 Tf 72 {} Td (The team expanded to London this quarter.) Tj ET ", 700 - 14 * i)).collect();
+    // A form selecting a math font, then body text that selects no font of its own.
+    let mut document = Document::with_version("1.7");
+    let form = document.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+        "Resources" => dictionary! { "Font" => dictionary! { "M" => cmmi() } } }, b"BT /M 10 Tf 0 0 Td ET".to_vec()));
+    let pages_id = document.new_object_id();
+    let content = document.add_object(Stream::new(Dictionary::new(), format!("BT /F1 10 Tf ET q /Fm Do Q BT 72 400 Td (after the form) Tj ET {body}").into_bytes()));
+    let page = document.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()], "Contents" => content,
+        "Resources" => dictionary! { "Font" => dictionary! { "F1" => helvetica() }, "XObject" => dictionary! { "Fm" => form } } });
+    document.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
+    let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    assert_eq!(mask(&timed("form font", &bytes)) & 0b11, 0);
+
+    // A q/Q block selecting a math font, then text that selects none.
+    let mut document = Document::with_version("1.7");
+    let content = format!("BT /F1 10 Tf ET q BT /M2 10 Tf ET Q BT 72 400 Td (after the block) Tj ET {body}");
+    let bytes = build(&mut document, dictionary! { "F1" => helvetica(), "M2" => cmmi() }, Dictionary::new(), content.as_bytes(), 1, Dictionary::new());
+    assert_eq!(mask(&timed("q/Q font", &bytes)) & 0b11, 0);
+}
+
+#[test]
+fn k_font_heads_do_not_spend_the_page_content_budget() {
+    // 24 pages, each with 1.3 MB of content (31 MB in all, inside the 32 MB content budget) and its own embedded
+    // TrueType font whose program does not compress: every page is still sampled.
+    let mut document = Document::with_version("1.7");
+    let pages_id = document.new_object_id();
+    let mut seed = 0x2545_f491_u32;
+    let mut kids = Vec::new();
+    for _ in 0..24 {
+        let noise: Vec<u8> = (0..96 * 1024).map(|_| { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed as u8 }).collect();
+        let program = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, zlib(&noise)));
+        let font = dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Plain", "FontDescriptor" => dictionary! { "FontFile2" => program } };
+        let mut content = vec![b' '; 1_300_000];
+        content.extend_from_slice(b"BT /F1 10 Tf 72 700 Td (A page of the quarterly report) Tj ET");
+        let content = document.add_object(Stream::new(Dictionary::new(), content));
+        kids.push(Object::Reference(document.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Contents" => content, "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } } })));
+    }
+    document.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 24 }));
+    let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    let result = probe(Rules::bundled(), &ProbeInput::whole("fonts.pdf", None, &bytes));
+    let pdf = result.pdf.unwrap();
+    assert_eq!((pdf.sampled_pages, pdf.budget_exhausted), (24, false));
+    assert!(pdf.tagged_formulas.is_some());
+}
+
+#[test]
+fn l_cut_or_corrupt_streams_are_unknown_not_absent() {
+    // A font program whose MATH table directory sits behind 70 KB of empty Flate blocks: past the compressed cap.
+    let mut document = Document::with_version("1.7");
+    let program = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, empty_blocks(14_000)));
+    let font = dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Plain", "FontDescriptor" => dictionary! { "FontFile2" => program } };
+    let bytes = build(&mut document, dictionary! { "F1" => font }, Dictionary::new(), b"BT /F1 10 Tf 72 700 Td (x) Tj ET", 1, Dictionary::new());
+    assert_eq!(mask(&timed("cut font program", &bytes)) & PARTIAL, PARTIAL);
+    // A corrupt Flate stream.
+    let mut document = Document::with_version("1.7");
+    let program = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, b"\x78\x9c\xff\xff\xff\xff not deflate".to_vec()));
+    let font = dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "Plain", "FontDescriptor" => dictionary! { "FontFile2" => program } };
+    let bytes = build(&mut document, dictionary! { "F1" => font }, Dictionary::new(), b"BT /F1 10 Tf 72 700 Td (x) Tj ET", 1, Dictionary::new());
+    assert_eq!(mask(&timed("corrupt font program", &bytes)) & PARTIAL, PARTIAL);
+    // A catalog associated file cut the same way leaves the tree truncated.
+    let mut document = Document::with_version("2.0");
+    let file = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, empty_blocks(14_000)));
+    let bytes = build(&mut document, dictionary! { "F1" => helvetica() }, Dictionary::new(), b"BT /F1 10 Tf 72 700 Td (x) Tj ET", 1, dictionary! { "AF" => vec![Object::Reference(file)] });
+    assert_eq!(timed("cut associated file", &bytes).pdf.unwrap().tagged_truncated, Some(true));
 }

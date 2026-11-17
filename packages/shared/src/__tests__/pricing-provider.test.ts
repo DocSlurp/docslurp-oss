@@ -215,6 +215,9 @@ describe("file profiles are untrusted", () => {
     expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedMathSources: 5 }), { size: 100_000 })?.pdf?.taggedMathSources).toBeUndefined();
     expect(fileProfileSchema.safeParse(pdfProfile({}, { taggedFormulas: 1, taggedTruncated: true })).success).toBe(true);
     expect(fileProfileSchema.safeParse(pdfProfile({}, { taggedFormulas: 1, taggedTruncated: false as never })).success).toBe(false);
+    const capped = normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedFormulas: 1_000_000, taggedTables: 900_000, taggedMathSources: 1_000_000 }), { size: 100_000 })?.pdf;
+    expect([capped?.taggedFormulas, capped?.taggedTables, capped?.taggedMathSources]).toEqual([50_000, 50_000, 50_000]);
+    expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedTruncated: true }), { size: 100_000 })?.pdf?.taggedTruncated).toBeUndefined();
   });
 
   it("drops a profile measured on another file size or with inconsistent histograms", () => {

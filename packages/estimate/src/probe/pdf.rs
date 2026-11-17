@@ -132,12 +132,13 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
     profile.furniture_images = repeated.len() as u32;
     let encoding_rules = &rules.encoding;
     let sampled_ids: HashSet<ObjectId> = read_pages.iter().map(|(_, id)| *id).collect();
-    // The structure tree is read only while the document's content budget lasts; its reads are charged to it.
+    // The structure tree is read only while the content budget lasts (pages that spent it end the reading); its reads
+    // come out of the encoding facts' own budget.
     let tagged = (!forms.document_budget_spent()).then(|| {
-        let mut budget = encoding::Budget::new(MAX_DOCUMENT_CONTENT_BYTES.saturating_sub(forms.decompressed));
+        let mut budget = encoding::Budget::new(forms.encoding_budget());
         let left = budget.left;
         let facts = encoding::struct_facts(document, encoding_rules, &sampled_ids, &mut budget);
-        forms.charge(left - budget.left);
+        forms.encoding_spend(left - budget.left);
         facts
     });
     // Strip and table-shaped images repeated like page furniture (often too small to count as significant images).
@@ -452,9 +453,14 @@ struct FormCache {
     /// are cached too), at most `MAX_CACHED_FONTS`; past that fonts are not classified and their glyphs make the page
     /// partial.
     fonts: HashMap<usize, usize>,
+    /// Bytes the encoding facts may read (font program and glyph procedure heads, associated files, text prefixes),
+    /// apart from the content budget so they never cut the pages sampled; set on first use.
+    encoding_left: Option<usize>,
 }
 
 const MAX_CACHED_FONTS: usize = 4_096;
+/// Bytes the encoding facts may read per document (compressed plus decoded), apart from the content budget.
+const MAX_ENCODING_BYTES: usize = 8 * 1024 * 1024;
 
 impl FormCache {
     fn document_budget_spent(&self) -> bool {
@@ -464,6 +470,16 @@ impl FormCache {
     /// Bytes still allowed for one stream: the per-stream limit or what is left of the document budget.
     fn stream_limit(&self) -> usize {
         MAX_STREAM_BYTES.min(MAX_DOCUMENT_CONTENT_BYTES.saturating_sub(self.decompressed))
+    }
+
+    /// What the encoding facts may still read.
+    fn encoding_budget(&mut self) -> usize {
+        *self.encoding_left.get_or_insert(MAX_ENCODING_BYTES)
+    }
+
+    fn encoding_spend(&mut self, bytes: usize) {
+        let left = self.encoding_budget();
+        self.encoding_left = Some(left.saturating_sub(bytes));
     }
 
     fn charge(&mut self, bytes: usize) {
@@ -887,7 +903,7 @@ fn unmapped_font(document: &Document, font: &Dictionary) -> bool {
         return false;
     }
     let name_of = |key: &[u8]| match font.get(key).ok().and_then(|object| deref(document, object)).map(|(_, value)| value) {
-        Some(Object::Name(value)) => Some(value.clone()),
+        Some(Object::Name(value)) => Some(value.as_slice()),
         _ => None,
     };
     name_of(b"Subtype").is_some_and(|subtype| subtype == b"Type0")
@@ -1352,8 +1368,9 @@ impl<'a> Context<'a, '_> {
     }
 
     /// The class of font resource `name` (`encoding::font_class`, with `FONT_UNMAPPED` from `unmapped_font`), cached per
-    /// font dictionary so a page switching fonts reads each once; its stream reads are charged to the document's content
-    /// budget, and a font met once that budget or the cache is full is unknown.
+    /// font dictionary so a page switching fonts reads each once. Its stream reads come out of the encoding facts' own
+    /// budget; once that or the cache is spent, a font is still classified by name, and one that would need a read is
+    /// unknown.
     fn font_class(&mut self, resources: &[&Dictionary], name: &[u8]) -> u8 {
         let found = resources.iter().find_map(|resource| {
             let fonts = resource.get(b"Font").ok().and_then(|object| dictionary(self.document, object))?;
@@ -1365,14 +1382,14 @@ impl<'a> Context<'a, '_> {
             return *class as u8;
         }
         let unmapped = unmapped_font(self.document, font);
-        if self.forms.fonts.len() >= MAX_CACHED_FONTS || self.forms.document_budget_spent() {
-            return encoding::FONT_UNKNOWN | if unmapped { encoding::FONT_UNMAPPED } else { 0 };
-        }
-        let mut budget = encoding::Budget::new(MAX_DOCUMENT_CONTENT_BYTES.saturating_sub(self.forms.decompressed));
+        let cacheable = self.forms.fonts.len() < MAX_CACHED_FONTS;
+        let mut budget = encoding::Budget::new(if cacheable { self.forms.encoding_budget() } else { 0 });
         let left = budget.left;
         let class = encoding::font_class(self.document, font, unmapped, &mut budget);
-        self.forms.charge(left - budget.left);
-        self.forms.fonts.insert(key, usize::from(class));
+        if cacheable {
+            self.forms.encoding_spend(left - budget.left);
+            self.forms.fonts.insert(key, usize::from(class));
+        }
         class
     }
 
@@ -1396,7 +1413,9 @@ impl<'a> Context<'a, '_> {
         let content = normalized.as_ref().map(|n|n.content.as_slice()).unwrap_or(content);
         let mut inline_index = 0usize;
         let mut ctm = base;
-        let mut stack: Vec<(Matrix, f64)> = Vec::new();
+        // The graphics state q/Q saves: the transformation, the line width and the encoding facts' font class (a form or
+        // a q/Q block selecting a math font does not make the text after it math).
+        let mut stack: Vec<(Matrix, f64, u8)> = Vec::new();
         let mut line_width = 1.0_f64;
         let mut path = layout::PathBuilder::default();
         if self.strict_validation { path.detailed_min_length = Some(self.layout.rule_min_length_pt); }
@@ -1415,8 +1434,8 @@ impl<'a> Context<'a, '_> {
             }
             let operands = &operation.operands;
             match operation.operator.as_str() {
-                "q" if stack.len() < 256 => stack.push((ctm, line_width)),
-                "Q" => (ctm, line_width) = stack.pop().unwrap_or((base, line_width)),
+                "q" if stack.len() < 256 => stack.push((ctm, line_width, stats.encoding.font)),
+                "Q" => (ctm, line_width, stats.encoding.font) = stack.pop().unwrap_or((base, line_width, stats.encoding.font)),
                 "w" => line_width = operands.first().and_then(number).filter(|width| width.is_finite()).unwrap_or(line_width),
                 "cm" => {
                     if let Some(matrix) = matrix_from(operands) {
@@ -1614,7 +1633,10 @@ impl<'a> Context<'a, '_> {
                             let own = xobject.dict.get(b"Resources").ok().and_then(|object| dictionary(self.document, object));
                             let mut form_resources: Vec<&Dictionary> = own.into_iter().collect();
                             form_resources.extend_from_slice(resources);
+                            // A form runs in its own saved graphics state (`Do` wraps it in q/Q).
+                            let font_before = stats.encoding.font;
                             self.interpret(&form_content, &form_resources, multiply(&matrix, &ctm), depth + 1, stats);
+                            stats.encoding.font = font_before;
                             if stats.exhausted {
                                 return;
                             }

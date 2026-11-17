@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { TEXT_PAGE_CHARS, TEXT_PAGE_LINES } from "./media-upload-estimate.js";
 import { PAGE_AREA_EQUIVALENTS_CAP } from "./page-equivalents.js";
-import { PDF_PAGE_ENCODING_KNOWN_MASK, PDF_PAGE_ENCODING_MAX_ENTRIES } from "./pdf-page-encoding.js";
+import { PDF_PAGE_ENCODING_KNOWN_MASK, PDF_PAGE_ENCODING_RULES } from "./pdf-page-encoding.js";
 
 /*
  * File profiles: what the offline profiler (`@docslurp/estimate`, Rust/WASM) measures about a file on the customer's own
@@ -49,7 +49,8 @@ const count = z.number().int().nonnegative().max(1_000_000);
  */
 const pageEncodingsSchema = z
   .array(z.tuple([z.number().int().nonnegative().max(0xffff), z.number().int().positive().max(FILE_PROFILE_MAX_SAMPLED_PAGES)]))
-  .max(PDF_PAGE_ENCODING_MAX_ENTRIES)
+  // One entry per distinct mask: never more than the pages sampled.
+  .max(FILE_PROFILE_MAX_SAMPLED_PAGES)
   .refine((entries) => entries.every(([mask]) => (mask & ~PDF_PAGE_ENCODING_KNOWN_MASK) === 0), "unknown page encoding bit")
   .refine((entries) => new Set(entries.map(([mask]) => mask)).size === entries.length, "duplicate page encoding mask");
 
@@ -293,7 +294,10 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         scanBesideTextUnknownPages: Math.min(pdf.scanBesideTextUnknownPages, sampled),
         ruledTablePages: Math.min(pdf.ruledTablePages, sampled),
         // Recoverable formula sources are a subset of the formulas.
-        ...(pdf.taggedMathSources !== undefined && pdf.taggedFormulas !== undefined ? { taggedMathSources: Math.min(pdf.taggedMathSources, pdf.taggedFormulas) } : {}),
+        // The structure walk visits at most structMaxElements elements; sources are a subset of the formulas.
+        ...(pdf.taggedFormulas !== undefined ? { taggedFormulas: Math.min(pdf.taggedFormulas, PDF_PAGE_ENCODING_RULES.structMaxElements) } : {}),
+        ...(pdf.taggedTables !== undefined ? { taggedTables: Math.min(pdf.taggedTables, PDF_PAGE_ENCODING_RULES.structMaxElements) } : {}),
+        ...(pdf.taggedMathSources !== undefined && pdf.taggedFormulas !== undefined ? { taggedMathSources: Math.min(pdf.taggedMathSources, pdf.taggedFormulas, PDF_PAGE_ENCODING_RULES.structMaxElements) } : {}),
         // Routes are a partition of the sampled pages: a profile whose routes sum past them is cut back route by route.
         ...(pdf.routePages ? { routePages: clampPartition(pdf.routePages, sampled) } : {}),
         scanBesideTextPages: Math.min(pdf.scanBesideTextPages, Math.max(0, sampled - Math.min(sampled, pdf.rasterPages)), pdf.textLayerPages),
@@ -313,6 +317,8 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
       clamped.pageEquivalentsByAllowance = sums;
       // Formula sources without a formula count describe nothing.
       if (clamped.taggedFormulas === undefined) delete clamped.taggedMathSources;
+      // "Truncated" qualifies counts: alone it says nothing.
+      if (clamped.taggedFormulas === undefined && clamped.taggedTables === undefined) delete clamped.taggedTruncated;
       clamped.maxPageEquivalentsByAllowance = maxes;
       if (sampled !== pdf.sampledPages) delete normalized.pdf;
     }
