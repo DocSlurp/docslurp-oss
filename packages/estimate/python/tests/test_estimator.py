@@ -79,6 +79,14 @@ class EstimatorTest(unittest.TestCase):
             for word in PRICING_WORDS:
                 self.assertNotIn(word, encoded)
 
+    def test_page_stats_stream_beside_the_same_profile(self):
+        result = self.estimator.profile_path_with_page_stats(FIXTURES / "text_wrapped_with_photo.pdf")
+        self.assertEqual(result["profile"], self.estimator.profile_path(FIXTURES / "text_wrapped_with_photo.pdf"))
+        lines = [json.loads(line) for line in result["pageStats"].splitlines()]
+        self.assertEqual(len(lines), result["profile"]["pdf"]["sampledPages"])
+        self.assertEqual(sorted(lines[0]), ["counts", "mask", "page"])
+        self.assertEqual(sum(pages for _, pages in result["profile"]["pdf"]["pageEncodings"]), len(lines))
+
     def test_estimate_paths_reports_progress_in_order(self):
         events = []
         result = self.estimator.estimate_paths([FIXTURES / "scan_plain.pdf", FIXTURES / "missing.pdf", FIXTURES / "text_wrapped_with_photo.pdf"], on_progress=events.append)

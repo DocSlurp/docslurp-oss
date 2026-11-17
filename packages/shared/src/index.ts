@@ -11,6 +11,7 @@ export * from "./billing.js";
 export * from "./pricing-provider.js";
 export { OPEN_PRICING, OPEN_CREDITS_PER_PAGE, openStoredBytes } from "./pricing-open.js";
 export * from "./file-profile.js";
+export * from "./pdf-page-encoding.js";
 export * from "./estimate-quote.js";
 export { assembleEstimateQuote, profiledPageArea, profiledTextChars, type StoredBytesModel } from "./estimate-assembly.js";
 export { installTestPricing, DISTINCT_TEST_PRICING, TEST_PAGE_CREDITS } from "./pricing-testing.js";

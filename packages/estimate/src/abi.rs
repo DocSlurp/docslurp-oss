@@ -5,7 +5,8 @@
 //! - Every call returns a `u64` packing `(ptr << 32) | len` of a UTF-8 JSON envelope the host reads and then frees
 //!   with `ds_free`: `{"ok":true,"value":...}` or `{"ok":false,"error":{"code":...,"message":...}}`.
 //! - `ds_info()`: `{ profileSchema, profiler }`. `ds_read_plan(meta)`: bytes to read for a profile.
-//!   `ds_probe(meta, head, tail)`: the file's profile (`tail_len` 0 for none).
+//!   `ds_probe(meta, head, tail)`: the file's profile (`tail_len` 0 for none). `ds_probe_pages(meta, head, tail)`:
+//!   `{ profile, pageStats }`, the same profile and a PDF's per-page stat stream as JSONL.
 //!
 //! The `ds_*` exports exist only on wasm32, where a pointer fits the packed `u64`; native callers use the `*_json`
 //! functions. A panic traps the module (WebAssembly aborts on panic); hosts discard the instance and create a new one.
@@ -127,14 +128,35 @@ fn parse<T: serde::de::DeserializeOwned>(what: &str, bytes: &[u8]) -> Result<T, 
 
 /// `ds_probe` without the memory plumbing.
 pub fn probe_json(meta: &[u8], head: &[u8], tail: Option<&[u8]>) -> String {
-    envelope((|| {
-        let meta: FileMeta = parse("file meta", meta)?;
-        if (head.len() as u64) > meta.size || tail.is_some_and(|tail| tail.len() as u64 > meta.size) {
-            return Err(Error::invalid_request("head and tail cannot be longer than the file"));
-        }
-        let input = ProbeInput { name: &meta.name, mime_type: meta.mime_type.as_deref(), size: meta.size, head, tail, bounded: meta.bounded };
-        Ok(probe(Rules::bundled(), &input))
-    })())
+    let profile = probe_value(meta, head, tail);
+    // The per-page stat lines belong to `ds_probe_pages` only: never left over for a later call.
+    crate::probe::take_page_stats();
+    envelope(profile)
+}
+
+fn probe_value(meta: &[u8], head: &[u8], tail: Option<&[u8]>) -> Result<crate::probe::FileProfile, Error> {
+    let meta: FileMeta = parse("file meta", meta)?;
+    if (head.len() as u64) > meta.size || tail.is_some_and(|tail| tail.len() as u64 > meta.size) {
+        return Err(Error::invalid_request("head and tail cannot be longer than the file"));
+    }
+    let input = ProbeInput { name: &meta.name, mime_type: meta.mime_type.as_deref(), size: meta.size, head, tail, bounded: meta.bounded };
+    Ok(probe(Rules::bundled(), &input))
+}
+
+/// `ds_probe_pages` without the memory plumbing: the same profile as `ds_probe` and, beside it, the per-page stat
+/// stream of a PDF's sampled pages as JSONL (one `{"page","mask","counts"}` object a line; empty for other files). A
+/// separate entry point keeps `ds_probe`'s value exactly the profile the server validates, and one call measures both.
+pub fn probe_pages_json(meta: &[u8], head: &[u8], tail: Option<&[u8]>) -> String {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WithPages {
+        profile: crate::probe::FileProfile,
+        page_stats: String,
+    }
+    crate::probe::take_page_stats();
+    let profile = probe_value(meta, head, tail);
+    let page_stats: String = crate::probe::take_page_stats().iter().filter_map(|stat| serde_json::to_string(stat).ok()).map(|line| line + "\n").collect();
+    envelope(profile.map(|profile| WithPages { profile, page_stats }))
 }
 
 /// `ds_read_plan` without the memory plumbing.
@@ -231,6 +253,22 @@ pub unsafe extern "C" fn ds_probe(
 ) -> u64 {
     let tail = (tail_len > 0).then(|| slice(tail_ptr, tail_len));
     into_host(probe_json(slice(meta_ptr, meta_len), slice(head_ptr, head_len), tail))
+}
+
+/// # Safety
+/// See [`slice`].
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub unsafe extern "C" fn ds_probe_pages(
+    meta_ptr: *const u8,
+    meta_len: usize,
+    head_ptr: *const u8,
+    head_len: usize,
+    tail_ptr: *const u8,
+    tail_len: usize,
+) -> u64 {
+    let tail = (tail_len > 0).then(|| slice(tail_ptr, tail_len));
+    into_host(probe_pages_json(slice(meta_ptr, meta_len), slice(head_ptr, head_len), tail))
 }
 
 /// Why the module last trapped, readable after the trap without allocating: a panic's message (the panic hook writes it
