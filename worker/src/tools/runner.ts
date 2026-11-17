@@ -1867,7 +1867,8 @@ export class CommandRunner {
     if (plan.sandboxedOcr) {
       const provider = requireSandboxedOcrProvider();
       const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
-      // Ownership hints come from trusted run state; neither authorizes sharing a VM across jobs.
+      // Ownership hints come from trusted run state; only the live SQL grant (authorizeCohort, its orgId) lets a provider
+      // reuse a VM across jobs, and only within that organization.
       const context = currentPerfContext();
       const scope = context?.orgId && context.projectId && context.documentId && context.executionGeneration !== undefined
         ? { orgId: context.orgId, projectId: context.projectId, runId: context.runId, documentId: context.documentId, executionGeneration: context.executionGeneration }
