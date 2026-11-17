@@ -186,6 +186,22 @@ describe("storeResponse", () => {
     expect(cache.readCachedResponse(tickets[7]!, 60_000)).toEqual(data("f7"));
   });
 
+  it("a read refreshes recency, and another organization's identical request gets its own key and misses", async () => {
+    cache.configureSearchResponseCacheLimitsForTests({ maxEntries: 2 });
+    const first = (await ticket(["ws-a"], { request: { q: "first" } }))!;
+    const second = (await ticket(["ws-a"], { request: { q: "second" } }))!;
+    await cache.storeResponse(first, data("1"), "ws-a");
+    await cache.storeResponse(second, data("2"), "ws-a");
+    expect(cache.readCachedResponse(first, 60_000)).toEqual(data("1"));
+    await cache.storeResponse((await ticket(["ws-a"], { request: { q: "third" } }))!, data("3"), "ws-a");
+    expect(cache.readCachedResponse(first, 60_000)).toEqual(data("1"));
+    expect(cache.readCachedResponse(second, 60_000)).toBeUndefined();
+    set("ws-same", "org-2");
+    const other = (await ticket(["ws-same"], { request: { q: "first" } }))!;
+    expect(other.key).not.toBe(first.key);
+    expect(cache.readCachedResponse(other, 60_000)).toBeUndefined();
+  });
+
   it("under global byte pressure evicts the least recently used answers", async () => {
     cache.configureSearchResponseCacheLimitsForTests({ maxBytes: 400 });
     for (let i = 0; i < 30; i += 1) {

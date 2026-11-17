@@ -9,7 +9,7 @@ import { hkdfSync, randomBytes } from "node:crypto";
  * provider-side prompt caches.
  */
 
-/** Minimum length of an explicit `EVIDENCE_TAG_KEY`; production refuses a shorter one (server config, worker startup, here). */
+/** Minimum length of an explicit `EVIDENCE_TAG_KEY`; production refuses a shorter one (server config and here). */
 export const SERVER_SECRET_KEY_MIN_LENGTH = 32;
 
 const derivedKeys = new Map<string, Buffer>();
@@ -26,7 +26,7 @@ export function serverSecretKey(label: string): Buffer {
   if (cached) return cached;
   const explicit = process.env.EVIDENCE_TAG_KEY?.trim();
   if (explicit && explicit.length < SERVER_SECRET_KEY_MIN_LENGTH) {
-    // Fail closed: production startup refuses it too (server config.ts, worker startup); this guards other callers.
+    // Fail closed: production startup refuses it too (server config.ts); this guards other callers.
     if (process.env.NODE_ENV === "production") throw new Error(`EVIDENCE_TAG_KEY must be at least ${SERVER_SECRET_KEY_MIN_LENGTH} characters`);
     if (!warnedShortKey) {
       warnedShortKey = true;

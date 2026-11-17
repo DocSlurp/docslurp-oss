@@ -428,7 +428,10 @@ export function createPrivateEndpointFetch(
     baseFetch?: typeof fetch;
     env?: EnvLike;
     chatTemplateKwargs?: Record<string, unknown>;
-    /** `false`: fold any system message into the first user turn, for models whose template rejects the system role. */
+    /**
+     * `false`: fold any system message into the first user turn of a JSON chat/completions body, for models whose
+     * template rejects the system role. Other paths and bodies pass through unchanged.
+     */
     systemMessage?: boolean;
   } = {},
 ): typeof fetch {
