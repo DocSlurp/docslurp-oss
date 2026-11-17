@@ -13,7 +13,7 @@
       "types": "./src/realtime/index.ts",
       "default": "./src/realtime/index.ts"
     },
-    "./mcp-origin": {
+    "./lib/mcp-origin": {
       "types": "./src/lib/mcp-origin.ts",
       "default": "./src/lib/mcp-origin.ts"
     }
