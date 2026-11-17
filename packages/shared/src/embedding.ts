@@ -639,7 +639,9 @@ export const visionModelCatalog = [
     description:
       "OpenRouter multimodal model for low-latency, high-volume page extraction.",
     estimatedCostPerPageCents: 0.5,
-    tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-25" },
+    // Priced at its US/EU Vertex endpoints (its vision profile allows only those: the global and AI Studio endpoints may
+    // process anywhere), $0.275/$1.65 per M (docs/evals/vision-route-prices-2026-11-17.json).
+    tokenPricing: { inputUsdPerMillion: 0.275, outputUsdPerMillion: 1.65, checked: "2026-11-17", basis: "pinned-route", providers: ["google-vertex/us", "google-vertex/eu"] },
     imageTokens: { kind: "fixed", tokens: 2_240, basis: "gemini-media-resolution" },
   },
   {
@@ -756,8 +758,10 @@ export const visionModelCatalog = [
       "Anthropic Claude Haiku 5.5 on OpenRouter; opt-in page extraction and a chart & diagram export generator.",
     // Computed, not measured: a full-resolution image (4,784 tokens) plus about 500 prompt and 1,000 output tokens at list price.
     estimatedCostPerPageCents: 0.11,
-    // OpenRouter list price, for prompts up to 100K tokens; max_price at this price keeps the $0.11/$0.55 regional hosts out.
-    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-11-13" },
+    // Priced at its US hosts (its vision profile allows only Bedrock us-east-1 and Vertex us: the untagged and global
+    // endpoints may process anywhere), $0.11/$0.55 per M for prompts up to 100K tokens
+    // (docs/evals/vision-route-prices-2026-11-17.json); max_price at this price admits them.
+    tokenPricing: { inputUsdPerMillion: 0.11, outputUsdPerMillion: 0.55, checked: "2026-11-17", basis: "pinned-route", providers: ["amazon-bedrock/us-east-1", "google-vertex/us"] },
     // High-resolution tier (Claude 4.7 and later models): images are downscaled to at most 2,576 px on the long edge and
     // 4,784 visual tokens (platform.claude.com/docs/en/build-with-claude/vision, 2026-11-13).
     imageTokens: { kind: "fixed", tokens: 4_784, basis: "anthropic-high-resolution-max" },

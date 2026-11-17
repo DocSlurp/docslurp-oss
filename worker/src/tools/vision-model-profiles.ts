@@ -105,6 +105,14 @@ export interface VisionModelProfile {
 
 /** Add a model with one entry; add a template to `visionPromptTemplates` only if it needs a new prompt. */
 export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>> = {
+  // Routing-only profiles (2026-11-17): models a project may choose for page reads, kept to hosts with a stated US or EU
+  // region (capability-pools.ts poolHostRegion; docs/evals/vision-route-prices-2026-11-17.json); requests otherwise generic.
+  // Haiku: untagged and global endpoints may process anywhere. Composite 0.936 (Bedrock us-east-1) and 0.933 (Vertex us)
+  // on the page-OCR development split (dev-page-ocr-20261117-pool-candidates, transcription prompt).
+  "anthropic/claude-haiku-5.5": { openRouterProvider: { only: ["amazon-bedrock/us-east-1", "google-vertex/us"], sort: "price", allow_fallbacks: true } },
+  // Gemini 3.1 Flash Lite: AI Studio and Vertex global may process anywhere; Vertex us and eu state their region (not
+  // re-measured on these hosts).
+  "google/gemini-3.1-flash-lite": { openRouterProvider: { only: ["google-vertex/us", "google-vertex/eu"], sort: "price", allow_fallbacks: true } },
   // 2026-10-21 tune split (68 pages): with `<OCR>` this snapshot writes plain-text math
   // (`softmax(QK^T / √d_k) V`); the Markdown/LaTeX prompt lifts math partial 0.44 -> 0.86.
   // BaseTen served runaway repetition loops ("| | | …" to the cap) and word substitutions;

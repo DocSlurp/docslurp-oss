@@ -89,9 +89,9 @@ describe("MiMo vision profile", () => {
   });
 
   it("leaves other models' prompts unchanged", async () => {
-    const other = await sentBody({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" });
+    const other = await sentBody({ modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" });
     expect(other.messages[1].content[0].text).toBe(visionPromptTemplates["<OCR>"]);
-    expect(other.provider).toEqual({ max_price: visionMaxPrice("google/gemini-3.1-flash-lite") });
+    expect(other.provider).toEqual({ max_price: visionMaxPrice("google/gemini-2.5-flash-lite") });
   });
 });
 

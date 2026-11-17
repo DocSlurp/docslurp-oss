@@ -18,6 +18,10 @@ const routeEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/vi
 const lunaRouteEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/vision-route-prices-2026-11-13.json", import.meta.url), "utf8")) as {
   endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
 };
+/** Endpoints of Claude Haiku 5.5 and Gemini 3.1 Flash Lite, fetched when their routes were restricted to US/EU hosts. */
+const regionRouteEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/vision-route-prices-2026-11-17.json", import.meta.url), "utf8")) as {
+  endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
+};
 /** DeepInfra's /models/list pricing for vision routes priced from a direct provider's list (`basis: "provider-list"`). */
 const deepInfraEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/deepinfra-vision-prices-2026-11-04.json", import.meta.url), "utf8")) as {
   models: { model_name: string; pricing: { cents_per_input_token: number; cents_per_output_token: number } }[];
@@ -86,7 +90,7 @@ describe("official model price evidence", () => {
       // A pinned route is priced at its most expensive pinned provider's cheapest endpoint, from the retained endpoint
       // response: every pinned provider can serve at or under the route price. A provider's dearer variants (for
       // example `fireworks/us`) never serve, since the request's max_price is the route price.
-      const endpoints = [...(evidence.endpoints[id] ?? []), ...(routeEvidence.endpoints[id] ?? []), ...(lunaRouteEvidence.endpoints[id] ?? [])];
+      const endpoints = [...(evidence.endpoints[id] ?? []), ...(routeEvidence.endpoints[id] ?? []), ...(lunaRouteEvidence.endpoints[id] ?? []), ...(regionRouteEvidence.endpoints[id] ?? [])];
       const cheapestOf = (provider: string, side: "prompt" | "completion") => {
         // Service tiers (`/spot`, `/flex`, `/priority`, `/fast`) are separate offers the route never asks for: not its price.
         const own = endpoints.filter((endpoint) => (endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`))

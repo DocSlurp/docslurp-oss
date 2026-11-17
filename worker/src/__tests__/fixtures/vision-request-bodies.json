@@ -29,10 +29,16 @@
       "include_usage": true
     },
     "provider": {
+      "only": [
+        "google-vertex/us",
+        "google-vertex/eu"
+      ],
+      "sort": "price",
+      "allow_fallbacks": true,
       "max_price": {
-        "prompt": 0.25,
-        "completion": 1.5,
-        "image": 0.00056,
+        "prompt": 0.275,
+        "completion": 1.65,
+        "image": 0.000616,
         "request": 0
       }
     }
@@ -67,10 +73,16 @@
       "include_usage": true
     },
     "provider": {
+      "only": [
+        "google-vertex/us",
+        "google-vertex/eu"
+      ],
+      "sort": "price",
+      "allow_fallbacks": true,
       "max_price": {
-        "prompt": 0.25,
-        "completion": 1.5,
-        "image": 0.00056,
+        "prompt": 0.275,
+        "completion": 1.65,
+        "image": 0.000616,
         "request": 0
       }
     }

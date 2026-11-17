@@ -278,7 +278,7 @@ describe("vision usage priced on the served route", () => {
     }, new MemoryVisionAttemptBackend());
     // A primary with no host allowlist (any host OpenRouter picks): refused, nothing sent.
     const gate = guard.call({ documentId: "doc", pageNumber: 1, purpose: "page" });
-    const error = await runVisionCall(state, { id: "doc" }, vision(OPENROUTER), { imagePath, outputPath: `${imagePath}.json` },
+    const error = await runVisionCall(state, { id: "doc" }, vision("llm://openrouter/google/gemini-2.5-flash-lite"), { imagePath, outputPath: `${imagePath}.json` },
       { mimeType: "image/png", pageNumber: 1, artifactUri: "raster://1" }, gate).catch((caught: unknown) => caught);
     await gate.finish();
     expect((error as Error).name).toBe("VisionRouteRegionError");

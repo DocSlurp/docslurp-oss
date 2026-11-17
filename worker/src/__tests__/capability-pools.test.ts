@@ -98,8 +98,12 @@ describe("worker capability pools at startup", () => {
     expect(visionPageRouteRegionProblem("llm://openrouter/deepseek/deepseek-v4.1-flash-1017")).toBeNull();
     expect(visionPageRouteRegionProblem("llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct")).toBeNull();
     // No allowlist (any host), a global direct provider: refused.
-    expect(visionPageRouteRegionProblem("llm://openrouter/anthropic/claude-haiku-5.5")).toMatch(/no host allowlist/);
-    expect(visionPageRouteRegionProblem("llm://openrouter/google/gemini-3.1-flash-lite")).toMatch(/no host allowlist/);
+    // Haiku and Gemini 3.1 Flash Lite keep their stated-region endpoints only.
+    expect(visionPageRouteRegionProblem("llm://openrouter/anthropic/claude-haiku-5.5")).toBeNull();
+    expect(visionModelProfile("anthropic/claude-haiku-5.5")?.openRouterProvider).toMatchObject({ only: ["amazon-bedrock/us-east-1", "google-vertex/us"] });
+    expect(visionPageRouteRegionProblem("llm://openrouter/google/gemini-3.1-flash-lite")).toBeNull();
+    // Gemini 2.5 Flash Lite has only AI Studio endpoints (any Google facility): refused.
+    expect(visionPageRouteRegionProblem("llm://openrouter/google/gemini-2.5-flash-lite")).toMatch(/no host allowlist/);
     expect(visionPageRouteRegionProblem("llm://openai/gpt-4.1-mini")).toMatch(/openai/);
     // The deployment's own operator route and local runtimes send pages to no third party.
     expect(visionPageRouteRegionProblem("llm://private/reader/model")).toBeNull();
