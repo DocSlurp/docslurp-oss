@@ -507,7 +507,7 @@ export interface ExtractorPlugin {
   pageImageReader?: PageImageReaderProvider;
   /**
    * The capability pool members this plugin's services serve (@docslurp/shared capability-pools.ts): one per service that
-   * reads customer pages, its `backend` the service's provider `id`, with where it processes pages (stated US or EU
+   * reads customer pages, its `backend` the service's provider `id`, with where it processes pages (US, EU or an unpinned `global` region,
    * evidence), whether the pool fails over to it automatically, and its measured quality and pages per $1. A service
    * without a member refuses worker start (its region would be unknown). Several plugins may each register a sandboxed PDF
    * provider when every one is a `text` member: the text pool then runs them in pool order with automatic failover.
