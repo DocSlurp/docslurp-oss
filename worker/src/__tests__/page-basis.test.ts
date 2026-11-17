@@ -280,6 +280,69 @@ describe("council #469: every check weighs one run-wide sum, on every attempt", 
   });
 });
 
+describe("council #469 round 2", () => {
+  it("an OCR read never spends balance a measured document already owes: a DOCX raise, then reads are refused (R2-A)", async () => {
+    const docx = doc("w", { mimeType: DOCX });
+    const scan = doc("s", { pageCount: 1_000, intakePageCount: 1_000, pageCountSource: "counted" });
+    const { pageBasis, ledger } = basis([docx, scan], { balance: 10 });
+    let pages = 2;
+    while (extraCreditsForMeasuredPages(pipeline, 1, pages + 1, "text-rule") <= 9) pages += 1;
+    await pageBasis.record(docx, { kind: "billing-pages", pages, method: "text-rule", format: "office-word" });
+    const owed = extraCreditsForMeasuredPages(pipeline, 1, pages, "text-rule", { features: false });
+    let reads = 0;
+    for (let i = 0; i < 1_000; i += 1) {
+      const decision = await pageBasis.fund({ kind: "page-read", mode: "ocr", pages: 8 });
+      if (!decision.funded) break;
+      ledger.balance -= pageCredits("ocr", 8);
+      reads += pageCredits("ocr", 8);
+    }
+    // What the run owes for measured pages plus the reads it funded never exceeds the balance it started with.
+    expect(owed + reads).toBeLessThanOrEqual(10);
+    expect(ledger.paused).not.toBeNull();
+  });
+
+  it("an escalation is sized against what the run already owes", async () => {
+    const text = doc("t", { mimeType: "text/plain", pageCount: 5_000, intakePageCount: 1, pageCountSource: "counted" });
+    const owed = pageCredits("fast", 4_999);
+    const upgrade = pageUpgradeCredits("ocr", "rich");
+    const { pageBasis } = basis([text], { balance: owed + upgrade * 0.5 });
+    expect(await pageBasis.affordable({ kind: "page-upgrade", from: "ocr", to: "rich" }, 1)).toBe(0);
+    const funded = basis([doc("t", { mimeType: "text/plain", pageCount: 5_000, intakePageCount: 1, pageCountSource: "counted" })], { balance: owed + upgrade * 1.5 });
+    expect(await funded.pageBasis.affordable({ kind: "page-upgrade", from: "ocr", to: "rich" }, 1)).toBe(1);
+  });
+
+  it("one rule for an image's own frames on both sides: past the larger of intake and charged pages (R2-B)", async () => {
+    const tiff = doc("t", { mimeType: "image/tiff", pageCount: 500, intakePageCount: 500, pageCountSource: "counted" });
+    const txt = doc("x", { mimeType: "text/plain" });
+    const { pageBasis, ledger } = basis([tiff, txt], { balance: 15 });
+    await pageBasis.record(tiff, { kind: "image-frames", frames: 500 });
+    // Priced at intake: it owes nothing in its own check, and nothing in any other document's.
+    expect(await ledger.runMeasurements("run-1", "x", [])).toMatchObject({ ocrFrames: 0 });
+    await expect(pageBasis.record(txt, { kind: "page-count", pages: 2 })).resolves.toBeDefined();
+    // Charged pages count up to the document's frames only.
+    const raised = doc("r", { mimeType: "image/tiff", pageCount: 30, intakePageCount: 1, pageCountSource: "counted" });
+    const charged = basis([raised], { balance: 100 });
+    charged.ledger.documents.get("r")!.chargedPages = 10;
+    expect((await charged.ledger.runMeasurements("run-1", null, [])).ocrFrames).toBe(20);
+    charged.ledger.documents.get("r")!.chargedPages = 999;
+    expect((await charged.ledger.runMeasurements("run-1", null, [])).ocrFrames).toBe(0);
+  });
+
+  it("the memory ledger leaves deduplicated copies out of the run-wide sum, as the SQL does", async () => {
+    const copy = doc("c", { pageCount: 900, intakePageCount: 1, pageCountSource: "counted", dedupedFromDocumentId: "orig" } as Partial<Document>);
+    const { ledger } = basis([copy]);
+    expect(await ledger.runMeasurements("run-1", null, [])).toEqual({ fastPages: 0, ocrFrames: 0, documentChargedPages: 0 });
+  });
+
+  it("an Office document's own pages count from its durable intake, never its raised count", async () => {
+    const docx = doc("w", { mimeType: DOCX, pageCount: 3, intakePageCount: 1, pageCountSource: "assumed" });
+    const { pageBasis, ledger } = basis([docx]);
+    await pageBasis.record(docx, { kind: "billing-pages", pages: 400, method: "text-rule", format: "office-word" });
+    // 399 Fast pages above an intake of 1 (not 397 above the page count of 3).
+    expect(ledger.checks.at(-1)).toBeCloseTo(extraCreditsForMeasuredPages(pipeline, 3, 400, "text-rule") - extraCreditsForMeasuredPages(pipeline, 3, 400, "text-rule", { features: false }) + pageCredits("fast", 399));
+  });
+});
+
 describe("affordability and reads", () => {
   it("sizes an image's frames with the other images' uncharged frames and this activity's buffered charges", async () => {
     const a = doc("a", { mimeType: "image/tiff" });

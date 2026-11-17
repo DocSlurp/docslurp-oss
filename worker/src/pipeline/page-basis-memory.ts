@@ -152,16 +152,18 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
   }
 
   /** The one run-wide sum, by run_measured_pages' rules (migration 0190). */
-  async runMeasurements(runId: string, excludeDocumentId: string, _readMetrics: readonly string[]): Promise<RunMeasurements> {
+  async runMeasurements(runId: string, excludeDocumentId: string | null, _readMetrics: readonly string[]): Promise<RunMeasurements> {
     let fastPages = 0;
     let ocrFrames = 0;
     let documentChargedPages = 0;
+    // ofRun leaves deduplicated copies out, as the SQL does.
     for (const row of this.ofRun(runId)) {
       if (row.status === "failed") continue;
-      if (row.id === excludeDocumentId) { documentChargedPages = row.chargedPages; continue; }
-      const mime = row.mimeType.toLowerCase();
+      const mime = row.mimeType.split(";")[0]!.trim().toLowerCase();
+      const charged = mime.startsWith("image/") && row.pageCount > 1 ? Math.min(row.chargedPages, row.pageCount) : 0;
+      if (row.id === excludeDocumentId) { documentChargedPages = charged; continue; }
       if (mime.startsWith("image/")) {
-        if (row.pageCount > 1) ocrFrames += Math.max(0, row.pageCount - Math.max(1, row.chargedPages));
+        if (row.pageCount > 1) ocrFrames += Math.max(0, row.pageCount - Math.max(1, row.intakePageCount ?? row.pageCount, charged));
       } else if (!mime.startsWith("audio/") && !mime.startsWith("video/")) {
         fastPages += Math.max(0, (row.billingPages ?? row.pageCount) - (row.intakePageCount ?? row.pageCount));
       }

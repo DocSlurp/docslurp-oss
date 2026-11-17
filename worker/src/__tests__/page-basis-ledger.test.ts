@@ -1,6 +1,6 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { defaultPipelineFeatures, PAGE_READ_METRICS, pageCredits } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures, PAGE_READ_METRICS, pageCredits } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { setSpendCheckConfig, SpendCheckUnavailableError } from "../db/spend-check.js";
@@ -148,6 +148,58 @@ describe("PageBasis over Postgres", () => {
       setSpendCheckConfig(null);
     }
   }, 60_000);
+
+  it("charged frames count only page numbers inside the image, as the completion fee does (council R2)", async () => {
+    await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, intake_page_count)
+      values ('img10', 'o1', 'u1', 'w1', 'run2', 't.tif', 'IMAGE/TIFF', 'raw/t10', 'processing', 10, 'counted', 1)`);
+    for (const page of ["100", "101", "abc", "0", "-1", "1.0", "1", "2"]) {
+      await db.exec(`insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, org_id)
+        values ('junk-${page}', 'u1', 'run2', 'docslurp', 'ocr', '${BILLABLE_UNIT_METRICS.ocrPage}', 1, 'page', 0, '{"documentId":"img10","pageNumber":"${page}"}', 'o1')`);
+    }
+    // Pages 1 and 2 are charged; 8 frames past them stay owed (an upper-case MIME type is still an image).
+    expect(await store.pageBasisLedger.runMeasurements("run2", null, PAGE_READ_METRICS)).toMatchObject({ ocrFrames: 8 });
+    expect(await store.pageBasisLedger.runMeasurements("run2", "img10", PAGE_READ_METRICS)).toMatchObject({ ocrFrames: 0, documentChargedPages: 2 });
+    await db.exec(`delete from usage_events where run_id = 'run2'; delete from documents where id = 'img10'`);
+  }, 60_000);
+
+  it("a refused charge is stored on the paused run for the resume sweep, and the larger refusal is kept (council R2)", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    try {
+      await db.exec(`update project_runs set control_state = null, pause_reason = null, spend_pause_credits = null where id = 'run-low'`);
+      const run = { id: "run-low", orgId: "o2", projectId: "w2", userId: "u1" };
+      await expect(store.pageBasisLedger.checkCharge(run, 7.25)).resolves.toMatchObject({ paused: true });
+      const stored = async () => Number((await db.query<{ c: string }>(`select spend_pause_credits::text as c from project_runs where id = 'run-low'`)).rows[0]!.c);
+      expect(await stored()).toBeCloseTo(7.25);
+      await expect(store.pageBasisLedger.checkCharge(run, 9.5)).resolves.toMatchObject({ paused: false, blocked: true });
+      expect(await stored()).toBeCloseTo(9.5);
+      await expect(store.pageBasisLedger.checkCharge(run, 4)).resolves.toMatchObject({ blocked: true });
+      expect(await stored()).toBeCloseTo(9.5);
+      await expect(store.pageBasisLedger.checkCharge(run, Number.NaN)).rejects.toBeInstanceOf(SpendCheckUnavailableError);
+    } finally {
+      setSpendCheckConfig(null);
+    }
+  }, 60_000);
+
+  it("stays fast on a large run: 2,000 documents and 60,000 usage events (council R2 performance)", async () => {
+    await db.exec(`
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-big', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2001, 2001);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, intake_page_count)
+        select 'big'||g, 'o1', 'u1', 'w1', 'run-big', 'x.txt', 'text/plain', 'raw/big'||g, 'processing', 5, 'counted', 1 from generate_series(1, 2000) g;
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, intake_page_count)
+        values ('big-img', 'o1', 'u1', 'w1', 'run-big', 'b.tif', 'image/tiff', 'raw/bigimg', 'processing', 40, 'counted', 1);
+      insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, org_id)
+        select 'big-e'||g, 'u1', 'run-big', 'docslurp', 'm', case when g % 3 = 0 then '${BILLABLE_UNIT_METRICS.ocrPage}' else 'embedding' end, 1, 'page', 0,
+          jsonb_build_object('documentId', case when g % 1000 = 0 then 'big-img' else 'big'||(g % 2000 + 1) end, 'pageNumber', (g % 5 + 1)::text), 'o1'
+        from generate_series(1, 60000) g;
+    `);
+    const started = Date.now();
+    for (let i = 0; i < 5; i += 1) await store.pageBasisLedger.runMeasurements("run-big", "big1", PAGE_READ_METRICS);
+    const perCall = (Date.now() - started) / 5;
+    process.stdout.write(`[page-basis-ledger] run_measured_pages ${perCall.toFixed(1)} ms per call (PGlite, 2,001 documents, 60,000 events, no ANALYZE)\n`);
+    expect(await store.pageBasisLedger.runMeasurements("run-big", "big1", PAGE_READ_METRICS)).toMatchObject({ fastPages: 1999 * 4 });
+    expect(perCall).toBeLessThan(1_000);
+  }, 180_000);
 
   it("refuses (retryable) a charge for a run with no organization, and never pauses or skips", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });

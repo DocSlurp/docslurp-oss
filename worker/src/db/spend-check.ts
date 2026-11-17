@@ -251,7 +251,7 @@ export async function enforceRunSpendForCharge(
     const available = Number(row?.available ?? 0) - credits;
     const reason = spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row);
     if (!reason) return { blocked: false, paused: false };
-    result = await pauseRunForSpend(client, run, reason, trigger, available);
+    result = await pauseRunForSpend(client, run, reason, trigger, available, credits);
   } catch (error) {
     console.error(`[spend-check] run=${run.id} charge check failed, refusing the charge: ${error instanceof Error ? error.message : String(error)}`);
     pushSpendCheckFailure(run, "check-failed");
@@ -312,7 +312,13 @@ export async function pauseRunForSpend(
   reason: string,
   trigger: "stage-boundary" | "page-interval" | "checkpoint-interval",
   available: number,
+  /**
+   * The charge this pause refused (enforceRunSpendForCharge), stored as project_runs.spend_pause_credits (migration 0190) so
+   * the resume sweep holds what the worker will check again. A run already paused keeps the larger of the two.
+   */
+  refusedCredits?: number,
 ): Promise<SpendCheckResult> {
+  const refused = refusedCredits !== undefined && Number.isFinite(refusedCredits) && refusedCredits > 0 ? refusedCredits : null;
   try {
     const message = BLOCK_MESSAGES[reason] ?? `Paused: ${reason}`;
     const updated = await client`
@@ -320,13 +326,23 @@ export async function pauseRunForSpend(
       set control_state = 'paused',
           control_requested_at = now(),
           pause_reason = ${reason},
+          spend_pause_credits = ${refused}::numeric,
           updated_at = now()
       where id = ${run.id}
         and status = 'processing'
         and coalesce(control_state, '') not in ('paused', 'pause_requested', 'cancelled', 'cancel_requested', 'dead-letter')
       returning id
     `;
-    if (updated.length === 0) return { blocked: true, paused: false, reason, available };
+    if (updated.length === 0) {
+      // Already paused for funds by another check: the sweep must hold the larger of the refused charges.
+      if (refused !== null) {
+        await client`
+          update project_runs set spend_pause_credits = greatest(coalesce(spend_pause_credits, 0), ${refused}::numeric)
+          where id = ${run.id} and control_state = 'paused' and pause_reason is not null
+        `;
+      }
+      return { blocked: true, paused: false, reason, available };
+    }
     console.warn(
       `[spend-check] run=${run.id} org=${run.orgId} trigger=${trigger} reason=${reason} available=${available.toFixed(4)} action=pause`,
     );

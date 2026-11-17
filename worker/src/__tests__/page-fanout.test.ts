@@ -98,6 +98,53 @@ describe("runPageFanOut", () => {
     expect(stats.spendPauses).toBe(2);
   });
 
+  it("128 lanes through many pause cycles: one probe at a time, redispatches never exhaust the admission budget (council R2-E)", async () => {
+    let paused = false;
+    let funded = 10;
+    let cycles = 0;
+    let peakAfterRefusal = 0;
+    let inFlight = 0;
+    let refusedSince = false;
+    const done = new Set<number>();
+    const stats = await runPageFanOut({
+      bundles: Array.from({ length: 1_000 }, (_, i) => i),
+      concurrency: 128,
+      quietPeriodMs: 0,
+      beforeDispatch: createAdmissionBudget(() => new Error("Admission history budget exhausted"), 1_100),
+      run: async (page) => {
+        inFlight += 1;
+        if (refusedSince) peakAfterRefusal = Math.max(peakAfterRefusal, inFlight);
+        await tick();
+        inFlight -= 1;
+        if (funded > 0) { funded -= 1; done.add(page); refusedSince = false; return zero; }
+        refusedSince = true;
+        if (!paused) { paused = true; cycles += 1; setTimeout(() => { funded = 10; paused = false; }, 3); }
+        throw new SpendPaused();
+      },
+      onUsage: () => {}, isSlotUnavailable: () => false, isSpendPaused: (error) => error instanceof SpendPaused,
+      waitFor, sleep: tick, now: Date.now, random: () => 0.5, isPaused: () => paused, isCancelled: () => false,
+    });
+    expect(done.size).toBe(1_000);
+    expect(cycles).toBeGreaterThan(50);
+    expect(stats.spendPauses).toBeGreaterThan(50);
+    // After a refusal the next dispatch is a single probe, not a burst across every lane.
+    expect(peakAfterRefusal).toBeLessThanOrEqual(1);
+  }, 60_000);
+
+  it("waits for the pause with the injected timed wait, so its timer can be cancelled", async () => {
+    const waits: number[] = [];
+    let refused = false;
+    await runPageFanOut({
+      bundles: [1], concurrency: 4,
+      run: async () => { if (!refused) { refused = true; throw new SpendPaused(); } return zero; },
+      onUsage: () => {}, isSlotUnavailable: () => false, isSpendPaused: (error) => error instanceof SpendPaused,
+      waitForTimeout: async (_predicate, ms) => { waits.push(ms); },
+      waitFor, sleep: async () => { throw new Error("raw sleep used"); }, now: Date.now, random: () => 0.5,
+      isPaused: () => false, isCancelled: () => false, spendPauseWaitMs: 60_000,
+    });
+    expect(waits).toEqual([60_000]);
+  });
+
   it("without the spend-pause rule a refusal for funds fails the fan-out as before", async () => {
     await expect(runPageFanOut({
       bundles: [1], concurrency: 1, run: async () => { throw new SpendPaused(); },
