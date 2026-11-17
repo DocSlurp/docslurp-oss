@@ -11,7 +11,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { PAGE_READ_METRICS, type WorkerCapability, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { type WorkerCapability, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -63,8 +63,8 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
-import { recordPageEquivalents, recordWholeDocumentPages } from "./page-equivalents.js";
-import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRunForSpend, SpendCheckUnavailableError, spendCounterSql } from "./spend-check.js";
+import { PostgresPageBasisLedger } from "./page-basis-ledger.js";
+import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
@@ -526,6 +526,8 @@ export class Store {
   private readonly runEvents: RunEventPublisher;
   /** This process's view of run credit leases (credit-lease.ts), shared with page tasks. */
   readonly creditLeases: RunCreditLeases;
+  /** The page basis port over this database (db/page-basis-ledger.ts); bindStore gives every hydrated state a PageBasis over it. */
+  readonly pageBasisLedger: PostgresPageBasisLedger;
   /** Historical stage timings per project/user; a 14-day aggregate does not need a fresh read per stage. */
   private readonly historicalPerformanceCache = new Map<string, { loadedAt: number; value: Record<string, unknown> | null }>();
   // One in-flight load per scope: after a fleet restart every activity misses
@@ -555,6 +557,7 @@ export class Store {
       idle_timeout: 20,
       connect_timeout: 10,
     }), databaseUrl, { onStatement: dbTraceStatementHook() });
+    this.pageBasisLedger = new PostgresPageBasisLedger(this.sql);
     this.plausibilityWarningThreshold =
       options?.plausibilityWarningThreshold ?? 0.3;
     this.apiKeyUsageRetentionDays = Math.max(
@@ -607,7 +610,7 @@ export class Store {
   }
 
   async hydrateState(state: WorkflowState, stageStates?: Promise<StageStateRows> | StageStateRows): Promise<void> {
-    state.store = this;
+    state.bindStore(this);
     state.runStages.clear();
     state.documentStages.clear();
     state.run.stats = state.run.stats ?? {};
@@ -2919,25 +2922,6 @@ export class Store {
   }
 
   /**
-   * Records the pages the worker measured for an Office, slide, sheet or EPUB document (documents.billing_pages), so the completion
-   * charge and the optional features bill what the file really holds. `page_count`, the page basis the text splits into, is not
-   * touched: those formats' text has no page breaks. Scoped to the run's own document.
-   */
-  async setDocumentBillingPages(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean> {
-    const rows = await this.sql`
-      update documents set billing_pages = ${billingPages}, billing_pages_method = ${method}, updated_at = now()
-      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
-      returning id
-    `;
-    return rows.length > 0;
-  }
-
-  /**
-   * Records the frames the OCR engine read from a multi-frame image (a TIFF) as the document's page basis (documents.page_count), so
-   * page rows, citations, strict page splitting and the completion charge count the pages the Markdown holds. Intake counts every
-   * image as one page. Scoped to the run's own document.
-   */
-  /**
    * The organization and run each document belongs to, read from the database (never from a request or a provider): what a
    * sandboxed PDF batch is checked against before any VM work (assertSingleScopeBatch).
    */
@@ -2947,79 +2931,6 @@ export class Store {
       select id, org_id, run_id, file_size from documents where id = any(${this.sql.array([...documentIds])}::text[])
     `;
     return new Map(rows.map((row) => [row.id, { orgId: row.org_id, runId: row.run_id, bytes: Number(row.file_size) || 0 }]));
-  }
-
-  async setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean> {
-    const rows = await this.sql`
-      update documents set page_count = ${pageCount}, page_count_source = 'counted', updated_at = now()
-      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
-      returning id
-    `;
-    return rows.length > 0;
-  }
-
-  /**
-   * The run's multi-frame images (TIFF) whose counted frames raised their page basis above intake's one page, with the distinct
-   * pages an OCR or Rich charge of this run already covers (read through usage_attribution). The frame-count spend check adds up the
-   * frames not yet charged, so concurrent documents of one run cannot each fit the balance alone and together overdraw it.
-   */
-  async countedImageFrames(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>> {
-    const rows = await this.sql<{ id: string; page_count: number; charged: number }[]>`
-      select d.id, d.page_count,
-        coalesce((select count(distinct (au.metadata ->> 'pageNumber')) from usage_attribution au
-          where au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[]) and au.metadata ->> 'documentId' = d.id), 0)::int as charged
-      from documents d
-      where d.run_id = ${runId} and d.deduped_from_document_id is null and d.page_count > 1
-        and lower(split_part(coalesce(d.mime_type, ''), ';', 1)) in ('image/tiff', 'image/tiff-fx')
-    `;
-    return rows.map((row) => ({ documentId: row.id, pageCount: Number(row.page_count) || 0, chargedPages: Number(row.charged) || 0 }));
-  }
-
-  /**
-   * The run's own documents the worker measured (billing_pages set) and that still bill at completion: their intake count, the measured
-   * count and its method. The page-count re-check adds up their extra pages, whose Fast fee is charged only when the run completes.
-   */
-  async measuredRunDocuments(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>> {
-    const rows = await this.sql<{ page_count: number; billing_pages: number; billing_pages_method: string | null }[]>`
-      select page_count, billing_pages, billing_pages_method from documents
-      where run_id = ${runId} and billing_pages is not null and deduped_from_document_id is null and status <> 'failed'
-    `;
-    return rows.map((row) => ({ pageCount: Number(row.page_count) || 0, billingPages: Number(row.billing_pages) || 0, method: row.billing_pages_method }));
-  }
-
-  /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
-  /** Fails closed: throws SpendCheckUnavailableError (retryable) when it cannot decide. */
-  /**
-   * Fast pages of the run measured above what admission priced (durable: documents.intake_page_count, migration 0130), over
-   * every paged document still in the run: none of them is charged before the run's completion fee. Images are excluded:
-   * their frames bill Rich as they are read (ocr/image-frames.ts).
-   */
-  async recordPageEquivalents(runId: string, documentId: string, rows: import("./page-equivalents.js").PageEquivalentRow[], allowance?: number): Promise<number | null> {
-    return await recordPageEquivalents(this.sql, { runId, documentId, rows, ...(allowance === undefined ? {} : { allowance }) });
-  }
-
-  async recordWholeDocumentPages(runId: string, documentId: string, pages: number): Promise<number | null> {
-    return await recordWholeDocumentPages(this.sql, { runId, documentId, pages });
-  }
-
-  async measuredPagesAboveIntake(runId: string): Promise<number> {
-    const [row] = await this.sql<{ pages: number }[]>`
-      select coalesce(sum(greatest(0, coalesce(billing_pages, page_count) - coalesce(intake_page_count, page_count))), 0)::int as pages
-      from documents
-      where run_id = ${runId} and deduped_from_document_id is null and status <> 'failed'
-        and coalesce(mime_type, '') not like 'image/%' and coalesce(mime_type, '') not like 'audio/%' and coalesce(mime_type, '') not like 'video/%'`;
-    return Number(row?.pages) || 0;
-  }
-
-  async pauseRunForSpend(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }> {
-    const result = await pauseRunForSpend(this.sql, run, reason, "stage-boundary", Number.NaN);
-    if (result.pauseFailed) throw new SpendCheckUnavailableError(`could not pause run ${run.id} for ${reason}`);
-    return { paused: result.paused, blocked: result.blocked };
-  }
-
-  async enforceSpendForCharge(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked: boolean }> {
-    const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
-    return { paused: result.paused, blocked: result.blocked };
   }
 
   async ocrEscalationReads(runId: string, documentId: string, pageNumber: number): Promise<import("../pipeline/pipeline.js").OcrEscalationReadRow[]> {
@@ -3068,11 +2979,6 @@ export class Store {
       console.warn(`[worker-capabilities] fleet check for ${capability} failed: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
-  }
-
-  /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers (spend-check.ts largestFundedCharge); read-only. */
-  async largestFundedCharge(run: { id: string; orgId: string | null; projectId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number> {
-    return await largestFundedCharge(this.sql, run, max, creditsFor);
   }
 
   async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {

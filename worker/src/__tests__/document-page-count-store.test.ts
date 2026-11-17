@@ -42,9 +42,9 @@ afterAll(async () => {
   await db?.close();
 });
 
-describe("Store.setDocumentBillingPages", () => {
+describe("PostgresPageBasisLedger.setBillingPages", () => {
   it("records a long DOCX's measured pages as billing pages and leaves the page basis alone", async () => {
-    expect(await store.setDocumentBillingPages("run1", "long-docx", 300, "pdf-conversion")).toBe(true);
+    expect(await store.pageBasisLedger.setBillingPages("run1", "long-docx", 300, "pdf-conversion")).toBe(true);
     const [row] = (await db.query<{ page_count: number; billing_pages: number; billing_pages_method: string }>(
       `select page_count, billing_pages, billing_pages_method from documents where id = 'long-docx'`)).rows;
     expect(row).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion" });
@@ -53,15 +53,15 @@ describe("Store.setDocumentBillingPages", () => {
   }, 60_000);
 
   it("never writes another run's document or a deduplicated copy", async () => {
-    expect(await store.setDocumentBillingPages("run1", "other-run", 999, "pdf-conversion")).toBe(false);
-    expect(await store.setDocumentBillingPages("run1", "copy", 999, "pdf-conversion")).toBe(false);
-    expect(await store.setDocumentBillingPages("run1", "missing", 999, "pdf-conversion")).toBe(false);
+    expect(await store.pageBasisLedger.setBillingPages("run1", "other-run", 999, "pdf-conversion")).toBe(false);
+    expect(await store.pageBasisLedger.setBillingPages("run1", "copy", 999, "pdf-conversion")).toBe(false);
+    expect(await store.pageBasisLedger.setBillingPages("run1", "missing", 999, "pdf-conversion")).toBe(false);
     const rows = (await db.query<{ id: string; billing_pages: number | null }>(`select id, billing_pages from documents where id in ('other-run','copy') order by id`)).rows;
     expect(rows).toEqual([{ id: "copy", billing_pages: null }, { id: "other-run", billing_pages: null }]);
   }, 60_000);
 
   it("refuses a negative billing count at the database; 0 is a measured empty file (migration 0130)", async () => {
-    await expect(store.setDocumentBillingPages("run1", "long-docx", -1, "pdf-conversion")).rejects.toThrow();
+    await expect(store.pageBasisLedger.setBillingPages("run1", "long-docx", -1, "pdf-conversion")).rejects.toThrow();
   }, 60_000);
 });
 

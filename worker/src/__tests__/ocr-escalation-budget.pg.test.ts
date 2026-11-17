@@ -11,6 +11,7 @@ import { authorizeImageFrames } from "../ocr/image-frames.js";
 import { VisionRunGuard, type VisionGuardConfig, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import type { ProjectRun } from "../models.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { bindMemoryPageBasis } from "../pipeline/page-basis-memory.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { pngHeader } from "../test/fake-ocr.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -159,7 +160,7 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
       const activities = await Promise.all(["ocrb-tiff-a", "ocrb-tiff-b"].map(async (id) => {
         const created = store();
         const state = WorkflowState.create(await created.loadRun("ocrb-tiff-run"), [(await created.loadDocument(id))!]);
-        state.store = created;
+        state.bindStore(created);
         state.usageLedger.runId = "ocrb-tiff-run";
         return { id, state };
       }));
@@ -198,9 +199,9 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
       const created = store();
       state.visionAttempts = created.visionAttempts;
       // This test is about the per-document budget across activities, not funding: escalation fails closed without a
-      // balance check (hosted-reader.ts authorizeEscalationRead), so the store answers that every read is funded.
-      created.largestFundedCharge = async () => 1;
+      // balance check (hosted-reader.ts authorizeEscalationRead), so the page basis is an in-memory one that funds every read.
       state.store = created;
+      bindMemoryPageBasis(state);
       state.usageLedger.runId = run;
       return { state, reader: createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { DOCSLURP_OCR_ESCALATION: "on" }, execute }) };
     };

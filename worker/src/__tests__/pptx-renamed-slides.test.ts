@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { listZipEntryNames } from "@docslurp/shared";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 import { measureExtractedPages, recordMeasuredPageCount } from "../lib/office-page-count.js";
+import { memoryPageBasis } from "../pipeline/page-basis-memory.js";
 import type { Document } from "../models.js";
 
 const python = process.env.OFFICE_TEST_PYTHON ?? "python3";
@@ -52,12 +53,11 @@ describe.skipIf(!hasOfficeLibs)("a PPTX with renamed slide parts", () => {
 describe("a measured count never bills below the page basis", () => {
   it("keeps a counted page_count when the extractor's output counts fewer pages; an assumed one is no floor", async () => {
     const assumed = { id: "doc-2", userId: "u", runId: "run-1", filename: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", sourceKey: "k", status: "queued", extractionMode: "hybrid", pageCount: 12, pageCountSource: "assumed", createdAt: new Date(), updatedAt: new Date() } as Document;
-    const recorded = vi.fn(async () => true);
-    expect((await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages: recorded } }, assumed, "office-pptx", { extractor: "pptx", markdown: "## One\n\f\n## Two" })).pages).toBe(2);
+    expect((await recordMeasuredPageCount({ pageBasis: memoryPageBasis({ id: "run-1" }, [assumed]).pageBasis }, assumed, "office-pptx", { extractor: "pptx", markdown: "## One\n\f\n## Two" })).pages).toBe(2);
     const document = { id: "doc-1", userId: "u", runId: "run-1", filename: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", sourceKey: "k", status: "queued", extractionMode: "hybrid", pageCount: 12, pageCountSource: "counted", createdAt: new Date(), updatedAt: new Date() } as Document;
-    const setDocumentBillingPages = vi.fn(async () => true);
-    const result = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, document, "office-pptx", { extractor: "pptx", markdown: "## One\n\f\n## Two" });
+    const { pageBasis, ledger } = memoryPageBasis({ id: "run-1" }, [document]);
+    const result = await recordMeasuredPageCount({ pageBasis }, document, "office-pptx", { extractor: "pptx", markdown: "## One\n\f\n## Two" });
     expect(result.pages).toBe(12);
-    expect(setDocumentBillingPages).toHaveBeenCalledWith("run-1", "doc-1", 12, "slides");
+    expect(ledger.documents.get("doc-1")).toMatchObject({ billingPages: 12, billingPagesMethod: "slides" });
   });
 });

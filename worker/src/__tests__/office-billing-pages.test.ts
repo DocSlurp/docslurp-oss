@@ -9,6 +9,8 @@ import { Store } from "../db/store.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { extraCreditsForMeasuredPages, recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
 import { featurePages } from "../pipeline/feature-charges.js";
+import type { ProjectRun } from "../models.js";
+import { PageBasis } from "../pipeline/page-basis.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -70,13 +72,16 @@ const counted = (pages: number): PageCountResult => ({ pages, method: "text-rule
 const markdownOfPages = (pages: number) =>
   Array.from({ length: pages * 5 }, (_, index) => `Paragraph ${index}: ${"the supplier shall deliver the goods. ".repeat(18)}`.trim()).join("\n\n");
 
+/** The run's page basis over the store's Postgres adapter (db/page-basis-ledger.ts). */
+const basis = (run: ProjectRun) => ({ pageBasis: new PageBasis({ run, usageLedger: { pendingBillableCents: 0 } }, store.pageBasisLedger) });
+
 const sql = () => (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
 
 describe("a measured DOCX: page rows and billing", () => {
   it("keeps the page basis the text splits into and bills the measured 300 pages", async () => {
     const run = await store.loadRun("run1");
     const loaded = (await store.loadDocument("docx1"))!;
-    const measured = await recordMeasuredPageCount({ run, store }, loaded, "office-word", { extractor: "pandoc", markdown: markdownOfPages(300) });
+    const measured = await recordMeasuredPageCount(basis(run), loaded, "office-word", { extractor: "pandoc", markdown: markdownOfPages(300) });
     expect(measured).toEqual({ pages: 300, method: "text-rule", intakePages: 1 });
 
     const document = (await store.loadDocument("docx1"))!;
@@ -111,12 +116,12 @@ describe("a measured DOCX: page rows and billing", () => {
     const owed = extraCreditsForMeasuredPages(run.pipeline, 1, 20_000);
     expect(owed).toBeGreaterThan(20);
     // The count is recorded, the run is paused and the document is stopped (a run-policy stop), not carried on.
-    await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
+    await expect(recordMeasuredPageCount(basis(run), document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
     expect((await store.loadDocument("docx2"))!.billingPages).toBe(20_000);
     const { rows } = await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from project_runs where id = 'run2'`);
     expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
     // A run already paused (or stopped) by something else: the check reports blocked without pausing, and still stops it.
-    await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
+    await expect(recordMeasuredPageCount(basis(run), document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
   }, 60_000);
 
   it("adds up the run's measured documents: ten large DOCX files that each fit a 10-credit balance cannot together overdraw it", async () => {
@@ -130,7 +135,7 @@ describe("a measured DOCX: page rows and billing", () => {
     const state = async () => (await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run3'`)).rows[0]!.control_state;
     let pausedAt = 0;
     for (let n = 1; n <= 10 && !pausedAt; n += 1) {
-      const stopped = await recordMeasuredPageCount({ run, store }, (await store.loadDocument(`big${n}`))!, "office-word", counted(400))
+      const stopped = await recordMeasuredPageCount(basis(run), (await store.loadDocument(`big${n}`))!, "office-word", counted(400))
         .then(() => false, (error: Error) => error.name === "RunPolicyError");
       if (await state() === "paused") {
         expect(stopped).toBe(true);
@@ -139,9 +144,9 @@ describe("a measured DOCX: page rows and billing", () => {
     }
     // Five files owe 9.98 credits and fit; the sixth takes the run to 11.97 and pauses it. Checked one file at a time, none ever would.
     expect(pausedAt).toBe(Math.floor(10 / each) + 1);
-    expect(await store.measuredRunDocuments("run3")).toHaveLength(pausedAt);
+    expect(await store.pageBasisLedger.measuredDocuments("run3")).toHaveLength(pausedAt);
     // Scoped to the run: another run's measured documents are not counted against this one.
-    expect((await store.measuredRunDocuments("run2")).every((row) => row.billingPages === 20_000)).toBe(true);
+    expect((await store.pageBasisLedger.measuredDocuments("run2")).every((row) => row.billingPages === 20_000)).toBe(true);
   }, 60_000);
 
   it("does not pause when the measured count is the intake count or the balance holds", async () => {
@@ -151,7 +156,7 @@ describe("a measured DOCX: page rows and billing", () => {
     await db.exec(`update project_runs set control_state = null, pause_reason = null where id = 'run1'`);
     const run = await store.loadRun("run1");
     const document = (await store.loadDocument("docx1"))!;
-    await recordMeasuredPageCount({ run, store }, document, "office-word", counted(40));
+    await recordMeasuredPageCount(basis(run), document, "office-word", counted(40));
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run1'`);
     expect(rows[0]!.control_state).toBeNull();
   }, 60_000);
@@ -164,11 +169,11 @@ describe("a measured DOCX: page rows and billing", () => {
     const document = (await store.loadDocument("docx1"))!;
     await db.exec(`alter function org_spend_status(text, text, numeric) rename to org_spend_status_unavailable`);
     try {
-      await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(4_000)))
+      await expect(recordMeasuredPageCount(basis(run), document, "office-word", counted(4_000)))
         .rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
       // A retryable infrastructure error: the stage leaves the document unfinished rather than failing it.
       const { isDocumentLevelFailure } = await import("../lib/document-failure.js");
-      const error = await recordMeasuredPageCount({ run, store }, document, "office-word", counted(4_000)).catch((caught: unknown) => caught);
+      const error = await recordMeasuredPageCount(basis(run), document, "office-word", counted(4_000)).catch((caught: unknown) => caught);
       expect(isDocumentLevelFailure(error)).toBe(false);
     } finally {
       await db.exec(`alter function org_spend_status_unavailable(text, text, numeric) rename to org_spend_status`);
@@ -181,7 +186,7 @@ describe("an Office file always bills a measured outcome, never intake's assumed
     const run = await store.loadRun("run4");
     const blank = (await store.loadDocument("blank"))!;
     expect(blank).toMatchObject({ pageCount: 1, pageCountSource: "assumed" });
-    expect(await recordMeasuredPageCount({ run, store }, blank, "office-word", { extractor: "pandoc", markdown: "  \n\n " }))
+    expect(await recordMeasuredPageCount(basis(run), blank, "office-word", { extractor: "pandoc", markdown: "  \n\n " }))
       .toEqual({ pages: 0, method: "empty", intakePages: 1 });
     const stored = (await store.loadDocument("blank"))!;
     expect(stored).toMatchObject({ billingPages: 0, billingPagesMethod: "empty" });
@@ -193,7 +198,7 @@ describe("an Office file always bills a measured outcome, never intake's assumed
   it("text extracted but no sheet tables: counted by the text rule", async () => {
     const run = await store.loadRun("run4");
     const sheet = (await store.loadDocument("sheetless"))!;
-    const measured = await recordMeasuredPageCount({ run, store }, sheet, "office-excel", { extractor: "xlsx", markdown: markdownOfPages(12) });
+    const measured = await recordMeasuredPageCount(basis(run), sheet, "office-excel", { extractor: "xlsx", markdown: markdownOfPages(12) });
     expect(measured).toMatchObject({ method: "text-rule" });
     expect(measured.pages).toBeGreaterThanOrEqual(12);
     const stored = (await store.loadDocument("sheetless"))!;

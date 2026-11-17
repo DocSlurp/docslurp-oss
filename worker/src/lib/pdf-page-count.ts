@@ -5,7 +5,6 @@ import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { HungWorkError } from "./hung-work.js";
 import { CommandExitError, type CommandRunner, type PdfPageCountLimits } from "../tools/runner.js";
-import { authorizeMeasuredPages } from "./measured-page-authorization.js";
 import { sniffedPdf } from "./sniffed-pdf.js";
 
 /** More pages than this is a parser fault, not a document. */
@@ -111,7 +110,7 @@ export async function countPdfPages(
  *  - `vm`: the sandboxed PDF provider counts it in a fresh VM; a provider that cannot is a refusal, never host parsing;
  *  - `local` (customer-owned): the page tree walked under the parser sandbox on this host (countPdfPages: Doppler pdfpagecount);
  *  - `off`: nothing (PDF extraction refuses the document anyway).
- * Measuring only: the pages above the estimate are authorized separately, on every attempt (authorizeMeasuredPages). Billing
+ * Recorded through the page basis (pipeline/page-basis.ts), which authorizes a raise; format-detect authorizes again on every attempt. Billing
  * reads only this measured count: a PDF still `assumed` never bills (db/page-base-fee.ts).
  */
 export async function recordMeasuredPdfPageCount(args: {
@@ -161,13 +160,9 @@ export async function recordMeasuredPdfPageCount(args: {
     await assertPopplerAcceptsPdf(args.runner, source, args.signal);
   }
   if (pages === null) throw new Error("unreadable PDF: no valid page count");
-  if (!state.store?.setDocumentPageCount) throw new Error("PDF page count measured but the store cannot persist it");
-  await state.store.setDocumentPageCount(state.run.id, document.id, pages);
-  document.pageCount = pages;
-  document.pageCountSource = "counted";
-  state.run.pagesTotal = Math.max(0, (Number(state.run.pagesTotal) || 0) + pages - estimate);
   console.log(`[pdf-pages] document=${document.id} measured=${pages} estimate=${estimate} mode=${mode}`);
-  // Authorizing the pages above the estimate is separate (lib/measured-page-authorization.ts) and runs on every attempt.
+  // The page basis records the count (and authorizes a raise); format-detect authorizes it again on every attempt.
+  await state.pageBasis.record(document, { kind: "page-count", pages });
   return { pages, method: mode, estimate };
 }
 
@@ -218,12 +213,8 @@ export async function reconcileProcessedPdfPages(
   if (!Number.isSafeInteger(processed) || processed < 1) return { measured, processed, mismatch: "none" };
   if (processed > measured) {
     console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} pages, the page tree reported ${measured}: billing and authorizing ${processed}`);
-    if (!state.store?.setDocumentPageCount) throw new Error("processed PDF pages exceed the measured count but the store cannot persist it");
-    await state.store.setDocumentPageCount(state.run.id, document.id, processed);
-    state.run.pagesTotal = Math.max(0, (Number(state.run.pagesTotal) || 0) + processed - measured);
-    document.pageCount = processed;
-    document.pageCountSource = "counted";
-    await authorizeMeasuredPages(state, document);
+    // Recorded and authorized by the page basis (a raise).
+    await state.pageBasis.record(document, { kind: "page-count", pages: processed });
     return { measured, processed, mismatch: "processed-above-measured" };
   }
   if (processed < measured) {
@@ -231,11 +222,7 @@ export async function reconcileProcessedPdfPages(
     console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} of ${measured} walked pages: billing ${processed}`);
     state.artifactLedger.recordDocument(document.id, PDF_WALKED_PAGES_SLOT, String(measured));
     if (current > processed) {
-      if (!state.store?.setDocumentPageCount) throw new Error("processed PDF pages are below the measured count but the store cannot persist it");
-      await state.store.setDocumentPageCount(state.run.id, document.id, processed);
-      state.run.pagesTotal = Math.max(0, (Number(state.run.pagesTotal) || 0) + processed - current);
-      document.pageCount = processed;
-      document.pageCountSource = "counted";
+      await state.pageBasis.record(document, { kind: "page-count", pages: processed });
     }
     return { measured, processed, mismatch: "processed-below-measured" };
   }

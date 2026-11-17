@@ -8,7 +8,6 @@ import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
-import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { detectFileFormat, resolvePdfMode, type NormalizedFormat } from "@docslurp/shared";
@@ -78,7 +77,7 @@ export class FormatDetectStage implements Stage {
           });
           // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
           // what admission priced, from durable state (intake_page_count), before any later stage runs.
-          await authorizeMeasuredPages(state, document);
+          await state.pageBasis.authorize(document);
 
           return {
             artifactUri: this.storage.uri(key),

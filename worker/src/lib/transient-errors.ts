@@ -45,7 +45,8 @@ export function isTransientNetworkError(error: unknown, options: { includeTimeou
 export function isTransientDatabaseError(error: unknown): boolean {
   for (const link of causeChain(error)) {
     if (typeof link !== "object" || link === null) continue;
-    if ((link as { name?: unknown }).name === "SpendCheckUnavailableError") return true;
+    const name = (link as { name?: unknown }).name;
+    if (name === "SpendCheckUnavailableError" || name === "PageBasisUnboundError") return true;
     const code = (link as { code?: unknown }).code;
     if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) && (/^(08|53|57)/.test(code) || code === "40001" || code === "40P01")) return true;
   }

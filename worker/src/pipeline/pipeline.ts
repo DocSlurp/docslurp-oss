@@ -7,6 +7,7 @@ import { DocumentArtifactLedger } from "./artifact-ledger.js";
 import { PipelineUsageEventLedger } from "./usage-ledger.js";
 import type { PageFactUpsert } from "./page-facts.js";
 import { runUsesOcrPageClass } from "./ocr-page-class.js";
+import { PageBasis, type PageBasisLedger } from "./page-basis.js";
 import {
   getPageProgressForDocumentStage,
   type PageProgress,
@@ -97,20 +98,11 @@ export interface CheckpointStore {
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.
    */
   setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
-  /** Persists the pages the worker measured after conversion (documents.billing_pages), which completion billing and features read. */
-  setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
-  setDocumentPageCount?(runId: string, documentId: string, pageCount: number): Promise<boolean>;
-  /** The run's TIFFs whose frames raised their page count, with the pages already charged Rich (frame-count spend check). */
-  countedImageFrames?(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>>;
-  /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
-  enforceSpendForCharge?(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
-  /** Records pages measured above one page (text or area equivalents) and raises billing_pages; returns it (db/page-equivalents.ts). */
-  recordPageEquivalents?(runId: string, documentId: string, rows: import("../db/page-equivalents.js").PageEquivalentRow[], allowance?: number): Promise<number | null>;
-  recordWholeDocumentPages?(runId: string, documentId: string, pages: number): Promise<number | null>;
-  /** Fast pages of the run measured above admission's priced counts (documents.intake_page_count); durable, recomputed per call. */
-  measuredPagesAboveIntake?(runId: string): Promise<number>;
-  /** Pauses the run for funds (pause_reason `reason`) without a balance check; `blocked` without `paused`: already paused or stopped. */
-  pauseRunForSpend?(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }>;
+  /**
+   * The page basis port (pipeline/page-basis.ts): document page counts, billing pages and the spend check they owe. Required:
+   * a store without it does not type-check, so no state bound to a store can skip a page-count spend check.
+   */
+  readonly pageBasisLedger: PageBasisLedger;
   /** This run's persisted OCR escalation reads of a page, oldest first (migration 0129). */
   ocrEscalationReads?(runId: string, documentId: string, pageNumber: number): Promise<OcrEscalationReadRow[]>;
   /**
@@ -118,10 +110,6 @@ export interface CheckpointStore {
    * concurrent calls of a page never share one); returns that number.
    */
   recordOcrEscalationRead?(row: Omit<OcrEscalationReadRow, "attempt"> & { runId: string; documentId: string; pageNumber: number }): Promise<number>;
-  /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers; read-only (nothing is paused). */
-  largestFundedCharge?(run: { id: string; orgId: string | null; projectId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number>;
-  /** The run's measured documents (billing_pages set) that still bill at completion, for the cumulative page-count spend check. */
-  measuredRunDocuments?(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>>;
   /**
    * Replaces the API's provisional file facts (header inspection) with the worker's full inspection, and the document's
    * MIME type with the one the bytes are. Scoped to the run's own document.
@@ -187,7 +175,13 @@ export class WorkflowState {
   contentHashOwners: Map<string, string> = new Map();
   runStages: Map<string, StageState>;
   documentStages: Map<string, Map<string, StageState>>;
+  /** Set only through bindStore, which binds the page basis to the same store. */
   store?: CheckpointStore;
+  /**
+   * The run's page basis (pipeline/page-basis.ts): every page-count or billing-page change and the spend check it owes go
+   * through it. Unbound (refusing every operation) until bindStore; tests bind an in-memory one (page-basis-memory.ts).
+   */
+  pageBasis: PageBasis;
   /**
    * The run's workflow recorded the first pass (pipeline/first-pass.ts): format-detect leaves first-pass PDFs' page counts to
    * the batch, which measures them in the same VM. Set by the stage runtime from recorded workflow input only.
@@ -249,6 +243,13 @@ export class WorkflowState {
     // The run's OCR page class decision (pipeline/ocr-page-class.ts), read when a charge is made: it may be pinned after
     // construction (startRun) or arrive with hydrated artifacts.
     this.usageLedger.ocrPageClass = () => runUsesOcrPageClass(this.artifactLedger);
+    this.pageBasis = PageBasis.unbound(this);
+  }
+
+  /** Binds the state to its store: checkpoints, and the page basis over the store's ledger. */
+  bindStore(store: CheckpointStore): void {
+    this.store = store;
+    this.pageBasis = new PageBasis(this, store.pageBasisLedger);
   }
 
   static create(run: ProjectRun, documents: Document[]): WorkflowState {

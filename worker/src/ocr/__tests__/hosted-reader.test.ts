@@ -8,6 +8,8 @@ import { priceVisionResult } from "../../lib/guarded-vision-call.js";
 import { MemoryVisionAttemptBackend, visionGuardFor, withVisionCall, type VisionRequestGate } from "../../lib/vision-attempt-guard.js";
 import { attachVisionBilledUsage } from "../../tools/vision-stream.js";
 import type { ProjectRun } from "../../models.js";
+import { PageBasis, PageBasisUnboundError } from "../../pipeline/page-basis.js";
+import { bindMemoryPageBasis } from "../../pipeline/page-basis-memory.js";
 import { WorkflowState } from "../../pipeline/pipeline.js";
 import { pngHeader } from "../../test/fake-ocr.js";
 import type { CommandRunner } from "../../tools/runner.js";
@@ -33,8 +35,10 @@ function runState(pipeline: Record<string, unknown> = {}, run: Record<string, un
   } as unknown as ProjectRun, []);
   state.visionAttempts = new MemoryVisionAttemptBackend();
   state.usageLedger.runId = "run-1";
-  // A funded organization: escalation reads check the balance first and skip without a store to check with.
-  (state as unknown as { store: unknown }).store = { largestFundedCharge: async (_run: unknown, max: number) => max };
+  // A store that persists escalation reads (none yet), as every hydrated activity has; a page task has none.
+  (state as unknown as { store: unknown }).store = { ocrEscalationReads: async () => [], recordOcrEscalationRead: async () => 1 };
+  // A funded organization: escalation reads check the balance first (an in-memory page basis with no limit).
+  bindMemoryPageBasis(state);
   return state;
 }
 
@@ -130,14 +134,9 @@ describe("OCR escalation reads", () => {
   it("checks the balance for the OCR-to-Rich upgrade before each escalation read: an org funded for OCR only never overdraws, and the run is not paused", async () => {
     const state = runState();
     const execute = stubExecute();
-    const checks: number[] = [];
     // Enough for the pages' OCR charges, not for an upgrade to Rich. Read-only: nothing here can pause the run.
     const balance = 2 * TEST_PAGE_CREDITS.ocr;
-    const enforceSpendForCharge = vi.fn();
-    (state as unknown as { store: unknown }).store = {
-      enforceSpendForCharge,
-      largestFundedCharge: async (_run: unknown, max: number, creditsFor: (n: number) => number) => { checks.push(creditsFor(1)); return creditsFor(1) > balance ? 0 : max; },
-    };
+    const ledger = bindMemoryPageBasis(state, { balance });
     state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 1, readBy: "page-ocr" });
     state.usageLedger.chargeOcrPage({ documentId: "doc-1", pageNumber: 2, readBy: "page-ocr" });
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
@@ -145,16 +144,22 @@ describe("OCR escalation reads", () => {
     const summary = await escalateOcrPages(outcome, reader, "doc-1");
     expect(summary).toMatchObject({ attempted: 1, replaced: 0, skipped: { unfunded: 1 }, capped: 0 });
     // The check covered the upgrade plus the OCR charges still buffered; no provider call, no Rich charge, OCR text kept.
-    expect(checks).toHaveLength(1);
-    expect(checks[0]).toBeCloseTo(TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr + 2 * TEST_PAGE_CREDITS.ocr);
+    expect(ledger.sizings).toHaveLength(1);
+    expect(ledger.sizings[0]).toBeCloseTo(TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr + 2 * TEST_PAGE_CREDITS.ocr);
     expect(execute).not.toHaveBeenCalled();
-    expect(enforceSpendForCharge).not.toHaveBeenCalled();
+    // Read-only: no pausing check, and the run is not paused.
+    expect(ledger.checks).toEqual([]);
+    expect(ledger.paused).toBeNull();
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
     expect(outcome.pages.map((page) => page.text)).toEqual(["ocr 1", "ocr 2"]);
     // Both pages are recorded as skipped for funds, for the ingest report.
     expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ escalatedPages: 0, skippedPages: { unfunded: 2 } });
-    // Fail closed: no store to check with, or no organization, skips the read too.
-    for (const strip of [(s: WorkflowState) => { (s as unknown as { store: unknown }).store = undefined; }, (s: WorkflowState) => { s.run.orgId = null as never; }]) {
+    // Fail closed: no store to persist the read (a page task), or no organization (or user) to charge, skips the read too.
+    for (const strip of [
+      (s: WorkflowState) => { (s as unknown as { store: unknown }).store = undefined; },
+      (s: WorkflowState) => { s.run.orgId = null as never; },
+      (s: WorkflowState) => { s.run.userId = "" as never; },
+    ]) {
       const bare = runState();
       strip(bare);
       const bareExecute = stubExecute();
@@ -162,9 +167,16 @@ describe("OCR escalation reads", () => {
       expect(await escalateOcrPages(bareOutcome, createHostedOcrReader({ state: bare, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: bareExecute }), "doc-1")).toMatchObject({ skipped: { unfunded: 1 } });
       expect(bareExecute).not.toHaveBeenCalled();
     }
+    // No store bound to the page basis: refused (retryable), never read as funded and never skipped silently.
+    const unbound = runState();
+    unbound.pageBasis = PageBasis.unbound(unbound);
+    const unboundExecute = stubExecute();
+    await expect(escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), createHostedOcrReader({ state: unbound, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: unboundExecute }), "doc-1"))
+      .rejects.toBeInstanceOf(PageBasisUnboundError);
+    expect(unboundExecute).not.toHaveBeenCalled();
     // A check that cannot decide is retried: the error propagates.
     const broken = runState();
-    (broken as unknown as { store: unknown }).store = { largestFundedCharge: async () => { throw new SpendCheckUnavailableError("balance read failed"); } };
+    bindMemoryPageBasis(broken).failNext = "balance";
     await expect(escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), createHostedOcrReader({ state: broken, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: stubExecute() }), "doc-1")).rejects.toBeInstanceOf(SpendCheckUnavailableError);
     // Funded: the read goes ahead.
     const funded = runState();
