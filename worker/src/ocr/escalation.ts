@@ -68,7 +68,8 @@ export async function escalateOcrPages(
         const reason = SKIP_REASON[error.reason];
         if (reason) (skipped[reason] ??= []).push(...rest);
         // Once disabled, refused, capped or out of budget, later pages of this document would be skipped the same way.
-        if (error.reason !== "guard") break;
+        // A timed-out read (unknown-billed) is this page's alone: later pages are still read.
+        if (error.reason !== "guard" && error.reason !== "unknown-billed") break;
         continue;
       }
       if (signal?.aborted) throw error;

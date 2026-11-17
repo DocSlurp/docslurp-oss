@@ -7,6 +7,7 @@
 import {
   activeCapabilityPools, assertCapabilityPoolRegions, capabilityPoolsLogLine, isAutomaticSelectionDenied, localPdfModeRequested,
   isLocalModelProvider, localServiceMember, parseLlmModelUri, poolMemberForModel, resolveCapabilityPools, setActiveCapabilityPools, visionRouteRegionProblem,
+  visionModelCatalog, visionModelUriProblem, visionProfileCatalog,
   type CapabilityPools, type PoolCapability, type PoolFailoverReason, type ServicePoolMember,
 } from "@docslurp/shared";
 import { recordPipelineTelemetry } from "@docslurp/shared/observability";
@@ -56,6 +57,18 @@ export function initializeCapabilityPools(env: Env = process.env, log: (line: st
     const problem = visionRouteRegionProblem(model, profileHosts(model));
     if (problem) problems.push(`vision profile: ${problem}`);
   }
+  // Every catalog model a project can select (not refused) and every preset must reach only stated US or EU hosts (or
+  // run inside this deployment); a refused model is rejected by config validation and never offered.
+  for (const entry of visionModelCatalog) {
+    if ("refusedReason" in entry || entry.target !== "hosted") continue;
+    const problem = visionPageRouteRegionProblem(entry.uri);
+    if (problem) problems.push(`vision catalog: ${problem}`);
+  }
+  for (const [key, preset] of Object.entries(visionProfileCatalog)) {
+    const uri = preset.config.modelUri;
+    const problem = visionModelUriProblem(uri) ?? visionPageRouteRegionProblem(uri);
+    if (problem) problems.push(`vision preset ${key}: ${problem}`);
+  }
   for (const { capability, backend } of pluginServices()) {
     if (!services.some((member) => member.capability === capability && member.backend === backend)) {
       problems.push(`the ${capability} service ${backend} registers no capability pool member (extractor plugin poolMembers), so where it processes pages is unknown`);
@@ -95,6 +108,19 @@ export function defaultVisionFallbackModel(model: string, env: Env = process.env
   const next = members.slice(members.findIndex((member) => member.id === primary.id) + 1)
     .find((member) => member.kind === "llm" && member.stage === "read" && member.automaticFailover);
   return next && next.kind === "llm" ? next.model : null;
+}
+
+/** Planning tokens of one page read (a page image plus the prompt in, a page of Markdown out), for a cost estimate. */
+const ESTIMATE_PAGE_TOKENS = { input: 3_000, output: 560 } as const;
+
+/**
+ * Estimated cents per page of a vision fallback on `model`: a pool member sent under its own price ceiling is estimated
+ * at that ceiling (what it can be billed at most), anything else at its catalog estimate. Null when neither is known.
+ */
+export function visionFallbackCentsPerPage(model: string, catalogCents: number | null, pools: CapabilityPools = activeCapabilityPools()): number | null {
+  const ceiling = poolMemberForModel("vision", model, "read", pools)?.priceCeiling;
+  if (!ceiling) return catalogCents;
+  return (ESTIMATE_PAGE_TOKENS.input * ceiling.inputUsdPerMTok + ESTIMATE_PAGE_TOKENS.output * ceiling.outputUsdPerMTok) / 1e4;
 }
 
 /** The vision member id serving `model` (stamped on results and usage), or null. */

@@ -158,6 +158,11 @@ export type AutomaticCallValueInput = {
    * billed.
    */
   primaryBilled?: boolean;
+  /**
+   * `fallback` only: whether the caller bills the page this read serves (a vision page read). False for reads whose
+   * value is not a page charge (critique, chart export, document-map OCR, materialize). Absent: unknown, treat as false.
+   */
+  billsPage?: boolean;
 };
 
 /** Price ceilings for a chart & diagram export generator, USD per million tokens. */

@@ -62,7 +62,7 @@ describe("hosted vision catalog", () => {
       "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-11-12", route: ["fireworks"] },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
       "openai/gpt-6-luna": { input: 0.11, output: 0.55, perPage: 0.061, checked: "2026-11-13", route: ["amazon-bedrock/us-east-1", "azure/us"], cacheWrite: 0.1375 },
-      "anthropic/claude-haiku-5.5": { input: 0.11, output: 0.55, perPage: 0.11, checked: "2026-11-17", route: ["amazon-bedrock/us-east-1", "google-vertex/us"] },
+      "anthropic/claude-haiku-5.5": { input: 0.11, output: 0.55, perPage: 0.113, checked: "2026-11-17", route: ["amazon-bedrock/us-east-1", "google-vertex/us"] },
       "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073, checked: "2026-11-12", route: ["wafer/us", "friendli", "inference-net/us"] },
     };
     for (const [id, expected] of Object.entries(tuned)) {

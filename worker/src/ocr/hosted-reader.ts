@@ -68,7 +68,7 @@ export interface HostedOcrRead {
 
 /** Why a hosted read did not happen. Escalation keeps the recogniser's text; hosted mode fails the page. */
 export class HostedOcrSkipped extends Error {
-  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard" | "margin" | "unfunded", message: string) {
+  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard" | "margin" | "unfunded" | "unknown-billed", message: string) {
     super(message);
     this.name = "HostedOcrSkipped";
   }
@@ -131,6 +131,8 @@ export function createHostedOcrReader(args: {
   env?: NodeJS.ProcessEnv;
   /** Test seam; defaults to the worker's vision runtime. */
   execute?: typeof executeVisionRuntime;
+  /** Test seam: a route's read timeout (default: the route's own `timeoutMs`). */
+  routeTimeoutMs?: (route: OcrEscalationRoute) => number | undefined;
 }): HostedOcrReader {
   const env = args.env ?? process.env;
   const execute = args.execute ?? executeVisionRuntime;
@@ -217,9 +219,10 @@ export function createHostedOcrReader(args: {
         for (const [index, candidate] of candidates.entries()) {
         const { vision, decision: marginDecision } = candidate;
         const ceiling = candidate.route.priceCeiling;
-        // A route with its own timeout (a slow host) is bounded: past it the read counts as unavailable and the next
-        // reader is tried, unless an attempt was already billed.
-        const routeTimeout = candidate.route.timeoutMs ? AbortSignal.timeout(candidate.route.timeoutMs) : null;
+        // A route with its own timeout (a slow host) is bounded: past it the request was sent and may have been billed, so
+        // the page is not read again by the next reader; it keeps its first read and is recorded as unknown-billed.
+        const timeoutMs = (args.routeTimeoutMs ?? ((route: OcrEscalationRoute) => route.timeoutMs))(candidate.route);
+        const routeTimeout = timeoutMs ? AbortSignal.timeout(timeoutMs) : null;
         const readSignal = routeTimeout ? (signal ? AbortSignal.any([signal, routeTimeout]) : routeTimeout) : signal;
         try {
         // The per-document page and attempt budgets are counted by the guard's durable attempt ledger (run, document, page),
@@ -287,12 +290,12 @@ export function createHostedOcrReader(args: {
             ...(candidate.memberId ? { poolMemberId: candidate.memberId } : {}) };
         });
         } catch (error) {
-          // The route's own timeout fired (not the caller's abort) and nothing was billed: the next reader, as unavailable.
-          if (routeTimeout?.aborted && !signal?.aborted && !findVisionBilledUsage(error) && !findVisionOutputRejected(error)) {
-            console.warn(`[ocr] ${purpose} reader=${candidate.route.optionId} document=${page.documentId} page=${page.pageNumber} timed out`);
-            recordPoolFailover("ocr", candidate.memberId, candidates[index + 1]?.memberId ?? null, "timeout");
-            if (index === candidates.length - 1) throw new HostedOcrSkipped("guard", `${purpose}: every reader timed out or was refused`);
-            continue;
+          // The route's own timeout fired (not the caller's abort): the request was sent and may have been billed. No
+          // fall-through to the next reader (it would read and bill the page again); the page keeps its first read.
+          if (routeTimeout?.aborted && !signal?.aborted) {
+            console.warn(`[ocr] ${purpose} reader=${candidate.route.optionId} document=${page.documentId} page=${page.pageNumber} timed out (possibly billed)`);
+            recordPoolFailover("ocr", candidate.memberId, null, "timeout");
+            throw new HostedOcrSkipped("unknown-billed", `${purpose}: the read timed out after it was sent; it may have been billed`);
           }
           // No host could serve this reader under its price ceiling (nothing billed): the next reader, else skip. Never sent
           // to a pricier host.

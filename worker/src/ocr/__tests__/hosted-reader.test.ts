@@ -231,6 +231,26 @@ describe("OCR escalation reads", () => {
     await expect(withVisionCall(state, { documentId: "doc-2", pageNumber: 1, purpose: "page" }, async (gate) => { await gate.admit(); })).resolves.toBeUndefined();
   });
 
+  it("a read that times out after it was sent is possibly billed: no fall-through to Qwen, recorded as unknown-billed", async () => {
+    const state = runState();
+    const execute = vi.fn(async (args: ExecuteArgs): Promise<VisionExecutionResult> => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      // Wafer refuses (routing, unbilled); Morph is sent and never answers within its timeout.
+      if ((args as { priceCeiling?: { hosts: string[] } }).priceCeiling?.hosts.includes("wafer/us")) {
+        await (args.gate as VisionRequestGate | null | undefined)?.unbilled("routing", { provider: "openrouter", status: 404 });
+        throw new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price");
+      }
+      if (args.vision.modelUri !== OCR_ESCALATION_GLM_MODEL) throw new Error("Qwen must not be called");
+      await new Promise((_resolve, reject) => args.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+      throw new Error("unreachable");
+    });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute, routeTimeoutMs: (route) => (route.timeoutMs ? 20 : undefined) });
+    const outcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 0, skipped: { "unknown-billed": 1 } });
+    expect(execute.mock.calls.map((call) => (call[0] as { priceCeiling?: { hosts: string[] } }).priceCeiling?.hosts)).toEqual([["wafer/us"], ["morph/fp8"]]);
+    expect(outcome.pages[0]!.text).toBe("ocr 1");
+  });
+
   it("does not fall back to Qwen after a GLM attempt of the page was billed: the read fails like any rejected read", async () => {
     const state = runState();
     const execute = stubExecute((args) => {

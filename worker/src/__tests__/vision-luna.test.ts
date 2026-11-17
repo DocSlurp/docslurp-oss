@@ -135,13 +135,13 @@ describe("GPT-6 Luna vision profile", () => {
     expect((await run(LUNA, undefined, [length, ok])).bodies).toHaveLength(2);
   });
 
-  it("retries a content-filtered page for unprofiled models by ignoring the failing provider", async () => {
-    const { bodies, result } = await run("google/gemini-2.5-flash-lite", undefined, [
+  it("retries a content-filtered page for a routing-only profile by ignoring the failing provider", async () => {
+    const { bodies, result } = await run("google/gemini-3.1-flash-lite", undefined, [
       { provider: "Google AI Studio", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0 } },
       ok,
     ]);
     expect(bodies).toHaveLength(2);
-    expect(bodies[1]!.provider).toEqual({ ignore: ["Google AI Studio"], max_price: visionMaxPrice("google/gemini-2.5-flash-lite") });
+    expect(bodies[1]!.provider).toMatchObject({ only: ["google-vertex/us", "google-vertex/eu"], ignore: ["Google AI Studio"], max_price: visionMaxPrice("google/gemini-3.1-flash-lite") });
     expect(result.finishReason).toBe("stop");
   });
 });

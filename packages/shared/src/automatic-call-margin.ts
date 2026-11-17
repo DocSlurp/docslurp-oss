@@ -293,7 +293,7 @@ export function automaticCallValue(
   model: string,
   tokens: { inputTokens: number; outputTokens: number },
   role: AutomaticCallRole = "pick",
-  extra: { primaryBilled?: boolean } = {},
+  extra: { primaryBilled?: boolean; billsPage?: boolean } = {},
 ): { value: number | null } | { error: string } {
   let provider;
   try {
@@ -306,7 +306,7 @@ export function automaticCallValue(
   }
   let value: unknown;
   try {
-    value = provider.automaticCallValueUsd({ kind, model, role, ...tokens, ...(role === "fallback" && extra.primaryBilled !== undefined ? { primaryBilled: extra.primaryBilled } : {}) });
+    value = provider.automaticCallValueUsd({ kind, model, role, ...tokens, ...(role === "fallback" && extra.primaryBilled !== undefined ? { primaryBilled: extra.primaryBilled } : {}), ...(role === "fallback" && extra.billsPage !== undefined ? { billsPage: extra.billsPage } : {}) });
   } catch (error) {
     return { error: `the pricing provider's automatic call value failed (${error instanceof Error ? error.message.slice(0, 80) : "error"})` };
   }
@@ -328,6 +328,8 @@ export function automaticCallMarginDecision(
     role?: AutomaticCallRole;
     /** `fallback` only: whether the primary's attempt may have been billed (AutomaticCallValueInput.primaryBilled). */
     primaryBilled?: boolean;
+    /** `fallback` only: whether the caller bills the page this read serves (AutomaticCallValueInput.billsPage). */
+    billsPage?: boolean;
     /** The call's own size when known (a chat turn's prompt and output cap): raises the planning tokens, never lowers them. */
     tokens?: { inputTokens?: number; outputTokens?: number };
   } = {},
@@ -353,7 +355,7 @@ export function automaticCallMarginDecision(
   if (routeBilling(route) === "private") {
     return { ...base, allowed: true, reason: "private-route", valueUsd: null, worstCostUsd: null, ratio: null, price: null, priceSource: null };
   }
-  const value = automaticCallValue(kind, model, tokens, options.role ?? "pick", { primaryBilled: options.primaryBilled });
+  const value = automaticCallValue(kind, model, tokens, options.role ?? "pick", { primaryBilled: options.primaryBilled, billsPage: options.billsPage });
   if ("error" in value) return refuse(value.error);
   if (value.value === null) {
     return { ...base, allowed: true, reason: "not-billed", valueUsd: null, worstCostUsd: null, ratio: null, price: null, priceSource: null };

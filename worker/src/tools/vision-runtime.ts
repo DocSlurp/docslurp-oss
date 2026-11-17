@@ -328,11 +328,11 @@ export async function executeVisionRuntime(args: {
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   /**
-   * A page read of the run's vision route (vision capability). Its primary and fallback routes must reach only hosts with a
-   * stated US or EU region (refused otherwise, nothing sent); it counts as a vision pool serve; and, with
-   * DOCSLURP_VISION_POOL_FALLBACK=on and no project fallback, the vision pool's next member (or DOCSLURP_VISION_FALLBACK_MODEL)
-   * is its fallback, tried only after a routing refusal, a timeout or a server error. Chart calls and OCR second reads leave
-   * it unset.
+   * A page read of the run's vision route (vision capability), billed as a page: it counts as a vision pool serve, its
+   * fallback is valued as the page's read, and, with DOCSLURP_VISION_POOL_FALLBACK=on and no project fallback, the vision
+   * pool's next member (or DOCSLURP_VISION_FALLBACK_MODEL) is its fallback, tried only after a routing refusal, a timeout or
+   * a server error. Chart calls, critique, document-map OCR, materialize and OCR second reads leave it unset. Every call in
+   * a run (a gate) is region-checked, page read or not.
    */
   pageRead?: boolean;
   /**
@@ -393,9 +393,10 @@ export async function executeVisionRuntime(args: {
   // Request profiles describe plain page transcription only; the fallback route is judged the same way.
   const routeArgs: RouteRequestArgs = { ...args, transcription: isPageTranscription(args) };
   const pageRead = args.pageRead === true;
-  // A customer page goes only to hosts with a stated US or EU region: a project's primary route that cannot prove it is
-  // refused before anything is sent (fail closed).
-  if (pageRead) {
+  // Customer content goes only to hosts with a stated US or EU region: inside a run (every call has a gate), a route that
+  // cannot prove it is refused before anything is sent (fail closed), whatever the call (page read, critique, chart,
+  // document map, materialize, second read). Benchmarks (no gate) name their hosts themselves.
+  if (args.gate) {
     const problem = visionPageRouteRegionProblem(selected.modelUri);
     if (problem) throw new VisionRouteRegionError(problem);
   }
@@ -422,7 +423,7 @@ export async function executeVisionRuntime(args: {
     // page's answer, not an outage.
     const outage = poolDefault ? visionOutageReason(error, args.signal) : null;
     if (poolDefault && !outage) throw error;
-    if (pageRead) {
+    if (args.gate) {
       const problem = visionPageRouteRegionProblem(fallbackUri);
       if (problem) {
         recordPoolFailover("vision", primaryMember, null, "region");
@@ -449,7 +450,7 @@ export async function executeVisionRuntime(args: {
       const fallbackRoute = poolMember ? poolMemberAutomaticRoute(poolMember) : visionAutomaticRoute(fallbackUri);
       await prepareAutomaticCallPrices("page-transcription", [fallbackRoute]);
       try {
-        fallbackDecision = assertAutomaticModelCallAllowed(fallbackUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute, role: "fallback", primaryBilled });
+        fallbackDecision = assertAutomaticModelCallAllowed(fallbackUri, "vision fallback model", { kind: "page-transcription", route: fallbackRoute, role: "fallback", primaryBilled, billsPage: pageRead });
       } catch (refusal) {
         if (refusal instanceof AutomaticCallRefusedError) {
           recordPoolFailover("vision", primaryMember, null, "margin");

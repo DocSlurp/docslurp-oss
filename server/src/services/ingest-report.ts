@@ -922,8 +922,8 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "vision-stopped", severity: "medium",
       title: "Vision stopped for the run",
-      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, or too many vision requests in the run returned unusable output.`,
-      effect: "These pages keep only their own text. Reprocess the files once the cause is fixed; contact support if the limit is too low for your files.",
+      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, too many vision requests in the run returned unusable output, or the run's vision model is no longer offered (it has no host in the US or EU).`,
+      effect: "These pages keep only their own text. If your project names a vision model that is no longer offered, choose another vision model in the project settings, then reprocess the files; otherwise reprocess them once the cause is fixed, or contact support if the limit is too low for your files.",
       affectedPages: stopped.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
       patch: null, reprocessDocumentIds: [],

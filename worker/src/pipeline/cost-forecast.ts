@@ -1,5 +1,5 @@
 import type { Document } from "../models.js";
-import { defaultVisionFallbackModel } from "../lib/capability-pools.js";
+import { defaultVisionFallbackModel, visionFallbackCentsPerPage } from "../lib/capability-pools.js";
 import { visionModelCatalogByUri, type PipelineFeatures } from "@docslurp/shared";
 import {
   calculateLocalComputeCost,
@@ -35,9 +35,12 @@ export function forecastRunCost(
   const configuredVisionCostPerPage =
     visionModelCatalogByUri[pipeline.vision.modelUri]?.estimatedCostPerPageCents ?? 0.3;
   // The project's fallback, else the deployment's vision pool default (DOCSLURP_VISION_POOL_FALLBACK) when one applies.
-  const fallbackUri = pipeline.vision.remoteFallbackModelUri ?? defaultVisionFallbackModel(pipeline.vision.modelUri);
+  const poolFallback = pipeline.vision.remoteFallbackModelUri ? null : defaultVisionFallbackModel(pipeline.vision.modelUri);
+  const fallbackUri = pipeline.vision.remoteFallbackModelUri ?? poolFallback;
+  const catalogFallbackCents = fallbackUri ? visionModelCatalogByUri[fallbackUri]?.estimatedCostPerPageCents ?? null : null;
+  // The pool default is sent under its member's price ceiling: estimated at that ceiling, not the model's widest route.
   const fallbackVisionCostPerPage = fallbackUri
-    ? (visionModelCatalogByUri[fallbackUri]?.estimatedCostPerPageCents ?? configuredVisionCostPerPage)
+    ? ((poolFallback ? visionFallbackCentsPerPage(poolFallback, catalogFallbackCents) : catalogFallbackCents) ?? configuredVisionCostPerPage)
     : configuredVisionCostPerPage;
   const visionCost = pipeline.visionFallback ? totalPages * configuredVisionCostPerPage : 0;
   const overheadCost = docCount * FIXED_OVERHEAD_PER_DOC;

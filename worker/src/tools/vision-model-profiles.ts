@@ -209,10 +209,14 @@ export function visionPromptKeyForModel(prompt: string | undefined, model: strin
 
 /** Request-body fragment with the profile's OpenRouter routing, or nothing. */
 export function openRouterProviderParams(model: string | undefined): { provider?: OpenRouterRoute } {
-  // Nitro chooses throughput-ranked providers, not the baseline profile order.
-  if (model && nitroBaseModel(model)) return {};
   const provider = visionModelProfile(model)?.openRouterProvider;
   if (!provider) return {};
+  // Speed boost (`:nitro`) ranks hosts by throughput, never beyond the profile's evidenced allowlist: it keeps `only` and
+  // lets the speed-boost preferences set the sort (openrouter-routing.ts withOpenRouterProviderPreferences).
+  if (model && nitroBaseModel(model)) {
+    const hosts = "only" in provider ? provider.only : provider.allow_fallbacks ? null : provider.order;
+    return hosts ? { provider: { only: [...hosts], allow_fallbacks: true } as OpenRouterRoute } : {};
+  }
   return "only" in provider
     ? { provider: { only: [...provider.only], sort: provider.sort, allow_fallbacks: provider.allow_fallbacks, ...(provider.ignore ? { ignore: [...provider.ignore] } : {}) } }
     : { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } };

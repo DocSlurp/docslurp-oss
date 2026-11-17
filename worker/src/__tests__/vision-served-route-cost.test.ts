@@ -1,3 +1,4 @@
+import { VISION_MODEL_PROFILES } from "../tools/vision-model-profiles.js";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,12 +24,14 @@ import { findVisionOutputRejected, resetStreamingSupportForTest } from "../tools
  * model and provider, the configured OpenAI base URL, never the project's configured primary route.
  */
 const baseCfg = {
-  openRouterApiKey: "or-key", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1",
+  openRouterApiKey: "or-key", openAiApiKey: "sk-test", deepInfraApiKey: "di-key", openAiBaseUrl: "https://api.openai.com/v1",
   costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03, visionStreaming: false,
 } as Config;
 
 const LOOPBACK = "llm://vllm/acme/plain-vl";
-const OPENAI = "llm://openai/gpt-4.1-mini";
+// The direct hosted route (a provider's own API): DeepInfra. The direct OpenAI route is refused (no stated US or EU region).
+const DIRECT = "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct";
+const DIRECT_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
 const OPENROUTER = "llm://openrouter/google/gemini-3.1-flash-lite";
 
 const answer = (finishReason: "stop" | "length", usage = { prompt_tokens: 1_200, completion_tokens: 300 }) =>
@@ -36,11 +39,11 @@ const answer = (finishReason: "stop" | "length", usage = { prompt_tokens: 1_200,
     { headers: { "content-type": "application/json" } });
 const badRequest = () => new Response(JSON.stringify({ error: { message: "bad request" } }), { status: 400, headers: { "content-type": "application/json" } });
 
-type Route = "loopback" | "openai" | "openrouter" | "gateway";
+type Route = "loopback" | "direct" | "openrouter" | "gateway";
 function routeOf(url: string): Route {
   const host = new URL(url).host;
   if (host.startsWith("127.0.0.1")) return "loopback";
-  if (host === "api.openai.com") return "openai";
+  if (host === "api.deepinfra.com") return "direct";
   if (host === "openrouter.ai") return "openrouter";
   return "gateway";
 }
@@ -94,26 +97,26 @@ describe("vision usage priced on the served route", () => {
   it("refuses a disabled local primary before sending, falling back or recording spend", async () => {
     vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "false");
     stubFetch(() => answer("stop"));
-    const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
+    const { outcome, recorded } = await guardedRead(vision(LOOPBACK, DIRECT));
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toContain("Tenant-selected local model endpoints are disabled");
     expect(sends).toEqual([]);
     expect(recorded).toEqual([]);
   });
 
-  it("a loopback primary whose OpenAI fallback is billed and rejected records the spend under the fallback model", async () => {
+  it("a loopback primary whose direct hosted fallback is billed and rejected records the spend under the fallback model", async () => {
     vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     stubFetch((route) => (route === "loopback" ? badRequest() : answer("length")));
-    const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
+    const { outcome, recorded } = await guardedRead(vision(LOOPBACK, DIRECT));
     expect(outcome).toBeInstanceOf(Error);
     expect(sends.some((send) => send.route === "loopback")).toBe(true);
-    expect(sends.filter((send) => send.route === "openai").length).toBeGreaterThanOrEqual(1);
+    expect(sends.filter((send) => send.route === "direct").length).toBeGreaterThanOrEqual(1);
     expect(recorded).toHaveLength(1);
     const [event] = recorded;
-    expect(event).toMatchObject({ provider: "openai", model: "gpt-4.1-mini", metric: "page-analysis-attempt", metadata: { outcome: "rejected", billable: false } });
-    // The OpenAI fallback billed every attempt at gpt-4.1-mini's list price; the loopback primary billed nothing.
+    expect(event).toMatchObject({ provider: "deepinfra", model: DIRECT_MODEL, metric: "page-analysis-attempt", metadata: { outcome: "rejected", billable: false } });
+    // The direct fallback billed every attempt at its list price; the loopback primary billed nothing.
     expect(event!.costCents!).toBeGreaterThan(0);
-    expect(event!.costCents!).toBeCloseTo(visionListPriceCents("gpt-4.1-mini", { inputTokens: event!.inputTokens!, outputTokens: event!.outputTokens! })!, 10);
+    expect(event!.costCents!).toBeCloseTo(visionListPriceCents(DIRECT_MODEL, { inputTokens: event!.inputTokens!, outputTokens: event!.outputTokens! })!, 10);
   });
 
   it("a fallback that misses the automatic-call margin is never sent: the primary's error stands", async () => {
@@ -122,14 +125,14 @@ describe("vision usage priced on the served route", () => {
     // A billed value no page read on the fallback's list price covers by the minimum margin.
     installTestPricing({ automaticCallValueUsd: () => 1e-9 });
     try {
-      const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
+      const { outcome, recorded } = await guardedRead(vision(LOOPBACK, DIRECT));
       expect(outcome).toBeInstanceOf(Error);
-      expect(sends.some((send) => send.route === "openai")).toBe(false);
+      expect(sends.some((send) => send.route === "direct")).toBe(false);
       expect(recorded).toEqual([]);
       expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] skipped label=vision fallback model kind=page-transcription/));
       // A value that covers it: the fallback answers.
       installTestPricing({ automaticCallValueUsd: () => 1 });
-      const allowed = await guardedRead(vision(LOOPBACK, OPENAI));
+      const allowed = await guardedRead(vision(LOOPBACK, DIRECT));
       expect((allowed.outcome as { result: VisionExecutionResult }).result.fallbackUsed).toBe(true);
     } finally {
       resetPricingProviderForTests();
@@ -139,84 +142,27 @@ describe("vision usage priced on the served route", () => {
   it("a local-to-hosted fallback success is priced and labelled on the hosted route", async () => {
     vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     stubFetch((route) => (route === "loopback" ? badRequest() : answer("stop")));
-    const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
+    const { outcome, recorded } = await guardedRead(vision(LOOPBACK, DIRECT));
     const result = (outcome as { admitted: true; result: VisionExecutionResult }).result;
     expect(result.fallbackUsed).toBe(true);
-    expect(result.route).toMatchObject({ provider: "openai", model: "gpt-4.1-mini", billing: "openai", baseUrl: "https://api.openai.com/v1" });
-    expect(priceVisionResult(result, baseCfg)).toBeCloseTo(visionListPriceCents("gpt-4.1-mini", { inputTokens: 1_200, outputTokens: 300 })!, 10);
+    expect(result.route).toMatchObject({ provider: "deepinfra", model: DIRECT_MODEL, billing: "deepinfra" });
+    expect(priceVisionResult(result, baseCfg)).toBeCloseTo(visionListPriceCents(DIRECT_MODEL, { inputTokens: 1_200, outputTokens: 300 })!, 10);
     // The loopback failure was never billed: nothing recorded for it.
     expect(recorded).toEqual([]);
   });
 
   it("a billed, rejected OpenRouter primary before a successful fallback is recorded on the primary's own route", async () => {
     stubFetch((route) => (route === "openrouter" ? answer("length") : answer("stop")));
-    const { outcome, recorded } = await guardedRead(vision(OPENROUTER, OPENAI));
+    const { outcome, recorded } = await guardedRead(vision(OPENROUTER, DIRECT));
     const result = (outcome as { admitted: true; result: VisionExecutionResult }).result;
-    expect(result.route).toMatchObject({ provider: "openai", model: "gpt-4.1-mini" });
+    expect(result.route).toMatchObject({ provider: "deepinfra", model: DIRECT_MODEL });
     expect(recorded).toHaveLength(1);
     expect(recorded[0]).toMatchObject({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metadata: { outcome: "rejected", fallbackPrimary: true } });
     expect(recorded[0]!.costCents!).toBeGreaterThan(0);
   });
 
-  describe("a loopback OPENAI_BASE_URL", () => {
-    const cfg = { ...baseCfg, openAiBaseUrl: "http://127.0.0.1:9000/v1" } as Config;
-
-    it("is unbilled when it serves: 0 cents, no OpenAI key", async () => {
-      stubFetch(() => answer("stop"));
-      const { outcome } = await guardedRead(vision(OPENAI), cfg);
-      const result = (outcome as { admitted: true; result: VisionExecutionResult }).result;
-      expect(sends.map((send) => send.url)).toEqual(["http://127.0.0.1:9000/v1/chat/completions"]);
-      expect(sends[0]!.authorization).toBeNull();
-      expect(result.route).toMatchObject({ billing: "loopback", provider: "vision-runtime", baseUrl: "http://127.0.0.1:9000/v1" });
-      expect(priceVisionResult(result, cfg)).toBe(0);
-    });
-
-    it("records a rejected read at 0 cents too, in the guarded call and in vision-extract", async () => {
-      stubFetch(() => answer("length"));
-      const { outcome, recorded } = await guardedRead(vision(OPENAI), cfg);
-      expect(outcome).toBeInstanceOf(Error);
-      expect(sends.every((send) => send.route === "loopback")).toBe(true);
-      expect(recorded).toHaveLength(1);
-      expect(recorded[0]).toMatchObject({ costCents: 0, provider: "vision-runtime", metadata: { outcome: "rejected" } });
-
-      // vision-extract's own recorder prices the same error on the same route.
-      const stage = new VisionExtractStage({} as CommandRunner, {} as ArtifactStore, cfg, {} as never);
-      const record = (stage as unknown as { recordFailedVisionAttempt(...args: unknown[]): { providerCostCents: number } })
-        .recordFailedVisionAttempt.bind(stage);
-      stubFetch(() => answer("length"));
-      const imagePath = join(await mkdtemp(join(tmpdir(), "vision-served-")), "page.png");
-      await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-      const error = await executeVisionRuntime({
-        imagePath, outputPath: `${imagePath}.json`,
-        vision: vision(OPENAI), cfg, runner: new CommandRunner(), privacyMode: "standard", gate: null,
-      }).catch((caught: unknown) => caught);
-      expect(findVisionOutputRejected(error)).not.toBeNull();
-      const state = { usageLedger: new PipelineUsageEventLedger(), pendingPerformance: [] } as unknown as WorkflowState;
-      const { providerCostCents } = record(state, { id: "doc" }, vision(OPENAI), { pageNumber: 1, artifactUri: "x" }, "rejected", error);
-      expect(providerCostCents).toBe(0);
-      expect(state.usageLedger.snapshot()).toMatchObject([{ costCents: 0, provider: "vision-runtime", model: "gpt-4.1-mini", metadata: { outcome: "rejected" } }]);
-    });
-  });
-
-  it("sends a route with no base URL of its own to OPENAI_BASE_URL, with the OpenAI key, billed as OpenAI", async () => {
-    const cfg = { ...baseCfg, openAiBaseUrl: "https://gateway.example/v1" } as Config;
-    expect(visionRouteBilling({ runtime: "remote-openai", baseUrl: null }, cfg)).toBe("openai");
-    stubFetch(() => answer("stop"));
-    const { outcome } = await guardedRead(vision(OPENAI), cfg);
-    const result = (outcome as { admitted: true; result: VisionExecutionResult }).result;
-    expect(sends.map((send) => send.url)).toEqual(["https://gateway.example/v1/chat/completions"]);
-    expect(sends[0]!.authorization).toBe("Bearer sk-test");
-    expect(result.route).toMatchObject({ billing: "openai", provider: "openai", baseUrl: "https://gateway.example/v1" });
-    expect(priceVisionResult(result, cfg)).toBeGreaterThan(0);
-  });
-
-  it("an empty OPENAI_BASE_URL sends to api.openai.com and bills it", async () => {
-    const cfg = { ...baseCfg, openAiBaseUrl: "" } as Config;
-    stubFetch(() => answer("stop"));
-    const { outcome } = await guardedRead(vision(OPENAI), cfg);
-    const result = (outcome as { admitted: true; result: VisionExecutionResult }).result;
-    expect(sends.map((send) => send.url)).toEqual(["https://api.openai.com/v1/chat/completions"]);
-    expect(result.route.billing).toBe("openai");
+  it("refuses the direct OpenAI route at validation: it states no US or EU region", () => {
+    expect(() => vision("llm://openai/gpt-4.1-mini")).toThrow(/no endpoint with a stated US or EU hosting region/);
   });
 
   describe("interrupted streams are priced on the route that served them", () => {
@@ -247,11 +193,11 @@ describe("vision usage priced on the served route", () => {
 
     it("a hosted stream cut off mid-response is priced at the served model's list price", async () => {
       stubFetch(() => broken([delta(text)]));
-      const { recorded } = await guardedRead(vision(OPENAI), streamingCfg);
+      const { recorded } = await guardedRead(vision(DIRECT), streamingCfg);
       expect(recorded).toHaveLength(1);
       const [event] = recorded;
-      expect(event).toMatchObject({ provider: "openai", model: "gpt-4.1-mini", metadata: { outcome: "failure" } });
-      const listPrice = visionListPriceCents("gpt-4.1-mini", { inputTokens: event!.inputTokens!, outputTokens: event!.outputTokens! })!;
+      expect(event).toMatchObject({ provider: "deepinfra", model: DIRECT_MODEL, metadata: { outcome: "failure" } });
+      const listPrice = visionListPriceCents(DIRECT_MODEL, { inputTokens: event!.inputTokens!, outputTokens: event!.outputTokens! })!;
       const configuredRate = (event!.inputTokens! / 1000) * baseCfg.costPer1kInputTokens + (event!.outputTokens! / 1000) * baseCfg.costPer1kOutputTokens;
       expect(listPrice).not.toBeCloseTo(configuredRate, 6);
       expect(event!.costCents!).toBeCloseTo(listPrice, 10);
@@ -278,8 +224,12 @@ describe("vision usage priced on the served route", () => {
     }, new MemoryVisionAttemptBackend());
     // A primary with no host allowlist (any host OpenRouter picks): refused, nothing sent.
     const gate = guard.call({ documentId: "doc", pageNumber: 1, purpose: "page" });
-    const error = await runVisionCall(state, { id: "doc" }, vision("llm://openrouter/google/gemini-2.5-flash-lite"), { imagePath, outputPath: `${imagePath}.json` },
-      { mimeType: "image/png", pageNumber: 1, artifactUri: "raster://1" }, gate).catch((caught: unknown) => caught);
+    // Haiku without its region allowlist (as a profile change could leave it): any host OpenRouter picks.
+    const profiles = VISION_MODEL_PROFILES as Record<string, unknown>;
+    const saved = profiles["anthropic/claude-haiku-5.5"];
+    delete profiles["anthropic/claude-haiku-5.5"];
+    const error = await runVisionCall(state, { id: "doc" }, vision("llm://openrouter/anthropic/claude-haiku-5.5"), { imagePath, outputPath: `${imagePath}.json` },
+      { mimeType: "image/png", pageNumber: 1, artifactUri: "raster://1" }, gate).catch((caught: unknown) => caught).finally(() => { profiles["anthropic/claude-haiku-5.5"] = saved; });
     await gate.finish();
     expect((error as Error).name).toBe("VisionRouteRegionError");
     expect(sends).toEqual([]);
