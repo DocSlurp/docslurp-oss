@@ -213,6 +213,7 @@ describe("public error boundary for the native API", () => {
     hono.get("/v1/mcp", (c) => c.json({ jsonrpc: "2.0", id: 1, error: { code: -32000, message: "bad" } }, 400));
     hono.get("/v1/models", (c) => c.json({ error: { message: "m", type: "invalid_request_error", code: "x", param: null } }, 400));
     hono.get("/oauth/mcp/token", (c) => c.json({ error: "invalid_grant" }, 400));
+    hono.get("/oauth/mcp/token/:code", (c) => c.json({ error: c.req.param("code"), error_description: "internal detail", docslurp_reason: c.req.query("reason"), secret: "x" }, 400));
     hono.get("/health", (c) => c.json({ error: "down" }, 503));
     return hono;
   }
@@ -237,6 +238,15 @@ describe("public error boundary for the native API", () => {
     expect(await (await hono.request("/v1/mcp")).json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32000 } });
     expect(await (await hono.request("/v1/models")).json()).toMatchObject({ error: { type: "invalid_request_error", param: null } });
     expect(await (await hono.request("/oauth/mcp/token")).json()).toMatchObject({ error: "invalid_grant" });
+    // Device polling and registration clients branch on these codes; the description stays generic.
+    for (const code of ["authorization_pending", "slow_down", "expired_token", "invalid_target", "invalid_client_metadata", "access_denied"]) {
+      const body = await (await hono.request(`/oauth/mcp/token/${code}`)).json();
+      expect(body, code).toEqual({ error: code, error_description: PUBLIC_ERROR_MESSAGES.invalid, requestId: "req-b" });
+    }
+    expect((await (await hono.request("/oauth/mcp/token/invalid_grant?reason=refresh_token_just_rotated")).json()).docslurp_reason).toBe("refresh_token_just_rotated");
+    // Anything outside the closed vocabulary is still withheld.
+    expect((await (await hono.request("/oauth/mcp/token/invalid_grant?reason=grant_42_revoked")).json()).docslurp_reason).toBeUndefined();
+    expect((await (await hono.request("/oauth/mcp/token/some_internal_reason")).json()).error).not.toBe("some_internal_reason");
     expect(typeof (await (await hono.request("/health")).json()).error).toBe("string");
   });
 });

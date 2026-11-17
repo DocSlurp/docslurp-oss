@@ -15,7 +15,7 @@ function token(values: Record<string, string | undefined>) {
   const params = { grant_type: "authorization_code", client_id: "client", resource: `${url}/v1/mcp`, code: "code", redirect_uri: grant.redirect_uri, code_verifier: verifier, ...values };
   return app.request(`${url}/oauth/mcp/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
 }
-beforeEach(() => { vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("MCP_PUBLIC_URL", url); query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 1 }); });
+beforeEach(() => { vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("MCP_PUBLIC_URL", url); vi.stubEnv("MCP_BROWSER_URL", ""); query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 1 }); });
 describe("MCP OAuth", () => {
   it("requests upload access in new default consent while respecting explicit read-only scopes", () => {
     expect(parseScopes(null)).toEqual(["search:deep", "chat", "read", "ingest"]);
@@ -61,6 +61,83 @@ describe("MCP OAuth", () => {
     vi.mocked(resolveBetterAuthSessionActor).mockResolvedValue(null);
   });
   it("rejects consent without exact origin", async () => { expect((await app.request(`${url}/oauth/mcp/authorize`, { method: "POST", headers: { origin: "https://evil.example" } })).status).toBe(403); });
+  describe("with the signed-in pages on another origin than the issuer (MCP_BROWSER_URL)", () => {
+    const browser = "http://app.localhost:4321";
+    const post = (path: string, origin?: string) => app.request(`${url}${path}`, { method: "POST", headers: { ...(origin === undefined ? {} : { origin }), "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ request: "consent_1", decision: "allow", orgId: "org", action: "approve", user_code: "WDJB-MJHT" }) });
+    beforeEach(() => { vi.stubEnv("MCP_BROWSER_URL", browser); });
+    it("refuses the consent decision, device approval and grant revocation from the issuer and from any other origin", async () => {
+      for (const origin of [url, "https://evil.example", `${browser}.evil.example`, "http://app.localhost", "null", undefined]) {
+        expect((await post("/oauth/mcp/authorize", origin)).status, String(origin)).toBe(403);
+        expect((await post("/oauth/mcp/grants/grant/revoke", origin)).status, String(origin)).toBe(403);
+        const device = await post("/oauth/mcp/device", origin);
+        expect(device.status, String(origin)).toBe(403);
+        expect(await device.text(), String(origin)).toContain("Request refused");
+      }
+      // Refused before the session or the database is consulted.
+      expect(query).not.toHaveBeenCalled();
+    });
+    it("accepts them from the browser origin only as far as the session check", async () => {
+      const consent = await post("/oauth/mcp/authorize", browser);
+      expect(consent.status).toBe(303);
+      expect(consent.headers.get("location")).toBe("/app/mcp/authorize?request=consent_1");
+      expect((await post("/oauth/mcp/grants/grant/revoke", browser)).status).toBe(401);
+      const device = await post("/oauth/mcp/device", browser);
+      expect(await device.text()).toContain("Sign in to connect a device");
+    });
+    it("keeps the issuer and every discovery endpoint on the MCP origin", async () => {
+      const metadata = await (await app.request(`${url}/.well-known/oauth-authorization-server`)).json() as Record<string, unknown>;
+      expect(metadata.issuer).toBe(url);
+      for (const name of ["authorization_endpoint", "token_endpoint", "registration_endpoint", "revocation_endpoint", "device_authorization_endpoint"]) {
+        expect(new URL(String(metadata[name])).origin, name).toBe(url);
+      }
+    });
+    it("fails closed on an unusable value instead of falling back to the issuer", async () => {
+      for (const value of ["not a url", "javascript:alert(1)", "ftp://app.localhost"]) {
+        vi.stubEnv("MCP_BROWSER_URL", value);
+        expect((await post("/oauth/mcp/authorize", url)).status, value).toBe(500);
+        expect((await post("/oauth/mcp/authorize", value)).status, value).toBe(500);
+      }
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("MCP_PUBLIC_URL", "https://docs.example");
+      vi.stubEnv("MCP_BROWSER_URL", "http://app.docs.example");
+      expect((await post("/oauth/mcp/authorize", "http://app.docs.example")).status).toBe(500);
+    });
+    it("refuses a list, credentials or a path, which would name some other origin", async () => {
+      for (const value of [`${browser},x@localhost:4321`, `${browser},https://evil.example`, `http://user:pw@app.localhost:4321`, `${browser}/x`, `${browser}?x=1`]) {
+        vi.stubEnv("MCP_BROWSER_URL", value);
+        for (const origin of [url, browser, "http://localhost:4321", "https://evil.example"]) {
+          expect((await post("/oauth/mcp/authorize", origin)).status, `${value} from ${origin}`).toBe(500);
+        }
+      }
+      vi.stubEnv("MCP_BROWSER_URL", `${browser}/`);
+      expect((await post("/oauth/mcp/authorize", browser)).status).toBe(303);
+    });
+    it("sends a page load that arrives on the issuer host to the browser origin, and never anywhere else", async () => {
+      const authorize = await app.request(`${url}/oauth/mcp/authorize?client_id=a&state=%2F%2Fevil.example`, { headers: { accept: "text/html" } });
+      expect(authorize.status).toBe(307);
+      expect(authorize.headers.get("location")).toBe(`${browser}/oauth/mcp/authorize?client_id=a&state=%2F%2Fevil.example`);
+      const device = await app.request(`${url}/oauth/mcp/device`);
+      expect(device.status).toBe(307);
+      expect(device.headers.get("location")).toBe(`${browser}/oauth/mcp/device`);
+      // On the browser origin, and on any other host, it is served (no loop, no redirect built from the request).
+      for (const host of [browser, "http://evil.example", "http://localhost:9999"]) {
+        const served = await app.request(`${host}/oauth/mcp/device`);
+        expect(served.status, host).toBe(403);
+        expect(served.headers.get("location"), host).toBeNull();
+        const page = await app.request(`${host}/oauth/mcp/authorize?client_id=unknown`);
+        expect(page.status, host).toBe(400);
+      }
+      expect(query.mock.calls.filter(([sql]) => String(sql).includes("INSERT"))).toEqual([]);
+    });
+    it("is the issuer when unset or blank", async () => {
+      vi.stubEnv("MCP_BROWSER_URL", "  ");
+      expect((await post("/oauth/mcp/authorize", url)).status).toBe(303);
+      expect((await post("/oauth/mcp/authorize", browser)).status).toBe(403);
+      // And no page load is redirected.
+      expect((await app.request(`${url}/oauth/mcp/device`)).status).toBe(403);
+      expect((await app.request(`${url}/oauth/mcp/authorize?client_id=unknown`)).status).toBe(400);
+    });
+  });
   it("checks live membership, expiry, revocation and audience for access", async () => { expect(await validateMcpToken("token", `${url}/v1/mcp`)).toBe(null); expect(query.mock.calls[0]?.[0]).toContain("JOIN org_memberships"); expect(query.mock.calls[0]?.[0]).toContain("g.resource=$2"); });
   it("uses the persisted server-key identity for downstream operation foreign keys", async () => {
     query.mockResolvedValue({ rows: [{ id: "grant", api_key_id: "native-key-id", user_id: "user", org_id: "org", scopes: ["read"] }], rowCount: 1 });
