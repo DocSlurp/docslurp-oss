@@ -319,6 +319,22 @@ describe("partial reprocess", () => {
     }
   }, 60_000);
 
+  it("never reuses another organization's document as a source: the run start fails and copies nothing", async () => {
+    await seedSourceRun(defaultPipelineFeatures);
+    await sql`insert into "user"(id, name, email) values ('u9', 'Z', 'z@example.com') on conflict do nothing`;
+    await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Other', 'other', 'u9') on conflict do nothing`;
+    await sql`update documents set org_id = 'o9' where id = 'src'`;
+    const pipeline = { ...defaultPipelineFeatures, restartFromStage: "embed" };
+    await seedPartialRun(pipeline);
+    const { stages, executed } = recordingStages();
+    const execution = createStageExecution({ store, stages, config });
+
+    await expect(execution.startRun({ runId: "run-re", executionGeneration: "test-generation", totalStages: 2 })).rejects.toThrow(/has no source document/);
+    expect(executed).toEqual([]);
+    expect(await sql`select id from document_chunks where document_id = 're'`).toEqual([]);
+    expect(await sql`select id from document_pages where document_id = 're'`).toEqual([]);
+  }, 60_000);
+
   it("fails the run start instead of running everything when no source document is linked", async () => {
     await seedSourceRun(defaultPipelineFeatures);
     const pipeline = { ...defaultPipelineFeatures, restartFromStage: "embed" };
