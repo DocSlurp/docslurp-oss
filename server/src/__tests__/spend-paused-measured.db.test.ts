@@ -4,7 +4,7 @@ import { defaultPipelineFeatures, pageCredits } from "@docslurp/shared";
 import type { SqlClient } from "../db.js";
 
 /*
- * The spend-paused resume sweep weighs what the run already owes for measured pages (run_measured_pages, migration 0187),
+ * The spend-paused resume sweep weighs what the run already owes for measured pages (run_measured_pages, migration 0190),
  * the same sum the worker's page-basis check pauses on, so a run is not resumed only to re-pause at its next check.
  */
 const url = process.env.TEST_DATABASE_URL;

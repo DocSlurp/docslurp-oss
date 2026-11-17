@@ -37,6 +37,7 @@ import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/sta
 import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { assertWorkerOperatorConfig } from "../lib/operator-config.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
+import { initializeCapabilityPools } from "../lib/capability-pools.js";
 import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer, setExtractorComputeAllocationAdmission, setExtractorComputeJobAdmission } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
@@ -168,6 +169,13 @@ async function main(): Promise<void> {
   await loadExtractorPlugins(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
+  // Capability pools (text, ocr, vision): every member must process customer pages in the US or EU from stated evidence,
+  // and every plugin service must be a registered member; otherwise refuse to start. Logs the resolved pools.
+  try {
+    initializeCapabilityPools(process.env);
+  } catch (error) {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  }
   // Legacy extractor ids (DOCSLURP_EXTRACTOR_ID_ALIASES) map onto what this worker serves, so stored and in-flight
   // configs that name a renamed extractor keep running. An alias to an id it cannot serve refuses to start.
   try {

@@ -1,10 +1,11 @@
+import { recordPoolFailover } from "../lib/capability-pools.js";
 import type postgres from "postgres";
 import sharp from "../tools/isolated-image.js";
 import { l2Normalize, packSignBits, pageCredits, ladderAllowsOffPlanReads, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";
 import {
-  resolvePageImageEmbedder,
+  resolvePageImageEmbedderWithReason,
   type PageImageEmbedder,
 } from "../deferred/page-image-embedders.js";
 import type { Document, ProjectRun } from "../models.js";
@@ -267,14 +268,16 @@ export class PageEmbedStage implements Stage {
       console.error(`[page-embed] skipped: ${qualityAllowsPageReading(pipeline.quality) ? "an Auto ladder limit" : "quality fast"} does not embed page images run=${state.run.id} documents=${state.documents.length}`);
       return;
     }
-    const embedder =
-      this.embedderOverride ??
-      resolvePageImageEmbedder({ route: pipeline.visualPages?.route ?? "auto", privacyMode: pipeline.privacyMode });
+    const resolved = this.embedderOverride
+      ? { embedder: this.embedderOverride, reason: null }
+      : resolvePageImageEmbedderWithReason({ route: pipeline.visualPages?.route ?? "auto", privacyMode: pipeline.privacyMode });
+    const embedder = resolved.embedder;
     if (!embedder) {
-      throw new Error(
-        "Visual indexing needs a page-image embedder: register a Jina v5 omni nano private endpoint " +
-          "(DOCSLURP_PRIVATE_MODEL_ENDPOINTS) or set GOOGLE_GENERATIVE_AI_API_KEY (not allowed in strict privacy modes)",
-      );
+      // Fail closed without failing the run: no embedder with a stated US or EU region, so no page image leaves the
+      // worker. Text indexing still runs; the reason is recorded (log and telemetry).
+      console.error(`[page-embed] skipped: page-image embedding is unavailable (${resolved.reason}); register a Jina v5 omni nano private endpoint attesting a US or EU region (DOCSLURP_PRIVATE_MODEL_ENDPOINTS) run=${state.run.id} documents=${state.documents.length}`);
+      recordPoolFailover("vision", "page-embed", null, "region");
+      return;
     }
     const deps: PageEmbedDeps = {
       sql: this.sql(),

@@ -107,7 +107,7 @@ describe("extractor plugin registration", () => {
     expect("remote" in launched && launched.timeoutMs).toBe(1_040);
     if ("remote" in launched) await launched.remote;
     const calls = run.mock.calls as unknown as Array<[unknown, { pages: number; profile?: () => Promise<unknown> }]>;
-    expect(calls[0]![0]).toEqual({ input: "/a.pdf", output: "/a.md" });
+    expect(calls[0]![0]).toEqual({ input: "/a.pdf", output: "/a.md", pageFacts: { include: ["mathtables"] } });
     expect(calls[0]![1].pages).toBe(40);
     await calls[0]![1].profile!();
     expect(profile).toHaveBeenCalledWith("extract-markdown:test-vm");

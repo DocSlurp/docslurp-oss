@@ -94,10 +94,10 @@ describe("recordCritiqueUsage", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const cfg = {
-      openRouterApiKey: "or-key", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1",
+      openRouterApiKey: "or-key", openAiApiKey: "sk-test", deepInfraApiKey: "di-test", openAiBaseUrl: "https://api.openai.com/v1",
       costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03, visionStreaming: false,
     } as Config;
-    const vision = visionConfigSchema.parse({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", remoteFallbackModelUri: "llm://openai/gpt-4.1-mini" });
+    const vision = visionConfigSchema.parse({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", remoteFallbackModelUri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" });
     // Page 2's critique fails on OpenRouter (rejected twice) and is served by the OpenAI fallback; pages 1 and 3 by OpenRouter.
     let page = 0;
     const answer = (finishReason: string, usage: Record<string, number>) => new Response(JSON.stringify({ choices: [{ message: { content: "Corrected page text" }, finish_reason: finishReason }], usage }),
@@ -105,7 +105,7 @@ describe("recordCritiqueUsage", () => {
     try {
       vi.stubGlobal("fetch", vi.fn(async (url: string) => {
         const host = new URL(url).host;
-        if (host === "api.openai.com") return answer("stop", { prompt_tokens: 900, completion_tokens: 200 });
+        if (host === "api.deepinfra.com") return answer("stop", { prompt_tokens: 900, completion_tokens: 200 });
         return page === 2 ? answer("length", { prompt_tokens: 1, completion_tokens: 1 }) : answer("stop", { prompt_tokens: 1_000, completion_tokens: 100 });
       }));
       const dir = await mkdtemp(join(tmpdir(), "critique-routes-"));
@@ -125,12 +125,12 @@ describe("recordCritiqueUsage", () => {
       const events = ledger.snapshot();
       expect(events).toHaveLength(2);
       const openRouter = events.find((event) => event.provider === "openrouter")!;
-      const openAi = events.find((event) => event.provider === "openai")!;
+      const openAi = events.find((event) => event.provider === "deepinfra")!;
       expect(openRouter).toMatchObject({ model: "google/gemini-3.1-flash-lite", metric: "page-critique", amount: 3, inputTokens: 2_000, outputTokens: 200,
         metadata: { documentId: "doc", reviewedPages: [1, 3, 4], acceptedPages: [1], billing: "openrouter" } });
-      expect(openAi).toMatchObject({ model: "gpt-4.1-mini", metric: "page-critique", amount: 1, inputTokens: 900, outputTokens: 200,
-        metadata: { reviewedPages: [2], acceptedPages: [2], billing: "openai" } });
-      expect(openAi.metadata!.providerCostCents as number ?? openAi.costCents).toBeCloseTo(visionListPriceCents("gpt-4.1-mini", { inputTokens: 900, outputTokens: 200 })!, 10);
+      expect(openAi).toMatchObject({ model: "Qwen/Qwen3-VL-30B-A3B-Instruct", metric: "page-critique", amount: 1, inputTokens: 900, outputTokens: 200,
+        metadata: { reviewedPages: [2], acceptedPages: [2], billing: "deepinfra" } });
+      expect(openAi.metadata!.providerCostCents as number ?? openAi.costCents).toBeCloseTo(visionListPriceCents("Qwen/Qwen3-VL-30B-A3B-Instruct", { inputTokens: 900, outputTokens: 200 })!, 10);
     } finally {
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
@@ -181,14 +181,14 @@ describe("self-critique provider request", () => {
     await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
       bodies.push(String(init.body));
-      return new Response(JSON.stringify({ choices: [{ message: { content: "Corrected text" }, finish_reason: new URL(url).host === "api.openai.com" ? "stop" : "length" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "Corrected text" }, finish_reason: new URL(url).host === "api.deepinfra.com" ? "stop" : "length" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { headers: { "content-type": "application/json" } });
     }));
     try {
-      const vision = visionConfigSchema.parse({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", remoteFallbackModelUri: "llm://openai/gpt-4.1-mini" });
+      const vision = visionConfigSchema.parse({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", remoteFallbackModelUri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" });
       await inAllowingRun(() => executeVisionRuntime({
         ...selfCritiqueVisionRequest(vision, "Candidate with damaged rows", true, true),
         imagePath, outputPath: `${imagePath}.json`, gate: null,
-        cfg: { openRouterApiKey: "or-test", openAiApiKey: "sk-test", openAiBaseUrl: "https://api.openai.com/v1", visionStreaming: false } as Config,
+        cfg: { openRouterApiKey: "or-test", openAiApiKey: "sk-test", deepInfraApiKey: "di-test", openAiBaseUrl: "https://api.openai.com/v1", visionStreaming: false } as Config,
         runner: new CommandRunner(), privacyMode: "standard",
       }));
       expect(bodies.length).toBeGreaterThanOrEqual(2);

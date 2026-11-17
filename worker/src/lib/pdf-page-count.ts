@@ -107,7 +107,7 @@ export async function countPdfPages(
 /**
  * The API never parses customer PDF bytes, so a PDF arrives with a page count intake estimated from its size (`assumed`).
  * Measure it in the PDF mode's boundary before any stage uses it or anything bills, and record it as `counted`:
- *  - `vm`: the sandboxed PDF provider counts it in a fresh VM; a provider that cannot is a refusal, never host parsing;
+ *  - `vm`: the sandboxed PDF provider counts it in a VM; a provider that cannot is a refusal, never host parsing;
  *  - `local` (customer-owned): the page tree walked under the parser sandbox on this host (countPdfPages: Doppler pdfpagecount);
  *  - `off`: nothing (PDF extraction refuses the document anyway).
  * Recorded through the page basis (pipeline/page-basis.ts), which authorizes a raise; format-detect authorizes again on every attempt. Billing

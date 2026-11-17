@@ -91,7 +91,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       if (!row) return { status: "not-spend-paused" } as const;
       await restoreRunMonthlyCapacity(tx, row.id);
       if (!spendGuardsSkipped()) {
-        // The run already owes its measured pages no charge covers yet (run_measured_pages, migration 0187: Fast pages above
+        // The run already owes its measured pages no charge covers yet (run_measured_pages, migration 0190: Fast pages above
         // intake, uncharged image frames), the same sum the worker's page-basis check pauses on. Resuming before the balance
         // covers them would only re-pause the run at its next check, forever; it stays paused until it does. A failed read
         // throws: the transaction rolls back and the pause is kept.

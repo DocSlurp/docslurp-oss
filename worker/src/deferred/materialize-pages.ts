@@ -45,6 +45,7 @@ import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-
 import { DocumentNotFoundError } from "../db/missing-document.js";
 import { billLockedMaterializedPages, lockPageRows } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
+import { finalizePageExtracts, logFinalizeOutcome, materializedPageRecords, pageExtractStatements, recordPageExtracts, type PageExtractState } from "../pipeline/page-extracts.js";
 
 /** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
 export const KEPT_AS_IMAGE_REASON = "kept-as-image";
@@ -614,7 +615,9 @@ export async function materializePageRange(
       const client = tx as unknown as Sql;
       // A document deleted meanwhile took its ledger rows with it: stop the range (the activity reports it), never
       // mistake the missing rows for a lost claim.
-      const [exists] = await client`select materialization_generation, source_materialization_blocked from documents where id = ${documentId} for share`;
+      // FOR NO KEY UPDATE, the lock a completion's documents UPDATE takes: this publication (and its page extract finalization)
+      // serializes with the document's completion. Lock order: the document row, then its page rows, then extract rows.
+      const [exists] = await client`select materialization_generation, source_materialization_blocked from documents where id = ${documentId} for no key update`;
       if (!exists) throw new DocumentNotFoundError(documentId);
       const sourceInvalidated = exists.source_materialization_blocked || exists.materialization_generation !== sourceVersion.materialization_generation;
       // The revocation is durable even if subsequent page locking/refusal fails.
@@ -701,6 +704,23 @@ export async function materializePageRange(
       const ownedReleased = released.filter((page) => held.has(page));
       if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
       owned = moved.sort((a, b) => a - b);
+      // Page extract records for the pages this run holds, and their final rows: the query-time read publishes them now.
+      if (run.orgId) {
+        const extracts: PageExtractState = { run: { id: claimedBy, orgId: run.orgId, projectId: run.projectId },
+          pendingPageExtracts: [], pendingPageExtractTags: [] };
+        recordPageExtracts(extracts, document, materializedPageRecords({
+          published: owned, modelRead: (page) => modelReads.has(page) || storedReads.has(page),
+          blocked: ownedBlocked, failed: [...failed].filter(([page]) => held.has(page) && !released.includes(page)),
+          keptAsImageReason: KEPT_AS_IMAGE_REASON,
+        }));
+        if (extracts.pendingPageExtracts.length > 0) {
+          for (const statement of pageExtractStatements(client as unknown as Sql<Record<string, unknown>>, extracts.pendingPageExtracts, [])) await statement;
+          const finalizeScope = { orgId: run.orgId, runId: claimedBy, documentIds: [documentId], pages: extracts.pendingPageExtracts.map((row) => row.page_number) };
+          const [demote, promote] = finalizePageExtracts(client as unknown as Sql<Record<string, unknown>>, finalizeScope);
+          await demote;
+          logFinalizeOutcome(await promote, finalizeScope);
+        }
+      }
       // markPages cleared the kept reads of pages it indexed or blocked.
 
       const lost = rangePages.filter((page) => !held.has(page));

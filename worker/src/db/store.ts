@@ -71,6 +71,7 @@ import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
+import { finalizePageExtracts, logFinalizeOutcome, pageExtractStatements } from "../pipeline/page-extracts.js";
 import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
@@ -498,11 +499,19 @@ function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, run
   ] as const;
 }
 
-async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId: string): Promise<string[]> {
+async function completeRunDocuments(
+  client: Sql<Record<string, unknown>>,
+  runId: string,
+  after: readonly [PendingQuery<any>, PendingQuery<{ run_found: number; changed: number }[]>],
+): Promise<{ ids: string[]; finalized: Array<{ run_found: number; changed: number }> }> {
   const [retire, cancel, completed] = completeRunDocumentStatements(client, runId);
   await retire;
   await cancel;
-  return (await completed).map((row) => row.id);
+  // Pipelined: sent together, run in order on the transaction's connection.
+  completed.execute();
+  for (const statement of after) statement.execute();
+  const [rows, , finalized] = await Promise.all([completed, after[0], after[1]]);
+  return { ids: rows.map((row) => row.id), finalized };
 }
 
 export class Store {
@@ -873,6 +882,7 @@ export class Store {
     for (const vector of state.vectorIndexes) referenced.add(vector.documentId);
     for (const event of state.pendingPerformance) if (event.documentId) referenced.add(event.documentId);
     for (const evaluation of state.pendingParserEvaluations) referenced.add(evaluation.documentId);
+    for (const row of state.pendingPageExtracts) referenced.add(row.document_id);
     if (referenced.size === 0) return false;
     const live = new Set((await this.sql<{ id: string }[]>`select id from documents where id = any(${[...referenced]})`).map((row) => row.id));
     const missing = new Set([...referenced].filter((id) => !live.has(id)));
@@ -880,6 +890,8 @@ export class Store {
     console.warn(`[store] dropping checkpoint rows for deleted documents run=${state.run.id} documents=${[...missing].join(",")}`);
     state.vectorIndexes = state.vectorIndexes.filter((vector) => !missing.has(vector.documentId));
     state.pendingParserEvaluations = state.pendingParserEvaluations.filter((evaluation) => !missing.has(evaluation.documentId));
+    state.pendingPageExtracts = state.pendingPageExtracts.filter((row) => !missing.has(row.document_id));
+    state.pendingPageExtractTags = state.pendingPageExtractTags.filter((row) => !missing.has(row.document_id));
     // Performance samples stay (stage timings still describe real work), detached from the deleted document.
     state.pendingPerformance = state.pendingPerformance.map((event) => (event.documentId && missing.has(event.documentId) ? { ...event, documentId: undefined } : event));
     return true;
@@ -895,6 +907,8 @@ export class Store {
     const usageBatch = state.usageLedger.checkpoint();
     const vectors = state.vectorIndexes.slice();
     const performance = state.pendingPerformance.slice();
+    const pageExtracts = state.pendingPageExtracts.slice();
+    const pageExtractTags = state.pendingPageExtractTags.slice();
     const parserEvaluations = state.pendingParserEvaluations.length > 0 && (await this.tableExists("parser_eval_results"))
       ? state.pendingParserEvaluations.slice()
       : [];
@@ -1025,6 +1039,7 @@ export class Store {
         statements.push(...this.vectorIndexStatements(vectors, client));
         statements.push(...this.performanceRowStatements(client, state, performance));
         statements.push(...this.parserEvaluationStatements(client, parserEvaluations));
+        statements.push(...pageExtractStatements(client, pageExtracts, pageExtractTags));
         if (options.readControlState) {
           controlIndex = statements.length;
           statements.push(client<{ control_state: string | null }[]>`select control_state from project_runs where id = ${state.run.id}`);
@@ -1076,6 +1091,8 @@ export class Store {
     state.vectorIndexes = without(state.vectorIndexes, vectors);
     state.pendingPerformance = without(state.pendingPerformance, performance);
     state.pendingParserEvaluations = without(state.pendingParserEvaluations, parserEvaluations);
+    state.pendingPageExtracts = without(state.pendingPageExtracts, pageExtracts);
+    state.pendingPageExtractTags = without(state.pendingPageExtractTags, pageExtractTags);
     };
     if (transaction) {
       transaction.afterCommit.push(commit);
@@ -1217,8 +1234,13 @@ export class Store {
         // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
         state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
-        const completed = await completeRunDocuments(client, state.run.id);
-        const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
+        // Documents completed here (pipelines without an index stage) get their page extract records' finals too: the two
+        // finalization statements go out right behind the statement that completes the documents (one flight; the
+        // documents UPDATE holds their row locks first).
+        const finalizeScope = { orgId: owner.orgId, runId: state.run.id, documentIds: "completed-in-run" as const };
+        const completed = await completeRunDocuments(client, state.run.id, finalizePageExtracts(client, finalizeScope));
+        logFinalizeOutcome(completed.finalized, finalizeScope);
+        const replacements = await supersededInThisTransaction(client, completed.ids.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
         // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
         const stamps = runStampsIngestVersion(state.run.kind);
@@ -1807,8 +1829,12 @@ export class Store {
                   ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
                   : client``}
             where d.id = ${documentId}`,
+          // The document's page extract records get their one final row per page, in the transaction that publishes it
+          // (after the documents UPDATE above, which holds the document's row lock: documents first, then extract rows).
+          ...(state.run.orgId ? finalizePageExtracts(client, { orgId: state.run.orgId, runId: state.run.id, documentIds: [documentId] }) : []),
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
+        if (state.run.orgId) logFinalizeOutcome(results.at(-2) as Array<{ run_found: number; changed: number }>, { runId: state.run.id, documentIds: [documentId] });
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
       });
     } else if (geoFinalSource) {
@@ -2854,12 +2880,14 @@ export class Store {
   /**
    * Ingest report page facts. Source facts (text layer, images) and vision
    * outcomes come from different stages, so each write only touches its own
-   * columns and never clears the other stage's values.
+   * columns and never clears the other stage's values, except routing facts
+   * (text_layer, scan_class, the encoding words): those belong to one run, so
+   * any write that moves a row to another run clears them unless it sets them.
    */
   async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
     const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
     const vision = rows.filter((row) => row.visionStatus !== undefined);
-    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null);
+    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null || row.mathBits != null);
     for (const batch of batchedRows(source)) {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
@@ -2876,6 +2904,12 @@ export class Store {
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
+            -- Routing facts are a run's own: another run's write clears them (council #467).
+            text_layer = case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end,
+            scan_class = case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end,
+            math_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             text_bytes = excluded.text_bytes,
             word_count = excluded.word_count,
             image_count = excluded.image_count,
@@ -2897,6 +2931,12 @@ export class Store {
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
+            -- Routing facts are a run's own: another run's write clears them (council #467).
+            text_layer = case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end,
+            scan_class = case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end,
+            math_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             vision_status = excluded.vision_status,
             vision_text_bytes = excluded.vision_text_bytes,
             updated_at = now()
@@ -2907,18 +2947,32 @@ export class Store {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
         text_layer: row.textLayer ?? null, scan_class: row.scanClass ?? null,
+        // Doppler's encoding words (migration 0189): all three or none, so one write never mixes two runs' words.
+        ...(row.mathBits != null && row.tableBits != null && row.encodingCounts != null
+          ? { math_bits: row.mathBits, table_bits: row.tableBits, encoding_counts: row.encodingCounts }
+          : { math_bits: null, table_bits: null, encoding_counts: null }),
       }));
       await this.sql`
-        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class)
-        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class
+        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class, math_bits, table_bits, encoding_counts)
+        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class, r.math_bits, r.table_bits, r.encoding_counts
         from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
-          document_id text, page_number integer, run_id text, text_layer text, scan_class text
+          document_id text, page_number integer, run_id text, text_layer text, scan_class text, math_bits bigint, table_bits bigint,
+          encoding_counts bigint
         )
         join documents d on d.id = r.document_id
         on conflict (document_id, page_number) do update
         set run_id = excluded.run_id,
-            text_layer = coalesce(excluded.text_layer, document_page_facts.text_layer),
-            scan_class = coalesce(excluded.scan_class, document_page_facts.scan_class),
+            -- A value the write does not know keeps the stored one only for the same run: another run's routing facts
+            -- describe facts this run did not produce (a reprocess with page facts off, or an older provider), so they are
+            -- cleared. The source and vision writes clear them the same way when they move the row to a new run.
+            text_layer = coalesce(excluded.text_layer, case when document_page_facts.run_id = excluded.run_id then document_page_facts.text_layer end),
+            scan_class = coalesce(excluded.scan_class, case when document_page_facts.run_id = excluded.run_id then document_page_facts.scan_class end),
+            math_bits = case when excluded.encoding_counts is not null then excluded.math_bits
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when excluded.encoding_counts is not null then excluded.table_bits
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when excluded.encoding_counts is not null then excluded.encoding_counts
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             updated_at = now()
       `;
     }

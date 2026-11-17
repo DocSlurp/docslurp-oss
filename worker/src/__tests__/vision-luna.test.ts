@@ -86,7 +86,7 @@ describe("GPT-6 Luna vision profile", () => {
     expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "provider", "reasoning", "stream", "stream_options", "temperature"]);
     // Only the price cap the guard weighed the request at.
     // Pinned to OpenAI and the content-filter retry hosts, never OpenAI Flex; max_price at the route price admits them all.
-    expect(body.provider).toEqual({ only: ["openai", "amazon-bedrock/us-east-1", "azure/us"], ignore: ["openai/flex"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
+    expect(body.provider).toEqual({ only: ["amazon-bedrock/us-east-1", "azure/us"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
     expect(visionMaxPrice(LUNA)).toMatchObject({ prompt: 0.11, completion: 0.55 });
   });
 
@@ -113,15 +113,15 @@ describe("GPT-6 Luna vision profile", () => {
     expect(bodies[0]!.messages[1].content[1].image_url.detail).toBeUndefined();
   });
 
-  it("retries a content-filtered page once on the profile's preferred route, keeps the retry text and sums both calls", async () => {
+  it("retries a content-filtered page once inside its US allowlist, ignoring the filtering host, keeps the retry text and sums both calls", async () => {
     const { bodies, result } = await run(LUNA, undefined, [
-      { provider: "OpenAI", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } },
+      { provider: "Azure", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0, cost: 0.00004 } },
       { provider: "Amazon Bedrock", choices: [{ message: { content: "# Full page" }, finish_reason: "stop" }], usage: { prompt_tokens: 2000, completion_tokens: 600, cost: 0.00055 } },
     ]);
     expect(bodies).toHaveLength(2);
-    expect(bodies[0]!.provider).toEqual({ only: ["openai", "amazon-bedrock/us-east-1", "azure/us"], ignore: ["openai/flex"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
-    // The retry goes to the preferred hosts only (order, no fallbacks), under the same max_price, which admits them.
-    expect(bodies[1]!.provider).toEqual({ order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false, max_price: visionMaxPrice(LUNA) });
+    expect(bodies[0]!.provider).toEqual({ only: ["amazon-bedrock/us-east-1", "azure/us"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(LUNA) });
+    // No separate retry route (its hosts are the old retry hosts): the retry keeps the allowlist and ignores the filtering host.
+    expect(bodies[1]!.provider).toMatchObject({ only: ["amazon-bedrock/us-east-1", "azure/us"], ignore: ["Azure"], max_price: visionMaxPrice(LUNA) });
     expect(result).toMatchObject({ text: "# Full page", finishReason: "stop", inputTokens: 2400, outputTokens: 600, attempts: 2 });
     expect(result.costCents).toBeCloseTo(0.059, 10);
   });
@@ -135,13 +135,13 @@ describe("GPT-6 Luna vision profile", () => {
     expect((await run(LUNA, undefined, [length, ok])).bodies).toHaveLength(2);
   });
 
-  it("retries a content-filtered page for unprofiled models by ignoring the failing provider", async () => {
+  it("retries a content-filtered page for a routing-only profile by ignoring the failing provider", async () => {
     const { bodies, result } = await run("google/gemini-3.1-flash-lite", undefined, [
       { provider: "Google AI Studio", choices: [{ message: { content: "Partial" }, finish_reason: "content_filter" }], usage: { prompt_tokens: 400, completion_tokens: 0 } },
       ok,
     ]);
     expect(bodies).toHaveLength(2);
-    expect(bodies[1]!.provider).toEqual({ ignore: ["Google AI Studio"], max_price: visionMaxPrice("google/gemini-3.1-flash-lite") });
+    expect(bodies[1]!.provider).toMatchObject({ only: ["google-vertex/us", "google-vertex/eu"], ignore: ["Google AI Studio"], max_price: visionMaxPrice("google/gemini-3.1-flash-lite") });
     expect(result.finishReason).toBe("stop");
   });
 });

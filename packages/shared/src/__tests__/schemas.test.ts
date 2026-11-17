@@ -10,6 +10,7 @@ import {
   defaultEmbeddingConfig,
   defaultPipelineFeatures,
   normalizePipelineFeatures,
+  parseStoredPipelineFeatures,
   compilePipelinePlan,
   defaultVisionConfig,
   embeddingProfileCatalog,
@@ -77,11 +78,16 @@ describe("pipelineFeaturesSchema", () => {
   });
 
   it("preserves local vision routing and hosted fallback while enforcing endpoint isolation", () => {
-    const saved = { vision: { model: 'Qwen/Qwen2-VL-2B-Instruct', baseUrl: 'http://127.0.0.1:8000/v1', remoteFallbackModel: 'gpt-4.1-mini' } };
+    const saved = { vision: { model: 'Qwen/Qwen2-VL-2B-Instruct', baseUrl: 'http://127.0.0.1:8000/v1', remoteFallbackModel: 'z-ai/glm-5.3-flash' } };
     const result = normalizePipelineFeatures(saved as unknown as Parameters<typeof normalizePipelineFeatures>[0]);
     expect(result.vision.target).toBe('local');
     expect(new URL(result.vision.modelUri).searchParams.get('baseUrl')).toBe('http://127.0.0.1:8000/v1');
-    expect(result.vision.remoteFallbackModelUri).toBe('llm://openai/gpt-4.1-mini');
+    expect(result.vision.remoteFallbackModelUri).toBe('llm://openrouter/z-ai/glm-5.3-flash');
+    // A stored fallback naming a model refused for having no US or EU host is rejected with a clear reason (strict parse);
+    // the lenient stored-pipeline reader drops it, so the run uses no fallback.
+    expect(() => normalizePipelineFeatures({ vision: { ...saved.vision, remoteFallbackModel: 'gpt-4.1-mini' } } as unknown as Parameters<typeof normalizePipelineFeatures>[0])).toThrow(/stated US or EU hosting region/);
+    expect(parseStoredPipelineFeatures({ vision: { modelUri: 'llm://openrouter/google/gemini-2.5-flash-lite', remoteFallbackModelUri: 'llm://openai/gpt-4.1-mini' } }).vision)
+      .toMatchObject({ modelUri: 'llm://openrouter/openai/gpt-6-luna', remoteFallbackModelUri: null });
     expect(() => normalizePipelineFeatures({ vision: { ...saved.vision, baseUrl: 'http://169.254.169.254' } } as unknown as Parameters<typeof normalizePipelineFeatures>[0])).toThrow();
     expect(saved.vision.model).toBe('Qwen/Qwen2-VL-2B-Instruct');
   });

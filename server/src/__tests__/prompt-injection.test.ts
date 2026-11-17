@@ -42,24 +42,24 @@ describe("evidence blocks", () => {
     expect(tags.size).toBe(20);
   });
 
-  it("keys the evidence tag per org with a server secret, stable within the org", () => {
+  it("keys the evidence tag with a server secret, stable for the same evidence in any org", () => {
     const docs = [{ title: "a.pdf", text: "Shipments rose to 7,215 units.", context: "Page: 3" }];
     vi.stubEnv("EVIDENCE_TAG_KEY", "k".repeat(40));
     resetEvidenceTagKeyForTests();
-    const tag = evidenceNonce(docs, "org-a");
+    const tag = evidenceNonce(docs);
     expect(tag).toMatch(/^[0-9a-f]{32}$/);
     // Same org and evidence: byte-identical blocks, so a follow-up turn can be served from the prompt cache.
-    expect(evidenceNonce(docs, "org-a")).toBe(tag);
+    expect(evidenceNonce(docs)).toBe(tag);
     expect(formatEvidenceBlocks(docs, evidenceTagNonce(docs, "org-a"))).toBe(formatEvidenceBlocks(docs, evidenceTagNonce(docs, "org-a")));
-    // Another org gets another tag for the same evidence: no cross-tenant shared prefix.
-    expect(evidenceNonce(docs, "org-b")).not.toBe(tag);
+    // Not partitioned per org (AGENTS.md): another org's identical evidence gets the same tag and can share the cache.
+    expect(evidenceTagNonce(docs, "org-b")).toBe(tag);
     // Any change to a document, title or context changes the tag.
-    expect(evidenceNonce([{ ...docs[0]!, text: "Shipments rose to 7,216 units." }], "org-a")).not.toBe(tag);
-    expect(evidenceNonce([{ ...docs[0]!, context: "Page: 4" }], "org-a")).not.toBe(tag);
+    expect(evidenceNonce([{ ...docs[0]!, text: "Shipments rose to 7,216 units." }])).not.toBe(tag);
+    expect(evidenceNonce([{ ...docs[0]!, context: "Page: 4" }])).not.toBe(tag);
     // Without the key the tag cannot be computed: a different key gives a different tag for the same input.
     vi.stubEnv("EVIDENCE_TAG_KEY", "z".repeat(40));
     resetEvidenceTagKeyForTests();
-    expect(evidenceNonce(docs, "org-a")).not.toBe(tag);
+    expect(evidenceNonce(docs)).not.toBe(tag);
     vi.unstubAllEnvs();
     resetEvidenceTagKeyForTests();
   });
@@ -109,14 +109,14 @@ describe("evidence blocks", () => {
     vi.stubEnv("BETTER_AUTH_SECRET", "s".repeat(40));
     vi.stubEnv("EVIDENCE_TAG_KEY", "short");
     resetEvidenceTagKeyForTests();
-    const weak = evidenceNonce(docs, "org-a");
+    const weak = evidenceNonce(docs);
     vi.stubEnv("EVIDENCE_TAG_KEY", "");
     resetEvidenceTagKeyForTests();
-    expect(evidenceNonce(docs, "org-a")).toBe(weak); // the short key was ignored: BETTER_AUTH_SECRET was used
+    expect(evidenceNonce(docs)).toBe(weak); // the short key was ignored: BETTER_AUTH_SECRET was used
     vi.stubEnv("EVIDENCE_TAG_KEY", "short");
     vi.stubEnv("NODE_ENV", "production");
     resetEvidenceTagKeyForTests();
-    expect(() => evidenceNonce(docs, "org-a")).toThrow(/at least 32/);
+    expect(() => evidenceNonce(docs)).toThrow(/at least 32/);
     vi.unstubAllEnvs();
     resetEvidenceTagKeyForTests();
   });

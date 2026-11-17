@@ -470,7 +470,7 @@ describe("generator model selection", () => {
     ]);
     expect(chartExportReasoning("llm://openrouter/anthropic/claude-haiku-5.5")).toEqual({ enabled: false });
     // Haiku is a priced, bounded vision catalog model: the worker can weigh and admit it.
-    expect(visionModelTokenPricing("anthropic/claude-haiku-5.5")).toMatchObject({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5 });
+    expect(visionModelTokenPricing("anthropic/claude-haiku-5.5")).toMatchObject({ inputUsdPerMillion: 0.11, outputUsdPerMillion: 0.55 });
     expect(visionImageTokens("anthropic/claude-haiku-5.5", null)).toBe(4_784);
   });
 

@@ -13,7 +13,7 @@
  * Target availability comes from credential presence (OPENROUTER_API_KEY, *_ENDPOINT_URL; runtime.ts buildRuntimeCatalog).
  */
 
-import { readDisableNonFreeSoftware } from "@docslurp/shared";
+import { isDevelopmentEnvSource, readDisableNonFreeSoftware } from "@docslurp/shared";
 
 /** Table candidate gate: `shadow` logs ruled-grid-or-crop decisions and estimates; extraction is unchanged. */
 export type TableGateMode = "off" | "shadow";
@@ -45,6 +45,31 @@ export interface RoutingFlags {
   healthHistoryPath: string | null;
   /** DECISION_LOCAL_SIDECAR_CMD: command of the local decision-model sidecar (default none). */
   localDecisionSidecarCmd: string | null;
+  /** DOCSLURP_ENCODING_FACTS_ROUTING (readEncodingFactsRouting): route by Doppler's math and table encoding facts. */
+  encodingFactsRouting: boolean;
+}
+
+export const ENCODING_FACTS_ROUTING_ENV = "DOCSLURP_ENCODING_FACTS_ROUTING";
+
+/**
+ * DOCSLURP_ENCODING_FACTS_ROUTING=1|true|on or 0|false|off: whether evidence routing reads Doppler's math and table
+ * encoding facts (PageLayoutFacts.encodings; docs/extraction/doppler-page-facts.md "Math and table encodings"). Default on
+ * in development and test (NODE_ENV development, test or empty, outside a service profile), off elsewhere until measured
+ * in production. Anything else keeps the default, with one warning. Off, the facts are still parsed and stored; routing
+ * ignores them.
+ */
+export function readEncodingFactsRouting(env: NodeJS.ProcessEnv = process.env): boolean {
+  const fallback = isDevelopmentEnvSource(env);
+  const value = text(env, ENCODING_FACTS_ROUTING_ENV)?.toLowerCase();
+  if (!value) return fallback;
+  if (value === "1" || value === "true" || value === "on") return true;
+  if (value === "0" || value === "false" || value === "off") return false;
+  const key = `${ENCODING_FACTS_ROUTING_ENV}=${value}`;
+  if (!warned.has(key)) {
+    warned.add(key);
+    console.warn(`[page-router] ignoring unknown ${key}; using ${fallback ? "on" : "off"} (allowed: on, off)`);
+  }
+  return fallback;
 }
 
 export const DEFAULT_LABELER_MODEL = "microsoft/Florence-2-small-ft";
@@ -84,5 +109,6 @@ export function readRoutingFlags(env: NodeJS.ProcessEnv = process.env): RoutingF
     modelPricesPath: text(env, "PAGE_ROUTER_MODEL_PRICES_PATH"),
     healthHistoryPath: text(env, HEALTH_HISTORY_ENV),
     localDecisionSidecarCmd: text(env, "DECISION_LOCAL_SIDECAR_CMD"),
+    encodingFactsRouting: readEncodingFactsRouting(env),
   };
 }

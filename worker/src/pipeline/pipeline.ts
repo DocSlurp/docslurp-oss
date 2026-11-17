@@ -164,6 +164,9 @@ export class WorkflowState {
   readonly staleVectorIds = new Map<string, string[]>();
   pendingPerformance: PerformanceEvent[];
   pendingParserEvaluations: ParserEvaluation[];
+  /** Page extract records and tag merges (pipeline/page-extracts.ts) waiting for the next checkpoint. */
+  pendingPageExtracts: import("./page-extracts.js").PageExtractRow[] = [];
+  pendingPageExtractTags: import("./page-extracts.js").PageExtractTagMerge[] = [];
   /**
    * Document asset ledger writes (db/document-asset-ledger.ts) waiting for the checkpoint that records the documents'
    * Markdown and figure slots: the store writes them after that checkpoint commits, never before.

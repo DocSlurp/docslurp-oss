@@ -293,7 +293,7 @@ export const PAGE_CHARGE_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT
 
 /**
  * Pages a run measured above what admission priced and that no charge covers yet (the database's run_measured_pages,
- * migration 0187): Fast pages of paged documents, and frames of multi-frame images not yet charged as page reads.
+ * migration 0190): Fast pages of paged documents, and frames of multi-frame images not yet charged as page reads.
  */
 export interface RunMeasuredPages { fastPages: number; ocrFrames: number }
 
@@ -425,6 +425,12 @@ export type BillingForecast = {
   searchCreditsPer30d: number;
   chatAnswersLast30d: number;
   chatCreditsPer30d: number;
+  /**
+   * Pages charged in the last 30 days by final class (Text, Scan, Vision): each page counts once per run, in the class
+   * it finally paid, so a Scan page later read by a vision model counts only under Vision. Counts are pages, not billed
+   * units (a long Vision page may bill several units), and a page charged by two runs counts in each.
+   * `ingestCreditsLast30d` is the exact sum of the ingest charges.
+   */
   fastPagesLast30d: number;
   ocrPagesLast30d: number;
   richPagesLast30d: number;

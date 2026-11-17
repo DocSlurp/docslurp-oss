@@ -1,14 +1,17 @@
 # TODO
+- [ ] Doppler #51 follow-ups (2026-11-17): move `worker/doppler.json` to the Doppler release cut from #51's merge (9312e3200 or its merge commit), with source url and sha256; measure `-level full` page facts memory on large tagged documents in the guest (the facts pass keeps its own parses, so expect up to about 1.5–2x the converter's peak on structure-heavy files) before relying on full-level facts at scale; known `--math` limits to review when `DOCSLURP_FIRST_PASS_MATH` is considered: arxiv-1907.11692, arxiv-2409.20242, arxiv-2411.01686.
+- [ ] Walker-parity grids on math runs (council #467): a `--math` batch's facts (`-glyphs`) carry no grid list core can use, so every page with enough rules is `gridsUnknown` and takes the table path. Have the guest (or Doppler) emit facts without `-glyphs` on math runs, for example a separate `pdfpagefacts -level full` pass (byte-identical to a pdftotext run without `-glyphs`; measure its CPU first) or a Doppler option to compute grids before stencil masks become rules, then accept those facts with their walker-parity fields.
+- [ ] Doppler encoding facts follow-ups (2026-11-16): keep `DOCSLURP_ENCODING_FACTS_ROUTING` off in production until the upload estimator and the quote account for encoding reads (`ocr-authorized:encoding-*`, capped by `encodingReadPageCap`) and those reads and the added table routes have been measured there (pages read per document, read reason `encoding`, `encoding-read-capped`). Precision first: on 638 ordinary pages the encodings added 30 reads to 24 base reads, mostly `glyph-outlines`/`type3-bitmap-font` on CVs, forms and annual reports, so those two flags need a stricter test (region size, in-text-flow math context) before production; send Doppler's `mathRegions` and the math report's `mathUncertainRegions` to a region-scoped read once evidence routing has one (whole pages today); plumb `mathUncertainRegions` from the provider result; have the VM guest pass `--page-facts-include mathtables` (`SandboxedPdfJob.pageFacts`) and return page facts; give the v2 page router's probe rows (`routing/probe/doppler-facts.ts`) the encodings.
 - [ ] Parked Modal VMs (compute reuse, #459): hand a session's idle VM to a session waiting at the worker VM cap (park instead of terminate in the budget reaper, and let `createVm`'s wait adopt a parked VM) so capacity pressure does not force a 2 s cold start; consider a full wipe at park time so a crash between park and adoption leaves no previous-document inputs in a parked VM until its lifetime ends (council M3/M4).
 
 - Page basis follow-ups (council, PR #469, 2026-11-17):
-  - Organization-wide measured-page overdraw: every page-basis sum (`run_measured_pages`, migration 0187) is per run, so concurrent runs of one organization each check their own measured pages against the whole balance. Repro: three runs in an organization with 3 credits each measure one DOCX at 500 pages (about 2.5 credits each); none pauses, and together they owe about 7.5 at completion. Sum measured-but-uncharged pages across the organization's active runs (or hold them as reservations like credit leases) without adding a round trip per check.
+  - Organization-wide measured-page overdraw: every page-basis sum (`run_measured_pages`, migration 0190) is per run, so concurrent runs of one organization each check their own measured pages against the whole balance. Repro: three runs in an organization with 3 credits each measure one DOCX at 500 pages (about 2.5 credits each); none pauses, and together they owe about 7.5 at completion. Sum measured-but-uncharged pages across the organization's active runs (or hold them as reservations like credit leases) without adding a round trip per check.
   - The page-task overdraft bound grows with page tasks in flight: each task checks the balance before its read (`authorizeOcrRead`), so the run can go over by up to one batch per concurrent task before the pause lands, the same in-flight bound `worker/src/db/spend-check.ts` documents for checkpoints.
   - Image page equivalents (an uploaded image's decoded area above one page, `billing_pages`) are not in the run-wide measured sum, which prices only Fast pages of paged documents and uncharged image frames; price them there once their billing class is settled.
 
 - Organization isolation follow-ups (council, PR #450, 2026-11-16):
   - Contract step for #451: drop `quarantined_sources` (0101) once no release reads it (now `org_quarantined_sources`, 0184), and its roles.mjs entry.
-  - Source quarantine is per organization since #451, so one hostile file can cost one worker per uploading organization (bounded per org by the teardown breaker, not fleet-wide). Add a fleet-wide signal used for routing only (a hash listed by any org runs elsewhere on a single-use VM in a capped lane, indistinguishable to the uploader) and an alert on distinct orgs per hash and fleet teardowns per hour (council #451 M2).
+  - Source quarantine is per organization since #451, so one hostile file can cost one worker per uploading organization (bounded per org by the teardown breaker, not fleet-wide). Add a fleet-wide signal used for routing only (a hash listed by any org runs elsewhere in a capped lane, indistinguishable to the uploader) and an alert on distinct orgs per hash and fleet teardowns per hour (council #451 M2).
 
 - Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
 
@@ -64,8 +67,9 @@ See [the stage notes](docs/document-summaries.md#summary-tree-section-summaries-
 - [ ] Enable `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` on production (council reviewed in PR #339; batch flag removed) and
   measure `quality=fast` and `quality=auto` 1-page uploads before/after
   (performance/quarantine-latency-2026-11-11/results.md).
-- [ ] Optional hardening (council M1): run the intake inspection in a plain parser session, so a parser-tool exploit never
-  shares a VM with clamd. One document per session already bounds it to the document that ran the exploit.
+- [ ] perf: warm reuse. Let one scanner session (and its restored VM) scan many documents of any run or organization
+  instead of restoring a VM from the snapshot for every document (AGENTS.md, owner 2026-11-17: no per-job compute
+  isolation; the per-document session binding was removed). Measure 1-page upload latency before and after.
 - [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
   update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
 - [ ] Residual after the nested-archive walk (PR #339, council round 4, 2026-11-11): a ZIP or RAR is now found behind up
@@ -78,6 +82,13 @@ See [the stage notes](docs/document-summaries.md#summary-tree-section-summaries-
 - [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
   reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
   the scan beside extraction. Coordinate with the first-pass plan's quarantine precondition.
+
+## Compute reuse follow-ups (owner 2026-11-17: no per-organization, per-run or per-job compute isolation)
+
+- [ ] perf: warm reuse. The Modal parser VM wipes all scratch after every command and the whole job tree before another
+  document's command (`resetVm`, council W #1, W #3, X #7), and wipes a parked VM twice on adoption. Keep only the cleanup
+  disks need (outputs and scratch past a size bound), drop the per-document full wipe and job-root probe, and measure
+  per-command latency before and after.
 
 ## ClamAV definitions in parser VMs (2026-11-06)
 

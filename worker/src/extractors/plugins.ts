@@ -13,15 +13,16 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  * - Fail closed. A named plugin that cannot load is a startup error, and a deployment that asks for the VM extractor
  *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service) without a provider is a startup error. The VM route
  *   never falls back to parsing on the worker host.
- * - A sandboxed PDF provider must isolate every job in a fresh VM or microVM. The worker holds secrets; providers
- *   receive file paths, not credentials, and return only bounded, validated output.
+ * - A sandboxed PDF provider runs every job in a VM or microVM, away from the worker's secrets; a warm VM may serve jobs
+ *   of any run or organization (AGENTS.md). Providers receive file paths, not credentials, and return only bounded,
+ *   validated output.
  * - Plugins get host classes through `host`, so errors and usage they raise are the worker's own types.
  *
  * Contract details: docs/extraction/extractor-plugins.md.
  */
 import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { isDevelopmentEnvironment, normalizeEnvSetting, serviceProfileFromEnv } from "@docslurp/shared";
+import { activeCapabilityPools, capabilityPoolsInitialized, isDevelopmentEnvironment, normalizeEnvSetting, registerServicePoolMember, serviceProfileFromEnv, type CapabilityPoolServiceRegistration, type ServicePoolMember } from "@docslurp/shared";
 import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
@@ -33,12 +34,14 @@ import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
 import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
-import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
-import { settleUnknownGrids } from "../lib/doppler-page-facts-layout.js";
+import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout, sandboxedPdfPageFactsMathRead } from "./sandboxed-pdf-page-facts.js";
+import { settleUnknownGrids, withEncodingRoutes } from "../lib/doppler-page-facts-layout.js";
+import { dopplerPageFactsMode, type DopplerPageFactsFamily } from "../lib/doppler-page-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
 import { validBatchProvider, type SandboxedPdfBatchProvider } from "./sandboxed-pdf-batch.js";
+import { createTextPoolProvider } from "./text-pool.js";
 
 export const EXTRACTOR_PLUGIN_API_VERSION = 1;
 /** The extractor id a registered sandboxed PDF provider serves. */
@@ -48,6 +51,14 @@ export const VM_PDF_EXTRACTOR_ID = "vm-pdf";
 export interface SandboxedPdfJob {
   input: string;
   output: string;
+  /**
+   * The page facts to compute beside the Markdown: Doppler families added to the basic level (`pdftomarkdown
+   * --page-facts-include`, comma-separated), returned as `pageFacts`. Set by the host unless DOCSLURP_DOPPLER_PAGE_FACTS
+   * is off (lib/doppler-page-facts.ts dopplerPageFactsRequest: `mathtables`, the math and table encoding words). A
+   * provider that cannot compute a family returns facts without it (unknown, never zero); a provider that returns no page
+   * facts at all ignores this.
+   */
+  pageFacts?: { include: DopplerPageFactsFamily[] };
   /** Return embedded images beside the Markdown, from the same VM job. Bounds in pixels, 1..4096. */
   embeddedImages?: { minWidth: number; minHeight: number };
   /**
@@ -73,7 +84,7 @@ export interface SandboxedPdfJob {
 
 /**
  * One figure resume (provider `figures.resume`), always for one range: a shard's pages, a gap's pages, or (for an unsharded
- * document) the whole document. Paths are host paths the provider stages into a fresh VM; the host reads nothing of the
+ * document) the whole document. Paths are host paths the provider stages into a VM; the host reads nothing of the
  * source. The answer is a figure outcome like SandboxedPdfResult.figures (`extracted`, `partial` with optional `gaps`
  * inside the range, or `failed` with a telemetry-only reason), and the host validates `dir` exactly like a first pass's
  * folder (no figure file it already stores may come back different: `resume-rewrite`).
@@ -147,6 +158,8 @@ export interface SandboxedPdfResult extends SandboxResult {
    * fact never raises a charge. Validated by the host: unique integers within the document's page count.
    */
   ocrPages?: number[];
+  /** Set by the host: the `text` capability pool member that served the job (capability-pools.ts poolMemberId). */
+  poolMemberId?: string;
   /**
    * Structural page layout from the same VM job (pdf-layout-facts@1, the open walker worker/scripts/pdf_layout_facts.py,
    * page numbers of the whole document). Untrusted: the host parses it with its bounded reader and drops pages outside the
@@ -206,7 +219,7 @@ export interface SandboxedPdfExtractorProvider {
   figures?: {
     producerId: string;
     /**
-     * Finish the images a figure pass left resumable, in a fresh VM (`pdftomarkdown --images-resume` with the stored
+     * Finish the images a figure pass left resumable, in a VM (`pdftomarkdown --images-resume` with the stored
      * manifest only: no figure file goes back into the VM). Optional: without it, resumable documents stay resumable.
      */
     resume?(job: FigureResumeJob, signal?: AbortSignal): Promise<unknown>;
@@ -216,7 +229,7 @@ export interface SandboxedPdfExtractorProvider {
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**
-   * Count a PDF's pages in a fresh VM (the guest's own pdfinfo), for documents whose count intake only estimated (the API never
+   * Count a PDF's pages in a VM (the guest's own pdfinfo), for documents whose count intake only estimated (the API never
    * parses PDFs). The worker records it before any stage uses the count or anything bills; without it a VM deployment refuses
    * such PDFs. `usage` is the VM's provider cost. A count the VM could not make throws an error carrying `pageCountOutcome`
    * (lib/pdf-page-count.ts PdfPageCountOutcome: open-failed, encrypted, limit, malformed, killed, unavailable), so a refused
@@ -282,8 +295,8 @@ export type SandboxedOcrResult = SandboxResult;
 
 /**
  * Job ownership from the stage run context: accounting, fairness caps and placement hints. A provider may run jobs of
- * any organization one after another on a warm unit (compute reuse, AGENTS.md), provided each job gets a workspace that
- * is wiped (or a restarted job process) before the next job, and its results go back only to the job that asked.
+ * any organization one after another on a warm unit (compute reuse, AGENTS.md); its results go back only to the job
+ * that asked.
  */
 export interface SandboxedOcrRunContext {
   tenantKey?: string;
@@ -314,8 +327,8 @@ export interface SandboxedOcrProvider {
 /**
  * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
  * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM, which may be a warm
- * VM shared by jobs of any run and organization (compute reuse, AGENTS.md): nothing of a job may persist on the VM for
- * the next one, and each page's Markdown goes back only to the job that sent it. The VM gets no credentials, no metadata
+ * VM shared by jobs of any run and organization (compute reuse, AGENTS.md): each page's Markdown goes back only to the
+ * job that sent it. The VM gets no credentials, no metadata
  * endpoint and no network beyond the job's own connection.
  */
 export interface PageImageReadJob {
@@ -432,6 +445,10 @@ export interface PageImageReaderProvider {
    * Read the job's pages. Resolves with one result per page it answers (at most one per key) and the provider cost of
    * every VM or request it ran. A rejection that spent compute carries that cost as `pageReaderUsage` (PAGE_READER_USAGE_PROPERTY,
    * read with pageReaderUsageOf); set `ocrRefused: true` when the reader refused the job's input rather than failing to run.
+   * A rejection may carry a job-level `reason` from PAGE_IMAGE_READ_FAILURES: `capacity` (the reader is at its caps) makes
+   * the host send the document's remaining pages in this run to its fallback instead. Set `pageReaderNoCompute: true`
+   * (PAGE_READER_NO_COMPUTE_PROPERTY) only when the job gave way before any compute ran for it; the host then releases the
+   * job's reservation on the organization's daily reader budget.
    * Either way the host keeps the recogniser's text for the job's pages: a page reader never fails a page or document.
    */
   read(job: PageImageReadJob, signal?: AbortSignal): Promise<{ results: PageImageReadResult[]; usage: UsageEvent[] }>;
@@ -439,6 +456,36 @@ export interface PageImageReaderProvider {
 
 /** The property a page reader's rejection carries its incurred usage on (PageImageReaderProvider.read). */
 export const PAGE_READER_USAGE_PROPERTY = "pageReaderUsage";
+
+/**
+ * The property a page reader's rejection sets to `true` when the job gave way before any compute was attributable to it,
+ * across every attempt inside that `read()` call: no VM or server was created (or a create started), no standby was
+ * claimed, no running or booting VM was joined or bound, no hosted request was sent (even one answered 429 or 503), and no
+ * page was sent. Use it only with job-level `reason: "capacity"` and no usage, and never after the job's signal fired.
+ * The host then releases the job's reservation against the organization's daily reader budget instead of settling it,
+ * within a per-organization daily backstop. Set it only when that is certain. A rejection without it, or one that also
+ * carries usage, is charged at no less than its reservation (fail closed).
+ */
+export const PAGE_READER_NO_COMPUTE_PROPERTY = "pageReaderNoCompute";
+
+/**
+ * Whether a page reader rejection asserts that no compute ran for the job: the flag is exactly `true`, the error is not a
+ * refusal of the job's input, and it carries no usage. Anything less is treated as compute that may have run.
+ */
+export function pageReaderGaveWayBeforeCompute(error: unknown): boolean {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return false;
+  const record = error as Record<string, unknown>;
+  if (record[PAGE_READER_NO_COMPUTE_PROPERTY] !== true || record.ocrRefused === true) return false;
+  if (record[PAGE_READER_USAGE_PROPERTY] !== undefined && !(Array.isArray(record[PAGE_READER_USAGE_PROPERTY]) && (record[PAGE_READER_USAGE_PROPERTY] as unknown[]).length === 0)) return false;
+  return record.usage === undefined;
+}
+
+/** The job-level failure reason a page reader rejection carries (`reason`, one of PAGE_IMAGE_READ_FAILURES), or null. */
+export function pageReaderJobFailureOf(error: unknown): PageImageReadFailure | null {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return null;
+  const reason = (error as { reason?: unknown }).reason;
+  return typeof reason === "string" && (PAGE_IMAGE_READ_FAILURES as readonly string[]).includes(reason) ? (reason as PageImageReadFailure) : null;
+}
 
 /** The usage a page reader rejection carries (shape-checked; never throws). A single SandboxRunError `usage` counts too. */
 export function pageReaderUsageOf(error: unknown): UsageEvent[] {
@@ -458,6 +505,14 @@ export interface ExtractorPlugin {
   imageOrientation?: ImageOrientationProvider;
   sandboxedOcr?: SandboxedOcrProvider;
   pageImageReader?: PageImageReaderProvider;
+  /**
+   * The capability pool members this plugin's services serve (@docslurp/shared capability-pools.ts): one per service that
+   * reads customer pages, its `backend` the service's provider `id`, with where it processes pages (stated US or EU
+   * evidence), whether the pool fails over to it automatically, and its measured quality and pages per $1. A service
+   * without a member refuses worker start (its region would be unknown). Several plugins may each register a sandboxed PDF
+   * provider when every one is a `text` member: the text pool then runs them in pool order with automatic failover.
+   */
+  poolMembers?: CapabilityPoolServiceRegistration[];
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
@@ -588,9 +643,16 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     throw new Error(`Extractor plugin API version mismatch: host ${EXTRACTOR_PLUGIN_API_VERSION}`);
   }
   if (!PROVIDER_ID.test(plugin.name ?? "")) throw new Error("Extractor plugin needs a lowercase name");
+  const members = validatePoolMembers(plugin);
   const pdf = plugin.sandboxedPdf;
   if (pdf) {
-    if (sandboxedPdfProvider()) throw new Error("Only one sandboxed PDF extractor provider may be registered");
+    // A second PDF provider only as a text pool member, beside a first that is one too (the pool orders and fails over).
+    const isTextMember = (id: string, list: readonly ServicePoolMember[]) => list.some((member) => member.capability === "text" && member.backend === id);
+    const existing = sandboxedPdfProviders();
+    if (existing.length && !(isTextMember(pdf.id, members) && existing.every((other) => isTextMember(other.id, poolMembers)))) {
+      throw new Error("Only one sandboxed PDF extractor provider may be registered, unless each is a text capability pool member");
+    }
+    if (existing.some((other) => other.id === pdf.id)) throw new Error(`Sandboxed PDF provider ${pdf.id} is registered twice`);
     if (!PROVIDER_ID.test(pdf.id ?? "")) throw new Error("Sandboxed PDF provider needs a lowercase id");
     if (!Number.isSafeInteger(pdf.maxSourceBytes) || pdf.maxSourceBytes < 1) throw new Error("Sandboxed PDF provider needs maxSourceBytes");
     for (const name of ["assertConfigured", "run", "timeoutMs"] as const) {
@@ -649,11 +711,56 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     }
   }
   plugins.push(plugin);
+  poolMembers.push(...members);
+  composite = null;
   if (pdf?.shardProfile) registerShardProfile(pdf.shardProfile.key, pdf.shardProfile.prior);
 }
 
+/** Pool members registered by plugins, in registration order. */
+const poolMembers: ServicePoolMember[] = [];
+
+/** Each registration must name one of this plugin's own services. */
+function validatePoolMembers(plugin: ExtractorPlugin): ServicePoolMember[] {
+  if (plugin.poolMembers === undefined) return [];
+  if (!Array.isArray(plugin.poolMembers)) throw new Error("Extractor plugin poolMembers must be an array");
+  const own: Record<string, string | undefined> = {
+    text: plugin.sandboxedPdf?.id,
+  };
+  const ocrBackends = [plugin.sandboxedOcr?.id, plugin.pageImageReader?.id].filter((id): id is string => !!id);
+  return plugin.poolMembers.map((registration) => {
+    const member = registerServicePoolMember(registration);
+    const ok = member.capability === "ocr" ? ocrBackends.includes(member.backend) : own[member.capability] === member.backend;
+    if (!ok) throw new Error(`Extractor plugin pool member ${member.id} names backend ${member.backend}, which this plugin does not provide for ${member.capability}`);
+    if (poolMembers.some((other) => other.id === member.id)) throw new Error(`Capability pool member ${member.id} is registered twice`);
+    if (poolMembers.some((other) => other.capability === member.capability && other.backend === member.backend)) {
+      throw new Error(`Capability pool backend ${member.backend} is already registered for ${member.capability}`);
+    }
+    return member;
+  });
+}
+
+/** Service pool members registered by plugins (worker lib/capability-pools.ts resolves them into the pools). */
+export function poolServiceMembers(): readonly ServicePoolMember[] {
+  return [...poolMembers];
+}
+
+/** Every registered sandboxed PDF provider, in registration order. */
+export function sandboxedPdfProviders(): SandboxedPdfExtractorProvider[] {
+  return plugins.flatMap((plugin) => (plugin.sandboxedPdf ? [plugin.sandboxedPdf] : []));
+}
+
+let composite: SandboxedPdfExtractorProvider | null = null;
+
+/**
+ * The sandboxed PDF provider: the one registered, or, when several are (each a text pool member), one provider that
+ * runs them in the text pool's order with automatic failover (extractors/text-pool.ts).
+ */
 export function sandboxedPdfProvider(): SandboxedPdfExtractorProvider | null {
-  return plugins.find((plugin) => plugin.sandboxedPdf)?.sandboxedPdf ?? null;
+  const providers = sandboxedPdfProviders();
+  if (providers.length <= 1) return providers[0] ?? null;
+  // The composite reads the pool order at call time; it is built once and orders its members only after worker startup
+  // resolved the pools (before that, startup checks see the first provider's features).
+  return composite ??= createTextPoolProvider(providers, () => (capabilityPoolsInitialized() ? activeCapabilityPools().text : null));
 }
 
 /** The provider, or a refusal: the VM route never falls back to host parsing. */
@@ -854,7 +961,13 @@ function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
       base.set(page, { ...UNKNOWN_PAGE });
       filled += 1;
     }
-    const { layout, fromFacts, unknown } = settleUnknownGrids(base, facts);
+    const { layout: gridsSettled, fromFacts, unknown } = settleUnknownGrids(base, facts);
+    // Doppler's math and table encodings for each page (absent where unknown), only in DOCSLURP_DOPPLER_PAGE_FACTS=use:
+    // `store` never steers routing. classify-route then reads them only with DOCSLURP_ENCODING_FACTS_ROUTING on, and they
+    // can only add table routes and reads.
+    const { layout } = dopplerPageFactsMode() === "use"
+      ? withEncodingRoutes(gridsSettled, facts, { mathRead: sandboxedPdfPageFactsMathRead(job) })
+      : { layout: gridsSettled };
     settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts, unknown, filled, walker: walkerPages(reported) };
   }
   settledLayouts.set(job, settled);
@@ -915,6 +1028,19 @@ export function sandboxedPdfFigures(job: SandboxedPdfJob): SandboxedPdfFigureOut
 }
 
 /** The validated pages a finished job reported it OCR'd, or undefined when the provider did not say. */
+const reportedPoolMembers = new WeakMap<SandboxedPdfJob, string>();
+
+/** Record the text pool member that served `job` (the runner, after accepting its result). */
+export function noteSandboxedPdfPoolMember(job: SandboxedPdfJob, memberId: string | null | undefined): void {
+  if (memberId) reportedPoolMembers.set(job, memberId);
+  else reportedPoolMembers.delete(job);
+}
+
+/** The text pool member id (capability-pools.ts poolMemberId) that converted `job`'s pages, for per-page records. */
+export function sandboxedPdfPoolMember(job: SandboxedPdfJob): string | undefined {
+  return reportedPoolMembers.get(job);
+}
+
 export function sandboxedPdfOcrPages(job: SandboxedPdfJob): number[] | undefined {
   return reportedOcrPages.get(job);
 }
@@ -1054,5 +1180,7 @@ function dopplerConverterInstalled(env: NodeJS.ProcessEnv): boolean {
 /** Test hook. */
 export function resetExtractorPluginsForTest(): void {
   plugins.length = 0;
+  poolMembers.length = 0;
+  composite = null;
   loadedFrom = undefined;
 }

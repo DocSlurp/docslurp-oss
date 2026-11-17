@@ -384,9 +384,10 @@ Measured on the parser-VM shape, in three separate sandboxes (`worker-startup.mj
     as the guest user with the same flag, then chown the directory to root and mount it read-only.
   - **Verified:** a test runs the guest on a prepared read-only mount (`unshare`) and checks, from Node's own
     compile-cache log, that the cached bundle was accepted in both the parent and the worker.
-  - **Deployment requirement (council r11 I3).** The in-guest check stops one run leaving compiled code for the next,
-    and no more. Use the cache only with **one VM per job**, or with the cache on a **hypervisor-level read-only disk or
-    image layer**, and **never under a parent directory the guest can write**. The check cannot cover three cases:
+  - **Deployment note (council r11 I3).** The in-guest check stops one run leaving compiled code for the next, and no
+    more. Prefer the cache on a read-only disk or image layer, never under a parent directory the guest can write. A VM
+    may still serve many jobs: cross-job residue on shared compute is accepted (AGENTS.md, owner 2026-11-17). The check
+    cannot cover three cases:
     - a root guest in a long-lived VM could remount the cache read-write;
     - a read-only alias of a path that is still writable elsewhere in the VM passes the probe;
     - concurrent runs under a writable parent can swap the directory between the check and the load.

@@ -3685,6 +3685,49 @@ export const documentAssets = pgTable("document_assets", {
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
+/**
+ * Page extract records (migration 0188): how each page's text was produced, one row per (document, page, run, pass).
+ * Labels only; closed vocabularies and bounds are CHECK constraints in the migration (packages/shared page-extracts.ts).
+ */
+export const documentPageExtracts = pgTable("document_page_extracts", {
+  documentId: text("document_id").notNull(),
+  orgId: text("org_id").notNull(),
+  projectId: text("project_id").notNull(),
+  runId: text("run_id").notNull(),
+  pageNumber: integer("page_number").notNull(),
+  pass: text().notNull(),
+  method: text().notNull(),
+  engine: text(),
+  memberId: text("member_id"),
+  region: text(),
+  billedClass: text("billed_class"),
+  tags: text().array().default(sql`'{}'`).notNull(),
+  confidence: real(),
+  plausibility: real(),
+  textBytes: integer("text_bytes"),
+  finishReason: text("finish_reason"),
+  durationMs: integer("duration_ms"),
+  isFinal: boolean("is_final").default(false).notNull(),
+  supersededByPass: text("superseded_by_pass"),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.documentId, table.pageNumber, table.runId, table.pass], name: "document_page_extracts_pkey" }),
+  foreignKey({
+    columns: [table.documentId, table.projectId, table.orgId],
+    foreignColumns: [documents.id, documents.projectId, documents.orgId],
+    name: "document_page_extracts_document_id_fkey",
+  }).onDelete("cascade").onUpdate("cascade"),
+  foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "document_page_extracts_org_id_fkey" }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.runId, table.projectId, table.orgId],
+    foreignColumns: [projectRuns.id, projectRuns.projectId, projectRuns.orgId],
+    name: "document_page_extracts_run_scope_fkey",
+  }).onDelete("cascade"),
+  index("document_page_extracts_run_idx").on(table.runId),
+  uniqueIndex("document_page_extracts_one_final_idx").on(table.documentId, table.pageNumber).where(sql`is_final`),
+]);
+
 /** Whether a document's Markdown is committed and how far its images got (migration 0141); one row per document. */
 export const documentExtractionLevels = pgTable("document_extraction_levels", {
   documentId: text("document_id").primaryKey().notNull(),

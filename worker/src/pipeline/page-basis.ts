@@ -32,7 +32,7 @@ export interface PageBasisRun {
 
 /**
  * What the run measured above admission's priced counts and no charge covers yet, over every document of the run except one
- * (the database's run_measured_pages, migration 0187), plus that one document's charged pages.
+ * (the database's run_measured_pages, migration 0190), plus that one document's charged pages.
  */
 export interface RunMeasurements extends RunMeasuredPages {
   /** Distinct pages of the excluded document a page-read charge already covers. */

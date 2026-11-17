@@ -151,7 +151,7 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
     return row.billingPages;
   }
 
-  /** The one run-wide sum, by run_measured_pages' rules (migration 0187). */
+  /** The one run-wide sum, by run_measured_pages' rules (migration 0190). */
   async runMeasurements(runId: string, excludeDocumentId: string, _readMetrics: readonly string[]): Promise<RunMeasurements> {
     let fastPages = 0;
     let ocrFrames = 0;
