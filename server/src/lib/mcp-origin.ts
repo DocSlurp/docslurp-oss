@@ -1,3 +1,7 @@
+// Load the project .env first: a host application checks these origins at startup, and a value
+// that only arrived later (from .env) would not be the one it checked.
+import "../env.js";
+
 /** Canonical public URLs never derive their origin from untrusted Host headers. */
 export function mcpOrigin(_requestUrl: string): string {
   const configured = process.env.MCP_PUBLIC_URL || process.env.API_URL || process.env.APP_URL || process.env.BETTER_AUTH_URL;
