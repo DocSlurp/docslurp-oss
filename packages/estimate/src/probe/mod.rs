@@ -11,7 +11,7 @@ mod office;
 pub mod layout;
 mod pdf;
 pub mod cost_route;
-pub use pdf::{layout_pages, LayoutImage, LayoutPage};
+pub use pdf::{layout_pages, take_page_stats, LayoutImage, LayoutPage, PageStat};
 pub use pdf::detail::{Options as DetailOptions, Session as DetailSession};
 pub use pdf::range::{RangeSession,Request as RangeRequest};
 
@@ -152,7 +152,24 @@ pub struct PdfProfile {
     /// Structural classes: decorative, picture, scan-like, unknown.
     pub image_region_classes: [u32; 4],
     pub repeated_image_placements: u32,
+    /// How math and tables are encoded on the sampled pages (`PDF_PAGE_ENCODING_BITS`): each distinct page mask and the
+    /// sampled pages with it, by mask. A histogram, so no page order and never more entries than pages.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub page_encodings: Option<Vec<(u16, u32)>>,
+    /// Structure-tree counts over the whole document: /Formula and /Table elements, and formulas whose source is
+    /// recoverable; `tagged_truncated` when the bounded walk stopped early (the counts are then lower bounds).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_formulas: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_tables: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_math_sources: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tagged_truncated: Option<bool>,
 }
+
+/// The per-page stat counts, in packing order (`PDF_PAGE_STAT_COUNTS` in `@docslurp/shared`).
+pub const PAGE_STAT_COUNTS: [&str; 8] = ["words", "glyphs", "mathGlyphs", "images", "pathOperations", "rules", "outlineClusters", "stripImages"];
 
 /// Facts about an Office or EPUB package.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -73,6 +73,10 @@ pub struct Rules {
     pub page_equivalents: PageEquivalentRules,
     pub extraction: ExtractionLimits,
     pub layout: LayoutRules,
+    pub page_encoding: serde_json::Value,
+    /// `page_encoding`, read (`PageEncodingRules::from_value`).
+    #[serde(skip)]
+    pub encoding: PageEncodingRules,
     pub revision: String,
 }
 
@@ -94,6 +98,120 @@ pub struct LayoutRules {
     pub coverage_raster: u32,
     pub max_rules_per_page: u32,
     pub max_words_per_page: u32,
+}
+
+/// Bit positions of a page's encoding mask (`PDF_PAGE_ENCODING_BITS` in `@docslurp/shared`).
+#[derive(Debug, Clone, Default)]
+pub struct PageEncodingBits {
+    pub math_font: u8,
+    pub stacked_math: u8,
+    pub math_source: u8,
+    pub actual_text: u8,
+    pub formula_strip: u8,
+    pub glyph_outlines: u8,
+    pub type3_bitmap_font: u8,
+    pub unmapped_math_font: u8,
+    pub rule_grid: u8,
+    pub horizontal_rule_table: u8,
+    pub tagged_table: u8,
+    pub tagged_formula: u8,
+    pub table_image: u8,
+    pub math_grid: u8,
+    pub partial: u8,
+}
+
+/// How math and tables are encoded on a page: the mask's bits, the per-page stat counts and the thresholds
+/// (`PDF_PAGE_ENCODING_RULES` in `@docslurp/shared`). Read from the rules' `pageEncoding` object by name (smaller in
+/// the module than a derived deserializer); every key must be known and present.
+#[derive(Debug, Clone, Default)]
+pub struct PageEncodingRules {
+    pub bits: PageEncodingBits,
+    pub stat_counts: Vec<String>,
+    pub strip_min_height_pt: f64,
+    pub strip_max_height_pt: f64,
+    pub strip_min_aspect: f64,
+    pub strip_max_page_share: f64,
+    pub strip_max_width_share: f64,
+    pub strip_min_page_chars: f64,
+    pub outline_gap_pt: f64,
+    pub outline_max_side_pt: f64,
+    pub outline_min_curves: u32,
+    pub outline_min_curves_per_path: u32,
+    pub outline_min_clusters: u32,
+    pub stacked_min_baseline_em: f64,
+    pub stacked_max_baseline_em: f64,
+    pub fraction_bar_max_length_pt: f64,
+    pub fraction_bar_reach_em: f64,
+    pub rule_table_min_rules: u32,
+    pub rule_table_min_rule_length_pt: f64,
+    pub rule_table_end_tolerance_pt: f64,
+    pub table_image_min_height_pt: f64,
+    pub table_image_min_page_share: f64,
+    pub table_image_max_page_share: f64,
+    pub table_image_min_width_share: f64,
+    pub table_image_min_aspect: f64,
+    pub table_image_max_aspect: f64,
+    pub table_image_min_page_words: f64,
+    pub struct_max_elements: u32,
+    pub struct_max_depth: u32,
+}
+
+impl PageEncodingRules {
+    fn from_value(value: &serde_json::Value) -> Self {
+        let object = value.as_object().expect("pageEncoding is an object");
+        let bits = object.get("bits").and_then(serde_json::Value::as_object).expect("pageEncoding.bits");
+        let number = |key: &str| object.get(key).and_then(serde_json::Value::as_f64).unwrap_or_else(|| panic!("pageEncoding.{key}"));
+        let bit = |key: &str| bits.get(key).and_then(serde_json::Value::as_u64).filter(|bit| *bit < 16).unwrap_or_else(|| panic!("pageEncoding.bits.{key}")) as u8;
+        assert_eq!(bits.len(), 15, "pageEncoding.bits has unknown or missing bits");
+        assert_eq!(object.len(), 29, "pageEncoding has unknown or missing keys");
+        Self {
+            bits: PageEncodingBits {
+                math_font: bit("mathFont"),
+                stacked_math: bit("stackedMath"),
+                math_source: bit("mathSource"),
+                actual_text: bit("actualText"),
+                formula_strip: bit("formulaStrip"),
+                glyph_outlines: bit("glyphOutlines"),
+                type3_bitmap_font: bit("type3BitmapFont"),
+                unmapped_math_font: bit("unmappedMathFont"),
+                rule_grid: bit("ruleGrid"),
+                horizontal_rule_table: bit("horizontalRuleTable"),
+                tagged_table: bit("taggedTable"),
+                tagged_formula: bit("taggedFormula"),
+                table_image: bit("tableImage"),
+                math_grid: bit("mathGrid"),
+                partial: bit("partial"),
+            },
+            stat_counts: object.get("statCounts").and_then(serde_json::Value::as_array).expect("pageEncoding.statCounts").iter().filter_map(|name| name.as_str().map(str::to_string)).collect(),
+            strip_min_height_pt: number("stripMinHeightPt"),
+            strip_max_height_pt: number("stripMaxHeightPt"),
+            strip_min_aspect: number("stripMinAspect"),
+            strip_max_page_share: number("stripMaxPageShare"),
+            strip_max_width_share: number("stripMaxWidthShare"),
+            strip_min_page_chars: number("stripMinPageChars"),
+            outline_gap_pt: number("outlineGapPt"),
+            outline_max_side_pt: number("outlineMaxSidePt"),
+            outline_min_curves: number("outlineMinCurves") as u32,
+            outline_min_curves_per_path: number("outlineMinCurvesPerPath") as u32,
+            outline_min_clusters: number("outlineMinClusters") as u32,
+            stacked_min_baseline_em: number("stackedMinBaselineEm"),
+            stacked_max_baseline_em: number("stackedMaxBaselineEm"),
+            fraction_bar_max_length_pt: number("fractionBarMaxLengthPt"),
+            fraction_bar_reach_em: number("fractionBarReachEm"),
+            rule_table_min_rules: number("ruleTableMinRules") as u32,
+            rule_table_min_rule_length_pt: number("ruleTableMinRuleLengthPt"),
+            rule_table_end_tolerance_pt: number("ruleTableEndTolerancePt"),
+            table_image_min_height_pt: number("tableImageMinHeightPt"),
+            table_image_min_page_share: number("tableImageMinPageShare"),
+            table_image_max_page_share: number("tableImageMaxPageShare"),
+            table_image_min_width_share: number("tableImageMinWidthShare"),
+            table_image_min_aspect: number("tableImageMinAspect"),
+            table_image_max_aspect: number("tableImageMaxAspect"),
+            table_image_min_page_words: number("tableImageMinPageWords"),
+            struct_max_elements: number("structMaxElements") as u32,
+            struct_max_depth: number("structMaxDepth") as u32,
+        }
+    }
 }
 
 /// The page-equivalent rule billing measures with: area against a standard page, capped per page; text by the text rule.
@@ -141,12 +259,14 @@ impl Rules {
     pub fn bundled() -> &'static Rules {
         static RULES: OnceLock<Rules> = OnceLock::new();
         RULES.get_or_init(|| {
-            let rules: Rules = serde_json::from_str(BUNDLED).expect("bundled profiler-rules.json is valid");
+            let mut rules: Rules = serde_json::from_str(BUNDLED).expect("bundled profiler-rules.json is valid");
+            rules.encoding = PageEncodingRules::from_value(&rules.page_encoding);
             assert_eq!(rules.profile_schema, PROFILE_SCHEMA, "profiler-rules.json is for another profile schema");
             assert_eq!(rules.schema, 1, "profiler-rules.json has another rules schema");
             assert!(rules.revision.len() == 64 && rules.revision.bytes().all(|byte| byte.is_ascii_hexdigit()), "profiler-rules.json revision");
             assert_eq!(rules.words_per_page_buckets.len(), crate::probe::WORDS_BUCKETS, "words-per-page buckets");
             assert_eq!(rules.image_coverage_buckets.len(), crate::probe::COVERAGE_BUCKETS, "image coverage buckets");
+            assert_eq!(rules.encoding.stat_counts, crate::probe::PAGE_STAT_COUNTS, "page stat counts order");
             rules
         })
     }

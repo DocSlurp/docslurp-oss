@@ -272,6 +272,12 @@ export interface SandboxedOcrJob {
    * uploaded image the worker ever decodes (visual indexing). Absent or null: none.
    */
   rendition?: { maxLongEdge: number; maxBytes: number } | null;
+  /**
+   * A PDF's shape from structure the worker measured (its walked page count against the pages whose extracted text has no
+   * words), never document metadata: `scanned` when every page needs OCR, `mixed` when only some do. Providers may use it
+   * to pick a calibrated host; it never changes what is read.
+   */
+  pdfShape?: "scanned" | "mixed";
 }
 
 /** What a sandboxed OCR run returns: the command result. The host reads and validates `job.output` itself. */
@@ -496,6 +502,12 @@ export interface ExtractorPluginHost {
   /** Bounded, content-free operational observations; unavailable storage refuses automatic host selection. */
   computeObservations(profileIds: readonly string[]): Promise<import("@docslurp/shared").ComputeObservations>;
   computeAllocationAdmission: import("@docslurp/shared").ComputeAllocationAdmission;
+  /**
+   * Fleet-wide job admission with per-organization fairness (migration 0186): a provider whose hosts or reader VMs are
+   * shared by several workers takes a ticket here before using a slot, so its caps hold across the fleet, not per process.
+   * Unbound storage rejects (fail closed).
+   */
+  computeJobAdmission: import("@docslurp/shared").ComputeJobAdmission;
   authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
   /** The figure outcomes this core accepts: a provider reports `partial` (exit 5, folder kept) only when it is listed. */
   figureOutcomes: readonly ("extracted" | "partial" | "failed")[];
@@ -506,6 +518,12 @@ let documentOwnersLookup: DocumentOwnersLookup | undefined;
 let computeObservationsLookup: ExtractorPluginHost["computeObservations"] | undefined;
 let allocationAdmission: ExtractorPluginHost["computeAllocationAdmission"] | undefined;
 export function setExtractorComputeAllocationAdmission(admission: ExtractorPluginHost["computeAllocationAdmission"] | undefined): void { allocationAdmission = admission; }
+let jobAdmission: ExtractorPluginHost["computeJobAdmission"] | undefined;
+export function setExtractorComputeJobAdmission(admission: ExtractorPluginHost["computeJobAdmission"] | undefined): void { jobAdmission = admission; }
+function requireJobAdmission(): ExtractorPluginHost["computeJobAdmission"] {
+  if (!jobAdmission) throw new SandboxRunError("Compute job admission is not bound in this worker");
+  return jobAdmission;
+}
 function requireAllocationAdmission(): ExtractorPluginHost["computeAllocationAdmission"] {
   if (!allocationAdmission) throw new SandboxRunError("Compute allocation admission is not bound in this worker");
   return allocationAdmission;
@@ -555,6 +573,13 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
       allocated: async (...args) => requireAllocationAdmission().allocated(...args),
       release: async (...args) => requireAllocationAdmission().release(...args),
       unreleased: async (...args) => requireAllocationAdmission().unreleased(...args),
+    },
+    computeJobAdmission: {
+      register: async (...args) => requireJobAdmission().register(...args),
+      admit: async (...args) => requireJobAdmission().admit(...args),
+      renew: async (...args) => requireJobAdmission().renew(...args),
+      release: async (...args) => requireJobAdmission().release(...args),
+      demand: async (...args) => requireJobAdmission().demand(...args),
     },
     authorizeComputeCohort,
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,

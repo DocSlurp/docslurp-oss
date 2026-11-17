@@ -112,6 +112,11 @@ export type Estimator = {
   rules(): Record<string, unknown> & { profileSchema: number; pageRasterRouting: Record<string, number>; layout: Record<string, number> };
   readPlan(file: FileMeta): ReadPlan;
   profile(file: FileMeta, head: Uint8Array, tail?: Uint8Array): FileProfile;
+  /**
+   * `profile`, plus a PDF's per-page stat stream as JSONL (one `{ page, mask, counts }` object per sampled page; see
+   * `PDF_PAGE_ENCODING_BITS` and `PDF_PAGE_STAT_COUNTS` in `@docslurp/shared`). Local output, never the profile.
+   */
+  profileWithPageStats(file: FileMeta, head: Uint8Array, tail?: Uint8Array): { profile: FileProfile; pageStats: string };
   profileBlob(blob: Blob, name?: string): Promise<FileProfile>;
   /** Local PDF evidence through bounded range reads, up to 2 GiB. */
   profileJsonl(blob: Blob, options?: PageProfileOptions): AsyncGenerator<string>;
