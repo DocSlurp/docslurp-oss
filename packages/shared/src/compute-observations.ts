@@ -104,4 +104,11 @@ export interface ComputeAllocationAdmission {
   allocated(fleetId: string, reservationId: string, providerId: string): Promise<void>;
   /** Only after definite non-creation or provider-confirmed deletion. Timeouts and uncertain responses MUST retain the reservation. */
   release(fleetId: string, reservationId: string, reason: ComputeAllocationReleaseReason): Promise<void>;
+  /**
+   * Unreleased reservations of the fleet older than `minAgeSeconds`, oldest first (at most 200): what a reconciler checks
+   * against the provider after a restart, a lost launch response or a missed release. Content-free ids only.
+   */
+  unreleased(fleetId: string, minAgeSeconds: number): Promise<ComputeAllocationPending[]>;
 }
+
+export interface ComputeAllocationPending { reservationId: string; providerId: string | null; reservedAt: string }

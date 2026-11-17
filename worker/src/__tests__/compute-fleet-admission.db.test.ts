@@ -56,6 +56,19 @@ describe("durable compute fleet admission",()=>{
     expect(count.n).toBe(2);
   });
 
+  it("lists only this fleet's unreleased reservations past the minimum age, for reconciliation",async()=>{
+    const f=await fleet(3), other=await fleet(1), a=randomUUID(), b=randomUUID(), c=randomUUID(), d=randomUUID();
+    await asRole("docslurp_worker",async()=>{
+      await api().reserve(f,a); await api().reserve(f,b); await api().reserve(f,c); await api().reserve(other,d);
+      await api().allocated(f,a,"i-a");
+      await api().release(f,c,"not-created");
+      expect(await api().unreleased(f,3600)).toEqual([]);
+      const pending=await api().unreleased(f,0);
+      expect(pending.map((p)=>[p.reservationId,p.providerId]).sort()).toEqual([[a,"i-a"],[b,null]].sort());
+      await expect(api().unreleased("bad fleet",0)).rejects.toThrow(/Invalid/);
+    });
+  });
+
   it("records exact allocation identity and keeps released tombstones immutable",async()=>{
     const f=await fleet(1),id=randomUUID();await api().reserve(f,id);
     await asRole("docslurp_worker",async()=>{

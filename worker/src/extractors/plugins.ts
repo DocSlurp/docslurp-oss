@@ -550,6 +550,7 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
       reserve: async (...args) => requireAllocationAdmission().reserve(...args),
       allocated: async (...args) => requireAllocationAdmission().allocated(...args),
       release: async (...args) => requireAllocationAdmission().release(...args),
+      unreleased: async (...args) => requireAllocationAdmission().unreleased(...args),
     },
     authorizeComputeCohort,
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,
