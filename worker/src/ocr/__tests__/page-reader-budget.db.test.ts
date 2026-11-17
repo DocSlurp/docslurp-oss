@@ -48,3 +48,24 @@ it("keeps an unsettled reservation for the day and ignores earlier days", async 
   // A cap of 0 sends nothing.
   expect((await budget.admit({ orgId: "org-z", reserveCents: 0, capCents: 0 })).admitted).toBe(false);
 });
+
+it("releases only the organization's own unsettled, cost-free ticket", async () => {
+  const budget = new PostgresPageReaderOrgBudget(sql);
+  const mine = await budget.admit({ orgId: "org-a", reserveCents: 40, capCents: 100 });
+  const theirs = await budget.admit({ orgId: "org-b", reserveCents: 40, capCents: 100 });
+  const settled = await budget.admit({ orgId: "org-a", reserveCents: 30, capCents: 100 });
+  if (!mine.admitted || !theirs.admitted || !settled.admitted) throw new Error("not admitted");
+  // Another organization's ticket, an unknown ticket and an empty scope are refused.
+  expect(await budget.releaseUnused(theirs.ticket, "org-a")).toBe(false);
+  expect(await budget.releaseUnused("no-such-ticket", "org-a")).toBe(false);
+  expect(await budget.releaseUnused(mine.ticket, "")).toBe(false);
+  expect(await budget.committedCents("org-b")).toBe(40);
+  // A ticket already settled (another job's outcome) keeps its cost.
+  await budget.settle(settled.ticket, 12);
+  expect(await budget.releaseUnused(settled.ticket, "org-a")).toBe(false);
+  expect(await budget.committedCents("org-a")).toBe(52);
+  // The organization's own open ticket goes back to 0, once.
+  expect(await budget.releaseUnused(mine.ticket, "org-a")).toBe(true);
+  expect(await budget.releaseUnused(mine.ticket, "org-a")).toBe(false);
+  expect(await budget.committedCents("org-a")).toBe(12);
+});

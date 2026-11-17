@@ -21,6 +21,8 @@ import { priceAiUsageEvent } from "@docslurp/shared";
 import {
   PAGE_IMAGE_READ_FAILURES,
   pageImageReaderProvider,
+  pageReaderGaveWayBeforeCompute,
+  pageReaderJobFailureOf,
   pageReaderUsageOf,
   type PageImageReadFailure,
   type PageImageReadJob,
@@ -50,7 +52,10 @@ export interface PageReaderSummary {
   empty: number;
   /** Pages sent but not read, by reason (provider failures, `job-failed`, `job-refused`, `invalid-response`, `missing`). */
   failed: Record<string, number>;
-  /** Candidate pages never sent, by reason (`no-scope`, `budget`, `cost-cap`, `org-daily-cost-cap`, `budget-ledger-unavailable`, `image-refused`). */
+  /**
+   * Candidate pages never sent, by reason (`no-scope`, `budget`, `cost-cap`, `org-daily-cost-cap`, `budget-ledger-unavailable`,
+   * `image-refused`, `reader-capacity`: the reader gave way at its capacity earlier for this document in this run).
+   */
   skipped: Record<string, number>;
   jobs: number;
   inputTokens: number;
@@ -88,6 +93,26 @@ export function stripControlCharacters(text: string): string {
  * document's OCR batches and vision reads). Keyed by the run's usage ledger, so it lives exactly as long as the activity's state.
  */
 const pagesSent = new WeakMap<object, Map<string, number>>();
+
+/**
+ * Documents whose reader job failed with `capacity` in this run state, per provider: their remaining pages go to the
+ * caller's fallback without another job, so one document cannot set off a give-way per page batch. Keyed like pagesSent.
+ */
+const capacityStopped = new WeakMap<object, Set<string>>();
+
+function capacityKey(provider: PageImageReaderProvider, documentId: string): string {
+  return `${provider.id}\u0000${documentId}`;
+}
+
+function readerCapacityStopped(ledger: object, provider: PageImageReaderProvider, documentId: string): boolean {
+  return capacityStopped.get(ledger)?.has(capacityKey(provider, documentId)) === true;
+}
+
+function stopReaderForCapacity(ledger: object, provider: PageImageReaderProvider, documentId: string): void {
+  let stopped = capacityStopped.get(ledger);
+  if (!stopped) capacityStopped.set(ledger, (stopped = new Set()));
+  stopped.add(capacityKey(provider, documentId));
+}
 
 function bump(map: Record<string, number>, key: string, by = 1): void {
   if (by > 0) map[key] = (map[key] ?? 0) + by;
@@ -221,7 +246,7 @@ export function pageReaderPagesRemaining(ledger: object, documentId: string, max
 }
 
 /** Skip reasons after which no further job of this document (or organization) can be sent now. */
-export const PAGE_READER_STOP_REASONS = ["no-scope", "privacy", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable", "no-cost-estimate"] as const;
+export const PAGE_READER_STOP_REASONS = ["no-scope", "privacy", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable", "no-cost-estimate", "reader-capacity"] as const;
 
 /** One page image the host sends to the reader. */
 export interface PageImageInput {
@@ -278,6 +303,12 @@ export async function readPageImagesWithProvider(
     console.warn(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the project's privacy mode admits only a registered private reader`);
     return logSummary(summary, ctx, use);
   }
+  // The reader gave way at its capacity for this document earlier in the run: its pages go to the fallback, no new job.
+  if (readerCapacityStopped(ctx.state.usageLedger, provider, ctx.documentId)) {
+    bump(summary.skipped, "reader-capacity", pages.length);
+    console.warn(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the reader gave way at its capacity earlier in this run`);
+    return logSummary(summary, ctx, use);
+  }
   const scope = { orgId: run.orgId, runId: run.id };
   let sent = pagesSent.get(ctx.state.usageLedger);
   if (!sent) pagesSent.set(ctx.state.usageLedger, (sent = new Map()));
@@ -311,6 +342,12 @@ export async function readPageImagesWithProvider(
   for (let start = 0; start < ready.length; start += provider.maxPagesPerJob) {
     ctx.signal?.throwIfAborted();
     const chunk = ready.slice(start, start + provider.maxPagesPerJob);
+    if (readerCapacityStopped(ctx.state.usageLedger, provider, ctx.documentId)) {
+      bump(summary.skipped, "reader-capacity", ready.length - start);
+      console.warn(`${use.logTag} stopped document=${ctx.documentId}: the reader gave way at its capacity; ${ready.length - start} pages keep their fallback`);
+      release(sent, ctx.documentId, ready.length - start);
+      break;
+    }
     if (isCostCapExceeded(ctx.state as WorkflowState)) {
       bump(summary.skipped, "cost-cap", ready.length - start);
       console.warn(`${use.logTag} stopped document=${ctx.documentId}: run cost cap reached`);
@@ -330,6 +367,9 @@ export async function readPageImagesWithProvider(
     // A job that throws may have run a VM it could not report (a lease that failed while booting, an abort): it keeps at
     // least its reservation, so cancelling jobs never releases spend the ledger did not see.
     let jobFailed = true;
+    // Set only when the provider asserted the job gave way before any compute ran and it carried no cost: the ticket is
+    // released (settled at 0) instead. Anything unclear keeps the charge above.
+    let gaveWayBeforeCompute = false;
     try {
       const byKey = new Map<string, PageImageInput>();
       const job: PageImageReadJob = { scope: { ...scope }, pages: [], ...(use.requireReady ? { requireReady: true } : {}) };
@@ -348,7 +388,10 @@ export async function readPageImagesWithProvider(
         jobCostCents += tokens.costCents;
         logAiUsage(provider, tokens, summary, use.metric);
         if (ctx.signal?.aborted) throw error;
-        const reason = jobFailureReason(error);
+        const capacity = pageReaderJobFailureOf(error) === "capacity";
+        if (capacity) stopReaderForCapacity(ctx.state.usageLedger, provider, ctx.documentId);
+        gaveWayBeforeCompute = capacity && pageReaderGaveWayBeforeCompute(error) && tokens.costCents === 0;
+        const reason = capacity ? "capacity" : jobFailureReason(error);
         bump(summary.failed, reason, chunk.length);
         console.warn(`${use.logTag} job failed document=${ctx.documentId} pages=${chunk.map((page) => page.pageNumber).join(",")} reason=${reason}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
         continue;
@@ -392,7 +435,9 @@ export async function readPageImagesWithProvider(
         summary.replaced += 1;
       }
     } finally {
-      await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents, use);
+      if (!(jobFailed && gaveWayBeforeCompute && (await releaseUnusedJob(ctx, ticket, run.orgId, use)))) {
+        await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents, use);
+      }
     }
   }
   return logSummary(summary, ctx, use);
@@ -473,6 +518,24 @@ async function settleJob(ctx: PageReaderContext, ticket: string, costCents: numb
     await budget?.settle(ticket, costCents);
   } catch (error) {
     console.error(`${use.logTag} spend settle failed document=${ctx.documentId}; the reservation stands: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+  }
+}
+
+/**
+ * Release the ticket of a job its provider gave way before any compute ran (settled at 0, scoped to the run's organization).
+ * False when the ledger refuses (not this organization's, already settled, carries cost) or fails: the caller then settles
+ * at no less than the reservation (fail closed).
+ */
+async function releaseUnusedJob(ctx: PageReaderContext, ticket: string, orgId: string, use: Pick<PageImageReadUse, "logTag">): Promise<boolean> {
+  const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
+  try {
+    const released = (await budget?.releaseUnused(ticket, orgId)) === true;
+    if (released) console.log(`${use.logTag} reservation released document=${ctx.documentId}: the reader gave way before any compute ran`);
+    else console.warn(`${use.logTag} reservation release refused document=${ctx.documentId}; settling at the reservation`);
+    return released;
+  } catch (error) {
+    console.error(`${use.logTag} reservation release failed document=${ctx.documentId}; settling at the reservation: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+    return false;
   }
 }
 
