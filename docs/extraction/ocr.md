@@ -22,7 +22,7 @@ to a weaker boundary or to another reader.
 
 | Mode | Default | Where OCR runs | Without what it needs |
 | --- | --- | --- | --- |
-| `vm` | when `DOCSLURP_PROFILE=service` | An extractor plugin's `sandboxedOcr` provider, one fresh VM or microVM per job ([Extractor plugins](extractor-plugins.md#ocr-provider-sandboxedocr)). | No provider: the worker refuses to start. A failed VM read fails the page. |
+| `vm` | when `DOCSLURP_PROFILE=service` | An extractor plugin's `sandboxedOcr` provider, in a VM or microVM that may be warm and shared across jobs ([Extractor plugins](extractor-plugins.md#ocr-provider-sandboxedocr)). | No provider: the worker refuses to start. A failed VM read fails the page. |
 | `local` | never | `docslurp_ocr.py` under the worker's parser sandbox (bubblewrap). Customer-owned self-hosting only. | Refused at startup unless `DOCSLURP_PROFILE=selfhost`. A missing venv or model fails the read. |
 | `hosted` | never | A hosted vision model reads the stored image bytes as uploaded (PNG, JPEG or WebP, up to 20 MiB). | Anything that would need host decoding, rasterising or resizing (PDF pages, TIFF, other formats) is refused and the page fails. |
 | `off` | outside production | Nowhere. | Pages that need OCR get no OCR text. |

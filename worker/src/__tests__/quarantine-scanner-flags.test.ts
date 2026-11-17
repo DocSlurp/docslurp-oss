@@ -50,15 +50,15 @@ async function fixture(extra: Document[] = []) {
     uri: (key: string) => `s3://test/${key}`,
   } as unknown as ArtifactStore;
   // The scanner double reports what clamd reports for these bytes; the real stage, refusal and checkpoint code run.
-  const sessions: Array<{ tenantKey: string | null | undefined; scanned: string[] }> = [];
-  const current = new AsyncLocalStorage<{ tenantKey: string | null | undefined; scanned: string[] }>();
+  const sessions: Array<{ scanned: string[] }> = [];
+  const current = new AsyncLocalStorage<{ scanned: string[] }>();
   const runner = {
     scanForMalware: vi.fn(async (p: string) => {
       current.getStore()?.scanned.push(p);
       return { status: (await readFile(p, "utf8")) === EICAR ? "infected" : "clean", engine: "clamdscan", signature: "Eicar-Test-Signature", databaseStatus: "fresh", healthWarnings: [] };
     }),
-    withMalwareScanner: vi.fn(async (tenantKey: string | null | undefined, fn: () => Promise<unknown>) => {
-      const session = { tenantKey, scanned: [] as string[] };
+    withMalwareScanner: vi.fn(async (fn: () => Promise<unknown>) => {
+      const session = { scanned: [] as string[] };
       sessions.push(session);
       return await current.run(session, fn);
     }),
@@ -86,8 +86,7 @@ describe("quarantine scanner flags", () => {
     expect(healthyDocuments(f.state).map((document) => document.id)).toEqual(["report.txt"]);
     // Snapshot off: the stage never opens a scanner session (exactly today's path).
     expect(f.runner.withMalwareScanner).toHaveBeenCalledTimes(scannerSessions);
-    expect(f.sessions.every((session) => session.tenantKey === "org-a")).toBe(true);
-    // M1: no scanner session ever scans a second document.
+    // Today each document opens its own session (a choice, not an isolation rule; AGENTS.md).
     expect(f.sessions.every((session) => session.scanned.length === 1)).toBe(true);
   });
 });

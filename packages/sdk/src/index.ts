@@ -2780,7 +2780,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /**
      * Finish extracting the figures a document's pass left out (a timed-out shard, a budget stop). Only queues the work: the
-     * service runs it in a fresh VM under its own caps (three attempts, one document per organization at a time). Server
+     * service runs it in a VM under its own caps (three attempts, one document per organization at a time). Server
      * keys need `ingest`. `status` is `queued`, `already-queued`, `not-resumable`, `capped` (attempts spent) or `off`
      * (the project's figures or resumes are off).
      */

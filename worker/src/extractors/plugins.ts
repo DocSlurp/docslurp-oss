@@ -13,8 +13,9 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  * - Fail closed. A named plugin that cannot load is a startup error, and a deployment that asks for the VM extractor
  *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service) without a provider is a startup error. The VM route
  *   never falls back to parsing on the worker host.
- * - A sandboxed PDF provider must isolate every job in a fresh VM or microVM. The worker holds secrets; providers
- *   receive file paths, not credentials, and return only bounded, validated output.
+ * - A sandboxed PDF provider runs every job in a VM or microVM, away from the worker's secrets; a warm VM may serve jobs
+ *   of any run or organization (AGENTS.md). Providers receive file paths, not credentials, and return only bounded,
+ *   validated output.
  * - Plugins get host classes through `host`, so errors and usage they raise are the worker's own types.
  *
  * Contract details: docs/extraction/extractor-plugins.md.
@@ -73,7 +74,7 @@ export interface SandboxedPdfJob {
 
 /**
  * One figure resume (provider `figures.resume`), always for one range: a shard's pages, a gap's pages, or (for an unsharded
- * document) the whole document. Paths are host paths the provider stages into a fresh VM; the host reads nothing of the
+ * document) the whole document. Paths are host paths the provider stages into a VM; the host reads nothing of the
  * source. The answer is a figure outcome like SandboxedPdfResult.figures (`extracted`, `partial` with optional `gaps`
  * inside the range, or `failed` with a telemetry-only reason), and the host validates `dir` exactly like a first pass's
  * folder (no figure file it already stores may come back different: `resume-rewrite`).
@@ -206,7 +207,7 @@ export interface SandboxedPdfExtractorProvider {
   figures?: {
     producerId: string;
     /**
-     * Finish the images a figure pass left resumable, in a fresh VM (`pdftomarkdown --images-resume` with the stored
+     * Finish the images a figure pass left resumable, in a VM (`pdftomarkdown --images-resume` with the stored
      * manifest only: no figure file goes back into the VM). Optional: without it, resumable documents stay resumable.
      */
     resume?(job: FigureResumeJob, signal?: AbortSignal): Promise<unknown>;
@@ -216,7 +217,7 @@ export interface SandboxedPdfExtractorProvider {
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**
-   * Count a PDF's pages in a fresh VM (the guest's own pdfinfo), for documents whose count intake only estimated (the API never
+   * Count a PDF's pages in a VM (the guest's own pdfinfo), for documents whose count intake only estimated (the API never
    * parses PDFs). The worker records it before any stage uses the count or anything bills; without it a VM deployment refuses
    * such PDFs. `usage` is the VM's provider cost. A count the VM could not make throws an error carrying `pageCountOutcome`
    * (lib/pdf-page-count.ts PdfPageCountOutcome: open-failed, encrypted, limit, malformed, killed, unavailable), so a refused
@@ -282,8 +283,8 @@ export type SandboxedOcrResult = SandboxResult;
 
 /**
  * Job ownership from the stage run context: accounting, fairness caps and placement hints. A provider may run jobs of
- * any organization one after another on a warm unit (compute reuse, AGENTS.md), provided each job gets a workspace that
- * is wiped (or a restarted job process) before the next job, and its results go back only to the job that asked.
+ * any organization one after another on a warm unit (compute reuse, AGENTS.md); its results go back only to the job
+ * that asked.
  */
 export interface SandboxedOcrRunContext {
   tenantKey?: string;
@@ -314,8 +315,8 @@ export interface SandboxedOcrProvider {
 /**
  * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
  * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM, which may be a warm
- * VM shared by jobs of any run and organization (compute reuse, AGENTS.md): nothing of a job may persist on the VM for
- * the next one, and each page's Markdown goes back only to the job that sent it. The VM gets no credentials, no metadata
+ * VM shared by jobs of any run and organization (compute reuse, AGENTS.md): each page's Markdown goes back only to the
+ * job that sent it. The VM gets no credentials, no metadata
  * endpoint and no network beyond the job's own connection.
  */
 export interface PageImageReadJob {

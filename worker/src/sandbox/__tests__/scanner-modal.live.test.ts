@@ -87,7 +87,7 @@ async function record(row: Record<string, unknown>): Promise<void> {
     for (const [name, body, expected] of [["a.pdf", PDF, "clean"], ["eicar.txt", EICAR, "infected"], ["b.pdf", PDF, "clean"], ["c.pdf", PDF, "clean"]] as const) {
       const source = await file(name, body);
       const started = Date.now();
-      const result = await inContext("org-a", name, () => runner.withMalwareScanner("org-a", () => runner.scanForMalware(source)));
+      const result = await inContext("org-a", name, () => runner.withMalwareScanner(() => runner.scanForMalware(source)));
       await record({ arm: first ? "Q1-cold-includes-snapshot-build" : "Q1-warm", file: name, status: result.status, engine: result.engine, ms: Date.now() - started, databaseStatus: result.databaseStatus, signature: result.signature });
       first = false;
       expect(result.status).toBe(expected);
@@ -101,7 +101,7 @@ async function record(row: Record<string, unknown>): Promise<void> {
     process.env.DOCSLURP_QUARANTINE_SCAN_SNAPSHOT = "on";
     const log = vi.spyOn(console, "log");
     const [first, second] = await Promise.all([file("one.pdf", PDF), file("two.pdf", PDF)]);
-    const results = await inContext("org-a", "doc-one", () => runner.withMalwareScanner("org-a", async () => {
+    const results = await inContext("org-a", "doc-one", () => runner.withMalwareScanner(async () => {
       const status = (await runner.scanForMalware(first)).status;
       const refuse = (orgId: string, documentId: string) => inContext(orgId, documentId, () => runner.scanForMalware(second)).then(() => "ran", (error: unknown) => (error as Error).message);
       return { status, otherDocument: await refuse("org-a", "doc-two"), otherOrg: await refuse("org-b", "doc-one") };

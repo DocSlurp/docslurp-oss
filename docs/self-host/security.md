@@ -81,7 +81,7 @@ With the Modal parser sandbox, `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` moves the sca
 
 Scanner sessions follow these rules:
 
-- **One document per session.** The session's first command binds it to that document. A command of another document, of no document or of another organization is refused before it reaches a VM. clamd outlives each command, so a document that compromised it could otherwise answer for later documents.
+- **No per-document or per-organization binding.** Today each document's quarantine opens its own session, but a session may run commands of any document or organization. Residue on shared scanner VMs is accepted (`AGENTS.md`).
 - **Network blocked after restore.** Before a restored VM runs anything, a root check confirms it cannot connect to public addresses. Otherwise the VM is refused.
 - **No per-VM secrets in the snapshot.** Every restored VM starts from the same memory, including userspace random-number state. The snapshot holds only the image, the signatures, the clamd config and the loaded daemon. Nothing that needs per-VM randomness, such as keys, tokens or nonces, may be added to it.
 - **Platform-cost builds.** The snapshot build serves every organization, so its VM time is logged as platform cost (`[sandbox-usage] status=platform kind=scanner-build`). It is never charged to the organization whose scan triggered it. A failed build is not retried for 60 s, and scans in that window return an error verdict.

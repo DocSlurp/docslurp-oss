@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
-import { SandboxPolicyError, type ParserSandboxProvider, type SandboxCommand, type SandboxSessionContext } from "../sandbox/types.js";
+import { type ParserSandboxProvider, type SandboxCommand, type SandboxSessionContext } from "../sandbox/types.js";
 import { CLAM_SCAN_COMMAND_TIMEOUT_MS, CLAM_SCAN_LIMITS, clamdLimitLines, clamscanLimitArgs, isClamEncryptedAlert, isClamLimitAlert } from "./clam-limits.js";
 import { clamdConfig } from "../sandbox/providers/modal/scanner.js";
 import { CommandRunner, clamDetection, parseClamDefinitionsHeader, readClamDefinitionsHeader } from "./runner.js";
@@ -70,8 +70,6 @@ describe("malware scans in a scanner session", () => {
           isolation: { filesystem: true, network: "full", processes: true, location: "remote" },
           run: async (command: SandboxCommand) => {
             commands.push(command);
-            // The provider's own check (providers/modal/index.ts) is covered in modal-staging.test.ts; mirrored here.
-            if (context.scanner && command.tenantKey !== context.scanner.tenantKey) throw new SandboxPolicyError("scanner session refuses a command of another organization (or of none)");
             return { exitCode: exit, stdout, stderr: "", cpuSeconds: 0 };
           },
           close: async () => {},
@@ -104,17 +102,17 @@ describe("malware scans in a scanner session", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  async function scan(orgId = "org-a", sessionOrg: string | null = "org-a") {
+  async function scan(orgId = "org-a") {
     const source = path.join(dir, "upload.pdf");
     await writeFile(source, "%PDF-1.4");
-    return await inOrg(orgId, () => new CommandRunner().withMalwareScanner(sessionOrg, () => new CommandRunner().scanForMalware(source)));
+    return await inOrg(orgId, () => new CommandRunner().withMalwareScanner(() => new CommandRunner().scanForMalware(source)));
   }
 
   it("opens a scanner session keyed by the staged signature set, and runs clamdscan --fdpass there with the run's organization", async () => {
     const result = await scan();
     expect(result).toMatchObject({ status: "clean", engine: "clamdscan", databaseStatus: "fresh" });
     expect(contexts).toHaveLength(1);
-    expect(contexts[0]!.scanner).toMatchObject({ tenantKey: "org-a", expectedVersion: 28180 });
+    expect(contexts[0]!.scanner).toMatchObject({ expectedVersion: 28180 });
     expect(contexts[0]!.scanner!.signatureSetHash).toMatch(/^[0-9a-f]{64}$/);
     // One command, no version-check VM command: freshness came from the host header.
     expect(commands).toHaveLength(1);
@@ -162,18 +160,14 @@ describe("malware scans in a scanner session", () => {
     expect(commands).toHaveLength(0);
   });
 
-  it("a document of another organization in the session is refused (cross-tenant batch)", async () => {
-    await expect(scan("org-b", "org-a")).rejects.toThrow(/another organization/);
-  });
-
-  it("refuses to open a scanner session without the run's organization", async () => {
-    await expect(scan("org-a", null)).rejects.toBeInstanceOf(SandboxPolicyError);
-    expect(contexts).toHaveLength(0);
+  it("scans a document of any organization (no per-organization compute binding)", async () => {
+    expect(await scan("org-b")).toMatchObject({ status: "clean" });
+    expect(commands[0]).toMatchObject({ tenantKey: "org-b" });
   });
 
   it("with the flag off, no scanner session is opened", async () => {
     vi.stubEnv("DOCSLURP_QUARANTINE_SCAN_SNAPSHOT", "off");
-    const ran = await new CommandRunner().withMalwareScanner("org-a", async () => "ran");
+    const ran = await new CommandRunner().withMalwareScanner(async () => "ran");
     expect(ran).toBe("ran");
     expect(contexts).toHaveLength(0);
   });
@@ -181,7 +175,7 @@ describe("malware scans in a scanner session", () => {
   it("a provider without scanner sessions keeps the per-command path, loudly", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     register("bubblewrap");
-    expect(await new CommandRunner().withMalwareScanner("org-a", async () => "ran")).toBe("ran");
+    expect(await new CommandRunner().withMalwareScanner(async () => "ran")).toBe("ran");
     expect(contexts).toHaveLength(0);
     expect(error).toHaveBeenCalledWith(expect.stringContaining("scanner-snapshot-unsupported"));
   });
