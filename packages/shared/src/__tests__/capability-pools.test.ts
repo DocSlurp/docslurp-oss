@@ -29,7 +29,7 @@ describe("capability pools: resolution and order", () => {
     expect(pools.vision.map((member) => member.id)).toEqual(["vision.llm.gpt-6-luna.us", "vision.llm.glm-5.3-flash.us"]);
     for (const member of [...pools.ocr, ...pools.vision]) {
       // A bounded telemetry label: no slash, no price, no private name.
-      expect(member.id).toMatch(/^[a-z]+\.(llm|service)\.[a-z0-9.+-]+\.(us|eu|eu\+us|local)$/);
+      expect(member.id).toMatch(/^[a-z]+\.(llm|service)\.[a-z0-9.+-]+\.(us|eu|eu\+us|local|global)$/);
       expect(member.id.length).toBeLessThanOrEqual(48);
       expect(member.id).not.toMatch(/usd|margin|credit|price|\d\.\d{2}/i);
       // Provider price ceilings (escalationRoute, priceCeiling) are routing constraints, not pricing mechanics.
@@ -109,9 +109,12 @@ describe("capability pools: regions from stated evidence only", () => {
     }
   });
 
-  it("refuses a member whose region is unknown or outside the US and EU, and a plugin that claims to be local", () => {
-    expect(() => registerServicePoolMember(service({ regions: [{ ...US, region: "SG" as never }] }))).toThrow(/not US or EU/);
-    expect(() => registerServicePoolMember(service({ regions: [{ ...US, region: "local" as never, evidence: "deployment" as never }] }))).toThrow(/not US or EU/);
+  it("refuses a member whose region is unknown, and a plugin that claims to be local; admits an unpinned (global) plugin service", () => {
+    expect(() => registerServicePoolMember(service({ regions: [{ ...US, region: "SG" as never }] }))).toThrow(/not US, EU or global/);
+    expect(() => registerServicePoolMember(service({ regions: [{ ...US, region: "local" as never, evidence: "deployment" as never }] }))).toThrow(/not US, EU or global/);
+    const unpinned = registerServicePoolMember(service({ engine: "cloud-sandbox", regions: [{ ...US, region: "global", evidence: "deployment" }] }));
+    expect(unpinned.id).toMatch(/\.global$/);
+    expect(capabilityPoolRegionProblems({ ...resolveCapabilityPools({ env: {} }), text: [unpinned] })).toEqual([]);
     expect(() => registerServicePoolMember(service({ regions: [{ ...US, evidence: "headquarters" as never }] }))).toThrow(/not stated evidence/);
     expect(() => registerServicePoolMember(service({ regions: [] }))).toThrow(/regions must state/);
     expect(() => registerServicePoolMember(service({ engine: "Private Fork!" }))).toThrow(/engine/);
