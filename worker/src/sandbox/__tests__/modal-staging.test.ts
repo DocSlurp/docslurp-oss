@@ -304,6 +304,8 @@ function fakeSdk(
     killFailsInVm?: number;
     /** The post-command reset finds the VM's disk or job roots unusable (exit 5) in this VM. */
     resetUnhealthyInVm?: number;
+    /** Every reset from the Nth on (1-based) reports an unusable VM (exit 5). */
+    resetFailFrom?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
     /** The post-command reset exec throws: Modal's exec deadline (a wipe of millions of files) or a transport error. */
@@ -486,6 +488,7 @@ function fakeSdk(
         state.events.push("reset");
         if (opts.resetThrows === "deadline") throw new Error("Deadline exceeded while waiting for the exec");
         if (opts.resetThrows === "transport") throw new Error("stream reset by peer");
+        if (opts.resetFailFrom !== undefined && state.resets.length >= opts.resetFailFrom) return finished("", 5);
         return finished("", opts.resetUnhealthyInVm === vm ? 5 : 0);
       }
       // The root leftover kill (KILL_PARSER_USER_ARGV): kill(-1) as the parser user, verified.
@@ -1978,6 +1981,32 @@ describe("modal provider session lifecycle", () => {
       await b.close();
       await a.close();
       await provider.drain!();
+      expect(state.terminate).toBe(1);
+    });
+
+    it("a parked VM whose wipe fails is stopped, and the adopting session starts a fresh VM (no token leaked)", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished(), resetFailFrom: 2 });
+      const provider = createModalProvider(async () => sdk);
+      const capped = { ...parkConfig, vmsPerWorker: 1, vmsPerActivity: 1 };
+      const a = await provider.openSession(capped, { activityId: "a" });
+      await a.run!({ ...command, affinityKey: "doc-a" });
+      await a.close();
+      expect(state.terminate).toBe(0);
+      // The adoption wipe (reset 2) fails: the parked VM is stopped and its capacity goes to a fresh VM.
+      const b = await provider.openSession({ ...capped, vmParkSeconds: 0 }, { activityId: "b" });
+      expect(state.reattached).toEqual(["sb-1"]);
+      expect(state.terminate).toBe(1);
+      expect(state.createOptions).toHaveLength(2);
+      await b.close();
+    });
+
+    it("parks nothing once the provider drained (worker shutdown)", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const a = await provider.openSession(parkConfig, { activityId: "a" });
+      await a.run!({ ...command, affinityKey: "doc-a" });
+      await provider.drain!();
+      await a.close();
       expect(state.terminate).toBe(1);
     });
 

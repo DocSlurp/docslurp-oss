@@ -1,4 +1,5 @@
 # TODO
+- [ ] Parked Modal VMs (compute reuse, #459): hand a session's idle VM to a session waiting at the worker VM cap (park instead of terminate in the budget reaper, and let `createVm`'s wait adopt a parked VM) so capacity pressure does not force a 2 s cold start; consider a full wipe at park time so a crash between park and adoption leaves no previous-document inputs in a parked VM until its lifetime ends (council M3/M4).
 
 - Organization isolation follow-ups (council, PR #450, 2026-11-16):
   - Contract step for #451: drop `quarantined_sources` (0101) once no release reads it (now `org_quarantined_sources`, 0184), and its roles.mjs entry.

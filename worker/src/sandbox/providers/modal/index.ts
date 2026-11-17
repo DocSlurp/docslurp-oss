@@ -757,6 +757,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
    */
   const parked: ParkedVm[] = [];
   let parkedMemberRegistered = false;
+  /** Set by drain(): nothing is parked any more (a VM parked after the drain would outlive the worker). */
+  let draining = false;
 
   function parkedShape(config: ModalConfig): string {
     return JSON.stringify([config.app, config.imageId ?? config.image, config.cpu, config.memoryMb, config.sessionTimeoutSeconds, config.tokenId]);
@@ -894,6 +896,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     },
     async drain() {
       // Worker shutdown: every parked VM is stopped now rather than left to its idle timer (which a process exit loses).
+      draining = true;
       const vmBudget = budget;
       if (!vmBudget) return;
       await Promise.all(parked.splice(0).map((entry) => { clearTimeout(entry.timer); return terminateParked(entry, "drain", vmBudget); }));
@@ -1046,6 +1049,16 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             return false;
           }
           if (sandbox || creating || lane.dead || closed) { void terminateParked(entry, "adopt-abandoned", vmBudget); return false; }
+          // The previous session's whole job tree is wiped (no input kept) before this session may use the VM; a VM that
+          // cannot be wiped, or is gone, is stopped and this lane starts a fresh one instead.
+          let wiped = false;
+          try {
+            const proc = await adopted.exec(resetArgv(parserJobRoots()), { timeoutMs: RESET_DEADLINE_MS });
+            wiped = (await withDeadline(proc.wait(), RESET_DEADLINE_MS + 5_000)) === 0;
+          } catch (error) {
+            console.warn(`[parser-sandbox] provider=modal status=parked-vm-wipe-failed activity=${context.activityId}: ${safeMessage(config, error)}`);
+          }
+          if (!wiped || sandbox || creating || lane.dead || closed) { void terminateParked(entry, wiped ? "adopt-abandoned" : "wipe-failed", vmBudget); return false; }
           if (holdsToken) vmBudget.release(); // the parked VM brings its own token
           holdsToken = true;
           sandbox = adopted;
@@ -1055,10 +1068,13 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           lane.accountedAt = Date.now();
           commandCount = entry.commandCount;
           for (const [name, dir] of entry.assetDirs) { stagedAssets.set(name, dir); assetDirs.set(name, Promise.resolve(dir)); }
+          // Wiped above; the first command wipes once more before staging (defense in depth).
           keptFor = PARKED_WIPE;
           vmReady = true;
           creating = Promise.resolve();
+          const parkedSeconds = Math.max(0, Date.now() - entry.parkedAt) / 1000;
           console.log(`[parser-sandbox] provider=modal status=vm-adopted activity=${context.activityId} lane=${lane.id} parked_ms=${Date.now() - entry.parkedAt} age_s=${Math.round((Date.now() - entry.lifetimeStart) / 1000)}`);
+          console.log(`[sandbox-usage] provider=modal status=platform kind=parked reason=adopted cpu_seconds=${(config.cpu * parkedSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * parkedSeconds).toFixed(3)}`);
           return true;
         }
 
@@ -1072,7 +1088,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
          * now is recorded in its last stage's ledger, as a terminate would; its worker token goes with it.
          */
         function park(): boolean {
-          if (!(parkMs > 0) || scanner || context.unmetered || parkedAway || lane.dead || lane.busy || terminating || !vmReady || !sandbox || !holdsToken) return false;
+          if (draining || !(parkMs > 0) || scanner || context.unmetered || parkedAway || lane.dead || lane.busy || terminating || !vmReady || !sandbox || !holdsToken) return false;
           if (pendingDiscards.length > 0 || remainingMs() < adoptMinRemainingMs(config)) return false;
           lane.dead = true;
           parkedAway = true;
