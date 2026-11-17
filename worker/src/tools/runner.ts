@@ -2,7 +2,7 @@ import { authorizeComputeCohort } from "../extractors/plugins.js";
 import { serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
-  acceptSandboxedPdfResult, noteSalvagedFigures, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
+  acceptSandboxedPdfResult, noteSalvagedFigures, noteSandboxedPdfPoolMember, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
 import { dopplerConverterPath } from "./doppler.js";
@@ -18,7 +18,8 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
-import { isDevelopmentEnvironment, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
+import { recordPoolServed } from "../lib/capability-pools.js";
+import { isDevelopmentEnvironment, poolMemberForBackend, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -1888,7 +1889,15 @@ export class CommandRunner {
       // The provider shards long documents itself and notes progress as shards finish.
       return {
         remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)
-          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages), (error: unknown) => {
+          .then((result) => {
+            const accepted = acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages);
+            // The text pool member that served it (the pool stamps failovers; a single provider is its own member).
+            const poolMemberId = result.poolMemberId ?? poolMemberForBackend("text", provider.id)?.id;
+            noteSandboxedPdfPoolMember(plan.sandboxedPdf!, poolMemberId);
+            // A failover pool records its own serves; a single provider's is recorded here.
+            if (!result.poolMemberId) recordPoolServed("text", poolMemberId ?? null, Math.max(1, pages));
+            return poolMemberId ? { ...accepted, poolMemberId } : accepted;
+          }, (error: unknown) => {
             // A failed job may still hand back the shards that finished (`error.figures`): kept for the stage to store.
             noteSalvagedFigures(plan.sandboxedPdf!, error, pages);
             throw error;

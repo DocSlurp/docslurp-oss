@@ -1303,7 +1303,7 @@ describe("managed model fields on project routes", () => {
   it("refuses backend models, providers and routes on create and update, naming categories and never echoing the value", async () => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     const cases: Array<[Hono, string, string, unknown]> = [
-      [buildApp(), "/projects", "POST", { name: "Contracts", pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } }],
+      [buildApp(), "/projects", "POST", { name: "Contracts", pipeline: { vision: { modelUri: "llm://openrouter/z-ai/glm-5.3-flash" } } }],
       [buildApp(), "/projects", "POST", { name: "Contracts", pipeline: { visualPages: { route: "gemini" } } }],
       [buildApp(), "/projects/ws-1", "PATCH", { pipeline: { textGeneration: { model: "z-ai/glm-5.3-flash" } } }],
       [buildApp({ orgId: "org-1", scopes: ["projects:manage"] }), "/projects/ws-1", "PATCH", { pipeline: { embedding: { profile: "good-fast-local", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b" } } }],

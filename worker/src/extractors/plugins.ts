@@ -22,7 +22,7 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  */
 import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { isDevelopmentEnvironment, normalizeEnvSetting, serviceProfileFromEnv } from "@docslurp/shared";
+import { activeCapabilityPools, capabilityPoolsInitialized, isDevelopmentEnvironment, normalizeEnvSetting, registerServicePoolMember, serviceProfileFromEnv, type CapabilityPoolServiceRegistration, type ServicePoolMember } from "@docslurp/shared";
 import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
@@ -40,6 +40,7 @@ import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.j
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
 import { validBatchProvider, type SandboxedPdfBatchProvider } from "./sandboxed-pdf-batch.js";
+import { createTextPoolProvider } from "./text-pool.js";
 
 export const EXTRACTOR_PLUGIN_API_VERSION = 1;
 /** The extractor id a registered sandboxed PDF provider serves. */
@@ -148,6 +149,8 @@ export interface SandboxedPdfResult extends SandboxResult {
    * fact never raises a charge. Validated by the host: unique integers within the document's page count.
    */
   ocrPages?: number[];
+  /** Set by the host: the `text` capability pool member that served the job (capability-pools.ts poolMemberId). */
+  poolMemberId?: string;
   /**
    * Structural page layout from the same VM job (pdf-layout-facts@1, the open walker worker/scripts/pdf_layout_facts.py,
    * page numbers of the whole document). Untrusted: the host parses it with its bounded reader and drops pages outside the
@@ -459,6 +462,14 @@ export interface ExtractorPlugin {
   imageOrientation?: ImageOrientationProvider;
   sandboxedOcr?: SandboxedOcrProvider;
   pageImageReader?: PageImageReaderProvider;
+  /**
+   * The capability pool members this plugin's services serve (@docslurp/shared capability-pools.ts): one per service that
+   * reads customer pages, its `backend` the service's provider `id`, with where it processes pages (stated US or EU
+   * evidence), whether the pool fails over to it automatically, and its measured quality and pages per $1. A service
+   * without a member refuses worker start (its region would be unknown). Several plugins may each register a sandboxed PDF
+   * provider when every one is a `text` member: the text pool then runs them in pool order with automatic failover.
+   */
+  poolMembers?: CapabilityPoolServiceRegistration[];
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
@@ -589,9 +600,16 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     throw new Error(`Extractor plugin API version mismatch: host ${EXTRACTOR_PLUGIN_API_VERSION}`);
   }
   if (!PROVIDER_ID.test(plugin.name ?? "")) throw new Error("Extractor plugin needs a lowercase name");
+  const members = validatePoolMembers(plugin);
   const pdf = plugin.sandboxedPdf;
   if (pdf) {
-    if (sandboxedPdfProvider()) throw new Error("Only one sandboxed PDF extractor provider may be registered");
+    // A second PDF provider only as a text pool member, beside a first that is one too (the pool orders and fails over).
+    const isTextMember = (id: string, list: readonly ServicePoolMember[]) => list.some((member) => member.capability === "text" && member.backend === id);
+    const existing = sandboxedPdfProviders();
+    if (existing.length && !(isTextMember(pdf.id, members) && existing.every((other) => isTextMember(other.id, poolMembers)))) {
+      throw new Error("Only one sandboxed PDF extractor provider may be registered, unless each is a text capability pool member");
+    }
+    if (existing.some((other) => other.id === pdf.id)) throw new Error(`Sandboxed PDF provider ${pdf.id} is registered twice`);
     if (!PROVIDER_ID.test(pdf.id ?? "")) throw new Error("Sandboxed PDF provider needs a lowercase id");
     if (!Number.isSafeInteger(pdf.maxSourceBytes) || pdf.maxSourceBytes < 1) throw new Error("Sandboxed PDF provider needs maxSourceBytes");
     for (const name of ["assertConfigured", "run", "timeoutMs"] as const) {
@@ -650,11 +668,56 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     }
   }
   plugins.push(plugin);
+  poolMembers.push(...members);
+  composite = null;
   if (pdf?.shardProfile) registerShardProfile(pdf.shardProfile.key, pdf.shardProfile.prior);
 }
 
+/** Pool members registered by plugins, in registration order. */
+const poolMembers: ServicePoolMember[] = [];
+
+/** Each registration must name one of this plugin's own services. */
+function validatePoolMembers(plugin: ExtractorPlugin): ServicePoolMember[] {
+  if (plugin.poolMembers === undefined) return [];
+  if (!Array.isArray(plugin.poolMembers)) throw new Error("Extractor plugin poolMembers must be an array");
+  const own: Record<string, string | undefined> = {
+    text: plugin.sandboxedPdf?.id,
+  };
+  const ocrBackends = [plugin.sandboxedOcr?.id, plugin.pageImageReader?.id].filter((id): id is string => !!id);
+  return plugin.poolMembers.map((registration) => {
+    const member = registerServicePoolMember(registration);
+    const ok = member.capability === "ocr" ? ocrBackends.includes(member.backend) : own[member.capability] === member.backend;
+    if (!ok) throw new Error(`Extractor plugin pool member ${member.id} names backend ${member.backend}, which this plugin does not provide for ${member.capability}`);
+    if (poolMembers.some((other) => other.id === member.id)) throw new Error(`Capability pool member ${member.id} is registered twice`);
+    if (poolMembers.some((other) => other.capability === member.capability && other.backend === member.backend)) {
+      throw new Error(`Capability pool backend ${member.backend} is already registered for ${member.capability}`);
+    }
+    return member;
+  });
+}
+
+/** Service pool members registered by plugins (worker lib/capability-pools.ts resolves them into the pools). */
+export function poolServiceMembers(): readonly ServicePoolMember[] {
+  return [...poolMembers];
+}
+
+/** Every registered sandboxed PDF provider, in registration order. */
+export function sandboxedPdfProviders(): SandboxedPdfExtractorProvider[] {
+  return plugins.flatMap((plugin) => (plugin.sandboxedPdf ? [plugin.sandboxedPdf] : []));
+}
+
+let composite: SandboxedPdfExtractorProvider | null = null;
+
+/**
+ * The sandboxed PDF provider: the one registered, or, when several are (each a text pool member), one provider that
+ * runs them in the text pool's order with automatic failover (extractors/text-pool.ts).
+ */
 export function sandboxedPdfProvider(): SandboxedPdfExtractorProvider | null {
-  return plugins.find((plugin) => plugin.sandboxedPdf)?.sandboxedPdf ?? null;
+  const providers = sandboxedPdfProviders();
+  if (providers.length <= 1) return providers[0] ?? null;
+  // The composite reads the pool order at call time; it is built once and orders its members only after worker startup
+  // resolved the pools (before that, startup checks see the first provider's features).
+  return composite ??= createTextPoolProvider(providers, () => (capabilityPoolsInitialized() ? activeCapabilityPools().text : null));
 }
 
 /** The provider, or a refusal: the VM route never falls back to host parsing. */
@@ -916,6 +979,19 @@ export function sandboxedPdfFigures(job: SandboxedPdfJob): SandboxedPdfFigureOut
 }
 
 /** The validated pages a finished job reported it OCR'd, or undefined when the provider did not say. */
+const reportedPoolMembers = new WeakMap<SandboxedPdfJob, string>();
+
+/** Record the text pool member that served `job` (the runner, after accepting its result). */
+export function noteSandboxedPdfPoolMember(job: SandboxedPdfJob, memberId: string | null | undefined): void {
+  if (memberId) reportedPoolMembers.set(job, memberId);
+  else reportedPoolMembers.delete(job);
+}
+
+/** The text pool member id (capability-pools.ts poolMemberId) that converted `job`'s pages, for per-page records. */
+export function sandboxedPdfPoolMember(job: SandboxedPdfJob): string | undefined {
+  return reportedPoolMembers.get(job);
+}
+
 export function sandboxedPdfOcrPages(job: SandboxedPdfJob): number[] | undefined {
   return reportedOcrPages.get(job);
 }
@@ -1055,5 +1131,7 @@ function dopplerConverterInstalled(env: NodeJS.ProcessEnv): boolean {
 /** Test hook. */
 export function resetExtractorPluginsForTest(): void {
   plugins.length = 0;
+  poolMembers.length = 0;
+  composite = null;
   loadedFrom = undefined;
 }

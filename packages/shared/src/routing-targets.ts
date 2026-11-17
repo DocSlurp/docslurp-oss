@@ -169,7 +169,6 @@ function base(
 }
 
 const HOSTED_SEED_MODELS = [
-  "google/gemini-2.5-flash-lite",
   "google/gemini-3.1-flash-lite",
   "google/gemini-3.5-flash-lite",
   "z-ai/glm-5.3-flash",

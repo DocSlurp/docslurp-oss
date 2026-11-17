@@ -573,6 +573,14 @@ export type VisionBenchmarkProfile = z.infer<
  * Why a cataloged hosted vision model is not admitted (`refusedReason` on its entry): no request is admitted, priced or
  * sent on it, and config validation rejects it, until serving-level evidence of its per-image token maximum exists.
  */
+/**
+ * Why a hosted vision model is refused for having no endpoint with a stated US or EU hosting region (2026-11-17,
+ * capability-pools.ts poolHostRegion): a customer page may only go to such a host. Config validation rejects it; a stored
+ * setting that names it falls back to the default model, and a run that still carries it keeps the page's own text.
+ */
+const NO_STATED_REGION =
+  "it has no endpoint with a stated US or EU hosting region, so no customer page can be sent to it; choose another vision model";
+
 const UNPROVEN_IMAGE_TOKEN_BOUND =
   "its per-image token maximum is not proven at the serving level (providers can raise the processor limits), so no request can be weighed; refused until serving evidence exists";
 
@@ -639,7 +647,9 @@ export const visionModelCatalog = [
     description:
       "OpenRouter multimodal model for low-latency, high-volume page extraction.",
     estimatedCostPerPageCents: 0.5,
-    tokenPricing: { inputUsdPerMillion: 0.25, outputUsdPerMillion: 1.5, checked: "2026-10-25" },
+    // Priced at its US/EU Vertex endpoints (its vision profile allows only those: the global and AI Studio endpoints may
+    // process anywhere), $0.275/$1.65 per M (docs/evals/vision-route-prices-2026-11-17.json).
+    tokenPricing: { inputUsdPerMillion: 0.275, outputUsdPerMillion: 1.65, checked: "2026-11-17", basis: "pinned-route", providers: ["google-vertex/us", "google-vertex/eu"] },
     imageTokens: { kind: "fixed", tokens: 2_240, basis: "gemini-media-resolution" },
   },
   {
@@ -653,7 +663,10 @@ export const visionModelCatalog = [
       "Ultra-low-cost OpenRouter multimodal option for lightweight page rescue.",
     estimatedCostPerPageCents: 0.25,
     tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4, checked: "2026-10-25" },
-    imageTokens: { kind: "patch", patchPx: 256, tokensPerPatch: 258, basis: "gemini-tiles" },
+    // Refused, so no bound is admitted (was 258 tokens per 256-px tile, gemini-tiles).
+    imageTokens: null,
+    // Served only by Google AI Studio, whose terms allow processing in any country with a Google facility.
+    refusedReason: NO_STATED_REGION,
   },
   {
     id: NEMOTRON_SUPER_VL_VISION_MODEL,
@@ -697,7 +710,9 @@ export const visionModelCatalog = [
       outputUsdPerMillion: 1.2,
       checked: "2026-11-12",
       basis: "pinned-route",
-      providers: ["fireworks", "parasail"],
+      // Fireworks only (2026-11-17): Parasail's privacy policy allows processing "in any other country", so its region is
+      // not stated as US or EU (capability-pools.ts poolHostRegion).
+      providers: ["fireworks"],
     },
     // StreamLake and DeepSeek billed the same input tokens per page as Together on the 2026-10-29 tune/select
     // pages (difference -2 to 0, maximum 1,158), so they serve the same image limit.
@@ -735,7 +750,7 @@ export const visionModelCatalog = [
       outputUsdPerMillion: 0.55,
       checked: "2026-11-13",
       basis: "pinned-route",
-      providers: ["openai", "amazon-bedrock/us-east-1", "azure/us"],
+      providers: ["amazon-bedrock/us-east-1", "azure/us"],
       // OpenAI caches prompts of 1,024+ tokens automatically and the route reports a cache write of about the whole
       // prompt on each call (2026-11-13): input is billed at the write rate, 1.25x base, $0.1375 at the dearest host.
       promptCacheWriteUsdPerMillion: 0.1375,
@@ -753,9 +768,12 @@ export const visionModelCatalog = [
     description:
       "Anthropic Claude Haiku 5.5 on OpenRouter; opt-in page extraction and a chart & diagram export generator.",
     // Computed, not measured: a full-resolution image (4,784 tokens) plus about 500 prompt and 1,000 output tokens at list price.
-    estimatedCostPerPageCents: 0.11,
-    // OpenRouter list price, for prompts up to 100K tokens; max_price at this price keeps the $0.11/$0.55 regional hosts out.
-    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-11-13" },
+    // At its US hosts ($0.11/$0.55): (5,284 x 0.11 + 1,000 x 0.55) / 1e4 = 0.113 cents.
+    estimatedCostPerPageCents: 0.113,
+    // Priced at its US hosts (its vision profile allows only Bedrock us-east-1 and Vertex us: the untagged and global
+    // endpoints may process anywhere), $0.11/$0.55 per M for prompts up to 100K tokens
+    // (docs/evals/vision-route-prices-2026-11-17.json); max_price at this price admits them.
+    tokenPricing: { inputUsdPerMillion: 0.11, outputUsdPerMillion: 0.55, checked: "2026-11-17", basis: "pinned-route", providers: ["amazon-bedrock/us-east-1", "google-vertex/us"] },
     // High-resolution tier (Claude 4.7 and later models): images are downscaled to at most 2,576 px on the long edge and
     // 4,784 visual tokens (platform.claude.com/docs/en/build-with-claude/vision, 2026-11-13).
     imageTokens: { kind: "fixed", tokens: 4_784, basis: "anthropic-high-resolution-max" },
@@ -771,14 +789,14 @@ export const visionModelCatalog = [
       "Open-weights (MIT) Z.ai GLM multimodal model on OpenRouter; opt-in page extraction.",
     // Computed, not measured: ~3,000 input + 560 output tokens at current list price = 0.073 cents.
     estimatedCostPerPageCents: 0.073,
-    // Priced at the most expensive host its vision profile allows (`only`: Wafer, Friendli, InferenceNet; Friendli lists
-    // $0.15/$0.50 per 1M), so the guard weight and max_price hold on every host it can route to.
+    // Priced at the most expensive host its vision profile allows (`only`: Wafer us, Friendli, InferenceNet us; Friendli
+    // lists $0.15/$0.50 per 1M), so the guard weight and max_price hold on every host it can route to.
     tokenPricing: {
       inputUsdPerMillion: 0.15,
       outputUsdPerMillion: 0.5,
       checked: "2026-11-12",
       basis: "pinned-route",
-      providers: ["wafer/nvfp4", "friendli", "inference-net/fp4"],
+      providers: ["wafer/us", "friendli", "inference-net/us"],
     },
     imageTokens: { kind: "fixed", tokens: 8_002, basis: "processor-max:glm5-next" },
   },
@@ -810,7 +828,10 @@ export const visionModelCatalog = [
       "Hosted remote fallback for difficult pages when local models miss the quality bar.",
     estimatedCostPerPageCents: 3,
     tokenPricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6, checked: "2026-10-25" },
-    imageTokens: { kind: "patch", patchPx: 32, tokensPerPatch: 1.62, basis: "openai-patch" },
+    // Refused, so no bound is admitted (was 32-px patches x 1.62, openai-patch).
+    imageTokens: null,
+    // OpenAI's own API processes a project without a selected region globally.
+    refusedReason: NO_STATED_REGION,
   },
 ] as const;
 
@@ -1059,12 +1080,13 @@ export const visionProfileCatalog = {
   },
   "cheapest-hosted": {
     label: "Cheapest hosted",
-    description: "Low-cost hosted Gemini Flash Lite route through OpenRouter.",
+    // Was Gemini 2.5 Flash Lite (refused 2026-11-17: no endpoint with a stated US or EU region).
+    description: "Low-cost hosted GLM 5.3 Flash route through its US hosts.",
     tags: ["cost", "speed", "hosted"],
     config: {
       profile: "cheapest-hosted",
       target: "hosted",
-      modelUri: "llm://openrouter/google/gemini-2.5-flash-lite",
+      modelUri: "llm://openrouter/z-ai/glm-5.3-flash",
     },
   },
   "good-fast-hosted": {

@@ -12,7 +12,15 @@
  *   for the pooled production route). OpenRouter endpoint listing, 2026-11-16: $0.042 / $0.184 per 1M prompt /
  *   completion tokens, no per-image fee; the ceiling leaves room for a price move before the next reader takes over. When no host is under the
  *   ceiling, OpenRouter refuses the request (nothing billed) and the next reader is tried.
+ * - GLM 5.3 Flash on Morph's US endpoint (morph/fp8), under its own ceiling: a second, independent GLM host, so the read
+ *   survives Wafer refusing or being unavailable. Morph's hosting region is OpenRouter's provider datacenters metadata
+ *   (US). Measured on the page-OCR development split on 2026-11-17 (dev-page-ocr-20261117-pool-candidates, escalation
+ *   prompt): composite 0.927 (tolerant text 0.907, tables 0.931, math 1.000), within 0.01 of the best measured second
+ *   reader; slow (p50 54 s a page), which is why it follows Wafer. OpenRouter endpoint listing, 2026-11-17: $0.06 / $0.173
+ *   per 1M prompt / completion tokens, no per-image fee.
  * - Qwen3-VL 30B A3B on DeepInfra's own API, at its list price.
+ *
+ * Each route is one member of the `ocr` capability pool's second-read stage (capability-pools.ts), in this order.
  */
 import { visionAutomaticRoute, type AutomaticCallRoute } from "./automatic-call-margin.js";
 
@@ -32,6 +40,8 @@ export interface OcrEscalationRoute {
   readonly optionId: string;
   readonly model: string;
   readonly priceCeiling: OcrEscalationPriceCeiling | null;
+  /** Whole-read timeout (ms) for this route; past it the read counts as unavailable and the next reader is tried. */
+  readonly timeoutMs?: number;
 }
 
 export const OCR_ESCALATION_ROUTES: readonly OcrEscalationRoute[] = Object.freeze([
@@ -39,6 +49,13 @@ export const OCR_ESCALATION_ROUTES: readonly OcrEscalationRoute[] = Object.freez
     optionId: "scan-ocr/hosted-escalation-glm",
     model: OCR_ESCALATION_GLM_MODEL,
     priceCeiling: Object.freeze({ inputUsdPerMTok: 0.065, outputUsdPerMTok: 0.24, imageUsd: 0, hosts: Object.freeze(["wafer/us"]) }),
+  },
+  {
+    optionId: "scan-ocr/hosted-escalation-glm-morph",
+    model: OCR_ESCALATION_GLM_MODEL,
+    priceCeiling: Object.freeze({ inputUsdPerMTok: 0.065, outputUsdPerMTok: 0.19, imageUsd: 0, hosts: Object.freeze(["morph/fp8"]) }),
+    // Slow host (p50 54 s, p90 146 s on the benchmark): bounded so a stalled read moves on to Qwen.
+    timeoutMs: 180_000,
   },
   { optionId: "scan-ocr/hosted-escalation", model: OCR_ESCALATION_QWEN_MODEL, priceCeiling: null },
 ]);
@@ -51,8 +68,12 @@ export const DEFAULT_OCR_ESCALATION_MODEL = OCR_ESCALATION_ROUTES[0]!.model;
  * ceiling when it has one (the request's `max_price`, its host allowlist and no per-image fee).
  */
 export function ocrEscalationAutomaticRoute(route: OcrEscalationRoute): AutomaticCallRoute {
-  const base = visionAutomaticRoute(route.model);
-  const ceiling = route.priceCeiling;
+  return cappedVisionAutomaticRoute(route.model, route.priceCeiling);
+}
+
+/** A vision call's automatic route lowered to a per-request price ceiling (`max_price`, host allowlist, no image fee). */
+export function cappedVisionAutomaticRoute(model: string, ceiling: OcrEscalationPriceCeiling | null): AutomaticCallRoute {
+  const base = visionAutomaticRoute(model);
   if (!ceiling) return base;
   const cap = { inputUsdPerMTok: ceiling.inputUsdPerMTok, outputUsdPerMTok: ceiling.outputUsdPerMTok };
   const lower = (sent: { inputUsdPerMTok: number; outputUsdPerMTok: number } | null | undefined) => sent
@@ -72,8 +93,11 @@ export function ocrEscalationAutomaticRoute(route: OcrEscalationRoute): Automati
  * else uncapped), or every route above.
  */
 export function ocrEscalationRoutes(configured: string | null | undefined): readonly OcrEscalationRoute[] {
-  const model = configured?.trim();
-  if (!model) return OCR_ESCALATION_ROUTES;
-  const known = OCR_ESCALATION_ROUTES.find((route) => route.model === model);
-  return [known ?? { optionId: "scan-ocr/hosted-escalation-configured", model, priceCeiling: null }];
+  const raw = configured?.trim();
+  if (!raw) return OCR_ESCALATION_ROUTES;
+  // A bare OpenRouter id (`z-ai/glm-5.3-flash`) is the same model as its `llm://openrouter/` URI.
+  const model = /^llm:\/\//i.test(raw) ? raw : `llm://openrouter/${raw}`;
+  // A model with several measured routes (GLM on two hosts) keeps all of them, in order.
+  const known = OCR_ESCALATION_ROUTES.filter((route) => route.model === model);
+  return known.length ? known : [{ optionId: "scan-ocr/hosted-escalation-configured", model, priceCeiling: null }];
 }

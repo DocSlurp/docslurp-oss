@@ -36,7 +36,7 @@ describe("estimateTargetCost", () => {
     const c = estimateTargetCost(t("vlm:openrouter/google/gemini-3.5-flash"), "chart-data", page);
     expect(c.costUsd).toBeGreaterThan(0);
     expect(c.billedUsd).toBe(0);
-    const cheap = estimateTargetCost(t("vlm:openrouter/google/gemini-2.5-flash-lite"), "chart-data", page);
+    const cheap = estimateTargetCost(t("vlm:openrouter/z-ai/glm-5.3-flash"), "chart-data", page);
     expect(cheap.costUsd).toBeLessThan(c.costUsd);
   });
   it("prices local compute from hourly cost and observed throughput", () => {

@@ -23,6 +23,7 @@
  * usage ledger, which also writes the `[ai-usage]` log line.
  */
 
+import { poolHostRegion } from "@docslurp/shared";
 import { spawn } from "node:child_process";
 import {
   assertProviderAllowed,
@@ -146,6 +147,20 @@ interface EndpointSpec {
   maxBodyBytes: number;
 }
 
+/**
+ * Why a hosted decision model may not receive page content, or null: its upstream (Perplexity, Liquid, or the lab
+ * OpenRouter's /systemone forwards to) must state a US or EU hosting region (capability-pools.ts poolHostRegion). None
+ * does today (2026-11-17): Perplexity's policy allows processing "including, but not limited to, the United States",
+ * Liquid states no location, and /systemone's upstream is the model's own lab. Local sidecars never leave the machine.
+ */
+export function decisionModelRegionProblem(model: Pick<DecisionModel, "id" | "endpoint">, upstreamRegion: (upstream: string) => unknown = poolHostRegion): string | null {
+  if (model.endpoint === "local-transformers") return null;
+  const spec = endpointSpec(model as DecisionModel);
+  if (!spec) return `${model.id}: unsupported decision endpoint ${model.endpoint}`;
+  const upstream = model.endpoint === "openrouter-systemone" ? baseProviderSlug(model.id) : spec.provider;
+  return upstreamRegion(upstream) ? null : `${model.id} is served by ${upstream}, which states no US or EU hosting region`;
+}
+
 function endpointSpec(model: DecisionModel): EndpointSpec | null {
   switch (model.endpoint) {
     case "perplexity-decisions":
@@ -257,6 +272,8 @@ export interface DecisionClientOptions {
   /** Local sidecar runner override (tests). */
   runSidecar?: (command: string[], request: unknown, signal?: AbortSignal) => Promise<unknown>;
   now?: () => number;
+  /** Region evidence for an upstream (tests of request shapes); default: capability-pools.ts poolHostRegion. */
+  upstreamRegion?: (upstream: string) => unknown;
 }
 
 function parseSidecarCommand(raw: string | undefined): string[] | null {
@@ -357,8 +374,16 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
         });
         // The upstream that serves the decision: OpenRouter's /systemone forwards to the model's own lab.
         const upstream = model.endpoint === "openrouter-systemone" ? baseProviderSlug(model.id) : spec.provider;
+        // Page images go only to an upstream with a stated US or EU hosting region (fail closed), whatever the policy.
+        const regionProblem = decisionModelRegionProblem(model, options.upstreamRegion);
+        if (regionProblem) {
+          console.warn(`[provider-region] refused decision model=${model.id} upstream=${upstream} reason=${JSON.stringify(regionProblem)}`);
+          throw new DecisionUnavailableError(regionProblem);
+        }
+        // No loaded provider policy: refuse (unknown scope fails closed), never send unchecked.
         const policy = await currentOpenRouterProviderPolicy();
-        if (policy && !isProviderAllowedByRegion(upstream, policy.allowChinaProviders)) {
+        if (!policy) throw new DecisionUnavailableError(`${model.id}: no provider policy is loaded for this call; refusing to send page content`);
+        if (!isProviderAllowedByRegion(upstream, policy.allowChinaProviders)) {
           console.warn(`[provider-region] refused decision model=${model.id} upstream=${upstream} region=${providerRegion(upstream)}`);
           throw new DecisionUnavailableError(`${model.id} is served by ${upstream}, which China-provider settings do not allow (region ${providerRegion(upstream)})`);
         }

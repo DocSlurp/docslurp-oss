@@ -149,38 +149,22 @@ describe("map router call", () => {
 });
 
 describe("embedPageQuery", () => {
-  it.each(["before", "during"])("propagates cancellation %s provider dispatch", async phase => {
-    const { embedPageQuery } = await import("../search/deferred/page-query-embedder.js");
-    const controller = new AbortController();
-    const journal = { record: vi.fn() };
-    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
-      const signal = init!.signal!;
-      const pending = new Promise<Response>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once:true}));
-      controller.abort();
-      return pending;
-    });
-    if (phase === "before") controller.abort();
-    await expect(embedPageQuery({ model: "gemini-embedding-2", query: "private query", journal, privacyMode: "standard", signal: controller.signal }, { fetchImpl, geminiApiKey: "k" })).rejects.toMatchObject({ name: "AbortError" });
-    expect(fetchImpl).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
-    expect(journal.record).not.toHaveBeenCalled();
-  });
-
-  it("sends Gemini text with no task prefix and degrades to null on failure", async () => {
+  it("refuses Gemini query embedding (no stated US or EU hosting region): returns null, sends nothing, records nothing", async () => {
     const { embedPageQuery } = await import("../search/deferred/page-query-embedder.js");
     const journal = { record: vi.fn() };
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ embeddings: [{ values: [3, 4] }], usageMetadata: { promptTokenCount: 7 } }))) as unknown as typeof fetch;
-    const vector = await embedPageQuery({ model: "gemini-embedding-2", query: "find the chart", journal, privacyMode: "standard" }, { fetchImpl, geminiApiKey: "k" });
-    expect(Array.from(vector!)).toEqual([0.6000000238418579, 0.800000011920929]);
-    const body = JSON.parse((vi.mocked(fetchImpl).mock.calls[0]![1] as RequestInit).body as string);
-    expect(body.requests[0].content.parts[0].text).toBe("find the chart");
-    expect(vi.mocked(fetchImpl).mock.calls[0]![0]).toContain(":batchEmbedContents");
-    // Actual provider token usage, not a length estimate.
-    expect(journal.record).toHaveBeenCalledWith(expect.objectContaining({
-      metric: "page-query-embedding", model: "gemini-embedding-2", inputTokens: 7, metadata: expect.objectContaining({ usageSource: "provider" }),
-    }));
-
-    const failing = vi.fn(async () => new Response("no", { status: 500 })) as unknown as typeof fetch;
-    expect(await embedPageQuery({ model: "gemini-embedding-2", query: "q", journal, privacyMode: "standard" }, { fetchImpl: failing, geminiApiKey: "k" })).toBeNull();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect(await embedPageQuery({ model: "gemini-embedding-2", query: "find the chart", journal, privacyMode: "standard" }, { fetchImpl, geminiApiKey: "k" })).toBeNull();
+      const controller = new AbortController();
+      controller.abort();
+      // A cancelled request still propagates its cancellation.
+      await expect(embedPageQuery({ model: "gemini-embedding-2", query: "q", journal, privacyMode: "standard", signal: controller.signal }, { fetchImpl, geminiApiKey: "k" })).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(journal.record).not.toHaveBeenCalled();
     expect(await embedPageQuery({ model: "gemini-embedding-2", query: "q", journal, privacyMode: "local-only" }, { fetchImpl, geminiApiKey: "k" })).toBeNull();
     expect(await embedPageQuery({ model: "unknown-model", query: "q", journal, privacyMode: "standard" })).toBeNull();
   });

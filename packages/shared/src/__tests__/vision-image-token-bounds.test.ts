@@ -182,10 +182,8 @@ const RULES: Record<string, (width: number, height: number) => number | null> = 
   "anthropic/claude-haiku-5.5": anthropicHighResolutionTokens,
   "deepseek/deepseek-v4.1-flash-1017": deepseekTokens,
   "z-ai/glm-5.3-flash": glm5NextTokens,
-  "gpt-4.1-mini": openAiTokens(1.62),
   // No multiplier published for GPT-6 Luna: the largest OpenAI lists (gpt-4.1-nano).
   "openai/gpt-6-luna": openAiTokens(2.46),
-  "google/gemini-2.5-flash-lite": gemini2Tokens,
   "google/gemini-3.1-flash-lite": () => 2_240,
   "Qwen/Qwen3-VL-30B-A3B-Instruct": qwen3vlTokens,
 };
@@ -200,7 +198,7 @@ describe("vision image-token bounds against each model's published image process
   it("has a rule for every admitted priced catalog model, and refused models have no bound", () => {
     const priced = visionModelCatalog.filter((spec) => spec.tokenPricing && !visionModelRefusal(spec.id)).map((spec) => spec.id);
     expect(Object.keys(RULES).sort()).toEqual([...priced].sort());
-    for (const model of ["nvidia/nemotron-3.5-super-vl", "xiaomi/mimo-v2.6-flash"]) {
+    for (const model of ["nvidia/nemotron-3.5-super-vl", "xiaomi/mimo-v2.6-flash", "google/gemini-2.5-flash-lite", "gpt-4.1-mini"]) {
       expect(visionModelRefusal(model), model).not.toBeNull();
       expect(visionImageTokens(model, null), model).toBeNull();
     }

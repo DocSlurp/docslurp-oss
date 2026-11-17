@@ -10,6 +10,7 @@ import {
   GEMINI_IMAGE_USD_PER_MTOK,
   JINA_NANO_MODEL_SUFFIX,
   PAGE_EMBED_ESTIMATED_PAGE_TOKENS,
+  attestedRegion,
   type PrivacyMode,
 } from "@docslurp/shared";
 
@@ -117,6 +118,10 @@ export function createGeminiPageEmbedder(args: { apiKey: string; dims?: 3072; fe
 export function createPrivateEndpointPageEmbedder(args: { modelUri: string; privacyMode?: PrivacyMode | string | null }): PageImageEmbedder {
   const lookup = lookupPrivateModelRoute({ ref: args.modelUri, capability: "embedding" });
   if (!lookup.ok) throw new Error(`Private page embedder ${args.modelUri} is not usable: ${lookup.reason}`);
+  // Customer page images only to an endpoint that attests a US or EU region (fail closed).
+  if (!attestedRegion(lookup.route.endpoint.attestation.region)) {
+    throw new Error(`Private page embedder ${args.modelUri} attests region "${lookup.route.endpoint.attestation.region}", which is not US or EU`);
+  }
   const dims = lookup.route.model.dimensions ?? 768;
 
   async function call(input: unknown[], signal?: AbortSignal) {
@@ -187,16 +192,36 @@ export function createPrivateEndpointPageEmbedder(args: { modelUri: string; priv
  * `auto` prefers a registered Jina nano private endpoint, then Gemini (when a key is set and the
  * privacy mode allows hosted providers). Returns null when nothing is usable.
  */
-export function resolvePageImageEmbedder(args: {
+/**
+ * Why a page-image embedder route may not receive customer page images, or null: the private (Jina) endpoint must attest
+ * a US or EU region; Gemini embedding is reachable only through Google AI Studio, which may process anywhere (no stated
+ * US or EU region), so it is never used for page images (2026-11-17).
+ */
+export function pageImageEmbedderRegionProblem(route: "jina-private" | "gemini", modelUri?: string | null): string | null {
+  if (route === "gemini") return "Gemini embedding is served only by Google AI Studio, which states no US or EU hosting region";
+  if (!modelUri) return "no private page-image embedder is registered";
+  const lookup = lookupPrivateModelRoute({ ref: modelUri, capability: "embedding" });
+  if (!lookup.ok) return `the private page-image embedder is not usable: ${lookup.reason}`;
+  const region = lookup.route.endpoint.attestation.region;
+  return attestedRegion(region) ? null : `the private page-image embedder attests region "${region}", which is not US or EU`;
+}
+
+/**
+ * The page-image embedder for a run, or why page-image embedding is unavailable. Customer page images go only to an
+ * embedder with a stated US or EU region (the private Jina endpoint's attested region); otherwise embedding is
+ * unavailable (fail closed), never the Gemini/AI Studio fallback.
+ */
+export function resolvePageImageEmbedderWithReason(args: {
   route: "auto" | "jina-private" | "gemini";
   privacyMode: PrivacyMode | string | null | undefined;
   env?: NodeJS.ProcessEnv;
-}): PageImageEmbedder | null {
-  const env = args.env ?? process.env;
+}): { embedder: PageImageEmbedder; reason: null } | { embedder: null; reason: string } {
   const jinaUri = args.route === "gemini" ? null : findJinaNanoUri();
-  if (jinaUri) return createPrivateEndpointPageEmbedder({ modelUri: jinaUri, privacyMode: args.privacyMode });
-  if (args.route === "jina-private") return null;
-  const apiKey = env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
-  if (apiKey && privacyModeAllowsHosted(args.privacyMode)) return createGeminiPageEmbedder({ apiKey });
-  return null;
+  const problem = pageImageEmbedderRegionProblem(jinaUri || args.route === "jina-private" ? "jina-private" : "gemini", jinaUri);
+  if (problem) return { embedder: null, reason: problem };
+  return { embedder: createPrivateEndpointPageEmbedder({ modelUri: jinaUri!, privacyMode: args.privacyMode }), reason: null };
+}
+
+export function resolvePageImageEmbedder(args: Parameters<typeof resolvePageImageEmbedderWithReason>[0]): PageImageEmbedder | null {
+  return resolvePageImageEmbedderWithReason(args).embedder;
 }

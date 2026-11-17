@@ -27,6 +27,7 @@
  * has rolled. An old worker reappearing (rollback) turns it back off for new
  * runs. Runs already started keep what their input recorded.
  */
+import { parseAdvertisedCapabilityPools, type AdvertisedCapabilityPools } from "./capability-pools.js";
 
 /** Bump only for an incompatible change to the registry row format. */
 export const WORKER_CAPABILITY_PROTOCOL = 1;
@@ -130,6 +131,8 @@ export interface WorkerAdvertisedConfig {
    * without one, absent from builds that do not report it (which the skew check counts as skew).
    */
   operatorConfig?: string | null;
+  /** The worker's resolved capability pools (capability-pools.ts): member ids in order, with stage, region and failover. */
+  capabilityPools?: AdvertisedCapabilityPools;
 }
 
 /** Parse a registry row's `config` defensively: anything malformed is dropped, never trusted. */
@@ -142,6 +145,8 @@ export function parseWorkerAdvertisedConfig(value: unknown): WorkerAdvertisedCon
   if (typeof record.profile === "string" && record.profile.length <= 20) out.profile = record.profile;
   if (Array.isArray(record.disabled)) out.disabled = record.disabled.filter((entry): entry is string => typeof entry === "string" && entry.length <= 40).slice(0, 20);
   if (record.operatorConfig === null || (typeof record.operatorConfig === "string" && record.operatorConfig.length <= 100)) out.operatorConfig = record.operatorConfig;
+  const pools = parseAdvertisedCapabilityPools(record.capabilityPools);
+  if (pools) out.capabilityPools = pools;
   return out;
 }
 
