@@ -275,13 +275,15 @@ export interface SandboxedOcrJob {
 export type SandboxedOcrResult = SandboxResult;
 
 /**
- * Job ownership from the stage run context, for accounting and placement hints. Organization membership alone
- * does not establish equal project/API-key access. Neither key authorizes VM reuse: each job gets a fresh VM.
+ * Job ownership from the stage run context. `tenantKey` alone never authorizes VM reuse. A provider may reuse a unit
+ * across jobs of one organization only when `authorizeCohort` returns a live grant whose `orgId` equals `tenantKey`,
+ * bound host-side and in-guest, within a bounded idle window and lifetime (organization isolation, AGENTS.md); anything
+ * else runs on a fresh, single-use unit.
  */
 export interface SandboxedOcrRunContext {
   tenantKey?: string;
   affinityKey?: string;
-  /** Revalidate live authorization before admission and publication; an expired/revoked scope returns null. */
+  /** Revalidate live authorization (and the run's organization) before admission and publication; an expired/revoked scope returns null. */
   authorizeCohort?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
 }
 

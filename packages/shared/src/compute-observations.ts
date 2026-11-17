@@ -57,10 +57,17 @@ export interface ComputeExecutionScope {
   executionGeneration: string | null;
 }
 
-/** Null cohort means authorized single-use execution, never permission to reuse by organization. */
+/**
+ * A live execution grant. Its existence proves, in SQL, that the run is live and belongs to `orgId` (with the document in
+ * that run). `orgId` is the only scope a compute unit may be reused across (organization isolation, AGENTS.md); a caller
+ * without a grant whose `orgId` equals the job's organization runs on a fresh, single-use unit. `cohortId` is the
+ * narrower run/principal/input cohort, or null.
+ */
 export interface ComputeCohortGrant {
   cohortId: string | null;
   validUntil: string;
+  /** The organization the SQL predicate verified the run belongs to. */
+  orgId: string;
 }
 
 export const computePriceColumns = {
