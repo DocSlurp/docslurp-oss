@@ -13,7 +13,7 @@ export { OPEN_PRICING, OPEN_CREDITS_PER_PAGE, openStoredBytes } from "./pricing-
 export * from "./file-profile.js";
 export * from "./estimate-quote.js";
 export { assembleEstimateQuote, profiledPageArea, profiledTextChars, type StoredBytesModel } from "./estimate-assembly.js";
-export { installTestPricing, DISTINCT_TEST_PRICING } from "./pricing-testing.js";
+export { installTestPricing, DISTINCT_TEST_PRICING, TEST_PAGE_CREDITS } from "./pricing-testing.js";
 export * from "./quality.js";
 export * from "./auto-ladder.js";
 export * from "./credit-leases.js";
@@ -152,3 +152,4 @@ export { computePriceColumns, computeCalibrationColumns, decodeComputeObservatio
 export type { ComputeExecutionScope, ComputeCohortGrant } from "./compute-observations.js";
 
 export type { ComputeAllocationAdmission, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "./compute-observations.js";
+export * from "./ocr-escalation-routes.js";

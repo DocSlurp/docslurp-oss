@@ -195,7 +195,12 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
         id: run, orgId: "ocrb-org", projectId: "ocrb-ws", userId: "ocrb-u1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
         pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
       } as unknown as ProjectRun, []);
-      state.visionAttempts = store().visionAttempts;
+      const created = store();
+      state.visionAttempts = created.visionAttempts;
+      // This test is about the per-document budget across activities, not funding: escalation fails closed without a
+      // balance check (hosted-reader.ts authorizeEscalationRead), so the store answers that every read is funded.
+      created.largestFundedCharge = async () => 1;
+      state.store = created;
       state.usageLedger.runId = run;
       return { state, reader: createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { DOCSLURP_OCR_ESCALATION: "on" }, execute }) };
     };

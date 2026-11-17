@@ -40,6 +40,7 @@ import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { pinRunPageBillingRules } from "../db/page-base-fee.js";
+import { pinRunOcrPageClass } from "./ocr-page-class.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
 import { latchedTeardownError, settleSandboxSession } from "../sandbox/session-context.js";
@@ -78,6 +79,8 @@ export type StageExecutionStore = Pick<
   | "finishShard"
 > & {
   readonly pageTasks: Pick<Store["pageTasks"], "completed">;
+  /** Whether every live worker advertises `capability` (Store.fleetAdvertises); absent: no (the old behaviour). */
+  fleetAdvertises?: Store["fleetAdvertises"];
 };
 
 /** Orchestrator hooks injected per stage execution. */
@@ -261,6 +264,8 @@ export function createStageExecution(deps: {
     // Page billing rules, pinned the same way: a run without the pin (started by an earlier release) keeps that release's
     // completion charge for image files and scanned pages (db/page-base-fee.ts).
     const pageBillingRules = pinRunPageBillingRules(state);
+    // The OCR page class, pinned the same way: on only when every live worker advertises it (pipeline/ocr-page-class.ts).
+    const ocrPageClass = await pinRunOcrPageClass(state, async () => (await store.fleetAdvertises?.("billing.ocr-page-class")) === true);
 
     // Mark run as processing
     state.run.status = "processing";
@@ -283,7 +288,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules} ocrPageClass=${ocrPageClass}`,
     );
     if (completedRunStages.length > 0) {
       console.log(

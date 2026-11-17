@@ -1,3 +1,4 @@
+import { recordOcrEscalationPages } from "../ocr/escalation-stats.js";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -293,6 +294,19 @@ describe("runDocumentStage", () => {
         }),
       ]),
     );
+  });
+
+  it("copies the document's OCR escalation record into the completed stage's stats, and nothing when there is none", async () => {
+    const state = makeState();
+    const document = makeDocument();
+    await runDocumentStage(state, document, "vision-extract", "doc-1:vision", "vision", async () => ({ artifactUri: "s3://v", stats: { pages: 2 } }));
+    expect(state.documentStage("doc-1", "vision-extract")?.stats).toEqual({ pages: 2 });
+    recordOcrEscalationPages(state.artifactLedger, "doc-1", { escalated: [1], capped: [4, 5] });
+    recordOcrEscalationPages(state.artifactLedger, "doc-2", { capped: [9] });
+    await runDocumentStage(state, document, "extract-markdown", "doc-1:markdown", "markdown", async () => ({ artifactUri: "s3://m", stats: { plausibilityScore: 0.9 } }));
+    expect(state.documentStage("doc-1", "extract-markdown")?.stats).toMatchObject({
+      plausibilityScore: 0.9, ocrEscalation: { escalatedPages: 1, cappedPages: 2, capped: [4, 5] },
+    });
   });
 
   it("escalates to the next strategy when plausibility is below threshold", async () => {

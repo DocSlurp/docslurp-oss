@@ -521,6 +521,34 @@ describe("runMaterializeRange activity", () => {
       ]);
     });
 
+    it("an OCR decision stamps the page without a Fast charge, and another run's model read upgrades it to Rich once, by the difference", async () => {
+      await reset();
+      const decide = async (runId: string, args: { requested: number[]; ledger?: PipelineUsageEventLedger; modelReads?: Map<number, number> }) =>
+        await sql.begin(async (tx) => {
+          await lockPageRows(tx as never, "d1", [6]);
+          return await billLockedMaterializedPages(tx as never, { runId, documentId: "d1", moved: args.requested.length ? null : new Set(), ...args });
+        });
+      // m2 holds page 6 and read it with the OCR route: its decision is the OCR charge, persisted with its stamp.
+      const ledger = new PipelineUsageEventLedger();
+      ledger.runId = "m2";
+      ledger.chargeOcrPage({ documentId: "d1", pageNumber: 6, readBy: "page-ocr" });
+      await decide("m2", { requested: [6], ledger });
+      await db.exec(`update document_page_states set state = 'indexed' where document_id = 'd1' and page_number = 6`);
+      // m1 read the page with a vision model but does not own it: it upgrades m2's OCR decision, the difference only.
+      await decide("m1", { requested: [], modelReads: new Map([[6, 1]]) });
+      await decide("m1", { requested: [], modelReads: new Map([[6, 1]]) });
+      const rows = (await db.query<{ id: string; run_id: string; metric: string; cost: number }>(`
+        select id, run_id, metric, cost_cents::float8 as cost from usage_events
+        where metadata->>'documentId' = 'd1' and coalesce(metadata->>'pageNumber', metadata->>'page') = '6' order by id`)).rows;
+      expect(rows.map((row) => [row.id, row.run_id, row.metric])).toEqual([
+        ["ocr:m2:d1:6", "m2", "ingest-page-ocr"],
+        ["rich-upgrade:d1:6", "m1", "ingest-page-rich"],
+      ]);
+      expect(rows[0]!.cost).toBeCloseTo(pageCredits("ocr", 1), 9);
+      expect(rows[1]!.cost).toBeCloseTo(pageCredits("rich", 1) - pageCredits("ocr", 1), 9);
+      expect(rows.reduce((sum, row) => sum + row.cost, 0)).toBeCloseTo(pageCredits("rich", 1), 9);
+    });
+
     it("a retried attempt charges nothing twice, with or without the earlier attempt's stamp", async () => {
       await reset();
       await runMaterializeRange(ocrDeps(), input("m1", [3, 4]));

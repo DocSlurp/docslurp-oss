@@ -15,6 +15,7 @@ import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   INGEST_REPORT_TEXT_BYTE_EDGES,
   applyDefaultVisionOverride,
   mergePipelineFeatures,
+  pageCredits,
   qualityAllowsPageReading,
   qualityModePriceRange,
   QUALITY_MODES,
@@ -107,6 +108,11 @@ export interface IngestReportStageRow {
   pdfPagesMismatch?: string | null;
   /** Raw `stats.visualCandidates` (VisualCandidateStats the worker records), validated before use. */
   visualCandidates?: unknown;
+  /**
+   * Raw `stats.ocrEscalation` (worker ocr/escalation-stats.ts): pages a hosted second read covered and pages the per-document
+   * second-read cap left on their first OCR read. Validated before use.
+   */
+  ocrEscalation?: unknown;
 }
 
 export interface IngestReportRunRow {
@@ -789,6 +795,8 @@ export const INGEST_RECOMMENDATION_CATALOG = {
   "reprocess-with-vision": { proposal: "reprocess-only", note: "The setting is already in place; only reprocessing the affected files helps." },
   "retry-vision-failures": { proposal: "reprocess-only", note: "Nothing to change; reprocessing retries the failed pages." },
   "vision-cost-cap": { proposal: "outside-allowlist", note: "maxCostCents is a budget control the proposal tool never changes." },
+  "ocr-escalation-cap": { proposal: "pipeline-patch", note: "quality is proposable; reprocess the affected files after the change (or reprocess them with quality good)." },
+  "ocr-escalation-skipped": { proposal: "reprocess-only", note: "Add credits or raise the run cost cap (neither is proposable), then reprocess the affected files." },
   "vision-stopped": { proposal: "outside-allowlist", note: "The per-page vision attempt bound, rejection breaker and organization attempt limit are operator settings." },
   "vision-rejected-pages": { proposal: "informational", note: "Pages kept their own text; nothing to change." },
   "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
@@ -886,7 +894,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       cost: {
         centsPer100Pages: round(vision.cents * 100, 2),
         reprocessCents: round(estimate.cents, 2),
-        basis: `Pages read by a model bill Rich (${qualityModePriceRange("good")} per 1,000 pages); vision about ${formatCents(vision.cents)} per page (${vision.basis}).`,
+        basis: `Pages read by a vision model bill as Vision pages (${qualityModePriceRange("good")} per 1,000 pages); vision about ${formatCents(vision.cents)} per page (${vision.basis}).`,
       },
       patch: settingInPlace ? null : patch,
       reprocessDocumentIds: ids,
@@ -948,6 +956,50 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       affectedPages: costCapped.length, affectedDocuments: new Set(costCapped.map((page) => page.documentId)).size,
       cost: { centsPer100Pages: round(vision.cents * 100, 2), reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
       patch: null, reprocessDocumentIds: [],
+    });
+  }
+
+  const capped = ocrEscalationCapped(observed);
+  // Under Good a vision model reads every page anyway: the cap is not what kept these pages on their OCR read.
+  if (capped.pages > 0 && pipeline.quality !== "good") {
+    const rich = pageCredits("rich", capped.pages);
+    recs.push({
+      id: "ocr-escalation-cap", severity: "medium",
+      title: "Some scanned pages kept their first OCR read",
+      reason: `${plural(capped.pages, "page")} in ${plural(capped.documentIds.length, "file")} read poorly by OCR kept ${agree(capped.pages, "its", "their")} first OCR read because the per-document second-read cap (pages or attempts) was reached, so ${agree(capped.pages, "its", "their")} text may be incomplete or garbled.`,
+      effect: `Reprocess the ${plural(capped.documentIds.length, "affected file")} with quality Good (or switch the project to Good) so a vision model reads every page, these included. Good reads bill as Vision pages (${qualityModePriceRange("good")} per 1,000 pages).`,
+      affectedPages: capped.pages, affectedDocuments: capped.documentIds.length,
+      cost: {
+        centsPer100Pages: round(pageCredits("rich", 100), 2),
+        reprocessCents: round(rich, 2),
+        basis: `Reprocessing is a new run: reading these ${plural(capped.pages, "page")} with a vision model bills them as Vision pages, about ${formatCents(rich)}, and the files' other pages are read with vision at Good too.`,
+      },
+      patch: { quality: "good" },
+      reprocessDocumentIds: capped.documentIds,
+    });
+  }
+
+  const skippedEscalation = ocrEscalationSkipped(observed);
+  if (skippedEscalation.pages > 0) {
+    const parts = OCR_ESCALATION_SKIP_TEXT.flatMap(([reason, why]) => skippedEscalation.byReason[reason] > 0 ? [`${plural(skippedEscalation.byReason[reason], "page")} ${why}`] : []);
+    const actions = [
+      ...(skippedEscalation.byReason.unfunded > 0 ? ["add credits"] : []),
+      ...(skippedEscalation.byReason["cost-cap"] > 0 ? ["raise or remove the run cost cap (maxCostCents)"] : []),
+    ];
+    const rich = pageCredits("rich", skippedEscalation.pages);
+    recs.push({
+      id: "ocr-escalation-skipped", severity: "medium",
+      title: "Some scanned pages skipped their second read",
+      reason: `${plural(skippedEscalation.pages, "page")} in ${plural(skippedEscalation.documentIds.length, "file")} read poorly by OCR kept ${agree(skippedEscalation.pages, "its", "their")} first OCR read without the second read: ${parts.join("; ")}.`,
+      effect: `${actions.length ? `${actions.join(" and ").replace(/^./, (c) => c.toUpperCase())}, then reprocess` : "Reprocess"} the ${plural(skippedEscalation.documentIds.length, "affected file")} so these pages get their second read.`,
+      affectedPages: skippedEscalation.pages, affectedDocuments: skippedEscalation.documentIds.length,
+      cost: {
+        centsPer100Pages: null,
+        reprocessCents: round(rich, 2),
+        basis: `A second read by a vision model bills these ${plural(skippedEscalation.pages, "page")} as Vision pages, about ${formatCents(rich)}; reprocessing runs the files again.`,
+      },
+      patch: null,
+      reprocessDocumentIds: skippedEscalation.documentIds,
     });
   }
 
@@ -1091,6 +1143,65 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
 
   const order = { high: 0, medium: 1, info: 2 } as const;
   return recs.sort((a, b) => order[a.severity] - order[b.severity]);
+}
+
+const escalationCount = z.number().int().nonnegative().max(1_000_000);
+const ocrEscalationStatsSchema = z.object({
+  escalatedPages: escalationCount,
+  cappedPages: escalationCount,
+  skippedPages: z.object({ unfunded: escalationCount, "cost-cap": escalationCount, "price-check": escalationCount }).partial().optional(),
+}).passthrough();
+
+type OcrEscalationSkipReason = "unfunded" | "cost-cap" | "price-check";
+/** Why a wanted second read did not happen (worker ocr/escalation-stats.ts), as the report says it. */
+const OCR_ESCALATION_SKIP_TEXT: ReadonlyArray<readonly [OcrEscalationSkipReason, string]> = [
+  ["unfunded", "skipped it because the balance ran out"],
+  ["cost-cap", "skipped it because the run cost cap was reached"],
+  ["price-check", "skipped it because no second-read model was available for it"],
+];
+
+/** Pages that kept their first OCR read for a reason other than the cap, per reason and in all (largest count per document). */
+function ocrEscalationSkipped(observed: Pick<Observed, "docs" | "stagesByDoc">): { pages: number; byReason: Record<OcrEscalationSkipReason, number>; documentIds: string[] } {
+  const byReason: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0 };
+  const documentIds: string[] = [];
+  let pages = 0;
+  for (const doc of observed.docs) {
+    if (statusBucket(doc.status) === "failed") continue;
+    const own: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0 };
+    for (const stage of observed.stagesByDoc.get(doc.id) ?? []) {
+      const parsed = ocrEscalationStatsSchema.safeParse(stage.ocrEscalation);
+      if (!parsed.success) continue;
+      for (const [reason] of OCR_ESCALATION_SKIP_TEXT) own[reason] = Math.max(own[reason], parsed.data.skippedPages?.[reason] ?? 0);
+    }
+    const limit = Math.max(1, doc.pageCount);
+    const total = Math.min(limit, own.unfunded + own["cost-cap"] + own["price-check"]);
+    if (total === 0) continue;
+    for (const [reason] of OCR_ESCALATION_SKIP_TEXT) byReason[reason] += Math.min(limit, own[reason]);
+    pages += total;
+    documentIds.push(doc.id);
+  }
+  return { pages, byReason, documentIds };
+}
+
+/**
+ * Pages the per-document OCR second-read cap left on their first OCR read, per document (the largest count any of its stages
+ * recorded: each stage copies the run's whole record), for documents that did not fail.
+ */
+function ocrEscalationCapped(observed: Pick<Observed, "docs" | "stagesByDoc">): { pages: number; documentIds: string[] } {
+  let pages = 0;
+  const documentIds: string[] = [];
+  for (const doc of observed.docs) {
+    if (statusBucket(doc.status) === "failed") continue;
+    let capped = 0;
+    for (const stage of observed.stagesByDoc.get(doc.id) ?? []) {
+      const parsed = ocrEscalationStatsSchema.safeParse(stage.ocrEscalation);
+      if (parsed.success) capped = Math.max(capped, parsed.data.cappedPages);
+    }
+    if (capped === 0) continue;
+    pages += Math.min(capped, Math.max(1, doc.pageCount));
+    documentIds.push(doc.id);
+  }
+  return { pages, documentIds };
 }
 
 /** User-controlled names go into Markdown as plain text: no links, images, HTML or emphasis. */
@@ -1279,7 +1390,7 @@ export async function loadIngestReport(args: {
       table_pages: string | number | null; duration_seconds: string | number | null; error: string | null; extractor_fallback: unknown;
       page_equivalents: string | number | null; dense_pages: unknown; dense_page_count: string | number | null;
       pdf_pages_measured: string | number | null; pdf_pages_processed: string | number | null; pdf_pages_mismatch: string | null;
-      visual_candidates: unknown;
+      visual_candidates: unknown; ocr_escalation: unknown;
     }[]>`
       select s.document_id, s.stage_name, s.status, left(s.error, 1000) as error,
         coalesce(s.stats -> 'skipped' = 'true'::jsonb, false) as skipped,
@@ -1296,7 +1407,8 @@ export async function loadIngestReport(args: {
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMeasured') = 'number' then (s.stats ->> 'pdfPagesMeasured')::numeric end as pdf_pages_measured,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesProcessed') = 'number' then (s.stats ->> 'pdfPagesProcessed')::numeric end as pdf_pages_processed,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMismatch') = 'string' then left(s.stats ->> 'pdfPagesMismatch', 40) end as pdf_pages_mismatch,
-        case when jsonb_typeof(s.stats -> 'visualCandidates') = 'object' then s.stats -> 'visualCandidates' end as visual_candidates
+        case when jsonb_typeof(s.stats -> 'visualCandidates') = 'object' then s.stats -> 'visualCandidates' end as visual_candidates,
+        case when jsonb_typeof(s.stats -> 'ocrEscalation') = 'object' then s.stats -> 'ocrEscalation' end as ocr_escalation
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
       where d.project_id = ${projectId} and d.id = any(${client.array(ids)}::text[])
@@ -1355,6 +1467,7 @@ export async function loadIngestReport(args: {
       pdfPagesProcessed: numOrNull(row.pdf_pages_processed),
       pdfPagesMismatch: row.pdf_pages_mismatch,
       visualCandidates: row.visual_candidates ?? null,
+      ocrEscalation: row.ocr_escalation ?? null,
     })),
     runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms), ...(Array.isArray(row.caps_applied) ? { capsApplied: row.caps_applied as ExtractionCap[] } : {}) })),
     costCents: cost?.costCents ?? null,

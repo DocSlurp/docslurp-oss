@@ -106,7 +106,7 @@ reads as the tightest limit. Adding a limit to a visual-mode project is refused
 
 ## Billing and estimates
 
-Limits never change prices. A page bills Rich only when OCR or a model reads it, and Fast otherwise, as without limits:
+Limits never change prices. A page bills OCR when OCR reads it, Rich when a vision model reads it, and Fast otherwise, as without limits:
 the ladder only decides which pages are read.
 
 Estimates follow the limits, so a capped page is not estimated as Rich: `maxRung: "fast"` is quoted as Fast, and an

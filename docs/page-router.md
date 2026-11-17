@@ -223,7 +223,7 @@ Both versions share these changes, which are not gated:
 
 #### Vision run guard
 
-Customers pay only for pages vision reads (one Rich page charge per page per run), and the run cost
+Customers pay only for pages vision reads (one Vision page charge per page per run), and the run cost
 cap counts only those charges, but every request sent to a vision provider can cost us: rejected and
 failed requests, inline 429/5xx retries, the alternate-route retry, the streaming-to-JSON fallback,
 self-critique and a second read of a page already charged create no new charge. Provider cost data
@@ -342,7 +342,7 @@ Deleting overrun rows does not lower any org's uncharged count: the `overrun:<ti
 `vision_org_attempts` stay until they age out, so the org bound keeps counting what was billed.
 
 **Org bound.** A request counts as uncharged from the moment it is admitted. It leaves the count
-only in the checkpoint transaction that persists the customer Rich page charge its read created: the
+only in the checkpoint transaction that persists the customer Vision page charge its read created: the
 charge (`rich:<run>:<document>:<page>`, deterministic per run and page) carries the request's ticket,
 and the checkpoint deletes the ticket's `vision_org_attempts` row only if its insert of that charge
 happened (`on conflict do nothing returning id`). A page charged earlier, by another activity or

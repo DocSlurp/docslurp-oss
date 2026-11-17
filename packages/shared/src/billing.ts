@@ -181,7 +181,7 @@ export function pageCredits(mode: PageMode, pages: number): number {
   return pricing().pageCredits(mode, pages);
 }
 
-/** Rich pages one vision/OCR read of a page counts as, given its output tokens. Unknown token counts count as 1. */
+/** Rich pages one vision-model read of a page counts as, given its output tokens. Unknown token counts count as 1. */
 export function richPagesForOutputTokens(outputTokens: number | null | undefined): number {
   return pricing().richPagesForOutputTokens(outputTokens);
 }
@@ -255,6 +255,8 @@ export function mediaRichPages(kind: "audio" | "video", seconds: number): number
  */
 export const BILLABLE_UNIT_METRICS = {
   fastPage: "ingest-page-fast",
+  /** A page an OCR engine read: one flat OCR page per page and run (worker pipeline/usage-ledger.ts). */
+  ocrPage: "ingest-page-ocr",
   richPage: "ingest-page-rich",
   mediaMinutes: "ingest-media-minutes",
   storage: "storage-daily",
@@ -275,6 +277,27 @@ export const BILLABLE_UNIT_METRICS = {
   summaryTree: "feature-summary-tree",
 } as const;
 export type BillableUnitMetric = (typeof BILLABLE_UNIT_METRICS)[keyof typeof BILLABLE_UNIT_METRICS];
+
+/** The unit metric each page class is charged under. */
+export const PAGE_MODE_METRICS: Readonly<Record<PageMode, BillableUnitMetric>> = {
+  fast: BILLABLE_UNIT_METRICS.fastPage,
+  ocr: BILLABLE_UNIT_METRICS.ocrPage,
+  rich: BILLABLE_UNIT_METRICS.richPage,
+};
+
+/** Unit metrics of a page charged by a read (OCR or Rich), as opposed to the Fast charge at completion. */
+export const PAGE_READ_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT_METRICS.ocrPage, BILLABLE_UNIT_METRICS.richPage];
+
+/** Unit metrics of every page charge, Fast, OCR and Rich. */
+export const PAGE_CHARGE_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT_METRICS.fastPage, ...PAGE_READ_METRICS];
+
+/**
+ * Credits a page already charged in class `from` owes when a later read puts it in the dearer class `to`: the difference
+ * only, never negative (a read in a cheaper class than the page's charge adds nothing).
+ */
+export function pageUpgradeCredits(from: PageMode, to: PageMode, pages: number = 1): number {
+  return Math.max(0, pageCredits(to, pages) - pageCredits(from, pages));
+}
 
 /** The unit metric each optional document feature is charged under. */
 export const DOCUMENT_FEATURE_METRICS: Readonly<Record<DocumentFeature, BillableUnitMetric>> = {
@@ -384,6 +407,7 @@ export type BillingForecast = {
   chatAnswersLast30d: number;
   chatCreditsPer30d: number;
   fastPagesLast30d: number;
+  ocrPagesLast30d: number;
   richPagesLast30d: number;
   ingestCreditsLast30d: number;
   /** storage + searches + chat at last-30-day pace; ingest shown separately because it is lumpy. */
@@ -405,6 +429,7 @@ export function buildBillingForecast(input: {
   chatAnswersLast30d: number;
   chatCreditsLast30d: number;
   fastPagesLast30d: number;
+  ocrPagesLast30d: number;
   richPagesLast30d: number;
   ingestCreditsLast30d: number;
 }): BillingForecast {
@@ -423,6 +448,7 @@ export function buildBillingForecast(input: {
     chatAnswersLast30d: nonNegative(input.chatAnswersLast30d),
     chatCreditsPer30d,
     fastPagesLast30d: nonNegative(input.fastPagesLast30d),
+    ocrPagesLast30d: nonNegative(input.ocrPagesLast30d),
     richPagesLast30d: nonNegative(input.richPagesLast30d),
     ingestCreditsLast30d: nonNegative(input.ingestCreditsLast30d),
     recurringCreditsPerMonth: recurring,
@@ -512,7 +538,7 @@ export type QualityModeInfo = {
 /** The public processing quality choice: what each mode does. Prices come from the pricing provider (`qualityModeInfo`). */
 export const QUALITY_MODES: Record<QualityMode, Pick<QualityModeInfo, "id" | "label" | "description">> = {
   fast: { id: "fast", label: "Fast", description: "Text layer only. Scanned pages are kept as images, not read." },
-  auto: { id: "auto", label: "Auto", description: "Reads each page the cheapest faithful way: text layer, or a vision model for scans and complex layouts." },
+  auto: { id: "auto", label: "Auto", description: "Reads each page the cheapest faithful way: text layer, OCR for scans and images, or a vision model for complex layouts." },
   good: { id: "good", label: "Good", description: "A vision model reads every page for the most faithful tables, figures and layout." },
 };
 
@@ -525,7 +551,7 @@ export function qualityModeInfo(mode: QualityMode): QualityModeInfo {
 
 const formatUsdPer1k = (credits: number): string => `$${creditsToDollars(credits).toFixed(2)}`;
 
-/** "$0.05", "$0.05 to $2.50" or "$2.50" per 1,000 pages for a quality mode. */
+/** "$0.10", "$0.10 to $1.50" or "$1.50" per 1,000 pages for a quality mode (whatever the pricing provider sets). */
 export function qualityModePriceRange(mode: QualityMode): string {
   const { min, max } = qualityModeInfo(mode).creditsPer1kPages;
   return min === max ? formatUsdPer1k(min) : `${formatUsdPer1k(min)} to ${formatUsdPer1k(max)}`;
@@ -571,6 +597,7 @@ export const billingForecastSchema = z.object({
   chatAnswersLast30d: z.number().nonnegative(),
   chatCreditsPer30d: z.number().nonnegative(),
   fastPagesLast30d: z.number().nonnegative(),
+  ocrPagesLast30d: z.number().nonnegative(),
   richPagesLast30d: z.number().nonnegative(),
   ingestCreditsLast30d: z.number().nonnegative(),
   recurringCreditsPerMonth: z.number().nonnegative(),

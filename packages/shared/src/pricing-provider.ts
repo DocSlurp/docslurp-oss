@@ -23,8 +23,14 @@ export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode };
 
 export const PRICING_PROVIDER_API_VERSION = 1;
 
-/** How one page is charged: a page whose text layer is used, or a page a model reads. */
-export type PageMode = "fast" | "rich";
+/**
+ * How one page is charged, cheapest first: `fast` (its text layer is used), `ocr` (an OCR engine transcribed it: the OCR
+ * route's recogniser, page reader or hosted OCR model) and `rich` (a vision model interpreted it). A provider's prices must
+ * keep that order for any page count: fast <= ocr <= rich (`assertPricingProvider` checks it at install).
+ */
+export type PageMode = "fast" | "ocr" | "rich";
+/** The page classes in price order, cheapest first. */
+export const PAGE_MODES: readonly PageMode[] = ["fast", "ocr", "rich"];
 /** Chat answer price tiers; the provider maps models to them. */
 export type ChatAnswerTier = "standard" | "advanced" | "premium";
 export const CHAT_ANSWER_TIERS: readonly ChatAnswerTier[] = ["standard", "advanced", "premium"];
@@ -70,12 +76,14 @@ export type IngestEstimate = {
   pagesPerMinute: number;
   minutesPer100Pages: number;
   fastPages: number;
+  /** Pages an OCR engine reads (scanned and image pages under `auto`). */
+  ocrPages: number;
   richPages: number;
   /** Rich pages counted for audio and video minutes. */
   mediaRichPages: number;
   credits: {
     totalCredits: number;
-    breakdown: { fast: number; rich: number; media: number; features: number };
+    breakdown: { fast: number; ocr: number; rich: number; media: number; features: number };
   };
   /** Credits per enabled optional feature, across all documents. */
   featureCredits: Partial<Record<DocumentFeature, number>>;
@@ -160,7 +168,7 @@ export interface PricingProvider {
    */
   pageEquivalentAllowance: number;
 
-  /** Credits for `pages` pages charged in `mode` (fractional). */
+  /** Credits for `pages` pages charged in `mode` (fractional). Must hold fast <= ocr <= rich for the same pages. */
   pageCredits(mode: PageMode, pages: number): number;
   /** Rich pages one model read of a page counts as, given its output tokens (unknown: 1). */
   richPagesForOutputTokens(outputTokens: number | null | undefined): number;
@@ -284,11 +292,30 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
   if (pricingRequired() && typeof provider.automaticCallValueUsd !== "function") {
     throw new Error(`pricing provider ${provider.id} has no automaticCallValueUsd(), required where pricing is required`);
   }
+  assertPageModeOrder(provider as PricingProvider);
   const cost = provider.internalCost;
   if (!cost || typeof cost.computeRates !== "function" || typeof cost.listCredits !== "function"
     || typeof cost.sandboxCostCents !== "function" || typeof cost.sandboxRatesObservedAt !== "function"
     || typeof cost.workerSlotUsdPerHour !== "function" || typeof cost.chartGeneratorMaxPricesUsdPerMTok !== "function") {
     throw new Error(`pricing provider ${provider.id} has an incomplete internalCost`);
+  }
+}
+
+/**
+ * Throw unless the provider's page prices are finite, non-negative and ordered fast <= ocr <= rich. Checked at a few page
+ * counts: an upgrade from a cheaper class to a dearer one charges the difference, which must never be negative.
+ */
+function assertPageModeOrder(provider: PricingProvider): void {
+  for (const pages of [1, 1_000]) {
+    const credits = PAGE_MODES.map((mode) => provider.pageCredits(mode, pages));
+    if (credits.some((value) => !Number.isFinite(value) || value < 0)) {
+      throw new Error(`pricing provider ${provider.id} returned an invalid page price`);
+    }
+    for (let index = 1; index < credits.length; index += 1) {
+      if (credits[index]! < credits[index - 1]!) {
+        throw new Error(`pricing provider ${provider.id} prices ${PAGE_MODES[index]} pages below ${PAGE_MODES[index - 1]} pages`);
+      }
+    }
   }
 }
 

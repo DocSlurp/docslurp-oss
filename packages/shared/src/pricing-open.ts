@@ -2,7 +2,7 @@
  * The open pricing default: what a deployment without a pricing provider (DOCSLURP_PRICING_PLUGIN) charges.
  *
  * One flat, published rule, so a self-hosted operator can predict every charge:
- * - every page costs OPEN_CREDITS_PER_PAGE, whichever way it was read;
+ * - every page costs OPEN_CREDITS_PER_PAGE, whichever way it was read (Fast, OCR and Rich pages cost the same);
  * - an audio or video file counts one page per started minute;
  * - storage, searches, chat answers, web tools, optional features and chart & diagram export cost nothing;
  * - no speed boost surcharge, no output-token surcharge, every run pays its full page charge.
@@ -72,9 +72,10 @@ function openEstimateIngest(input: IngestEstimateInput): IngestEstimate {
     pagesPerMinute,
     minutesPer100Pages: pagesPerMinute > 0 ? 100 / pagesPerMinute : 0,
     fastPages: pages,
+    ocrPages: 0,
     richPages: 0,
     mediaRichPages: mediaMinutes,
-    credits: { totalCredits, breakdown: { fast: pageCreditsTotal, rich: 0, media, features: 0 } },
+    credits: { totalCredits, breakdown: { fast: pageCreditsTotal, ocr: 0, rich: 0, media, features: 0 } },
     featureCredits,
     pagesPerDollar: dollars > 0 ? pages / dollars : 0,
     creditsPer1000Pages: pages > 0 ? (totalCredits / pages) * 1000 : 0,

@@ -143,7 +143,7 @@ export interface EmbeddedImageSet {
 /** What a sandboxed PDF run returns: the command result, plus the pages the provider OCR'd, when it knows. */
 export interface SandboxedPdfResult extends SandboxResult {
   /**
-   * 1-based pages whose text the provider read with OCR (each is billed as a Rich read). Omit when unknown: an unknown
+   * 1-based pages whose text the provider read with OCR (each is billed as an OCR read). Omit when unknown: an unknown
    * fact never raises a charge. Validated by the host: unique integers within the document's page count.
    */
   ocrPages?: number[];

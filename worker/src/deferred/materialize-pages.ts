@@ -424,7 +424,7 @@ export async function materializePageRange(
         record: (usage) => deps.usage.record(usage),
         metadata: { materializedBy: input.reason, sessionId: input.sessionId },
         call: (gate) => ops.ocrPage(document, page, { runId: input.runId, pipeline, gate }),
-        // Customer credits: an OCR-read page bills Rich (the usage ledger charges it, once per run and
+        // Customer credits: a page the vision model transcribed here bills Rich (the usage ledger charges it, once per run and
         // page); that request leaves the org's uncharged count. Provider cost is ours.
         onResult: (ocr, gate) => {
           recordVisionRead(deps.usage, gate, { documentId, pageNumber: page }, {

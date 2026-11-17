@@ -329,6 +329,13 @@ export async function executeVisionRuntime(args: {
    * whose size cannot be read, is refused before admission (nothing is sent or billed): `VisionImageOverBudgetError`.
    */
   maxImageTokens?: number;
+  /**
+   * A per-request price ceiling (OpenRouter routes only): `max_price` is sent at the lower of the catalog price and this
+   * ceiling, and the request is restricted to `hosts`, so only hosts priced under the ceiling can serve it (OCR
+   * escalation, shared ocr-escalation-routes.ts). No host under it: OpenRouter refuses the request (a routing exclusion,
+   * `ProviderRoutingExclusionError`, lib/provider-retry.ts), and nothing is billed.
+   */
+  priceCeiling?: VisionPriceCeiling;
 }): Promise<VisionExecutionResult> {
   const normalized = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
   const selected = args.promptText !== undefined ? { ...normalized, prompt: args.promptText } : normalized;
@@ -479,8 +486,27 @@ function weightedGate(gate: VisionRequestGate, weightCents: number, route: Visio
 /** What one route's request needs from `executeVisionRuntime`'s call, plus whether it is plain page transcription. */
 type RouteRequestArgs = Pick<
   Parameters<typeof executeVisionRuntime>[0],
-  "imagePath" | "mimeType" | "outputPath" | "runner" | "signal" | "cfg" | "privacyMode" | "gate" | "reasoning" | "maxOutputTokens" | "singleAttempt" | "maxImageTokens" | "requestText" | "cacheOrderedPrompt"
+  "imagePath" | "mimeType" | "outputPath" | "runner" | "signal" | "cfg" | "privacyMode" | "gate" | "reasoning" | "maxOutputTokens" | "singleAttempt" | "maxImageTokens" | "requestText" | "cacheOrderedPrompt" | "priceCeiling"
 > & { transcription: boolean };
+
+/** A per-request price ceiling: USD per million prompt and completion tokens, USD per image, and the hosts allowed. */
+export interface VisionPriceCeiling {
+  inputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+  imageUsd: number;
+  hosts: readonly string[];
+}
+
+/** The catalog `max_price`, lowered to a per-request ceiling. */
+function cappedMaxPrice(maxPrice: VisionMaxPrice | null, ceiling: VisionPriceCeiling | undefined): VisionMaxPrice | null {
+  if (!maxPrice || !ceiling) return maxPrice;
+  return {
+    inputUsdPerMillion: Math.min(maxPrice.inputUsdPerMillion, ceiling.inputUsdPerMillion),
+    outputUsdPerMillion: Math.min(maxPrice.outputUsdPerMillion, ceiling.outputUsdPerMillion),
+    imageUsd: Math.min(maxPrice.imageUsd, ceiling.imageUsd),
+    requestUsd: maxPrice.requestUsd,
+  };
+}
 
 /**
  * Sends one page to a resolved route. Private routes are authorized (and,
@@ -542,6 +568,11 @@ async function sendRouteVisionRequest(
     imageTokens: visionImageTokenBound(imageSize, model),
     outputTokens: outputCap.bound,
   });
+  // A price ceiling or host restriction must be sent as one: a route that cannot carry it (not OpenRouter, or no catalog
+  // price to send as max_price) is refused before anything is admitted or sent, never sent unrestricted.
+  if (args.priceCeiling && (isPrivate || billing !== "openrouter" || !pricing.maxPrice)) {
+    throw new UnpricedVisionRouteError(model, "cannot carry the request's price ceiling and host restriction");
+  }
   const knownSize = Boolean(imageSize?.widthPx && imageSize.heightPx);
   console.log(
     `[vision-weight] model=${model} billing=${billing} weightCents=${pricing.weightCents.toFixed(4)} ` +
@@ -565,7 +596,9 @@ async function sendRouteVisionRequest(
     ...(args.singleAttempt ? { singleAttempt: true } : {}),
   };
   if (!isPrivate) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, streaming: args.cfg.visionStreaming });
+    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy,
+      maxPrice: cappedMaxPrice(pricing.maxPrice, args.priceCeiling), streaming: args.cfg.visionStreaming,
+      ...(args.priceCeiling && pricing.maxPrice ? { providerOnly: args.priceCeiling.hosts } : {}) });
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   onUsageModel(call.usageModel);
@@ -797,6 +830,8 @@ export async function runVisionRequest(args: {
   gate: VisionRequestGate | null;
   /** Prices and fee caps the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
   maxPrice?: VisionMaxPrice | null;
+  /** OpenRouter hosts the request is restricted to, in place of the model profile's (a price-ceiling route). */
+  providerOnly?: readonly string[];
   /** Overrides the model's page-transcription reasoning default (OpenRouter only). */
   reasoning?: OpenRouterReasoning;
   /** Per-model request shape (prompt mode, system message, sampling); see `visionRequestProfileForRoute`. */
@@ -935,6 +970,10 @@ export async function runVisionRequest(args: {
         // Per-model routing restricted to providers measured to transcribe faithfully.
         ...(isOpenRouter ? openRouterProviderParams(args.model) : {}),
       };
+      if (isOpenRouter && args.providerOnly?.length) {
+        const own = (body as { provider?: Record<string, unknown> }).provider ?? {};
+        Object.assign(body, { provider: { ...own, only: [...args.providerOnly], order: undefined, sort: own.sort ?? "price", allow_fallbacks: true } });
+      }
       // An org or project that turned off China-based providers keeps them out of every attempt: the
       // restriction is applied right before each send (vision-stream.ts `withProviderPolicy`).
       // No upstream provider (or OpenRouter fallback) may bill above the price the guard weighed this

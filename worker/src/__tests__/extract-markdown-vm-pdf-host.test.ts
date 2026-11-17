@@ -13,6 +13,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { PRODUCER_MARKER, docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
+import { OCR_PAGE_CLASS_SLOT } from "../pipeline/ocr-page-class.js";
 import { PAGE_BILLING_RULES_SLOT } from "../db/page-base-fee.js";
 import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
@@ -95,7 +96,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   (state as { store?: unknown }).store = new Proxy({ upsertPageFacts, getCompletedPages: async () => new Set<number>() } as Record<string, unknown>, {
     get: (object, key) => (typeof key !== "string" || key === "then" ? undefined : object[key] ?? (async () => undefined)),
   });
-  const richIds = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id);
+  const richIds = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr").map((event) => event.id);
   const hostPdf = () => [
     ...calls.filter((name) => /^pdf|pageText|extractText|ocrPdf|images|info|render|rasteri[sz]e/i.test(name)),
     ...commands.filter((command) => !command.sandboxedPdf).map((command) => command.binary),
@@ -117,7 +118,7 @@ describe("the sandboxed PDF route on the worker host", () => {
       expect(h.commands.map((command) => command.binary)).toEqual(["test-vm"]);
       expect(h.hostPdf()).toEqual([]);
       expect(h.upsertPageFacts).not.toHaveBeenCalled();
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2"]);
       expect(checkpoint?.stats).toMatchObject({ extractor: "vm-pdf", hostPdfProbes: "skipped-sandboxed-route", ocrReadPages: 1, ocrReadSource: "extractor-reported" });
     } finally { await h.cleanup(); }
   });
@@ -432,7 +433,7 @@ describe("the sandboxed PDF route on the worker host", () => {
         expect(h.upsertPageFacts.mock.calls.flat(2).some((row) => (row as { scanClass?: unknown }).scanClass !== undefined)).toBe(false);
         expect(h.state.artifactLedger.readDocument("doc-1", "page-layout-facts")).toBeUndefined();
         // Billing evidence is the provider's ocrPages alone, whatever happened to the facts.
-        expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+        expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2"]);
       } finally { await h.cleanup(); }
     }
     vi.restoreAllMocks();
@@ -461,6 +462,8 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     const h = await harness(provider);
     h.state.artifactLedger.record(PAGE_BILLING_RULES_SLOT, "test-pricing@1");
     h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    // Started with the OCR page class on (every live worker advertised it).
+    h.state.artifactLedger.record(OCR_PAGE_CLASS_SLOT, "1");
     return h;
   }
   const sourceRows = (h: Awaited<ReturnType<typeof harness>>) =>
@@ -556,7 +559,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     }
     // Billing evidence is the provider's ocrPages and the walker's sizes (none here) alone, facts or not.
     expect(outcomes[1]).toEqual(outcomes[0]);
-    expect(outcomes[0]!.rich).toEqual(["rich:run-1:doc-1:2"]);
+    expect(outcomes[0]!.rich).toEqual(["ocr:run-1:doc-1:2"]);
     expect(outcomes[0]!.equivalents).toEqual([]);
 
     // A run started before the page billing pin bills pages with no text bytes and an image as scans at completion
@@ -566,7 +569,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     try {
       await h.stage.run(h.state);
       expect(sourceRows(h)).toEqual([]);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2"]);
       expect(h.state.documentStage("doc-1", "extract-markdown")?.stats).toMatchObject({ dopplerFactsEvidence: { status: "built", rows: 0, rowsSkipped: "legacy-billing" } });
     } finally { await h.cleanup(); }
   });

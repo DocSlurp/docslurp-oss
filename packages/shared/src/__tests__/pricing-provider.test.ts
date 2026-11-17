@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  BILLABLE_UNIT_METRICS,
+  isBillableUnitMetric,
+  PAGE_MODE_METRICS,
+  PAGE_MODES,
+  PAGE_READ_METRICS,
+  pageUpgradeCredits,
+  TEST_PAGE_CREDITS,
   applyFileProfile,
   profilePageEquivalents,
   applySpeedBoostUnitCharge,
@@ -228,5 +235,33 @@ describe("file profiles are untrusted", () => {
     quoteUpload({ files: [{ name: "a.pdf", size: 100_000, profile: pdfProfile({}, { rasterPages: 50 }) }, { name: "b.pdf", size: 7, profile: pdfProfile() }], profile });
     expect((seen[0] as FileProfile).pdf?.rasterPages).toBe(10);
     expect(seen[1]).toBeUndefined();
+  });
+});
+
+describe("OCR page class", () => {
+  it("prices fast, ocr and rich through the provider; the open default charges every class the same", () => {
+    for (const mode of PAGE_MODES) expect(OPEN_PRICING.pageCredits(mode, 1_000)).toBeCloseTo(OPEN_CREDITS_PER_PAGE * 1_000);
+    installTestPricing(DISTINCT_TEST_PRICING);
+    expect(PAGE_MODES.map((mode) => pageCredits(mode, 1_000))).toEqual(PAGE_MODES.map((mode) => TEST_PAGE_CREDITS[mode] * 1_000));
+    expect(PAGE_MODE_METRICS).toEqual({ fast: "ingest-page-fast", ocr: "ingest-page-ocr", rich: "ingest-page-rich" });
+    expect(PAGE_READ_METRICS).toEqual([BILLABLE_UNIT_METRICS.ocrPage, BILLABLE_UNIT_METRICS.richPage]);
+    expect(isBillableUnitMetric("ingest-page-ocr")).toBe(true);
+  });
+
+  it("charges an upgrade the difference only, never a negative amount", () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
+    expect(pageUpgradeCredits("fast", "ocr")).toBeCloseTo(TEST_PAGE_CREDITS.ocr - TEST_PAGE_CREDITS.fast);
+    expect(pageUpgradeCredits("ocr", "rich")).toBeCloseTo(TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.ocr);
+    expect(pageUpgradeCredits("fast", "rich", 3)).toBeCloseTo(3 * (TEST_PAGE_CREDITS.rich - TEST_PAGE_CREDITS.fast));
+    expect(pageUpgradeCredits("rich", "ocr")).toBe(0);
+    expect(pageUpgradeCredits("ocr", "ocr")).toBe(0);
+  });
+
+  it("refuses a provider whose page prices are out of order or invalid", () => {
+    const order = (credits: Record<string, number>) => ({ ...OPEN_PRICING, id: "test", pageCredits: (mode: string, pages: number) => credits[mode]! * pages });
+    expect(() => installPricingProvider(order({ fast: 0.01, ocr: 0.005, rich: 1 }) as PricingProvider)).toThrow(/prices ocr pages below fast/);
+    expect(() => installPricingProvider(order({ fast: 0.01, ocr: 2, rich: 1 }) as PricingProvider)).toThrow(/prices rich pages below ocr/);
+    expect(() => installPricingProvider(order({ fast: 0.01, ocr: Number.NaN, rich: 1 }) as PricingProvider)).toThrow(/invalid page price/);
+    expect(() => installPricingProvider(order({ fast: 0.01, ocr: 0.01, rich: 0.01 }) as PricingProvider)).not.toThrow();
   });
 });

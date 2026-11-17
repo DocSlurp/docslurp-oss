@@ -86,10 +86,9 @@ most `DOCSLURP_OCR_MAX_LONG_EDGE` (default 2000 px, 640 to 4000), which bounds t
 mode the memory is the VM's, not the worker's.
 
 A cap above the 2000 px default is an operator opt-in, off unless set. It buys detail on small print at the cost of more
-VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Rich page,
-so with escalation on a dense page at a high cap can cost more than it bills: slightly loss-making. The worker logs
-`[ocr] long-edge-opt-in` at startup when it is set, and the provider
-cost is recorded at the VM's real rate, so the provider-cost loss alert flags runs that lose money.
+VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Scan page,
+whatever the cap. The worker logs `[ocr] long-edge-opt-in` at startup when it is set, and the VM's time is recorded on
+the usage ledger as for every read.
 
 ## Languages
 
@@ -229,7 +228,7 @@ every eligible run, whatever vision model a project configured.
   the run's own configured model, never one the system picks as a fallback. A render or download error propagates as it
   would on the hosted route; only reader errors fall back.
 - Usage: `[ai-usage] vision-page-reader model=<model> input_tokens=<n> output_tokens=<n>` per job, provider cost on the
-  ledger at 0 credits; each page read is one Rich page, charged once per run.
+  ledger at 0 credits; each page read is one Vision page, charged once per run.
 - The reader's Markdown passes through vision-extract's own post-processing: HTML tables are rebuilt in the parser VM and
   `$...$` / `$$...$$` math is kept, the conventions the hosted transcription prompts ask for.
 
@@ -269,9 +268,13 @@ start-up the provider needs. A reader without `warm` is unaffected.
 
 ## Billing and usage
 
-- An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
+- OCR reads bill as Scan pages (page class `ocr`, `ingest-page-ocr`): one flat Scan page per page and run, however long
+  its text. Pages a vision model reads bill as Vision pages (`rich`), pages left to their text layer as Text pages (`fast`).
+  OCR reads are those of the OCR route: the engine (`page-ocr`, `pdf-ocr`, the native engine's `ocr-native-pdf`), the
+  page reader (`ocr-page-reader`) and `hosted` mode (`hosted-ocr`). A vision model's read of a page bills Vision.
+- An uploaded image: every frame the engine read is one Scan page read, metric `page-ocr`, with or without text in it
   (owner decision, 2026-11-05). The VM costs the same for a blank frame.
-- A scanned PDF page: one Rich page read only when the read found words.
+- A scanned PDF page: one Scan page read only when the read found words.
 - Each charge is keyed by run, document and page, so a retry or a second reader does not charge it twice.
 - A TIFF's frames are its pages: the frames read become `documents.page_count`. A TIFF with more than 64 frames (the
   job's frame cap) is refused before anything is charged, with the public error `imageTooManyFrames`.
@@ -279,12 +282,50 @@ start-up the provider needs. A reader without `warm` is unaffected.
   provider's own cost arrives separately, at provider cost. Remote usage outside a stage context has no usage ledger:
   it is logged as `[usage-unrecorded]` and counted on `docslurp.usage.unrecorded`, never dropped silently.
 - Escalation reads are recorded as `ocr-escalation`, and `hosted` mode reads as `hosted-ocr`, each with the provider's
-  actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
-  (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
-  cost is still recorded.
+  actual input and output tokens. An escalation is a vision model's read: it upgrades the page from Scan to Vision (the
+  page's first Vision charge is the Vision price minus its Scan charge, so the page pays Vision once), in every quality
+  that runs it. An escalated page bills at most one Vision page, whatever the output length (escalation output tokens
+  add no Vision pages), and an escalation that returned no text charges nothing more (the page stays Scan); its usage
+  is still recorded.
+- Escalation readers, tried in order: GLM 5.3 Flash on OpenRouter, restricted to the hosts listed at or under the
+  request's price ceiling (`max_price`), then Qwen3-VL 30B A3B on DeepInfra. Each is checked on its own before it is
+  used; when no host can serve a reader under its ceiling, the next one is tried, and with none left the page keeps its
+  OCR read (recorded as skipped). `DOCSLURP_OCR_ESCALATION_MODEL` names a single reader instead.
+- Before each new escalation read the balance must cover the page's upgrade from Scan to Vision plus the activity's
+  buffered charges. The check is read-only: an unfunded organization skips the escalation (the page keeps its OCR read)
+  and the run goes on, unpaused. Without a store, a user or an organization to check, the escalation is skipped too. A
+  check that cannot decide is retried with the activity.
+- The database settles a page's read charges (migration 0185, `settle_page_read_charge`), whichever activity, worker or
+  release recorded them: an OCR charge for a page the run already charged Rich is not inserted, and a page's first Rich
+  unit is inserted at its price minus the run's OCR charge for that page. Each charge locks its run's row first (the
+  same row the run spend trigger updates), so settlements of one run serialize without a lock per page.
+- Pages that wanted a second read but kept their first OCR read are recorded per document with the reason: the
+  per-document cap (its page budget, `DOCSLURP_OCR_ESCALATION_MAX_PAGES`, or its attempt budget,
+  `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`, retries included), the balance, the run cost cap, or the second-read model's
+  price check. The ingest report turns them into `ocr-escalation-cap` and `ocr-escalation-skipped`.
+
+### Rollout and rollback of the OCR page class
+
+A worker pins each new run to the OCR page class (`run:page-billing-ocr`) only when every live worker advertises
+`billing.ocr-page-class` in the capability registry (a worker advertises it once migration 0185's trigger exists) and
+`DOCSLURP_OCR_PAGE_CLASS` is not `off`. Otherwise the run bills OCR reads as Rich, as before. Runs started by an earlier
+release keep its rule.
+
+- Deploy order: apply migrations, roll every worker and confirm no older worker still polls (the fleet view lists each
+  worker's capabilities), then deploy the API. New runs use the class from the first run started after the last older
+  worker leaves.
+- Backstop: Fast charges carry `pageRules: 2`, and the database refuses (SQLSTATE `DS001`) a Fast charge without it for
+  a run that has OCR charges, so an older worker cannot bill a run's OCR pages Fast as well. Its message names the run
+  for operators; raw database errors stay in logs and traces.
+- Rollback of workers to a release before the class: set `DOCSLURP_OCR_PAGE_CLASS=off` on the current workers so new runs
+  stop using the class, let the runs pinned to it finish, then turn the backstop off
+  (`ALTER DATABASE <db> SET docslurp.page_rules_guard = 'off'`, effective for new connections) and roll back. Turn it
+  back on (`ALTER DATABASE <db> RESET docslurp.page_rules_guard`) once current workers run again. Each document stage records the pages escalated and the pages
+  capped (`stats.ocrEscalation`), and the ingest report recommends reading the capped pages with a vision model
+  (`ocr-escalation-cap`).
 - Page reader jobs are recorded as `ocr-page-reader` at provider cost, billing 0 credits (`providerCostCents`), also
   when the job failed. The host sets the metric, model and tenant scope of each event; a provider cannot record a
-  billable charge. A page the reader replaced is one Rich page, charged once per run like the recogniser's read of it.
+  billable charge. A page the reader replaced is one Scan page, charged once per run like the recogniser's read of it.
 - Quotes count a TIFF's frames as its pages, up to 64.
 
 ## Host phases outside OCR

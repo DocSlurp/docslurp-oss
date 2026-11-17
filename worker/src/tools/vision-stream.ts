@@ -10,7 +10,7 @@
  */
 import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readPromptCacheTokens, readProviderCharge, resolveOpenRouterUsage } from "@docslurp/shared";
 
-import { fetchWithProviderRetry } from "../lib/provider-retry.js";
+import { fetchWithProviderRetry, isRoutingExclusion, ProviderRoutingExclusionError } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
 import type { VisionRequestGate } from "../lib/vision-attempt-guard.js";
 
@@ -557,7 +557,14 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       ...(args.gate ? { gate: args.gate } : {}),
     });
     if (!response.ok) {
+      const routingBody = response.status === 503 || response.status === 404 ? await response.clone().text().catch(() => "") : "";
       void response.body?.cancel().catch(() => {});
+      if (routingBody && isRoutingExclusion(response.status, routingBody)) {
+        // Refused before acceptance, nothing billed: handed back, never a failed request (a no-op when the retry layer
+        // already handed it back).
+        await args.gate?.unbilled("routing", { provider: args.providerLabel, status: response.status });
+        throw new ProviderRoutingExclusionError(response.status, routingBody);
+      }
       if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {
         // Refused before acceptance: no page admission, no breaker failure, no org count.
         await args.gate?.unbilled("unsupported", { provider: args.providerLabel, status: response.status });

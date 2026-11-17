@@ -169,7 +169,7 @@ export const simpleServiceSchemas = {
   },
 };
 
-const qualityDescription = "Processing quality for these files; omitted uses the project's (auto by default). fast: text layer only, scanned pages kept as page images and not read ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50).";
+const qualityDescription = "Processing quality for these files; omitted uses the project's (auto by default). fast: text layer only, scanned pages kept as page images and not read (Text pages, $0.10 per 1,000 pages). auto: each page read the cheapest faithful way (Text, Scan or Vision pages, $0.10 to $1.50). good: a vision model reads every page (Vision pages, $1.50).";
 const pipelineOverrides = {
   type: "object", description: "Per-upload pipeline overrides merged onto the project pipeline.",
   properties: { quality: { type: "string", enum: ["fast", "auto", "good"], description: qualityDescription } },

@@ -11,7 +11,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { PAGE_READ_METRICS, type WorkerCapability, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -72,6 +72,7 @@ import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
 import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
+  ocrPageClassSettlementProbe,
   resolveWorkerCapabilities,
   WorkerCapabilityRegistry,
   type WorkerCapabilityRegistryOptions,
@@ -2559,11 +2560,13 @@ export class Store {
    */
   capabilityRegistry(options: Omit<WorkerCapabilityRegistryOptions, "sql" | "capabilities">): WorkerCapabilityRegistry {
     const lexicalColumnPresent = lexicalColumnProbe(this.sql);
+    const ocrSettlement = ocrPageClassSettlementProbe(this.sql);
     return new WorkerCapabilityRegistry({
       ...options,
       sql: this.sql,
       capabilities: () => resolveWorkerCapabilities({
         creditLeasesActive: () => this.creditLeases.active(),
+        ocrPageClassSettlement: ocrSettlement,
         lexicalColumnPresent,
         firstPassBatch: () => sandboxedPdfBatchProvider() !== null,
       }),
@@ -2956,14 +2959,14 @@ export class Store {
 
   /**
    * The run's multi-frame images (TIFF) whose counted frames raised their page basis above intake's one page, with the distinct
-   * pages a Rich charge of this run already covers (read through usage_attribution). The frame-count spend check adds up the
+   * pages an OCR or Rich charge of this run already covers (read through usage_attribution). The frame-count spend check adds up the
    * frames not yet charged, so concurrent documents of one run cannot each fit the balance alone and together overdraw it.
    */
   async countedImageFrames(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>> {
     const rows = await this.sql<{ id: string; page_count: number; charged: number }[]>`
       select d.id, d.page_count,
         coalesce((select count(distinct (au.metadata ->> 'pageNumber')) from usage_attribution au
-          where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage} and au.metadata ->> 'documentId' = d.id), 0)::int as charged
+          where au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[]) and au.metadata ->> 'documentId' = d.id), 0)::int as charged
       from documents d
       where d.run_id = ${runId} and d.deduped_from_document_id is null and d.page_count > 1
         and lower(split_part(coalesce(d.mime_type, ''), ';', 1)) in ('image/tiff', 'image/tiff-fx')
@@ -3044,6 +3047,26 @@ export class Store {
       if (inserted.length > 0) return Number(inserted[0]!.attempt);
     }
     throw new Error(`could not persist an OCR escalation read for ${row.documentId} page ${row.pageNumber}: attempt numbers kept colliding`);
+  }
+
+  /**
+   * Whether every live worker advertises `capability` in the capability registry (worker_capabilities, migration 0055):
+   * at least one row seen within the live window and not stopped, and none of them without it. Any error reads as no.
+   * The app's own gate also checks Temporal's live pollers (server services/worker-fleet.ts); a worker cannot, so a
+   * poller from before the handshake is not seen here. Every build since migration 0055 registers.
+   */
+  async fleetAdvertises(capability: WorkerCapability): Promise<boolean> {
+    try {
+      const [row] = await this.sql<{ live: number; lacking: number }[]>`
+        select count(*)::int as live, count(*) filter (where not (${capability} = any(capabilities)))::int as lacking
+        from worker_capabilities
+        where stopped_at is null and last_seen_at > now() - interval '90 seconds'
+      `;
+      return (row?.live ?? 0) > 0 && (row?.lacking ?? 1) === 0;
+    } catch (error) {
+      console.warn(`[worker-capabilities] fleet check for ${capability} failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   }
 
   /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers (spend-check.ts largestFundedCharge); read-only. */

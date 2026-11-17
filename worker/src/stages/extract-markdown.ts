@@ -1010,9 +1010,9 @@ export class ExtractMarkdownStage implements Stage {
                   const pageImageEvidenceUri = hostPdfProbes === "skipped-sandboxed-route"
                     ? factsEvidence?.pageImageEvidenceUri ?? this.skipHostPdfEvidence(document, "page-image-evidence", sandboxReason ?? "sandboxed-pdf-winner")
                     : await this.recordDocumentImageEvidence(document, tempFile, winningText, state, { isPdf, format }, signal);
-                  // Every page OCR produced text for was read by a model: record the read per page, which is the only
-                  // thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same page, charged
-                  // once (the ledger keys a charge by run, document and page) and topped up for its output tokens.
+                  // Every page OCR produced text for was read by the OCR route: record the read per page, which bills the
+                  // page OCR (db/page-base-fee.ts charges no Fast for it). Vision reading it too upgrades the same page to Rich,
+                  // charged once (the ledger keys a charge by run, document and page) and topped up for its output tokens.
                   const ocrReadPages = await this.recordOcrPageReads(state, document, {
                     format, isPdf, winningText, candidate: winningCandidate, sourcePath: tempFile,
                     sandboxedRoute: hostPdfProbes === "skipped-sandboxed-route",
@@ -1474,7 +1474,7 @@ export class ExtractMarkdownStage implements Stage {
       const batch = empty.slice(start, start + OCR_PDF_BATCH_PAGES);
       // Recorded as each batch is sent: a page sent to the OCR engine counts against the ladder's cap, text or not.
       if (args.ladderBudget !== undefined) recordExtractEscalatedPages(state.artifactLedger, document.id, state.run.id, batch, args.contentHash);
-      // Each batch's Rich pages are authorized before its VM starts, as an image's read is: the cost cap, then the balance
+      // Each batch's OCR pages are authorized before its VM starts, as an image's read is: the cost cap, then the balance
       // for this batch plus what earlier batches read (still buffered). A refusal pauses the run here (RunPolicyError, outside
       // the refusal handling below); pages already read stay ledgered and are charged once.
       await authorizeOcrRead(state, document.id, batch.length, "pdf-batch");
@@ -1540,7 +1540,7 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /**
-   * Records the Rich read of every page OCR produced text for, exactly once per page per run (the ledger keys a charge by run,
+   * Records the OCR read of every page OCR produced text for, exactly once per page per run (the ledger keys a charge by run,
    * document and page; a retry re-records the same pages under the same ids). An unknown fact never raises a charge.
    *
    * - A winner the OCR engine produced (the `ocr` extractor: an image, every frame of a multi-frame TIFF): the engine already
@@ -1597,7 +1597,7 @@ export class ExtractMarkdownStage implements Stage {
       }
     }
     for (const pageNumber of [...pages].sort((a, b) => a - b)) {
-      state.usageLedger.chargeRichPage({ documentId: document.id, pageNumber, readBy: reported ? "page-ocr" : "pdf-ocr", model: args.candidate.label });
+      state.usageLedger.chargeOcrPage({ documentId: document.id, pageNumber, readBy: reported ? "page-ocr" : "pdf-ocr", model: args.candidate.label });
     }
     return [...pages].sort((a, b) => a - b);
   }
@@ -1958,7 +1958,7 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<ExtractedCandidate> {
     if (!context?.state) throw new Error("ocr extraction requires the run state");
     const state = context.state;
-    // The read starts a VM: authorized before it (cost cap, balance for its Rich page), not only after the frames are counted.
+    // The read starts a VM: authorized before it (cost cap, balance for its OCR page), not only after the frames are counted.
     await authorizeImageRead(state, context.documentId);
     const result = await ocrDocument({ checkpointStorage: this.storage,
       runner: this.runner,
@@ -1970,7 +1970,7 @@ export class ExtractMarkdownStage implements Stage {
       ...(context.ocrLanguage ? { languageSetting: context.ocrLanguage } : {}),
       hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
       stage: this.name,
-      // Each frame read is a page of the document (intake counted the image as one): recorded, and its extra Rich frames checked
+      // Each frame read is a page of the document (intake counted the image as one): recorded, and its extra OCR frames checked
       // against the balance, before anything is charged.
       beforeCharging: (frames) => authorizeImageFrames(state, context.documentId, this.name, frames),
       // The VM reads no more frames than the run can pay for.

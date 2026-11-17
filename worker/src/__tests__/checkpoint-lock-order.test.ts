@@ -133,6 +133,43 @@ describe.skipIf(!realUrl)("run checkpoint lock order under real concurrency", ()
     }
   }, 30_000);
 
+  it("a page-read charge's settlement lock never waits on child-row foreign-key locks", async () => {
+    const pages = await pg.reserve();
+    const checkpoint = await pg.reserve();
+    try {
+      // Shard B: a page_stage_states insert holds FOR KEY SHARE on the run row.
+      await pages`begin`;
+      await pages`insert into page_stage_states (run_id, document_id, stage_name, page_number, status, completed_at)
+        values (${runId}, ${docIds[0]!}, 'extract-markdown', 1, 'completed', now())`;
+      // Shard A: a checkpoint updates the run row, then inserts an OCR page charge and a Rich upgrade of another page; the
+      // settlement trigger (0185) locks the run row for each. FOR UPDATE would queue behind B; FOR NO KEY UPDATE must not.
+      await checkpoint`begin`;
+      await checkpoint`update project_runs set updated_at = now() where id = ${runId}`;
+      const insert = (id: string, metric: string, page: number) => checkpoint`
+        insert into usage_events (id, user_id, run_id, org_id, project_id, provider, model, metric, amount, unit, cost_cents, metadata)
+        values (${id}, 'lock-u1', ${runId}, ${`${prefix}-org`}, ${`${prefix}-ws`}, ${UNIT_CHARGE_PROVIDER}, 'price-card', ${metric}, 1, 'page', 1,
+          ${checkpoint.json(unitChargeMetadata({ documentId: docIds[1]!, pageNumber: page }) as never)})`;
+      const charges = insert(`ocr:${runId}:${docIds[1]!}:1`, BILLABLE_UNIT_METRICS.ocrPage, 1)
+        .then(() => insert(`rich:${runId}:${docIds[1]!}:2`, BILLABLE_UNIT_METRICS.richPage, 2))
+        .then(() => "done" as const, (error: { code?: string }) => error.code ?? "error");
+      const whileBOpen = await Promise.race([
+        charges,
+        new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 1_000)),
+      ]);
+      const pageInsert = await pages`insert into page_stage_states (run_id, document_id, stage_name, page_number, status, completed_at)
+        values (${runId}, ${docIds[0]!}, 'extract-markdown', 2, 'completed', now())`.then(() => "done", (error: { code?: string }) => error.code ?? "error");
+      await pages`commit`.catch(() => undefined);
+      const afterBCommit = await charges;
+      await checkpoint`commit`.catch(() => undefined);
+      expect({ whileBOpen, pageInsert, afterBCommit }).toEqual({ whileBOpen: "done", pageInsert: "done", afterBCommit: "done" });
+    } finally {
+      await checkpoint`rollback`.catch(() => undefined);
+      await pages`rollback`.catch(() => undefined);
+      checkpoint.release();
+      pages.release();
+    }
+  }, 30_000);
+
   // The cycle needs a particular interleaving; repeat the batch to hit it (about
   // one batch in four deadlocked with FOR UPDATE on an idle 8-CPU host).
   it.each(Array.from({ length: 6 }, (_, index) => index + 1))("parallel shard checkpoints and page batches finish without deadlocks or lost usage (batch %i)", async () => {

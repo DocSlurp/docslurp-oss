@@ -38,7 +38,7 @@ async function fixture() {
   return { input, state, objects, storage, fake };
 }
 
-it("reuses base text across a failed publication and fresh worker ledger, charges Rich once per run/page and deletes after completion", async () => {
+it("reuses base text across a failed publication and fresh worker ledger, charges OCR once per run/page and deletes after completion", async () => {
   const { input, state, objects, fake } = await fixture();
   const publish = vi.fn().mockRejectedValueOnce(new Error("injected publication outage")).mockResolvedValue(undefined);
   const first = await ocrDocument(input);
@@ -111,9 +111,9 @@ it("replays the same deterministic charge id without replaying measured base com
   await ocrDocument(input);
   const retry = { ...input, state: state() };
   await ocrDocument(retry);
-  const rich = (ledger: PipelineUsageEventLedger) => ledger.snapshot().filter(event => event.metric === "ingest-page-rich");
-  expect(rich(retry.state.usageLedger).map(event => event.id)).toEqual(rich(input.state.usageLedger).map(event => event.id));
-  expect(rich(retry.state.usageLedger)).toHaveLength(1);
+  const ocr = (ledger: PipelineUsageEventLedger) => ledger.snapshot().filter(event => event.metric === "ingest-page-ocr");
+  expect(ocr(retry.state.usageLedger).map(event => event.id)).toEqual(ocr(input.state.usageLedger).map(event => event.id));
+  expect(ocr(retry.state.usageLedger)).toHaveLength(1);
   expect(retry.state.usageLedger.snapshot().filter(event => event.metric === "ocr-compute")).toHaveLength(0);
 });
 

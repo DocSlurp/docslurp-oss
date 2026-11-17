@@ -220,6 +220,7 @@ export async function getBillingOverview(orgId: string, now = new Date()): Promi
       chatAnswersLast30d: last30d.chatAnswers,
       chatCreditsLast30d: last30d.chatCredits,
       fastPagesLast30d: last30d.fastPages,
+      ocrPagesLast30d: last30d.ocrPages,
       richPagesLast30d: last30d.richPages,
       ingestCreditsLast30d: last30d.ingestCredits,
     }),

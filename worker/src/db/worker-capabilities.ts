@@ -27,6 +27,8 @@ export interface WorkerCapabilityProbes {
   creditLeasesActive: () => Promise<boolean>;
   /** documents.lexical_searchable_at exists (0051). */
   lexicalColumnPresent: () => Promise<boolean>;
+  /** The page read charge settlement trigger exists (0185): this worker may write OCR page class charges. */
+  ocrPageClassSettlement?: () => Promise<boolean>;
 }
 
 /** Capabilities this build supports, given runtime config and schema. */
@@ -41,10 +43,13 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
     // This build resolves DOCSLURP_PROFILE and enforces every DOCSLURP_DISABLE token at execution (release R0).
     "extraction.config-v1",
   ];
-  const [leases, lexical] = await Promise.all([
+  const [leases, lexical, ocrSettlement] = await Promise.all([
     probes.creditLeasesActive().catch(() => false),
     probes.lexicalColumnPresent().catch(() => false),
+    probes.ocrPageClassSettlement?.().catch(() => false) ?? Promise.resolve(false),
   ]);
+  // Bills OCR route reads in the OCR page class and settles Fast with page rules 2 (pipeline/ocr-page-class.ts).
+  if (ocrSettlement) capabilities.push("billing.ocr-page-class");
   if (leases) capabilities.push("billing.credit-leases");
   if (lexical) capabilities.push("search.early-lexical");
   // Only a worker whose PDF provider converts batches can run a first pass: without it the fleet never records one.
@@ -63,6 +68,20 @@ export function lexicalColumnProbe(sql: Client): () => Promise<boolean> {
         select 1 from information_schema.columns
         where table_schema = current_schema() and table_name = 'documents' and column_name = 'lexical_searchable_at'
       ) as present
+    `;
+    state = { present: row?.present === true, checkedAt: now };
+    return state.present;
+  };
+}
+
+/** Cached once present; re-checked every 5 minutes while missing: the settlement trigger of migration 0185. */
+export function ocrPageClassSettlementProbe(sql: Client): () => Promise<boolean> {
+  let state: { present: boolean; checkedAt: number } | null = null;
+  return async () => {
+    const now = Date.now();
+    if (state && (state.present || now - state.checkedAt < 5 * 60_000)) return state.present;
+    const [row] = await sql<{ present: boolean }[]>`
+      select exists (select 1 from pg_trigger where tgname = 'usage_events_settle_page_read_charge' and not tgisinternal) as present
     `;
     state = { present: row?.present === true, checkedAt: now };
     return state.present;
