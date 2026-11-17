@@ -1444,7 +1444,8 @@ impl<'a> Context<'a, '_> {
                 "q" => stats.encoding.unknown = true,
                 "Q" => match stack.pop() {
                     Some(saved) => (ctm, line_width, stats.encoding.font) = saved,
-                    None => { (ctm, line_width) = (base, line_width); stats.encoding.unknown = true; }
+                    // Nothing saved (a stray trailing Q is a common writer slip): only text shown after it is in doubt.
+                    None => { (ctm, line_width) = (base, line_width); stats.encoding.unbalanced = true; }
                 },
                 "w" => line_width = operands.first().and_then(number).filter(|width| width.is_finite()).unwrap_or(line_width),
                 "cm" => {

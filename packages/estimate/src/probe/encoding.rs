@@ -110,6 +110,8 @@ pub struct PageEncoding {
     pub text_checked: usize,
     /// A fact on the page could not be decided (a font class, a capped check): the mask is partial.
     pub unknown: bool,
+    /// A restore found nothing saved: the font of any text shown after it is in doubt.
+    pub unbalanced: bool,
 }
 
 impl PageEncoding {
@@ -123,7 +125,7 @@ impl PageEncoding {
             if unmapped { self.unmapped_math = true; } else { self.mapped_math = true; }
         }
         if font & FONT_TYPE3_BITMAP != 0 { self.type3_bitmap = true; }
-        if font & FONT_UNKNOWN != 0 { self.unknown = true; }
+        if font & FONT_UNKNOWN != 0 || self.unbalanced { self.unknown = true; }
         let run = Run { math, symbol: font & FONT_SYMBOL != 0 && !math, unmapped, glyphs, ..run };
         if self.runs.len() < MAX_RUNS { self.runs.push(run); } else { self.runs_overflow = true; }
     }
@@ -550,8 +552,9 @@ fn type3_paints_images<'a>(document: &'a Document, font: &'a Dictionary, budget:
     (procs.len() <= TYPE3_PROCS_READ).then_some(false)
 }
 
-/// What a stream's head says, remembered per stream object so a stream many fonts share is read (and charged) once.
-pub type StreamMemo = HashMap<ObjectId, usize>;
+/// What a stream's head says, remembered per stream object and head length so a stream many fonts share is read (and
+/// charged) once, and a stream read for a shorter head never answers for a longer one.
+pub type StreamMemo = HashMap<(ObjectId, u64), usize>;
 const HEAD_MATH: usize = 1;
 const HEAD_IMAGE: usize = 2;
 const HEAD_DRAWS: usize = 4;
@@ -559,14 +562,14 @@ const HEAD_UNKNOWN: usize = 8;
 const MAX_REMEMBERED_STREAMS: usize = 8_192;
 
 fn stream_facts(id: Option<ObjectId>, stream: &lopdf::Stream, max: u64, budget: &mut Budget, memo: &mut StreamMemo) -> usize {
-    if let Some(facts) = id.and_then(|id| memo.get(&id)) { return *facts; }
+    if let Some(facts) = id.and_then(|id| memo.get(&(id, max))) { return *facts; }
     let facts = match stream_head(stream, max, budget) {
         None => HEAD_UNKNOWN,
         Some(head) => (if has_math_table(&head) { HEAD_MATH } else { 0 })
             | (if has_token(&head, b"BI") { HEAD_IMAGE } else { 0 })
             | (if has_token(&head, b"Do") { HEAD_DRAWS } else { 0 }),
     };
-    if let Some(id) = id { if memo.len() < MAX_REMEMBERED_STREAMS { memo.insert(id, facts); } }
+    if let Some(id) = id { if memo.len() < MAX_REMEMBERED_STREAMS { memo.insert((id, max), facts); } }
     facts
 }
 

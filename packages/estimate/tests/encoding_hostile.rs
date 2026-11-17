@@ -393,3 +393,21 @@ fn o_predictors_external_data_and_q_overflow_are_unknown() {
     let bytes = build(&mut document, dictionary! { "M" => cmmi }, Dictionary::new(), content.as_bytes(), 1, Dictionary::new());
     assert_eq!(mask(&timed("q overflow", &bytes)) & PARTIAL, PARTIAL);
 }
+
+#[test]
+fn p_a_stream_read_as_a_font_head_does_not_answer_for_a_glyph_procedure() {
+    // One stream is both a TrueType font program (its head read for 1,020 bytes) and a Type 3 glyph procedure whose
+    // image comes after that: the font drawn first must not make the procedure's answer "no image".
+    let mut source = b"0 0 0 0 10 10 d1\n".to_vec();
+    for _ in 0..25 { source.extend_from_slice(b"% padding comment line to push the image past the font-head window\n"); }
+    source.extend_from_slice(b"q 10 0 0 10 0 0 cm BI /W 1 /H 1 /IM true ID \xff EI Q");
+    let mut document = Document::with_version("1.7");
+    let shared = document.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, zlib(&source)));
+    let fonts = dictionary! {
+        "P" => dictionary! { "Type" => "Font", "Subtype" => "TrueType", "BaseFont" => "ABCDEF+Body", "FontDescriptor" => dictionary! { "FontFile2" => shared } },
+        "T" => type3(dictionary! { "a" => shared }),
+    };
+    let content = "BT /P 10 Tf 72 720 Td (hi) Tj ET BT /T 10 Tf 72 600 Td (aaaa) Tj ET";
+    let bytes = build(&mut document, fonts, Dictionary::new(), content.as_bytes(), 1, Dictionary::new());
+    assert_eq!(mask(&timed("shared font head and glyph procedure", &bytes)) & (1 << 6), 1 << 6);
+}
