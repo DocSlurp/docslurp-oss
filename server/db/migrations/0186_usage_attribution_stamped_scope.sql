@@ -6,6 +6,17 @@
 --
 -- Only columns are appended (CREATE OR REPLACE VIEW keeps every existing column, its name, type and order); the
 -- attribution rule is unchanged. The body is the current definition (0043 as renamed by 0132).
+--
+-- The prefilter is `stamped_org_id = $org OR stamped_org_id IS NULL OR (stamped_project_id IS NULL AND metadata ?
+-- 'projectIds')`: only an event split across projects can attribute to an org other than its stamped one. The last branch
+-- gets a small partial index (split events are rare), so it no longer reads every org's org-only search and chat events.
+--
+-- Locking: CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on the view and the index build holds SHARE on usage_events (one
+-- pass over the table, as 0042; CONCURRENTLY cannot run in a transaction). Each waits at most 5 s for its lock
+-- (transaction-local) and fails the release instead of queueing usage writes and reads behind a long-open transaction; a
+-- retried deploy finishes the work. Both statements are idempotent.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 CREATE OR REPLACE VIEW usage_attribution AS
 SELECT
   ue.id,
@@ -54,3 +65,7 @@ CROSS JOIN LATERAL (
 LEFT JOIN projects w
   ON w.id = scope.workspace_id
   AND (scope.split OR ue.org_id IS NULL);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS usage_events_split_created_idx
+  ON usage_events (created_at)
+  WHERE project_id IS NULL AND metadata ? 'projectIds';

@@ -132,6 +132,23 @@ describe("org page counts by final class", () => {
     expect(usage.ingestCredits).toBe(VISION);
   });
 
+  it("counts a legacy charge without a stamped org through its project's org, and only there", async () => {
+    // Rows written before the tenant columns: org_id null, the project names the org (usage_attribution resolves it).
+    const legacy = async (runId: string, page: number) => {
+      const projectId = projectOf(orgOf[runId]!);
+      await sql`
+        insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, org_id, project_id)
+        values (${`ocr:${runId}:${DOC}:${page}`}, 'u1', ${runId}, 'docslurp', 'price-card', ${BILLABLE_UNIT_METRICS.ocrPage}, 1, 'page', ${SCAN},
+          ${JSON.stringify(unitChargeMetadata({ documentId: DOC, pageNumber: page }))}::text::jsonb, null, ${projectId})
+      `;
+    };
+    await legacy(RUN_A1, 30);
+    await legacy(RUN_B, 31);
+    await legacy(RUN_B, 32);
+    expect(await usageOf(ORG_A)).toMatchObject({ ocrPages: 1, ingestCredits: SCAN });
+    expect(await usageOf(ORG_B)).toMatchObject({ ocrPages: 2, ingestCredits: 2 * SCAN });
+  });
+
   it("never lets another org's or another run's events change an org's counts", async () => {
     await scan(RUN_A1, 1);
     await text(RUN_A1, 4);

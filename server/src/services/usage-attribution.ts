@@ -80,9 +80,9 @@ export function attributedUsage(
 /**
  * `attributedUsage` limited to one organization's rows. The view's `org_id` is derived (it cannot use an index), so the
  * fragment also filters on the event's stamped columns (migration 0186), which the planner pushes down to
- * `usage_events_org_created_idx`. That filter is an exact superset of the org's rows: a row whose stamped org is set
- * and not this org, and that has a stamped project (so it is not split across projects), always attributes to its
- * stamped org. The derived `org_id` then decides, as in `attributedUsage`.
+ * `usage_events_org_created_idx` and `usage_events_split_created_idx`. That filter is an exact superset of the org's rows:
+ * a row whose stamped org is set and that is not split across projects (it has a stamped project, or no `projectIds`)
+ * always attributes to its stamped org. The derived `org_id` then decides, as in `attributedUsage`.
  */
 export function orgAttributedUsage(
   orgId: string,
@@ -92,7 +92,8 @@ export function orgAttributedUsage(
   return client`(
     select au.* from usage_attribution au
     where ${windowPredicate(client, window)}
-      and (au.stamped_org_id = ${orgId} or au.stamped_org_id is null or au.stamped_project_id is null)
+      and (au.stamped_org_id = ${orgId} or au.stamped_org_id is null
+        or (au.stamped_project_id is null and au.metadata ? 'projectIds'))
       and au.org_id = ${orgId}
   )`;
 }
@@ -277,21 +278,37 @@ export interface OrgUnitUsage {
  * Runs one read with JIT compilation off, scoped to that read. On a large org the unit-usage query's plan cost passes
  * `jit_above_cost`, and compiling it took longer (~1.2 s measured) than executing it. On a pool or connection the read
  * runs in its own transaction with `SET LOCAL jit = off`; inside a caller's transaction the setting is switched for the
- * read and restored after it, so the caller's later statements keep their own setting.
+ * read and restored after it, so the caller's later statements keep their own setting. Any other handle is refused.
  */
 async function withoutJit<T>(client: SqlClient, read: (db: SqlClient) => Promise<T>): Promise<T> {
-  if (typeof (client as { begin?: unknown }).begin === "function") {
+  const handle = client as { begin?: unknown; savepoint?: unknown };
+  if (typeof handle.begin === "function") {
     return await client.begin(async (tx) => {
       await tx`set local jit = off`;
       return read(tx as unknown as SqlClient);
     }) as T;
   }
+  // A transaction handle (postgres.js TransactionSql has `savepoint`, no `begin`): set_config(..., true) holds until the
+  // caller's transaction ends, so switch JIT off for this read and put the caller's value back after it. Anything else
+  // (a reserved connection outside a transaction) could not scope the setting, so it is refused.
+  if (typeof handle.savepoint !== "function") {
+    throw new Error("usage attribution: a JIT-scoped read needs a pool, a connection or a transaction");
+  }
   const [previous] = await client<{ jit: string }[]>`select current_setting('jit') as jit`;
   await client`select set_config('jit', 'off', true)`;
+  let failed = false;
   try {
     return await read(client);
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await client`select set_config('jit', ${previous?.jit ?? "on"}, true)`;
+    try {
+      await client`select set_config('jit', ${previous?.jit ?? "on"}, true)`;
+    } catch (restoreError) {
+      // A failed read leaves the caller's transaction aborted, so the restore fails too: keep the read's error.
+      if (!failed) throw restoreError;
+    }
   }
 }
 
