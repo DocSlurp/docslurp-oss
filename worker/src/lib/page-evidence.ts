@@ -119,20 +119,18 @@ export function mathGlyphNeed(ratio: number): number {
 }
 
 /**
- * Furniture (a logo, a letterhead, a slide background), as the layout walker finds it: an image object drawn on at least
- * repeatedImageMinPages pages and on at least repeatedImageMinShare of the `scope` pages, as the walker computes the floor
- * (worker/scripts/pdf_layout_facts.py `repeated_objects`, ceil of the share in floating point). Mirrored by Doppler's
- * layout mapping and chart-export, which must agree with the walker.
+ * Furniture (a logo, a letterhead, a slide background): an image object drawn on at least repeatedImageMinPages pages and
+ * on at least repeatedImageMinShare of the `scope` pages. One rule in two forms: the walker's floor
+ * (worker/scripts/pdf_layout_facts.py `repeated_objects`, mirrored by Doppler's layout mapping and chart-export) and the
+ * host probe's share (lib/page-image-evidence.ts, mirrored by evidence built from Doppler facts) agree for every page count
+ * up to the facts' 100,000-page ceiling. What each counts differs on purpose: the walker counts every placement over the
+ * pages it considered, the probe only significant placements over the pages it listed.
  */
 export function furnitureFloor(scope: number, rule: { minPages: number; minShare: number } = FURNITURE): number {
   return Math.max(rule.minPages, Math.ceil(rule.minShare * Math.max(1, scope)));
 }
 
-/**
- * Furniture as the host's `pdfimages -list` probe finds it (lib/page-image-evidence.ts): placements on `pages` of the `scope`
- * pages, as a share. Mirrored by page-image evidence built from Doppler facts, which must agree with the probe. Differs from
- * `furnitureFloor` only where the share's floating-point product rounds up (3 of 15 pages: furniture here, not there).
- */
+/** The same furniture rule as a test of one object's page count (see furnitureFloor). */
 export function isFurnitureShare(pages: number, scope: number, rule: { minPages: number; minShare: number } = FURNITURE): boolean {
   return pages >= rule.minPages && pages / Math.max(1, scope) >= rule.minShare;
 }
