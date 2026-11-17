@@ -24,7 +24,7 @@ export const TEST_PAGE_CREDITS: Readonly<Record<import("./pricing-provider.js").
 /**
  * Test prices. Per page, Fast 5, OCR 40 and Rich 250 credits per 1,000 pages; these and everything else is arbitrary and distinct, not any deployment's rule: one more Rich page per
  * started 800 output tokens past the first 800, a video minute two pages and an audio minute one, a feature 0.4 per started
- * 8 pages, an exported visual 0.07 per generator call, storage 7 credits per GB-month, an LLM search three searches, speed boost 4x, a reindex-only run half the page
+ * 8 pages, an exported visual 0.07 per generator call, storage 7 credits per GB-month, an LLM search three searches, a hosted-reranked search two plus 1.5x its reranker provider cost, speed boost 4x, a reindex-only run half the page
  * charge, and remote sandboxes at 0.002 cents per core-second plus 0.0005 per GiB-second.
  */
 export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
@@ -32,8 +32,9 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
   richPagesForOutputTokens: (tokens) => 1 + Math.max(0, Math.ceil((Math.max(0, tokens ?? 0) - 800) / 800)),
   mediaRichPages: (kind, seconds) => Math.ceil(Math.max(0, seconds) / 60) * (kind === "video" ? 2 : 1),
   storageCreditsPerMonth: (bytes) => (Math.max(0, bytes) / 1024 ** 3) * 7,
-  searchUnits: ({ llmStrategies }) => (llmStrategies ? 3 : 1),
-  searchCredits: (searches, { llmStrategies }) => Math.max(0, searches) * (llmStrategies ? 3 : 1) * 0.01,
+  searchUnits: ({ llmStrategies, hostedRerank }) => (llmStrategies ? 3 : hostedRerank ? 2 : 1),
+  searchCredits: (searches, { llmStrategies, hostedRerank, providerCostCents }) =>
+    Math.max(0, searches) * (llmStrategies ? 3 : hostedRerank ? 2 : 1) * 0.01 + Math.max(0, providerCostCents ?? 0) * 1.5,
   chatAnswerCredits: () => 2,
   featureCredits: (feature, pages) => (feature === "documentSummary" ? 0.3 : 0.4 * Math.max(1, Math.ceil(Math.max(0, pages) / 8))),
   visualExportCredits: ({ visuals, callsPerVisual }) => Math.max(0, visuals) * Math.max(0, callsPerVisual) * 0.07,

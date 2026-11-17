@@ -10,11 +10,10 @@ import { sql } from "../db.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
-import { compressChunks } from "./contextual-compression.js";
 import { countSearchEvent, emitSearchPhase, recordSearchPhase, timePhase } from "./timings.js";
 import { mmrSelectWithDiagnostics } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
-import { rerankHosted } from "./hosted-rerank.js";
+import { HOSTED_RERANK_MAX_CANDIDATES, rerankHosted } from "./hosted-rerank.js";
 import { fuseWithRerank, rerankBM25, type RankedChunk } from "./rerank.js";
 import {
   applyRelevanceFloor,
@@ -69,11 +68,10 @@ export interface SearchPostRetrievalInput {
   limit: number;
   options: Pick<
     SearchOptions,
-    "useRerank" | "useMmr" | "mmrLambda" | "useContextualCompression" | "candidateDepth" | "resultOrder" | "rerankProvider" | "rerankModel"
+    "useRerank" | "useMmr" | "mmrLambda" | "candidateDepth" | "resultOrder" | "rerankProvider" | "rerankModel"
   >;
   rerankApiKey?: string;
   rerankScope?: { orgId: string; projectId: string };
-  openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
   session: SearchSessionJournal;
 }
@@ -177,34 +175,13 @@ export async function applySearchPostRetrievalProcessing(
   if (input.options.useRerank) {
     const rerankStarted = performance.now();
     const reranked = input.options.rerankProvider === "deepinfra"
-      ? await rerankHosted({ query: input.query, chunks: ranked, model: input.options.rerankModel,
+      // The hosted reranker scores only the top candidates (each is billed by the token); the rest keep their fused rank.
+      ? await rerankHosted({ query: input.query, chunks: ranked.slice(0, HOSTED_RERANK_MAX_CANDIDATES), model: input.options.rerankModel,
           apiKey: input.rerankApiKey, scope: input.rerankScope,
           privacyMode: input.privacyMode, session: input.session })
       : rerankBM25(input.query, ranked);
     ranked = fuseWithRerank(ranked, reranked);
     emitSearchPhase("rerank", performance.now() - rerankStarted);
-  }
-
-  if (input.options.useContextualCompression) {
-    const compressed = await compressChunks(
-      input.query,
-      ranked.map((chunk) => ({
-        id: chunk.id,
-        text: chunk.text,
-        score: chunk.crossScore ?? chunk.score,
-      })),
-      input.openRouterApiKey ?? "",
-      input.session,
-      input.privacyMode,
-    );
-
-    const compressedById = new Map(
-      compressed.map((chunk) => [chunk.id, chunk.text]),
-    );
-    ranked = ranked.map((chunk) => ({
-      ...chunk,
-      text: compressedById.get(chunk.id) ?? chunk.text,
-    }));
   }
 
   let selected: Array<{ id: string; score: number }> = ranked.slice(0, input.limit);
@@ -289,7 +266,6 @@ export async function executeSearchSessionRetrieval(
     fused.length > 0 &&
     (input.options.useRerank ||
       input.options.useMmr ||
-      input.options.useContextualCompression ||
       input.options.resultOrder === "prompt");
   const rankedChunks = shouldPostProcess
     ? await applySearchPostRetrievalProcessing({
@@ -297,7 +273,6 @@ export async function executeSearchSessionRetrieval(
         chunks: fused,
         limit: input.limit,
         options: input.options,
-        openRouterApiKey: input.openRouterApiKey,
         rerankApiKey: input.rerankApiKey,
         rerankScope: input.rerankScope,
         privacyMode: input.privacyMode,

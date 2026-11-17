@@ -55,7 +55,7 @@ const { apiKeyRateLimitRulesSchema } = await import("@docslurp/shared");
 /** Every option that could make a search call a model or use vectors, all turned on. */
 const everythingOn = {
   useHyDE: true, queryRewrite: true, queryDecompose: true, stepback: true, selfQuery: true,
-  useContextualCompression: true, adaptiveRetrieval: true, iterativeMultiHop: true, summarySeed: true,
+  adaptiveRetrieval: true, iterativeMultiHop: true, summarySeed: true,
   enableGraphExpansion: true, enableCommunityExpansion: true, enableWebFallback: true,
   useRerank: true, rerankProvider: "deepinfra" as const, rerankModel: "Qwen/Qwen3-Reranker-0.6B" as const,
   queryVector: [0.1, 0.2],
@@ -63,7 +63,7 @@ const everythingOn = {
 /** What hybrid turns off (and keyword too). */
 const modelSteps = {
   useHyDE: false, queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false,
-  useContextualCompression: false, adaptiveRetrieval: false, iterativeMultiHop: false,
+  adaptiveRetrieval: false, iterativeMultiHop: false,
   enableGraphExpansion: false, enableCommunityExpansion: false, enableWebFallback: false,
   useRerank: false, rerankProvider: "bm25", rerankModel: undefined,
 };

@@ -18,7 +18,6 @@ const { hydeExpand } = await import("../search/hyde.js");
 const { stepbackPrompt } = await import("../search/stepback.js");
 const { rewriteQuery } = await import("../search/query-rewrite.js");
 const { deriveSelfQueryFilters } = await import("../search/self-query.js");
-const { compressChunks } = await import("../search/contextual-compression.js");
 const { createSearchSessionJournal } = await import("../search/session.js");
 
 function fakeRecorder(): UsageRecorder & { inputs: UsageInput[] } {
@@ -70,29 +69,6 @@ describe("search strategy usage", () => {
     expect(plan.filters.pageRange).toEqual({ from: 3, to: 3 });
     expect(recorder.inputs).toEqual([
       expect.objectContaining({ metric: "self-query", inputTokens: 11, outputTokens: 4 }),
-    ]);
-  });
-
-  it("compression records one event per chunk call, matching its log lines", async () => {
-    const recorder = fakeRecorder();
-    generateOpenRouterText
-      .mockResolvedValueOnce(reply("x", 5, 1))
-      .mockResolvedValueOnce(reply("y", 6, 2));
-
-    await compressChunks(
-      "q",
-      [
-        { id: "a", text: "alpha", score: 1 },
-        { id: "b", text: "beta", score: 0.5 },
-      ],
-      "key",
-      recorder,
-      "standard",
-    );
-
-    expect(recorder.inputs.map((input) => [input.metric, input.inputTokens])).toEqual([
-      ["contextual-compression", 5],
-      ["contextual-compression", 6],
     ]);
   });
 

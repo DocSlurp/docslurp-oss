@@ -17,7 +17,6 @@ describe("parseRetrievalQueryFlags", () => {
     expect(parse("rerank=false&mmr=1&compression=0&communityExpansion=true")).toMatchObject({
       useRerank: false,
       useMmr: true,
-      useContextualCompression: false,
       enableCommunityExpansion: true,
     });
   });

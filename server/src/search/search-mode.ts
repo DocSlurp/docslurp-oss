@@ -38,7 +38,6 @@ export function clampToSearchMode<T extends SearchOptions>(options: T, mode: Sea
     queryDecompose: false,
     stepback: false,
     selfQuery: false,
-    useContextualCompression: false,
     adaptiveRetrieval: false,
     iterativeMultiHop: false,
     enableGraphExpansion: false,

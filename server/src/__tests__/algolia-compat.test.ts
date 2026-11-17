@@ -123,7 +123,6 @@ describe("algolia compat", () => {
         resultCount: 8,
         useHyDE: false,
         useRerank: true,
-        useContextualCompression: false,
         useMmr: false,
         mmrLambda: 0.4,
         queryRewrite: false,
@@ -180,7 +179,7 @@ describe("algolia compat", () => {
     expect((await response.json()).results[0].processingTimeMS).toBeGreaterThan(0);
     expect(hybridSearchMock).toHaveBeenCalledWith("alpha", "demo-user", expect.objectContaining({
       useHyDE: false, useRerank: false, queryRewrite: false, queryDecompose: false,
-      useContextualCompression: false, stepback: false,
+      stepback: false,
     }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 

@@ -87,7 +87,7 @@ describe("actual hybrid retrieval with isolated SQL and LanceDB", () => {
         const options = { filters: { projectId: 'rank-ws' }, queryVector: [1, 0, 0], candidateDepth, useRerank,
           limit: 10, minScore: 0, useMmr: false, parentRetrieval: false, summarySeed: false,
           queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false,
-          useHyDE: false, useContextualCompression: false, enableGraphExpansion: false, enableCommunityExpansion: false };
+          useHyDE: false, enableGraphExpansion: false, enableCommunityExpansion: false };
         const relevance = await hybridSearch('pump maintenance', 'rank-user', { ...options, resultOrder: 'relevance' }, TEST_SEARCH_SCOPE);
         const prompt = await hybridSearch('pump maintenance', 'rank-user', { ...options, resultOrder: 'prompt' }, TEST_SEARCH_SCOPE);
         expect(relevance.results).toHaveLength(10);

@@ -45,7 +45,7 @@ type Arm = typeof ALL_ARMS[number];
 type Result = { text: string; citation: { documentId: string; chunkIndex?: number; pageNumber: number | null; pageNumbers: number[] }; kind?: "chunk" | "summary"; summary?: { id: string; level: number; chunkStart: number; chunkEnd: number } };
 
 const BASE_OPTIONS = {
-  limit: K, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false, parentRetrieval: true, useContextualCompression: false, useHyDE: false,
+  limit: K, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false, parentRetrieval: true, useHyDE: false,
   stepback: false, iterativeMultiHop: false, enableGraphExpansion: false, enableCommunityExpansion: false, summarySeed: false, queryDecompose: false,
   useMmr: false, resultOrder: "relevance" as const, searchMode: "hybrid" as const, suppressSessionLog: true,
 };

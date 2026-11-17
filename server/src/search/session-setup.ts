@@ -183,9 +183,9 @@ export async function resolveSearchSetup(
   const privacyMode = projectPipeline.privacyMode;
   const wantsHostedStrategies = Boolean(
     resolvedOptions.useHyDE || resolvedOptions.queryRewrite || resolvedOptions.stepback ||
-    resolvedOptions.selfQuery || resolvedOptions.useContextualCompression || resolvedOptions.iterativeMultiHop,
+    resolvedOptions.selfQuery || resolvedOptions.iterativeMultiHop,
   );
-  // HyDE, rewrite, stepback, self-query, compression and multi-hop are optional
+  // HyDE, rewrite, stepback, self-query and multi-hop are optional
   // and skip without a key, so a privacy block withholds the key.
   // Only deep search holds an LLM key, so no later step of a keyword or hybrid search can call one.
   const openRouterApiKey = resolvedOptions.searchMode !== "deep"

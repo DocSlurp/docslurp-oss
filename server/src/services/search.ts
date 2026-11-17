@@ -66,6 +66,7 @@ import { servedVectorSearch, type IndexServing } from "../search/index-serving.j
 import { embedQuery } from "../search/session-planner.js";
 import type { SearchFilters } from "../search/filters.js";
 import { type SearchUsageEvent } from "../search/session.js";
+import { HOSTED_RERANK_USAGE_METRIC } from "../search/hosted-rerank.js";
 import { searchChunkToResult } from "../search/session-execution.js";
 import { skippedLeg } from "../search/retrieval-adapters.js";
 import { currentSearchStreamDelivery, currentSearchStreamSink, noteSearchStreamProject, withSearchStreamSubSearch } from "../search/stream-events.js";
@@ -197,7 +198,6 @@ export interface SearchOptions {
   queryDecompose?: boolean;
   stepback?: boolean;
   glossary?: Record<string, string[]>;
-  useContextualCompression?: boolean;
   selfQuery?: boolean;
   adaptiveRetrieval?: boolean;
   queryTier?: "simple" | "multi-facet" | "analytical";
@@ -2012,6 +2012,24 @@ interface SearchChargeInput {
   /** One per query of a keyword fan-out, otherwise 1. */
   searches: number;
   llmStrategies: boolean;
+  /** The hosted reranker scored this search's candidates (at least one metered call). */
+  hostedRerank?: boolean;
+  /** Provider cost (cents) of the search's hosted reranker calls, passed to the pricing provider. */
+  rerankProviderCostCents?: number;
+}
+
+/** Whether the hosted reranker ran and what its metered calls cost us (provider cents), from a search's usage events. */
+export function hostedRerankUsage(events: readonly SearchUsageEvent[] | undefined): { hostedRerank: boolean; providerCostCents: number } {
+  let hostedRerank = false;
+  let providerCostCents = 0;
+  for (const event of events ?? []) {
+    if (event.metric !== HOSTED_RERANK_USAGE_METRIC) continue;
+    hostedRerank = true;
+    const stored = event.metadata?.providerCostCents;
+    const cost = typeof stored === "number" && Number.isFinite(stored) ? stored : Number(event.costCents);
+    if (Number.isFinite(cost) && cost > 0) providerCostCents += cost;
+  }
+  return { hostedRerank, providerCostCents };
 }
 
 function searchChargeOf(result: SearchResponse, userId: string, activity: SearchActivity): SearchChargeInput | null {
@@ -2026,26 +2044,35 @@ function searchChargeOf(result: SearchResponse, userId: string, activity: Search
     mode: result.searchMode,
     searches: result.keywordQueries?.length || 1,
     llmStrategies: (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0),
+    ...(() => {
+      const rerank = hostedRerankUsage(result.usageEvents);
+      return { hostedRerank: rerank.hostedRerank, rerankProviderCostCents: rerank.providerCostCents };
+    })(),
   };
 }
 
 /**
  * Bill one completed root search (pricing provider). A search that ran an
- * LLM query strategy (HyDE, rewrite, stepback, compression, self-query,
- * decomposition: any call with output tokens) counts as the pricing
- * provider's searchUnits. Query embeddings and strategy tokens are our cost, recorded
- * non-billable by the Search Session journal.
+ * LLM query strategy (HyDE, rewrite, stepback, self-query,
+ * decomposition: any call with output tokens) or the hosted reranker counts
+ * as the pricing provider's searchUnits. The hosted reranker's provider cost
+ * is passed to the provider too, which may charge it through. Query
+ * embeddings and strategy tokens are our cost, recorded non-billable by the
+ * Search Session journal.
  */
 async function chargeSearch(input: SearchChargeInput | null): Promise<void> {
   if (!input) return;
   const { userId, searchId, sessionId, projectId, orgId, mode, searches, llmStrategies } = input;
-  // API-key keyword and hybrid searches are charged in batches (lean-logging.ts).
-  if (!llmStrategies && leanSearchLogging(mode)) {
+  const hostedRerank = input.hostedRerank === true;
+  const providerCostCents = hostedRerank ? Math.max(0, input.rerankProviderCostCents ?? 0) : 0;
+  // API-key keyword and hybrid searches are charged in batches (lean-logging.ts); a batch carries no per-search extras.
+  if (!llmStrategies && !hostedRerank && leanSearchLogging(mode)) {
     enqueueSearchCharge({ userId, orgId, projectId, mode: mode! }, searches);
     return;
   }
   const llmMode = mode ?? "deep";
-  const credits = searchCredits(searches, { llmStrategies, mode: llmMode });
+  const priceOptions = { llmStrategies, mode: llmMode, ...(hostedRerank ? { hostedRerank, providerCostCents } : {}) };
+  const credits = searchCredits(searches, priceOptions);
   // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS, retried until it lands; the id makes a retry idempotent.
   await writeBehindWithinCap(credits, async () => {
     await recordUnitCharge({
@@ -2058,7 +2085,10 @@ async function chargeSearch(input: SearchChargeInput | null): Promise<void> {
         amount: searches,
         unit: "search",
         credits,
-        metadata: { llmStrategies, searchMode: llmMode, searchUnits: searchUnits({ llmStrategies, mode: llmMode }) },
+        metadata: {
+          llmStrategies, searchMode: llmMode, searchUnits: searchUnits(priceOptions),
+          ...(hostedRerank ? { hostedRerank, rerankProviderCostCents: providerCostCents } : {}),
+        },
       },
     });
   }, {

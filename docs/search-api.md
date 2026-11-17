@@ -13,7 +13,7 @@ Each result has a `score` (rank-based, so the top hit is always near 1) and a `r
 
 Search only returns each document's current version; older versions are archived for reading ([versions and retention](document-versions.md)). During a re-index after a config change, documents are served from their previous index until each is rebuilt ([config-change jobs](config-change-jobs.md)).
 
-With the defaults, local reranking and parent-section retrieval are on, and graph expansion follows the project pipeline. Provider-backed steps (HyDE, compression, query rewriting and decomposition, step-back, self-query) stay off unless the request or the project owner turns them on. Embedding the query can still use a provider; that usage is logged and reported in `usage`.
+With the defaults, local reranking and parent-section retrieval are on, and graph expansion follows the project pipeline. Provider-backed steps (HyDE, query rewriting and decomposition, step-back, self-query) stay off unless the request or the project owner turns them on. Embedding the query can still use a provider; that usage is logged and reported in `usage`.
 
 When `selfQuery` is enabled, `budget tag:finance` searches for `budget` within documents tagged `finance`. Tag labels are case sensitive; quote labels containing spaces, for example `budget tag:"Finance Team"`. Explicit caller `tags` filters take precedence over labels in the query. Consumed labels are excluded from retrieval text, reranking, relevance scoring and derived model prompts; diagnostics retain the original query. Malformed labels and queries containing only tag labels return HTTP 400.
 
@@ -66,7 +66,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 ## Aggregate search
 
-`POST /v1/search/aggregate` searches several projects at once (`projects`: IDs, slugs or names; empty means every project the caller can search, up to `maxProjects`) and merges their citations. It needs a search scope and takes `mode` like `POST /v1/search`. It uses the same defaults as `POST /v1/search`: provider-backed steps (`hyde`, `compression`, `queryRewrite`, `queryDecompose`, `stepback`, `selfQuery`) stay off unless the request turns them on. When turned on they call a model, are billed to the project's organization and run only in `deep` mode (a `search:deep` key), as on `POST /v1/search`.
+`POST /v1/search/aggregate` searches several projects at once (`projects`: IDs, slugs or names; empty means every project the caller can search, up to `maxProjects`) and merges their citations. It needs a search scope and takes `mode` like `POST /v1/search`. It uses the same defaults as `POST /v1/search`: provider-backed steps (`hyde`, `queryRewrite`, `queryDecompose`, `stepback`, `selfQuery`) stay off unless the request turns them on. When turned on they call a model, are billed to the project's organization and run only in `deep` mode (a `search:deep` key), as on `POST /v1/search`.
 
 `generateAnswer` (default `false`) also writes one answer over the merged citations with a model, billed as a chat answer:
 
@@ -523,6 +523,8 @@ reads no summaries.
 
 - `candidateDepth`: integer from 1 to 200. Bounds each evidence adapter's contribution and the fused candidate window before the relevance floor. This window is independent of `rerank` and the returned `limit`; a depth smaller than the output limit can return fewer hits. Filtering and the relevance floor can reduce the window further; there is no automatic refill.
 - `resultOrder`: `"relevance"` keeps the selected results in ranked order; `"prompt"` places high-ranked passages at the beginning and end for prompt assembly. It changes placement of the selected passages, not membership. This does not measure generated-answer quality.
+
+The hosted reranker (deep mode) scores at most the top 50 candidates of that window; the rest keep their fused order. A search that used it is billed for the reranker's model calls as well as the search.
 
 For an equal-candidate comparison, hold `candidateDepth`, `limit`, filters and floor constant while toggling `rerank`:
 

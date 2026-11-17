@@ -50,7 +50,7 @@ A key holds one search scope, the most it may search. Modes nest: a `search:deep
 | --- | --- | --- |
 | `search:keyword` | `keyword` | Keyword matching and the free BM25 rerank. Never embeds the query or calls a model. |
 | `search:hybrid` | `hybrid` | Keyword plus the query embedding and vector search, fused. No graph expansion, hosted reranker or LLM step. |
-| `search:deep` | `deep` | Everything the project and request turn on: graph and community expansion, the hosted reranker, deferred (on-demand) pages, and LLM query strategies (HyDE, rewriting, decomposition, stepback, self-query, compression, multi-hop). |
+| `search:deep` | `deep` | Everything the project and request turn on: graph and community expansion, the hosted reranker, deferred (on-demand) pages, and LLM query strategies (HyDE, rewriting, decomposition, stepback, self-query, multi-hop). |
 
 Pass `mode` (`keyword`, `hybrid` or `deep`) on a search to run a cheaper mode; omitted, a search runs in the key's mode. A mode above the key's scope runs at the key's mode, and the response's `mode` says which mode ran. Project search settings never lift a search above its mode. Every passage-search endpoint takes any search scope: `/v1/search`, batches, `/v1/search/aggregate`, the Algolia, Meilisearch, Typesense and Pagefind compatible routes, and the MCP `search`, `listProjects`, `suggestQueries` and `getMediaEvidence` tools. Paid web tools and `/v1/capabilities` need `search:deep`. Keys created with the retired `search` scope became `search:deep`.
 
