@@ -1,3 +1,4 @@
+import { assertMcpBrowserOrigin } from "./lib/mcp-origin.js";
 import { deprecationWarnings } from "./lib/deprecation.js";
 import { realtimeMetrics } from "./realtime/broker.js";
 import { chartExportDefaultsWarnings, chartExportSwitchWarning, resolveDeploymentProfile, summaryTreeSwitchWarnings } from "@docslurp/shared";
@@ -128,6 +129,7 @@ const repoRoot = findRepoRoot(dirname(fileURLToPath(import.meta.url)));
 
 export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export { forwardRequest } from "./lib/forward-request.js";
+export { mcpOrigin, mcpBrowserOrigin } from "./lib/mcp-origin.js";
 /** Commit pending write-behind search writes (sessions, usage) before the host exits; resolves after `timeoutMs` at most. */
 export async function drainSearchSessionWrites(timeoutMs?: number): Promise<void> {
   const started = Date.now();
@@ -320,6 +322,8 @@ export function ensureApiStartup(): Promise<void> {
       // Environment only, so it runs first: production refuses to start when chat concurrency caps
       // would be counted per process (no shared Redis, or half of a REST pair) without the explicit opt-out.
       assertChatConcurrencyBackend();
+      // Environment only: an unusable MCP_BROWSER_URL (the origin the signed-in OAuth forms post from) stops startup.
+      assertMcpBrowserOrigin();
       // The deployment posture (DOCSLURP_PROFILE, DOCSLURP_DISABLE): refuses an unknown switch, an unknown or conflicting
       // profile, dev outside development and service without NODE_ENV=production. Release R0 warns (R1 refuses) when
       // the API runs outside development with no profile; the worker, which reads customer bytes, always refuses.

@@ -102,10 +102,40 @@ describe("MCP OAuth", () => {
       vi.stubEnv("MCP_BROWSER_URL", "http://app.docs.example");
       expect((await post("/oauth/mcp/authorize", "http://app.docs.example")).status).toBe(500);
     });
+    it("refuses a list, credentials or a path, which would name some other origin", async () => {
+      for (const value of [`${browser},x@localhost:4321`, `${browser},https://evil.example`, `http://user:pw@app.localhost:4321`, `${browser}/x`, `${browser}?x=1`]) {
+        vi.stubEnv("MCP_BROWSER_URL", value);
+        for (const origin of [url, browser, "http://localhost:4321", "https://evil.example"]) {
+          expect((await post("/oauth/mcp/authorize", origin)).status, `${value} from ${origin}`).toBe(500);
+        }
+      }
+      vi.stubEnv("MCP_BROWSER_URL", `${browser}/`);
+      expect((await post("/oauth/mcp/authorize", browser)).status).toBe(303);
+    });
+    it("sends a page load that arrives on the issuer host to the browser origin, and never anywhere else", async () => {
+      const authorize = await app.request(`${url}/oauth/mcp/authorize?client_id=a&state=%2F%2Fevil.example`, { headers: { accept: "text/html" } });
+      expect(authorize.status).toBe(307);
+      expect(authorize.headers.get("location")).toBe(`${browser}/oauth/mcp/authorize?client_id=a&state=%2F%2Fevil.example`);
+      const device = await app.request(`${url}/oauth/mcp/device`);
+      expect(device.status).toBe(307);
+      expect(device.headers.get("location")).toBe(`${browser}/oauth/mcp/device`);
+      // On the browser origin, and on any other host, it is served (no loop, no redirect built from the request).
+      for (const host of [browser, "http://evil.example", "http://localhost:9999"]) {
+        const served = await app.request(`${host}/oauth/mcp/device`);
+        expect(served.status, host).toBe(403);
+        expect(served.headers.get("location"), host).toBeNull();
+        const page = await app.request(`${host}/oauth/mcp/authorize?client_id=unknown`);
+        expect(page.status, host).toBe(400);
+      }
+      expect(query.mock.calls.filter(([sql]) => String(sql).includes("INSERT"))).toEqual([]);
+    });
     it("is the issuer when unset or blank", async () => {
       vi.stubEnv("MCP_BROWSER_URL", "  ");
       expect((await post("/oauth/mcp/authorize", url)).status).toBe(303);
       expect((await post("/oauth/mcp/authorize", browser)).status).toBe(403);
+      // And no page load is redirected.
+      expect((await app.request(`${url}/oauth/mcp/device`)).status).toBe(403);
+      expect((await app.request(`${url}/oauth/mcp/authorize?client_id=unknown`)).status).toBe(400);
     });
   });
   it("checks live membership, expiry, revocation and audience for access", async () => { expect(await validateMcpToken("token", `${url}/v1/mcp`)).toBe(null); expect(query.mock.calls[0]?.[0]).toContain("JOIN org_memberships"); expect(query.mock.calls[0]?.[0]).toContain("g.resource=$2"); });

@@ -16,6 +16,7 @@ import {
   formatUserCode,
   lockDeviceAttempts,
   mcpBrowserOrigin,
+  mcpBrowserRedirect,
   normalizeUserCode,
   recordDeviceAttemptFailure,
   transaction,
@@ -119,6 +120,8 @@ function ago(date: Date): string {
 }
 
 deviceVerificationRoutes.get("/", async (c) => {
+  const elsewhere = mcpBrowserRedirect(c.req.url);
+  if (elsewhere) return c.redirect(elsewhere, 307);
   const actor = await sessionOrSignIn(c);
   if (actor instanceof Response) return actor;
   // Any user_code in the query is ignored: the code is always typed.
