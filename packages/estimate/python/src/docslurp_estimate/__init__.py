@@ -72,7 +72,7 @@ class Estimator:
     def _instantiate(self) -> None:
         instance = wasmtime.Instance(self._store, self._module, [self._memory])
         exports = instance.exports(self._store)
-        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe", "ds_detail_open", "ds_detail_next", "ds_detail_close", "ds_range_open", "ds_range_step", "ds_range_supply", "ds_range_close")}
+        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe", "ds_probe_pages", "ds_detail_open", "ds_detail_next", "ds_detail_close", "ds_range_open", "ds_range_step", "ds_range_supply", "ds_range_close")}
         for name in ("ds_init", "ds_clear_trap", "ds_last_panic", "ds_last_failed_alloc"):
             if name in exports:
                 self._fn[name] = exports[name]
@@ -97,7 +97,7 @@ class Estimator:
         self._new_store()
 
     def _call(self, name: str, *inputs: Optional[bytes]) -> Any:
-        if self._detail_token is not None and name == "ds_probe":
+        if self._detail_token is not None and name in ("ds_probe", "ds_probe_pages"):
             raise EstimatorError("invalid_request", "close the detailed profile before a legacy probe")
         store = self._store
         if "ds_clear_trap" in self._fn:
@@ -170,8 +170,22 @@ class Estimator:
             except EstimatorError:
                 raise error from None
 
-    def profile_path(self, path: str | os.PathLike, type: Optional[str] = None) -> dict:
-        """Profile the file at ``path``, reading only the bytes the profile needs."""
+    def profile_with_page_stats(self, name: str, size: int, head: bytes, tail: Optional[bytes] = None, type: Optional[str] = None) -> dict:
+        """:meth:`profile` plus a PDF's per-page stat stream: ``{"profile": ..., "pageStats": jsonl}``.
+
+        ``pageStats`` holds one ``{"page", "mask", "counts"}`` object per sampled page, one a line (bit and bucket layout:
+        ``PDF_PAGE_ENCODING_BITS`` and ``PDF_PAGE_STAT_COUNTS`` in ``@docslurp/shared``); it is empty for other files.
+        Local output only: send ``profile``, never the stream, for a quote.
+        """
+        try:
+            return self._call("ds_probe_pages", self._meta(name, size, type), head, tail)
+        except EstimatorError as error:
+            if error.code not in ("out_of_memory", "crashed"):
+                raise
+            # The bounded retry measures no page facts, so it has no page stats.
+            return {"profile": self.profile(name, size, head, tail, type), "pageStats": ""}
+
+    def _read_path(self, path: str | os.PathLike, type: Optional[str]) -> tuple[str, int, bytes, Optional[bytes]]:
         name = os.path.basename(os.fspath(path))
         size = os.path.getsize(path)
         plan = self.read_plan(name, size, type)
@@ -181,7 +195,17 @@ class Estimator:
             if plan["tail"]:
                 handle.seek(size - plan["tail"])
                 tail = handle.read(plan["tail"])
+        return name, size, head, tail
+
+    def profile_path(self, path: str | os.PathLike, type: Optional[str] = None) -> dict:
+        """Profile the file at ``path``, reading only the bytes the profile needs."""
+        name, size, head, tail = self._read_path(path, type)
         return self.profile(name, size, head, tail, type)
+
+    def profile_path_with_page_stats(self, path: str | os.PathLike, type: Optional[str] = None) -> dict:
+        """:meth:`profile_with_page_stats` for the file at ``path``."""
+        name, size, head, tail = self._read_path(path, type)
+        return self.profile_with_page_stats(name, size, head, tail, type)
 
     def health(self) -> dict:
         """Traps (``crashed``) and the fresh instances made after them."""

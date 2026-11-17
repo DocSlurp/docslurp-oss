@@ -37,6 +37,21 @@ export async function profilePath(estimator, path, type) {
   }
 }
 
+/** `profilePath` with the per-page stat stream: `{ file, profile, pageStats }` (`estimator.profileWithPageStats`). */
+export async function profilePathWithPageStats(estimator, path, type) {
+  const { size } = await stat(path);
+  const file = { name: basename(path), size, ...(type ? { type } : {}) };
+  const plan = estimator.readPlan(file);
+  const handle = await open(path, "r");
+  try {
+    const head = await read(handle, 0, plan.head);
+    const tail = plan.tail > 0 ? await read(handle, size - plan.tail, plan.tail) : undefined;
+    return { file, ...estimator.profileWithPageStats(file, head, tail) };
+  } finally {
+    await handle.close();
+  }
+}
+
 /** A source over a file on disk; a path that cannot be read is reported as a failed file, not thrown. */
 async function pathSource(path, type) {
   const name = basename(path);
