@@ -234,10 +234,18 @@ export interface OrgUnitUsage {
   searchCredits: number;
   chatAnswers: number;
   chatCredits: number;
+  /**
+   * Page counts by final class: each charged page of a run counts once, in the class it finally paid (Text = fast,
+   * Scan = ocr, Vision = rich). A page charged in one class and later upgraded to Vision (the OCR-then-vision settle of
+   * migration 0185, or a `rich-upgrade:` of another run's Text or Scan decision) counts only as Vision; its earlier
+   * charge stays in `ingestCredits`. Page counts are pages, not billed units: a Vision page billed several output units
+   * counts once, so counts times the per-page rates need not equal `ingestCredits` exactly. Credits are always the sum
+   * of the charged `cost_cents`.
+   */
   fastPages: number;
-  /** Pages the OCR route read, one per page and run (a page later upgraded to Rich is counted in both). */
+  /** Pages whose final class is Scan (OCR-read and not upgraded to Vision). */
   ocrPages: number;
-  /** Rich pages, including media minutes counted as Rich pages. */
+  /** Pages whose final class is Vision, including pages upgraded from Text or Scan, plus media minutes counted as Vision pages. */
   richPages: number;
   ingestCredits: number;
 }
@@ -246,7 +254,8 @@ export interface OrgUnitUsage {
  * Units and credits the price card charged an org since `since` (the billing
  * forecast's last-30-day pace). Unit events record the count in `amount`:
  * chat answers as 1 per call, searches as 1 per search or the batch size for
- * batched API searches (search/lean-logging.ts), pages as billed pages.
+ * batched API searches (search/lean-logging.ts). Page counts follow the final
+ * class rule documented on `OrgUnitUsage`; credits are the summed charges.
  */
 export async function orgUnitUsage(orgId: string, since: UsageWindow, client: SqlClient = sql): Promise<OrgUnitUsage> {
   const rows = await client<{ metric: string; amount: number; cost_cents: number; events: number }[]>`
@@ -262,15 +271,73 @@ export async function orgUnitUsage(orgId: string, since: UsageWindow, client: Sq
   const by = new Map(rows.map((row) => [row.metric, { amount: Number(row.amount ?? 0), cost: Number(row.cost_cents ?? 0), events: Number(row.events ?? 0) }]));
   const get = (metric: string) => by.get(metric) ?? { amount: 0, cost: 0, events: 0 };
   const ingestCredits = INGEST_UNIT_METRICS.reduce((sum, metric) => sum + get(metric).cost, 0);
+  const pages = await orgPageClassCounts(orgId, since, client);
   return {
     searches: get(BILLABLE_UNIT_METRICS.search).amount,
     searchCredits: get(BILLABLE_UNIT_METRICS.search).cost,
     chatAnswers: get(BILLABLE_UNIT_METRICS.chatAnswer).events,
     chatCredits: get(BILLABLE_UNIT_METRICS.chatAnswer).cost,
-    fastPages: get(BILLABLE_UNIT_METRICS.fastPage).amount,
-    ocrPages: get(BILLABLE_UNIT_METRICS.ocrPage).amount,
-    richPages: get(BILLABLE_UNIT_METRICS.richPage).amount + get(BILLABLE_UNIT_METRICS.mediaMinutes).amount,
+    fastPages: pages.fast,
+    ocrPages: pages.ocr,
+    richPages: pages.rich + get(BILLABLE_UNIT_METRICS.mediaMinutes).amount,
     ingestCredits,
+  };
+}
+
+/**
+ * Charged pages of an org since `since`, each counted once in its final class (see `OrgUnitUsage`).
+ *
+ * - Text and Scan: the summed `amount` of their charges (a per-page charge is 1; a run's aggregate Text charge carries
+ *   its page count), minus every per-page charge a Vision charge of the same org upgraded. An upgrade names the charge it
+ *   replaces (`metadata.upgradeOf` = that charge's id) and must match it on document and run (`decidedBy` for a
+ *   cross-run upgrade, else the upgrade's own run), so no other run's or org's events can remove a page.
+ * - Vision: distinct (run, document, page) over per-page Vision charges, so a page billed several units, or upgraded,
+ *   counts once; plus the summed `amount` of aggregate Vision charges without a page (legacy scan pages).
+ *
+ * Both sides of an upgrade are read inside the same org and window; an upgrade is always later than what it replaces.
+ */
+async function orgPageClassCounts(
+  orgId: string,
+  since: UsageWindow,
+  client: SqlClient,
+): Promise<{ fast: number; ocr: number; rich: number }> {
+  const fast = BILLABLE_UNIT_METRICS.fastPage;
+  const ocr = BILLABLE_UNIT_METRICS.ocrPage;
+  const rich = BILLABLE_UNIT_METRICS.richPage;
+  const [row] = await client<{ fast_pages: number; ocr_pages: number; rich_page_reads: number; rich_aggregate_pages: number }[]>`
+    with page_charges as (
+      select au.id, au.metric, au.amount, au.source_run_id, au.metadata,
+        case when au.metric = ${rich}
+            and au.metadata ->> 'documentId' is not null
+            and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
+          then coalesce(au.source_run_id, '') || ':' || (au.metadata ->> 'documentId') || ':' || ((au.metadata ->> 'pageNumber')::int)::text
+        end as rich_page
+      from ${attributedUsage(since, client)} au
+      where au.org_id = ${orgId}
+        and au.metric = any(${[fast, ocr, rich]}::text[])
+    ),
+    upgraded as (
+      select distinct src.id
+      from page_charges src
+      join page_charges up
+        on up.metric = ${rich}
+        and up.metadata ->> 'upgradeOf' = src.id
+        and up.metadata ->> 'documentId' = src.metadata ->> 'documentId'
+        and src.source_run_id = coalesce(up.metadata ->> 'decidedBy', up.source_run_id)
+      where src.metric in (${fast}, ${ocr})
+    )
+    select
+      coalesce(sum(pc.amount) filter (where pc.metric = ${fast} and u.id is null), 0)::double precision as fast_pages,
+      coalesce(sum(pc.amount) filter (where pc.metric = ${ocr} and u.id is null), 0)::double precision as ocr_pages,
+      count(distinct pc.rich_page)::int as rich_page_reads,
+      coalesce(sum(pc.amount) filter (where pc.metric = ${rich} and pc.rich_page is null), 0)::double precision as rich_aggregate_pages
+    from page_charges pc
+    left join upgraded u on u.id = pc.id
+  `;
+  return {
+    fast: Number(row?.fast_pages ?? 0),
+    ocr: Number(row?.ocr_pages ?? 0),
+    rich: Number(row?.rich_page_reads ?? 0) + Number(row?.rich_aggregate_pages ?? 0),
   };
 }
 

@@ -14,7 +14,7 @@ describe("ingest spend metrics", () => {
     for (const metric of PAGE_CHARGE_METRICS) expect(INGEST_UNIT_METRICS).toContain(metric);
   });
 
-  it("reports OCR pages beside Fast and Rich, scoped to the organization it was asked for", async () => {
+  it("reports page counts by final class and credits as summed charges, scoped to the organization it was asked for", async () => {
     const calls: unknown[][] = [];
     // A stand-in SQL client: fragments resolve to themselves, the final query returns per-metric sums.
     const client = ((strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -24,11 +24,16 @@ describe("ingest spend metrics", () => {
         { metric: BILLABLE_UNIT_METRICS.ocrPage, amount: 4, cost_cents: 0.16, events: 4 },
         { metric: BILLABLE_UNIT_METRICS.richPage, amount: 2, cost_cents: 0.5, events: 2 },
       ];
-      return strings.join("").includes("group by au.metric") ? Promise.resolve(rows) : { strings, values };
+      const text = strings.join("");
+      if (text.includes("group by au.metric")) return Promise.resolve(rows);
+      // The final-class page counts (one upgraded page already moved from Scan to Vision by the query).
+      if (text.includes("page_charges")) return Promise.resolve([{ fast_pages: 10, ocr_pages: 3, rich_page_reads: 2, rich_aggregate_pages: 0 }]);
+      return { strings, values };
     }) as never;
     const usage = await orgUnitUsage("org-a", null, client);
-    expect(usage).toMatchObject({ fastPages: 10, ocrPages: 4, richPages: 2 });
+    expect(usage).toMatchObject({ fastPages: 10, ocrPages: 3, richPages: 2 });
     expect(usage.ingestCredits).toBeCloseTo(0.71);
-    expect(calls.at(-1)).toContain("org-a");
+    // Both the credit and the page-count query are bound to the organization asked for.
+    expect(calls.filter((values) => values.includes("org-a"))).toHaveLength(2);
   });
 });
