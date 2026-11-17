@@ -3686,7 +3686,7 @@ export const documentAssets = pgTable("document_assets", {
 ]);
 
 /**
- * Page extract records (migration 0187): how each page's text was produced, one row per (document, page, run, pass).
+ * Page extract records (migration 0188): how each page's text was produced, one row per (document, page, run, pass).
  * Labels only; closed vocabularies and bounds are CHECK constraints in the migration (packages/shared page-extracts.ts).
  */
 export const documentPageExtracts = pgTable("document_page_extracts", {

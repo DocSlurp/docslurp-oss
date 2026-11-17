@@ -1,5 +1,5 @@
 /**
- * Page extract records (document_page_extracts, migration 0187; docs/extraction/page-extract-records.md): one labelled
+ * Page extract records (document_page_extracts, migration 0188; docs/extraction/page-extract-records.md): one labelled
  * row per (document, page, run, pass) saying how the page's text was produced. Stages queue records on the workflow state
  * (`recordPageExtracts`, `tagPageExtracts`); the next progress checkpoint writes them in its own pipelined transaction
  * (`pageExtractStatements`): one multi-row upsert and at most one tag merge per checkpoint, never a statement per page.

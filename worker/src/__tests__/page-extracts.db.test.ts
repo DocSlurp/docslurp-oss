@@ -16,7 +16,7 @@ import {
 import { startMigratedPostgres } from "../test/migrated-postgres.js";
 
 /**
- * Page extract records (migration 0187, pipeline/page-extracts.ts) over a migrated database: a mixed PDF (text pages,
+ * Page extract records (migration 0188, pipeline/page-extracts.ts) over a migrated database: a mixed PDF (text pages,
  * scanned pages read by OCR, one page escalated to a second read, one page read by vision) yields exactly one final record
  * per page once its document completes; retries are idempotent and a withdrawn pass restores the one before it; a failed
  * reprocess, an older run and a shorter reprocess never leave two finals or a stale one; rows stay in their organization.

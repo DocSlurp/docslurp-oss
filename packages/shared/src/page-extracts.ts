@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * Page extract records (document_page_extracts, migration 0187): labelled provenance of how each page's text was produced.
+ * Page extract records (document_page_extracts, migration 0188): labelled provenance of how each page's text was produced.
  * The vocabularies below are closed and enforced by the database's CHECK constraints; keep both in step.
  * No page text, document-supplied value or model id is ever part of a record.
  */

@@ -1,5 +1,5 @@
 /*
- * Read side of the page extract records (document_page_extracts, migration 0187; docs/extraction/page-extract-records.md):
+ * Read side of the page extract records (document_page_extracts, migration 0188; docs/extraction/page-extract-records.md):
  * how each page of a document got its text, as labels (method, pass, route, tags, quality signals). Every query is
  * filtered by the caller's organization (and project, when known); a document of another scope, or a purged one, reads
  * as missing (null), exactly like one that does not exist. There is no unscoped read.

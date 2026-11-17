@@ -2,9 +2,13 @@
 
 Every page gets durable, labelled provenance of how its text was produced (docs/extraction/page-extract-records.md).
 
-- Migration 0187 `document_page_extracts`: one org-scoped row per (document, page, run, pass) with method, engine route, capability-pool member and region, billed class, closed tags, OCR confidence or plausibility, text bytes, finish reason, timing, `adopted`, `is_final` and `superseded_by_pass`. Labels only. Finals are set when a document completes in its current run (or a query-time read publishes pages), never by an older run.
+- Migration 0188 `document_page_extracts`: one org-scoped row per (document, page, run, pass) with method, engine route, capability-pool member and region, billed class, closed tags, OCR confidence or plausibility, text bytes, finish reason, timing, `adopted`, `is_final` and `superseded_by_pass`. Labels only. Finals are set when a document completes in its current run (or a query-time read publishes pages), never by an older run.
 - Written in the checkpoint transaction (one pipelined multi-row upsert per 2,000 records, no extra round trip) by extract-markdown (extractor, scan-fill OCR, escalation and page-reader second reads, self-critique, audio/video transcripts), query-time materialization, vision-extract (vision, OCR of mixed scans, page reader; rejected and unread pages non-final), and classify-route (table, math, garbled layer, drawn, yield-deficit, scanned, blank tags).
 - Read: `GET /v1/documents/:id/page-extracts` (org and project scoped, API keys need `artifacts`), ingest report page views (`extractMethod`, `finalPass`, `extractTags`), telemetry `docslurp.pages.extracts` and `docslurp.pages.extract_tags`.
+
+## Billing forecast page counts by final class (2026-11-16)
+
+- `orgUnitUsage` (billing forecast `fastPagesLast30d` / `ocrPagesLast30d` / `richPagesLast30d`) counts each charged page once per run, in its final class: a page OCR-read and then vision-read (the 0185 settle), or another run's Text or Scan decision upgraded by `rich-upgrade:`, counts only as Vision, and a Vision page billed several units counts once per run. Upgrades match the replaced charge by id, document and run inside the same organization. Credits remain the exact sum of the charges. Counts and credits come from one pass over the org's rows, which now uses the org index through the view's new stamped columns (migration 0187).
 
 ## Compute reuse across organizations (2026-11-16)
 

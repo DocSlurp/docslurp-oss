@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { appDbPool } from "../lib/auth.js";
 import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
-import { getConsentRequest, MCP_SCOPES, FIRST_PARTY_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, allowedScopes, createGrant, validRedirect, redirectMatches, parseScopes, normalizeOAuthScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
+import { getConsentRequest, MCP_SCOPES, FIRST_PARTY_SCOPES, mcpOrigin, mcpBrowserOrigin, mcpBrowserRedirect, mcpResource, apiResource, allowedResources, allowedScopes, createGrant, validRedirect, redirectMatches, parseScopes, normalizeOAuthScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
 import { deviceVerificationRoutes } from "./mcp-oauth-device.js";
 import { requestIp } from "../lib/request-context.js";
 export const mcpOAuthMetadataRoutes = new Hono();
@@ -42,6 +42,9 @@ function authorizeError(c: Context, error: string, description: string) {
   return c.json({ error, error_description: description }, 400);
 }
 mcpOAuthRoutes.get("/authorize", async (c) => {
+  const elsewhere = mcpBrowserRedirect(c.req.url);
+  if (elsewhere)
+    return c.redirect(elsewhere, 307);
   const params = new URL(c.req.url).searchParams;
   const client = (await appDbPool.query("SELECT * FROM mcp_oauth_clients WHERE id=$1", [params.get("client_id")])).rows[0];
   const redirect = params.get("redirect_uri"), challenge = params.get("code_challenge");
@@ -86,7 +89,7 @@ mcpOAuthRoutes.get("/consent/:id", async (c) => {
   return c.json({ id: request.id, client_name: request.client_name, redirect_uri: request.redirect_uri, resource: request.resource, scopes: request.scopes, expires_at: new Date(request.expires_at).toISOString() });
 });
 mcpOAuthRoutes.post("/authorize", async (c) => {
-  if (c.req.header("origin") !== mcpOrigin(c.req.url))
+  if (c.req.header("origin") !== mcpBrowserOrigin(c.req.url))
     return c.json({ error: "Forbidden" }, 403);
   const body = await c.req.parseBody();
   // A failed decision returns to the consent page, which explains an expired,
@@ -304,7 +307,7 @@ mcpOAuthRoutes.get("/grants", async (c) => {
   return c.json({ grants: (await appDbPool.query(`SELECT g.id,g.org_id,g.scopes,g.created_at,c.name AS client_name FROM mcp_oauth_grants g JOIN mcp_oauth_clients c ON c.id=g.client_id WHERE g.user_id=$1 AND g.revoked_at IS NULL ORDER BY g.created_at DESC`, [actor.userId])).rows });
 });
 mcpOAuthRoutes.post("/grants/:id/revoke", async (c) => {
-  if (c.req.header("origin") !== mcpOrigin(c.req.url))
+  if (c.req.header("origin") !== mcpBrowserOrigin(c.req.url))
     return c.json({ error: "Forbidden" }, 403);
   const actor = await resolveBetterAuthSessionActor(c.req.raw.headers);
   if (!actor)

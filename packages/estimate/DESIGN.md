@@ -32,6 +32,26 @@ They describe pages, not prices, and the worker reads the same thresholds (`prof
   (`text-layer-quality.ts`) needs Unicode text, which the profiler does not decode; it stays in the worker.
 - **Drawn content**: no words or images anywhere, yet heavy non-image bytes per page (`drawnContent`).
 - **Text page rule**: text files counted exactly as the API counts them.
+- **Page encodings** (`pdf-page-encoding.ts`): how math and tables are encoded on each sampled page, as a 16-bit mask
+  (math fonts, stacked math, recoverable source, formula strips, glyph outlines, bitmap fonts, rule grids, horizontal-rule
+  tables, tagged tables and formulas, table-shaped images, math grids, partial). The profile carries a histogram of the
+  masks (`pageEncodings`: each distinct mask and its page count, at most one entry a sampled page), so it keeps no page
+  order and no per-page array; the bit positions and thresholds are in `profiler-rules.json` and the server refuses
+  unknown bits. Font names, ActualText, Alt text and structure types are classified into the bits inside the probe and
+  never emitted. The structure-tree walk is bounded (elements, depth, each object once). Every stream the facts read
+  (font programs, Type 3 glyph procedures, associated files) is read from a capped compressed prefix, fed to the decoder
+  in small pieces, and charged (input consumed plus output) to the encoding facts' own 8 MiB budget, so it never cuts
+  the pages sampled; each stream object is read once per document, and detail and range sessions (which do not
+  report these facts) read none; fonts are classified once per font dictionary, and text strings by a bounded prefix. What
+  could not be decided marks the page `partial` or the tree `taggedTruncated`, never "absent".
+
+## Per-page stat stream (separate output)
+
+`ds_probe_pages` returns the profile unchanged and, beside it, one JSONL line per sampled page (`{ page, mask, counts }`,
+counts as 4-bit log2 buckets in `PDF_PAGE_STAT_COUNTS` order). It is for local and SDK consumers; it is not part of the
+file profile, which keeps its no-per-page-arrays rule, and the server never receives it. A separate entry point (rather
+than an option on `ds_probe`) keeps `ds_probe`'s value exactly the profile the server validates, and one call measures
+both.
 
 ## Contracts fail closed
 

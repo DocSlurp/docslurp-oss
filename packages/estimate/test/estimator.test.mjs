@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { FILE_PROFILE_SCHEMA, decodeTextBytes, fileProfileSchema, normalizeFileProfile, textPageCount } from "@docslurp/shared";
+import { FILE_PROFILE_SCHEMA, PDF_PAGE_ENCODING_KNOWN_MASK, PDF_PAGE_STAT_COUNTS, decodeTextBytes, fileProfileSchema, normalizeFileProfile, textPageCount, unpackPdfPageStatCounts } from "@docslurp/shared";
 
 import { createEstimator, EstimatorError, requestQuote } from "../js/index.mjs";
-import { estimatePaths, profilePath } from "../js/node.mjs";
+import { estimatePaths, profilePath, profilePathWithPageStats } from "../js/node.mjs";
 import { lazyObjectStreamBomb, manyObjectsPdf } from "./hostile.mjs";
 
 const fixture = (name) => new URL(`../tests/fixtures/${name}`, import.meta.url).pathname;
@@ -34,6 +34,27 @@ describe("@docslurp/estimate (wasm)", () => {
       assert.ok(json.length <= 4096, `${name}: ${json.length} bytes`);
       for (const word of PRICING_WORDS) assert.ok(!json.toLowerCase().includes(word), `${name}: ${word} in ${json}`);
     }
+  });
+
+  it("streams one stat line per sampled page beside the same profile, in the shared bit and bucket layout", async () => {
+    for (const name of fixtureNames) {
+      const { profile } = await profilePath(estimator, fixture(name));
+      const withStats = await profilePathWithPageStats(estimator, fixture(name));
+      assert.deepEqual(withStats.profile, profile, name);
+      const lines = withStats.pageStats.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      assert.equal(lines.length, profile.pdf?.sampledPages ?? 0, name);
+      for (const line of lines) {
+        assert.deepEqual(Object.keys(line).sort(), ["counts", "mask", "page"]);
+        assert.equal(line.mask & ~PDF_PAGE_ENCODING_KNOWN_MASK, 0);
+        assert.deepEqual(Object.keys(unpackPdfPageStatCounts(line.counts)), [...PDF_PAGE_STAT_COUNTS]);
+      }
+      // The histogram in the profile is the stream's masks, counted.
+      const counted = new Map();
+      for (const line of lines) counted.set(line.mask, (counted.get(line.mask) ?? 0) + 1);
+      assert.deepEqual(new Map(profile.pdf?.pageEncodings ?? []), counted, name);
+    }
+    const text = Buffer.from("plain notes");
+    assert.equal(estimator.profileWithPageStats({ name: "notes.txt", size: text.length }, text).pageStats, "");
   });
 
   it("measures raster pages, layout-heavy pages and text layers on the fixtures", async () => {

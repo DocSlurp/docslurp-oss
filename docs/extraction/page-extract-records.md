@@ -6,7 +6,7 @@ text, a document-supplied value or a model id.
 
 ## Table
 
-`document_page_extracts` (migration 0187) has one row per (document, page, run, pass), scoped to its organization and
+`document_page_extracts` (migration 0188) has one row per (document, page, run, pass), scoped to its organization and
 project by composite foreign keys to the document and the run.
 
 | Column | Meaning |

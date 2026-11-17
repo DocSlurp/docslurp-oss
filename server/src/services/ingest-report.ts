@@ -1415,7 +1415,7 @@ export async function loadIngestReport(args: {
       cross join lateral generate_series(1, d.pages) as gs(n)
       left join document_page_facts f on f.document_id = d.id and f.page_number = gs.n
       left join ch on ch.document_id = d.id and ch.page_number = gs.n
-      -- The page's final extract record (migration 0187): its method, pass and tags, and how many records and finals the
+      -- The page's final extract record (migration 0188): its method, pass and tags, and how many records and finals the
       -- page has, so a missing or duplicate final shows instead of hiding. Labels only; scoped to the project.
       left join lateral (
         select e.method, e.pass, e.tags from document_page_extracts e
