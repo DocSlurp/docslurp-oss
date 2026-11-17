@@ -1,25 +1,23 @@
 import { createHash } from "node:crypto";
 import { requireOrgId } from "@docslurp/shared";
 
-import { envInt, OrgPartitionedTtlLru } from "./ttl-lru.js";
+import { envInt, TtlLruCache } from "./ttl-lru.js";
 
 /**
  * Query-embedding cache. Follow-up and repeated searches re-embed the same
  * text; a hit skips the provider call entirely.
  *
- * Entries are keyed per organization, so one tenant's searches can never be
- * observed (even as a latency difference) by another. The key also carries
+ * Entries are keyed per organization, so one tenant's vector is never served
+ * to another. The key also carries
  * everything that changes the vector: provider, runtime, endpoint, model,
  * dimensions, normalization, and the query text. Text is only trimmed and
  * whitespace-collapsed (never lowercased: many models are case-sensitive) and
  * is stored as a hash, so the cache holds no readable query text.
  *
- * Entries are also held in a per-organization partition with its own share of
- * the cache (OrgPartitionedTtlLru), so one tenant's volume cannot evict another's
- * entries and turn its hits into misses.
+ * One bounded LRU serves every organization (the org is in the key), so a
+ * single organization can use the whole cache.
  *
- * Env: SEARCH_EMBEDDING_CACHE_MAX_ENTRIES (default 1000; 0 disables),
- * SEARCH_EMBEDDING_CACHE_MAX_ENTRIES_PER_ORG (default a quarter of the total) and
+ * Env: SEARCH_EMBEDDING_CACHE_MAX_ENTRIES (default 1000; 0 disables) and
  * SEARCH_EMBEDDING_CACHE_TTL_SECONDS (default 3600).
  */
 export interface EmbeddingCacheIdentity {
@@ -47,19 +45,17 @@ export function embeddingCacheKey(identity: EmbeddingCacheIdentity, query: strin
   ])).digest("hex");
 }
 
-export function createEmbeddingCache(env: NodeJS.ProcessEnv = process.env, now?: () => number): OrgPartitionedTtlLru<number[]> {
-  const maxEntries = envInt("SEARCH_EMBEDDING_CACHE_MAX_ENTRIES", 1000, env);
-  return new OrgPartitionedTtlLru<number[]>(
-    maxEntries,
+export function createEmbeddingCache(env: NodeJS.ProcessEnv = process.env, now?: () => number): TtlLruCache<number[]> {
+  return new TtlLruCache<number[]>(
+    envInt("SEARCH_EMBEDDING_CACHE_MAX_ENTRIES", 1000, env),
     envInt("SEARCH_EMBEDDING_CACHE_TTL_SECONDS", 3600, env) * 1000,
-    envInt("SEARCH_EMBEDDING_CACHE_MAX_ENTRIES_PER_ORG", Math.max(1, Math.floor(maxEntries / 4)), env),
     now,
   );
 }
 
-let shared: OrgPartitionedTtlLru<number[]> | undefined;
+let shared: TtlLruCache<number[]> | undefined;
 
-export function embeddingCache(): OrgPartitionedTtlLru<number[]> {
+export function embeddingCache(): TtlLruCache<number[]> {
   return shared ??= createEmbeddingCache();
 }
 

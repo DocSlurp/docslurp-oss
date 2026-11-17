@@ -63,9 +63,9 @@ describe("TtlLruCache", () => {
 
   it("is disabled by zero entries or zero TTL", () => {
     const off = createEmbeddingCache({ SEARCH_EMBEDDING_CACHE_MAX_ENTRIES: "0" } as NodeJS.ProcessEnv);
-    off.set("org-a", "a", [1]);
+    off.set("a", [1]);
     expect(off.enabled).toBe(false);
-    expect(off.get("org-a", "a")).toBeUndefined();
+    expect(off.get("a")).toBeUndefined();
     expect(createEmbeddingCache({ SEARCH_EMBEDDING_CACHE_TTL_SECONDS: "0" } as NodeJS.ProcessEnv).enabled).toBe(false);
     expect(createEmbeddingCache({} as NodeJS.ProcessEnv).enabled).toBe(true);
     expect(createEmbeddingCache({ SEARCH_EMBEDDING_CACHE_MAX_ENTRIES: "junk" } as NodeJS.ProcessEnv).enabled).toBe(true);
