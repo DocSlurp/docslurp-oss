@@ -244,20 +244,20 @@ export async function generateOpenRouterText(args: {
 }
 
 /**
- * The keyed evidence nonce: 128 bits of HMAC-SHA256 under a server secret over the tenant scope (org id) and every
- * block. Nobody without the key can compute it, so a document cannot be ground offline to contain its own closing
- * tag, and the same evidence in another org gets a different tag (no cross-tenant shared cache prefix). Within one org
- * the same evidence keeps the same tag, so a follow-up turn over the same documents can be served from the cache.
+ * The keyed evidence nonce: 128 bits of HMAC-SHA256 under a server secret over every block. Nobody without the key can
+ * compute it, so a document cannot be ground offline to contain its own closing tag. The same evidence keeps the same
+ * tag, so a follow-up turn over the same documents can be served from the prompt cache. It is not keyed per organization:
+ * provider prefix caches are shared (AGENTS.md, no per-organization cache partitions or prompt salts).
  */
-export function evidenceNonce(documents: Array<{ title: string; text: string; context?: string }>, scope: string): string {
-  const mac = createHmac("sha256", evidenceTagKeyBytes()).update(scope).update("\0");
+export function evidenceNonce(documents: Array<{ title: string; text: string; context?: string }>): string {
+  const mac = createHmac("sha256", evidenceTagKeyBytes());
   for (const document of documents) mac.update(JSON.stringify([document.title, document.context ?? "", document.text])).update("\n");
   return mac.digest("hex").slice(0, 32);
 }
 
 /**
- * The tag nonce for one call: the keyed nonce when the call has a tenant scope and no document already contains it,
- * else a fresh random one (that call is not cacheable, which only costs the cache).
+ * The tag nonce for one call: the keyed nonce when the call has a tenant scope (a hosted route) and no document already
+ * contains it, else a fresh random one (that call is not cacheable, which only costs the cache).
  */
 export function evidenceTagNonce(
   documents: Array<{ title: string; text: string; context?: string }>,
@@ -265,7 +265,7 @@ export function evidenceTagNonce(
   nonceOf: typeof evidenceNonce = evidenceNonce,
 ): string {
   if (!scope) return randomBytes(16).toString("hex");
-  const nonce = nonceOf(documents, scope);
+  const nonce = nonceOf(documents);
   const named = documents.some((document) => namesNonce(document.title, nonce) || namesNonce(document.text, nonce) || namesNonce(document.context ?? "", nonce));
   return named ? randomBytes(16).toString("hex") : nonce;
 }
@@ -296,7 +296,7 @@ export function namesNonce(text: string, nonce: string): boolean {
 
 /**
  * Retrieved documents as isolated evidence blocks. Each block is delimited by a tag name document text cannot predict:
- * a keyed per-org nonce (`evidenceTagNonce`) on hosted routes, a random one per call otherwise (the default). A
+ * a keyed nonce (`evidenceTagNonce`) on hosted routes, a random one per call otherwise (the default). A
  * document can therefore neither close its own block nor forge a neighbouring one (the old `---` separator and `[n]`
  * header could be imitated from inside a file). Text is passed verbatim; no line is removed for looking like an
  * instruction (see services/prompt-injection.ts).
@@ -323,8 +323,8 @@ export async function generateOpenRouterDocumentText(args: {
     context?: string;
   }>;
   /**
-   * Tenant scope of the evidence (the org id). Keys the evidence tag so the same evidence repeats byte for byte within
-   * the org (prompt cache) and differs across orgs. Absent: a random tag per call.
+   * Tenant scope of the evidence (the org id). Present: a keyed evidence tag, so the same evidence repeats byte for byte
+   * (prompt cache). Absent: a random tag per call.
    */
   evidenceScope?: string | null;
   model?: string;

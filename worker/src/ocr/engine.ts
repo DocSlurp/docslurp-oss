@@ -42,6 +42,8 @@ export interface OcrPageRead {
   elapsedMs: number;
   /** Why this page should get a hosted second read, and the boundary's PNG of it; null when it should not. */
   escalation: { reason: OcrEscalationReason; imagePath: string; width: number; height: number } | null;
+  /** Set by escalation (escalation.ts) on a candidate that kept its first read: the per-document cap, or an unfunded balance. */
+  escalationHeld?: "capped" | "unfunded";
   /**
    * The boundary's PNG of the frame (signature and IHDR size checked, never decoded), when the read kept one for the page
    * reader (OcrReadInput.keepFrames). Present on escalation candidates and, with `keepFrames: "all"`, on every frame with text.

@@ -62,7 +62,7 @@ async function fixture(pipeline: Record<string, unknown>, extra: Array<[string, 
   } as unknown as ArtifactStore;
   const runner = {
     scanForMalware: vi.fn(async (p: string) => ({ status: (await readFile(p, "utf8")).includes("INFECTED") ? "infected" : "clean", engine: "clamdscan", signature: "Test-Signature", databaseStatus: "fresh", healthWarnings: [] })),
-    withMalwareScanner: vi.fn(async (_tenant: unknown, fn: () => Promise<unknown>) => await fn()),
+    withMalwareScanner: vi.fn(async (fn: () => Promise<unknown>) => await fn()),
   } as unknown as CommandRunner;
   const config = { quarantineEnabled: true, quarantineFailOpenOnToolMissing: false, quarantineMaxArchiveEntries: 10, quarantineMaxArchiveDepth: 3,
     quarantineMaxTotalUncompressedBytes: 1 << 20, quarantineMaxSingleEntryBytes: 1 << 20, quarantineMaxExpansionRatio: 10 } as Config;

@@ -1,4 +1,6 @@
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { recordPageExtracts, visionPageRecords } from "../pipeline/page-extracts.js";
+import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { recordPageEscalation } from "../pipeline/run-milestones.js";
 import { recordOcrReads } from "../ocr/ledger.js";
 import { OcrInfrastructureError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
@@ -680,6 +682,10 @@ export class VisionExtractStage implements Stage {
               outputs,
               this.storage.uri(key),
             );
+
+            recordPageExtracts(state, document, visionPageRecords({
+              outputs, skips: failedPages, reconciliation, ocrPageClass: runUsesOcrPageClass(state.artifactLedger),
+            }));
 
             console.log(
               `[extract-debug] document=${document.id} visionCompleted ` +

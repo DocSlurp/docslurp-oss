@@ -69,6 +69,9 @@ export async function escalateOcrPages(
         // read (unknown-billed) is this page's alone.
         const reason = SKIP_REASON[error.reason];
         if (reason) (skipped[reason] ??= []).push(...(error.reason === "unknown-billed" ? [page.pageNumber] : rest));
+        // Page extract records tag the pages that kept their first read (pipeline/page-extracts.ts).
+        const held = error.reason === "budget" ? "capped" as const : error.reason === "unfunded" ? "unfunded" as const : null;
+        if (held) for (const candidate of candidates.slice(index)) candidate.escalationHeld ??= held;
         // Once disabled, refused, capped or out of budget, later pages of this document would be skipped the same way.
         // A timed-out read (unknown-billed) is this page's alone: later pages are still read.
         if (error.reason !== "guard" && error.reason !== "unknown-billed") break;

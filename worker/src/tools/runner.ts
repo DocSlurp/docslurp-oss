@@ -1211,7 +1211,7 @@ export class CommandRunner {
   }
 
   /**
-   * OCR in a fresh VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
+   * OCR in a VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
    * to the worker host or to another reader.
    */
   async sandboxedOcrRead(job: SandboxedOcrJob): Promise<CommandPlan> {
@@ -1419,20 +1419,18 @@ export class CommandRunner {
   }
 
   /**
-   * Run `fn` (one document's quarantine: never more than one document per session, council M1) in a malware scanner session when
-   * DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its VMs are restored from a clean snapshot in which clamd already holds the
-   * staged signatures (providers/modal/scanner.ts), and serve only `tenantKey`'s commands. Signature freshness is read on
-   * this host from the staged daily header, so no VM runs `clamscan --version`. Off, or without VM-only parsing, `fn`
-   * runs unchanged. A provider without scanner sessions keeps the per-command path (same VM isolation), loudly logged.
+   * Run `fn` (one document's quarantine) in a malware scanner session when DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its
+   * VMs are restored from a clean snapshot in which clamd already holds the staged signatures (providers/modal/scanner.ts).
+   * Signature freshness is read on this host from the staged daily header, so no VM runs `clamscan --version`. Off, or
+   * without VM-only parsing, `fn` runs unchanged. A provider without scanner sessions keeps the per-command path (same VM isolation), loudly logged.
    */
-  async withMalwareScanner<T>(tenantKey: string | null | undefined, fn: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+  async withMalwareScanner<T>(fn: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
     if (!quarantineScanSnapshotEnabled(env) || !vmOnlyParsing(env)) return fn();
     const sandbox = registeredParserSandbox();
     if (!sandbox || sandbox.provider.id !== "modal") {
       console.error(`[quarantine] status=scanner-snapshot-unsupported provider=${sandbox?.provider.id ?? "none"}: DOCSLURP_QUARANTINE_SCAN_SNAPSHOT needs the modal parser sandbox; scanning per command`);
       return fn();
     }
-    if (!tenantKey) throw new SandboxPolicyError("a malware scanner session needs the run's organization");
     const policy = resolveMalwareScanPolicy(env);
     const staged = await stageClamDefinitions(policy.databaseDirectory);
     try {
@@ -1442,7 +1440,7 @@ export class CommandRunner {
       const documentId = currentPerfContext()?.documentId ?? "none";
       const scope = new SandboxSessionScope(() => sandbox.provider.openSession(sandbox.config, {
         activityId: `scanner:${runId}:${documentId}`,
-        scanner: { tenantKey, definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
+        scanner: { definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
       }));
       try {
         return await runWithSandboxScope(scope, () => scannerDefinitionsStorage.run(header, fn));

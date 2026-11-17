@@ -70,10 +70,7 @@ export interface SandboxCommand {
    * provider stages it once per VM, readable but not writable by the command, and maps paths under it.
    */
   readOnlyAssetDir?: string;
-  /**
-   * The organization the command's document belongs to. A scanner session (SandboxSessionContext.scanner) runs only
-   * commands of its own organization and refuses any other, or one without it.
-   */
+  /** The organization the command's document belongs to: accounting and fairness only, never a placement restriction. */
   tenantKey?: string;
   /** The command needs the scanner VM's malware daemon: only a scanner session may run it; any other refuses. */
   requiresScanner?: boolean;
@@ -245,12 +242,10 @@ export interface ParserSandboxProvider<C = Record<string, unknown>> {
 
 /**
  * A malware scanner session (quarantine fast path): its VMs are restored from a clean memory snapshot in which the malware
- * daemon has already loaded the named signature set. The snapshot is taken before any job input exists; every VM restored
- * from it serves one organization and is terminated when the session closes.
+ * daemon has already loaded the named signature set. The snapshot is taken before any job input exists; a session may
+ * scan documents of any run or organization (AGENTS.md: no per-organization or per-job compute isolation).
  */
 export interface ScannerSessionSpec {
-  /** The only organization whose commands this session runs (SandboxCommand.tenantKey). */
-  tenantKey: string;
   /** Host directory holding exactly the signature files to load (stageClamDefinitions), read by the snapshot build only. */
   definitionsDir: string;
   /** sha256 over the signature files' names and contents: the snapshot's cache key. */
