@@ -85,6 +85,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "worker/src/lib/unicode-text.ts#segmenters": { class: "operational", why: "Intl.Segmenter per locale" },
   "worker/src/lib/vision-attempt-guard.ts#pendingOverruns": { class: "per-job", why: "overrun requests per run id" },
   "worker/src/media/rates.ts#verifiedUntil": { class: "operational", why: "provider rate check" },
+  "worker/src/ocr/page-reader.ts#releasesByOrgDay": { class: "tenant-id", why: "release counter per UTC day + org id; holds no data, only a count" },
   "worker/src/ocr/page-reader-warm.ts#runs": { class: "per-job", why: "warm state per run id" },
   "worker/src/pipeline/first-pass.ts#results": { class: "per-job", why: "runId+documentId" },
   "worker/src/pipeline/run-milestones.ts#finalStages": { class: "per-job", why: "final stage per run id" },
