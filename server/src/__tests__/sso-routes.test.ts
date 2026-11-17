@@ -370,6 +370,9 @@ describe("ssoRoutes security hardening", () => {
     expect(response.status).toBe(302);
     expect(response.headers.get("set-cookie")).toContain("Secure");
     expect(response.headers.get("set-cookie")).toContain("SameSite=None");
+    // Host-only by name: a sibling host cannot set a `__Host-` cookie.
+    expect(response.headers.get("set-cookie")).toMatch(/^__Host-docslurp_sso_state=[0-9a-f]{64}; Max-Age=600; Path=\/; HttpOnly; Secure; SameSite=None$/);
+    expect(response.headers.get("set-cookie")).not.toMatch(/Domain=/i);
   });
 
   it("rejects OIDC metadata that points token or JWKS endpoints at untrusted hosts", async () => {
@@ -674,6 +677,23 @@ describe("SSO callback account binding", () => {
     db.users.push({ id: "victim-1", email: "victim@acme.com" });
     db.memberships.push({ org_id: "org-1", user_id: "victim-1", role: "member" });
   }
+
+  it("over HTTPS a callback carrying only the plain-named state cookie is refused (a sibling host can plant that name)", async () => {
+    seedVictim();
+    seedRequest("s1");
+    await stubIdp(() => ({ sub: "idp-victim", email: "victim@acme.com", nonce: "nonce-s1" }));
+    process.env.PUBLIC_API_URL = "https://api.docslurp.example";
+    const digest = createHash("sha256").update("s1").digest("hex");
+
+    const planted = await buildApp().request("http://internal.local/v1/auth/oidc/org-1/callback?state=s1&code=c", { headers: { Cookie: `docslurp_sso_state=${digest}; __Secure-docslurp_sso_state=${digest}` } });
+    expect(planted.headers.get("set-cookie") ?? "").not.toContain("session_token=");
+    expect(planted.headers.get("set-cookie") ?? "").not.toContain("sso_unlinked=");
+    expect(createSessionMock).not.toHaveBeenCalled();
+
+    // The same flow from the browser that started it gets past the binding and consumes the cookie.
+    const own = await buildApp().request("http://internal.local/v1/auth/oidc/org-1/callback?state=s1&code=c", { headers: { Cookie: `__Host-docslurp_sso_state=${digest}` } });
+    expect(own.headers.get("set-cookie")).toMatch(/__Host-docslurp_sso_state=; Max-Age=0; Path=\/; Secure/);
+  });
 
   it("refuses to sign in as a pre-existing account that never linked this SSO identity", async () => {
     seedVictim();
