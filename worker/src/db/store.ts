@@ -64,6 +64,7 @@ import {
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
 import { PostgresPageBasisLedger } from "./page-basis-ledger.js";
+import type { PageBasisLedger } from "../pipeline/page-basis.js";
 import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
@@ -527,7 +528,7 @@ export class Store {
   /** This process's view of run credit leases (credit-lease.ts), shared with page tasks. */
   readonly creditLeases: RunCreditLeases;
   /** The page basis port over this database (db/page-basis-ledger.ts); bindStore gives every hydrated state a PageBasis over it. */
-  readonly pageBasisLedger: PostgresPageBasisLedger;
+  readonly pageBasisLedger: PageBasisLedger;
   /** Historical stage timings per project/user; a 14-day aggregate does not need a fresh read per stage. */
   private readonly historicalPerformanceCache = new Map<string, { loadedAt: number; value: Record<string, unknown> | null }>();
   // One in-flight load per scope: after a fleet restart every activity misses

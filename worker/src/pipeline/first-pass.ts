@@ -143,6 +143,8 @@ export interface FirstPassStore {
   loadDocumentsForRun: Parameters<typeof loadRunState>[0]["loadDocumentsForRun"];
   hydrateState: Parameters<typeof loadRunState>[0]["hydrateState"];
   readStageStates?: Parameters<typeof loadRunState>[0]["readStageStates"];
+  /** The page basis port every loaded state checks spend through (pipeline/page-basis.ts). */
+  pageBasisLedger: Parameters<typeof loadRunState>[0]["pageBasisLedger"];
   documentScopes(documentIds: readonly string[]): Promise<Map<string, { orgId: string | null; runId: string; bytes: number }>>;
   updateProgress(state: WorkflowState): Promise<void>;
 }
