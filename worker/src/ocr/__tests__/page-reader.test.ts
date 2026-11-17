@@ -300,6 +300,24 @@ describe("readPagesWithProvider", () => {
     expect(outcome.pages.every((page) => page.recogniser === "multi" && page.escalation)).toBe(true);
   });
 
+  it("passes the run's live SQL grant for the run's own scope, and none without an execution generation", async () => {
+    const { setExtractorComputeCohortAuthorizer } = await import("../../extractors/plugins.js");
+    const { runWithPerfContext } = await import("../../lib/perf-context.js");
+    const authorizer = vi.fn(async (scope: { orgId: string }) => ({ cohortId: null, validUntil: new Date(Date.now() + 10_000).toISOString(), orgId: scope.orgId }));
+    setExtractorComputeCohortAuthorizer(authorizer as never);
+    try {
+      const provider = reader(echo);
+      await runWithPerfContext({ runId: "run-1", executionGeneration: "g-1", scope: "test", stageName: "ocr", pushPerformance: () => undefined },
+        async () => { await readPagesWithProvider(await outcomeWith([{ pageNumber: 1, escalate: true }]), provider, ctx(runState())); });
+      const job = provider.read.mock.calls[0]![0] as PageImageReadJob;
+      expect(await job.authorize!()).toMatchObject({ orgId: "org-1" });
+      expect(authorizer).toHaveBeenCalledWith({ orgId: "org-1", projectId: "proj-1", runId: "run-1", documentId: "doc-1", executionGeneration: "g-1" });
+      const bare = reader(echo);
+      await readPagesWithProvider(await outcomeWith([{ pageNumber: 1, escalate: true }]), bare, ctx(runState()));
+      expect((bare.read.mock.calls[0]![0] as PageImageReadJob).authorize).toBeUndefined();
+    } finally { setExtractorComputeCohortAuthorizer(undefined); }
+  });
+
   it("never calls the provider without an organization scope", async () => {
     const state = runState({ orgId: null });
     const outcome = await outcomeWith([{ pageNumber: 1 }]);

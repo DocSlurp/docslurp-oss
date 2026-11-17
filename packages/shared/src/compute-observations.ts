@@ -57,10 +57,17 @@ export interface ComputeExecutionScope {
   executionGeneration: string | null;
 }
 
-/** Null cohort means authorized single-use execution, never permission to reuse by organization. */
+/**
+ * A live execution grant. Its existence proves, in SQL, that the run is live and belongs to `orgId` (with the document in
+ * that run). `orgId` is the only scope a compute unit may be reused across (organization isolation, AGENTS.md); a caller
+ * without a grant whose `orgId` equals the job's organization runs on a fresh, single-use unit. `cohortId` is the
+ * narrower run/principal/input cohort, or null.
+ */
 export interface ComputeCohortGrant {
   cohortId: string | null;
   validUntil: string;
+  /** The organization the SQL predicate verified the run belongs to. */
+  orgId: string;
 }
 
 export const computePriceColumns = {
@@ -97,4 +104,11 @@ export interface ComputeAllocationAdmission {
   allocated(fleetId: string, reservationId: string, providerId: string): Promise<void>;
   /** Only after definite non-creation or provider-confirmed deletion. Timeouts and uncertain responses MUST retain the reservation. */
   release(fleetId: string, reservationId: string, reason: ComputeAllocationReleaseReason): Promise<void>;
+  /**
+   * Unreleased reservations of the fleet older than `minAgeSeconds`, oldest first (at most 200): what a reconciler checks
+   * against the provider after a restart, a lost launch response or a missed release. Content-free ids only.
+   */
+  unreleased(fleetId: string, minAgeSeconds: number): Promise<ComputeAllocationPending[]>;
 }
+
+export interface ComputeAllocationPending { reservationId: string; providerId: string | null; reservedAt: string }

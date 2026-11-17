@@ -1,5 +1,5 @@
 import type postgres from "postgres";
-import type { ComputeAllocationAdmission, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "@docslurp/shared";
+import type { ComputeAllocationAdmission, ComputeAllocationPending, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "@docslurp/shared";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function validate(fleetId: string, reservationId: string): void {
@@ -37,6 +37,16 @@ export function computeAllocationAdmission(sql: postgres.Sql): ComputeAllocation
       if (rows.length) return;
       const [row] = await sql`select released_at,release_reason from compute_allocation_reservations where id=${reservationId} and fleet_id=${fleetId}`;
       if (!row?.released_at || row.release_reason !== reason) throw new Error("Compute reservation release refused");
+    },
+    async unreleased(fleetId, minAgeSeconds): Promise<ComputeAllocationPending[]> {
+      if (!/^[A-Za-z0-9_.:-]{1,200}$/.test(fleetId) || !Number.isFinite(minAgeSeconds) || minAgeSeconds < 0 || minAgeSeconds > 30 * 86_400) {
+        throw new Error("Invalid compute reservation query");
+      }
+      const rows = await sql<{ id: string; provider_id: string | null; created_at: Date }[]>`
+        select id, provider_id, created_at from compute_allocation_reservations
+        where fleet_id=${fleetId} and released_at is null and created_at < now() - (${minAgeSeconds} * interval '1 second')
+        order by created_at limit 200`;
+      return rows.map((row) => ({ reservationId: row.id, providerId: row.provider_id, reservedAt: new Date(row.created_at).toISOString() }));
     },
   };
 }

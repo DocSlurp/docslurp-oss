@@ -275,13 +275,15 @@ export interface SandboxedOcrJob {
 export type SandboxedOcrResult = SandboxResult;
 
 /**
- * Job ownership from the stage run context, for accounting and placement hints. Organization membership alone
- * does not establish equal project/API-key access. Neither key authorizes VM reuse: each job gets a fresh VM.
+ * Job ownership from the stage run context. `tenantKey` alone never authorizes VM reuse. A provider may reuse a unit
+ * across jobs of one organization only when `authorizeCohort` returns a live grant whose `orgId` equals `tenantKey`,
+ * bound host-side and in-guest, within a bounded idle window and lifetime (organization isolation, AGENTS.md); anything
+ * else runs on a fresh, single-use unit.
  */
 export interface SandboxedOcrRunContext {
   tenantKey?: string;
   affinityKey?: string;
-  /** Revalidate live authorization before admission and publication; an expired/revoked scope returns null. */
+  /** Revalidate live authorization (and the run's organization) before admission and publication; an expired/revoked scope returns null. */
   authorizeCohort?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
 }
 
@@ -306,15 +308,21 @@ export interface SandboxedOcrProvider {
 
 /**
  * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
- * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to `scope` (one
- * organization's run) for that VM's whole life, both in its own lease table and inside the VM: it may serve several jobs of
- * that run, never another run's or another organization's, and a VM it cannot prove bound to the scope is never used (a
- * fresh one is started). It reads them there and returns only bounded Markdown per page. The VM gets no
+ * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to
+ * `scope.orgId` (one organization) for that VM's whole life, both in its own lease table and inside the VM: it may serve
+ * jobs of several runs of that organization within a bounded idle window and lifetime, never another organization's, and
+ * only after `authorize` proved in SQL that the run belongs to that organization (organization isolation, AGENTS.md). It reads them there and returns only bounded Markdown per page. The VM gets no
  * credentials, no metadata endpoint and no network beyond the job's own connection.
  */
 export interface PageImageReadJob {
-  /** Tenant scope of every page. A provider binds an isolated VM to this organization's run and refuses a job of any other. */
+  /** Tenant scope of every page. A provider binds an isolated VM to this organization and refuses a job of any other. */
   scope: { orgId: string; runId: string };
+  /**
+   * The run's live SQL grant (authorize_compute_cohort). A provider that reuses VMs across runs calls it before the lease
+   * and before returning results, and refuses the job unless the grant's `orgId` equals `scope.orgId`. Absent when the
+   * host cannot form the run's execution scope; such a job must not reach a reused VM.
+   */
+  authorize?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
   /** Opaque keys (never document ids) and absolute paths of PNGs the OCR boundary wrote and the host validated by signature and size. */
   pages: Array<{ key: string; imagePath: string }>;
   /**
@@ -542,6 +550,7 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
       reserve: async (...args) => requireAllocationAdmission().reserve(...args),
       allocated: async (...args) => requireAllocationAdmission().allocated(...args),
       release: async (...args) => requireAllocationAdmission().release(...args),
+      unreleased: async (...args) => requireAllocationAdmission().unreleased(...args),
     },
     authorizeComputeCohort,
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,

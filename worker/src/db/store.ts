@@ -724,7 +724,8 @@ export class Store {
     }
     const [row] = await this.sql<{ cohort_id: string | null; valid_until: Date }[]>`
       select * from public.authorize_compute_cohort(${scope.orgId}, ${scope.projectId}, ${scope.runId}, ${scope.documentId}, ${scope.executionGeneration})`;
-    return row ? { cohortId: row.cohort_id, validUntil: new Date(row.valid_until).toISOString() } : null;
+    // A row exists only when the run belongs to scope.orgId (authorize_compute_cohort's `r.org_id = p_org`).
+    return row ? { cohortId: row.cohort_id, validUntil: new Date(row.valid_until).toISOString(), orgId: scope.orgId } : null;
   }
 
   async computeObservations(profileIds: readonly string[]): Promise<ComputeObservations> {
