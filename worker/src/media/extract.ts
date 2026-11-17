@@ -28,6 +28,7 @@ import { buildMediaCanonicalDocument, type VisualSegment } from "./canonical.js"
 import { diarize, type DiarizationOutcome } from "./diarize.js";
 import { SegmentAssembler, planChunkWindows, toTimedSegments, type TimedSegment } from "./segments.js";
 import { buildMediaSummary } from "./summary.js";
+import { recordPageExtracts } from "../pipeline/page-extracts.js";
 import type { MediaJournal, SpeakerTurn } from "./types.js";
 import { mediaWindowConcurrency, readMediaWindowConcurrency, runOrderedWindows } from "./windows.js";
 import { recordShardTiming } from "../pipeline/shard-calibration.js";
@@ -193,6 +194,9 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       state.artifactLedger.recordDocument(document.id, "canonical-document", storage.uri(`${prefix}.canonical.json`));
       state.artifactLedger.recordDocument(document.id, "markdown-manifest", storage.uri(`${prefix}.manifest.json`));
       document.pageCount = 1;
+      // Page extract record: the one page is the transcript (labels only; the provider stays out of the record).
+      recordPageExtracts(state, document, [{ pageNumber: 1, pass: "extract", method: "transcription", engine: `media-${mediaKind}`,
+        textBytes: Buffer.byteLength(text, "utf8"), finishReason: text.trim() ? "stop" : "empty" }]);
       return { artifactUri: storage.uri(`${prefix}.md`), stats: { provider: provider.id, model: provider.model,
         durationSeconds: duration, segments: segments.length, speakers: summary.speakerCount, visualSegments: visualSegments.length, coverage } };
     } finally {

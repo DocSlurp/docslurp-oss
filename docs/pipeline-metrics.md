@@ -48,9 +48,22 @@ Run outcomes are recorded once per run (`project_runs.outcome_recorded_at`), so 
 | --- | --- | --- |
 | `docslurp.pages.routed` | counter of pages | `route` (`text`, `read`, `blank`), `reason` (why a page was sent to a read: `raster`, `garbled`, `drawn`, `yield-deficit`, `other`) |
 | `docslurp.pages.escalation` | counter of pages | `route` (`ocr-hosted`, `vision`), `outcome` (`replaced`, `failed`, `skipped-<reason>`, or a vision page outcome) |
+| `docslurp.pages.extracts` | counter of page extract records | `method` (`text-layer`, `ocr`, `ocr-second-read`, `vision`, `transcription`, `correction`, `kept-as-image`, `none`), `pass` (`extract`, `scan-ocr`, `critique`, `vision`, `human`), `adopted` (`true`/`false`), `member` (`pool` when a capability-pool member served the page, else `none`), `class` (`fast`, `ocr`, `rich`, or `none`) |
+| `docslurp.pages.extract_tags` | counter of page tags | `tag` (the closed page tag vocabulary, docs/extraction/page-extract-records.md), `method` or `source` (`routing`) |
 | `docslurp.pages.router_decisions` | counter of pages | `mode` (`shadow`, `active`), `pixels` (`yes`/`no`), `agrees` (`yes`/`no`/`unknown`, against the current routing) |
 
 The share of pages escalated beyond fast extraction is `read / (text + read + blank)` over `docslurp.pages.routed`.
+
+## Capability pools
+
+Each billed page capability (`text`, `ocr`, `vision`) has an ordered pool of members with automatic failover (`packages/shared/src/capability-pools.ts`). The worker logs its resolved pools at startup (`[capability-pools] ...`), advertises them in its registry row, and `/ops/worker-fleet` shows them (`capabilityPools`).
+
+| Metric | Kind | Labels |
+| --- | --- | --- |
+| `docslurp.capability_pool.served` | counter of pages | `capability`, `member` (the pool member id, such as `ocr.llm.glm-5.3-flash+wafer.us`) |
+| `docslurp.capability_pool.failover` | counter | `capability`, `from`, `to` (`none` when nothing was left), `reason` (`margin`, `routing`, `unavailable`, `privacy`, `error`, `unsupported`) |
+
+A `routing` failover is a request no host would serve under its constraints (nothing billed): it is handed back to the vision guard and never counts toward its breaker. The share of pages served by a pool's first member is `served{member=<first>} / sum(served)` per capability.
 
 ## Search and chat
 

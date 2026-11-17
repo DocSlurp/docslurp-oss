@@ -49,6 +49,9 @@ export interface AttributedUsageRow {
   input_tokens: number;
   output_tokens: number;
   cost_cents: number;
+  /** The event's own org_id and project_id columns as written (migration 0187), for index-backed prefilters only. */
+  stamped_org_id: string | null;
+  stamped_project_id: string | null;
 }
 
 function windowPredicate(client: SqlClient, window: UsageWindow) {
@@ -71,6 +74,27 @@ export function attributedUsage(
   return client`(
     select au.* from usage_attribution au
     where ${windowPredicate(client, window)}
+  )`;
+}
+
+/**
+ * `attributedUsage` limited to one organization's rows. The view's `org_id` is derived (it cannot use an index), so the
+ * fragment also filters on the event's stamped columns (migration 0187), which the planner pushes down to
+ * `usage_events_org_created_idx` and `usage_events_split_created_idx`. That filter is an exact superset of the org's rows:
+ * a row whose stamped org is set and that is not split across projects (it has a stamped project, or no `projectIds`)
+ * always attributes to its stamped org. The derived `org_id` then decides, as in `attributedUsage`.
+ */
+export function orgAttributedUsage(
+  orgId: string,
+  window: UsageWindow,
+  client: SqlClient = sql,
+): SqlFragment {
+  return client`(
+    select au.* from usage_attribution au
+    where ${windowPredicate(client, window)}
+      and (au.stamped_org_id = ${orgId} or au.stamped_org_id is null
+        or (au.stamped_project_id is null and au.metadata ? 'projectIds'))
+      and au.org_id = ${orgId}
   )`;
 }
 
@@ -114,7 +138,7 @@ export async function orgUsageTotals(
       coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
       count(distinct au.id)::int as event_count
-    from ${attributedUsage(window, client)} au
+    from ${orgAttributedUsage(orgId, window, client)} au
     where au.org_id = ${orgId}
   `;
   return toTotals(row);
@@ -170,7 +194,7 @@ export async function orgDailyUsage(
       coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
       count(distinct au.id)::int as event_count
-    from ${attributedUsage(since, client)} au
+    from ${orgAttributedUsage(orgId, since, client)} au
     where au.org_id = ${orgId}
     group by date_trunc('day', au.created_at)::date
     order by date desc
@@ -218,7 +242,7 @@ export async function orgSpendByCategory(
         else 'other'
       end as category,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents
-    from ${attributedUsage(since, client)} au
+    from ${orgAttributedUsage(orgId, since, client)} au
     where au.org_id = ${orgId}
     group by 1
   `;
@@ -234,42 +258,135 @@ export interface OrgUnitUsage {
   searchCredits: number;
   chatAnswers: number;
   chatCredits: number;
+  /**
+   * Page counts by final class: each charged page counts once per run, in the class it finally paid (Text = fast,
+   * Scan = ocr, Vision = rich). A page charged in one class and later upgraded to Vision (the OCR-then-vision settle of
+   * migration 0185, or a `rich-upgrade:` of another run's Text or Scan decision) counts only as Vision; its earlier
+   * charge stays in `ingestCredits`. Page counts are pages, not billed units: a Vision page billed several output units
+   * counts once per run, so counts times the per-page rates need not equal `ingestCredits` exactly. Credits are always the sum
+   * of the charged `cost_cents`.
+   */
   fastPages: number;
-  /** Pages the OCR route read, one per page and run (a page later upgraded to Rich is counted in both). */
+  /** Pages whose final class is Scan (OCR-read and not upgraded to Vision). */
   ocrPages: number;
-  /** Rich pages, including media minutes counted as Rich pages. */
+  /** Pages whose final class is Vision, including pages upgraded from Text or Scan, plus media minutes counted as Vision pages. */
   richPages: number;
   ingestCredits: number;
 }
 
 /**
+ * Runs one read with JIT compilation off, scoped to that read. On a large org the unit-usage query's plan cost passes
+ * `jit_above_cost`, and compiling it took longer (~1.2 s measured) than executing it. On a pool or connection the read
+ * runs in its own transaction with `SET LOCAL jit = off`; inside a caller's transaction the setting is switched for the
+ * read and restored after it, so the caller's later statements keep their own setting. Any other handle is refused.
+ */
+async function withoutJit<T>(client: SqlClient, read: (db: SqlClient) => Promise<T>): Promise<T> {
+  const handle = client as { begin?: unknown; savepoint?: unknown };
+  if (typeof handle.begin === "function") {
+    return await client.begin(async (tx) => {
+      await tx`set local jit = off`;
+      return read(tx as unknown as SqlClient);
+    }) as T;
+  }
+  // A transaction handle (postgres.js TransactionSql has `savepoint`, no `begin`): set_config(..., true) holds until the
+  // caller's transaction ends, so switch JIT off for this read and put the caller's value back after it. Anything else
+  // (a reserved connection outside a transaction) could not scope the setting, so it is refused.
+  if (typeof handle.savepoint !== "function") {
+    throw new Error("usage attribution: a JIT-scoped read needs a pool, a connection or a transaction");
+  }
+  const [previous] = await client<{ jit: string }[]>`select current_setting('jit') as jit`;
+  await client`select set_config('jit', 'off', true)`;
+  let failed = false;
+  try {
+    return await read(client);
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    try {
+      await client`select set_config('jit', ${previous?.jit ?? "on"}, true)`;
+    } catch (restoreError) {
+      // A failed read leaves the caller's transaction aborted, so the restore fails too: keep the read's error.
+      if (!failed) throw restoreError;
+    }
+  }
+}
+
+/**
  * Units and credits the price card charged an org since `since` (the billing
- * forecast's last-30-day pace). Unit events record the count in `amount`:
- * chat answers as 1 per call, searches as 1 per search or the batch size for
- * batched API searches (search/lean-logging.ts), pages as billed pages.
+ * forecast's last-30-day pace), in one pass over the org's rows. Unit events
+ * record the count in `amount`: chat answers as 1 per call, searches as 1 per
+ * search or the batch size for batched API searches (search/lean-logging.ts).
+ * Credits are the summed charges. Page counts follow the final-class rule on
+ * `OrgUnitUsage`:
+ *
+ * - Text and Scan: the summed `amount` of their charges (a per-page charge is 1; a run's aggregate Text charge carries
+ *   its page count), minus every per-page charge a Vision charge of the same org upgraded. An upgrade names the charge
+ *   it replaces (`metadata.upgradeOf` = that charge's id) and must match it on document and run (`decidedBy` for a
+ *   cross-run upgrade, else the upgrade's own run), so no other org's events, and no other run's unlinked events, can
+ *   remove a page.
+ * - Vision: distinct (run, document, page) over per-page Vision charges, so a page billed several units, or upgraded,
+ *   counts once per run; plus the summed `amount` of aggregate Vision charges without a page (legacy scan pages).
+ *
+ * Both sides of an upgrade are read inside the same org and window; an upgrade is always later than what it replaces.
  */
 export async function orgUnitUsage(orgId: string, since: UsageWindow, client: SqlClient = sql): Promise<OrgUnitUsage> {
-  const rows = await client<{ metric: string; amount: number; cost_cents: number; events: number }[]>`
-    select au.metric,
-      coalesce(sum(au.amount), 0)::double precision as amount,
-      coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      count(distinct au.id)::int as events
-    from ${attributedUsage(since, client)} au
-    where au.org_id = ${orgId}
-      and au.metric = any(${[...INGEST_UNIT_METRICS, BILLABLE_UNIT_METRICS.search, BILLABLE_UNIT_METRICS.chatAnswer]}::text[])
-    group by au.metric
-  `;
-  const by = new Map(rows.map((row) => [row.metric, { amount: Number(row.amount ?? 0), cost: Number(row.cost_cents ?? 0), events: Number(row.events ?? 0) }]));
-  const get = (metric: string) => by.get(metric) ?? { amount: 0, cost: 0, events: 0 };
+  const fast = BILLABLE_UNIT_METRICS.fastPage;
+  const ocr = BILLABLE_UNIT_METRICS.ocrPage;
+  const rich = BILLABLE_UNIT_METRICS.richPage;
+  const chat = BILLABLE_UNIT_METRICS.chatAnswer;
+  const rows = await withoutJit(client, (db) => db<{ metric: string; amount: number; cost_cents: number; events: number; final_pages: number }[]>`
+    with charges as materialized (
+      select au.id, au.metric, au.amount, au.cost_cents, au.source_run_id,
+        case when au.metric in (${fast}, ${ocr}, ${rich}) then au.metadata ->> 'documentId' end as document_id,
+        case when au.metric = ${rich} then au.metadata ->> 'upgradeOf' end as upgrade_of,
+        case when au.metric = ${rich} then coalesce(au.metadata ->> 'decidedBy', au.source_run_id) end as upgrade_run,
+        case when au.metric = ${rich}
+            and au.metadata ->> 'documentId' is not null
+            and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
+          then coalesce(au.source_run_id, '') || ':' || (au.metadata ->> 'documentId') || ':' || ((au.metadata ->> 'pageNumber')::int)::text
+        end as rich_page
+      from ${orgAttributedUsage(orgId, since, db)} au
+      where au.org_id = ${orgId}
+        and au.metric = any(${[...INGEST_UNIT_METRICS, BILLABLE_UNIT_METRICS.search, chat]}::text[])
+    ),
+    upgraded as (
+      select src.id from charges src
+      where src.metric in (${fast}, ${ocr})
+        and exists (
+          select 1 from charges up
+          where up.upgrade_of = src.id and up.document_id = src.document_id and up.upgrade_run = src.source_run_id
+        )
+    ),
+    by_metric as (
+      select c.metric,
+        coalesce(sum(c.amount), 0) as amount,
+        coalesce(sum(c.cost_cents), 0) as cost_cents,
+        coalesce(sum(c.amount) filter (where c.rich_page is null and c.id not in (select id from upgraded)), 0) as unlinked_pages
+      from charges c
+      group by c.metric
+    )
+    select m.metric,
+      m.amount::double precision as amount,
+      m.cost_cents::double precision as cost_cents,
+      case when m.metric = ${chat} then (select count(distinct c.id) from charges c where c.metric = ${chat}) else 0 end::int as events,
+      (m.unlinked_pages + case when m.metric = ${rich}
+        then (select count(distinct c.rich_page) from charges c where c.rich_page is not null) else 0 end)::double precision as final_pages
+    from by_metric m
+  `);
+  const by = new Map(rows.map((row) => [row.metric, {
+    amount: Number(row.amount ?? 0), cost: Number(row.cost_cents ?? 0), events: Number(row.events ?? 0), pages: Number(row.final_pages ?? 0),
+  }]));
+  const get = (metric: string) => by.get(metric) ?? { amount: 0, cost: 0, events: 0, pages: 0 };
   const ingestCredits = INGEST_UNIT_METRICS.reduce((sum, metric) => sum + get(metric).cost, 0);
   return {
     searches: get(BILLABLE_UNIT_METRICS.search).amount,
     searchCredits: get(BILLABLE_UNIT_METRICS.search).cost,
-    chatAnswers: get(BILLABLE_UNIT_METRICS.chatAnswer).events,
-    chatCredits: get(BILLABLE_UNIT_METRICS.chatAnswer).cost,
-    fastPages: get(BILLABLE_UNIT_METRICS.fastPage).amount,
-    ocrPages: get(BILLABLE_UNIT_METRICS.ocrPage).amount,
-    richPages: get(BILLABLE_UNIT_METRICS.richPage).amount + get(BILLABLE_UNIT_METRICS.mediaMinutes).amount,
+    chatAnswers: get(chat).events,
+    chatCredits: get(chat).cost,
+    fastPages: get(fast).pages,
+    ocrPages: get(ocr).pages,
+    richPages: get(rich).pages + get(BILLABLE_UNIT_METRICS.mediaMinutes).amount,
     ingestCredits,
   };
 }

@@ -6,7 +6,7 @@
 
 - Organization isolation follow-ups (council, PR #450, 2026-11-16):
   - Contract step for #451: drop `quarantined_sources` (0101) once no release reads it (now `org_quarantined_sources`, 0184), and its roles.mjs entry.
-  - Source quarantine is per organization since #451, so one hostile file can cost one worker per uploading organization (bounded per org by the teardown breaker, not fleet-wide). Add a fleet-wide signal used for routing only (a hash listed by any org runs elsewhere on a single-use VM in a capped lane, indistinguishable to the uploader) and an alert on distinct orgs per hash and fleet teardowns per hour (council #451 M2).
+  - Source quarantine is per organization since #451, so one hostile file can cost one worker per uploading organization (bounded per org by the teardown breaker, not fleet-wide). Add a fleet-wide signal used for routing only (a hash listed by any org runs elsewhere in a capped lane, indistinguishable to the uploader) and an alert on distinct orgs per hash and fleet teardowns per hour (council #451 M2).
 
 - Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
 
@@ -22,7 +22,8 @@
   usage attribution, realtime fields); SDK, CLI and MCP switches for `firstPass`/`afterFirstPass`; recover the text-first
   throughput the batch's table facts cost (about +130% guest CPU on a 1,037-PDF corpus: a deferred, lower-priority phase after
   each text result would keep them off the first-searchable path); figure links rewritten to export paths; and `DOCSLURP_FIRST_PASS_MATH` stays off until the math reader follow-up above is closed.
-- Doppler 705d2c7 follow-ups (council, 2026-11-10; still open at 79957e1): before anyone enables `pdftomarkdown --math`, bound the cluster x prose-run `across_bar` scan in `docslurp/doppler-md/src/math/mod.rs` (a few MB of hostile page content reaches ~21 s per page inside the page caps); retain fewer bytes per glyph in non-streaming `--math`; add tests that compare late `-f` slices with an unsliced extraction and cover consecutive empty content streams; correct the "error checks remain unchanged" comment in `pdftotext.cc` (a skipped prefix page is no longer built, so its `Page::isOk` rejection no longer hides later pages).
+- Doppler 0cf2981 follow-ups (council, 2026-11-16; none worse than the previous pin): a content stream shared by many pages is interpreted again for each page with no per-page cost cap in Doppler (a 103 KB file with five pages sharing a 100 MiB `q Q` stream takes ~40 s; the host job timeout is the only bound); main xref section memory is unbounded below ~1 GB (`/Size` 15,000,000, `/Columns` 250,000,000); per-kind object-stream caches (Facts, Geometry, Audit) re-parse an object stream once per kind; the first-missing-entry rebuild can make different page ranges resolve an unlisted object differently (flagged `xref-repaired`); the TIFF predictor shifts by 64 for 16-bit four-component rows (`Stream.cc`); a refused predictor row in a rebuild yields raw bytes instead of failing the stream.
+- Doppler 705d2c7 follow-ups (council, 2026-11-10; still open at 0cf2981): before anyone enables `pdftomarkdown --math`, bound the cluster x prose-run `across_bar` scan in `docslurp/doppler-md/src/math/mod.rs` (a few MB of hostile page content reaches ~21 s per page inside the page caps); retain fewer bytes per glyph in non-streaming `--math`; add tests that compare late `-f` slices with an unsliced extraction and cover consecutive empty content streams; correct the "error checks remain unchanged" comment in `pdftotext.cc` (a skipped prefix page is no longer built, so its `Page::isOk` rejection no longer hides later pages).
 - Doppler security advisory tracking (council A L-B, 2026-11-05): the worker images and the VM guest run the pinned Doppler fork (`worker/doppler.json`), which does not receive Debian's poppler-utils patches (host probes stay Debian's). Before each release, and at least monthly, compare Poppler upstream security fixes and the Debian `src:poppler` tracker with the fork's base, cherry-pick or rebase in DocSlurp/doppler, and move the pin. Automate as a scheduled CI check that fails when upstream Poppler has a security tag newer than the fork's base.
 
 - Remaining host reads of customer bytes after the VM-only parser merge (#288 + #295, 2026-11-06): (1) worker format-detect decodes text-format files (`lib/text-page-count.ts`, pure TypeScript `decodeTextBytes`, no parser) to count their pages; (2) the API's intake sniffs a header (`fileFactsFor` depth `header`, magic bytes only) and decodes up to 2 MB of a text file to estimate its pages (`source-metadata.ts`); (3) `pdf-asset-cache` reads the 24-byte header of PNGs our own renderer produced. Move (1) and (2) into the parser VM (one `text-pages` entrypoint) and read raster dimensions from the VM's result instead of (3).
@@ -61,8 +62,9 @@ See [the stage notes](docs/document-summaries.md#summary-tree-section-summaries-
 - [ ] Enable `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` on production (council reviewed in PR #339; batch flag removed) and
   measure `quality=fast` and `quality=auto` 1-page uploads before/after
   (performance/quarantine-latency-2026-11-11/results.md).
-- [ ] Optional hardening (council M1): run the intake inspection in a plain parser session, so a parser-tool exploit never
-  shares a VM with clamd. One document per session already bounds it to the document that ran the exploit.
+- [ ] perf: warm reuse. Let one scanner session (and its restored VM) scan many documents of any run or organization
+  instead of restoring a VM from the snapshot for every document (AGENTS.md, owner 2026-11-17: no per-job compute
+  isolation; the per-document session binding was removed). Measure 1-page upload latency before and after.
 - [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
   update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
 - [ ] Residual after the nested-archive walk (PR #339, council round 4, 2026-11-11): a ZIP or RAR is now found behind up
@@ -75,6 +77,13 @@ See [the stage notes](docs/document-summaries.md#summary-tree-section-summaries-
 - [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
   reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
   the scan beside extraction. Coordinate with the first-pass plan's quarantine precondition.
+
+## Compute reuse follow-ups (owner 2026-11-17: no per-organization, per-run or per-job compute isolation)
+
+- [ ] perf: warm reuse. The Modal parser VM wipes all scratch after every command and the whole job tree before another
+  document's command (`resetVm`, council W #1, W #3, X #7), and wipes a parked VM twice on adoption. Keep only the cleanup
+  disks need (outputs and scratch past a size bound), drop the per-document full wipe and job-root probe, and measure
+  per-command latency before and after.
 
 ## ClamAV definitions in parser VMs (2026-11-06)
 

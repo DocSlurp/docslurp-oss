@@ -17,14 +17,16 @@ function installUpgradeValue() {
 }
 
 describe("OCR escalation readers", () => {
-  it("tries GLM under its price ceiling first, then Qwen; a configured model is tried alone", () => {
-    expect(OCR_ESCALATION_ROUTES.map((route) => route.model)).toEqual(["llm://openrouter/z-ai/glm-5.3-flash", "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct"]);
+  it("tries GLM under its price ceiling on two US hosts first, then Qwen; a configured model keeps only its own routes", () => {
+    expect(OCR_ESCALATION_ROUTES.map((route) => route.model)).toEqual(["llm://openrouter/z-ai/glm-5.3-flash", "llm://openrouter/z-ai/glm-5.3-flash", "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct"]);
+    expect(ocrEscalationRoutes("llm://openrouter/z-ai/glm-5.3-flash").map((route) => route.optionId)).toEqual(["scan-ocr/hosted-escalation-glm", "scan-ocr/hosted-escalation-glm-morph"]);
     expect(ocrEscalationRoutes(null)).toBe(OCR_ESCALATION_ROUTES);
     expect(ocrEscalationRoutes("llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct").map((route) => route.optionId)).toEqual(["scan-ocr/hosted-escalation"]);
     expect(ocrEscalationRoutes("llm://openrouter/some/model")).toEqual([{ optionId: "scan-ocr/hosted-escalation-configured", model: "llm://openrouter/some/model", priceCeiling: null }]);
     // The capped reader sends pages only to a host whose region is stated (US); two readers keep escalation available.
     expect(OCR_ESCALATION_ROUTES[0]!.priceCeiling!.hosts).toEqual(["wafer/us"]);
-    expect(OCR_ESCALATION_ROUTES).toHaveLength(2);
+    expect(OCR_ESCALATION_ROUTES[1]!.priceCeiling!.hosts).toEqual(["morph/fp8"]);
+    expect(OCR_ESCALATION_ROUTES).toHaveLength(3);
   });
 
   it("prices the GLM reader at its ceiling: the request's max_price, its hosts and no per-image fee", () => {
@@ -36,7 +38,7 @@ describe("OCR escalation readers", () => {
     expect(route.maxPriceSent).toEqual(route.capUsdPerMTok);
     expect(route.capImageUsd).toBe(0);
     // The uncapped reader keeps the vision route as sent (Qwen on DeepInfra's own API, at its list price).
-    expect(ocrEscalationAutomaticRoute(OCR_ESCALATION_ROUTES[1]!)).toMatchObject({ billing: "direct" });
+    expect(ocrEscalationAutomaticRoute(OCR_ESCALATION_ROUTES[2]!)).toMatchObject({ billing: "direct" });
   });
 
   it("the gate checks the GLM reader at the ceiling and admits it at the test prices", () => {

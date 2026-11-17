@@ -38,7 +38,12 @@ export interface VisionPageOutcome {
     /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
     | "unverified-render"
     /** Outside the document's Auto ladder plan (pipeline.ladder): no model reads the page. */
-    | "ladder-capped";
+    | "ladder-capped"
+    /**
+     * The run's vision model (or its fallback) is refused (not admitted, or no host with a stated US or EU region): nothing
+     * was sent, and the page keeps its own text. The ingest report recommends choosing another vision model.
+     */
+    | "model-refused";
   /** The page has usable native or OCR text to keep when vision gives nothing. */
   fallbackText: boolean;
 }
@@ -56,6 +61,7 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
     case "overrun-unreconciled":
     case "document-page-limit":
     case "document-attempt-limit":
+    case "model-refused":
       return "guarded";
     case "blank-render":
     case "unverified-render":
@@ -82,7 +88,7 @@ export interface PageFactUpsert {
   scanClass?: PageScanClass | null;
   /**
    * Doppler's packed math and table encoding words (document_page_facts.math_bits / table_bits / encoding_counts, migration
-   * 0186; lib/doppler-encoding-facts.ts decodes them). Written together or not at all; absent keeps the stored values.
+   * 0189; lib/doppler-encoding-facts.ts decodes them). Written together or not at all; absent keeps the stored values.
    */
   mathBits?: number | null;
   tableBits?: number | null;

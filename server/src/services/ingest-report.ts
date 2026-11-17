@@ -35,6 +35,12 @@ import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   type ProjectRecord,
   partialExtractionMessage,
   pageReadingQuality,
+  normalizePageExtractTags,
+  PAGE_EXTRACT_METHODS,
+  PAGE_EXTRACT_PASSES,
+  type PageExtractMethod,
+  type PageExtractPass,
+  type PageExtractTag,
 } from "@docslurp/shared";
 import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
@@ -81,6 +87,13 @@ export interface IngestReportPageRow {
   visionStatus: string | null;
   chunkCount: number;
   chunkBytes: number;
+  /** The page's final extract record (page-extracts.ts); absent for pages without one. */
+  extractMethod?: PageExtractMethod | null;
+  finalPass?: PageExtractPass | null;
+  extractTags?: PageExtractTag[];
+  /** How many extract records and final records the page has. */
+  extractRows?: number;
+  extractFinals?: number;
 }
 
 export interface IngestReportStageRow {
@@ -284,6 +297,13 @@ function classifyPage(doc: IngestReportDocumentRow, row: IngestReportPageRow): P
     imageCount: row.imageCount,
     visionStatus: row.visionStatus,
     chunkCount: row.chunkCount,
+    extractMethod: row.extractMethod ?? null,
+    finalPass: row.finalPass ?? null,
+    extractTags: row.extractTags ?? [],
+    extractRecordStatus: !row.extractRows ? null
+      : (row.extractFinals ?? 0) > 1 ? "duplicate"
+      : row.extractFinals === 1 ? "ok"
+      : docStatus === "completed" ? "missing" : null,
     kind,
     scannedLooking,
     docStatus,
@@ -690,6 +710,10 @@ function onOff(value: boolean | undefined) {
 }
 
 /** The settings that shaped what this report observed, with why each matters here. */
+/** Shown on the vision setting of projects using the Cheapest hosted preset, which changed model on 2026-11-17. */
+export const CHEAPEST_HOSTED_CHANGE_NOTICE =
+  "Since November 17, 2026, Cheapest hosted reads pages with GLM 5.3 Flash instead of Gemini 2.5 Flash Lite, which has no host in the US or EU. Files processed before then keep their earlier reads; reprocess them to use the new model.";
+
 export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed): IngestReportConfigItem[] {
   const items: IngestReportConfigItem[] = [];
   const kinds = new Set(observed.docs.map((doc) => fileKind(doc.mimeType, doc.filename)));
@@ -710,7 +734,9 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
     items.push({
       // The profile (a category), never the backend model id behind it.
       key: "vision.profile", label: "Vision", value: visionProfileCatalog[pipeline.vision.profile]?.label ?? pipeline.vision.profile,
-      note: perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "Estimated from the project's quality setting.",
+      note: (perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "Estimated from the project's quality setting.")
+        // Notice (2026-11-17): the preset moved models because the old one has no host in the US or EU.
+        + (pipeline.vision.profile === "cheapest-hosted" ? ` ${CHEAPEST_HOSTED_CHANGE_NOTICE}` : ""),
     });
     if (pipeline.pageRouter?.mode && pipeline.pageRouter.mode !== "off") {
       items.push({ key: "pageRouter.mode", label: "Page router", value: pipeline.pageRouter.mode, note: "The decision-model router chooses an extractor per page; only active mode changes extraction." });
@@ -820,6 +846,15 @@ export type IngestRecommendationId = keyof typeof INGEST_RECOMMENDATION_CATALOG;
  * Fast left the page unread on purpose: kept as its page image, or (past the render cap, or blank) not read at all.
  * Both read as "kept as a page image" to users: previews render any page on demand.
  */
+const EXTRACT_METHODS: ReadonlySet<string> = new Set(PAGE_EXTRACT_METHODS);
+const EXTRACT_PASSES: ReadonlySet<string> = new Set(PAGE_EXTRACT_PASSES);
+function pageExtractMethodOrNull(value: string | null): PageExtractMethod | null {
+  return value !== null && EXTRACT_METHODS.has(value) ? value as PageExtractMethod : null;
+}
+function pageExtractPassOrNull(value: string | null): PageExtractPass | null {
+  return value !== null && EXTRACT_PASSES.has(value) ? value as PageExtractPass : null;
+}
+
 function fastLeftUnread(status: string | null | undefined): boolean {
   return status === "kept-as-image" || status === "not-read";
 }
@@ -922,8 +957,8 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "vision-stopped", severity: "medium",
       title: "Vision stopped for the run",
-      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, or too many vision requests in the run returned unusable output.`,
-      effect: "These pages keep only their own text. Reprocess the files once the cause is fixed; contact support if the limit is too low for your files.",
+      reason: `${plural(stopped.length, "page")} in ${plural(ids.length, "file")} skipped vision because the page or your organization reached its vision attempt limit, too many vision requests in the run returned unusable output, or the run's vision model is no longer offered (it has no host in the US or EU).`,
+      effect: "These pages keep only their own text. If your project names a vision model that is no longer offered, choose another vision model in the project settings, then reprocess the files; otherwise reprocess them once the cause is fixed, or contact support if the limit is too low for your files.",
       affectedPages: stopped.length, affectedDocuments: ids.length,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
       patch: null, reprocessDocumentIds: [],
@@ -1149,25 +1184,26 @@ const escalationCount = z.number().int().nonnegative().max(1_000_000);
 const ocrEscalationStatsSchema = z.object({
   escalatedPages: escalationCount,
   cappedPages: escalationCount,
-  skippedPages: z.object({ unfunded: escalationCount, "cost-cap": escalationCount, "price-check": escalationCount }).partial().optional(),
+  skippedPages: z.object({ unfunded: escalationCount, "cost-cap": escalationCount, "price-check": escalationCount, "unknown-billed": escalationCount }).partial().optional(),
 }).passthrough();
 
-type OcrEscalationSkipReason = "unfunded" | "cost-cap" | "price-check";
+type OcrEscalationSkipReason = "unfunded" | "cost-cap" | "price-check" | "unknown-billed";
 /** Why a wanted second read did not happen (worker ocr/escalation-stats.ts), as the report says it. */
 const OCR_ESCALATION_SKIP_TEXT: ReadonlyArray<readonly [OcrEscalationSkipReason, string]> = [
   ["unfunded", "skipped it because the balance ran out"],
   ["cost-cap", "skipped it because the run cost cap was reached"],
   ["price-check", "skipped it because no second-read model was available for it"],
+  ["unknown-billed", "kept the first read because the second read timed out after it was sent"],
 ];
 
 /** Pages that kept their first OCR read for a reason other than the cap, per reason and in all (largest count per document). */
 function ocrEscalationSkipped(observed: Pick<Observed, "docs" | "stagesByDoc">): { pages: number; byReason: Record<OcrEscalationSkipReason, number>; documentIds: string[] } {
-  const byReason: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0 };
+  const byReason: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0, "unknown-billed": 0 };
   const documentIds: string[] = [];
   let pages = 0;
   for (const doc of observed.docs) {
     if (statusBucket(doc.status) === "failed") continue;
-    const own: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0 };
+    const own: Record<OcrEscalationSkipReason, number> = { unfunded: 0, "cost-cap": 0, "price-check": 0, "unknown-billed": 0 };
     for (const stage of observed.stagesByDoc.get(doc.id) ?? []) {
       const parsed = ocrEscalationStatsSchema.safeParse(stage.ocrEscalation);
       if (!parsed.success) continue;
@@ -1353,6 +1389,8 @@ export async function loadIngestReport(args: {
     detailIds.length === 0 ? Promise.resolve([]) : client<{
       document_id: string; page_number: number; has_facts: boolean; text_bytes: number | null; image_count: number | null;
       vision_status: string | null; chunks: number; chunk_bytes: string | number;
+      extract_method: string | null; final_pass: string | null; extract_tags: string[] | null; pii_withheld: boolean | null;
+      extract_rows: number | null; extract_finals: number | null;
     }[]>`
       with d as (
         select id, run_id, least(greatest(page_count, 0), ${MAX_PAGES_PER_DOCUMENT}) as pages
@@ -1377,11 +1415,25 @@ export async function loadIngestReport(args: {
         group by cp.document_id, pg
       )
       select d.id as document_id, gs.n as page_number, (f.text_bytes is not null or f.image_count is not null) as has_facts,
-        f.text_bytes, f.image_count, f.vision_status, coalesce(ch.chunks, 0) as chunks, coalesce(ch.bytes, 0) as chunk_bytes
+        f.text_bytes, f.image_count, f.vision_status, coalesce(ch.chunks, 0) as chunks, coalesce(ch.bytes, 0) as chunk_bytes,
+        x.method as extract_method, x.pass as final_pass, x.tags as extract_tags, ps.state = 'blocked-pii' as pii_withheld,
+        xc.rows as extract_rows, xc.finals as extract_finals
       from d
       cross join lateral generate_series(1, d.pages) as gs(n)
       left join document_page_facts f on f.document_id = d.id and f.page_number = gs.n
       left join ch on ch.document_id = d.id and ch.page_number = gs.n
+      -- The page's final extract record (migration 0188): its method, pass and tags, and how many records and finals the
+      -- page has, so a missing or duplicate final shows instead of hiding. Labels only; scoped to the project.
+      left join lateral (
+        select e.method, e.pass, e.tags from document_page_extracts e
+        where e.document_id = d.id and e.page_number = gs.n and e.project_id = ${projectId} and e.is_final
+        order by e.created_at desc limit 1
+      ) x on true
+      left join lateral (
+        select count(*)::int as rows, (count(*) filter (where e.is_final))::int as finals from document_page_extracts e
+        where e.document_id = d.id and e.page_number = gs.n and e.project_id = ${projectId}
+      ) xc on true
+      left join document_page_states ps on ps.document_id = d.id and ps.page_number = gs.n
       order by d.id, gs.n
     `,
     client<{
@@ -1453,6 +1505,9 @@ export async function loadIngestReport(args: {
       documentId: row.document_id, pageNumber: num(row.page_number), hasFacts: row.has_facts,
       textBytes: numOrNull(row.text_bytes), imageCount: numOrNull(row.image_count), visionStatus: row.vision_status,
       chunkCount: num(row.chunks), chunkBytes: num(row.chunk_bytes),
+      extractMethod: pageExtractMethodOrNull(row.extract_method), finalPass: pageExtractPassOrNull(row.final_pass),
+      extractTags: normalizePageExtractTags([...(row.extract_tags ?? []), ...(row.pii_withheld ? ["pii-withheld"] : [])]),
+      extractRows: num(row.extract_rows), extractFinals: num(row.extract_finals),
     })),
     stages: stageRows.map((row) => ({
       documentId: row.document_id, stage: row.stage_name, status: row.status, skipped: row.skipped, reason: row.reason,

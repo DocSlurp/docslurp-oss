@@ -31,7 +31,7 @@ describe("OCR escalation record", () => {
     recordOcrEscalationPages(l, "doc", { escalated: [2], capped: [6, 7] });
     // A page that a later call escalated is no longer capped.
     recordOcrEscalationPages(l, "doc", { escalated: [5] });
-    expect(ocrEscalationStageStats(l, "doc")).toEqual({ escalatedPages: 3, cappedPages: 2, capped: [6, 7], skippedPages: { unfunded: 0, "cost-cap": 0, "price-check": 0 } });
+    expect(ocrEscalationStageStats(l, "doc")).toEqual({ escalatedPages: 3, cappedPages: 2, capped: [6, 7], skippedPages: { unfunded: 0, "cost-cap": 0, "price-check": 0, "unknown-billed": 0 } });
     // Another document's record is its own.
     expect(ocrEscalationStageStats(l, "other")).toBeNull();
     // Hostile or corrupt ledger values never throw and never count.

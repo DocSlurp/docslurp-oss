@@ -48,6 +48,8 @@ export async function adoptBackfillDocuments(
     await retire(client, other.temp_id, other.adoptable ? "completed" : null);
   }
   for (const { temp_id: temp, source_id: source, mode, source_run_id: sourceRun } of pairs as Array<{ temp_id: string; source_id: string; mode: string; source_run_id: string | null }>) {
+    // Lock order: the source document's row before its page rows, as a query-time materialization of it takes them.
+    await client`select 1 from documents where id = ${source} for no key update`;
     await client`delete from document_maps where document_id = ${source} and exists (select 1 from document_maps where document_id = ${temp})`;
     await client`update document_maps set document_id = ${source} where document_id = ${temp}`;
 

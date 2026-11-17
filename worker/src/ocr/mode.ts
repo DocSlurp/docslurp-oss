@@ -3,7 +3,7 @@
  * every refusal is loud: the worker never moves OCR to a weaker boundary, and never substitutes another reader for an
  * OCR path that is missing.
  *
- * - `vm`: an extractor plugin's `sandboxedOcr` provider reads each job in a fresh VM or microVM. The default under
+ * - `vm`: an extractor plugin's `sandboxedOcr` provider reads each job in a VM or microVM (warm and shared across jobs). The default under
  *   `DOCSLURP_SERVICE_PROFILE=service`. Without a provider the worker refuses to start; a failed VM read fails the page.
  * - `local`: the fixed `docslurp_ocr.py` CLI under the worker's parser sandbox. Only for customer-owned execution, where the
  *   operator owns both the bytes and the machine: it needs `DOCSLURP_SERVICE_PROFILE=self-hosted` and is refused at startup

@@ -130,6 +130,8 @@ import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
 import { documentCostStats } from "../lib/document-cost-stats.js";
 import { DOPPLER_FACTS_EVIDENCE_SOURCE, checkDopplerFactsEvidence, pageFactRowsFromCheckedFacts, pageImageEvidenceFromCheckedFacts } from "../lib/doppler-page-facts-evidence.js";
 import { runBillsScansAtCompletion } from "../db/page-base-fee.js";
+import { extractionPageRecords, recordPageExtracts, type ScanFillPageRead } from "../pipeline/page-extracts.js";
+import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
@@ -1082,6 +1084,23 @@ export class ExtractMarkdownStage implements Stage {
                   }
                   await this.recordDocumentTitle(state, document, format, tempFile, winningText);
 
+                  // Page extract records: how each page's text was produced (labels only), written with this stage's
+                  // checkpoint; the page's final row is set when the document completes.
+                  recordPageExtracts(state, document, extractionPageRecords({
+                    pageCount: document.pageCount,
+                    finalPages: splitTextIntoPagesStrict(winningText, document.pageCount),
+                    extractor: winningCandidate.label,
+                    imageOcr: format === "image" && winningCandidate.label !== "image-textless",
+                    winnerOcrPages: [...ocrReadPages, ...(winningCandidate.ocrPages ?? [])],
+                    scanFill: scanFill?.reads ?? null,
+                    ocrFailedPages: ocrFailedPages(state.artifactLedger, document.id),
+                    critiquePages: critique?.acceptedPages ?? [],
+                    ocrPageClass: runUsesOcrPageClass(state.artifactLedger),
+                    plausibility: plausibilityScore,
+                    extractMs: Date.now() - extractionStartedAt,
+                    readsPages: qualityAllowsPageReading(state.run.pipeline.quality),
+                  }));
+
                   state.pendingPerformance.push({
                     documentId: document.id,
                     scope: "document",
@@ -1433,7 +1452,7 @@ export class ExtractMarkdownStage implements Stage {
     document: import("../models.js").Document,
     args: { sourcePath: string; text: string; textKey: string; ocrLanguage?: string; contentHash: string; ladderBudget?: number },
     signal?: AbortSignal,
-  ): Promise<{ text: string; textUri: string; pages: number[] } | null> {
+  ): Promise<{ text: string; textUri: string; pages: number[]; reads: Map<number, ScanFillPageRead> } | null> {
     const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
     // A fully scanned PDF often comes back as no text at all (some extractors add page breaks only around text): every page
     // is empty then.
@@ -1467,6 +1486,7 @@ export class ExtractMarkdownStage implements Stage {
     }
     const pages = [...split];
     const read: number[] = [];
+    const reads = new Map<number, ScanFillPageRead>();
     const hostedReader = createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner });
     const failed: number[] = [];
     let consecutiveFailedBatches = 0;
@@ -1479,9 +1499,12 @@ export class ExtractMarkdownStage implements Stage {
       // the refusal handling below); pages already read stay ledgered and are charged once.
       await authorizeOcrRead(state, document.id, batch.length, "pdf-batch");
       let result: Awaited<ReturnType<typeof ocrDocument>>;
+      const batchStarted = Date.now();
       try {
         result = await ocrDocument({ checkpointStorage: this.storage,
           runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
+          // Measured: every walked page lacks words (scanned) or only some do (mixed); routing only.
+          pdfShape: scanned.length >= pageCount ? "scanned" : "mixed",
           ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
           hostedReader, stage: this.name, ...(signal ? { signal } : {}),
         });
@@ -1520,6 +1543,9 @@ export class ExtractMarkdownStage implements Stage {
         if (page.pageNumber >= 1 && page.pageNumber <= pageCount && hasWords(page.text)) {
           pages[page.pageNumber - 1] = page.text;
           read.push(page.pageNumber);
+          reads.set(page.pageNumber, { reader: page.reader, confidence: page.confidence ?? null,
+            durationMs: Math.round((Date.now() - batchStarted) / Math.max(1, batch.length)),
+            ...(page.escalationHeld ? { escalationHeld: page.escalationHeld } : {}) });
         }
       }
     }
@@ -1536,7 +1562,7 @@ export class ExtractMarkdownStage implements Stage {
     const key = `${args.textKey}.ocr.md`;
     await this.storage.putBytes(key, Buffer.from(text, "utf8"), "text/markdown; charset=utf-8");
     console.log(`[ocr] document=${document.id} scanned pages read=${read.length}/${empty.length}`);
-    return { text, textUri: this.storage.uri(key), pages: read };
+    return { text, textUri: this.storage.uri(key), pages: read, reads };
   }
 
   /**

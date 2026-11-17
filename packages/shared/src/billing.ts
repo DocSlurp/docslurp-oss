@@ -406,6 +406,12 @@ export type BillingForecast = {
   searchCreditsPer30d: number;
   chatAnswersLast30d: number;
   chatCreditsPer30d: number;
+  /**
+   * Pages charged in the last 30 days by final class (Text, Scan, Vision): each page counts once per run, in the class
+   * it finally paid, so a Scan page later read by a vision model counts only under Vision. Counts are pages, not billed
+   * units (a long Vision page may bill several units), and a page charged by two runs counts in each.
+   * `ingestCreditsLast30d` is the exact sum of the ingest charges.
+   */
   fastPagesLast30d: number;
   ocrPagesLast30d: number;
   richPagesLast30d: number;

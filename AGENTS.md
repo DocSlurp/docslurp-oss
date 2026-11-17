@@ -52,7 +52,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 **Boundaries in scope:**
 
 - **Untrusted file processing:** anything that reads customer bytes. This covers parsers, converters, OCR, media tools, archive and Office handling, rasterizers, native PDF engine bindings, and the code that stages inputs and outputs for them.
-- **Tenant data boundaries:** organization, project, user and API-key scoping in queries, search and vector indexes, storage prefixes, caches, exports, webhooks, MCP tools and chat retrieval.
+- **Tenant data boundaries:** organization scoping of queries, search and vector indexes, storage prefixes, exports, webhooks, MCP tools and chat retrieval (data only, not compute).
 - **Identity and access:** sessions, API keys and their scopes, OAuth and MCP consent, SSO, CSRF and origin checks.
 - **Secrets and egress:** credential storage and distribution, user-supplied URLs, connectors and any outbound fetch driven by user input.
 - **Billing and credits:** anything that can let one tenant spend, see or reset another tenant's balance.
@@ -60,34 +60,28 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 **Be extremely careful:**
 
 - Assume every input file and every request field is hostile.
-- Fail closed. Never fall back silently to weaker isolation, a broader scope or an unauthenticated path. A missing sandbox, engine or policy is a startup failure or a loud, logged refusal.
+- Fail closed. Never fall back silently to running customer bytes next to secrets, a broader scope or an unauthenticated path. A missing sandbox, engine or policy is a startup failure or a loud, logged refusal.
 - Never widen a default scope. A query, cache key or storage key without an explicit tenant scope is a bug.
-- Every boundary change ships with negative tests: cross-tenant access, a revoked or wrong-scope key, and a malicious or oversized file.
+- Boundary changes ship with negative tests where they apply: cross-organization data access, a revoked or wrong-scope key, a malicious or oversized file.
 
-**Organization isolation (mandatory):** the organization is the only tenant scope. Nothing computed from or for one organization may be served to or reused by another.
+**Organization data scoping:** the organization is the only tenant scope.
 
-- Every cache, memo, dedup or reuse key and every storage key includes the organization id, or an id (project, run, document, API key, or user, since a user belongs to one organization) that belongs to exactly one organization and is used only after its access was checked. Build new cache and reuse keys with `orgScopedCacheKey` from `@docslurp/shared`, which throws without an organization; never fall back to a shared or null scope.
-- No cross-organization dedup or reuse of any customer-derived value: uploaded bytes, renders, page images, OCR or vision output, embeddings, model outputs, figures, exports. Identical bytes from two organizations are stored and processed twice.
-- Reuse lookups by content hash (embeddings, renders, extraction checkpoints) filter by organization in the query itself; a hash match is never proof of ownership.
-- Isolation measures must not cost user-visible latency or throughput; performance is a priority. Put the organization in the key or in the same query's predicate; do not add round trips, locks or lookups per request for isolation alone.
-- Accepted, by owner decision (2026-11-16): provider prompt prefix caches shared across organizations (no per-organization prompt salt or `cache_salt`), one shared bounded in-memory LRU per cache with the organization in the key (cross-organization eviction allowed, no per-organization partitions or caps), and timing or volume side channels. Do not reintroduce them without the owner.
-- Cache statistics shown to a caller (hits, sizes, timings) are that organization's own, never process-wide.
-- A new module-level cache map must be classified in `server/src/__tests__/org-isolation-caches.test.ts`; caches the test cannot see (class fields on long-lived instances, Sets, database tables and storage keyed by content) get the same review in the pull request. Any new cache or reuse path ships with a negative test: organization B never gets organization A's entry with identical inputs, and an unscoped key is refused.
-- Reviewers check this rule on every change that adds or changes a cache, a reuse or dedup path, a storage key or a tenant query.
+- One organization never receives another organization's data: documents, results, search hits, chat, cached responses or URLs. Queries filter by organization, and storage and cache keys carry the organization (or a project, run or document id that belongs to one). `orgScopedCacheKey` from `@docslurp/shared` builds such a key; a hash match on content is never proof of ownership, so content-hash lookups filter by organization in the same query.
+- That is the whole rule. Use the cheapest form and never add round trips, locks, partitions, salts or lookups for isolation. Cache statistics shown to a caller are that organization's own.
 
-**Isolation for untrusted files:**
+**No per-organization, per-run or per-job compute isolation (owner, 2026-11-17).** It is an enterprise feature for later and costs latency now. Compute that touches customer bytes (VMs, sandboxes, warm pools, GPU readers, OCR and text hosts, parser lanes) is shared and reused across jobs, runs and organizations, warm by default. Do not add, require or review for: dedicated or fresh VMs per job, run or organization; unit-to-organization or unit-to-run bindings; per-job workspace wipes or attestation that add latency; per-organization cache partitions, prompt salts or `cache_salt`. Residue or timing side channels on shared compute are accepted, not findings. Results still go back only to the job that asked (normal correctness). Fairness comes from fleet-wide caps and fair queueing.
 
-- Untrusted files must be processed behind a VM or microVM boundary, or something stronger. Firecracker, Cloud Hypervisor and a dedicated VM per job qualify.
-- Containers, namespaces, bubblewrap, landlock and seccomp are defense in depth inside that boundary. They are never the boundary on their own.
-- In-process parsing of customer bytes inside a process that holds secrets does not qualify, including native bindings loaded into the worker.
-- Compute units that touch customer bytes (VMs, microVMs, sandboxes, containers, warm or standby pools, GPU readers, OCR hosts, parser VM lanes) may be shared and reused across jobs, runs and organizations (owner, 2026-11-16): performance is a priority, and warm reuse is the default. Minimal safeguards, none of which may add a cold start: each job's inputs and outputs live in a per-job workspace that is wiped (or the job process restarted) before the next job uses the unit; results go back only to the job that asked, and a stale job can never read another job's output (a per-job token or the job's own connection); the VM boundary from the worker's secrets above is unchanged; and fairness comes from a fleet-wide cap and fair queueing, with per-organization caps only where they cost no cold start. A unit that fails its reset or verification is destroyed. Residue a hostile file leaves on a shared unit (memory, caches, a subverted guest) for a later job, including another organization's, is an accepted risk; a source quarantine refuses the flagged source for the organization that hit it (per-organization quarantine), so another organization's identical upload may still run on a shared unit.
-- The sandbox host holds the minimum keys it needs, ideally none. It gets no database credentials, no model-provider keys, no auth or encryption secrets and no bucket-wide storage keys. Give it short-lived access scoped to its own input and output objects, no network beyond what the job requires, and no cloud metadata endpoint.
+**Isolation for untrusted files:** this protects the worker's secrets, not one tenant from another.
+
+- Untrusted files are processed outside any process that holds secrets, behind a VM or microVM boundary (Firecracker, Cloud Hypervisor, a cloud VM). One shared, warm VM serving many jobs qualifies.
+- Containers, namespaces, bubblewrap, landlock and seccomp are defense in depth inside that boundary, never the boundary on their own. In-process parsing of customer bytes in the worker, including native bindings, does not qualify.
+- The sandbox host holds the minimum keys it needs, ideally none: no database credentials, model-provider keys, auth or encryption secrets, or bucket-wide storage keys; short-lived access scoped to its own input and output objects; no network beyond what the job requires; no cloud metadata endpoint.
 
 **Council review before merge:**
 
-- Any change touching a boundary above needs a council review before it merges.
-- A council is at least two independent reviewers, run as separate agents or models. Give each one the diff, the threat model and the boundary rules, but not the author's conclusion.
-- At least one reviewer is adversarial and tries to break the change: escape the sandbox, read another tenant's data, reuse a credential.
+- Changes to identity and access, secrets and egress, billing, organization data scoping, or the VM boundary between customer bytes and secrets need a council review before they merge. Sharing, reusing or warming compute does not.
+- A council is at least two independent reviewers, run as separate agents or models. Give each one the diff, the threat model and the boundary rules, but not the author's conclusion. At least one is adversarial: read another organization's data, reuse a credential, escape to the secrets.
+- Cross-job or cross-organization residue on shared compute is out of scope for reviewers (see above); do not raise it or block on it.
 - Record each reviewer, their findings and how each was resolved in the pull request. An unresolved high-severity finding blocks the merge.
 - Use a draft pull request, never a direct push to `main`. A human owner approves the merge, and deploying the change remains a separate manual decision.
 

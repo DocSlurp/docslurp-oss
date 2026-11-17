@@ -1,3 +1,4 @@
+import { poolHostRegion } from "@docslurp/shared";
 import { verifyDeepInfraRate } from "./rates.js";
 import { tokenCost, disputed, MEDIA_RATE_VERSION, nonnegative, recordedMediaCost, type MediaAccounting } from "./accounting.js";
 import { jsonResponse } from "./providers.js";
@@ -46,7 +47,12 @@ export class DeepInfraVisionProvider implements MediaVisionProvider {
 /** Register a capability independently of host provisioning and audio transport. */
 export class MediaVisionRegistry {
   private readonly providers = new Map<string, MediaVisionProvider>();
-  register(provider: MediaVisionProvider): this { if (this.providers.has(provider.id)) throw new Error("Duplicate media vision provider"); this.providers.set(provider.id, provider); return this; }
+  register(provider: MediaVisionProvider): this {
+    if (this.providers.has(provider.id)) throw new Error("Duplicate media vision provider");
+    // Video frames are customer content: only a provider with a stated US or EU hosting region (capability-pools.ts).
+    if (!poolHostRegion(provider.id)) throw new Error(`Media vision provider ${provider.id} states no US or EU hosting region`);
+    this.providers.set(provider.id, provider); return this;
+  }
   resolve(id: string): MediaVisionProvider { const provider = this.providers.get(id); if (!provider) throw new Error("Media vision provider is not configured"); return provider; }
 }
 export async function configuredVisionProvider(env: NodeJS.ProcessEnv = process.env): Promise<MediaVisionProvider> {

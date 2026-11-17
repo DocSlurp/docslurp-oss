@@ -9,6 +9,7 @@ import { Store } from "../db/store.js";
 import { completeDocumentPages, emitDocumentPageProgress, runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { createStageExecution } from "../pipeline/stage-execution.js";
+import { recordPageExtracts, tagPageExtracts } from "../pipeline/page-extracts.js";
 import { withWorkerSlot } from "../temporal/activities.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -103,8 +104,20 @@ function documentStage(name: string, body?: Parameters<typeof runDocumentStage>[
 }
 
 const stages: Stage[] = [
-  ...["quarantine", "format-detect", "to-canonical", "format-tooling", "normalize", "pdf-tooling", "classify-route"]
+  ...["quarantine", "format-detect", "to-canonical", "format-tooling", "normalize", "pdf-tooling"]
     .map((name) => documentStage(name)),
+  // Routing tags merge into the page extract records with the stage's checkpoint (one statement).
+  {
+    name: "classify-route",
+    async run(state, signal) {
+      for (const document of state.documents) {
+        await runDocumentStage(state, document, "classify-route", `${document.id}:classify-route`, "ready", async () => {
+          tagPageExtracts(state, document, new Map([[1, ["table" as const]], [2, ["scanned" as const]]]));
+          return { artifactUri: `s3://b/${document.id}/classify-route` };
+        }, signal);
+      }
+    },
+  },
   ...["split-pages", "render-images"].map((name): Stage => ({
     name,
     async run(state, signal) {
@@ -124,6 +137,10 @@ const stages: Stage[] = [
         await runDocumentStage(state, document, "extract-markdown", `${document.id}:extract-markdown`, "ready", async () => {
           await emitDocumentPageProgress(state, document, "extract-markdown", 1, PAGES, "processing");
           await state.store!.getCompletedPages(state.run.id, document.id, "extract-markdown");
+          // Page extract records ride the stage's checkpoint: one multi-row upsert, pipelined (no extra round trip).
+          recordPageExtracts(state, document, Array.from({ length: PAGES }, (_, i) => ({
+            pageNumber: i + 1, pass: "extract" as const, method: "text-layer" as const, engine: "vm-pdf", billedClass: "fast" as const, textBytes: 1_000,
+          })));
           await completeDocumentPages(state, document, "extract-markdown", Array.from({ length: PAGES }, (_, i) => i + 1), PAGES);
           return { artifactUri: `s3://b/${document.id}/md` };
         }, signal);
@@ -222,8 +239,14 @@ const STATEMENTS_PER_PAGE_BUDGET = 24;
 // page count. Measured: 210 flights, 245 statements for this 10-page run. The per-page slope is unchanged.
 // 2026-11-16: the run's page-class pin (pipeline/ocr-page-class.ts) asks once per run whether every live worker
 // advertises the OCR page class: +1 flight, +1 statement whatever the page count. Measured: 211 flights, 246 statements.
-const TERMINAL_ROUND_TRIP_ALLOWANCE = 11;
-const TERMINAL_STATEMENT_ALLOWANCE = 6;
+// 2026-11-16: page extract records (pipeline/page-extracts.ts): one pipelined multi-row upsert per 2,000 records in the
+// extraction checkpoint, one tag merge per 2,000 merges in the routing checkpoint, and two finalization statements
+// (demote, then promote, for the one-final-per-page unique index) in each of the document's index completion and the run
+// completion, all pipelined beside statements that already run: +6 statements for this 10-page document whatever its
+// page count. The run completion's finalization measures +1 flight (fixed per run, not per page). Measured: 212 flights,
+// 252 statements.
+const TERMINAL_ROUND_TRIP_ALLOWANCE = 12;
+const TERMINAL_STATEMENT_ALLOWANCE = 12;
 const TERMINAL_NOTIFY_STATEMENT_ALLOWANCE = 3;
 // The same stages as one stage group: 14.9 after.
 const GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET = 16.5;
@@ -271,6 +294,11 @@ describe("database statement budget per page", () => {
       const stamped = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
       const [run] = await stamped<{ ingest_version: number }[]>`select ingest_version from project_runs where id = 'run-1'`;
       expect(run!.ingest_version).toBe(CURRENT_INGEST_VERSION);
+      // The page extract records landed with the checkpoints and were finalized at completion: one final row per page.
+      const extracts = await stamped<{ n: number; tagged: number }[]>`
+        select count(*)::int as n, count(*) filter (where cardinality(tags) > 0)::int as tagged
+        from document_page_extracts where run_id = 'run-1' and is_final`;
+      expect(extracts[0]).toEqual({ n: PAGES, tagged: 2 });
       const docs = await stamped<{ ingest_version: number }[]>`select ingest_version from documents where run_id = 'run-1'`;
       expect(docs.length).toBeGreaterThan(0);
       for (const doc of docs) expect(doc.ingest_version).toBe(CURRENT_INGEST_VERSION);

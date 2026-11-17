@@ -16,7 +16,7 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { priceAiUsageEvent } from "@docslurp/shared";
+import { poolMemberForBackend, priceAiUsageEvent } from "@docslurp/shared";
 
 import {
   PAGE_IMAGE_READ_FAILURES,
@@ -42,6 +42,8 @@ export interface PageReaderSummary {
   /** The reader's mode for this route (`escalation` / `all` for OCR, `all` for vision transcription). */
   mode: string;
   provider: string;
+  /** The ocr capability pool member of `provider` (capability-pools.ts poolMemberId), when registered. */
+  poolMemberId?: string;
   /** Pages sent to the provider. */
   attempted: number;
   /** Pages whose text the reader replaced. */
@@ -196,6 +198,8 @@ function recordProviderUsage(
         documentId: ctx.documentId,
         purpose: metric,
         reader: provider.id,
+        // The ocr capability pool member this reader serves (capability-pools.ts poolMemberId), for per-page records.
+        ...(poolMemberForBackend("ocr", provider.id) ? { poolMemberId: poolMemberForBackend("ocr", provider.id)!.id } : {}),
         pages: details.pages,
         outcome: details.outcome,
         costSource: "provider",
@@ -261,7 +265,7 @@ export async function readPageImagesWithProvider(
   use: PageImageReadUse,
 ): Promise<PageReaderSummary> {
   const summary: PageReaderSummary = {
-    mode: ctx.mode, provider: provider.id, attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0,
+    mode: ctx.mode, provider: provider.id, ...(poolMemberForBackend("ocr", provider.id) ? { poolMemberId: poolMemberForBackend("ocr", provider.id)!.id } : {}), attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0,
   };
   if (!pages.length) return summary;
   const run = ctx.state.run;
@@ -537,7 +541,7 @@ export async function readOcrPagesWithConfiguredReader(
 async function readOcrPagesWarm(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext, minPages: number): Promise<PageReaderSummary> {
   const candidates = outcome.pages.filter((page) => page.image).length;
   const run = ctx.state.run;
-  const summary: PageReaderSummary = { mode: ctx.mode, provider: provider.id, attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0 };
+  const summary: PageReaderSummary = { mode: ctx.mode, provider: provider.id, ...(poolMemberForBackend("ocr", provider.id) ? { poolMemberId: poolMemberForBackend("ocr", provider.id)!.id } : {}), attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0 };
   if (!candidates || !run?.id || typeof run.orgId !== "string" || !run.orgId) return await readPagesWithProvider(outcome, provider, ctx, { requireReady: true });
   const scope = { orgId: run.orgId, runId: run.id };
   const gate = await pageReaderWarmGate(provider, {

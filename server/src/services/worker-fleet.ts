@@ -13,6 +13,7 @@ import {
   type GatedFeatureState,
   type WorkerCapability,
   type WorkerCapabilityRecord,
+  type AdvertisedCapabilityPools,
 } from "@docslurp/shared";
 
 import { assessOperatorConfigSkew, currentOperatorConfigDigest, type OperatorConfigSkew } from "@docslurp/shared/operator-config";
@@ -366,7 +367,32 @@ export interface WorkerFleetReport {
    * reports none; `unknown` without live pollers). The deploy's skew check fails on anything but `ok`.
    */
   operatorConfig: OperatorConfigSkew;
+  /**
+   * The capability pools the fleet's workers resolved at startup (text, ocr, vision: member ids in order, with stage,
+   * region and failover), one entry per distinct set with the workers that run it. Workers that do not report pools
+   * are left out.
+   */
+  capabilityPools: CapabilityPoolsFleetView[];
   checkedAt: string;
+}
+
+export interface CapabilityPoolsFleetView {
+  pools: AdvertisedCapabilityPools;
+  workers: string[];
+}
+
+/** Pure: the distinct capability pool sets the workers advertise, each with its workers. */
+export function capabilityPoolsFleetView(workers: FleetCapabilitySnapshot["workers"]): CapabilityPoolsFleetView[] {
+  const byKey = new Map<string, CapabilityPoolsFleetView>();
+  for (const worker of workers) {
+    const pools = worker.config?.capabilityPools;
+    if (!pools) continue;
+    const key = JSON.stringify(pools);
+    const entry = byKey.get(key) ?? { pools, workers: [] };
+    entry.workers.push(worker.identity);
+    byKey.set(key, entry);
+  }
+  return [...byKey.values()].map((entry) => ({ ...entry, workers: entry.workers.sort() }));
 }
 
 export interface ExtractionConfigFleetView {
@@ -437,6 +463,7 @@ export async function workerFleetReport(taskQueue?: string, env: Env = process.e
     extractionConfig: extractionConfigFleetView(snapshot, env),
     // Skew is checked whether or not the capability gate is on.
     operatorConfig: operatorConfigSkewOf(gate ? snapshot : await workerFleet().resolve(queue), currentOperatorConfigDigest()),
+    capabilityPools: capabilityPoolsFleetView(snapshot.workers),
     checkedAt: new Date().toISOString(),
   };
 }

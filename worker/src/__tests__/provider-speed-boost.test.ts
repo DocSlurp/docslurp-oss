@@ -11,8 +11,10 @@ it("keeps concurrent org scopes and nested opt-ins independent", async () => {
   })));
   expect(currentProviderPolicy().speedBoost).toBe(false);
 });
-it("preserves vision reasoning and output limits without baseline provider ordering", () => {
+it("preserves vision reasoning and output limits, and keeps speed boost inside the evidenced host allowlist", () => {
   expect(visionModelProfile("z-ai/glm-5.3-flash:nitro")).toBe(visionModelProfile("z-ai/glm-5.3-flash"));
-  expect(openRouterProviderParams("z-ai/glm-5.3-flash:nitro")).toEqual({});
+  // Nitro ranks by throughput but only among the profile's stated US/EU hosts.
+  expect(openRouterProviderParams("z-ai/glm-5.3-flash:nitro")).toEqual({ provider: { only: ["wafer/us", "friendli", "inference-net/us"], allow_fallbacks: true } });
+  expect(openRouterProviderParams("openai/gpt-6-luna:nitro")).toEqual({ provider: { only: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: true } });
   expect(openRouterProviderParams("z-ai/glm-5.3-flash").provider).toBeDefined();
 });

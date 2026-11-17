@@ -105,6 +105,14 @@ export interface VisionModelProfile {
 
 /** Add a model with one entry; add a template to `visionPromptTemplates` only if it needs a new prompt. */
 export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>> = {
+  // Routing-only profiles (2026-11-17): models a project may choose for page reads, kept to hosts with a stated US or EU
+  // region (capability-pools.ts poolHostRegion; docs/evals/vision-route-prices-2026-11-17.json); requests otherwise generic.
+  // Haiku: untagged and global endpoints may process anywhere. Composite 0.936 (Bedrock us-east-1) and 0.933 (Vertex us)
+  // on the page-OCR development split (dev-page-ocr-20261117-pool-candidates, transcription prompt).
+  "anthropic/claude-haiku-5.5": { openRouterProvider: { only: ["amazon-bedrock/us-east-1", "google-vertex/us"], sort: "price", allow_fallbacks: true } },
+  // Gemini 3.1 Flash Lite: AI Studio and Vertex global may process anywhere; Vertex us and eu state their region (not
+  // re-measured on these hosts).
+  "google/gemini-3.1-flash-lite": { openRouterProvider: { only: ["google-vertex/us", "google-vertex/eu"], sort: "price", allow_fallbacks: true } },
   // 2026-10-21 tune split (68 pages): with `<OCR>` this snapshot writes plain-text math
   // (`softmax(QK^T / √d_k) V`); the Markdown/LaTeX prompt lifts math partial 0.44 -> 0.86.
   // BaseTen served runaway repetition loops ("| | | …" to the cap) and word substitutions;
@@ -119,23 +127,26 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    // Keep requests and fallback inside the approved transcription endpoints.
-    openRouterProvider: { only: ["fireworks", "parasail"], sort: "latency", allow_fallbacks: true },
+    // Keep requests and fallback inside the approved transcription endpoints with a stated US or EU region (2026-11-17):
+    // Fireworks states US servers; Parasail's policy allows "any other country", so it is no longer on the list.
+    openRouterProvider: { only: ["fireworks"], sort: "latency", allow_fallbacks: true },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.
   // Output: the longest complete page in 2,490 calls was 2,509 tokens; a repetition loop on a low-resource
   // script ran to the 16k cap (48 s), so 8k keeps 3x headroom and can only lower a smaller shared cap.
-  // Routing: Relace (mxfp4) was fastest and cheapest at fp8 quality; DeepInfra had the next-best tail.
-  // Unpinned routing spread calls onto Makora/Venice/Xiaomi (11-34 tok/s), which made the p95 tail.
-  // Fallbacks stay on so an outage never fails a page.
+  // Routing (2026-11-17): only hosts with a stated US or EU hosting region (capability-pools.ts). Relace, the earlier
+  // first host, states none and no longer serves the model; the old `order` with fallbacks could reach any host,
+  // Xiaomi's own (China) included. GMICloud bf16 (US, OpenRouter datacenters metadata) measured composite 0.936 on the
+  // page-OCR development split (dev-page-ocr-20261117-pool-candidates, with the catalog refusal lifted in a scratch
+  // harness only: the model stays refused until its image-token bound is proven at the serving level).
   "xiaomi/mimo-v2.6-flash": {
     defaultPrompt: "markdown-transcription",
     maxOutputTokens: 8_192,
     maxOutputTokensMode: "ceiling",
     // Reasons by default; `{ effort: "none" }` and `{ enabled: false }` both return 0 reasoning tokens.
     reasoning: { effort: "none" },
-    openRouterProvider: { order: ["relace", "deepinfra"], allow_fallbacks: true },
+    openRouterProvider: { only: ["gmicloud/bf16"], sort: "price", allow_fallbacks: true },
     postProcess: normalizeMarkdownMathDelimiters,
   },
   // 2026-10-21 tuning (tune split, 68 pages x 2): the LaTeX/table template lifts math and content F1;
@@ -152,22 +163,23 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     reasoning: { effort: "none" },
     // Rare: some models wrap the whole page in a ```markdown fence.
     postProcess: unwrapWholeMarkdownFence,
-    // OpenAI's output filter deterministically stops some ordinary published pages (corporate filings,
-    // government guidance) mid-page; Bedrock and Azure US transcribed them. Both list $0.11/$0.55 per M, so the catalog
-    // prices Luna as this pinned route at that price: the request's max_price must admit the retry hosts (at $0.10/$0.50
-    // they answered 404, live 2026-11-13).
-    contentFilterRetryProvider: { order: ["amazon-bedrock/us-east-1", "azure/us"], allow_fallbacks: false },
-    // OpenAI first (cheapest allowed), the retry hosts as fallbacks. OpenAI's Flex tier is cheaper but queues requests
-    // (Flex latency); page reads must not land there.
-    openRouterProvider: { only: ["openai", "amazon-bedrock/us-east-1", "azure/us"], ignore: ["openai/flex"], sort: "price", allow_fallbacks: true },
+    // No content-filter retry route: OpenAI's own output filter stopped some ordinary pages, and Bedrock and Azure US, the
+    // retry hosts that transcribed them, are now the route itself (2026-11-17).
+    // US hosts only (capability-pools.ts VISION_LUNA_HOSTS, 2026-11-17): OpenAI's own endpoint states no region (its
+    // documentation processes a project without a selected region globally), so it is not on the list. Measured on the
+    // page-OCR development split (dev-page-ocr-20261117-pool-candidates): Bedrock us-east-1 composite 0.931 with this
+    // prompt; Azure us 0.935 and OpenAI 0.934 with the transcription prompt.
+    openRouterProvider: { only: ["amazon-bedrock/us-east-1", "azure/us"], sort: "price", allow_fallbacks: true },
   },
   // 2026-10-21 tune split (68 pages): with `<OCR>` GLM writes math as Unicode prose and matrices as
   // box-drawing art, and describes figures ("[Figure: plot of …]"); the template lifts content F1 0.922 -> 0.963,
   // reading order 0.781 -> 0.838 and math 0.837 -> 0.988 at the same token cost.
   // Routing: quality was flat across 15 endpoints (fp4 matched fp8), except OpenInference, which drops the
-  // image (~590 input tokens a page) and invents the page. Wafer was fastest and about half Friendli's
-  // reported cost; Friendli and InferenceNet back it up. The explicit allowlist confines failover
-  // to these measured endpoints, excluding hosts that ignore the image.
+  // image (~590 input tokens a page) and invents the page. The explicit allowlist confines failover to measured
+  // endpoints with a stated US hosting region (capability-pools.ts VISION_GLM_HOSTS, 2026-11-17): Wafer's and
+  // InferenceNet's US endpoints (their region is the endpoint tag; neither provider states a location for its other
+  // endpoints) and Friendli (its privacy policy keeps data in the U.S.). Composite 0.932 / 0.927 / 0.932 on the page-OCR
+  // development split (dev-page-ocr-20261116-glm-wafer, dev-page-ocr-20261117-pool-candidates).
   // Output: the longest complete page was ~2.4k tokens; rare separator loops (`- - -`, `_ _ _`) ran to the
   // 16k cap, so 8k bounds their cost and latency and can only lower a smaller shared cap.
   "z-ai/glm-5.3-flash": {
@@ -177,7 +189,7 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     // Same as the shared chat floor, pinned here so chat changes never move vision. Its endpoints reject
     // `none` and `{ enabled: false }` ("Reasoning is mandatory"); minimal spends ~1 reasoning token a page.
     reasoning: { effort: "minimal" },
-    openRouterProvider: { only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true },
+    openRouterProvider: { only: ["wafer/us", "friendli", "inference-net/us"], sort: "price", allow_fallbacks: true },
     // ~3% of its pipe tables (course lists, price lists) arrive without the `| --- |` row and would render
     // as literal text; the repair restored them (tables tolerant +0.32 and +0.51 on the affected pages).
     postProcess: insertMissingTableDelimiters,
@@ -197,10 +209,14 @@ export function visionPromptKeyForModel(prompt: string | undefined, model: strin
 
 /** Request-body fragment with the profile's OpenRouter routing, or nothing. */
 export function openRouterProviderParams(model: string | undefined): { provider?: OpenRouterRoute } {
-  // Nitro chooses throughput-ranked providers, not the baseline profile order.
-  if (model && nitroBaseModel(model)) return {};
   const provider = visionModelProfile(model)?.openRouterProvider;
   if (!provider) return {};
+  // Speed boost (`:nitro`) ranks hosts by throughput, never beyond the profile's evidenced allowlist: it keeps `only` and
+  // lets the speed-boost preferences set the sort (openrouter-routing.ts withOpenRouterProviderPreferences).
+  if (model && nitroBaseModel(model)) {
+    const hosts = "only" in provider ? provider.only : provider.allow_fallbacks ? null : provider.order;
+    return hosts ? { provider: { only: [...hosts], allow_fallbacks: true } as OpenRouterRoute } : {};
+  }
   return "only" in provider
     ? { provider: { only: [...provider.only], sort: provider.sort, allow_fallbacks: provider.allow_fallbacks, ...(provider.ignore ? { ignore: [...provider.ignore] } : {}) } }
     : { provider: { order: [...provider.order], allow_fallbacks: provider.allow_fallbacks } };

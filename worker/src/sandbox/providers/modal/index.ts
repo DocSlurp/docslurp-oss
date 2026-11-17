@@ -904,8 +904,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     async openSession(config, context) {
       const scanner = context.scanner;
       if (scanner) {
-        if (!scanner.tenantKey || !/^[0-9a-f]{64}$/.test(scanner.signatureSetHash) || !Number.isSafeInteger(scanner.expectedVersion) || scanner.expectedVersion <= 0) {
-          throw new SandboxPolicyError("invalid scanner session: an organization, a signature set hash and its version are required");
+        if (!/^[0-9a-f]{64}$/.test(scanner.signatureSetHash) || !Number.isSafeInteger(scanner.expectedVersion) || scanner.expectedVersion <= 0) {
+          throw new SandboxPolicyError("invalid scanner session: a signature set hash and its version are required");
         }
       }
       const { sdk, client } = await loadClient(config);
@@ -915,8 +915,6 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       const vmBudget = (budget ??= new VmBudget(Math.max(1, Math.floor(config.vmsPerWorker ?? Number.MAX_SAFE_INTEGER))));
       let closed = false;
       let clientClosed = false;
-      /** The one document a scanner session serves (bound by its first command). */
-      let scannerDocument: string | undefined;
       /** Whether the worker's parked pool holds a VM this session may adopt (never for scanner or unmetered sessions). */
       const shape = parkedShape(config);
       const hasParked = () => !scanner && !context.unmetered &&
@@ -1769,18 +1767,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           // A closed session is the sandbox's failure, never the document's (recheck R #2).
           if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
-          // A scanner VM serves one organization: a command of any other, or one without an organization, is refused
-          // before it can reach a VM. A command that needs the scanner daemon never runs on a plain parser VM.
-          if (scanner && command.tenantKey !== scanner.tenantKey) {
-            throw new SandboxPolicyError("scanner session refuses a command of another organization (or of none)");
-          }
-          // A scanner session serves one document (council M1): its first command binds it, and a command of any other
-          // document, or of none, is refused before it can reach a VM that document's bytes may have touched.
-          if (scanner) {
-            if (!command.affinityKey) throw new SandboxPolicyError("scanner session refuses a command without a document");
-            scannerDocument ??= command.affinityKey;
-            if (command.affinityKey !== scannerDocument) throw new SandboxPolicyError("scanner session serves one document; refusing another document's command");
-          }
+          // A command that needs the scanner daemon never runs on a plain parser VM. A scanner session itself may scan
+          // documents of any run or organization (AGENTS.md: no per-organization or per-job compute isolation).
           if (!scanner && command.requiresScanner) throw new SandboxPolicyError("this command needs a malware scanner session");
           let lane = await acquireLane(command.affinityKey, signal);
           if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;

@@ -48,6 +48,7 @@ import { pageTextYield } from "../lib/page-yield-evidence.js";
 import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from "../lib/vision-routing-v2.js";
 import { scanDocumentTables } from "../pipeline/table-routing-vm.js";
 import type { CommandRunner } from "../tools/runner.js";
+import { routingPageTags, tagPageExtracts } from "../pipeline/page-extracts.js";
 
 /**
  * The parser VM's reading of each page text's HTML tables (scanDocumentTables), by page text; null for a page it did not
@@ -153,6 +154,8 @@ export class ClassifyRouteStage implements Stage {
             measuredPages: imageEvidence?.pages.size ?? 0,
             imageEvidence: imageEvidence?.pages,
           });
+          // Page extract records: what routing learned about each page (tables, math, garbled layer, drawn, scanned).
+          tagPageExtracts(state, document, routingPageTags(surface.pages, pageReadReason, BLANK_PAGE_SIGNAL));
           for (const [reason, count] of Object.entries(decisions.pagesReadByReason)) recordPagesRouted("read", reason, count);
           recordPagesRouted("blank", "blank", decisions.blankPages);
           recordPagesRouted("text", "text", Math.max(0, surface.pages.length - decisions.pagesRead - decisions.blankPages));

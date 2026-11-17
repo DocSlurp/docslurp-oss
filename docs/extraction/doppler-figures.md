@@ -544,7 +544,7 @@ shard that is not complete. The last kind runs as that shard's resume narrowed t
 the claimed unit:
 
 1. Pending uploads are adopted, and slots a crash left out are re-added.
-2. Only the unit's stored manifest is downloaded (none for a gap), and the provider runs it in a fresh VM on the
+2. Only the unit's stored manifest is downloaded (none for a gap), and the provider runs it in a VM on the
    document's **parse source**: quarantine's decision, resolved by the loader's rule (`lib/parse-source.ts`). For an
    encrypted PDF that is its scanned copy; otherwise the upload exactly as the scan read it. It is staged with hash
    verification, and its hash must be the level's source digest (the bytes the figures were made from). The upload's

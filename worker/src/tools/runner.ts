@@ -2,7 +2,7 @@ import { authorizeComputeCohort } from "../extractors/plugins.js";
 import { firstPassResultGlyphs, serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
-  acceptSandboxedPdfResult, noteSalvagedFigures, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
+  acceptSandboxedPdfResult, noteSalvagedFigures, noteSandboxedPdfPoolMember, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
 import { dopplerConverterPath } from "./doppler.js";
@@ -19,7 +19,8 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
-import { isDevelopmentEnvironment, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
+import { recordPoolServed } from "../lib/capability-pools.js";
+import { isDevelopmentEnvironment, poolMemberForBackend, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -1212,7 +1213,7 @@ export class CommandRunner {
   }
 
   /**
-   * OCR in a fresh VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
+   * OCR in a VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
    * to the worker host or to another reader.
    */
   async sandboxedOcrRead(job: SandboxedOcrJob): Promise<CommandPlan> {
@@ -1420,20 +1421,18 @@ export class CommandRunner {
   }
 
   /**
-   * Run `fn` (one document's quarantine: never more than one document per session, council M1) in a malware scanner session when
-   * DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its VMs are restored from a clean snapshot in which clamd already holds the
-   * staged signatures (providers/modal/scanner.ts), and serve only `tenantKey`'s commands. Signature freshness is read on
-   * this host from the staged daily header, so no VM runs `clamscan --version`. Off, or without VM-only parsing, `fn`
-   * runs unchanged. A provider without scanner sessions keeps the per-command path (same VM isolation), loudly logged.
+   * Run `fn` (one document's quarantine) in a malware scanner session when DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its
+   * VMs are restored from a clean snapshot in which clamd already holds the staged signatures (providers/modal/scanner.ts).
+   * Signature freshness is read on this host from the staged daily header, so no VM runs `clamscan --version`. Off, or
+   * without VM-only parsing, `fn` runs unchanged. A provider without scanner sessions keeps the per-command path (same VM isolation), loudly logged.
    */
-  async withMalwareScanner<T>(tenantKey: string | null | undefined, fn: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+  async withMalwareScanner<T>(fn: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
     if (!quarantineScanSnapshotEnabled(env) || !vmOnlyParsing(env)) return fn();
     const sandbox = registeredParserSandbox();
     if (!sandbox || sandbox.provider.id !== "modal") {
       console.error(`[quarantine] status=scanner-snapshot-unsupported provider=${sandbox?.provider.id ?? "none"}: DOCSLURP_QUARANTINE_SCAN_SNAPSHOT needs the modal parser sandbox; scanning per command`);
       return fn();
     }
-    if (!tenantKey) throw new SandboxPolicyError("a malware scanner session needs the run's organization");
     const policy = resolveMalwareScanPolicy(env);
     const staged = await stageClamDefinitions(policy.databaseDirectory);
     try {
@@ -1443,7 +1442,7 @@ export class CommandRunner {
       const documentId = currentPerfContext()?.documentId ?? "none";
       const scope = new SandboxSessionScope(() => sandbox.provider.openSession(sandbox.config, {
         activityId: `scanner:${runId}:${documentId}`,
-        scanner: { tenantKey, definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
+        scanner: { definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
       }));
       try {
         return await runWithSandboxScope(scope, () => scannerDefinitionsStorage.run(header, fn));
@@ -1894,7 +1893,15 @@ export class CommandRunner {
       // The provider shards long documents itself and notes progress as shards finish.
       return {
         remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)
-          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages), (error: unknown) => {
+          .then((result) => {
+            const accepted = acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages);
+            // The text pool member that served it (the pool stamps failovers; a single provider is its own member).
+            const poolMemberId = result.poolMemberId ?? poolMemberForBackend("text", provider.id)?.id;
+            noteSandboxedPdfPoolMember(plan.sandboxedPdf!, poolMemberId);
+            // A failover pool records its own serves; a single provider's is recorded here.
+            if (!result.poolMemberId) recordPoolServed("text", poolMemberId ?? null, Math.max(1, pages));
+            return poolMemberId ? { ...accepted, poolMemberId } : accepted;
+          }, (error: unknown) => {
             // A failed job may still hand back the shards that finished (`error.figures`): kept for the stage to store.
             noteSalvagedFigures(plan.sandboxedPdf!, error, pages);
             throw error;

@@ -2181,8 +2181,8 @@ describe("modal scanner sessions (quarantine Q1)", () => {
   function open(opts: Parameters<typeof fakeSdk>[0] = {}) {
     const { sdk, state } = fakeSdk({ exec: async () => finished(""), ...opts });
     const provider = createModalProvider(async () => sdk);
-    const spec = (tenantKey = "org-a", signatureSetHash = hash) => ({ tenantKey, definitionsDir: sigDir, signatureSetHash, expectedVersion: 28180 });
-    return { state, provider, scanner: (tenantKey?: string, signatureSetHash?: string) => provider.openSession(lifecycleConfig, { activityId: "q", scanner: spec(tenantKey, signatureSetHash) }) };
+    const spec = (signatureSetHash = hash) => ({ definitionsDir: sigDir, signatureSetHash, expectedVersion: 28180 });
+    return { state, provider, scanner: (signatureSetHash?: string) => provider.openSession(lifecycleConfig, { activityId: "q", scanner: spec(signatureSetHash) }) };
   }
 
   it("takes the snapshot before any job input exists: the build VM runs no job command and is terminated; jobs run only in restored VMs", async () => {
@@ -2219,7 +2219,7 @@ describe("modal scanner sessions (quarantine Q1)", () => {
     }
     expect(state.snapshots).toBe(1);
     expect(state.restores).toBe(3);
-    const updated = await scanner("org-a", "b".repeat(64));
+    const updated = await scanner("b".repeat(64));
     await updated.close();
     expect(state.snapshots).toBe(2);
     // Every restored VM was terminated with its session.
@@ -2227,14 +2227,13 @@ describe("modal scanner sessions (quarantine Q1)", () => {
     for (const vm of restored) expect(state.scannerEvents).toContain(`terminate:${vm}`);
   });
 
-  it("refuses a command of another organization, or of none, before it reaches a VM (cross-tenant)", async () => {
+  it("a scanner session runs commands of any organization and document (no per-organization compute binding)", async () => {
     const { state, scanner } = open();
-    const session = await scanner("org-a");
-    await expect(session.run!({ ...command, tenantKey: "org-b" })).rejects.toThrow(/another organization/);
-    await expect(session.run!({ ...command })).rejects.toThrow(/another organization/);
-    expect(state.commands).toHaveLength(0);
-    await session.run!({ ...command, tenantKey: "org-a" });
-    expect(state.commands).toHaveLength(1);
+    const session = await scanner();
+    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
+    await session.run!({ ...command, tenantKey: "org-b", affinityKey: "doc-2" });
+    await session.run!({ ...command });
+    expect(state.commands).toHaveLength(3);
     await session.close();
   });
 
@@ -2245,10 +2244,10 @@ describe("modal scanner sessions (quarantine Q1)", () => {
     await session.close();
   });
 
-  it("refuses a scanner session without an organization or with a malformed signature set", async () => {
+  it("refuses a scanner session with a malformed signature set or version", async () => {
     const { provider } = open();
-    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "", definitionsDir: sigDir, signatureSetHash: hash, expectedVersion: 1 } })).rejects.toThrow(/organization/);
-    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "zz", expectedVersion: 1 } })).rejects.toThrow(/signature set/);
+    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { definitionsDir: sigDir, signatureSetHash: "zz", expectedVersion: 1 } })).rejects.toThrow(/signature set/);
+    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { definitionsDir: sigDir, signatureSetHash: hash, expectedVersion: 0 } })).rejects.toThrow(/signature set/);
   });
 
   it.each([
@@ -2284,31 +2283,9 @@ describe("scanner session council fixes (PR #339)", () => {
   function scanner(opts: Parameters<typeof fakeSdk>[0] = {}) {
     const { sdk, state } = fakeSdk({ exec: async () => finished(""), ...opts });
     const provider = createModalProvider(async () => sdk);
-    const open = () => provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "c".repeat(64), expectedVersion: 28180 } });
+    const open = () => provider.openSession(lifecycleConfig, { activityId: "q", scanner: { definitionsDir: sigDir, signatureSetHash: "c".repeat(64), expectedVersion: 28180 } });
     return { state, open };
   }
-
-  it("M1: a scanner session serves one document; a second document's command never reaches a VM the first touched", async () => {
-    const { state, open } = scanner();
-    const session = await open();
-    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
-    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
-    const ran = state.commands.length;
-    await expect(session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-2" })).rejects.toThrow(/one document/);
-    await expect(session.run!({ ...command, tenantKey: "org-a" })).rejects.toThrow(/without a document/);
-    expect(state.commands).toHaveLength(ran);
-    await session.close();
-    // The next document gets its own session, and with it a VM freshly restored from the snapshot.
-    const next = await open();
-    await next.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-2" });
-    await next.close();
-    const vms = state.scannerEvents.filter((event) => event.startsWith("command:")).map((event) => event.split(":")[1]);
-    const doc1Vm = vms[0]!;
-    expect(vms.at(-1)).not.toBe(doc1Vm);
-    expect(state.scannerEvents).toContain(`terminate:${doc1Vm}`);
-    expect(state.scannerEvents.indexOf(`terminate:${doc1Vm}`)).toBeLessThan(state.scannerEvents.lastIndexOf(`command:${vms.at(-1)}`));
-    expect(state.restores).toBe(2);
-  });
 
   it("L1: a restored VM that can reach the internet is refused before it runs anything", async () => {
     const { state, open } = scanner({ egressOpen: true });
@@ -2351,7 +2328,7 @@ describe("scanner session council fixes (PR #339)", () => {
     const usage: unknown[] = [];
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const outcome = buildScannerSnapshot({} as ModalSdk, client as never, { ...lifecycleConfig, imageId: "im-test" } as never,
-      { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "a".repeat(64), expectedVersion: 1 }, (event) => usage.push(event)).catch((error: Error) => error);
+      { definitionsDir: sigDir, signatureSetHash: "a".repeat(64), expectedVersion: 1 }, (event) => usage.push(event)).catch((error: Error) => error);
     // Real file I/O (the signature read) runs before create; setImmediate is not faked. Bounded by real time, not turns.
     const waitUntil = performance.now() + 10_000;
     while (!create.mock.calls.length && performance.now() < waitUntil) await new Promise((resolve) => setImmediate(resolve));
