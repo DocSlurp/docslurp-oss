@@ -57,6 +57,9 @@ export function dopplerFlagBit<T extends string>(names: readonly T[], name: T): 
 
 /** A word's names in bit order, and the bits this build does not name (from a newer Doppler: unknown encodings). */
 export function decodeDopplerFlags<T extends string>(word: number, names: readonly T[]): { flags: T[]; unknownBits: number } {
+  // Not a word (non-finite, fractional, negative or past 32 bits): nothing this build can name. The reader never passes
+  // one; a caller that does gets "unknown" (unknownBits non-zero), never an empty word.
+  if (!Number.isSafeInteger(word) || word < 0 || word > DOPPLER_FLAG_WORD_MAX) return { flags: [], unknownBits: Number.POSITIVE_INFINITY };
   const flags: T[] = [];
   let unknownBits = 0;
   // Arithmetic, not `>>`: a 32-bit word's top bit would read negative through JavaScript's signed shifts.
@@ -107,9 +110,16 @@ export const RASTER_TABLE_FLAGS: readonly DopplerTableFlag[] = ["raster-table-li
 /** Math only a read of the page recovers (images, outlines, bitmap fonts). */
 export const VISION_MATH_FLAGS: readonly DopplerMathFlag[] = ["raster-strips", "glyph-outlines", "type3-bitmap-font"];
 /**
+ * The fewest unreadable math glyphs (encodingCounts nibble `unreadableMathGlyphs`) for `math-font-no-unicode` to need a
+ * read: bucket 5 is 16 or more glyphs. A few unmapped delimiter or radical pieces (pdflatex's big operators commonly lack a
+ * Unicode value) are not a formula the text layer lost.
+ */
+export const UNMAPPED_MATH_READ_MIN_BUCKET = 5;
+
+/**
  * Math glyphs without a Unicode value: the text layer cannot read them, but Doppler's math reader (`pdftomarkdown --math`)
- * reads them from glyph names and lists what it cannot read in its report. Vision only when the run did not read math,
- * and never when the page carries its own TeX or MathML source.
+ * reads them from glyph names and lists what it cannot read in its report. Vision only when the run did not read math, the
+ * page carries no TeX or MathML source, and at least UNMAPPED_MATH_READ_MIN_BUCKET's worth of glyphs are unreadable.
  */
 export const UNMAPPED_MATH_FLAGS: readonly DopplerMathFlag[] = ["math-font-no-unicode"];
 /** The page carries the formula's source (TeX in ActualText or Alt, MathML): copy it, keep the text layer. */
@@ -135,12 +145,14 @@ export interface PageEncodingRoute {
   math: EncodingMathRoute;
   /** The run read math (`--math`): unmapped math glyphs were the math reader's to read. */
   mathRead: boolean;
+  /** encodingCounts' `unreadableMathGlyphs` log2 bucket (0..15): orders capped reads, gates `math-font-no-unicode`. */
+  unreadableMathGlyphs: number;
   /** The page's flags in bit order (for signals and the ingest report). */
   mathFlags: DopplerMathFlag[];
   tableFlags: DopplerTableFlag[];
 }
 
-export type PageEncodingUnknown = "absent" | "failed" | "low-confidence" | "truncated" | "unknown-bits";
+export type PageEncodingUnknown = "absent" | "failed" | "low-confidence" | "xref-repaired" | "drawing-limit" | "truncated" | "unknown-bits";
 
 export type PageEncodingVerdict = { status: "known"; route: PageEncodingRoute } | { status: "unknown"; reason: PageEncodingUnknown };
 
@@ -157,20 +169,26 @@ export function pageEncodingRoute(page: DopplerPageFacts, options: { mathRead?: 
   if (page.failed) return { status: "unknown", reason: "failed" };
   if (page.mathBits === undefined || page.tableBits === undefined || page.encodingCounts === undefined) return { status: "unknown", reason: "absent" };
   if (page.parseWarnings.includes("xref-repaired-earlier")) return { status: "unknown", reason: "low-confidence" };
+  // As gridFacts (lib/doppler-page-facts-layout.ts): a rebuilt cross-reference table or a drawing cap leaves the page's
+  // drawing (so its rules, outlines and table shapes) incomplete.
+  if (page.parseWarnings.includes("xref-repaired")) return { status: "unknown", reason: "xref-repaired" };
+  if (page.vectors?.limitHit || page.parseWarnings.includes("limit-hit") || page.unusualFeatures.includes("drawing-limit")) {
+    return { status: "unknown", reason: "drawing-limit" };
+  }
   const math = decodeDopplerFlags(page.mathBits, DOPPLER_MATH_FLAGS);
   const table = decodeDopplerFlags(page.tableBits, DOPPLER_TABLE_FLAGS);
   if (math.unknownBits !== 0 || table.unknownBits !== 0) return { status: "unknown", reason: "unknown-bits" };
   if (math.flags.includes("analysis-truncated") || table.flags.includes("analysis-truncated")) return { status: "unknown", reason: "truncated" };
-  return { status: "known", route: encodingRouteFromFlags(math.flags, table.flags, options.mathRead === true) };
+  return { status: "known", route: encodingRouteFromFlags(math.flags, table.flags, options.mathRead === true, dopplerEncodingNibble(page.encodingCounts, "unreadableMathGlyphs")) };
 }
 
 /** The route the flags name (pageEncodingRoute's rules; the flags are complete and not truncated). */
-export function encodingRouteFromFlags(mathFlags: readonly DopplerMathFlag[], tableFlags: readonly DopplerTableFlag[], mathRead: boolean): PageEncodingRoute {
+export function encodingRouteFromFlags(mathFlags: readonly DopplerMathFlag[], tableFlags: readonly DopplerTableFlag[], mathRead: boolean, unreadableMathGlyphs = 0): PageEncodingRoute {
   const hasTable = (set: readonly DopplerTableFlag[]) => tableFlags.some((flag) => set.includes(flag));
   const hasMath = (set: readonly DopplerMathFlag[]) => mathFlags.some((flag) => set.includes(flag));
   const table: EncodingTableRoute = hasTable(TEXT_LAYER_TABLE_FLAGS) ? "text-layer" : hasTable(VISION_TABLE_FLAGS) ? "vision" : "none";
   const source = hasMath(SOURCE_MATH_FLAGS);
-  const unmappedNeedsRead = hasMath(UNMAPPED_MATH_FLAGS) && !source && !mathRead;
+  const unmappedNeedsRead = hasMath(UNMAPPED_MATH_FLAGS) && !source && !mathRead && unreadableMathGlyphs >= UNMAPPED_MATH_READ_MIN_BUCKET;
   const math: EncodingMathRoute = hasMath(VISION_MATH_FLAGS) || unmappedNeedsRead ? "vision"
     : source ? "source"
       : hasMath(TEXT_MATH_FLAGS) || hasMath(UNMAPPED_MATH_FLAGS) ? "text"
@@ -181,6 +199,7 @@ export function encodingRouteFromFlags(mathFlags: readonly DopplerMathFlag[], ta
     mathGrid: tableFlags.includes("math-grid"),
     math,
     mathRead,
+    unreadableMathGlyphs,
     mathFlags: DOPPLER_MATH_FLAGS.filter((flag) => mathFlags.includes(flag)),
     tableFlags: DOPPLER_TABLE_FLAGS.filter((flag) => tableFlags.includes(flag)),
   };
@@ -188,11 +207,12 @@ export function encodingRouteFromFlags(mathFlags: readonly DopplerMathFlag[], ta
 
 /** The flags behind a route, for a signal: `vision` math names the flags that need a read. */
 export function encodingMathVisionFlags(route: PageEncodingRoute): DopplerMathFlag[] {
-  return route.mathFlags.filter((flag) => VISION_MATH_FLAGS.includes(flag) || UNMAPPED_MATH_FLAGS.includes(flag));
+  return route.mathFlags.filter((flag) => VISION_MATH_FLAGS.includes(flag) ||
+    (UNMAPPED_MATH_FLAGS.includes(flag) && !route.mathRead && route.unreadableMathGlyphs >= UNMAPPED_MATH_READ_MIN_BUCKET));
 }
 
 /**
- * Parse a stored PageEncodingRoute (page-layout-facts JSON). Only the flags and `mathRead` are read, as closed
+ * Parse a stored PageEncodingRoute (page-layout-facts JSON). Only the flags, `mathRead` and the unreadable-glyph bucket are read, as closed
  * vocabularies; the route is derived from them again (encodingRouteFromFlags), so a stored route can never say more than
  * its flags. A truncated flag, or anything malformed, is unknown.
  */
@@ -200,11 +220,13 @@ export function parsePageEncodingRoute(value: unknown): PageEncodingRoute | unde
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
   if (typeof v.mathRead !== "boolean") return undefined;
+  const unreadable = v.unreadableMathGlyphs;
+  if (typeof unreadable !== "number" || !Number.isSafeInteger(unreadable) || unreadable < 0 || unreadable > 15) return undefined;
   const names = <T extends string>(list: unknown, vocabulary: readonly T[]): T[] | undefined =>
     Array.isArray(list) && list.length <= vocabulary.length && list.every((item) => (vocabulary as readonly unknown[]).includes(item))
       ? list as T[] : undefined;
   const mathFlags = names(v.mathFlags, DOPPLER_MATH_FLAGS);
   const tableFlags = names(v.tableFlags, DOPPLER_TABLE_FLAGS);
   if (!mathFlags || !tableFlags || mathFlags.includes("analysis-truncated") || tableFlags.includes("analysis-truncated")) return undefined;
-  return encodingRouteFromFlags(mathFlags, tableFlags, v.mathRead);
+  return encodingRouteFromFlags(mathFlags, tableFlags, v.mathRead, unreadable);
 }

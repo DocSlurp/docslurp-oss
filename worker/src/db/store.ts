@@ -2918,9 +2918,14 @@ export class Store {
         set run_id = excluded.run_id,
             text_layer = coalesce(excluded.text_layer, document_page_facts.text_layer),
             scan_class = coalesce(excluded.scan_class, document_page_facts.scan_class),
-            math_bits = case when excluded.encoding_counts is null then document_page_facts.math_bits else excluded.math_bits end,
-            table_bits = case when excluded.encoding_counts is null then document_page_facts.table_bits else excluded.table_bits end,
-            encoding_counts = coalesce(excluded.encoding_counts, document_page_facts.encoding_counts),
+            -- A write without words keeps the stored ones only for the same run: another run's words describe facts this
+            -- run did not produce (a reprocess with page facts off, or an older provider), so they are cleared.
+            math_bits = case when excluded.encoding_counts is not null then excluded.math_bits
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.math_bits end,
+            table_bits = case when excluded.encoding_counts is not null then excluded.table_bits
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.table_bits end,
+            encoding_counts = case when excluded.encoding_counts is not null then excluded.encoding_counts
+              when document_page_facts.run_id = excluded.run_id then document_page_facts.encoding_counts end,
             updated_at = now()
       `;
     }

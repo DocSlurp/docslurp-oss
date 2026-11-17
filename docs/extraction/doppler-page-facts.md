@@ -208,10 +208,10 @@ page: the cheap router form.
 | 5 | `raster-strips` | read the page |
 | 6 | `glyph-outlines` | read the page |
 | 7 | `type3-bitmap-font` | read the page |
-| 8 | `math-font-no-unicode` | read the page, unless the run read math (`--math` reads glyph names) or the page has a source |
+| 8 | `math-font-no-unicode` | read the page only when the run did not read math (`--math` reads glyph names), the page has no source, and 16 or more glyphs are unreadable |
 | 9 | `plain-unicode-math` | text layer |
 | 10 | `formula-struct` | text layer |
-| 11 | `math-matrix` | text layer (not a table) |
+| 11 | `math-matrix` | text layer |
 | 12 | `analysis-truncated` | unknown |
 
 `tableBits`:
@@ -226,7 +226,7 @@ page: the cheap router form.
 | 5 | `tagged-table` | text-layer table |
 | 6 | `raster-table-like` | candidate only: a lossless image shaped like a table (charts and logos match too), never a read on its own |
 | 7 | `outlined-text-grid` | read the page: a table drawn as glyph outlines has no text layer |
-| 8 | `math-grid` | not a table |
+| 8 | `math-grid` | signal only (a ruled notation table can carry it too) |
 | 9 | `analysis-truncated` | unknown |
 
 `encodingCounts` nibbles, in order: math-font characters with a Unicode value, plain Unicode math, unreadable math glyphs,
@@ -244,20 +244,34 @@ reader also drops all three words when they contradict their own names or count 
 `document_page_facts` (`math_bits`, `table_bits`, `encoding_counts`; migration 0186), all three or none. Never a billing
 input.
 
-**Routing** (`DOCSLURP_ENCODING_FACTS_ROUTING`: on in development and test, off in production until measured; off, the facts
-are still parsed and stored). Evidence routing (`stages/classify-route.ts`):
+**Routing.** Encodings steer routing only when both `DOCSLURP_DOPPLER_PAGE_FACTS=use` (in `store`, the default, they are
+parsed and stored, and the layout carries none) and `DOCSLURP_ENCODING_FACTS_ROUTING` is on (on in development and test,
+off in production). Evidence routing (`stages/classify-route.ts`) then lets them **add, never remove**: they never settle a
+ruled grid as "no table", never take a grid out of the table count, never relabel a page and never decline a read. A ruled
+table of notation can read as `math-grid` alone, and a table of prose cells has no table bit at all, so an absent bit is no
+evidence against a table. Exactly what they can change:
 
-- tables matter most. A ruled grid neither the walker nor the facts could settle (`gridsUnknown`) stays on the table path
-  when the encodings name a text-layer table (signal `encoding-table:<flags>`), and is settled as no table when they name
-  none (`encoding-no-table`), instead of sending every such page down the table path;
-- a math grid is never a table: with `math-grid` and no table encoding, the page's grids leave the table count
-  (`encoding-math-grid`);
-- a table drawn as glyph outlines, or math only a read recovers, authorizes a page read (`ocr-authorized:encoding-table-outlines`,
-  `ocr-authorized:encoding-math-unreadable`; read reason `encoding`). Facts only add a read, never remove one, and the read
-  bills as any other read the project's vision setting allows. Doppler's math regions (full level) and the report's
-  `mathUncertainRegions` name boxes to crop, but evidence routing reads whole pages today;
-- `raster-table-like` is a signal only (`encoding-table-raster-candidate`), and text math or a TeX or MathML source keeps
-  the text layer; a page with math and no other label is labelled `formula-heavy` for the report.
+- **Add a table route:** a text-layer table bit (`rule-grid`, `hrule-open`, `booktabs`, `whitespace`, `shaded-rows`,
+  `tagged-table`) on a page that no grid, Markdown table or aligned rows made table-heavy puts it on the table path
+  (`encoding-table:<flags>`). A page with an unknown grid stays on the table path as before, with the same signal added.
+- **Add a page read:** a table drawn as glyph outlines (`ocr-authorized:encoding-table-outlines`), or math only a read
+  recovers (`ocr-authorized:encoding-math-unreadable`): raster strips, glyph outlines, Type 3 bitmap fonts, and unmapped
+  math glyphs when the run did not read math, the page has no TeX or MathML source and at least 16 glyphs are unreadable
+  (`encodingCounts` bucket 5). Read reason `encoding`.
+- **Cap those reads:** at most `encodingReadPageCap(pages)` pages a document (the table-leak cap's shape: 3 plus 5% of the
+  pages, at most 20) are read on encodings alone; pages with no native text first, then the most unreadable math glyphs,
+  then page order. The rest keep the decision they had without the encodings (`encoding-read-capped`) and are logged.
+- **Signals only:** `encoding-math:<route>`, `encoding-math-grid`, `encoding-table-raster-candidate`. They do not change
+  the route, so they never reach the complexity or playbook summaries.
+
+Whole pages are read: Doppler's math regions (full level) and the report's `mathUncertainRegions` name boxes to crop, but
+evidence routing has no region scope yet. The upload estimator and the quote do not yet know about encoding reads, which is
+one reason the routing flag stays off in production until they do and the reads have been measured there.
+
+A page's encodings are unknown also with `xref-repaired` or a drawing cap (`vectors.limitHit`, `limit-hit`,
+`drawing-limit`), as for the walker grids. Doppler writes the words at the basic level with `-include mathtables` and at
+the `full` level (which includes `mathtables`); core reads them from either. Facts without them (an older build, a provider
+that returns none, the walker alone) leave every page unknown.
 
 The v2 page router's trust cascade keeps its own math gate on `mathGlyphRatio` (0.01, `routing/trust.ts`), which these
 facts do not change.

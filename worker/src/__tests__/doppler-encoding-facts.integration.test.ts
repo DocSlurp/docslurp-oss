@@ -91,8 +91,12 @@ describe.skipIf(!available)("Doppler math and table encodings (real converter)",
     expect(layout.get(1)?.encodings?.table).toBe("text-layer");
     expect(layout.get(3)?.encodings?.mathGrid).toBe(true);
     const prose = "Customers move between plans each quarter with these probabilities.";
+    const off = classifyAdaptivePage(3, prose, { routingV2: true, layout: layout.get(3)! });
     const matrix = classifyAdaptivePage(3, prose, { routingV2: true, layout: layout.get(3)!, encodings: layout.get(3)!.encodings });
-    expect(matrix.route).not.toBe("table-heavy");
+    // Encodings only add: the matrix page keeps whatever route its grids gave it, with the math grid as a signal.
+    expect(matrix.route).toBe(off.route);
     expect(matrix.signals).toContain("encoding-math-grid");
+    // The booktabs page gets a table route from its encodings.
+    expect(classifyAdaptivePage(1, "Region Q1 Q2 Q3", { routingV2: true, layout: layout.get(1)!, encodings: layout.get(1)!.encodings }).route).toBe("table-heavy");
   });
 });

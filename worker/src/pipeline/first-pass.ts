@@ -68,9 +68,16 @@ export const DOPPLER_MATH_DEFAULT_ENV = "DOCSLURP_DOPPLER_MATH_DEFAULT";
  * typeset math as LaTeX, so it is the default; a project opts out with the vm-pdf option `math: false`. `off`, `0` or
  * `false` restores opt-in (`math: true` only). Anything else keeps the default.
  */
+const warnedMathDefault = new Set<string>();
 export function dopplerMathDefault(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = env[DOPPLER_MATH_DEFAULT_ENV]?.trim().toLowerCase();
-  return !(value === "off" || value === "0" || value === "false");
+  if (!value || value === "on" || value === "1" || value === "true") return true;
+  if (value === "off" || value === "0" || value === "false") return false;
+  if (!warnedMathDefault.has(value)) {
+    warnedMathDefault.add(value);
+    console.warn(`[first-pass] ignoring unknown ${DOPPLER_MATH_DEFAULT_ENV}=${JSON.stringify(value.slice(0, 32))}; using on (allowed: on, off)`);
+  }
+  return true;
 }
 
 /**

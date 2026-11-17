@@ -14,7 +14,7 @@ import { pageLayoutFactsFromDopplerPage, routingFactsWithDopplerFacts, withEncod
 import { parsePageLayoutFacts, type PageLayoutFacts } from "./page-layout-facts.js";
 import { buildRoutingPageFacts } from "../pipeline/page-facts.js";
 import { acceptSandboxedPdfResult, sandboxedPdfLayoutFacts, type SandboxedPdfJob } from "../extractors/plugins.js";
-import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, encodingReadDecision, pageReadReason } from "../stages/classify-route.js";
+import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, encodingReadDecision, encodingReadPageCap, pageReadReason } from "../stages/classify-route.js";
 import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 
 const word = <T extends string>(names: readonly T[], flags: readonly T[]) => flags.reduce((sum, flag) => sum + dopplerFlagBit(names, flag), 0);
@@ -34,8 +34,8 @@ function parsePage(line: Record<string, unknown>, pageCount = 1): DopplerPageFac
   if (!parsed.ok) throw new Error(parsed.reason);
   return parsed.facts.pages.get(line.page as number);
 }
-function route(mathFlags: DopplerMathFlag[], tableFlags: DopplerTableFlag[], mathRead = false) {
-  return encodingRouteFromFlags(mathFlags, tableFlags, mathRead);
+function route(mathFlags: DopplerMathFlag[], tableFlags: DopplerTableFlag[], mathRead = false, unreadable = 0) {
+  return encodingRouteFromFlags(mathFlags, tableFlags, mathRead, unreadable);
 }
 
 describe("bit layout (Doppler's order is an API: names are appended, never moved)", () => {
@@ -76,6 +76,8 @@ describe("bit layout (Doppler's order is an API: names are appended, never moved
     expect(decodeDopplerFlags(2307, DOPPLER_MATH_FLAGS).flags).toEqual(["text-math", "stacked-math", "math-font-no-unicode", "math-matrix"]);
     expect(decodeDopplerFlags(2 ** 31 + 1, DOPPLER_TABLE_FLAGS)).toEqual({ flags: ["rule-grid"], unknownBits: 2 ** 31 });
     expect(decodeDopplerFlags(2 ** 13, DOPPLER_MATH_FLAGS)).toEqual({ flags: [], unknownBits: 2 ** 13 });
+    // Not a word: unknown, never an empty word.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, 2 ** 32]) expect(decodeDopplerFlags(bad, DOPPLER_MATH_FLAGS).unknownBits).not.toBe(0);
   });
 
   it("decodes the log2 buckets of encodingCounts, up to all 52 bits", () => {
@@ -212,12 +214,15 @@ describe("what each encoding means for routing", () => {
   });
 
   it("math only a read recovers: raster strips, glyph outlines, Type 3 bitmap fonts, unmapped math glyphs", () => {
-    for (const flag of ["raster-strips", "glyph-outlines", "type3-bitmap-font", "math-font-no-unicode"] as const) {
+    for (const flag of ["raster-strips", "glyph-outlines", "type3-bitmap-font"] as const) {
       expect(route([flag], []).math).toBe("vision");
     }
+    // Unmapped math glyphs need a read only when there are enough of them (bucket 5: 16 or more), not a few delimiter pieces.
+    expect(route(["math-font-no-unicode"], [], false, 5).math).toBe("vision");
+    expect(route(["math-font-no-unicode"], [], false, 2).math).toBe("text");
     // The math reader handles unmapped glyphs (and reports what it cannot read); a TeX or MathML source covers them too.
-    expect(route(["math-font-no-unicode", "text-math"], [], true).math).toBe("text");
-    expect(route(["math-font-no-unicode", "actualtext-tex"], []).math).toBe("source");
+    expect(route(["math-font-no-unicode", "text-math"], [], true, 15).math).toBe("text");
+    expect(route(["math-font-no-unicode", "actualtext-tex"], [], false, 15).math).toBe("source");
     // Pixels and outlines have no glyphs to read, math reader or not.
     expect(route(["raster-strips"], [], true).math).toBe("vision");
   });
@@ -238,6 +243,10 @@ describe("what each encoding means for routing", () => {
     expect(pageEncodingRoute({ page: 1, parseWarnings: [], unusualFeatures: [] })).toEqual({ status: "unknown", reason: "absent" });
     expect(pageEncodingRoute({ ...page([], []), failed: true })).toEqual({ status: "unknown", reason: "failed" });
     expect(pageEncodingRoute(page([], [], { parseWarnings: ["xref-repaired-earlier"] }))).toEqual({ status: "unknown", reason: "low-confidence" });
+    // As gridFacts: a rebuilt cross-reference table or a drawing cap leaves the drawing incomplete.
+    expect(pageEncodingRoute(page([], [], { parseWarnings: ["xref-repaired"] }))).toEqual({ status: "unknown", reason: "xref-repaired" });
+    expect(pageEncodingRoute(page([], [], { parseWarnings: ["limit-hit"] }))).toEqual({ status: "unknown", reason: "drawing-limit" });
+    expect(pageEncodingRoute(page([], [], { unusualFeatures: ["drawing-limit"] }))).toEqual({ status: "unknown", reason: "drawing-limit" });
     expect(pageEncodingRoute(page([], []))).toMatchObject({ status: "known", route: { table: "none", math: "none" } });
   });
 
@@ -249,6 +258,8 @@ describe("what each encoding means for routing", () => {
     expect(parsePageEncodingRoute({ ...stored, mathFlags: ["analysis-truncated"] })).toBeUndefined();
     expect(parsePageEncodingRoute({ ...stored, tableFlags: ["not-a-flag"] })).toBeUndefined();
     expect(parsePageEncodingRoute({ ...stored, mathRead: "yes" })).toBeUndefined();
+    expect(parsePageEncodingRoute({ ...stored, unreadableMathGlyphs: 16 })).toBeUndefined();
+    expect(parsePageEncodingRoute(JSON.parse(JSON.stringify(route(["math-font-no-unicode"], [], false, 6))))!.math).toBe("vision");
     expect(parsePageEncodingRoute([])).toBeUndefined();
   });
 });
@@ -277,9 +288,10 @@ describe("layout facts and stored rows carry the encodings", () => {
     expect(layout.get(2)).not.toHaveProperty("encodings");
   });
 
-  it("a provider result's layout carries them; a math run's unmapped glyphs are the math reader's", () => {
+  it("a provider result's layout carries them in use mode only; a math run's unmapped glyphs are the math reader's", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    const unmapped = { mathBits: mathWord("math-font-no-unicode", "text-math"), tableBits: 0, encodingCounts: counts({ mathFontChars: 3, unreadableMathGlyphs: 2 }) };
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    const unmapped = { mathBits: mathWord("math-font-no-unicode", "text-math"), tableBits: 0, encodingCounts: counts({ mathFontChars: 3, unreadableMathGlyphs: 6 }) };
     const layoutFacts = { version: "pdf-layout-facts@1", pages: [{ pageNumber: 1, known: true, images: [], tables: [], words: 40, grids: null, tableCoverage: null }] };
     const pageFacts = jsonl([docLine({ pageCount: 1 }), encodedPage(1, unmapped), runLine({ pagesEmitted: 1 })]);
     const plain: SandboxedPdfJob = { input: "/a", output: "/b" };
@@ -288,6 +300,12 @@ describe("layout facts and stored rows carry the encodings", () => {
     const math: SandboxedPdfJob = { input: "/a", output: "/b" };
     acceptSandboxedPdfResult(math, { exitCode: 0, stdout: "", stderr: "", layoutFacts, pageFacts }, 1, { glyphs: true });
     expect(sandboxedPdfLayoutFacts(math)?.get(1)?.encodings).toMatchObject({ math: "text", mathRead: true });
+    // `store` (the default) never steers routing: the facts are parsed and stored, the layout carries no encodings.
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "store");
+    const stored: SandboxedPdfJob = { input: "/a", output: "/b" };
+    acceptSandboxedPdfResult(stored, { exitCode: 0, stdout: "", stderr: "", layoutFacts, pageFacts }, 1);
+    expect(sandboxedPdfLayoutFacts(stored)?.get(1)).not.toHaveProperty("encodings");
+    vi.unstubAllEnvs();
   });
 
   it("stores the three words per page, all or none", () => {
@@ -313,25 +331,40 @@ describe("evidence routing by encodings (DOCSLURP_ENCODING_FACTS_ROUTING)", () =
     pageLayout: new Map([[1, layout]]), routingV2: true, encodingRouting,
   }).pages[0]!;
 
-  it("settles an unknown ruled grid as no table when the encodings name none; unknown encodings keep the table path", () => {
+  it("never settles an unknown ruled grid as no table: a prose-cell table has no table bit (council #467)", () => {
     const unknownGrids = walkerPage({ grids: null, tableCoverage: null, gridsUnknown: true });
     expect(classifyAdaptivePage(1, prose, { layout: unknownGrids }).route).toBe("table-heavy");
-    const none = classifyAdaptivePage(1, prose, { layout: unknownGrids, encodings: route([], []) });
-    expect(none.route).not.toBe("table-heavy");
-    expect(none.signals).toContain("encoding-no-table");
+    for (const encodings of [route([], []), route(["math-matrix"], ["math-grid"]), route([], ["raster-table-like"])]) {
+      const page = classifyAdaptivePage(1, prose, { layout: unknownGrids, encodings });
+      expect(page.route).toBe("table-heavy");
+      expect(page.signals).toContain("grids-unknown");
+    }
     const textTable = classifyAdaptivePage(1, prose, { layout: unknownGrids, encodings: route([], ["booktabs"]) });
     expect(textTable.route).toBe("table-heavy");
     expect(textTable.signals).toEqual(expect.arrayContaining(["grids-unknown", "encoding-table:booktabs"]));
   });
 
-  it("never counts a math grid as a table", () => {
-    const matrix = walkerPage({ grids: [{ rows: 6, columns: 3, coverage: null }] });
-    expect(classifyAdaptivePage(1, prose, { layout: matrix }).route).toBe("table-heavy");
-    const asMath = classifyAdaptivePage(1, prose, { layout: matrix, encodings: route(["math-matrix", "text-math"], ["math-grid"]) });
-    expect(asMath.route).toBe("formula-heavy");
-    expect(asMath.signals).toEqual(expect.arrayContaining(["encoding-math-grid", "encoding-math:text"]));
-    // A named table beside the matrix keeps the grids.
-    expect(classifyAdaptivePage(1, prose, { layout: matrix, encodings: route([], ["math-grid", "rule-grid"]) }).route).toBe("table-heavy");
+  it("adds a table route for a text-layer table no grid showed", () => {
+    expect(classifyAdaptivePage(1, prose, { layout: walkerPage() }).route).not.toBe("table-heavy");
+    for (const flag of ["booktabs", "hrule-open", "whitespace", "shaded-rows", "tagged-table", "rule-grid"] as const) {
+      const page = classifyAdaptivePage(1, prose, { layout: walkerPage(), encodings: route([], [flag]) });
+      expect(page.route).toBe("table-heavy");
+      expect(page.signals).toContain(`encoding-table:${flag}`);
+    }
+  });
+
+  it("never takes a grid out of the table count: a ruled notation table can read as math-grid alone (council #467)", () => {
+    const grid = walkerPage({ grids: [{ rows: 6, columns: 3, coverage: null }] });
+    expect(classifyAdaptivePage(1, prose, { layout: grid }).route).toBe("table-heavy");
+    const withMathGrid = classifyAdaptivePage(1, prose, { layout: grid, encodings: route(["math-matrix", "text-math"], ["math-grid"]) });
+    expect(withMathGrid.route).toBe("table-heavy");
+    expect(withMathGrid.signals).toEqual(expect.arrayContaining(["encoding-math-grid", "encoding-math:text"]));
+  });
+
+  it("never relabels a page: math encodings are signals only", () => {
+    const page = classifyAdaptivePage(1, prose, { layout: walkerPage(), encodings: route(["text-math", "stacked-math"], []) });
+    expect(page.route).toBe(classifyAdaptivePage(1, prose, { layout: walkerPage() }).route);
+    expect(page.signals).toContain("encoding-math:text");
   });
 
   it("reads a page whose math only a read recovers, or whose table is drawn as outlines; flag off, the page is not read", () => {
@@ -348,7 +381,7 @@ describe("evidence routing by encodings (DOCSLURP_ENCODING_FACTS_ROUTING)", () =
   });
 
   it("never reads for a raster table shape, text math or a source alone", () => {
-    for (const encodings of [route([], ["raster-table-like"]), route(["text-math", "stacked-math"], []), route(["actualtext-tex"], []), route(["math-font-no-unicode"], [], true)]) {
+    for (const encodings of [route([], ["raster-table-like"]), route(["text-math", "stacked-math"], []), route(["actualtext-tex"], []), route(["math-font-no-unicode"], [], true, 15), route(["math-font-no-unicode"], [], false, 2)]) {
       const page = surface(walkerPage({ encodings }), true);
       expect(page.ocrDecision?.authorized).toBe(false);
     }
@@ -364,12 +397,33 @@ describe("evidence routing by encodings (DOCSLURP_ENCODING_FACTS_ROUTING)", () =
   });
 
   it("flag off: stored encodings change nothing", () => {
-    const layout = walkerPage({ grids: null, tableCoverage: null, gridsUnknown: true, encodings: route([], []) });
+    const layout = walkerPage({ encodings: route(["raster-strips"], ["booktabs"]) });
     const off = surface(layout, false);
-    expect(off.route).toBe("table-heavy");
-    expect(off.signals).toContain("grids-unknown");
+    expect(off.route).not.toBe("table-heavy");
+    expect(off.ocrDecision?.authorized).toBe(false);
     expect(off.signals.some((signal) => signal.startsWith("encoding"))).toBe(false);
     const on = surface(layout, true);
-    expect(on.route).not.toBe("table-heavy");
+    expect(on.route).toBe("table-heavy");
+    expect(on.ocrDecision?.authorized).toBe(true);
+  });
+
+  it("caps encoding-only reads per document: no native text first, then the most unreadable math", () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const pageCount = 10;   // cap: 3 + floor(10 * 0.05) = 3
+    expect(encodingReadPageCap(pageCount)).toBe(3);
+    const layout = new Map<number, PageLayoutFacts>();
+    for (let n = 1; n <= pageCount; n += 1) {
+      const unreadable = n === 4 ? 9 : n === 7 ? 12 : 6;
+      layout.set(n, walkerPage({ words: n === 9 ? 0 : 60, encodings: route(["math-font-no-unicode"], [], false, unreadable) }));
+    }
+    const pages = buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "doc.pdf", text: Array.from({ length: pageCount }, () => prose).join("\f"), pageCount,
+      evidence: { source: "canonical-document", artifactUri: "s3://x" }, pageLayout: layout, routingV2: true, encodingRouting: true,
+    }).pages;
+    const read = pages.filter((page) => page.ocrDecision?.authorized).map((page) => page.pageNumber);
+    expect(read).toEqual([4, 7, 9]);
+    const capped = pages.filter((page) => page.signals.includes("encoding-read-capped")).map((page) => page.pageNumber);
+    expect(capped).toEqual([1, 2, 3, 5, 6, 8, 10]);
+    expect(pages.every((page) => !(page.ocrDecision?.signals ?? []).includes("ocr-authorized:encoding-math-unreadable") || read.includes(page.pageNumber))).toBe(true);
   });
 });

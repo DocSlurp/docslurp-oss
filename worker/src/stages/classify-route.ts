@@ -408,7 +408,7 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename, { routingV2 });
   const pageCount = Math.max(1, args.pageCount);
   const pages = routingV2
-    ? capTableLeakPages(buildEvidencePages(args, pageCount), pageCount)
+    ? capTableLeakPages(capEncodingReadPages(buildEvidencePages(args, pageCount), pageCount), pageCount)
     : buildLegacyPages(args, pageCount);
   const summary = summarizeAdaptiveRouting(pages);
   const specializedContentSummary = summarizeSpecializedContent(pages);
@@ -539,7 +539,7 @@ function buildEvidencePages(
       ? pageTextYield(nativeText, complexity.textLength) : null;
     const yieldDeficit = yieldEvidence?.substantialDeficit === true && complexity !== undefined && !complexity.isGarbled &&
       Number.isFinite(complexity.textCoverage) && complexity.textCoverage >= 0.05 && complexity.textCoverage <= 1;
-    const ocrDecision: AdaptiveOcrDecision = yieldDeficit
+    const baseDecision: AdaptiveOcrDecision = yieldDeficit
       ? {
           authorized: true,
           confidence: 0.8,
@@ -548,7 +548,22 @@ function buildEvidencePages(
             `text-yield:expected-chars=${yieldEvidence!.expectedCharacters}:actual-chars=${yieldEvidence!.actualCharacters}:actual-utf8-bytes=${yieldEvidence!.actualTextBytes}`,
           ],
         }
-      : encodingReadDecision({ authorized: decision.read, confidence: decision.confidence, signals: decision.signals }, encodings);
+      : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
+    // Doppler's encodings may add a read (never remove one); such reads are capped per document (capEncodingReadPages).
+    const withEncoding = encodingReadDecision(baseDecision, encodings);
+    const finished = finishEvidencePage(withEncoding);
+    if (withEncoding === baseDecision) return finished;
+    const declined = finishEvidencePage(baseDecision);
+    return {
+      ...finished,
+      [ENCODING_UNCAPPED]: {
+        page: { ...declined, signals: [...declined.signals, ENCODING_READ_CAPPED_SIGNAL] },
+        noNativeText: (words ?? 0) === 0,
+        unreadable: encodings?.unreadableMathGlyphs ?? 0,
+      },
+    };
+
+    function finishEvidencePage(ocrDecision: AdaptiveOcrDecision): AdaptivePageRoutingEntry {
     // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
     // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
     // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
@@ -579,13 +594,45 @@ function buildEvidencePages(
       signals: [...page.signals, ...ocrDecision.signals, ...(ocrDecision.signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || decision.kind === "garbled-text-layer" ? ["garbled-text"] : [])],
       ocrDecision,
     };
+    }
   });
 }
 
 const UNCAPPED = Symbol("table-leak-uncapped");
+const ENCODING_UNCAPPED = Symbol("encoding-read-uncapped");
+
+/**
+ * At most encodingReadPageCap(pageCount) pages of a document are read because Doppler's encodings alone asked for it
+ * (math only a read recovers, tables drawn as outlines): pages with no native text first, then the most unreadable math
+ * glyphs, then page order. The rest keep the decision they had without the encodings (signal `encoding-read-capped`);
+ * the capped pages are logged.
+ */
+function capEncodingReadPages(pages: AdaptivePageRoutingEntry[], pageCount: number): AdaptivePageRoutingEntry[] {
+  type Uncapped = { page: AdaptivePageRoutingEntry; noNativeText: boolean; unreadable: number };
+  type Capped = AdaptivePageRoutingEntry & { [ENCODING_UNCAPPED]?: Uncapped };
+  const reads = (pages as Capped[])
+    .map((page, index) => ({ index, uncapped: page[ENCODING_UNCAPPED] }))
+    .filter((entry): entry is { index: number; uncapped: Uncapped } => entry.uncapped !== undefined)
+    .sort((a, b) => Number(b.uncapped.noNativeText) - Number(a.uncapped.noNativeText) || b.uncapped.unreadable - a.uncapped.unreadable || a.index - b.index);
+  const cap = encodingReadPageCap(pageCount);
+  const dropped = new Set(reads.slice(cap).map(({ index }) => index));
+  if (dropped.size) {
+    const capped = [...dropped].sort((a, b) => a - b).map((index) => pages[index]!.pageNumber);
+    console.log(`[classify-route] encoding-read cap=${cap} pages=${reads.length} capped=${dropped.size} cappedPages=${capped.slice(0, 50).join(",")}${capped.length > 50 ? ",..." : ""}`);
+  }
+  return (pages as Capped[]).map((page, index) => {
+    const { [ENCODING_UNCAPPED]: uncapped, ...kept } = page;
+    return dropped.has(index) && uncapped ? uncapped.page : kept;
+  });
+}
+
+/** Pages a document may have read on Doppler's encodings alone: the table-leak cap's shape (TABLE_LEAK_PAGE_CAP). */
+export function encodingReadPageCap(pageCount: number): number {
+  return tableLeakPageCap(pageCount);
+}
 
 /** Signals of encoding routing (Doppler math and table encoding facts, DOCSLURP_ENCODING_FACTS_ROUTING). */
-export const ENCODING_NO_TABLE_SIGNAL = "encoding-no-table";
+export const ENCODING_READ_CAPPED_SIGNAL = "encoding-read-capped";
 export const ENCODING_MATH_GRID_SIGNAL = "encoding-math-grid";
 export const ENCODING_RASTER_TABLE_SIGNAL = "encoding-table-raster-candidate";
 export const ENCODING_MATH_READ_SIGNAL = "ocr-authorized:encoding-math-unreadable";
@@ -1153,11 +1200,10 @@ export function classifyAdaptivePage(
   } = {},
 ): AdaptivePageRoutingEntry {
   const routingV2 = options.routingV2 === true;
+  // Doppler's encodings only ADD table routes and reads (council #467): they never settle an unknown grid as "no table" and
+  // never take a grid out of the table count. A ruled table of notation (T/F cells) can read as `math-grid` alone, and a
+  // table of prose cells has no table bit at all.
   const encodings = options.encodings ?? null;
-  // Encodings that name no table at all (complete, not truncated): a ruled grid the walker could not settle is not a table.
-  const encodingsNameNoTable = encodings !== null && encodings.table === "none";
-  // A grid of math glyphs (a matrix) is never a table: its grids leave the table count when no table encoding is named.
-  const tableLayout = options.layout && encodings?.mathGrid === true && encodingsNameNoTable ? { ...options.layout, grids: [] } : options.layout;
   const tableScan = tableScanOf(text, options.tableScans);
   const normalized = text.trim();
   const charCount = normalized.length;
@@ -1245,20 +1291,27 @@ export function classifyAdaptivePage(
     extractorHint = "vision-rescue";
     confidence = 0.72;
     signals.push(encodingTableSignal(encodings));
-  } else if (options.layout?.gridsUnknown === true && !encodingsNameNoTable) {
+  } else if (options.layout?.gridsUnknown === true) {
     // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
-    // path, never a guessed "no table" a document could steer its own pages into. Doppler's encoding facts, when known,
-    // name the table encodings the text layer holds (`encoding-table:*`) or settle that there are none (next branches).
+    // path, never a guessed "no table" a document could steer its own pages into. Doppler's encodings never change that;
+    // a text-layer table bit only names the encoding (`encoding-table:*`).
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = encodings?.table === "text-layer" ? 0.74 : 0.6;
     signals.push("grids-unknown");
     if (encodings?.table === "text-layer") signals.push(encodingTableSignal(encodings));
-  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: tableLayout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
+  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
     signals.push("table-markers");
+  } else if (encodings?.table === "text-layer" && !(options.layout?.grids?.length)) {
+    // A table the text layer holds that no grid or Markdown table showed (rules only across, whitespace columns, shaded
+    // rows, tagged structure): the encodings add the table route.
+    route = "table-heavy";
+    extractorHint = "layout-aware";
+    confidence = 0.7;
+    signals.push(encodingTableSignal(encodings));
   } else if (!routingV2 && chartMarkers >= 2) {
     route = "chart-or-figure";
     extractorHint = "vision-rescue";
@@ -1273,18 +1326,11 @@ export function classifyAdaptivePage(
     signals.push("dense-prose");
   }
   if (encodings) {
-    if (options.layout?.gridsUnknown === true && encodingsNameNoTable) signals.push(ENCODING_NO_TABLE_SIGNAL);
+    // Signals only: the route stays what the page's text and grids made it (an encoding never relabels a page, so it never
+    // reaches the complexity or playbook summaries).
     if (encodings.mathGrid) signals.push(ENCODING_MATH_GRID_SIGNAL);
     if (encodings.rasterTableCandidate) signals.push(ENCODING_RASTER_TABLE_SIGNAL);
-    if (encodings.math !== "none") {
-      signals.push(`encoding-math:${encodings.math}`);
-      // Typeset math the text layer, its source or a read holds: label the page a formula page when nothing else did.
-      if (route === "straightforward-text") {
-        route = "formula-heavy";
-        extractorHint = "syntax-preserving";
-        confidence = Math.max(confidence, 0.7);
-      }
-    }
+    if (encodings.math !== "none") signals.push(`encoding-math:${encodings.math}`);
   }
 
   if (digitCount > Math.max(12, charCount * 0.18)) {

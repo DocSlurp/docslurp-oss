@@ -35,7 +35,7 @@ import { currentPerfContext } from "../lib/perf-context.js";
 import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout, sandboxedPdfPageFactsMathRead } from "./sandboxed-pdf-page-facts.js";
 import { settleUnknownGrids, withEncodingRoutes } from "../lib/doppler-page-facts-layout.js";
-import type { DopplerPageFactsFamily } from "../lib/doppler-page-facts.js";
+import { dopplerPageFactsMode, type DopplerPageFactsFamily } from "../lib/doppler-page-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -839,9 +839,12 @@ function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
       filled += 1;
     }
     const { layout: gridsSettled, fromFacts, unknown } = settleUnknownGrids(base, facts);
-    // Doppler's math and table encodings for each page (absent where unknown); classify-route reads them only with
-    // DOCSLURP_ENCODING_FACTS_ROUTING on.
-    const { layout } = withEncodingRoutes(gridsSettled, facts, { mathRead: sandboxedPdfPageFactsMathRead(job) });
+    // Doppler's math and table encodings for each page (absent where unknown), only in DOCSLURP_DOPPLER_PAGE_FACTS=use:
+    // `store` never steers routing. classify-route then reads them only with DOCSLURP_ENCODING_FACTS_ROUTING on, and they
+    // can only add table routes and reads.
+    const { layout } = dopplerPageFactsMode() === "use"
+      ? withEncodingRoutes(gridsSettled, facts, { mathRead: sandboxedPdfPageFactsMathRead(job) })
+      : { layout: gridsSettled };
     settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts, unknown, filled, walker: walkerPages(reported) };
   }
   settledLayouts.set(job, settled);

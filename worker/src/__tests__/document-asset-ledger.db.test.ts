@@ -600,6 +600,12 @@ describe("routing page facts go through the page-facts write (MEDIUM-6)", () => 
       { page_number: 1, text_layer: "mixed", math_bits: "4097", table_bits: "2147483648", encoding_counts: "4503599627370495" },
       { page_number: 2, text_layer: null, math_bits: null, table_bits: null, encoding_counts: null },
     ]);
+    // Another run's write without words clears them: they described facts that run did not produce.
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-b", pageNumber: 1, textLayer: "visible" }]);
+    expect(await sql`select math_bits, table_bits, encoding_counts from document_page_facts where document_id = 'doc-a' and page_number = 1`).toEqual([
+      { math_bits: null, table_bits: null, encoding_counts: null },
+    ]);
+    await store.upsertPageFacts(rows.map((row) => ({ ...row, runId: "run-b" })));
     // The table refuses a partial set and an out-of-range word.
     await expect(sql`update document_page_facts set math_bits = null where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();
     await expect(sql`update document_page_facts set table_bits = 4294967296 where document_id = 'doc-a' and page_number = 1`).rejects.toThrow();
