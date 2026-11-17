@@ -11,8 +11,9 @@ export class DocumentNotFoundError extends Error {
  * deletion: a caller that treats a missing document as deleted must fail loudly instead, as nothing it may read was found.
  */
 export class DocumentOutOfScopeError extends Error {
-  constructor(readonly documentId: string, readonly scope: "run" | "org") {
-    super(`document ${documentId} is outside the caller's ${scope} scope`);
+  /** `mismatch`: the scope predicate the row failed (its organization, its run, or both). */
+  constructor(readonly documentId: string, readonly mismatch: "org" | "run" | "org and run") {
+    super(`document ${documentId} is outside the caller's scope (${mismatch} mismatch)`);
     this.name = "DocumentOutOfScopeError";
   }
 }

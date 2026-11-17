@@ -1,10 +1,10 @@
-import type { JSONValue, PendingQuery, Row, Sql } from "postgres";
+import type { PendingQuery, Row, Sql } from "postgres";
 
 import type { EmbeddingReuseRef } from "../embeddings/embedding-reuse.js";
 import type { PageFactUpsert } from "../pipeline/page-facts.js";
 import type { DocumentRowScope } from "./document-records.js";
 import { DocumentNotFoundError, DocumentOutOfScopeError } from "./missing-document.js";
-import { batchedRows, sqlJson } from "./sql-helpers.js";
+import { batchedRows, jsonRowsText, wellFormed } from "./sql-helpers.js";
 import { pipelineTransaction } from "./transaction-pipeline.js";
 
 /** The document content port stages write through (pipeline CheckpointStore.content). */
@@ -70,7 +70,7 @@ export class PostgresDocumentContent {
         )
         select r.id, r.document_id, r.run_id, r.user_id, r.chunk_index, r.text, r.heading_path, r.page_number, r.token_estimate,
           coalesce(r.metadata, '{}'::jsonb), r.content_hash, r.pipeline_version
-        from jsonb_to_recordset(${this.toJson(batch)}::jsonb) as r(
+        from jsonb_to_recordset(${jsonRowsText(batch)}::text::jsonb) as r(
           id text, document_id text, run_id text, user_id text, chunk_index integer, text text, heading_path text[],
           page_number integer, token_estimate integer, metadata jsonb, content_hash text, pipeline_version text
         )
@@ -88,6 +88,8 @@ export class PostgresDocumentContent {
           metadata = excluded.metadata,
           content_hash = excluded.content_hash,
           pipeline_version = excluded.pipeline_version
+        -- An id collision with another document's row never overwrites it.
+        where document_chunks.document_id = excluded.document_id
       `);
     }
   }
@@ -143,7 +145,11 @@ export class PostgresDocumentContent {
    * any write that moves a row to another run clears them unless it sets them.
    */
   async upsertPageFacts(scope: RunScope, rows: readonly PageFactUpsert[]): Promise<void> {
-    rows = rows.filter((row) => row.runId === scope.runId);
+    const own = rows.filter((row) => row.runId === scope.runId);
+    if (own.length < rows.length) {
+      console.warn(`[page-facts] dropped rows of another run run=${scope.runId} dropped=${rows.length - own.length}`);
+    }
+    rows = own;
     const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
     const vision = rows.filter((row) => row.visionStatus !== undefined);
     const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null || row.mathBits != null);
@@ -156,7 +162,7 @@ export class PostgresDocumentContent {
       await this.sql`
         insert into document_page_facts (document_id, page_number, run_id, text_bytes, word_count, image_count, facts_source)
         select r.document_id, r.page_number, r.run_id, r.text_bytes, r.word_count, r.image_count, r.facts_source
-        from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
+        from jsonb_to_recordset(${jsonRowsText(payload)}::text::jsonb) as r(
           document_id text, page_number integer, run_id text, text_bytes integer, word_count integer,
           image_count integer, facts_source text
         )
@@ -184,7 +190,7 @@ export class PostgresDocumentContent {
       await this.sql`
         insert into document_page_facts (document_id, page_number, run_id, vision_status, vision_text_bytes)
         select r.document_id, r.page_number, r.run_id, r.vision_status, r.vision_text_bytes
-        from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
+        from jsonb_to_recordset(${jsonRowsText(payload)}::text::jsonb) as r(
           document_id text, page_number integer, run_id text, vision_status text, vision_text_bytes integer
         )
         join documents d on d.id = r.document_id and d.org_id = ${scope.orgId} and d.run_id = ${scope.runId}
@@ -214,7 +220,7 @@ export class PostgresDocumentContent {
       await this.sql`
         insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class, math_bits, table_bits, encoding_counts)
         select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class, r.math_bits, r.table_bits, r.encoding_counts
-        from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
+        from jsonb_to_recordset(${jsonRowsText(payload)}::text::jsonb) as r(
           document_id text, page_number integer, run_id text, text_layer text, scan_class text, math_bits bigint, table_bits bigint,
           encoding_counts bigint
         )
@@ -268,7 +274,7 @@ export class PostgresDocumentContent {
       await this.scopedWrite(scope, (inScope) => this.sql`
         insert into document_pages (id, document_id, run_id, user_id, page_number, text, token_estimate)
         select r.id, r.document_id, r.run_id, r.user_id, r.page_number, r.text, r.token_estimate
-        from jsonb_to_recordset(${this.toJson(batch)}::jsonb) as r(
+        from jsonb_to_recordset(${jsonRowsText(batch)}::text::jsonb) as r(
           id text, document_id text, run_id text, user_id text, page_number integer, text text, token_estimate integer
         )
         where ${inScope}
@@ -278,6 +284,8 @@ export class PostgresDocumentContent {
             page_number = excluded.page_number,
             text = excluded.text,
             token_estimate = excluded.token_estimate
+        -- An id collision with another document's row never overwrites it.
+        where document_pages.document_id = excluded.document_id
       `);
     }
   }
@@ -387,7 +395,7 @@ export class PostgresDocumentContent {
       await this.scopedWrite(scope, (inScope) => this.sql`
         insert into document_propositions (id, document_id, run_id, user_id, chunk_index, text, source_paragraph, token_estimate)
         select r.id, r.document_id, r.run_id, r.user_id, r.chunk_index, r.text, r.source_paragraph, r.token_estimate
-        from jsonb_to_recordset(${this.toJson(batch)}::jsonb) as r(
+        from jsonb_to_recordset(${jsonRowsText(batch)}::text::jsonb) as r(
           id text, document_id text, run_id text, user_id text, chunk_index integer, text text, source_paragraph text,
           token_estimate integer
         )
@@ -414,7 +422,7 @@ export class PostgresDocumentContent {
         ${summary.documentId},
         ${summary.runId},
         ${summary.userId},
-        ${summary.summary}
+        ${wellFormed(summary.summary)}
       where ${inScope}
       on conflict (id) do nothing
     `);
@@ -435,18 +443,20 @@ export class PostgresDocumentContent {
       select exists (select 1 from in_scope) as in_scope
     `;
     if (row?.in_scope) return;
-    const [exists] = await this.sql<{ one: number }[]>`select 1 as one from documents where id = ${scope.documentId} limit 1`;
-    if (exists) {
-      console.error(`[document-content] write out of scope document=${scope.documentId} run=${scope.runId}`);
-      throw new DocumentOutOfScopeError(scope.documentId, "run");
+    // Which predicate failed, as two booleans: no column of another tenant's row leaves the database.
+    const [found] = await this.sql<{ org_ok: boolean; run_ok: boolean }[]>`
+      select coalesce(org_id = ${scope.orgId}, false) as org_ok, coalesce(run_id = ${scope.runId}, false) as run_ok
+      from documents where id = ${scope.documentId} limit 1`;
+    if (found) {
+      const mismatch = !found.org_ok && !found.run_ok ? "org and run" as const : !found.org_ok ? "org" as const : "run" as const;
+      console.error(`[document-content] write out of scope document=${scope.documentId} run=${scope.runId} mismatch=${mismatch}`);
+      throw new DocumentOutOfScopeError(scope.documentId, mismatch);
     }
     throw new DocumentNotFoundError(scope.documentId);
   }
 
 
-  private toJson(value: unknown) {
-    return sqlJson(this.sql, value);
-  }
+
 }
 
 /** The document's rows, only while the document is the organization's and the run's: `<column> in (that document)`. */

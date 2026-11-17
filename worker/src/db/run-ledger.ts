@@ -398,7 +398,7 @@ export class PostgresRunLedger implements CheckpointStore {
       const [exists] = await this.sql<{ one: number }[]>`select 1 as one from documents where id = ${documentId} limit 1`;
       if (exists) {
         const kind = "runId" in scope ? "run" as const : "org" as const;
-        console.error(`[run-ledger] document out of scope document=${documentId} scope=${kind}`);
+        console.error(`[run-ledger] document out of scope document=${documentId} mismatch=${kind}`);
         throw new DocumentOutOfScopeError(documentId, kind);
       }
       throw new DocumentNotFoundError(documentId);
@@ -1941,7 +1941,8 @@ export class PostgresRunLedger implements CheckpointStore {
           source.purged_at is not null as source_purged,
           source_run.artifacts_purged_at is not null as source_artifacts_purged
         from documents d
-        left join documents source on source.id = d.reused_from_document_id
+        -- The source must be the same organization's document: another organization's is no source at all.
+        left join documents source on source.id = d.reused_from_document_id and source.org_id = d.org_id
         left join project_runs source_run on source_run.id = source.run_id
         where d.run_id = ${runId}
         order by d.created_at, d.id

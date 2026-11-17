@@ -42,6 +42,8 @@ beforeAll(async () => {
              ('d2', 'o2', 'u2', 'w2', 'r2', 'b.pdf', 'application/pdf', 'k2', 'processing', 2);
     insert into document_chunks(id, document_id, run_id, user_id, chunk_index, text) values ('d1-000', 'd1', 'r1', 'u1', 0, 'earnings beat');
     insert into document_pages(id, document_id, run_id, user_id, page_number, text) values ('d1-page-0001', 'd1', 'r1', 'u1', 1, 'page one');
+    insert into document_chunks(id, document_id, run_id, user_id, chunk_index, text) values ('d2-000', 'd2', 'r2', 'u2', 0, 'other org text');
+    insert into document_pages(id, document_id, run_id, user_id, page_number, text) values ('d2-page-0001', 'd2', 'r2', 'u2', 1, 'other org page');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -148,5 +150,45 @@ describe("graph and document loads", () => {
     expect(await store.graph.loadDocumentGraphChunks("w2", "d1")).toEqual([]);
     await expect(store.loadDocument("d1", { orgId: "o2" })).rejects.toBeInstanceOf(DocumentOutOfScopeError);
     await expect(store.loadDocument("d1", { runId: "r2" })).rejects.toBeInstanceOf(DocumentOutOfScopeError);
+  }, 60_000);
+});
+
+describe("scope errors name the predicate the row failed", () => {
+  it("org, run, or both; a null organization is an org mismatch", async () => {
+    const mismatch = async (scope: { orgId: string | null; runId: string; documentId: string }) =>
+      (await store.content.insertSummary(scope, { id: "m-s", documentId: scope.documentId, runId: scope.runId, userId: "u1", summary: "x" })
+        .catch((error: unknown) => error)) as DocumentOutOfScopeError;
+    expect((await mismatch({ orgId: "o2", runId: "r1", documentId: "d1" })).mismatch).toBe("org");
+    expect((await mismatch({ orgId: "o1", runId: "r1b", documentId: "d1" })).mismatch).toBe("run");
+    expect((await mismatch({ orgId: "o2", runId: "r2", documentId: "d1" })).mismatch).toBe("org and run");
+    expect((await mismatch({ orgId: null, runId: "r1", documentId: "d1" })).mismatch).toBe("org");
+    expect((await mismatch({ orgId: "o2", runId: "r2", documentId: "d1" })).message).toMatch(/org and run mismatch/);
+  }, 60_000);
+});
+
+describe("an id collision with another document's row never overwrites it", () => {
+  it("chunk and page upserts leave the other document's rows as they were", async () => {
+    await store.content.insertChunks(D1, [{ ...chunk("d2-000", "r1", "overwrite attempt") }]);
+    await store.content.insertPages(D1, [{ id: "d2-page-0001", documentId: "d1", runId: "r1", userId: "u1", pageNumber: 1, text: "overwrite attempt", tokenEstimate: 1 }]);
+    expect((await db.query(`select document_id, run_id, text from document_chunks where id = 'd2-000'`)).rows)
+      .toEqual([{ document_id: "d2", run_id: "r2", text: "other org text" }]);
+    expect((await db.query(`select document_id, run_id, text from document_pages where id = 'd2-page-0001'`)).rows)
+      .toEqual([{ document_id: "d2", run_id: "r2", text: "other org page" }]);
+  }, 60_000);
+});
+
+describe("lone UTF-16 surrogates are stored as U+FFFD, as the text protocol stored them", () => {
+  it("chunks, pages, propositions and the summary accept \"ab\\ud83dcd\"", async () => {
+    const broken = "ab\ud83dcd";
+    const fixed = "ab\ufffdcd";
+    await store.content.insertChunks(D1, [{ ...chunk("d1-sur", "r1", broken), headingPath: [broken], metadata: { rawText: broken, nested: [broken] } }]);
+    await store.content.insertPages(D1, [{ id: "d1-page-sur", documentId: "d1", runId: "r1", userId: "u1", pageNumber: 7, text: broken, tokenEstimate: 1 }]);
+    await store.content.insertPropositions(D1, [{ id: "d1-p-sur", documentId: "d1", runId: "r1", userId: "u1", chunkIndex: 0, text: broken, sourceParagraph: broken, tokenEstimate: 1 }]);
+    await store.content.insertSummary(D1, { id: "d1-s-sur", documentId: "d1", runId: "r1", userId: "u1", summary: broken });
+    expect((await db.query(`select text, heading_path, metadata from document_chunks where id = 'd1-sur'`)).rows)
+      .toEqual([{ text: fixed, heading_path: [fixed], metadata: { rawText: fixed, nested: [fixed] } }]);
+    expect((await db.query(`select text from document_pages where id = 'd1-page-sur'`)).rows).toEqual([{ text: fixed }]);
+    expect((await db.query(`select text, source_paragraph from document_propositions where id = 'd1-p-sur'`)).rows).toEqual([{ text: fixed, source_paragraph: fixed }]);
+    expect((await db.query(`select summary from document_summaries where id = 'd1-s-sur'`)).rows).toEqual([{ summary: fixed }]);
   }, 60_000);
 });

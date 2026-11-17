@@ -46,3 +46,24 @@ export class TableExistence {
     return exists;
   }
 }
+
+/**
+ * The value with every string well formed: a lone UTF-16 surrogate becomes U+FFFD, as the text protocol stores it (jsonb
+ * rejects `\ud83d`). Arrays and plain objects are copied; other values are returned as they are.
+ */
+export function wellFormed<T>(value: T): T {
+  if (typeof value === "string") return (value as unknown as { toWellFormed(): string }).toWellFormed() as T;
+  if (Array.isArray(value)) return value.map((item) => wellFormed(item)) as T;
+  if (value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [wellFormed(key), wellFormed(item)])) as T;
+  }
+  return value;
+}
+
+/**
+ * Rows as one JSON text for a `${text}::text::jsonb` parameter (a text parameter: a jsonb one would be serialised again) (jsonb_to_recordset): strings made well formed, serialised once.
+ * Undefined fields drop out, as JSON does.
+ */
+export function jsonRowsText(rows: readonly unknown[]): string {
+  return JSON.stringify(wellFormed(rows));
+}
