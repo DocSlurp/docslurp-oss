@@ -1,6 +1,6 @@
 import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
-import type { PreloadedRunState } from "../db/store.js";
+import type { PreloadedRunState } from "../db/run-ledger.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
 import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
 import { noteRunMilestone, noteRunOutcome, workerStartKind } from "./run-milestones.js";

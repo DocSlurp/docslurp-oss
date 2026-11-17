@@ -114,7 +114,7 @@ describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/pa
       // Log field names only.
       "sandbox/source-integrity.ts": /source_key/,
       // Raw document rows: the loader, cleanup, retention, exports (download original) and vector relocation metadata.
-      "db/store.ts": /source_key/,
+      "db/run-ledger.ts": /source_key/,
       "db/document-records.ts": /source_key/,
       "db/maintenance.ts": /source_key/,
       "db/superseded-purge.ts": /source_key/,

@@ -39,7 +39,7 @@ export interface StageOutput {
   /** Set when the stage ran with readControlState: the run's pause/cancel request at its completion checkpoint. */
   controlRequested?: boolean;
   /** In-process only (a stage group's next stage); never part of an activity result. */
-  preloaded?: import("../db/store.js").PreloadedRunState;
+  preloaded?: import("../db/run-ledger.js").PreloadedRunState;
 }
 
 export interface UsageSummary {

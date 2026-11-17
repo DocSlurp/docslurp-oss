@@ -21,7 +21,7 @@ import {
 
 /**
  * The ports a run's stages write through, bound to every loaded state (WorkflowState.bindStore). Run and stage checkpoints
- * are the run ledger's own (db/store.ts); each other concern is a required port owned by its module, so a bound state never
+ * are the run ledger's own (db/run-ledger.ts); each other concern is a required port owned by its module, so a bound state never
  * probes for a capability and never skips a write because a method is missing. A state without a store (unit tests, a page
  * task that must not flush a stale run snapshot) has none of them; every caller decides explicitly what that means.
  */
@@ -187,7 +187,7 @@ export class WorkflowState {
   /**
    * Set while this state runs one document shard of a stage beside other
    * shards: what the run row already holds from this state, so progress
-   * checkpoints write only this shard's additions (see Store.writeProgress).
+   * checkpoints write only this shard's additions (see PostgresRunLedger.writeProgress).
    */
   shard: { artifacts: Record<string, string> } | null = null;
 

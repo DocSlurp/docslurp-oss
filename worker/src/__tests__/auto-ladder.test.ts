@@ -41,7 +41,7 @@ function pdf(pageCount: number, id = "doc-1"): Document {
 }
 
 function runState(document: Document, pipeline: Record<string, unknown> = {}): WorkflowState {
-  // As the worker loads a run (store.ts): the ladder limits applied.
+  // As the worker loads a run (db/run-ledger.ts): the ladder limits applied.
   const state = WorkflowState.create({
     id: "run-1", orgId: "org-1", projectId: "proj-1", userId: "user-1", spentCents: 0, storagePrefix: "user-1/run-1",
     pipeline: applyLadderLimits({ ...defaultPipelineFeatures, privacyMode: "standard", ...pipeline } as typeof defaultPipelineFeatures),

@@ -3,8 +3,8 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { chartExportDefaultsWarnings } from "@docslurp/shared";
-import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
-import { Store } from "../db/store.js";
+import { chartExportFreeVmCap } from "./chart-export-free-vm-cap.js";
+import { Store } from "./store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 

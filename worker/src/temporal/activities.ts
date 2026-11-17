@@ -398,7 +398,7 @@ export function createActivities(deps: ActivityDependencies) {
             }
             // The previous stage's completion checkpoint already read the control state.
             let controlRequested: boolean | undefined;
-            let preloaded: import("../db/store.js").PreloadedRunState | undefined;
+            let preloaded: import("../db/run-ledger.js").PreloadedRunState | undefined;
             for (const [position, stageName] of input.stageNames.entries()) {
               if (position < resumeAt) continue;
               if (position > resumeAt && input.yieldToControl && (controlRequested ?? await store.hasRunControlRequest(input.runId))) {

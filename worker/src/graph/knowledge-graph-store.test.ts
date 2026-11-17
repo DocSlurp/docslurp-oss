@@ -4,9 +4,9 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultGraphConfig, graphConfigFingerprint, normalizePipelineFeatures } from "@docslurp/shared";
 
-import { replaceDocumentGraph } from "../graph/graph-store.js";
-vi.mock("../graph/graph-store.js", async (original) => {
-  const actual = await original<typeof import("../graph/graph-store.js")>();
+import { replaceDocumentGraph } from "./graph-store.js";
+vi.mock("./graph-store.js", async (original) => {
+  const actual = await original<typeof import("./graph-store.js")>();
   return { ...actual, replaceDocumentGraph: vi.fn(actual.replaceDocumentGraph) };
 });
 
@@ -20,9 +20,9 @@ import type { CommandRunner } from "../tools/runner.js";
 import { Store } from "../db/store.js";
 import { Maintenance } from "../db/maintenance.js";
 import { refreshKnowledgeGraphNodes } from "../db/superseded-purge.js";
-import { refreshProjectCommunities } from "../graph/communities.js";
-import { graphNodeKey, type DocumentGraph } from "../graph/extract.js";
-import { countGraphJobDocuments, runGraphJobs } from "../graph/rebuild-job.js";
+import { refreshProjectCommunities } from "./communities.js";
+import { graphNodeKey, type DocumentGraph } from "./extract.js";
+import { countGraphJobDocuments, runGraphJobs } from "./rebuild-job.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 import type { ArtifactStore } from "../tools/storage.js";

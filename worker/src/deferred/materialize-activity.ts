@@ -95,7 +95,7 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
     parseManagedPipelineOverrides(source.managed, `project of document ${documentId}`),
     label,
   );
-  // The Auto ladder's limits apply to query-time reads as to ingest (store.ts).
+  // The Auto ladder's limits apply to query-time reads as to ingest (db/run-ledger.ts).
   return tighten({ ...run, pipeline: applyDefaultVisionOverride(managed.pipeline) });
 }
 
