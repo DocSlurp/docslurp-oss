@@ -110,7 +110,7 @@ describe("chat MCP agent with the real SDK loop", () => {
     ]));
   });
 
-  it("starts the agent system prompt with the org-keyed salt: same org same prefix, other orgs differ", async () => {
+  it("sends every org the same leading system text (shared fixed rules, a provider cache prefix)", async () => {
     const firstSystemLine = async (orgId: string) => {
       const model = new MockLanguageModelV4({ doStream: [step(false)] });
       mocks.provider.mockReturnValue(model);
@@ -119,10 +119,9 @@ describe("chat MCP agent with the real SDK loop", () => {
       const text = typeof system?.content === "string" ? system.content : JSON.stringify(system?.content);
       return text.split("\n")[0]!;
     };
-    const a1 = await firstSystemLine("org-a"), a2 = await firstSystemLine("org-a"), b = await firstSystemLine("org-b");
-    expect(a1).toMatch(/^Workspace [0-9a-f]{16}\.$/);
-    expect(a2).toBe(a1);
-    expect(b).not.toBe(a1);
+    const a = await firstSystemLine("org-a"), b = await firstSystemLine("org-b");
+    expect(a).not.toMatch(/^Workspace /);
+    expect(b).toBe(a);
   });
 
   it("preserves caller system history while keeping retrieved content in tool messages", async () => {

@@ -64,16 +64,16 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - Never widen a default scope. A query, cache key or storage key without an explicit tenant scope is a bug.
 - Every boundary change ships with negative tests: cross-tenant access, a revoked or wrong-scope key, and a malicious or oversized file.
 
-**Organization isolation (mandatory):** the organization is the only tenant scope. Nothing computed from or for one organization may be served to, reused by or observed by another.
+**Organization isolation (mandatory):** the organization is the only tenant scope. Nothing computed from or for one organization may be served to or reused by another.
 
 - Every cache, memo, dedup or reuse key and every storage key includes the organization id, or an id (project, run, document, API key, or user, since a user belongs to one organization) that belongs to exactly one organization and is used only after its access was checked. Build new cache and reuse keys with `orgScopedCacheKey` from `@docslurp/shared`, which throws without an organization; never fall back to a shared or null scope.
 - No cross-organization dedup or reuse of any customer-derived value: uploaded bytes, renders, page images, OCR or vision output, embeddings, model outputs, figures, exports, VM or sandbox state. Identical bytes from two organizations are stored and processed twice.
 - Reuse lookups by content hash (embeddings, renders, extraction checkpoints) filter by organization in the query itself; a hash match is never proof of ownership.
-- Provider prompt caches may share only tenant-free prefixes (fixed system prompts, tool schemas). Prompts that carry tenant content start with the per-organization salt (`@docslurp/shared/org-prompt-salt`, the only salt helper) before any tenant text; a request that cannot carry a leading line (no system role, image first) sends it as the endpoint's cache salt (`cache_salt`). Where the salt is model input to a calibrated or classifying model, measure answers with and without it before shipping. Any provider cache key or user id sent with tenant content is per organization and never the raw org id. Open gaps are listed in `TODO.md`.
-- Shared in-memory caches holding tenant-derived values give each organization a bounded partition (`OrgPartitionedTtlLru`, or per-org caps as in the search response cache): a write evicts only its own organization's entries (or is not kept), never another's, and total memory stays bounded. Older caches not yet partitioned are listed in `TODO.md`.
+- Isolation measures must not cost user-visible latency or throughput; performance is a priority. Put the organization in the key or in the same query's predicate; do not add round trips, locks or lookups per request for isolation alone.
+- Accepted, by owner decision (2026-11-16): provider prompt prefix caches shared across organizations (no per-organization prompt salt or `cache_salt`), one shared bounded in-memory LRU per cache with the organization in the key (cross-organization eviction allowed, no per-organization partitions or caps), and timing or volume side channels. Do not reintroduce them without the owner.
 - Cache statistics shown to a caller (hits, sizes, timings) are that organization's own, never process-wide.
 - A new module-level cache map must be classified in `server/src/__tests__/org-isolation-caches.test.ts`; caches the test cannot see (class fields on long-lived instances, Sets, database tables and storage keyed by content) get the same review in the pull request. Any new cache or reuse path ships with a negative test: organization B never gets organization A's entry with identical inputs, and an unscoped key is refused.
-- Reviewers check this rule on every change that adds or changes a cache, a reuse or dedup path, a storage key, a prompt layout or a tenant query.
+- Reviewers check this rule on every change that adds or changes a cache, a reuse or dedup path, a storage key or a tenant query.
 
 **Isolation for untrusted files:**
 
