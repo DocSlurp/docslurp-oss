@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const query = vi.hoisted(() => vi.fn());
 const release = vi.hoisted(() => vi.fn());
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query, connect: async () => ({ query, release }) } }));
-vi.mock("../lib/request-actor.js", () => ({ resolveBetterAuthSessionActor: vi.fn(async () => null) }));
+vi.mock("../lib/request-actor.js", () => ({ resolveBetterAuthSessionActor: vi.fn(async () => null), hasBetterAuthSession: vi.fn(async () => false) }));
 import { mcpOAuthRoutes, mcpOAuthMetadataRoutes } from "../routes/mcp-oauth.js";
 import { parseScopes, pkceChallenge, redirectMatches, validRedirect, validateMcpToken } from "../services/mcp-oauth.js";
 import { bearerToken, mcpBearerChallenge } from "../middleware/mcp-auth.js";
@@ -88,6 +88,15 @@ describe("MCP OAuth", () => {
       const page = await app.request(`${browser}/oauth/mcp/device`);
       expect(page.status).toBe(302);
       expect(page.headers.get("location")).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
+      expect(page.headers.get("cache-control")).toBe("no-store");
+      // A session the app accepts but this page refuses (second factor pending): a page, not a redirect, or the two
+      // would bounce the browser between them forever.
+      const { hasBetterAuthSession } = await import("../lib/request-actor.js");
+      vi.mocked(hasBetterAuthSession).mockResolvedValueOnce(true);
+      const pending = await app.request(`${browser}/oauth/mcp/device`);
+      expect(pending.status).toBe(200);
+      expect(pending.headers.get("location")).toBeNull();
+      expect(await pending.text()).toContain("Finish signing in first");
     });
     it("keeps the issuer and every discovery endpoint on the MCP origin", async () => {
       const metadata = await (await app.request(`${url}/.well-known/oauth-authorization-server`)).json() as Record<string, unknown>;
