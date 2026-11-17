@@ -57,9 +57,13 @@ export async function safeErrorResponse(response: Response, requestId?: string, 
           body = { jsonrpc: "2.0", id: typeof original.id === "string" || typeof original.id === "number" ? original.id : null,
             error: { code: original.error.code, message } };
         }
-        const oauthErrors = new Set(["invalid_request", "invalid_client", "invalid_grant", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "access_denied", "server_error", "temporarily_unavailable", "unsupported_response_type"]);
+        const oauthErrors = new Set(["invalid_request", "invalid_client", "invalid_grant", "unauthorized_client", "unsupported_grant_type", "invalid_scope", "access_denied", "server_error", "temporarily_unavailable", "unsupported_response_type",
+          // RFC 8628 device polling, RFC 8707 audience, RFC 7591 registration: clients branch on these codes.
+          "authorization_pending", "slow_down", "expired_token", "invalid_target", "invalid_client_metadata", "invalid_redirect_uri"]);
         if (typeof original.error === "string" && oauthErrors.has(original.error)) {
           body = { error: original.error, error_description: message };
+          // The one machine-readable reason the token endpoint publishes (a refresh that lost a rotation race).
+          if (original.docslurp_reason === "refresh_token_just_rotated") body.docslurp_reason = original.docslurp_reason;
         }
         if (Array.isArray(original.issues)) {
           // Zod reports `path` as an array; keep the field names (never the messages) so clients can fix the request.
