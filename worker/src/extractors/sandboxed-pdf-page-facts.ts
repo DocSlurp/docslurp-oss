@@ -25,8 +25,8 @@ const accepted = new WeakMap<Job, { facts: DopplerPageFactsDocument; layout: Map
  * page count. Never throws on provider input: unusable facts are dropped with a warning.
  *
  * `glyphs`: the run read math (`pdftomarkdown --math`, so its pdftotext ran with `-glyphs`). Doppler's walker-parity fields
- * (thin-rule grid counts, centred words inside) hold only for a run without `-glyphs`, so they are stripped and the facts
- * map as an older build's would. The single-file guest never passes `--math`; the batch guest does when the job asks.
+ * (thin-rule grid counts, centred words inside) hold only for a run without `-glyphs`, so they are stripped with the whole
+ * grid list: the page's grids are unknown (the table path), never an older build's "no table". The single-file guest never passes `--math`; the batch guest does when the job asks.
  */
 export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: number, env: NodeJS.ProcessEnv = process.env, options: { glyphs?: boolean } = {}): void {
   accepted.delete(job);

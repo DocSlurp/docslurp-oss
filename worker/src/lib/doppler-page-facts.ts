@@ -665,12 +665,10 @@ function vectors(value: unknown): DopplerVectorFacts | undefined {
   if (facts.unlistedRuledGrids === undefined && facts.grids?.some((g) => g.hRules !== undefined)) return undefined;
   // A grid's distinct lines are some of the page's own rules (thin rules are rules; boxes are not): more lines than the
   // page has rules contradicts them. Under `-glyphs` (pdftomarkdown --math) thin stencil masks are rules the page count
-  // leaves out, so this is also what a math run can write: the thin-rule counts are dropped (an older build's reading),
-  // and the rest of the family stands.
-  if (facts.grids?.some((g) => g.hRules !== undefined && (g.hRules > facts.hRules || g.vRules! > facts.vRules))) {
-    delete facts.unlistedRuledGrids;
-    facts.grids = facts.grids.map(({ hRules: _h, vRules: _v, outerSides: _o, connected: _c, ...g }) => g);
-  }
+  // leaves out, so this is also what a math run can write. Its grid list is not the walker's, and reading it as an older
+  // build's could turn a table into "no table" (a one-column grid reads as `[]`): the whole list goes, so the page's grids
+  // are unknown (the table path stays open), and the rest of the family stands.
+  if (facts.grids?.some((g) => g.hRules !== undefined && (g.hRules > facts.hRules || g.vRules! > facts.vRules))) dropGridList(facts);
   return facts;
 }
 
@@ -885,11 +883,21 @@ export function validateDopplerPage(value: unknown, pageCount: number): DopplerP
   return out;
 }
 
+/** Drop a vectors family's grid list (grids, its truncation flag, unlisted walker grids): the page's grids become unknown. */
+function dropGridList(vectors: DopplerVectorFacts): void {
+  delete vectors.grids;
+  delete vectors.gridsTruncated;
+  delete vectors.unlistedRuledGrids;
+}
+
 /**
- * The facts without Doppler #44's walker-parity fields (each grid's thin-rule counts, `unlistedRuledGrids`, and images'
- * centred word counts). Doppler vouches for them only when facts and Markdown come from one `pdftotext -bbox-layout -rules`
- * run without `-glyphs`; `pdftomarkdown --math` adds `-glyphs`, which turns thin stencil masks into rules. A caller that
- * asked for math strips them: the page then maps as a build without them would (grids unknown, whole-box word counts).
+ * The facts of a `-glyphs` run without what only a run without `-glyphs` vouches for: Doppler #44's walker-parity fields
+ * (images' centred word counts) and the whole grid list. Doppler vouches for grids only when facts and Markdown come from
+ * one `pdftotext -bbox-layout -rules` run without `-glyphs`; `pdftomarkdown --math` adds `-glyphs`, which turns thin
+ * stencil masks into rules, so its grids are neither the walker's nor an older build's. Reading them as an older build's
+ * would turn a one-column grid into "no table" (council #467), so they go, and the page's grids map as unknown (the table
+ * path stays open). The page's rule counts stay: `-glyphs` only adds rules, so too few of them still proves no grid.
+ * The result re-serializes without the list (dopplerPageFactsJsonl), so a served math result cannot bring it back.
  * Returns a copy; the input is not changed.
  */
 export function withoutWalkerParityFacts<T extends Pick<DopplerPageFactsDocument, "pages">>(facts: T): T {
@@ -897,8 +905,9 @@ export function withoutWalkerParityFacts<T extends Pick<DopplerPageFactsDocument
   for (const [number, page] of facts.pages) {
     const copy: DopplerPageFacts = { ...page };
     if (page.vectors) {
-      const { unlistedRuledGrids: _u, ...vectors } = page.vectors;
-      copy.vectors = { ...vectors, ...(vectors.grids ? { grids: vectors.grids.map(({ hRules: _h, vRules: _v, outerSides: _o, connected: _c, ...g }) => g) } : {}) };
+      const vectors = { ...page.vectors };
+      dropGridList(vectors);
+      copy.vectors = vectors;
     }
     if (page.images?.items) {
       copy.images = { ...page.images, items: page.images.items.map(({ visibleWordsCentredInside: _a, invisibleWordsCentredInside: _b, ...item }) => item) };

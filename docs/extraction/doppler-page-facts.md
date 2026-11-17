@@ -167,8 +167,11 @@ context pages), and the run-wide rule budget and any later cross-reference rebui
 Doppler withholds the counts in those cases, so they come out unknown. What remains is Doppler's documented residual: an
 older `/Prev` section read lazily, which neither run can see. `pdftomarkdown --math` adds
 `-glyphs`, which turns thin stencil masks into rules, so facts from a math batch (`DOCSLURP_FIRST_PASS_MATH=on` and a
-project that did not opt out of math) lose the walker-parity fields when they are accepted (`withoutWalkerParityFacts`) and
-map as an older build's would. Their math and table encoding words stand: they describe the PDF, not the conversion, and
+project that did not opt out of math) lose the walker-parity fields and their whole grid list when they are accepted
+(`withoutWalkerParityFacts`): such a page's grids are unknown (`gridsUnknown`, so the table path stays open), never an
+older build's reading, which would call a one-column grid "no table" (council #467). Only the page's rule counts stay:
+`-glyphs` only adds rules, so too few of them still proves there is no grid. A grid list whose distinct lines exceed the
+page's rules (what a `-glyphs` run writes) is dropped the same way by the reader. Their math and table encoding words stand: they describe the PDF, not the conversion, and
 are the same with or without `--math`, so a grid a math batch leaves unknown can still be settled by them
 ([below](#math-and-table-encodings)). The single-file guest never passes `--math`.
 

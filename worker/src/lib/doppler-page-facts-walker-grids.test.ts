@@ -94,13 +94,15 @@ describe("doppler #44 facts: strict reader", () => {
       expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids, name).toBeNull();
     }
     // More distinct lines than the page has rules (what a -glyphs run can write: stencil-mask rules count for the grid
-    // only): the thin-rule counts go, the family stands, and the grid reads as an older build's (unknown).
+    // only): the whole grid list goes (never an older build's reading, which can call a table "no table"), the family
+    // stands, and the page's grids are unknown.
     for (const rules of [{ hRules: 6, vRules: 40 }, { hRules: 40, vRules: 4 }]) {
       const facts = one(page({ vectors: rules }));
       const v = facts.pages.get(1)!.vectors!;
       expect(v.unlistedRuledGrids).toBeUndefined();
-      expect(v.grids![0]!.hRules).toBeUndefined();
-      expect(v.grids![0]!.rows).toBe(6);
+      expect(v.grids).toBeUndefined();
+      expect(v.gridsTruncated).toBeUndefined();
+      expect(v.hRules).toBe(rules.hRules);
       expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids).toBeNull();
     }
     // unlistedRuledGrids with no list to qualify.
@@ -229,7 +231,7 @@ describe("doppler #44 facts: the walker-grid contract", () => {
     expect(layoutOf(short).images).toBeNull();
   });
 
-  it("facts of a -glyphs run (pdftomarkdown --math) lose the walker-parity fields and map as an older build", () => {
+  it("facts of a -glyphs run (pdftomarkdown --math) lose the walker-parity fields and their grid list: grids unknown", () => {
     const line = page({ vectors: { grids: [WALKER] }, item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 4, invisibleWordsCentredInside: 0 }, extra: { text: { ...(base.text as object), textOverImageRatio: 0.2 } } });
     const facts = one(line);
     expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids).toHaveLength(1);
@@ -239,7 +241,7 @@ describe("doppler #44 facts: the walker-grid contract", () => {
     const mapped = pageLayoutFactsFromDopplerFacts(stripped).get(1)!;
     expect(mapped.grids).toBeNull();
     expect(mapped.images![0]!.wordsInside).toBeNull();
-    expect(dopplerPageFactsJsonl(stripped)).not.toMatch(/unlistedRuledGrids|CentredInside|outerSides|"connected"/);
+    expect(dopplerPageFactsJsonl(stripped)).not.toMatch(/unlistedRuledGrids|CentredInside|outerSides|"connected"|"grids"/);
 
     // Through acceptance: a single-file run (no --math) keeps them; a math batch strips them, and hands on only the strip.
     const raw = jsonl([docLine({ pageCount: 1 }), line, runLine({ pagesEmitted: 1 })]);
