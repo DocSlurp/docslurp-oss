@@ -80,8 +80,7 @@ class MemoryStore implements StageExecutionStore {
   async failRun(_runId: string, stage: string, message: string) { this.runStatus = "failed"; this.failures.push({ stage, message }); }
   async currentRunStage() { return null; }
   async seedReusedStageOutputs() { return { seededDocuments: 0, unavailable: [] }; }
-  async triggerRunEmails() {}
-  async triggerWebhooks() {}
+  readonly notifications = { triggerRunEmails: async () => {} };
 }
 
 type Behaviour = (stage: string, documentId: string) => void;

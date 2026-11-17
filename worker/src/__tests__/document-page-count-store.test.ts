@@ -100,7 +100,7 @@ describe("Store.triggerWebhooks", () => {
         error = 'connect ECONNREFUSED 10.0.3.7:5432 at Pool.connect (/app/worker/src/db/store.ts:123) password=hunter2'
         where id = 'run1';
     `);
-    await store.triggerWebhooks("run1", "run.failed");
+    await store.notifications.triggerWebhooks("run1", "run.failed");
     const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox where payload->>'runId' = 'run1'`)).rows;
     expect(row!.payload).toMatchObject({ event: "run.failed", runId: "run1", projectId: "w1", status: "failed" });
     expect(JSON.stringify(row!.payload)).not.toMatch(/ECONNREFUSED|10\.0\.3\.7|hunter2|store\.ts/);
@@ -110,7 +110,7 @@ describe("Store.triggerWebhooks", () => {
   it("sends a null error for a run that did not fail", async () => {
     await db.exec(`update project_runs set status = 'completed', error = null where id = 'run2'`);
     await db.exec(`delete from webhook_outbox`);
-    await store.triggerWebhooks("run2", "run.failed");
+    await store.notifications.triggerWebhooks("run2", "run.failed");
     const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox`)).rows;
     expect(row!.payload.error).toBeNull();
   }, 60_000);

@@ -6,20 +6,19 @@ import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js"
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
-import { emitEventLog } from "@docslurp/shared/error-reporting";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { type WorkerCapability, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { type WorkerCapability, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
 import { reserveChartExportFreeVmRun } from "./chart-export-free-vm-cap.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
-import { randomUUID, createHmac } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
 import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
@@ -65,6 +64,8 @@ import {
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
 import { PostgresPageBasisLedger } from "./page-basis-ledger.js";
+import { appendAuditLog } from "./audit-log.js";
+import { escapeHtml, RunNotifications, type CanonicalReplacement } from "./run-notifications.js";
 import type { PageBasisLedger } from "../pipeline/page-basis.js";
 import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
@@ -340,12 +341,6 @@ export function resolveBudgetAlertLevel(
 }
 
 /** A newer canonical version that took over search from older ones. */
-export type CanonicalReplacement = {
-  documentId: string;
-  canonicalId: string;
-  previousVersionId: string | null;
-  replacedDocumentIds: string[];
-};
 
 /**
  * SQL fragment: this run's `index` stage has completed the document. With
@@ -526,6 +521,8 @@ export class Store {
   /** Tail of each state's checkpoint queue (writeProgress runs one at a time per state). */
   private readonly progressQueues = new WeakMap<WorkflowState, Promise<unknown>>();
   private readonly runEvents: RunEventPublisher;
+  /** Webhook outbox rows and notification deliveries (run-notifications.ts). */
+  readonly notifications: RunNotifications;
   /** This process's view of run credit leases (credit-lease.ts), shared with page tasks. */
   readonly creditLeases: RunCreditLeases;
   /** The page basis port over this database (db/page-basis-ledger.ts); bindStore gives every hydrated state a PageBasis over it. */
@@ -562,6 +559,7 @@ export class Store {
     this.pageBasisLedger = new PostgresPageBasisLedger(this.sql);
     this.plausibilityWarningThreshold =
       options?.plausibilityWarningThreshold ?? 0.3;
+    this.notifications = new RunNotifications(this.sql, this.plausibilityWarningThreshold);
     this.apiKeyUsageRetentionDays = Math.max(
       1,
       options?.apiKeyUsageRetentionDays ?? 30,
@@ -1219,7 +1217,7 @@ export class Store {
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
-        await this.announceReplacements(state, replacements, client, logicalId);
+        await this.notifications.announceReplacements(state, replacements, client, logicalId);
         // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
         const stamps = runStampsIngestVersion(state.run.kind);
         const stampMode = runReusesExtraction(state.run.pipeline) ? "inherited" as const : "extracted" as const;
@@ -1230,7 +1228,7 @@ export class Store {
           stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
           lease_expires_at = null, updated_at = now() ${stampRun} where id = ${state.run.id}`;
         await insertProjectRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
-        await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
+        await this.notifications.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
       });
     } catch (error) {
       Object.assign(state.run, snapshot.run);
@@ -1351,7 +1349,7 @@ export class Store {
         stats: row.stats ?? {},
         payload: plan.eventPayload,
       }] });
-      await this.triggerWebhooks(runId, "run.failed", client, logicalId);
+      await this.notifications.triggerWebhooks(runId, "run.failed", client, logicalId);
     });
   }
 
@@ -1840,7 +1838,7 @@ export class Store {
     if (vectors.length > 0) {
       state.vectorIndexes = state.vectorIndexes.filter((vector) => !vectors.includes(vector));
     }
-    await this.announceReplacements(state, cutover);
+    await this.notifications.announceReplacements(state, cutover);
 
     state.setDocumentStage({
       runId: state.run.id,
@@ -1906,7 +1904,7 @@ export class Store {
           threshold: this.plausibilityWarningThreshold,
         },
       });
-      await this.triggerPlausibilityWarningEmail(
+      await this.notifications.triggerPlausibilityWarningEmail(
         state.run.id,
         documentId,
         stats.plausibilityScore,
@@ -2053,28 +2051,6 @@ export class Store {
     await this.insertVectorIndexes([vector]);
   }
 
-  /** Emits document.replaced once a newer canonical version has taken over in search. */
-  private async announceReplacements(state: WorkflowState, replacements: CanonicalReplacement[], client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
-    for (const replacement of replacements) {
-      await insertProjectRunEvents({ sql: client, events: [{
-        id: logicalId ? `${logicalId}:replacement:${replacement.documentId}` : randomUUID(),
-        userId: state.run.userId,
-        runId: state.run.id,
-        documentId: replacement.documentId,
-        eventType: "document.replaced",
-        status: "completed",
-        message: `Replaced ${replacement.replacedDocumentIds.length} previous version(s) of ${replacement.canonicalId}`,
-        // progress travels on the live NOTIFY channel; payload is stored only.
-        progress: {
-          canonicalId: replacement.canonicalId,
-          replacedDocumentIds: replacement.replacedDocumentIds,
-        },
-        payload: { ...replacement },
-      }] });
-    }
-    await this.triggerDocumentWebhooks(state, replacements, client, logicalId);
-  }
-
   private vectorIndexStatements(
     vectors: VectorIndex[],
     client: Sql<Record<string, unknown>> = this.sql,
@@ -2124,238 +2100,6 @@ export class Store {
     client: Sql<Record<string, unknown>> = this.sql,
   ): Promise<void> {
     for (const statement of this.vectorIndexStatements(vectors, client)) await statement;
-  }
-
-  /**
-   * Records run webhook events in the outbox. The API delivers them with its
-   * signed, SSRF-checked dispatcher; the worker never calls subscriber URLs.
-   */
-  async triggerWebhooks(runId: string, event: string, client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
-    // One statement: the run is read inside the outbox insert. Subscribers include teammates and external systems, so the
-    // raw worker error (stack frames, hosts, provider text) stays in the run record and telemetry; the payload carries its
-    // public copy, the same mapping as publicDocumentError (reviewed copy for known markers, else the generic message).
-    await this.enqueueWebhookEvent(event, client`
-      select r.user_id, jsonb_build_object(
-        'event', ${event}::text,
-        'runId', r.id,
-        'projectId', r.project_id,
-        'status', r.status,
-        'stage', r.stage,
-        'processedDocuments', r.processed_documents,
-        'pagesProcessed', r.pages_processed,
-        'failedDocuments', coalesce((r.stats->>'failedDocuments')::int, 0),
-        'error', ${publicErrorSql(client, "r.error")}
-      ) as payload
-      from project_runs r
-      where r.id = ${runId}
-    `, client, logicalId);
-  }
-
-  private async triggerDocumentWebhooks(
-    state: WorkflowState,
-    replacements: CanonicalReplacement[],
-    client: Sql<Record<string, unknown>> = this.sql,
-    logicalId?: string,
-  ): Promise<void> {
-    for (const replacement of replacements) {
-      const payload = {
-        event: "document.replaced",
-        runId: state.run.id,
-        projectId: state.run.projectId,
-        ...replacement,
-      };
-      await this.enqueueWebhookEvent("document.replaced", client`
-        select ${state.run.userId}::text as user_id, ${this.toJson(payload)}::jsonb as payload
-      `, client, logicalId ? `${logicalId}:replacement:${replacement.documentId}` : undefined);
-    }
-  }
-
-  /** Inserts one outbox row per source row, only when its run's organization has a webhook subscribed to the event, and wakes the API. */
-  private async enqueueWebhookEvent(
-    event: string,
-    source: postgres.PendingQuery<postgres.Row[]>,
-    client: Sql<Record<string, unknown>> = this.sql,
-    logicalId?: string,
-  ): Promise<void> {
-    await client`
-      with source as (${source}),
-      queued as (
-        insert into webhook_outbox (id, user_id, event_type, payload)
-        select coalesce(${logicalId ?? null}::text, gen_random_uuid()::text), source.user_id, ${event}, source.payload
-        from source
-        where exists (
-          -- Webhooks belong to the run's organization, not to the user who started the run, so a
-          -- teammate's run reaches the team's webhook. user_id is attribution only; the API routes
-          -- each event by its run and checks the webhook's creator still administers the organization.
-          select 1 from webhooks w
-          join project_runs r on r.org_id = w.org_id
-          where r.id = source.payload->>'runId'
-            and w.active = true and ${event} = any(w.events)
-        )
-        returning id
-      )
-      select pg_notify('webhook_outbox', id) from queued
-    `;
-  }
-
-  async triggerRunEmails(
-    runId: string,
-    event: "run.completed" | "run.failed",
-  ): Promise<void> {
-    const rows = await this.sql.unsafe<
-      Array<{
-        user_id: string;
-        org_id: string | null;
-        project_id: string;
-        project_name: string;
-        stage: string;
-        error: string | null;
-        email: string;
-        run_completed: boolean | null;
-        run_failed: boolean | null;
-      }>
-    >(
-      `
-      select
-        r.user_id,
-        r.org_id,
-        r.project_id,
-        w.name as project_name,
-        r.stage,
-        r.error,
-        u.email,
-        np.run_completed,
-        np.run_failed
-      from project_runs r
-      join projects w on w.id = r.project_id
-      join "user" u on u.id = r.user_id
-      left join notification_prefs np on np.user_id = r.user_id
-      -- Extract runs send their own completion email with the download (server services/extracts.ts).
-      where r.id = $1 and r.extract_id is null
-      limit 1
-      `,
-      [runId],
-    );
-    const row = rows[0];
-
-    if (!row) {
-      return;
-    }
-
-    const enabled =
-      event === "run.completed"
-        ? (row.run_completed ?? true)
-        : (row.run_failed ?? true);
-    if (!enabled) {
-      return;
-    }
-
-    const subject =
-      event === "run.completed"
-        ? `Run completed: ${row.project_name}`
-        : `Run failed: ${row.project_name}`;
-    const lines = [
-      `Project: ${row.project_name}`,
-      `Run ID: ${runId}`,
-      `Status: ${event === "run.completed" ? "completed" : "failed"}`,
-      `Stage: ${row.stage}`,
-    ];
-    if (row.error) {
-      lines.push(PUBLIC_ERROR_MESSAGES.processing);
-    }
-
-    await this.recordNotificationEvent({
-      deliveryId: randomUUID(),
-      userId: row.user_id,
-      orgId: row.org_id,
-      projectId: row.project_id,
-      runId,
-      event,
-      recipient: row.email,
-      subject,
-      text: lines.join("\n"),
-      html: `<p>${lines.map((line) => escapeHtml(line)).join("<br />")}</p>`,
-      metadata: {
-        runId,
-        stage: row.stage,
-        error: row.error,
-      },
-    });
-  }
-
-  async triggerPlausibilityWarningEmail(
-    runId: string,
-    documentId: string,
-    plausibilityScore: number,
-    stage: string,
-  ): Promise<void> {
-    const rows = await this.sql.unsafe<
-      Array<{
-        user_id: string;
-        org_id: string | null;
-        project_id: string;
-        project_name: string;
-        filename: string;
-        email: string;
-        quality_warning: boolean | null;
-      }>
-    >(
-      `
-      select
-        r.user_id,
-        r.org_id,
-        r.project_id,
-        w.name as project_name,
-        d.filename,
-        u.email,
-        np.quality_warning
-      from project_runs r
-      join projects w on w.id = r.project_id
-      join documents d on d.id = $2 and d.run_id = r.id
-      join "user" u on u.id = r.user_id
-      left join notification_prefs np on np.user_id = r.user_id
-      where r.id = $1
-      limit 1
-      `,
-      [runId, documentId],
-    );
-    const row = rows[0];
-
-    if (!row || row.quality_warning === false) {
-      return;
-    }
-
-    const subject = `Extraction plausibility warning: ${row.filename}`;
-    const lines = [
-      `Project: ${row.project_name}`,
-      `Run ID: ${runId}`,
-      `Document: ${row.filename}`,
-      `Stage: ${stage}`,
-      `Plausibility score: ${plausibilityScore.toFixed(3)}`,
-      `Threshold: ${this.plausibilityWarningThreshold.toFixed(3)}`,
-    ];
-
-    await this.recordNotificationEvent({
-      deliveryId: randomUUID(),
-      userId: row.user_id,
-      orgId: row.org_id,
-      projectId: row.project_id,
-      runId,
-      documentId,
-      event: "plausibility.warning",
-      recipient: row.email,
-      subject,
-      text: lines.join("\n"),
-      html: `<p>${lines.map((line) => escapeHtml(line)).join("<br />")}</p>`,
-      metadata: {
-        runId,
-        documentId,
-        filename: row.filename,
-        plausibilityScore,
-        threshold: this.plausibilityWarningThreshold,
-        stage,
-      },
-    });
   }
 
   async processBudgetAlerts(): Promise<void> {
@@ -2409,7 +2153,7 @@ export class Store {
       ].join("\n");
       const html = `<p>${text.replaceAll("\n", "<br/>")}</p>`;
 
-      await this.recordNotificationEvent({
+      await this.notifications.recordNotificationEvent({
         deliveryId: randomUUID(),
         userId: row.owner_user_id,
         orgId: null,
@@ -2523,7 +2267,7 @@ export class Store {
     };
     await storage.putJson(reportKey, persistedReport);
 
-    await this.appendAuditLog({
+    await appendAuditLog(this.sql, {
       action: "maintenance.storage_integrity_sweep",
       resourceType: "maintenance",
       resourceId: reportKey,
@@ -3903,7 +3647,7 @@ export class Store {
       `;
       await this.notifySearchEligibilityChanged([row.project_id]);
 
-      await this.appendAuditLog({
+      await appendAuditLog(this.sql, {
         orgId: row.org_id,
         userId: row.user_id,
         projectId: row.project_id,
@@ -3950,7 +3694,7 @@ export class Store {
     );
 
     for (const row of rows) {
-      await this.appendAuditLog({
+      await appendAuditLog(this.sql, {
         orgId: row.org_id,
         userId: row.user_id,
         projectId: row.project_id,
@@ -4180,7 +3924,7 @@ export class Store {
         : `Status: monthly spend crossed ${args.thresholdPercent}% of budget.`,
     ];
 
-    await this.recordNotificationEvent({
+    await this.notifications.recordNotificationEvent({
       deliveryId: randomUUID(),
       userId: args.userId,
       orgId: args.orgId,
@@ -4201,134 +3945,6 @@ export class Store {
     });
   }
 
-  /**
-   * Workers never send email. Each notification event goes to SigNoz as a
-   * structured log and to the in-app inbox (notification_deliveries).
-   */
-  private async recordNotificationEvent(args: {
-    deliveryId: string;
-    userId: string;
-    orgId?: string | null;
-    projectId?: string | null;
-    runId?: string | null;
-    documentId?: string | null;
-    event:
-      | "run.completed"
-      | "run.failed"
-      | "plausibility.warning"
-      | "cost.alert"
-      | "project.invite";
-    recipient: string;
-    subject: string;
-    text: string;
-    html: string;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
-    const provider = "log";
-    emitEventLog(`notification.${args.event}`, {
-      "notification.id": args.deliveryId,
-      "notification.event": args.event,
-      "notification.subject": args.subject,
-      "notification.text": args.text,
-      "enduser.id": args.userId,
-      "docslurp.org_id": args.orgId,
-      "docslurp.project_id": args.projectId,
-      "docslurp.run_id": args.runId,
-      "docslurp.document_id": args.documentId,
-      "notification.metadata": args.metadata,
-    });
-
-    await this.sql`
-      insert into notification_deliveries (
-        id,
-        user_id,
-        org_id,
-        project_id,
-        event_type,
-        provider,
-        recipient,
-        subject,
-        delivered,
-        metadata,
-        created_at
-      )
-      values (
-        ${args.deliveryId},
-        ${args.userId},
-        ${args.orgId ?? null},
-        ${args.projectId ?? null},
-        ${args.event},
-        ${provider},
-        ${args.recipient},
-        ${args.subject},
-        true,
-        ${this.toJson({
-          ...(args.metadata ?? {}),
-          runId: args.runId ?? null,
-          documentId: args.documentId ?? null,
-        })}::jsonb,
-        now()
-      )
-    `;
-
-    await this.appendAuditLog({
-      orgId: args.orgId ?? null,
-      userId: args.userId,
-      projectId: args.projectId ?? null,
-      runId: args.runId ?? null,
-      documentId: args.documentId ?? null,
-      action: "notification.logged",
-      resourceType: "notification",
-      resourceId: args.deliveryId,
-      metadata: {
-        event: args.event,
-        provider,
-        subject: args.subject,
-        ...(args.metadata ?? {}),
-      },
-    });
-  }
-
-  private async appendAuditLog(args: {
-    orgId?: string | null;
-    userId?: string | null;
-    projectId?: string | null;
-    runId?: string | null;
-    documentId?: string | null;
-    action: string;
-    resourceType: string;
-    resourceId?: string | null;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
-    await this.sql`
-      insert into audit_log (
-        id,
-        org_id,
-        user_id,
-        project_id,
-        run_id,
-        document_id,
-        action,
-        resource_type,
-        resource_id,
-        metadata,
-        created_at
-      )
-      values (
-        gen_random_uuid()::text,
-        ${args.orgId ?? null},
-        ${args.userId ?? null},
-        ${args.projectId ?? null},
-        ${args.runId ?? null},
-        ${args.documentId ?? null},
-        ${args.action},
-        ${args.resourceType},
-        ${args.resourceId ?? null},
-        ${this.toJson(args.metadata ?? {})}::jsonb,
-        now()
-      )
-    `;
-  }
 }
 
 function mapRun(row: ProjectRunRow): ProjectRun {
@@ -4578,14 +4194,6 @@ export function buildStorageIntegrityReport(args: {
   };
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
 
 function formatCurrency(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
@@ -4674,16 +4282,3 @@ export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<stri
   return { byPrefix, ungrouped };
 }
 
-/**
- * SQL for publicDocumentError over a text column: null stays null, a known failure marker maps to its reviewed public
- * copy, anything else to the generic processing message. Built from the same tables, so the two cannot drift.
- */
-export function publicErrorSql(client: Sql<Record<string, unknown>>, column: "r.error"): postgres.PendingQuery<postgres.Row[]> {
-  const value = client.unsafe(column);
-  let expression = client`case when ${value} is null or ${value} = '' then null::text`;
-  for (const [key, marker] of Object.entries(DOCUMENT_FAILURE_MARKERS)) {
-    const message = PUBLIC_ERROR_MESSAGES[key as keyof typeof DOCUMENT_FAILURE_MARKERS];
-    expression = client`${expression} when strpos(${value}, ${marker}::text) > 0 then ${message}::text`;
-  }
-  return client`${expression} else ${PUBLIC_ERROR_MESSAGES.processing}::text end`;
-}

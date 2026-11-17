@@ -62,8 +62,7 @@ class CheckpointStore {
   async appendEvent() {}
   async completeRun() {}
   async failRun() {}
-  async triggerRunEmails() {}
-  async triggerWebhooks() {}
+  readonly notifications = { triggerRunEmails: async () => {} };
 }
 
 type Behavior = "deploy" | "recycle" | "sigkill" | "error" | "hang" | "succeed";

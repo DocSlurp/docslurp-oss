@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
 
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
-import { publicErrorSql } from "./store.js";
+import { publicErrorSql } from "./run-notifications.js";
 
 /**
  * The run.completed / run.failed outbox payload maps a run's stored error in SQL (triggerWebhooks). It must give exactly

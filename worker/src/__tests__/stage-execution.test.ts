@@ -46,7 +46,7 @@ class FakeStore implements StageExecutionStore {
   stageStatus = new Map<string, string>();
   runStatus = "queued";
   failures: Array<{ stage: string; message: string }> = [];
-  notifications: string[] = [];
+  notices: string[] = [];
   failWebhooks = false;
 
   readonly pageTasks = { completed: async () => this.completedPages } as unknown as StageExecutionStore["pageTasks"];
@@ -80,11 +80,9 @@ class FakeStore implements StageExecutionStore {
     this.seeded.push({ runId, reusedStages });
     return { seededDocuments: this.documents.length, unavailable: [] };
   }
-  async triggerRunEmails(_runId: string, event: string) { this.notifications.push(`email:${event}`); }
-  async triggerWebhooks(_runId: string, event: string) {
-    if (this.failWebhooks) throw new Error("webhook down");
-    this.notifications.push(`webhook:${event}`);
-  }
+  readonly notifications = {
+    triggerRunEmails: async (_runId: string, event: string) => { this.notices.push(`email:${event}`); },
+  };
 }
 
 function stage(name: string, run: Stage["run"]): Stage {
@@ -327,7 +325,7 @@ describe("Stage Execution", () => {
     expect(store.runStatus).toBe("completed");
     expect(store.calls.find((call) => call.startsWith("completeRun:"))).not.toBe("completeRun:0");
     expect(store.events).toEqual([]); // The store owns the transactional completion event.
-    expect(store.notifications).toEqual(["email:run.completed"]);
+    expect(store.notices).toEqual(["email:run.completed"]);
   });
 
   it("fails a Run through the store and notifies", async () => {
@@ -338,7 +336,7 @@ describe("Stage Execution", () => {
 
     expect(store.runStatus).toBe("failed");
     expect(store.failures).toEqual([{ stage: "parse", message: "parser crashed" }]);
-    expect(store.notifications).toEqual(["email:run.failed"]);
+    expect(store.notices).toEqual(["email:run.failed"]);
   });
 
   it("records the group stage that was running when a stage group fails", async () => {

@@ -74,13 +74,12 @@ export type StageExecutionStore = Pick<
   | "completeRun"
   | "failRun"
   | "currentRunStage"
-  | "triggerRunEmails"
-  | "triggerWebhooks"
   | "seedReusedStageOutputs"
   | "finishShard"
   | "pageBasisLedger"
 > & {
   readonly pageTasks: Pick<Store["pageTasks"], "completed">;
+  readonly notifications: Pick<Store["notifications"], "triggerRunEmails">;
   /** Whether every live worker advertises `capability` (Store.fleetAdvertises); absent: no (the old behaviour). */
   fleetAdvertises?: Store["fleetAdvertises"];
 };
@@ -717,7 +716,7 @@ export function createStageExecution(deps: {
   }
 
   async function notifyTerminal(runId: string, event: "run.completed" | "run.failed"): Promise<void> {
-    await store
+    await store.notifications
       .triggerRunEmails(runId, event)
       .catch((err) =>
         console.error(
