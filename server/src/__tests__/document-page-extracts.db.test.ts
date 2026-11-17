@@ -45,7 +45,7 @@ beforeAll(async () => {
     ('doc-a', 'org-a', 'proj-a', 'run-a', 3, 'vision', 'vision', 'vision-model', 'rich', '{table}', null, 280, true, true, null),
     ('doc-b', 'org-b', 'proj-b', 'run-b', 1, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 50, true, true, null),
     ('doc-b', 'org-b', 'proj-b', 'run-b', 2, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 50, true, true, null),
-    ('doc-b', 'org-b', 'proj-b', 'run-b', 2, 'vision', 'vision', 'vision-model', 'rich', '{}', null, 50, true, true, null),
+    ('doc-b', 'org-b', 'proj-b', 'run-b', 2, 'vision', 'vision', 'vision-model', 'rich', '{}', null, 50, true, false, null),
     ('doc-b', 'org-b', 'proj-b', 'run-b', 3, 'extract', 'text-layer', 'vm-pdf', 'fast', '{}', null, 50, true, false, null)`;
   await sql`insert into document_page_states (document_id, page_number, state) values ('doc-a', 3, 'blocked-pii')`;
   service = await import("../services/document-page-extracts.js");
@@ -95,7 +95,7 @@ describe("getDocumentPageExtracts", () => {
     expect(old?.records.map((r) => [r.pageNumber, r.runId, r.isFinal])).toEqual([[1, "run-old", false]]);
   });
 
-  it("pages by (page, pass, run) cursor and filters finals; refuses a forged cursor", async () => {
+  it("pages by (page, run, pass) cursor and filters finals; refuses a forged cursor", async () => {
     const first = await service.getDocumentPageExtracts({ orgId: "org-a", documentId: "doc-a" }, { limit: 2 });
     expect(first?.records.map((r) => [r.pageNumber, r.pass])).toEqual([[1, "extract"], [2, "extract"]]);
     expect(first?.nextCursor).toEqual(expect.any(String));
@@ -161,9 +161,11 @@ describe("ingest report page views", () => {
     expect((report.focus ?? []).map((page) => page.extractRecordStatus)).toEqual(["ok", "ok", "ok"]);
   });
 
-  it("shows a duplicate or missing final instead of hiding it", async () => {
+  it("shows a missing final instead of hiding it; the database refuses a second final on a page", async () => {
     const { loadIngestReport } = await import("../services/ingest-report.js");
     const report = await loadIngestReport({ project: { id: "proj-b", name: "B", pipeline: defaultPipelineFeatures }, canEdit: false, documentIds: ["doc-b"], focusPages: [1, 2, 3] });
-    expect((report.focus ?? []).map((page) => [page.pageNumber, page.extractRecordStatus])).toEqual([[1, "ok"], [2, "duplicate"], [3, "missing"]]);
+    expect((report.focus ?? []).map((page) => [page.pageNumber, page.extractRecordStatus])).toEqual([[1, "ok"], [2, "ok"], [3, "missing"]]);
+    await expect(sql`update document_page_extracts set is_final = true where document_id = 'doc-b' and page_number = 2 and pass = 'vision'`)
+      .rejects.toThrow(/document_page_extracts_one_final_idx/);
   });
 });

@@ -50,7 +50,15 @@ Stages only record what they adopted; `is_final` is set by one statement (worker
 - when a query-time materialization publishes pages (deferred/materialize-pages.ts), for those pages.
 
 A page a newer run (by creation time) already finalized is left alone, so a late or retried older run never takes it back.
-A page the run has no adopted row for (past a shorter reprocess's page count) is left with no final. The ingest report
+A completion clears older finals on pages the run has no adopted row for (past a shorter reprocess's page count); a
+query-time read whose page failed keeps the older final, and clears it only on a page it found PII on. A partial unique
+index allows at most one final row per page; finalization demotes before it promotes.
+
+Lock order: every writer of extract rows holds the document's row lock first (FOR NO KEY UPDATE, the lock a completion's
+documents UPDATE takes): completions update the document before finalizing, a query-time read locks the document before
+its page rows and extract rows, and checkpoint upserts and tag merges lock their documents (in id order) in the same
+statement before touching extract rows. A finalization that finds no run in the organization logs
+`[page-extracts] finalize-skipped`. The ingest report
 flags a page with records but no final on a completed document (`missing`) or with more than one (`duplicate`).
 
 ## Retention
@@ -60,7 +68,7 @@ runs' rows yet: a later retention job may drop non-final rows of runs whose arti
 
 ## Reads
 
-- `GET /v1/documents/:id/page-extracts?after=&limit=&final=true&run=`: keyset pages by (page, pass, run); `run` is
+- `GET /v1/documents/:id/page-extracts?after=&limit=&final=true&run=`: keyset pages by (page, run, pass), the primary key order; `run` is
   `current` (default: the document's current run plus every page's final row), `all`, or one run id. The caller must
   reach the document's project; API keys need `artifacts` and the project. Another organization's document is a 404.
   SDK: `getDocumentPageExtracts`.

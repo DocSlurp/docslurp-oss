@@ -113,7 +113,7 @@ function view(row: Row): PageExtractRecordView {
 }
 
 /**
- * The document's page extract records, one keyset page of them (ordered by page, pass, run), or null when the document is
+ * The document's page extract records, one keyset page of them (ordered by page, run, pass: the primary key), or null when the document is
  * not in this organization (and project) or is purged. The scope is required: there is no unscoped read. The capability-pool
  * member and region are not served until they hold tier-safe values.
  */
@@ -143,8 +143,9 @@ export async function getDocumentPageExtracts(
     where e.document_id = ${scope.documentId} and e.org_id = ${scope.orgId}
       ${runFilter}
       ${finalOnly ? sql`and e.is_final` : sql``}
-      ${after === null ? sql`` : sql`and (e.page_number, e.pass, e.run_id) > (${after.page}, ${after.pass}, ${after.runId})`}
-    order by e.page_number, e.pass, e.run_id
+      ${after === null ? sql`` : sql`and (e.page_number, e.run_id, e.pass) > (${after.page}, ${after.runId}, ${after.pass})`}
+    -- The primary key's order (document, page, run, pass): the keyset walks its index.
+    order by e.page_number, e.run_id, e.pass
     limit ${limit + 1}`;
   const pageRows = rows.slice(0, limit);
   const last = pageRows.at(-1);

@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS document_page_extracts (
   CONSTRAINT document_page_extracts_final_check CHECK (NOT (is_final AND (superseded_by_pass IS NOT NULL OR NOT adopted)))
 );
 --> statement-breakpoint
+-- At most one final row per page, whatever writes race (finalization demotes before it promotes). The table is new and
+-- empty, so the index builds instantly.
+CREATE UNIQUE INDEX IF NOT EXISTS document_page_extracts_one_final_idx ON document_page_extracts (document_id, page_number) WHERE is_final;
+--> statement-breakpoint
 -- Deleting a run cascades through this index; reads go through the primary key (document, page).
 CREATE INDEX IF NOT EXISTS document_page_extracts_run_idx ON document_page_extracts (run_id);
 --> statement-breakpoint

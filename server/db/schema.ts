@@ -3725,6 +3725,7 @@ export const documentPageExtracts = pgTable("document_page_extracts", {
     name: "document_page_extracts_run_scope_fkey",
   }).onDelete("cascade"),
   index("document_page_extracts_run_idx").on(table.runId),
+  uniqueIndex("document_page_extracts_one_final_idx").on(table.documentId, table.pageNumber).where(sql`is_final`),
 ]);
 
 /** Whether a document's Markdown is committed and how far its images got (migration 0141); one row per document. */

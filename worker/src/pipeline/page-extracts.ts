@@ -194,6 +194,10 @@ export function tagPageExtracts(
 /** Rows per statement: well under the 65,535 bind limit (the payload is one jsonb parameter anyway). */
 const ROWS_PER_STATEMENT = 2_000;
 
+function documentIdsOf(rows: ReadonlyArray<{ document_id: string }>): string[] {
+  return [...new Set(rows.map((row) => row.document_id))].sort();
+}
+
 function rowKey(row: { document_id: string; page_number: number; run_id: string; pass: string }): string {
   return `${row.document_id}\u0000${row.page_number}\u0000${row.run_id}\u0000${row.pass}`;
 }
@@ -228,6 +232,9 @@ export function pageExtractStatements(
         document_id text, org_id text, project_id text, run_id text, page_number integer, pass text, method text,
         engine text, member_id text, region text, billed_class text, tags text[], confidence real, plausibility real,
         text_bytes integer, finish_reason text, duration_ms integer, adopted boolean)
+      -- Lock order: the documents' rows first (an init plan, in id order), then extract rows, as finalization does.
+      where (select count(*) from (select 1 from documents where id = any(${client.array(documentIdsOf(batch))}::text[])
+        order by id for no key update) locked) >= 0
       on conflict (document_id, page_number, run_id, pass) do update set
         method = excluded.method, engine = excluded.engine, member_id = excluded.member_id, region = excluded.region,
         billed_class = excluded.billed_class,
@@ -254,6 +261,9 @@ export function pageExtractStatements(
       ) m
       where t.document_id = m.document_id and t.page_number = m.page_number and t.run_id = m.run_id and t.org_id = m.org_id
         and not (t.tags @> m.tags)
+        -- Lock order: the documents' rows first (an init plan, in id order), then extract rows.
+        and (select count(*) from (select 1 from documents where id = any(${client.array(documentIdsOf(batch))}::text[])
+          order by id for no key update) locked) >= 0
     `);
   }
   return statements;
@@ -262,41 +272,52 @@ export function pageExtractStatements(
 /** Pass order within a run is PAGE_EXTRACT_PASSES order: a later pass that adopted a page's text replaces an earlier one. */
 /**
  * Sets each page's one final row for documents that completed in `runId` (`pages` absent), or for the pages a query-time
- * materialization of `runId` just published (`pages` given). In one statement:
+ * materialization of `runId` just published (`pages` given):
  * - the page's final is the highest-ranked adopted pass of `runId` (so a retry that withdrew a pass restores the one
  *   before it), and every other row of the page, of any run, stops being final, naming that pass as its replacement;
- * - a page `runId` has no adopted row for (beyond a shorter reprocess's page count, or never read) is left with no final
- *   from an older run;
+ * - completing a document clears older runs' finals on pages `runId` has no adopted row for (past a shorter reprocess's
+ *   page count, or never read); a query-time read leaves them, except on pages it found PII on (`pii-withheld`);
  * - nothing changes on a page a newer run (by creation time) already finalized: an older run's late or retried
  *   completion never overrides it;
  * - for whole documents, only documents whose current run is `runId` (documents.run_id): a failed or stale run never
  *   finalizes, so a failed reprocess leaves the previous run's finals in place.
- * Callers run it in the transaction that publishes the content (it holds the documents' row locks), so two finalizations
- * of one document serialize.
+ *
+ * Two statements, demotions first, so the partial unique index (one final row per page) never sees two finals mid-update.
+ * Lock order: callers hold the documents' row locks (FOR NO KEY UPDATE, or the UPDATE of a completion) before these touch
+ * extract rows; every other writer of extract rows takes the same documents locks first (pageExtractStatements), so two
+ * finalizations of one document serialize and nothing inverts. The second statement returns `run_found` (0 when the run
+ * is not in the organization) and `changed`; pass its rows to logFinalizeOutcome.
  */
 export function finalizePageExtracts(
   client: Sql<Record<string, unknown>>,
-  scope: { orgId: string; runId: string; documentIds: readonly string[]; pages?: readonly number[] },
-): PendingQuery<any> {
+  scope: { orgId: string; runId: string; documentIds: readonly string[] | "completed-in-run"; pages?: readonly number[] },
+): [PendingQuery<any>, PendingQuery<{ run_found: number; changed: number }[]>] {
+  // "completed-in-run": every completed, current document of the run (run completion sends this beside the statement
+  // that completes them, so it needs no round trip of its own).
+  const inRun = scope.documentIds === "completed-in-run";
+  const documentFilter = inRun
+    ? client`and d.status = 'completed' and d.superseded_at is null`
+    : client`and e.document_id = any(${client.array([...(scope.documentIds as readonly string[])])}::text[])`;
   const pagesOnly = scope.pages !== undefined;
   const pages = [...(scope.pages ?? [])];
   const passes = client.array([...PAGE_EXTRACT_PASSES]);
   // One pass over the document's rows (window functions per page, no join between derived row sets), then a primary-key
   // update of the rows that change: linear in the document's rows, whatever its page count.
-  return client`
-    with me as (select created_at from project_runs where id = ${scope.runId} and org_id = ${scope.orgId}),
+  const target = () => client`
+    me as (select created_at from project_runs where id = ${scope.runId} and org_id = ${scope.orgId}),
     ranked as (
       select e.document_id, e.page_number, e.run_id, e.pass, e.adopted, e.is_final, e.superseded_by_pass,
         array_position(${passes}::text[], e.pass) as rank,
         max(case when e.run_id = ${scope.runId} and e.adopted and e.page_number <= greatest(d.page_count, 1)
           then array_position(${passes}::text[], e.pass) end) over page as final_rank,
-        bool_or(e.is_final and e.run_id <> ${scope.runId} and coalesce(nr.created_at > me.created_at, false)) over page as held
+        bool_or(e.is_final and e.run_id <> ${scope.runId} and coalesce(nr.created_at > me.created_at, false)) over page as held,
+        bool_or(e.run_id = ${scope.runId} and 'pii-withheld' = any(e.tags)) over page as withheld
       from document_page_extracts e
       join documents d on d.id = e.document_id and d.org_id = ${scope.orgId}
         ${pagesOnly ? client`` : client`and d.run_id = ${scope.runId}`}
       cross join me
       left join project_runs nr on nr.id = e.run_id
-      where e.document_id = any(${client.array([...scope.documentIds])}::text[]) and e.org_id = ${scope.orgId}
+      where e.org_id = ${scope.orgId} ${documentFilter}
         ${pagesOnly ? client`and e.page_number = any(${pages}::int[])` : client``}
       window page as (partition by e.document_id, e.page_number)
     ),
@@ -307,15 +328,37 @@ export function finalizePageExtracts(
           then (${passes}::text[])[final_rank] end as next_superseded,
         is_final, superseded_by_pass
       from ranked
-      where not held
-    )
+      where not held and (final_rank is not null ${pagesOnly ? client`or withheld` : client`or true`})
+    )`;
+  const demote = client`
+    with ${target()}
     update document_page_extracts t
-    set is_final = x.next_final, superseded_by_pass = x.next_superseded, updated_at = now()
+    set is_final = false, superseded_by_pass = x.next_superseded, updated_at = now()
     from target x
     where t.document_id = x.document_id and t.page_number = x.page_number and t.run_id = x.run_id and t.pass = x.pass
-      and t.org_id = ${scope.orgId}
-      and (x.is_final is distinct from x.next_final or x.superseded_by_pass is distinct from x.next_superseded)
-  `;
+      and t.org_id = ${scope.orgId} and t.is_final and not x.next_final`;
+  const promote = client<{ run_found: number; changed: number }[]>`
+    with ${target()},
+    changed as (
+      update document_page_extracts t
+      set is_final = x.next_final, superseded_by_pass = x.next_superseded, updated_at = now()
+      from target x
+      where t.document_id = x.document_id and t.page_number = x.page_number and t.run_id = x.run_id and t.pass = x.pass
+        and t.org_id = ${scope.orgId}
+        and (t.is_final is distinct from x.next_final or t.superseded_by_pass is distinct from x.next_superseded)
+      returning 1
+    )
+    select (select count(*) from me)::int as run_found, (select count(*) from changed)::int as changed`;
+  return [demote, promote];
+}
+
+/** Says loudly when a finalization found no run row in the organization (it then changed nothing). */
+export function logFinalizeOutcome(rows: ReadonlyArray<{ run_found: number; changed: number }> | undefined, scope: { runId: string; documentIds: readonly string[] | "completed-in-run" }): void {
+  const row = rows?.[0];
+  if (!row || row.run_found === 0) {
+    const documents = typeof scope.documentIds === "string" ? scope.documentIds : String(scope.documentIds.length);
+    console.error(`[page-extracts] finalize-skipped run=${scope.runId} documents=${documents} reason=run-not-in-organization`);
+  }
 }
 
 /** OCR reader labels (ocr/read-document.ts `reader`) as a method and route. Model ids after the prefix are never kept. */

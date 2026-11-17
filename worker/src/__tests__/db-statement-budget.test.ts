@@ -240,11 +240,13 @@ const STATEMENTS_PER_PAGE_BUDGET = 24;
 // 2026-11-16: the run's page-class pin (pipeline/ocr-page-class.ts) asks once per run whether every live worker
 // advertises the OCR page class: +1 flight, +1 statement whatever the page count. Measured: 211 flights, 246 statements.
 // 2026-11-16: page extract records (pipeline/page-extracts.ts): one pipelined multi-row upsert per 2,000 records in the
-// extraction checkpoint, one tag merge per 2,000 merges in the routing checkpoint, and one finalization statement each in
-// the document's index completion and the run completion, all pipelined beside statements that already run: +4
-// statements for this 10-page document, +0 round trips. Measured: 211 flights, 250 statements.
-const TERMINAL_ROUND_TRIP_ALLOWANCE = 11;
-const TERMINAL_STATEMENT_ALLOWANCE = 10;
+// extraction checkpoint, one tag merge per 2,000 merges in the routing checkpoint, and two finalization statements
+// (demote, then promote, for the one-final-per-page unique index) in each of the document's index completion and the run
+// completion, all pipelined beside statements that already run: +6 statements for this 10-page document whatever its
+// page count. The run completion's finalization measures +1 flight (fixed per run, not per page). Measured: 212 flights,
+// 252 statements.
+const TERMINAL_ROUND_TRIP_ALLOWANCE = 12;
+const TERMINAL_STATEMENT_ALLOWANCE = 12;
 const TERMINAL_NOTIFY_STATEMENT_ALLOWANCE = 3;
 // The same stages as one stage group: 14.9 after.
 const GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET = 16.5;

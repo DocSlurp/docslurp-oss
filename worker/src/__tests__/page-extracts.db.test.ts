@@ -35,6 +35,7 @@ beforeAll(async () => {
     (100, 'run-a', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract-markdown', '{}', now() - interval '3 hours'),
     (100, 'run-a2', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract-markdown', '{}', now() - interval '2 hours'),
     (100, 'run-m', 'org-a', 'ua', 'proj-a', 'materialize', 'processing', 'materialize', '{}', now() - interval '1 hour'),
+    (100, 'run-m2', 'org-a', 'ua', 'proj-a', 'materialize', 'processing', 'materialize', '{}', now() - interval '30 minutes'),
     (100, 'run-big', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract-markdown', '{}', now()),
     (100, 'run-b', 'org-b', 'ub', 'proj-b', 'upload', 'processing', 'extract-markdown', '{}', now())`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
@@ -63,7 +64,7 @@ async function flush(s: PageExtractState): Promise<void> {
 
 async function finalize(runId: string, documentId: string, pages?: number[]): Promise<void> {
   await sql.begin(async (tx) => {
-    await finalizePageExtracts(tx as unknown as typeof sql, { orgId: "org-a", runId, documentIds: [documentId], ...(pages ? { pages } : {}) });
+    for (const statement of finalizePageExtracts(tx as unknown as typeof sql, { orgId: "org-a", runId, documentIds: [documentId], ...(pages ? { pages } : {}) })) await statement;
   });
 }
 
@@ -221,6 +222,23 @@ describe("page extract records", () => {
     expect((await finals("doc-a")).filter(([page]) => page <= 3)).toEqual(now.filter(([page]) => page <= 3));
   });
 
+  it("a query-time read that failed keeps the older final; one that found PII clears it", async () => {
+    const before = await finals("doc-a");
+    expect(before.find(([page]) => page === 1)).toEqual([1, "run-a2", "extract", "text-layer"]);
+    const m2 = state("run-m2", "org-a", "proj-a");
+    recordPageExtracts(m2, DOC_A, materializedPageRecords({
+      published: [], modelRead: () => false, blocked: [3], failed: [[1, "embedding failed"]], keptAsImageReason: "kept-as-image",
+    }));
+    await flush(m2);
+    await finalize("run-m2", "doc-a", [1, 3]);
+    const after = await finals("doc-a");
+    // Page 1: the newer read failed, so the older final stands.
+    expect(after.find(([page]) => page === 1)).toEqual([1, "run-a2", "extract", "text-layer"]);
+    // Page 3: the newer read found PII, so the page has no final any more.
+    expect(after.find(([page]) => page === 3)).toBeUndefined();
+    expect(after.find(([page]) => page === 2)).toEqual([2, "run-m", "vision", "vision"]);
+  });
+
   it("records nothing for a run without an organization, and cannot name another organization's document", async () => {
     const unscoped = state("run-a", null, "proj-a");
     recordPageExtracts(unscoped, DOC_A, [{ pageNumber: 1, pass: "extract", method: "text-layer" }]);
@@ -235,7 +253,7 @@ describe("page extract records", () => {
     tagPageExtracts(tagger, DOC_A, new Map([[1, ["drawn" as const]]]));
     await flush(tagger);
     await sql.begin(async (tx) => {
-      await finalizePageExtracts(tx as unknown as typeof sql, { orgId: "org-b", runId: "run-b", documentIds: ["doc-a"] });
+      for (const statement of finalizePageExtracts(tx as unknown as typeof sql, { orgId: "org-b", runId: "run-b", documentIds: ["doc-a"] })) await statement;
     });
     expect(await rows("doc-a")).toEqual(before);
   });

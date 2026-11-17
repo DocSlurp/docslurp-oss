@@ -69,7 +69,7 @@ import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
-import { finalizePageExtracts, pageExtractStatements } from "../pipeline/page-extracts.js";
+import { finalizePageExtracts, logFinalizeOutcome, pageExtractStatements } from "../pipeline/page-extracts.js";
 import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
@@ -497,11 +497,19 @@ function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, run
   ] as const;
 }
 
-async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId: string): Promise<string[]> {
+async function completeRunDocuments(
+  client: Sql<Record<string, unknown>>,
+  runId: string,
+  after: readonly [PendingQuery<any>, PendingQuery<{ run_found: number; changed: number }[]>],
+): Promise<{ ids: string[]; finalized: Array<{ run_found: number; changed: number }> }> {
   const [retire, cancel, completed] = completeRunDocumentStatements(client, runId);
   await retire;
   await cancel;
-  return (await completed).map((row) => row.id);
+  // Pipelined: sent together, run in order on the transaction's connection.
+  completed.execute();
+  for (const statement of after) statement.execute();
+  const [rows, , finalized] = await Promise.all([completed, after[0], after[1]]);
+  return { ids: rows.map((row) => row.id), finalized };
 }
 
 export class Store {
@@ -1220,13 +1228,13 @@ export class Store {
         // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
         state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
-        const completed = await completeRunDocuments(client, state.run.id);
-        // Documents completed here (pipelines without an index stage) get their page extract records' finals too; sent
-        // beside the supersede lookup (one pipelined flight, no extra round trip).
-        const [replacements] = await Promise.all([
-          supersededInThisTransaction(client, completed.filter(id => !adopted.has(id))),
-          completed.length > 0 ? finalizePageExtracts(client, { orgId: owner.orgId, runId: state.run.id, documentIds: completed }) : null,
-        ]);
+        // Documents completed here (pipelines without an index stage) get their page extract records' finals too: the two
+        // finalization statements go out right behind the statement that completes the documents (one flight; the
+        // documents UPDATE holds their row locks first).
+        const finalizeScope = { orgId: owner.orgId, runId: state.run.id, documentIds: "completed-in-run" as const };
+        const completed = await completeRunDocuments(client, state.run.id, finalizePageExtracts(client, finalizeScope));
+        logFinalizeOutcome(completed.finalized, finalizeScope);
+        const replacements = await supersededInThisTransaction(client, completed.ids.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
         // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
         const stamps = runStampsIngestVersion(state.run.kind);
@@ -1815,10 +1823,12 @@ export class Store {
                   ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
                   : client``}
             where d.id = ${documentId}`,
-          // The document's page extract records get their one final row per page, in the transaction that publishes it.
-          ...(state.run.orgId ? [finalizePageExtracts(client, { orgId: state.run.orgId, runId: state.run.id, documentIds: [documentId] })] : []),
+          // The document's page extract records get their one final row per page, in the transaction that publishes it
+          // (after the documents UPDATE above, which holds the document's row lock: documents first, then extract rows).
+          ...(state.run.orgId ? finalizePageExtracts(client, { orgId: state.run.orgId, runId: state.run.id, documentIds: [documentId] }) : []),
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
+        if (state.run.orgId) logFinalizeOutcome(results.at(-2) as Array<{ run_found: number; changed: number }>, { runId: state.run.id, documentIds: [documentId] });
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
       });
     } else if (geoFinalSource) {

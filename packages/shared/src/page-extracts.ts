@@ -81,7 +81,7 @@ export type PageExtractRecordView = z.infer<typeof pageExtractRecordSchema>;
 
 export const documentPageExtractsSchema = z.object({
   documentId: z.string(),
-  /** Records ordered by page, run and pass. */
+  /** Records ordered by page, run and pass (the primary key order). */
   records: z.array(pageExtractRecordSchema),
   /** Pass as `after` for the next page of records; null on the last. */
   nextCursor: z.string().nullable(),
