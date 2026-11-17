@@ -1,3 +1,12 @@
+## Compute reuse across organizations (2026-11-16)
+
+Owner directive: stop the per-organization compute isolation that made small uploads slow; warm reuse is the default.
+
+- Modal parser VMs are no longer bound to one organization's run: the per-document in-guest scope bind exec, the reset's scope marker and single-use VMs for commands without a run are gone (runKey removed). Every command still runs after a root wipe of the previous document's job tree.
+- Parked VMs: an activity's idle, healthy VMs are parked for the worker's next activity (any run or organization) for `DOCSLURP_MODAL_VM_PARK_SECONDS` (default 30) instead of terminated; the job tree is wiped at adoption (a VM that cannot be wiped is replaced) and again before the first staging. Saves the ~2 s create-and-harden per activity. Adoption needs two thirds of the VM lifetime left; parked VMs hold worker capacity and stop at worker shutdown (`provider.drain`).
+- Page reader jobs no longer carry a per-job SQL organization proof (`PageImageReadJob.authorize` removed); `warm.status` may report a shared warm VM ready for any scope, so small runs use it at once.
+- AGENTS.md: compute units may be shared across organizations with per-job workspace reset, results only to the requesting job, the VM boundary from worker secrets unchanged.
+
 ## Data-plane isolation relaxed for performance (2026-11-16)
 
 Owner decision: isolation keeps everything that stops one organization reading another's data (org in every cache and storage key, org predicates, per-run job authorization, chat and search scoping, per-org quarantine), and drops measures that only cost latency, throughput or money.

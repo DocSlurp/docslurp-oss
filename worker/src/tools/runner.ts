@@ -1947,12 +1947,9 @@ export class CommandRunner {
         const started = new Promise<void>((resolve) => (onStart = resolve));
         // Bound to this stage's context: a pooled VM's idle time is recorded in this stage's ledger when the VM is reaped.
         const recordUsage = AsyncResource.bind((event: UsageEvent) => recordRemoteUsage(event));
-        // The run's organization and the run travel with every remote command: a scanner session runs only its own
-        // organization's, and a pooled parser VM is bound to one organization's run (never reused across either).
+        // The run's organization travels with every remote command: a scanner session runs only its own organization's.
         const orgId = currentPerfContext()?.orgId;
-        const runId = currentPerfContext()?.runId;
-        const remote = session.run({ ...command, ...(documentId ? { affinityKey: documentId } : {}), ...(orgId ? { tenantKey: orgId } : {}),
-          ...(runId ? { runKey: runId } : {}) }, signal, { onStart, recordUsage });
+        const remote = session.run({ ...command, ...(documentId ? { affinityKey: documentId } : {}), ...(orgId ? { tenantKey: orgId } : {}) }, signal, { onStart, recordUsage });
         if (!session.reportsStart) return { remote, timeoutMs: command.limits.timeoutMs, release };
         void remote.then(onStart, onStart); // a run that settles without admission (closed, aborted) ends the wait
         return { remote, timeoutMs: command.limits.timeoutMs, release, started };

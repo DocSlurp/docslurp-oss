@@ -251,6 +251,9 @@ A reader VM can take many minutes to boot. When the registered reader implements
 - Once `warm.status` reports `ready`, the remaining pages go to the reader in jobs marked `requireReady`: a VM that went
   away in between fails the job at once and its pages take their other route. Nothing waits on a boot, and a failed,
   refused or slow start never delays or fails a page.
+- `warm.status` is checked before the threshold: a provider whose warm VMs serve every run and organization reports
+  `ready` for any run while one has room, so a run below the threshold uses an already-warm reader at once. The
+  threshold only decides when a run starts a new reader.
 - A run starts at most three readers per worker process, and a second only after an earlier one read pages; at most
   three starts the provider refuses. The start-up reservation stands until the reader answers one of the run's jobs (the
   provider records a warmed reader's boot on the first job it serves), and otherwise for the day, so a reader started
