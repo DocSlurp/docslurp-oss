@@ -67,6 +67,9 @@ export async function escalateOcrPages(
         // An unfunded balance, the run cost cap and a refused price stop the rest of this document the same way.
         const reason = SKIP_REASON[error.reason];
         if (reason) (skipped[reason] ??= []).push(...rest);
+        // Page extract records tag the pages that kept their first read (pipeline/page-extracts.ts).
+        const held = error.reason === "budget" ? "capped" as const : error.reason === "unfunded" ? "unfunded" as const : null;
+        if (held) for (const candidate of candidates.slice(index)) candidate.escalationHeld ??= held;
         // Once disabled, refused, capped or out of budget, later pages of this document would be skipped the same way.
         if (error.reason !== "guard") break;
         continue;

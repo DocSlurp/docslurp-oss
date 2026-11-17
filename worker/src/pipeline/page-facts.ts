@@ -82,7 +82,7 @@ export interface PageFactUpsert {
   scanClass?: PageScanClass | null;
   /**
    * Doppler's packed math and table encoding words (document_page_facts.math_bits / table_bits / encoding_counts, migration
-   * 0186; lib/doppler-encoding-facts.ts decodes them). Written together or not at all; absent keeps the stored values.
+   * 0189; lib/doppler-encoding-facts.ts decodes them). Written together or not at all; absent keeps the stored values.
    */
   mathBits?: number | null;
   tableBits?: number | null;

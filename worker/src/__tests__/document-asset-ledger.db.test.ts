@@ -589,7 +589,7 @@ describe("routing page facts go through the page-facts write (MEDIUM-6)", () => 
     await sql`delete from document_page_facts where document_id = 'doc-a'`;
   });
 
-  it("Doppler's encoding words (migration 0186) land all three together, and a later write without them keeps them", async () => {
+  it("Doppler's encoding words (migration 0189) land all three together, and a later write without them keeps them", async () => {
     const { buildRoutingPageFacts } = await import("../pipeline/page-facts.js");
     // 2^52 - 1 is the largest count word: exact through JSON and bigint.
     const words = { mathBits: 2 ** 12 + 1, tableBits: 2 ** 31, encodingCounts: 2 ** 52 - 1 };

@@ -195,6 +195,31 @@ describe("file profiles are untrusted", () => {
     expect(fileProfileSchema.safeParse({ ...pdfProfile(), pages: -1 }).success).toBe(false);
   });
 
+  it("accepts page encodings and tagged counts as optional facts, and refuses unknown bits, duplicate masks and partial sums", () => {
+    // Profiles from profilers before them stay valid.
+    expect(fileProfileSchema.safeParse(pdfProfile()).success).toBe(true);
+    const tagged = { taggedFormulas: 3, taggedTables: 1, taggedMathSources: 1 };
+    const encoded = pdfProfile({}, { pageEncodings: [[0, 6], [0b11, 3], [1 << 15, 1]], ...tagged });
+    expect(fileProfileSchema.safeParse(encoded).success).toBe(true);
+    expect(normalizeFileProfile(encoded, { size: 100_000 })?.pdf).toMatchObject({ pageEncodings: encoded.pdf?.pageEncodings, ...tagged });
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { pageEncodings: [[1 << 14, 10]] })).success).toBe(false);
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { pageEncodings: [[1 << 16, 10]] })).success).toBe(false);
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { pageEncodings: [[1, 5], [1, 5]] })).success).toBe(false);
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { pageEncodings: [[1, 0], [0, 10]] })).success).toBe(false);
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { pageEncodings: Array.from({ length: 25 }, (_, mask) => [mask, 1] as [number, number]) })).success).toBe(false);
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { pageEncodings: [[0, 10]], taggedFormulas: -1 })).success).toBe(false);
+    // Encodings that do not account for exactly the sampled pages drop the page facts; sources never exceed formulas.
+    expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 9]] }), { size: 100_000 })?.pdf).toBeUndefined();
+    expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedFormulas: 1, taggedMathSources: 5 }), { size: 100_000 })?.pdf?.taggedMathSources).toBe(1);
+    // Sources with no formula count describe nothing; "not truncated" is said by omission only.
+    expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedMathSources: 5 }), { size: 100_000 })?.pdf?.taggedMathSources).toBeUndefined();
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { taggedFormulas: 1, taggedTruncated: true })).success).toBe(true);
+    expect(fileProfileSchema.safeParse(pdfProfile({}, { taggedFormulas: 1, taggedTruncated: false as never })).success).toBe(false);
+    const capped = normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedFormulas: 1_000_000, taggedTables: 900_000, taggedMathSources: 1_000_000 }), { size: 100_000 })?.pdf;
+    expect([capped?.taggedFormulas, capped?.taggedTables, capped?.taggedMathSources]).toEqual([50_000, 50_000, 50_000]);
+    expect(normalizeFileProfile(pdfProfile({}, { pageEncodings: [[0, 10]], taggedTruncated: true }), { size: 100_000 })?.pdf?.taggedTruncated).toBeUndefined();
+  });
+
   it("drops a profile measured on another file size or with inconsistent histograms", () => {
     expect(normalizeFileProfile(pdfProfile(), { size: 99 })).toBeNull();
     expect(normalizeFileProfile(pdfProfile({}, { wordsPerPage: [10, 0, 0, 0, 0, 5] }), { size: 100_000 })?.pdf).toBeUndefined();

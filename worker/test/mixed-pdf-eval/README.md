@@ -10,7 +10,7 @@ DocSlurp customer's files.
 
 - Both OCR arms run the worker's PP-OCR CLI (`worker/scripts/docslurp_ocr.py`) under `worker/scripts/parser-sandbox.sh`.
   That sandbox is bubblewrap: defence in depth, not the isolation boundary DocSlurp requires for customer bytes. In the
-  service, customer files are OCR'd only in a fresh VM per job ([OCR](../../../docs/extraction/ocr.md)).
+  service, customer files are OCR'd only in a VM ([OCR](../../../docs/extraction/ocr.md)).
 - `execution_guard.py` enforces this:
   - it refuses to run under `DOCSLURP_SERVICE_PROFILE=service`;
   - `measure.py` and `timing.py` refuse a `--dataset`, or any case PDF in it (symlinks resolved), outside the data

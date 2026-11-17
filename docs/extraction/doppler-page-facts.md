@@ -252,7 +252,7 @@ reader also drops all three words when they contradict their own names or count 
 
 **Where they go.** Each known page's route is attached to its layout facts (`PageLayoutFacts.encodings`, flags and
 `mathRead` only; a stored route is re-derived from its flags when read back), and the three words are stored per page in
-`document_page_facts` (`math_bits`, `table_bits`, `encoding_counts`; migration 0186), all three or none. Never a billing
+`document_page_facts` (`math_bits`, `table_bits`, `encoding_counts`; migration 0189), all three or none. Never a billing
 input.
 
 **Routing.** Encodings steer routing only when both `DOCSLURP_DOPPLER_PAGE_FACTS=use` (in `store`, the default, they are

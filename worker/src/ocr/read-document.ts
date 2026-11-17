@@ -51,6 +51,8 @@ export interface OcrDocumentInput {
   refuseUnfundedFrames?: (budget: number) => Promise<never>;
   /** Ask the boundary for a bounded rendition of every frame (visual indexing); returned as bytes on each page. */
   rendition?: { maxLongEdge: number; maxBytes: number };
+  /** The PDF's measured shape (SandboxedOcrJob.pdfShape): host routing only. */
+  pdfShape?: "scanned" | "mixed";
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -59,6 +61,10 @@ export interface OcrDocumentPage {
   pageNumber: number;
   text: string;
   reader: string;
+  /** The recogniser's mean confidence for the page in [0, 1], when it reported one and its read was kept. */
+  confidence?: number | null;
+  /** Why an escalation candidate kept its first read (escalation.ts). */
+  escalationHeld?: "capped" | "unfunded";
   /** The boundary's validated rendition of the frame (raw RGB with its header), read before its scratch directory is removed. */
   rendition?: { bytes: Buffer; width: number; height: number };
   /** The frame's decoded pixel size (page area equivalents of an uploaded image). */
@@ -108,6 +114,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       escalation: hostedEscalation,
       ...(keepFrames ? { keepFrames } : {}),
       ...(input.rendition ? { rendition: input.rendition } : {}),
+      ...(input.kind === "pdf" && input.pdfShape ? { pdfShape: input.pdfShape } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       env,
     });
@@ -144,7 +151,10 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       // The rendition was validated by header and exact size (engine.ts); its bytes are carried as-is.
       const rendition = page.rendition ? { bytes: await readFile(page.rendition.imagePath), width: page.rendition.width, height: page.rendition.height } : undefined;
       if (rendition && input.rendition && rendition.bytes.length > input.rendition.maxBytes) throw new Error("OCR rendition grew past its cap");
+      const firstRead = !page.recogniser.startsWith("page-reader:") && !page.recogniser.startsWith("escalated:");
       pages.push({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser, ...(rendition ? { rendition } : {}),
+        ...(firstRead && typeof page.meanConfidence === "number" ? { confidence: page.meanConfidence } : {}),
+        ...(page.escalationHeld ? { escalationHeld: page.escalationHeld } : {}),
         ...(page.sourceWidth && page.sourceHeight ? { sourceWidth: page.sourceWidth, sourceHeight: page.sourceHeight } : {}) });
     }
     // A page reader or hosted escalation read may hold model HTML tables: read in the parser VM (one job per document) and rebuilt.

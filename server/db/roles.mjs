@@ -49,6 +49,7 @@ export const WORKER_TABLES = Object.freeze({
   document_extraction_levels: { privileges: DML, evidence: "worker/src/db/document-asset-ledger.ts writeDocumentAssetLedger and listResumableDocuments" },
   document_extraction_shards: { privileges: DML, evidence: "worker/src/db/document-asset-ledger.ts writeDocumentAssetLedger (per-shard records) and listResumableDocuments" },
   document_maps: { privileges: DML, evidence: "worker/src/deferred/backfill-adoption.ts; document map stage" },
+  document_page_extracts: { privileges: ["select", "insert", "update"], evidence: "worker/src/pipeline/page-extracts.ts checkpoint upsert, supersession and tag merge (org-scoped)" },
   document_page_facts: { privileges: DML, evidence: "worker/src/db/store.ts page facts" },
   document_page_renders: { privileges: DML, evidence: "packages/shared/src/worker-autoscale.ts; page render stages" },
   document_page_states: { privileges: DML, evidence: "worker/src/db/page-base-fee.ts; deferred indexing" },
@@ -134,6 +135,8 @@ export const WORKER_TABLES = Object.freeze({
   provider_endpoint_current: { privileges: ["select"], evidence: "server/src/services/provider-observations.ts readProviderObservations (view)" },
   compute_fleets: { privileges: ["select"], columns: { update: ["id"] }, evidence: "operator-owned caps; UPDATE(id) permits a policy row lock, while the identity trigger forbids renaming" },
   compute_allocation_reservations: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/compute-fleet-store.ts durable allocation admission; SQL trigger enforces capacity" },
+  compute_job_fleets: { privileges: ["select"], columns: { update: ["id"] }, evidence: "operator-owned job caps; UPDATE(id) permits a policy row lock, while the identity trigger forbids renaming" },
+  compute_job_tickets: { privileges: ["select", "insert", "update", "delete"], evidence: "worker/src/db/compute-job-store.ts fleet-wide fair job admission; expired tickets are deleted" },
   compute_price_observations: { privileges: ["select"], evidence: "operator-owned compute prices; runtime lookup only" },
   compute_calibration_observations: { privileges: ["select", "insert"], evidence: "append-only operational compute measurements" },
 });
@@ -275,7 +278,7 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
     }
   }
   if (has(roles.app)) {
-    for (const table of ["compute_fleets", "compute_allocation_reservations"]) {
+    for (const table of ["compute_fleets", "compute_allocation_reservations", "compute_job_fleets", "compute_job_tickets"]) {
       if (relations.includes(table)) statements.push(`revoke all on public.${quoteIdent(table)} from ${quoteIdent(roles.app)}`);
     }
   }
@@ -314,6 +317,13 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
         `grant select on drizzle.__drizzle_migrations to ${worker}`,
       );
     }
+  }
+  if (relations.includes("compute_job_tickets")) {
+    // Fair job admission runs as the worker (SECURITY INVOKER); the API has no use for it.
+    const signature = "public.compute_job_admit(text,uuid,integer)";
+    statements.push(`revoke all on function ${signature} from public`);
+    if (has(roles.app)) statements.push(`revoke all on function ${signature} from ${quoteIdent(roles.app)}`);
+    if (has(roles.worker)) statements.push(`grant execute on function ${signature} to ${quoteIdent(roles.worker)}`);
   }
   if (existingColumns?.project_runs?.includes("compute_input_manifest_hash")) {
     const signature = "public.authorize_compute_cohort(text,text,text,text,text)";
