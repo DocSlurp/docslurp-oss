@@ -109,14 +109,14 @@ describe("GLM 5.3 Flash vision profile", () => {
   });
 
   it("a price-ceiling request sends max_price at the ceiling and is restricted to the ceiling's hosts", async () => {
-    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/nvfp4", "wafer/us"] };
+    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/us"] };
     const body = await requestBody(GLM, undefined, { priceCeiling: ceiling });
-    expect(body.provider).toMatchObject({ only: ["wafer/nvfp4", "wafer/us"], sort: "price", allow_fallbacks: true,
+    expect(body.provider).toMatchObject({ only: ["wafer/us"], sort: "price", allow_fallbacks: true,
       max_price: { prompt: 0.065, completion: 0.24, image: 0 } });
   });
 
   it("a request no host can serve under its ceiling fails as a routing exclusion, not a model failure", async () => {
-    const ceiling = { inputUsdPerMillion: 0.001, outputUsdPerMillion: 0.001, imageUsd: 0, hosts: ["wafer/nvfp4", "wafer/us"] };
+    const ceiling = { inputUsdPerMillion: 0.001, outputUsdPerMillion: 0.001, imageUsd: 0, hosts: ["wafer/us"] };
     await expect(requestBody(GLM, undefined, { priceCeiling: ceiling, response: () => new Response(JSON.stringify({ error: { message: "No endpoints found matching your data policy and max_price" } }), { status: 404 }) }))
       .rejects.toSatisfy((error: unknown) => {
         for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
@@ -132,7 +132,7 @@ describe("GLM 5.3 Flash vision profile", () => {
     const dir = await mkdtemp(join(tmpdir(), "vision-glm-"));
     const imagePath = join(dir, "page.png");
     await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/nvfp4", "wafer/us"] };
+    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/us"] };
     // DeepInfra's own API takes no max_price or host allowlist.
     await expect(inAllowingRun(() => executeVisionRuntime({
       imagePath, outputPath: `${imagePath}.json`, gate: null,
