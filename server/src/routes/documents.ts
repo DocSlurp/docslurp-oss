@@ -778,4 +778,6 @@ acceptApiKeys(documentsRoutes, [
   "GET /:docId/versions",
   "GET /:docId/changelog",
   "GET /:docId/correction-workbench",
+  // Page extract records: the handler requires the `artifacts` scope and the key's project access.
+  "GET /:docId/page-extracts",
 ]);
