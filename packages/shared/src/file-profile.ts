@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { TEXT_PAGE_CHARS, TEXT_PAGE_LINES } from "./media-upload-estimate.js";
 import { PAGE_AREA_EQUIVALENTS_CAP } from "./page-equivalents.js";
+import { PDF_PAGE_ENCODING_KNOWN_MASK, PDF_PAGE_ENCODING_MAX_ENTRIES } from "./pdf-page-encoding.js";
 
 /*
  * File profiles: what the offline profiler (`@docslurp/estimate`, Rust/WASM) measures about a file on the customer's own
@@ -41,6 +42,16 @@ export const fileProfileKindSchema = z.enum(["pdf", "image", "office", "ebook", 
 export type FileProfileKind = z.infer<typeof fileProfileKindSchema>;
 
 const count = z.number().int().nonnegative().max(1_000_000);
+
+/**
+ * Page encoding masks (pdf-page-encoding.ts) as a histogram: each distinct mask with the sampled pages that have it.
+ * Masks are unique, carry only known bits, and every page count is at least 1.
+ */
+const pageEncodingsSchema = z
+  .array(z.tuple([z.number().int().nonnegative().max(0xffff), z.number().int().positive().max(FILE_PROFILE_MAX_SAMPLED_PAGES)]))
+  .max(PDF_PAGE_ENCODING_MAX_ENTRIES)
+  .refine((entries) => entries.every(([mask]) => (mask & ~PDF_PAGE_ENCODING_KNOWN_MASK) === 0), "unknown page encoding bit")
+  .refine((entries) => new Set(entries.map(([mask]) => mask)).size === entries.length, "duplicate page encoding mask");
 
 export const pdfProfileSchema = z.strictObject({
   /** Pages inspected. */
@@ -150,6 +161,20 @@ export const pdfProfileSchema = z.strictObject({
   imageRegionSizes: z.array(count).length(5).optional(),
   imageRegionClasses: z.array(count).length(4).optional(),
   repeatedImagePlacements: count.optional(),
+  /**
+   * How math and tables are encoded on the sampled pages (pdf-page-encoding.ts): distinct page masks and the pages with
+   * each; the pages sum to `sampledPages`. Absent from profilers before it.
+   */
+  pageEncodings: pageEncodingsSchema.optional(),
+  /**
+   * Document-level structure-tree counts: /Formula and /Table elements (through the RoleMap), and formulas whose source
+   * is recoverable (TeX-like Alt or ActualText, a MathML associated file or MathML structure). Absent when the tree was
+   * not read; `taggedTruncated` when the walk reached its caps, so the counts are lower bounds.
+   */
+  taggedFormulas: count.optional(),
+  taggedTables: count.optional(),
+  taggedMathSources: count.optional(),
+  taggedTruncated: z.boolean().optional(),
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -222,7 +247,9 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
       // Estimated pages add glyphs no size was measured for: the histogram may then hold fewer, never more.
       || (pdf.textEstimatedPages > 0 ? sum(pdf.charsByFontSize) > pdf.sampledChars : sum(pdf.charsByFontSize) !== pdf.sampledChars)
       || sum(pdf.textEquivalentsPerPage) !== pdf.sampledPages || sum(pdf.areaEquivalentsPerPage) !== pdf.sampledPages
-      || sum(pdf.imagePpi) !== pdf.images || sum(pdf.imageBytesPerPixel) !== pdf.images) {
+      || sum(pdf.imagePpi) !== pdf.images || sum(pdf.imageBytesPerPixel) !== pdf.images
+      // Page encodings partition the sampled pages, like the histograms above.
+      || (pdf.pageEncodings !== undefined && sum(pdf.pageEncodings.map(([, pages]) => pages)) !== pdf.sampledPages)) {
       delete normalized.pdf;
     } else {
       const clamp = (value: number) => Math.min(sampled, value);
@@ -265,6 +292,8 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         // Only pages with native text, and never a page already held by a full-page image.
         scanBesideTextUnknownPages: Math.min(pdf.scanBesideTextUnknownPages, sampled),
         ruledTablePages: Math.min(pdf.ruledTablePages, sampled),
+        // Recoverable formula sources are a subset of the formulas.
+        ...(pdf.taggedMathSources !== undefined ? { taggedMathSources: Math.min(pdf.taggedMathSources, pdf.taggedFormulas ?? pdf.taggedMathSources) } : {}),
         // Routes are a partition of the sampled pages: a profile whose routes sum past them is cut back route by route.
         ...(pdf.routePages ? { routePages: clampPartition(pdf.routePages, sampled) } : {}),
         scanBesideTextPages: Math.min(pdf.scanBesideTextPages, Math.max(0, sampled - Math.min(sampled, pdf.rasterPages)), pdf.textLayerPages),
