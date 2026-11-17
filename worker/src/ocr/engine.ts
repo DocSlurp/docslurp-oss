@@ -95,6 +95,8 @@ export interface OcrReadInput {
   keepFrames?: "candidates" | "all";
   /** Ask the boundary for a bounded rendition of every frame (visual indexing of uploaded images). */
   rendition?: { maxLongEdge: number; maxBytes: number };
+  /** The PDF's measured shape (SandboxedOcrJob.pdfShape), for host routing only. */
+  pdfShape?: "scanned" | "mixed";
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -318,6 +320,7 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
       input: input.source,
       kind: input.kind,
       ...(input.pages?.length ? { pages: [...input.pages] } : {}),
+      ...(input.kind === "pdf" && input.pdfShape ? { pdfShape: input.pdfShape } : {}),
       output: path.join(dir, "result.json"),
       imageDir,
       recognisers: language.recognisers,

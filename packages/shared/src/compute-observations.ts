@@ -111,3 +111,42 @@ export interface ComputeAllocationAdmission {
 }
 
 export interface ComputeAllocationPending { reservationId: string; providerId: string | null; reservedAt: string }
+
+/**
+ * Fleet-wide job admission with per-organization fairness (migration 0186). Platform bookkeeping only: it carries a keyed
+ * organization hash and measured page counts, never content or tenant ids, and does not authorize file access.
+ */
+export type ComputeJobTicketState = "routing" | "waiting" | "admitted";
+export interface ComputeJobTicket {
+  fleetId: string;
+  ticketId: string;
+  /** 64 lowercase hex: a keyed hash of the organization (the plugin's choice of key; one per fleet). */
+  orgKey: string;
+  /** Measured pages of the job (a structural count), 1..100000. Never document-supplied metadata. */
+  pages: number;
+}
+export interface ComputeJobDemandCounts { jobs: number; pages: number }
+export interface ComputeJobDemand {
+  maxJobs: number;
+  maxJobsPerOrg: number;
+  /** The asking organization's own tickets by state. */
+  org: Record<ComputeJobTicketState, ComputeJobDemandCounts>;
+  /** Every organization's tickets on this fleet, aggregated (no per-organization breakdown). */
+  fleet: Record<ComputeJobTicketState, ComputeJobDemandCounts>;
+}
+export type ComputeJobAdmitResult = ComputeJobTicketState | "unknown" | "unavailable";
+export interface ComputeJobAdmission {
+  /** Record a ticket as `routing` (demand only) or `waiting`. False when the fleet is missing or disabled (fail closed). */
+  register(ticket: ComputeJobTicket, state: "routing" | "waiting", leaseSeconds: number): Promise<boolean>;
+  /**
+   * Join the fair queue (a routing ticket becomes waiting), renew the lease and admit waiting tickets while the fleet has
+   * room, fewest-held organization first. `unknown`: the ticket expired or was released; `unavailable`: fleet disabled.
+   */
+  admit(fleetId: string, ticketId: string, leaseSeconds: number): Promise<ComputeJobAdmitResult>;
+  /** Extend a live ticket's lease. False when it is gone (expired): the holder must stop using the slot it stood for. */
+  renew(fleetId: string, ticketId: string, leaseSeconds: number): Promise<boolean>;
+  /** Idempotent. */
+  release(fleetId: string, ticketId: string): Promise<void>;
+  /** Live (unexpired) demand on the fleet. Null when the fleet is missing or disabled. */
+  demand(fleetId: string, orgKey: string): Promise<ComputeJobDemand | null>;
+}
