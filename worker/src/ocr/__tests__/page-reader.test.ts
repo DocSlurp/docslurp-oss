@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BILLABLE_UNIT_METRICS, setPrivateModelEndpointRegistryForTests, UNIT_CHARGE_PROVIDER } from "@docslurp/shared";
 
 import {
-  EXTRACTOR_PLUGIN_API_VERSION, loadedPluginCapabilities, PAGE_READER_USAGE_PROPERTY, pageReaderUsageOf, registerExtractorPlugin, resetExtractorPluginsForTest,
+  EXTRACTOR_PLUGIN_API_VERSION, loadedPluginCapabilities, PAGE_READER_NO_COMPUTE_PROPERTY, PAGE_READER_USAGE_PROPERTY, pageReaderUsageOf, registerExtractorPlugin, resetExtractorPluginsForTest,
   type PageImageReadJob, type PageImageReaderProvider, type SandboxedOcrProvider,
 } from "../../extractors/plugins.js";
 import type { ProjectRun, UsageEvent } from "../../models.js";
@@ -16,7 +16,8 @@ import type { HostedOcrReader } from "../hosted-reader.js";
 import { assertOcrConfiguration } from "../mode.js";
 import {
   assertOcrPageReaderConfiguration, DEFAULT_OCR_PAGE_READER_MAX_PAGES, ocrPageReaderMaxPages, ocrPageReaderMode, readPagesWithProvider, validatePageReadResults,
-  readOcrPagesWithConfiguredReader, MAX_PAGE_READER_TOKENS_PER_PAGE, type PageReaderContext,
+  readOcrPagesWithConfiguredReader, MAX_PAGE_READER_TOKENS_PER_PAGE, PAGE_READER_MAX_RELEASES_PER_ORG_DAY, pageReaderPagesRemaining, readPageImagesWithProvider,
+  resetPageReaderReleasesForTest, type PageReaderContext,
 } from "../page-reader.js";
 import { InMemoryPageReaderOrgBudget } from "../page-reader-budget.js";
 import { ocrPageReaderOrgDailyMaxCostCents, pageReaderAllowedForPrivacy } from "../page-reader-mode.js";
@@ -26,6 +27,7 @@ let scratch: string;
 beforeEach(async () => {
   scratch = await mkdtemp(path.join(tmpdir(), "docslurp-ocr-page-reader-"));
   resetExtractorPluginsForTest();
+  resetPageReaderReleasesForTest();
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -202,6 +204,25 @@ describe("validatePageReadResults", () => {
     ["too many results", [{ key: "a", status: "read", markdown: "x" }, { key: "b", status: "read", markdown: "x" }, { key: "a", status: "read", markdown: "x" }]],
   ])("rejects %s", (_name, raw) => {
     expect(() => validatePageReadResults(raw, keys, 10)).toThrow();
+  });
+});
+
+describe("InMemoryPageReaderOrgBudget.releaseUnused", () => {
+  it("releases only the organization's own unsettled, cost-free ticket", async () => {
+    const budget = new InMemoryPageReaderOrgBudget();
+    const mine = await budget.admit({ orgId: "org-a", reserveCents: 40, capCents: 100 });
+    const theirs = await budget.admit({ orgId: "org-b", reserveCents: 40, capCents: 100 });
+    const settled = await budget.admit({ orgId: "org-a", reserveCents: 30, capCents: 100 });
+    if (!mine.admitted || !theirs.admitted || !settled.admitted) throw new Error("not admitted");
+    expect(await budget.releaseUnused(theirs.ticket, "org-a")).toBe(false);
+    expect(await budget.releaseUnused("no-such-ticket", "org-a")).toBe(false);
+    expect(await budget.releaseUnused(mine.ticket, "")).toBe(false);
+    expect(await budget.committedCents("org-b")).toBe(40);
+    await budget.settle(settled.ticket, 12);
+    expect(await budget.releaseUnused(settled.ticket, "org-a")).toBe(false);
+    expect(await budget.releaseUnused(mine.ticket, "org-a")).toBe(true);
+    expect(await budget.releaseUnused(mine.ticket, "org-a")).toBe(false);
+    expect(await budget.committedCents("org-a")).toBe(12);
   });
 });
 
@@ -399,7 +420,9 @@ describe("readPagesWithProvider", () => {
     missing.pageReaderBudget = null;
     expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(missing))).skipped).toEqual({ "budget-ledger-unavailable": 1 });
     const broken = runState();
-    broken.pageReaderBudget = { admit: async () => { throw new Error("database down"); }, settle: async () => undefined, committedCents: async () => { throw new Error("database down"); } };
+    broken.pageReaderBudget = {
+      admit: async () => { throw new Error("database down"); }, settle: async () => undefined, releaseUnused: async () => false, committedCents: async () => { throw new Error("database down"); },
+    };
     expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(broken))).skipped).toEqual({ "budget-ledger-unavailable": 1 });
     expect(provider.read).not.toHaveBeenCalled();
   });
@@ -424,6 +447,168 @@ describe("readPagesWithProvider", () => {
     const provider = reader(async () => { throw Object.assign(new Error("vm lost"), { pageReaderUsage: [{ provider: "x", model: "x", metric: "x", amount: 1, unit: "page", costCents: 0.7 }] }); });
     await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state));
     expect(settle).toHaveBeenCalledWith(expect.any(String), 0.7);
+  });
+
+  describe("a capacity give-way", () => {
+    /** A rejection like a reader at its caps: job-level reason `capacity`, optionally asserting no compute ran. */
+    const capacityError = (extra: Record<string, unknown> = {}) => Object.assign(new Error("reader at its capacity"), { reason: "capacity", ...extra });
+
+    it("releases the reservation when the reader gave way before any compute ran: no charge, the day's budget unchanged", async () => {
+      const state = runState();
+      const budget = state.pageReaderBudget as InMemoryPageReaderOrgBudget;
+      const settle = vi.spyOn(budget, "settle");
+      const release = vi.spyOn(budget, "releaseUnused");
+      const provider = reader(async () => { throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true }); }, { estimateJobCostCents: () => 4 });
+      const outcome = await outcomeWith([{ pageNumber: 1, escalate: true }]);
+      const summary = await readPagesWithProvider(outcome, provider, ctx(state, { orgDailyMaxCostCents: 10 } as never));
+      expect(summary.failed).toEqual({ capacity: 1 });
+      expect(release).toHaveBeenCalledWith(expect.any(String), "org-1");
+      expect(settle).not.toHaveBeenCalled();
+      expect(await budget.committedCents("org-1")).toBe(0);
+      expect(readerEvents(state)).toHaveLength(0);
+      // The page keeps the recogniser's text and stays a hosted escalation candidate.
+      expect(outcome.pages[0]!.text).toBe("recogniser 1");
+      expect(outcome.pages[0]!.escalation).not.toBeNull();
+    });
+
+    it("charges a capacity failure after compute started: usage carried, or no assertion that nothing ran", async () => {
+      const state = runState();
+      const budget = state.pageReaderBudget as InMemoryPageReaderOrgBudget;
+      const settle = vi.spyOn(budget, "settle");
+      const release = vi.spyOn(budget, "releaseUnused");
+      const usage = [{ provider: "x", model: "x", metric: "x", amount: 1, unit: "page", costCents: 0.7 }];
+      // Claims nothing ran but carries a VM's cost: conflicting, so charged at no less than the reservation.
+      await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]),
+        reader(async () => { throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true, pageReaderUsage: usage }); }, { estimateJobCostCents: () => 4 }), ctx(state, { documentId: "doc-a" }));
+      expect(settle).toHaveBeenLastCalledWith(expect.any(String), 4);
+      // Partial compute, then a capacity failure (a VM that failed to start): its cost is charged in full.
+      await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]),
+        reader(async () => { throw capacityError({ pageReaderUsage: [{ ...usage[0]!, costCents: 6 }] }); }, { estimateJobCostCents: () => 4 }), ctx(state, { documentId: "doc-b" }));
+      expect(settle).toHaveBeenLastCalledWith(expect.any(String), 6);
+      // Capacity without the assertion: unclear whether compute ran, so the reservation is charged.
+      await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]),
+        reader(async () => { throw capacityError(); }, { estimateJobCostCents: () => 4 }), ctx(state, { documentId: "doc-c" }));
+      expect(settle).toHaveBeenLastCalledWith(expect.any(String), 4);
+      // The assertion on anything but a capacity give-way, or a loose truthy value, is not trusted either.
+      for (const [index, error] of [
+        Object.assign(new Error("vm lost"), { reason: "vm-lost", [PAGE_READER_NO_COMPUTE_PROPERTY]: true }),
+        capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: "true" }),
+        capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true, ocrRefused: true }),
+      ].entries()) {
+        await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), reader(async () => { throw error; }, { estimateJobCostCents: () => 4 }), ctx(state, { documentId: `doc-x${index}` }));
+        expect(settle).toHaveBeenLastCalledWith(expect.any(String), 4);
+      }
+      expect(release).not.toHaveBeenCalled();
+      expect(await budget.committedCents("org-1")).toBeCloseTo(4 + 6 + 4 + 12, 4);
+    });
+
+    it("charges an aborted give-way and settles at the reservation when the ledger refuses or fails the release", async () => {
+      const state = runState();
+      const budget = state.pageReaderBudget as InMemoryPageReaderOrgBudget;
+      const settle = vi.spyOn(budget, "settle");
+      const giveWay = reader(async () => { throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true }); }, { estimateJobCostCents: () => 4 });
+      vi.spyOn(budget, "releaseUnused").mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("database down"));
+      await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), giveWay, ctx(state, { documentId: "doc-a" }));
+      expect(settle).toHaveBeenLastCalledWith(expect.any(String), 4);
+      await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), giveWay, ctx(state, { documentId: "doc-b" }));
+      expect(settle).toHaveBeenLastCalledWith(expect.any(String), 4);
+      const abort = new AbortController();
+      const aborting = reader(async () => { abort.abort(); throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true }); }, { estimateJobCostCents: () => 4 });
+      await expect(readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), aborting, ctx(state, { documentId: "doc-c", signal: abort.signal }))).rejects.toThrow();
+      expect(settle).toHaveBeenLastCalledWith(expect.any(String), 4);
+      expect(await budget.committedCents("org-1")).toBeCloseTo(12, 4);
+    });
+
+    it("sends none of the document's later batches to the reader in this run; other documents and runs still go", async () => {
+      const state = runState();
+      let calls = 0;
+      const provider = reader(async (job) => {
+        calls += 1;
+        if (calls === 1) throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true });
+        return echo(job);
+      }, { maxPagesPerJob: 1 });
+      const first = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }, { pageNumber: 2 }, { pageNumber: 3 }]), provider, ctx(state));
+      expect(provider.read).toHaveBeenCalledTimes(1);
+      expect(first.failed).toEqual({ capacity: 1 });
+      expect(first.skipped).toEqual({ "reader-capacity": 2 });
+      // The document's next OCR batch goes straight to its fallback, without a job.
+      const later = await outcomeWith([{ pageNumber: 4 }, { pageNumber: 5 }]);
+      const second = await readPagesWithProvider(later, provider, ctx(state));
+      expect(provider.read).toHaveBeenCalledTimes(1);
+      expect(second.skipped).toEqual({ "reader-capacity": 2 });
+      expect(later.pages.map((page) => page.text)).toEqual(["recogniser 4", "recogniser 5"]);
+      // Pages never sent, and the released job's page, went back to the document's page budget.
+      expect(pageReaderPagesRemaining(state.usageLedger, "doc-1", 100)).toBe(100);
+      // Another document of the run, and the same document in another run, still use the reader.
+      expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state, { documentId: "doc-2" }))).replaced).toBe(1);
+      expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(runState({ id: "run-2" })))).replaced).toBe(1);
+    });
+
+    it("charges a give-way whose rejection carries any usage shape, and releases one with an empty usage list", async () => {
+      const state = runState();
+      const budget = state.pageReaderBudget as InMemoryPageReaderOrgBudget;
+      const settle = vi.spyOn(budget, "settle");
+      const usageEvent = { provider: "x", model: "x", metric: "x", amount: 1, unit: "page", costCents: 0 };
+      for (const [index, extra] of [{ usage: usageEvent }, { pageReaderUsage: "lots" }, { pageReaderUsage: [usageEvent] }].entries()) {
+        await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]),
+          reader(async () => { throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true, ...extra }); }, { estimateJobCostCents: () => 4 }), ctx(state, { documentId: `doc-u${index}` }));
+        expect(settle).toHaveBeenLastCalledWith(expect.any(String), 4);
+      }
+      settle.mockClear();
+      const summary = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]),
+        reader(async () => { throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true, pageReaderUsage: [] }); }, { estimateJobCostCents: () => 4 }), ctx(state, { documentId: "doc-empty" }));
+      expect(summary.released).toBe(1);
+      expect(settle).not.toHaveBeenCalled();
+      expect(await budget.committedCents("org-1")).toBeCloseTo(12, 4);
+    });
+
+    it("stops releasing after the organization's daily backstop; other organizations keep theirs", async () => {
+      const state = runState();
+      const budget = state.pageReaderBudget as InMemoryPageReaderOrgBudget;
+      const giveWay = reader(async () => { throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true }); }, { estimateJobCostCents: () => 1, maxPagesPerJob: 1 });
+      for (let index = 0; index < PAGE_READER_MAX_RELEASES_PER_ORG_DAY; index += 1) {
+        await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), giveWay, ctx(state, { documentId: `doc-${index}`, orgDailyMaxCostCents: 1_000 } as never));
+      }
+      expect(await budget.committedCents("org-1")).toBe(0);
+      const over = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), giveWay, ctx(state, { documentId: "doc-over", orgDailyMaxCostCents: 1_000 } as never));
+      expect(over.released ?? 0).toBe(0);
+      expect(await budget.committedCents("org-1")).toBe(1);
+      const other = runState({ id: "run-2", orgId: "org-2" });
+      other.pageReaderBudget = budget;
+      expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), giveWay, ctx(other))).released).toBe(1);
+    });
+
+    it("a warm-start (requireReady) give-way is released but never stops the document", async () => {
+      const state = runState();
+      let calls = 0;
+      const provider = reader(async (job) => {
+        calls += 1;
+        if (calls === 1) throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true });
+        return echo(job);
+      }, { maxPagesPerJob: 1 });
+      const pages = [{ pageNumber: 1, imagePath: await png("w1.png") }, { pageNumber: 2, imagePath: await png("w2.png") }];
+      const use = { metric: "ocr-page-reader", logTag: "[test]", requireReady: true, onRead: vi.fn() };
+      const summary = await readPageImagesWithProvider(pages, provider, ctx(state), use);
+      expect(provider.read).toHaveBeenCalledTimes(2);
+      expect(summary.released).toBe(1);
+      expect(summary.replaced).toBe(1);
+      expect(summary.skipped).toEqual({});
+    });
+
+    it("a capacity stop on one reader leaves another reader of the same document alone", async () => {
+      const state = runState();
+      await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), reader(async () => { throw capacityError({ [PAGE_READER_NO_COMPUTE_PROPERTY]: true }); }), ctx(state));
+      const other = reader(echo, { id: "other-reader" });
+      expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 2 }]), other, ctx(state))).replaced).toBe(1);
+    });
+
+    it("stops the document after a capacity failure even when the reader may have run compute", async () => {
+      const state = runState();
+      const provider = reader(async () => { throw capacityError({ pageReaderUsage: [{ provider: "x", model: "x", metric: "x", amount: 1, unit: "page", costCents: 1 }] }); }, { maxPagesPerJob: 1 });
+      const summary = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }, { pageNumber: 2 }]), provider, ctx(state));
+      expect(provider.read).toHaveBeenCalledTimes(1);
+      expect(summary.skipped).toEqual({ "reader-capacity": 1 });
+    });
   });
 
   it("parses the org daily provider-cost cap, refusing anything outside 0..10000000", () => {

@@ -178,7 +178,13 @@ advisory lock, the day's settled cost plus the reservations of unsettled jobs pl
 optional `estimateJobCostCents`) must stay within the cap, or the job's pages keep the recogniser read. A completed job
 settles its reservation with the cost it recorded; a job that throws (a lease that failed while booting, an abort) settles
 at no less than its reservation, since it may have run a VM it could not report; a job that never settles (a crashed
-worker) keeps its reservation for the day. A ledger that cannot answer, or whose organization lock is not free within
+worker) keeps its reservation for the day. The one exception is a capacity give-way: a rejection with job-level reason
+`capacity` that also sets `pageReaderNoCompute: true`, carries no usage, is not an input refusal and was not aborted
+asserts that no compute ran for the job, so its ticket is released (settled at 0, only if it is still that
+organization's own unsettled, cost-free ticket, and at most 200 times per organization per UTC day in one worker;
+otherwise it settles at the reservation). After a job-level `capacity` failure (other than a warm-start `requireReady`
+miss) the document's remaining pages in this worker's run state go to the fallback without another reader job
+(`reader-capacity` in the summary), so one document cannot set off a give-way per page batch. A ledger that cannot answer, or whose organization lock is not free within
 10 s, sends nothing. A tier word never picks a reader scoring at or under the recogniser alone, and treats a hosted
 escalation model other than the measured one as unmeasured. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
 and any error inside the reader path is logged and leaves the pages with their reads (only an abort propagates).
