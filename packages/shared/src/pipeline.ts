@@ -18,6 +18,7 @@ import {
   inferenceLaneSchema,
   vectorBackendSchema,
   visionConfigSchema,
+  visionModelRefusal,
   parseLlmModelUri,
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
@@ -1202,6 +1203,21 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
     if (extraction.dropped.length > 0) {
       next = { ...next, documentExtraction: extraction.value };
       dropped.push(...extraction.dropped);
+    }
+  }
+  // A vision model that was allowed when the row was written and is refused now (no stated US or EU hosting region,
+  // an unproven image-token bound): the setting is dropped, so the row reads with the default model. No page is sent to
+  // the refused model either way; without this one such project fails every read, including the owner's project list.
+  if (isPlainRecord(next.vision)) {
+    const vision = next.vision as Record<string, unknown>;
+    const refused = ["modelUri", "remoteFallbackModelUri"].filter((key) => typeof vision[key] === "string" && visionModelRefusal(vision[key] as string) !== null);
+    // A profile is a named model: with no model of its own on the row, a profile whose model is refused goes too.
+    const profileModel = typeof vision.profile === "string" && Object.hasOwn(visionProfileCatalog, vision.profile)
+      ? visionProfileCatalog[vision.profile as keyof typeof visionProfileCatalog].config.modelUri : null;
+    if (profileModel && visionModelRefusal(profileModel) !== null && (typeof vision.modelUri !== "string" || refused.includes("modelUri"))) refused.push("profile");
+    if (refused.length > 0) {
+      next = { ...next, vision: Object.fromEntries(Object.entries(vision).filter(([key]) => !refused.includes(key))) };
+      dropped.push(...refused.map((key) => `vision.${key}`));
     }
   }
   if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
