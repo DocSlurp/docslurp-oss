@@ -1751,7 +1751,9 @@ export class VisionExtractStage implements Stage {
           if (batchSignal.aborted) throw error;
           console.error(`[vision-extract] page-reader error document=${document.id} pages=${batch.join(",")}; unread pages go hosted: ${toError(error).message.slice(0, 300)}`);
         }
-        const stop = summary && PAGE_READER_STOP_REASONS.find((reason) => (summary!.skipped[reason] ?? 0) > 0);
+        // A capacity failure stops the reader for this document at once (page-reader.ts), before another batch is rendered.
+        const stop = summary && (PAGE_READER_STOP_REASONS.find((reason) => (summary!.skipped[reason] ?? 0) > 0)
+          ?? (!warm && (summary.failed.capacity ?? 0) > 0 ? "reader-capacity" : undefined));
         if (stop) stopped = stop;
         if (warm && scope && summary) {
           // The first job on the warmed reader records its boot: the start-up reservation goes back.

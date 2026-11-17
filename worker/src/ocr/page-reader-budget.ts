@@ -82,7 +82,7 @@ export class InMemoryPageReaderOrgBudget implements PageReaderOrgBudget {
 
   async releaseUnused(ticket: string, orgId: string): Promise<boolean> {
     const row = this.tickets.get(ticket);
-    if (!row || row.orgId !== orgId || row.settled || row.cost !== 0) return false;
+    if (!ticket || !orgId || !row || row.orgId !== orgId || row.settled || row.cost !== 0) return false;
     Object.assign(row, { cost: 0, settled: true });
     return true;
   }

@@ -446,11 +446,13 @@ export interface PageImageReaderProvider {
 export const PAGE_READER_USAGE_PROPERTY = "pageReaderUsage";
 
 /**
- * The property a page reader's rejection sets to `true` when the job gave way before any compute ran for it: no VM or
- * request was created, claimed, booted or bound for it, and no page was sent (a give-way at the provider's capacity caps).
- * The host then releases the job's reservation against the organization's daily reader budget instead of settling it.
- * Set it only when that is certain. A rejection without it, or one that also carries usage, is charged at no less than its
- * reservation (fail closed).
+ * The property a page reader's rejection sets to `true` when the job gave way before any compute was attributable to it,
+ * across every attempt inside that `read()` call: no VM or server was created (or a create started), no standby was
+ * claimed, no running or booting VM was joined or bound, no hosted request was sent (even one answered 429 or 503), and no
+ * page was sent. Use it only with job-level `reason: "capacity"` and no usage, and never after the job's signal fired.
+ * The host then releases the job's reservation against the organization's daily reader budget instead of settling it,
+ * within a per-organization daily backstop. Set it only when that is certain. A rejection without it, or one that also
+ * carries usage, is charged at no less than its reservation (fail closed).
  */
 export const PAGE_READER_NO_COMPUTE_PROPERTY = "pageReaderNoCompute";
 

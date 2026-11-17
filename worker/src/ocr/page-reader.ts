@@ -58,6 +58,8 @@ export interface PageReaderSummary {
    */
   skipped: Record<string, number>;
   jobs: number;
+  /** Failed jobs whose daily reader budget reservation was released (a give-way before any compute ran). */
+  released?: number;
   inputTokens: number;
   outputTokens: number;
 }
@@ -106,6 +108,30 @@ function capacityKey(provider: PageImageReaderProvider, documentId: string): str
 
 function readerCapacityStopped(ledger: object, provider: PageImageReaderProvider, documentId: string): boolean {
   return capacityStopped.get(ledger)?.has(capacityKey(provider, documentId)) === true;
+}
+
+/**
+ * Backstop on the provider's no-compute assertion: at most this many give-way releases per organization per UTC day in one
+ * worker process. Past it, a give-way settles at its reservation again, so a plugin that wrongly asserts no compute cannot
+ * keep failed-job spend outside the daily cap.
+ */
+export const PAGE_READER_MAX_RELEASES_PER_ORG_DAY = 200;
+const releasesByOrgDay = new Map<string, number>();
+
+/** Take one of the organization's releases for today; false when the backstop is spent. */
+function takeRelease(orgId: string, now = new Date()): boolean {
+  const day = now.toISOString().slice(0, 10);
+  for (const key of releasesByOrgDay.keys()) if (!key.startsWith(`${day}\u0000`)) releasesByOrgDay.delete(key);
+  const key = `${day}\u0000${orgId}`;
+  const used = releasesByOrgDay.get(key) ?? 0;
+  if (used >= PAGE_READER_MAX_RELEASES_PER_ORG_DAY) return false;
+  releasesByOrgDay.set(key, used + 1);
+  return true;
+}
+
+/** Tests only: forget the per-organization release counts. */
+export function resetPageReaderReleasesForTest(): void {
+  releasesByOrgDay.clear();
 }
 
 function stopReaderForCapacity(ledger: object, provider: PageImageReaderProvider, documentId: string): void {
@@ -306,7 +332,7 @@ export async function readPageImagesWithProvider(
   // The reader gave way at its capacity for this document earlier in the run: its pages go to the fallback, no new job.
   if (readerCapacityStopped(ctx.state.usageLedger, provider, ctx.documentId)) {
     bump(summary.skipped, "reader-capacity", pages.length);
-    console.warn(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the reader gave way at its capacity earlier in this run`);
+    console.log(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the reader gave way at its capacity earlier in this run`);
     return logSummary(summary, ctx, use);
   }
   const scope = { orgId: run.orgId, runId: run.id };
@@ -389,7 +415,9 @@ export async function readPageImagesWithProvider(
         logAiUsage(provider, tokens, summary, use.metric);
         if (ctx.signal?.aborted) throw error;
         const capacity = pageReaderJobFailureOf(error) === "capacity";
-        if (capacity) stopReaderForCapacity(ctx.state.usageLedger, provider, ctx.documentId);
+        // A warm-start (requireReady) miss is a momentary race for a ready VM: it never stops the document, and a give-way
+        // there runs nothing, so it is released below. Any other capacity failure sends the rest of the document to its fallback.
+        if (capacity && !use.requireReady) stopReaderForCapacity(ctx.state.usageLedger, provider, ctx.documentId);
         gaveWayBeforeCompute = capacity && pageReaderGaveWayBeforeCompute(error) && tokens.costCents === 0;
         const reason = capacity ? "capacity" : jobFailureReason(error);
         bump(summary.failed, reason, chunk.length);
@@ -435,7 +463,11 @@ export async function readPageImagesWithProvider(
         summary.replaced += 1;
       }
     } finally {
-      if (!(jobFailed && gaveWayBeforeCompute && (await releaseUnusedJob(ctx, ticket, run.orgId, use)))) {
+      if (jobFailed && gaveWayBeforeCompute && (await releaseUnusedJob(ctx, ticket, run.orgId, reservedCents, use))) {
+        summary.released = (summary.released ?? 0) + 1;
+        // Nothing was read: the pages go back to the document's page budget too.
+        release(sent, ctx.documentId, chunk.length);
+      } else {
         await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents, use);
       }
     }
@@ -526,11 +558,16 @@ async function settleJob(ctx: PageReaderContext, ticket: string, costCents: numb
  * False when the ledger refuses (not this organization's, already settled, carries cost) or fails: the caller then settles
  * at no less than the reservation (fail closed).
  */
-async function releaseUnusedJob(ctx: PageReaderContext, ticket: string, orgId: string, use: Pick<PageImageReadUse, "logTag">): Promise<boolean> {
+async function releaseUnusedJob(ctx: PageReaderContext, ticket: string, orgId: string, reservedCents: number, use: Pick<PageImageReadUse, "logTag">): Promise<boolean> {
   const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
+  if (!budget) return false;
+  if (!takeRelease(orgId)) {
+    console.error(`${use.logTag} reservation release refused document=${ctx.documentId} org=${orgId}: ${PAGE_READER_MAX_RELEASES_PER_ORG_DAY} give-way releases today; settling at the reservation`);
+    return false;
+  }
   try {
-    const released = (await budget?.releaseUnused(ticket, orgId)) === true;
-    if (released) console.log(`${use.logTag} reservation released document=${ctx.documentId}: the reader gave way before any compute ran`);
+    const released = (await budget.releaseUnused(ticket, orgId)) === true;
+    if (released) console.log(`${use.logTag} reservation released document=${ctx.documentId} org=${orgId} reserved_cents=${reservedCents.toFixed(4)}: the reader gave way before any compute ran`);
     else console.warn(`${use.logTag} reservation release refused document=${ctx.documentId}; settling at the reservation`);
     return released;
   } catch (error) {
@@ -548,7 +585,7 @@ function logAiUsage(provider: PageImageReaderProvider, tokens: { inputTokens: nu
 function logSummary(summary: PageReaderSummary, ctx: PageReaderContext, use: Pick<PageImageReadUse, "logTag">): PageReaderSummary {
   console.log(
     `${use.logTag} document=${ctx.documentId} mode=${summary.mode} provider=${summary.provider} jobs=${summary.jobs} attempted=${summary.attempted} ` +
-      `replaced=${summary.replaced} empty=${summary.empty} failed=${JSON.stringify(summary.failed)} skipped=${JSON.stringify(summary.skipped)}`,
+      `replaced=${summary.replaced} empty=${summary.empty} released=${summary.released ?? 0} failed=${JSON.stringify(summary.failed)} skipped=${JSON.stringify(summary.skipped)}`,
   );
   return summary;
 }
