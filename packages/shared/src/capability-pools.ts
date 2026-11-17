@@ -31,7 +31,12 @@ export type PoolMemberKind = "llm" | "service";
 /** `read`: serves the page; `second-read` (ocr only): re-reads a page the first read doubts. */
 export type PoolMemberStage = "read" | "second-read";
 /** Where a member processes pages. `local`: inside this deployment (built-in members only). */
-export type PoolRegion = "US" | "EU" | "local";
+/**
+ * `global`: a plugin service whose processing region is not pinned (for example a cloud sandbox scheduled in any region).
+ * Accepted for plugin services (owner, 2026-11-17: US/EU is not enforced for compute; China-controlled hosts are never
+ * used, so a plugin renting marketplace GPUs must exclude them itself). LLM routes still need a stated US or EU host.
+ */
+export type PoolRegion = "US" | "EU" | "local" | "global";
 export type PoolRegionEvidenceKind = "endpoint-tag" | "provider-docs" | "openrouter-metadata" | "deployment";
 
 /** Where one host (or service) processes pages, and the stated evidence. */
@@ -59,7 +64,7 @@ interface PoolMemberBase {
   readonly stage: PoolMemberStage;
   /** Generic engine or route label (`glm-5.3-flash+wafer`, `vm-pdf`). */
   readonly engine: string;
-  /** Region of the member: every host's region (`US`, `EU`, `local`), joined when they differ (`US+EU`). */
+  /** Region of the member: every host's region (`US`, `EU`, `local`, `global`), joined when they differ (`US+EU`). */
   readonly region: string;
   /** Per-host (LLM) or per-service evidence. */
   readonly regions: readonly PoolRegionEvidence[];
@@ -281,8 +286,8 @@ export function serviceMemberFromRegistration(registration: CapabilityPoolServic
   if (!/^[a-z][a-z0-9-]{1,63}$/.test(registration.backend ?? "")) problems.push("backend must be the provider's lowercase id");
   if (!Array.isArray(registration.regions) || registration.regions.length === 0) problems.push("regions must state where the service processes pages");
   for (const entry of registration.regions ?? []) {
-    if (entry.region !== "US" && entry.region !== "EU") problems.push(`region ${String(entry.region)} is not US or EU`);
-    if (!["endpoint-tag", "provider-docs", "openrouter-metadata"].includes(entry.evidence)) problems.push(`region evidence ${String(entry.evidence)} is not stated evidence`);
+    if (entry.region !== "US" && entry.region !== "EU" && entry.region !== "global") problems.push(`region ${String(entry.region)} is not US, EU or global`);
+    if (!["endpoint-tag", "provider-docs", "openrouter-metadata", "deployment"].includes(entry.evidence)) problems.push(`region evidence ${String(entry.evidence)} is not stated evidence`);
     if (typeof entry.source !== "string" || !entry.source.trim()) problems.push("region evidence needs a source");
     if (!DATE.test(entry.checked ?? "")) problems.push("region evidence needs a checked date (YYYY-MM-DD)");
   }
@@ -357,8 +362,9 @@ export function registerServicePoolMember(registration: CapabilityPoolServiceReg
 }
 
 /**
- * Every member sends customer pages, so every member must process them in the US or EU, from stated evidence, or run
- * inside this deployment (a built-in member only). Returns the problems (empty when the pools may serve).
+ * LLM members must send customer pages only to hosts with a stated US or EU region. Plugin services may also run in an
+ * unpinned (`global`) region; built-in members run inside this deployment. Returns the problems (empty when the pools
+ * may serve).
  */
 export function capabilityPoolRegionProblems(pools: CapabilityPools): string[] {
   const problems: string[] = [];
@@ -366,8 +372,9 @@ export function capabilityPoolRegionProblems(pools: CapabilityPools): string[] {
     for (const member of pools[capability]) {
       if (member.regions.length === 0) problems.push(`${member.id}: no region evidence`);
       for (const entry of member.regions) {
-        const ok = entry.region === "US" || entry.region === "EU" || (entry.region === "local" && member.builtin && entry.evidence === "deployment");
-        if (!ok) problems.push(`${member.id}: region ${String(entry.region)} (${String(entry.evidence)}) is not US, EU or this deployment`);
+        const ok = entry.region === "US" || entry.region === "EU" || (entry.region === "global" && member.kind === "service" && !member.builtin)
+          || (entry.region === "local" && member.builtin && entry.evidence === "deployment");
+        if (!ok) problems.push(`${member.id}: region ${String(entry.region)} (${String(entry.evidence)}) is not US, EU, an unpinned plugin service or this deployment`);
       }
       if (member.kind === "llm") {
         for (const host of member.hosts) {

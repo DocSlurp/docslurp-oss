@@ -59,7 +59,7 @@ describe("worker capability pools at startup", () => {
 
   it("refuses a plugin member outside the US and EU, or one naming a service the plugin does not provide", () => {
     expect(() => registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "pdf-vm", sandboxedPdf: pdfProvider("pdf-vm", async () => ok("a")),
-      poolMembers: [textMember("pdf-vm", "vm-pdf", { regions: [{ ...US, region: "SG" as never }] })] })).toThrow(/not US or EU/);
+      poolMembers: [textMember("pdf-vm", "vm-pdf", { regions: [{ ...US, region: "SG" as never }] })] })).toThrow(/not US, EU or global/);
     expect(() => registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "pdf-vm", sandboxedPdf: pdfProvider("pdf-vm", async () => ok("a")),
       poolMembers: [textMember("someone-else", "vm-pdf")] })).toThrow(/does not provide/);
   });
