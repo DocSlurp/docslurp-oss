@@ -61,7 +61,7 @@ export interface PageBasisLedger {
    * pages the caller adds from its own state), and that document's charged pages. Failed and deduplicated documents never bill
    * and are not counted. `readMetrics` are the page-read charge metrics.
    */
-  runMeasurements(runId: string, excludeDocumentId: string, readMetrics: readonly string[]): Promise<RunMeasurements>;
+  runMeasurements(runId: string, excludeDocumentId: string | null, readMetrics: readonly string[]): Promise<RunMeasurements>;
   /**
    * Pauses the run when `credits` more would take the organization below what a running job needs. Throws
    * SpendCheckUnavailableError (retryable) when it cannot decide or cannot pause. `blocked` without `paused`: the run was
@@ -150,7 +150,7 @@ export function intakePagesOf(document: Pick<Document, "pageCount" | "intakePage
  * count past its intake (Fast). Audio and video bill by duration elsewhere.
  */
 function documentMeasuredPages(document: Document, chargedPages: number, intake: number): RunMeasuredPages {
-  const mime = (document.mimeType ?? "").toLowerCase();
+  const mime = (document.mimeType ?? "").split(";")[0]!.trim().toLowerCase();
   if (mime.startsWith("audio/") || mime.startsWith("video/")) return { fastPages: 0, ocrFrames: 0 };
   const pageCount = Math.max(0, Math.trunc(Number(document.pageCount)) || 0);
   if (mime.startsWith("image/")) {
@@ -247,7 +247,10 @@ export class PageBasis {
     const run = this.chargeableRun();
     const pages = Math.max(1, charge.pages);
     if (!Number.isSafeInteger(pages)) throw new PageBasisInvariantError(`invalid page-read count ${charge.pages}`);
-    const credits = runMeasuredPagesCredits({ fastPages: 0, ocrFrames: pages }, this.speedBoost()) + this.state.usageLedger.pendingBillableCents;
+    // The read, the charges still buffered here, and everything the run measured that no charge covers yet: a read never
+    // spends balance a measured document of the run already owes at completion.
+    const owed = await this.runOwedAll();
+    const credits = runMeasuredPagesCredits({ fastPages: 0, ocrFrames: pages }, this.speedBoost()) + this.state.usageLedger.pendingBillableCents + owed;
     const outcome = await this.checkCharge(run, credits);
     return { funded: !outcome.paused && !outcome.blocked, paused: outcome.paused, credits };
   }
@@ -263,7 +266,8 @@ export class PageBasis {
     const pending = this.state.usageLedger.pendingBillableCents;
     if (charge.kind === "page-upgrade") {
       const perPage = pageUpgradeCredits(charge.from, charge.to) * this.boost();
-      return await this.ledger.largestFundedCharge(run, max, (n) => perPage * n + pending);
+      const owed = await this.runOwedAll();
+      return await this.ledger.largestFundedCharge(run, max, (n) => perPage * n + pending + owed);
     }
     const pipeline = this.pipeline();
     // What admission priced (durable), never the frames a previous attempt recorded as the page count.
@@ -337,7 +341,7 @@ export class PageBasis {
     if (!(own > 0)) return change;
     const chargeable = this.chargeableRun();
     const features = own - extraCreditsForMeasuredPages(pipeline, intakePages, pages, measurement.method, { features: false });
-    const owed = await this.runOwed(document, Math.max(1, Math.trunc(Number(intakePages)) || 1));
+    const owed = await this.runOwed(document, intakePagesOf(document));
     const credits = features + owed.credits;
     const outcome = await this.checkCharge(chargeable, credits);
     if (outcome.paused || outcome.blocked) {
@@ -357,6 +361,12 @@ export class PageBasis {
     const own = documentMeasuredPages(document, Math.max(0, Number(others.documentChargedPages) || 0), intake);
     const total = { fastPages: others.fastPages + own.fastPages, ocrFrames: others.ocrFrames + own.ocrFrames };
     return { credits: runMeasuredPagesCredits(total, this.speedBoost()), pages: total.fastPages + total.ocrFrames };
+  }
+
+  /** What the run owes for measured pages no charge covers yet, over every document (durable, run_measured_pages). */
+  private async runOwedAll(): Promise<number> {
+    const all = await this.ledger.runMeasurements(this.state.run.id, null, PAGE_READ_METRICS);
+    return runMeasuredPagesCredits(all, this.speedBoost());
   }
 
   /** The ledger's charge check; a credit amount that is not a finite number is refused, never read as nothing owed. */

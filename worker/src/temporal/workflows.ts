@@ -501,11 +501,15 @@ export async function documentPipeline(
         const spendPaused = pageTaskSpendPauseRule();
         // Bundles refused for funds, dispatched again once the run resumes (before any not yet started).
         const requeued: typeof bundles = [];
+        // One lane waits out a spend pause; the others wait for it.
+        let spendHold = false;
         await Promise.all(Array.from({ length: Math.min(bundles.length, concurrency) }, async () => {
           while ((requeued.length > 0 || cursor < bundles.length) && !pageFailure) {
-            while (paused && !cancelled) await condition(() => !paused || cancelled);
+            while ((paused || spendHold) && !cancelled) await condition(() => (!paused && !spendHold) || cancelled);
             if (cancelled) return;
-            const bundle = requeued.shift() ?? bundles[cursor++]!;
+            // Another lane may have taken the last bundle while this one waited.
+            const bundle = requeued.shift() ?? (cursor < bundles.length ? bundles[cursor++] : undefined);
+            if (!bundle) continue;
             try {
               const pageUsage = bundleSize > 1 ? await runVisionPageBundle(bundle) : await runVisionPageTask(bundle[0]!);
               usage = { inputTokens: usage.inputTokens + pageUsage.inputTokens, outputTokens: usage.outputTokens + pageUsage.outputTokens, costCents: usage.costCents + pageUsage.costCents };
@@ -513,8 +517,15 @@ export async function documentPipeline(
             } catch (error) {
               if (spendPaused?.(error) && !cancelled) {
                 // Wait for the pause signal (the loop then waits for the resume); retry after a minute if it never comes.
+                // condition's own timeout: its timer is cancelled when the pause arrives, so cycles add no stray timers.
                 requeued.push(bundle);
-                await Promise.race([condition(() => paused || cancelled), sleep(60_000)]);
+                if (spendHold) continue;
+                spendHold = true;
+                try {
+                  await condition(() => paused || cancelled, 60_000);
+                } finally {
+                  spendHold = false;
+                }
                 continue;
               }
               pageFailure = error;
@@ -745,6 +756,7 @@ export async function visionPageBatch(input: VisionPageBatchInput): Promise<Usag
     onUsage: (pageUsage) => { usage = addUsage(usage, pageUsage); },
     isSlotUnavailable: (error) => input.slotGate && isSlotUnavailable(error),
     isSpendPaused: pageTaskSpendPauseRule(),
+    waitForTimeout: (predicate, ms) => condition(predicate, ms),
     waitFor: (predicate) => condition(predicate),
     sleep: (ms) => sleep(ms),
     now: () => Date.now(),

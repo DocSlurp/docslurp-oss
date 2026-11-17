@@ -32,6 +32,11 @@ export interface PageFanOutOptions<B> {
    */
   isSpendPaused?: (error: unknown) => boolean;
   spendPauseWaitMs?: number;
+  /**
+   * Waits for `predicate` at most `ms` (Temporal `condition(predicate, ms)`, whose timer is cancelled when the predicate wins,
+   * so pause cycles leave no timers in history). Default: `waitFor` raced with `sleep`.
+   */
+  waitForTimeout?: (predicate: () => boolean, ms: number) => Promise<unknown>;
   waitFor: (predicate: () => boolean) => Promise<void>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -69,10 +74,16 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
   let consecutiveDenials = 0;
   let lastDenialAt = Number.NEGATIVE_INFINITY;
   let failure: { error: unknown } | undefined;
+  // A lane is waiting out a spend pause: nothing is dispatched until it is done (then at most one probe at a time).
+  let spendHold = false;
+  // Bundles a spend pause handed back: their redispatch is not charged to the admission budget again.
+  const spendRequeued = new Set<B>();
+  const waitForTimeout = options.waitForTimeout
+    ?? ((predicate: () => boolean, ms: number) => Promise.race([options.waitFor(predicate), options.sleep(ms)]));
 
   const stop = () => failure !== undefined || options.isCancelled();
   const canDispatch = () =>
-    pending.length > 0 && inFlight < limit && backingOff === 0 && !options.isPaused();
+    pending.length > 0 && inFlight < limit && backingOff === 0 && !spendHold && !options.isPaused();
 
   const lane = async (): Promise<void> => {
     for (;;) {
@@ -82,7 +93,7 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
       inFlight += 1;
       stats.dispatched += 1;
       try {
-        options.beforeDispatch?.();
+        if (!spendRequeued.delete(bundle)) options.beforeDispatch?.();
         const usage = await options.run(bundle);
         inFlight -= 1;
         consecutiveDenials = 0;
@@ -96,14 +107,18 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
         if (options.isSpendPaused?.(error) && !options.isCancelled()) {
           stats.spendPauses += 1;
           pending.unshift(bundle);
-          backingOff += 1;
+          spendRequeued.add(bundle);
+          // One dispatch at a time until pages succeed again (the window regrows as after a slot denial).
+          limit = 1;
+          stats.minWindow = Math.min(stats.minWindow, limit);
+          lastDenialAt = options.now();
+          options.onWindow?.(limit, inFlight);
+          if (spendHold) continue;
+          spendHold = true;
           try {
-            await Promise.race([
-              options.waitFor(() => options.isPaused() || options.isCancelled()),
-              options.sleep(options.spendPauseWaitMs ?? 60_000),
-            ]);
+            await waitForTimeout(() => options.isPaused() || options.isCancelled(), options.spendPauseWaitMs ?? 60_000);
           } finally {
-            backingOff -= 1;
+            spendHold = false;
           }
           continue;
         }

@@ -38,7 +38,7 @@ function localMembers(env: Env): ServicePoolMember[] {
 
 /**
  * Resolve, check and activate this worker's pools; throws (the worker refuses to start) when:
- * - a member's hosts or service region is not US or EU from stated evidence (or this deployment, for built-ins);
+ * - a member's hosts or service region is not US, EU (or global, for a plugin service) (or this deployment, for built-ins);
  * - a plugin serves pages without registering its pool member (its region would be unknown);
  * - DOCSLURP_OCR_ESCALATION_MODEL or DOCSLURP_VISION_FALLBACK_MODEL names a model that is no pool member.
  */

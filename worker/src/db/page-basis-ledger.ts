@@ -47,7 +47,7 @@ export class PostgresPageBasisLedger implements PageBasisLedger {
   }
 
   /** The one run-wide sum (migration 0190 run_measured_pages), shared with the spend-paused resume sweep. */
-  async runMeasurements(runId: string, excludeDocumentId: string, readMetrics: readonly string[]): Promise<RunMeasurements> {
+  async runMeasurements(runId: string, excludeDocumentId: string | null, readMetrics: readonly string[]): Promise<RunMeasurements> {
     const [row] = await this.sql<{ fast_pages: string | number; ocr_frames: string | number; document_charged_pages: number }[]>`
       select fast_pages, ocr_frames, document_charged_pages
       from run_measured_pages(${runId}, ${[...readMetrics]}::text[], ${excludeDocumentId})`;

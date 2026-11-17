@@ -52,6 +52,33 @@ describe.skipIf(!url)("spend-paused resume weighs the run's measured pages (Post
     expect((await sql`select control_state from project_runs where id = 'measured-r'`)[0]!.control_state).toBe("paused");
   });
 
+  it("never resumes a run the worker would refuse at once: it holds the charge the worker refused (features included)", async () => {
+    // The worker refused 60 credits (its run-wide measured pages plus a document's feature extra and buffered charges),
+    // well above what the measured pages alone are worth here.
+    const measuredOnly = pageCredits("fast", 999);
+    const refused = measuredOnly + 55;
+    await sql`update project_runs set spend_pause_credits = ${refused} where id = 'measured-r'`;
+    expect(await funding.runMeasuredCredits(sql as unknown as SqlClient, "measured-r")).toBeCloseTo(refused);
+    // Enough for the measured pages, not for what the worker checks: stays paused.
+    await sql`update organizations set credit_balance_cents = ${measuredOnly + 10} where id = 'measured-o'`;
+    expect((await funding.resumeSpendPausedRunOutcome("measured-r", { sql: sql as unknown as SqlClient, signals })).status).toBe("blocked");
+    expect(signals.resume).not.toHaveBeenCalled();
+    // Enough for the refused charge: resumes, and the stored refusal is cleared with the pause.
+    await sql`update organizations set credit_balance_cents = ${refused + 1} where id = 'measured-o'`;
+    expect((await funding.resumeSpendPausedRunOutcome("measured-r", { sql: sql as unknown as SqlClient, signals })).status).toBe("resumed");
+    expect((await sql`select spend_pause_credits from project_runs where id = 'measured-r'`)[0]!.spend_pause_credits).toBeNull();
+  });
+
+  it("keeps the pause, under its own log line, when what the run owes cannot be read", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await sql`update organizations set credit_balance_cents = 1000000 where id = 'measured-o'`;
+    await sql`update project_runs set spend_pause_credits = 'NaN'::numeric where id = 'measured-r'`;
+    expect((await funding.resumeSpendPausedRunOutcome("measured-r", { sql: sql as unknown as SqlClient, signals })).status).toBe("deferred");
+    expect(error.mock.calls.some((call) => String(call[0]).includes("measured_owed_read_failed=true"))).toBe(true);
+    expect((await sql`select control_state from project_runs where id = 'measured-r'`)[0]!.control_state).toBe("paused");
+    error.mockRestore();
+  });
+
   it("resumes once the balance covers what the run owes plus the admission reserve", async () => {
     const owed = pageCredits("fast", 999);
     await sql`update organizations set credit_balance_cents = ${owed + 10} where id = 'measured-o'`;

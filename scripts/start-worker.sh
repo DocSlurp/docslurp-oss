@@ -110,7 +110,8 @@ refuse_unsafe_overrides() {
     *) refused+=(DOCSLURP_CLAMAV_ENABLED) ;;
   esac
   value="$(normalize_env_setting "${DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS:-}")"
-  if [[ -n "${value}" && ! "${value}" =~ ^([1-9]|1[0-9]|2[0-4])$ ]]; then
+  # ASCII digits only, whatever the locale: [0-9] matches other scripts' digits under UTF-8 collation.
+  if [[ -n "${value}" ]] && ! LC_ALL=C bash -c '[[ "$1" =~ ^([1-9]|[1-6][0-9]|7[0-2])$ ]]' _ "${value}"; then
     refused+=(DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS)
   fi
   value="$(normalize_env_setting "${DOCSLURP_PARSER_SANDBOX:-}")"
@@ -376,7 +377,8 @@ verify_clamav_signature_freshness() {
   fi
   age_hours=$(( age_seconds / 3600 ))
 
-  if (( age_seconds > CLAMAV_MAX_DB_AGE_HOURS * 3600 )); then
+  # Written so that an arithmetic error (a limit that is not a number) reads as stale, never as fresh.
+  if ! (( age_seconds <= CLAMAV_MAX_DB_AGE_HOURS * 3600 )); then
     clamav_warn_or_exit \
       "ClamAV signature database is stale (${age_hours}h old, max ${CLAMAV_MAX_DB_AGE_HOURS}h)" \
       "${CLAMAV_FAIL_OPEN_ON_STALE_DB}"
