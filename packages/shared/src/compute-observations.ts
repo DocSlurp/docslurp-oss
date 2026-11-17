@@ -113,14 +113,14 @@ export interface ComputeAllocationAdmission {
 export interface ComputeAllocationPending { reservationId: string; providerId: string | null; reservedAt: string }
 
 /**
- * Fleet-wide job admission with per-organization fairness (migration 0186). Platform bookkeeping only: it carries a keyed
- * organization hash and measured page counts, never content or tenant ids, and does not authorize file access.
+ * Fleet-wide job admission with per-organization fairness (migration 0186). Platform bookkeeping only: it carries a hashed
+ * organization key and measured page counts, never content or tenant ids, and does not authorize file access.
  */
 export type ComputeJobTicketState = "routing" | "waiting" | "admitted";
 export interface ComputeJobTicket {
   fleetId: string;
   ticketId: string;
-  /** 64 lowercase hex: a keyed hash of the organization (the plugin's choice of key; one per fleet). */
+  /** 64 lowercase hex: a sha256 of the organization bound to the fleet (the plugin's choice; not a secret-keyed MAC). */
   orgKey: string;
   /** Measured pages of the job (a structural count), 1..100000. Never document-supplied metadata. */
   pages: number;

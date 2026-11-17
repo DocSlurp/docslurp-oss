@@ -1328,7 +1328,6 @@ export class VisionExtractStage implements Stage {
       let result: Awaited<ReturnType<typeof ocrDocument>>;
       try {
         result = await ocrDocument({ checkpointStorage: this.storage, runner: this.runner, state, documentId: document.id, source, kind: "pdf", pages: batch, hostedReader,
-          pdfShape: pages.length >= Math.max(1, Math.trunc(document.pageCount) || 1) ? "scanned" : "mixed",
           stage: this.name, ...(signal ? { signal } : {}) });
       } catch (error) {
         if (signal?.aborted || error instanceof OcrInfrastructureError) throw error;

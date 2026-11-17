@@ -15,7 +15,7 @@ FOR EACH ROW EXECUTE FUNCTION public.guard_compute_fleet_identity();
 CREATE TABLE IF NOT EXISTS public.compute_job_tickets (
   id uuid PRIMARY KEY,
   fleet_id text NOT NULL REFERENCES public.compute_job_fleets(id),
-  -- A keyed hash of the organization, never its id: the table is fairness bookkeeping, not tenant data.
+  -- A per-fleet hash of the organization, never its id: the table is fairness bookkeeping, not tenant data.
   org_key text NOT NULL CHECK (org_key ~ '^[a-f0-9]{64}$'),
   -- Measured pages of the job (structural counts the worker established), for demand; never document metadata.
   pages integer NOT NULL CHECK (pages BETWEEN 1 AND 100000),
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS public.compute_job_tickets (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS compute_job_tickets_fleet_state_idx ON public.compute_job_tickets(fleet_id, state, queued_at);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS compute_job_tickets_fleet_expiry_idx ON public.compute_job_tickets(fleet_id, expires_at);
 --> statement-breakpoint
 -- Join the fleet's fair queue (routing -> waiting), drop expired tickets, then admit waiting tickets while the fleet has
 -- room: each free slot goes to the waiting ticket whose organization holds the fewest admitted jobs (under its cap),
