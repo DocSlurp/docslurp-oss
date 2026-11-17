@@ -16,7 +16,7 @@
  *   1. adopt pending uploads a crashed attempt left (streamed SHA-256, no VM);
  *   2. if a runnable unit remains (below #355's per-unit and per-document caps): the lease is extended for the unit's
  *      pages (heartbeat), the launch is counted (lifetime and per organization per day), the unit's stored manifest only
- *      (none for a gap: a fresh pass over its pages becomes its shard), the provider's `figures.resume` in a fresh VM, the
+ *      (none for a gap: a fresh pass over its pages becomes its shard), the provider's `figures.resume` in a VM, the
  *      folder validated whole (resume mode: stored images keep their digest), new files stored pending → stored with
  *      conditional creates, figure files only (`folderFiles: false`); the new manifests are staged by content before the
  *      ledger write and published after it, the index rebuilt after it with the stored Markdown's markers (unsharded);
@@ -720,7 +720,7 @@ async function resumeUnit(
     }
     // 2. The parse source quarantine decided (lib/parse-source.ts, R6-H1), never the upload: an encrypted PDF's scanned copy,
     //    or the upload exactly as the scan read it; hash-bound when staged (stageSourceFile). The provider stages it into a
-    //    fresh VM (the host never parses it), counted before it starts and timed whatever happens.
+    //    VM (the host never parses it), counted before it starts and timed whatever happens.
     source = await stageSourceFile(deps.storage, { id: row.document_id, ...parse! }, "figure-resume-source-*.pdf");
     const outDir = path.join(work, "out");
     await mkdir(outDir, { mode: 0o700 });

@@ -77,12 +77,12 @@ describe("managed pipeline model fields", () => {
   });
 
   it("applies explicit admin overrides, and stores them so direct readers see them", () => {
-    const overrides = { textGeneration: { model: "llm://private/gpu1/acme/text" }, vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } };
+    const overrides = { textGeneration: { model: "llm://private/gpu1/acme/text" }, vision: { modelUri: "llm://openrouter/z-ai/glm-5.3-flash" } };
     const resolved = resolveManagedPipeline({ ...defaultPipelineFeatures, textGeneration: { model: "z-ai/glm-5.3-flash", models: {} } }, overrides, "test");
     expect(resolved.pipeline.textGeneration.model).toBe("llm://private/gpu1/acme/text");
-    expect(resolved.pipeline.vision.modelUri).toBe("llm://openrouter/google/gemini-2.5-flash-lite");
+    expect(resolved.pipeline.vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
     const stored = storedManagedPipeline(resolved.pipeline, overrides, resolved.applied) as { vision: Record<string, unknown>; embedding: Record<string, unknown> };
-    expect(stored.vision.modelUri).toBe("llm://openrouter/google/gemini-2.5-flash-lite");
+    expect(stored.vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
     // A default the schema filled in is not stored, so a later default change applies.
     expect(stored.embedding).not.toHaveProperty("modelUri");
   });

@@ -25,6 +25,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { recordOcrEscalationPages, type OcrEscalationSkipReason } from "./escalation-stats.js";
 import { findProviderRoutingExclusion } from "../lib/provider-retry.js";
+import { recordPoolFailover, recordPoolServed, secondReadPoolMemberId } from "../lib/capability-pools.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 
 export { DEFAULT_OCR_ESCALATION_MODEL } from "@docslurp/shared";
@@ -61,11 +62,13 @@ export interface HostedOcrRead {
   inputTokens: number;
   outputTokens: number;
   costCents: number;
+  /** The capability pool member that read the page (capability-pools.ts poolMemberId), for per-page records. */
+  poolMemberId?: string;
 }
 
 /** Why a hosted read did not happen. Escalation keeps the recogniser's text; hosted mode fails the page. */
 export class HostedOcrSkipped extends Error {
-  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard" | "margin" | "unfunded", message: string) {
+  constructor(readonly reason: "disabled" | "privacy" | "cost-cap" | "budget" | "guard" | "margin" | "unfunded" | "unknown-billed", message: string) {
     super(message);
     this.name = "HostedOcrSkipped";
   }
@@ -128,6 +131,8 @@ export function createHostedOcrReader(args: {
   env?: NodeJS.ProcessEnv;
   /** Test seam; defaults to the worker's vision runtime. */
   execute?: typeof executeVisionRuntime;
+  /** Test seam: a route's read timeout (default: the route's own `timeoutMs`). */
+  routeTimeoutMs?: (route: OcrEscalationRoute) => number | undefined;
 }): HostedOcrReader {
   const env = args.env ?? process.env;
   const execute = args.execute ?? executeVisionRuntime;
@@ -142,10 +147,14 @@ export function createHostedOcrReader(args: {
       // The readers to try, in order. Each must be a hosted route the project's privacy mode allows and, for an escalation,
       // pass the automatic-call gate at the price its request can reach (automatic-call-margin.ts); a refused reader is
       // skipped with a logged reason and the next one tried. None left: the recogniser's text stands.
-      type Candidate = { route: OcrEscalationRoute; vision: VisionConfig; decision: ReturnType<typeof admitAutomaticCall> | null };
+      type Candidate = { route: OcrEscalationRoute; vision: VisionConfig; decision: ReturnType<typeof admitAutomaticCall> | null; memberId: string | null };
       const candidates: Candidate[] = [];
       let refusal: HostedOcrSkipped | null = null;
-      for (const reader of ocrEscalationReaders(env)) {
+      // The ocr pool's second-read members, in pool order (capability-pools.ts); an operator pool that leaves a route out skips it.
+      const readers = ocrEscalationReaders(env).map((route) => ({ route, memberId: secondReadPoolMemberId(route.optionId) }))
+        .filter(({ memberId }) => memberId !== null);
+      const nextMember = (index: number) => readers[index + 1]?.memberId ?? null;
+      for (const [readerIndex, { route: reader, memberId }] of readers.entries()) {
         const vision: VisionConfig = { ...visionConfigForModel(state.run.pipeline.vision, reader.model), prompt: "markdown-transcription", remoteFallbackModelUri: null };
         const route = resolveVisionRoute(vision);
         if (!HOSTED_OCR_PROVIDERS.has(route.provider)) {
@@ -155,6 +164,7 @@ export function createHostedOcrReader(args: {
         }
         if (!(await allowHostedCall(state, visionCall(route), [page.documentId]))) {
           refusal ??= new HostedOcrSkipped("privacy", `privacy mode refuses ${purpose}`);
+          recordPoolFailover("ocr", memberId, nextMember(readerIndex), "privacy");
           continue;
         }
         let decision: ReturnType<typeof admitAutomaticCall> | null = null;
@@ -164,10 +174,11 @@ export function createHostedOcrReader(args: {
           decision = admitAutomaticCall("page-transcription", automatic, purpose, { role: "escalation" });
           if (!decision.allowed) {
             if (!refusal || refusal.reason !== "margin") refusal = new HostedOcrSkipped("margin", `${purpose} refused by the automatic-call gate (${decision.reason})`);
+            recordPoolFailover("ocr", memberId, nextMember(readerIndex), "margin");
             continue;
           }
         }
-        candidates.push({ route: reader, vision, decision });
+        candidates.push({ route: reader, vision, decision, memberId });
       }
       if (candidates.length === 0) throw refusal ?? new HostedOcrSkipped("disabled", `no ${purpose} reader`);
       if (isCostCapExceeded(state)) throw new HostedOcrSkipped("cost-cap", `run cost cap reached before ${purpose}`);
@@ -186,7 +197,8 @@ export function createHostedOcrReader(args: {
         const done = prior.find((row) => row.status === "completed" && row.text !== null);
         if (done) {
           console.log(`[ocr] ${purpose} reused document=${page.documentId} page=${page.pageNumber} attempt=${done.attempt}: no new provider call`);
-          return { text: done.text!, model: done.model, inputTokens: 0, outputTokens: 0, costCents: 0 };
+          const reusedMember = candidates.find((candidate) => candidate.route.model === done.model)?.memberId;
+          return { text: done.text!, model: done.model, inputTokens: 0, outputTokens: 0, costCents: 0, ...(reusedMember ? { poolMemberId: reusedMember } : {}) };
         }
       }
       // A new escalation read upgrades its page from OCR to Rich: before the call, the balance must cover that upgrade plus the
@@ -207,6 +219,11 @@ export function createHostedOcrReader(args: {
         for (const [index, candidate] of candidates.entries()) {
         const { vision, decision: marginDecision } = candidate;
         const ceiling = candidate.route.priceCeiling;
+        // A route with its own timeout (a slow host) is bounded: past it the request was sent and may have been billed, so
+        // the page is not read again by the next reader; it keeps its first read and is recorded as unknown-billed.
+        const timeoutMs = (args.routeTimeoutMs ?? ((route: OcrEscalationRoute) => route.timeoutMs))(candidate.route);
+        const routeTimeout = timeoutMs ? AbortSignal.timeout(timeoutMs) : null;
+        const readSignal = routeTimeout ? (signal ? AbortSignal.any([signal, routeTimeout]) : routeTimeout) : signal;
         try {
         // The per-document page and attempt budgets are counted by the guard's durable attempt ledger (run, document, page),
         // so an activity retry or a worker restart cannot reset them; a retried call counts against the attempt budget.
@@ -215,7 +232,7 @@ export function createHostedOcrReader(args: {
           try {
             result = await execute({
               imagePath: page.imagePath, mimeType: page.mimeType, outputPath, vision, cfg: args.cfg, runner: args.runner,
-              privacyMode: state.run.pipeline.privacyMode, outputSchema: null, signal, gate,
+              privacyMode: state.run.pipeline.privacyMode, outputSchema: null, signal: readSignal, gate,
               ...(ceiling ? { priceCeiling: { inputUsdPerMillion: ceiling.inputUsdPerMTok, outputUsdPerMillion: ceiling.outputUsdPerMTok, imageUsd: ceiling.imageUsd, hosts: ceiling.hosts } } : {}),
             });
           } catch (error) {
@@ -262,14 +279,33 @@ export function createHostedOcrReader(args: {
               purpose,
               usageSource: result.usageSource,
               outcome: result.text.trim() ? "completed" : "empty-output",
+              ...(candidate.memberId ? { poolMemberId: candidate.memberId } : {}),
               ...(result.servedModel ? { servedModel: result.servedModel } : {}),
             },
           });
           if (read) read.id = callId;
           await persist("completed", result.text, result.model, [read]);
-          return { text: result.text, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents };
+          recordPoolServed("ocr", candidate.memberId);
+          return { text: result.text, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens, costCents,
+            ...(candidate.memberId ? { poolMemberId: candidate.memberId } : {}) };
         });
         } catch (error) {
+          // The route's own timeout fired (not the caller's abort): the request was sent and may have been billed. No
+          // fall-through to the next reader (it would read and bill the page again); the page keeps its first read.
+          if (routeTimeout?.aborted && !signal?.aborted) {
+            console.warn(`[ocr] ${purpose} reader=${candidate.route.optionId} document=${page.documentId} page=${page.pageNumber} timed out (possibly billed)`);
+            recordPoolFailover("ocr", candidate.memberId, null, "timeout");
+            // The possible charge stays visible: a usage event of unknown cost, flagged, on the route that was sent.
+            const unknown = state.usageLedger.enqueue({
+              provider: "openrouter", model: candidate.route.model.replace(/^llm:\/\/[^/]+\//, ""), metric: purpose, amount: 1, unit: "attempt",
+              costCents: 0, inputTokens: 0, outputTokens: 0,
+              metadata: { documentId: page.documentId, pageNumber: page.pageNumber, purpose, outcome: "timeout", costSource: "unknown", possiblyBilled: true,
+                ...(candidate.memberId ? { poolMemberId: candidate.memberId } : {}) },
+            }, { logAiUsage: true });
+            if (unknown) unknown.id = `${callId}:${candidate.route.optionId}:timeout`;
+            await persist("failed", null, candidate.route.model, [unknown]);
+            throw new HostedOcrSkipped("unknown-billed", `${purpose}: the read timed out after it was sent; it may have been billed`);
+          }
           // No host could serve this reader under its price ceiling (nothing billed): the next reader, else skip. Never sent
           // to a pricier host.
           if (!findProviderRoutingExclusion(error)) throw error;
@@ -277,6 +313,8 @@ export function createHostedOcrReader(args: {
           // that read happened, so the page is not read again by the next reader; it fails like any rejected read.
           if (findVisionBilledUsage(error) || findVisionOutputRejected(error)) throw error;
           console.warn(`[ocr] ${purpose} reader=${candidate.route.optionId} document=${page.documentId} page=${page.pageNumber} no host under its price ceiling`);
+          // Nothing was billed: a routing refusal is a failover, never a breaker failure (the guard handed it back).
+          recordPoolFailover("ocr", candidate.memberId, candidates[index + 1]?.memberId ?? null, "routing");
           if (index === candidates.length - 1) throw new HostedOcrSkipped("margin", `${purpose}: no host can serve the read under its price ceiling`);
         }
         }

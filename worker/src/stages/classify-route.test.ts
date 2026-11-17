@@ -39,7 +39,7 @@ describe("routing decision stats", () => {
       intakePages: 7,
       measuredPages: 5,
       pagesRead: 3,
-      pagesReadByReason: { raster: 1, garbled: 1, drawn: 1, "yield-deficit": 0, other: 0 },
+      pagesReadByReason: { raster: 1, garbled: 1, drawn: 1, "yield-deficit": 0, encoding: 0, other: 0 },
       blankPages: 1,
       repeatedImagePages: 1,
       textLayerVerdicts: { garbled: 1, ok: 1, suspect: 2 },

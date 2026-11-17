@@ -292,6 +292,25 @@ export const PAGE_READ_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT_M
 export const PAGE_CHARGE_METRICS: readonly BillableUnitMetric[] = [BILLABLE_UNIT_METRICS.fastPage, ...PAGE_READ_METRICS];
 
 /**
+ * Pages a run measured above what admission priced and that no charge covers yet (the database's run_measured_pages,
+ * migration 0190): Fast pages of paged documents, and frames of multi-frame images not yet charged as page reads.
+ */
+export interface RunMeasuredPages { fastPages: number; ocrFrames: number }
+
+/**
+ * Credits a run owes for its measured pages once they bill (Fast at completion, OCR as frames are read), times the speed
+ * boost. The one price both the worker's page-basis spend check and the spend-paused resume sweep weigh. Non-finite or
+ * negative counts are refused (thrown), never read as nothing owed.
+ */
+export function runMeasuredPagesCredits(pages: RunMeasuredPages, speedBoost: boolean | undefined = false): number {
+  for (const value of [pages.fastPages, pages.ocrFrames]) {
+    if (!Number.isFinite(value) || value < 0) throw new Error(`invalid measured page count ${value}`);
+  }
+  const credits = (pages.fastPages > 0 ? pageCredits("fast", pages.fastPages) : 0) + (pages.ocrFrames > 0 ? pageCredits("ocr", pages.ocrFrames) : 0);
+  return credits * speedBoostMultiplier(speedBoost);
+}
+
+/**
  * Credits a page already charged in class `from` owes when a later read puts it in the dearer class `to`: the difference
  * only, never negative (a read in a cheaper class than the page's charge adds nothing).
  */
@@ -406,6 +425,12 @@ export type BillingForecast = {
   searchCreditsPer30d: number;
   chatAnswersLast30d: number;
   chatCreditsPer30d: number;
+  /**
+   * Pages charged in the last 30 days by final class (Text, Scan, Vision): each page counts once per run, in the class
+   * it finally paid, so a Scan page later read by a vision model counts only under Vision. Counts are pages, not billed
+   * units (a long Vision page may bill several units), and a page charged by two runs counts in each.
+   * `ingestCreditsLast30d` is the exact sum of the ingest charges.
+   */
   fastPagesLast30d: number;
   ocrPagesLast30d: number;
   richPagesLast30d: number;

@@ -232,6 +232,8 @@ export async function enforceRunSpendForCharge(
   credits: number,
   trigger: "stage-boundary" | "page-interval" | "checkpoint-interval" = "stage-boundary",
 ): Promise<SpendCheckResult> {
+  // A charge that is not a finite number cannot be weighed: refused, never read as nothing owed.
+  if (!Number.isFinite(credits)) throw new SpendCheckUnavailableError(`run ${run.id} charge check got a non-finite amount (${credits})`);
   if (!spendCheckConfig().enabled || !(credits > 0)) return { blocked: false, paused: false };
   if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to check a ${credits.toFixed(2)}-credit charge against`);
   let result: SpendCheckResult;
@@ -286,7 +288,10 @@ export async function largestFundedCharge(
     throw new SpendCheckUnavailableError("balance read for sizing a charge failed", { cause: error });
   }
   for (let n = max; n >= 1; n -= 1) {
-    const available = Number(row?.available ?? 0) - creditsFor(n);
+    const credits = creditsFor(n);
+    // A size whose charge is not a finite number is never funded.
+    if (!Number.isFinite(credits)) continue;
+    const available = Number(row?.available ?? 0) - credits;
     if (!spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row)) return n;
   }
   return 0;

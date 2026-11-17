@@ -1,6 +1,6 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures, normalizePipelineFeatures, pageCredits, splitTextIntoPagesStrict } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, PAGE_READ_METRICS, defaultPipelineFeatures, normalizePipelineFeatures, pageCredits, splitTextIntoPagesStrict } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadFixtureDocument } from "../test/load-document.js";
 
@@ -145,9 +145,11 @@ describe("a measured DOCX: page rows and billing", () => {
     }
     // Five files owe 9.98 credits and fit; the sixth takes the run to 11.97 and pauses it. Checked one file at a time, none ever would.
     expect(pausedAt).toBe(Math.floor(10 / each) + 1);
-    expect(await store.pageBasisLedger.measuredDocuments("run3")).toHaveLength(pausedAt);
-    // Scoped to the run: another run's measured documents are not counted against this one.
-    expect((await store.pageBasisLedger.measuredDocuments("run2")).every((row) => row.billingPages === 20_000)).toBe(true);
+    const measured = (await db.query<{ n: number }>(`select count(*)::int as n from documents where run_id = 'run3' and billing_pages is not null`)).rows[0]!.n;
+    expect(measured).toBe(pausedAt);
+    // Scoped to the run: another run's measured pages are not counted against this one.
+    const run3 = await store.pageBasisLedger.runMeasurements("run3", "none", PAGE_READ_METRICS);
+    expect(run3.fastPages).toBe(pausedAt * 399);
   }, 60_000);
 
   it("does not pause when the measured count is the intake count or the balance holds", async () => {

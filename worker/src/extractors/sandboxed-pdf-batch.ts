@@ -37,10 +37,16 @@ export interface SandboxedPdfBatchFile {
 }
 
 export interface SandboxedPdfBatchOptions {
-  /** Read typeset math as LaTeX (the project asked for it). */
+  /**
+   * Read typeset math as LaTeX (`pdftomarkdown --math`): the default for PDFs unless the project opts out
+   * (pipeline/first-pass.ts firstPassBatchOptions). A math run's facts lose Doppler's walker-parity fields; its math and
+   * table encoding words stand.
+   */
   math: boolean;
   /** Extract figures into each file's `figures.dir` after its text. */
   figures: boolean;
+  /** Page facts families to add to basic for every file (SandboxedPdfJob.pageFacts); omitted when page facts are off. */
+  pageFacts?: { include: import("../lib/doppler-page-facts.js").DopplerPageFactsFamily[] };
 }
 
 export interface SandboxedPdfBatchJob {
@@ -197,7 +203,8 @@ export function acceptSandboxedPdfBatchEvent(job: SandboxedPdfBatchJob, raw: unk
       if (result!.figures !== undefined) fail("figures on a text result");
       const single: SandboxedPdfJob = { input: file.input, output: file.output };
       const slots = (processed as number | undefined) ?? (pages as number);
-      // A math batch runs pdftotext with -glyphs: its facts lose the walker-parity fields (acceptSandboxedPdfPageFacts).
+      // A math batch runs pdftotext with -glyphs: its facts lose the walker-parity fields and their grid list, so the
+      // page's grids are unknown and the table path stays open (acceptSandboxedPdfPageFacts, withoutWalkerParityFacts).
       const accepted = acceptSandboxedPdfResult(single, result!, slots, { glyphs: job.options.math });
       const jobs = textJobs.get(job) ?? new Map<number, SandboxedPdfJob>();
       textJobs.set(job, jobs);

@@ -1,6 +1,6 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, PAGE_READ_METRICS, pageCredits } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadFixtureDocument } from "../test/load-document.js";
 
@@ -31,12 +31,13 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
-    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'One', 'one', 'u1', 8, 100000), ('o2', 'Low', 'low', 'u1', 8, 3);
-    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'L');
+    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'One', 'one', 'u1', 8, 100000), ('o2', 'Low', 'low', 'u1', 8, 3), ('o3', 'Mixed', 'mixed', 'u1', 8, 3);
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'L'), ('w3', 'o3', 'u1', 'M');
     insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values (100, 'run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 6, 6),
              (100, 'run2', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 1),
-             (100, 'run-low', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 2);
+             (100, 'run-low', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 2),
+             (100, 'run-mixed', 'o3', 'u1', 'w3', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 2);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, intake_page_count) values
       ('pdf', 'o1', 'u1', 'w1', 'run1', 'a.pdf', 'application/pdf', 'raw/a', 'processing', 3, 'assumed', 3),
       ('docx', 'o1', 'u1', 'w1', 'run1', 'b.docx', '${DOCX}', 'raw/b', 'processing', 1, 'assumed', 1),
@@ -44,7 +45,9 @@ beforeAll(async () => {
       ('failed', 'o1', 'u1', 'w1', 'run1', 'd.pdf', 'application/pdf', 'raw/d', 'failed', 1, 'assumed', 1),
       ('other-run', 'o1', 'u1', 'w1', 'run2', 'e.pdf', 'application/pdf', 'raw/e', 'processing', 1, 'assumed', 1),
       ('low-a', 'o2', 'u1', 'w2', 'run-low', 'f.docx', '${DOCX}', 'raw/f', 'processing', 1, 'assumed', 1),
-      ('low-b', 'o2', 'u1', 'w2', 'run-low', 'g.docx', '${DOCX}', 'raw/g', 'processing', 1, 'assumed', 1);
+      ('low-b', 'o2', 'u1', 'w2', 'run-low', 'g.docx', '${DOCX}', 'raw/g', 'processing', 1, 'assumed', 1),
+      ('mixed-text', 'o3', 'u1', 'w3', 'run-mixed', 'm.txt', 'text/plain', 'raw/m', 'processing', 1, 'assumed', 1),
+      ('mixed-docx', 'o3', 'u1', 'w3', 'run-mixed', 'm.docx', '${DOCX}', 'raw/md', 'processing', 1, 'assumed', 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, intake_page_count, deduped_from_document_id)
       values ('copy', 'o1', 'u1', 'w1', 'run1', 'a-copy.pdf', 'application/pdf', 'raw/a', 'processing', 3, 'assumed', 3, 'pdf');
   `);
@@ -92,18 +95,20 @@ describe("PageBasis over Postgres", () => {
     await state.pageBasis.record(pdf, { kind: "page-count", pages: 10 });
     expect(await row("pdf")).toMatchObject({ page_count: 10, page_count_source: "counted" });
     expect(pdf).toMatchObject({ pageCount: 10, pageCountSource: "counted" });
-    // Pages above intake: the PDF's 7; the image, the failed document and another run's are not counted.
-    await db.exec(`update documents set page_count = 30 where id in ('tiff', 'failed', 'other-run')`);
-    expect(await store.pageBasisLedger.measuredPagesAboveIntake("run1")).toBe(7);
-    expect((await store.pageBasisLedger.countedImageFrames("run1")).map((r) => [r.documentId, r.pageCount, r.chargedPages])).toEqual([["tiff", 30, 0]]);
+    // One run-wide sum: the PDF's 7 Fast pages and the TIFF's 29 uncharged frames; the failed document, the deduplicated copy
+    // and another run's are not counted, and the excluded document is left for the caller.
+    await db.exec(`update documents set page_count = 30 where id in ('tiff', 'failed', 'other-run', 'copy')`);
+    expect(await store.pageBasisLedger.runMeasurements("run1", "none", PAGE_READ_METRICS)).toEqual({ fastPages: 7, ocrFrames: 29, documentChargedPages: 0 });
+    expect(await store.pageBasisLedger.runMeasurements("run1", "pdf", PAGE_READ_METRICS)).toEqual({ fastPages: 0, ocrFrames: 29, documentChargedPages: 0 });
     await db.exec(`update documents set page_count = 1 where id in ('tiff', 'failed', 'other-run')`);
+    await db.exec(`update documents set page_count = 3 where id = 'copy'`);
   }, 60_000);
 
   it("records an Office count as billing pages and leaves page_count alone", async () => {
     const state = await activity("run1", ["docx"]);
     await state.pageBasis.record(state.documents[0]!, { kind: "billing-pages", pages: 40, method: "text-rule", format: "office-word" });
     expect(await row("docx")).toMatchObject({ page_count: 1, billing_pages: 40, billing_pages_method: "text-rule" });
-    expect(await store.pageBasisLedger.measuredDocuments("run1")).toEqual([{ pageCount: 1, billingPages: 40, method: "text-rule" }]);
+    expect((await store.pageBasisLedger.runMeasurements("run1", "pdf", PAGE_READ_METRICS)).fastPages).toBe(39);
   }, 60_000);
 
   it("concurrent activities of one run cannot overdraw: two Office files that each fit a 3-credit balance, recorded at once", async () => {
@@ -120,6 +125,26 @@ describe("PageBasis over Postgres", () => {
       for (const outcome of outcomes) if (outcome.status === "rejected") expect(outcome.reason).toBeInstanceOf(UnfundedPagesError);
       const [run] = (await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from project_runs where id = 'run-low'`)).rows;
       expect(run).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
+    } finally {
+      setSpendCheckConfig(null);
+    }
+  }, 60_000);
+
+  it("one run-wide sum whatever the order: a text raise then an Office count that each fit the balance alone pause the run", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    try {
+      const state = await activity("run-mixed", ["mixed-text", "mixed-docx"]);
+      const docxPages = 500;
+      let textPages = 2;
+      while (pageCredits("fast", textPages) < 2.5) textPages += 1;
+      const docxOwes = extraCreditsForMeasuredPages(defaultPipelineFeatures, 1, docxPages, "text-rule");
+      expect(pageCredits("fast", textPages - 1)).toBeLessThan(3);
+      expect(docxOwes).toBeLessThan(3);
+      await state.pageBasis.record(state.documents[0]!, { kind: "page-count", pages: textPages });
+      await expect(state.pageBasis.record(state.documents[1]!, { kind: "billing-pages", pages: docxPages, method: "text-rule", format: "office-word" }))
+        .rejects.toBeInstanceOf(UnfundedPagesError);
+      const [run] = (await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run-mixed'`)).rows;
+      expect(run!.control_state).toBe("paused");
     } finally {
       setSpendCheckConfig(null);
     }

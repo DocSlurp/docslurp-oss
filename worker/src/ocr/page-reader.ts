@@ -16,11 +16,13 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { priceAiUsageEvent } from "@docslurp/shared";
+import { poolMemberForBackend, priceAiUsageEvent } from "@docslurp/shared";
 
 import {
   PAGE_IMAGE_READ_FAILURES,
   pageImageReaderProvider,
+  pageReaderGaveWayBeforeCompute,
+  pageReaderJobFailureOf,
   pageReaderUsageOf,
   type PageImageReadFailure,
   type PageImageReadJob,
@@ -42,6 +44,8 @@ export interface PageReaderSummary {
   /** The reader's mode for this route (`escalation` / `all` for OCR, `all` for vision transcription). */
   mode: string;
   provider: string;
+  /** The ocr capability pool member of `provider` (capability-pools.ts poolMemberId), when registered. */
+  poolMemberId?: string;
   /** Pages sent to the provider. */
   attempted: number;
   /** Pages whose text the reader replaced. */
@@ -50,9 +54,14 @@ export interface PageReaderSummary {
   empty: number;
   /** Pages sent but not read, by reason (provider failures, `job-failed`, `job-refused`, `invalid-response`, `missing`). */
   failed: Record<string, number>;
-  /** Candidate pages never sent, by reason (`no-scope`, `budget`, `cost-cap`, `org-daily-cost-cap`, `budget-ledger-unavailable`, `image-refused`). */
+  /**
+   * Candidate pages never sent, by reason (`no-scope`, `budget`, `cost-cap`, `org-daily-cost-cap`, `budget-ledger-unavailable`,
+   * `image-refused`, `reader-capacity`: the reader gave way at its capacity earlier for this document in this run).
+   */
   skipped: Record<string, number>;
   jobs: number;
+  /** Failed jobs whose daily reader budget reservation was released (a give-way before any compute ran). */
+  released?: number;
   inputTokens: number;
   outputTokens: number;
 }
@@ -88,6 +97,50 @@ export function stripControlCharacters(text: string): string {
  * document's OCR batches and vision reads). Keyed by the run's usage ledger, so it lives exactly as long as the activity's state.
  */
 const pagesSent = new WeakMap<object, Map<string, number>>();
+
+/**
+ * Documents whose reader job failed with `capacity` in this run state, per provider: their remaining pages go to the
+ * caller's fallback without another job, so one document cannot set off a give-way per page batch. Keyed like pagesSent.
+ */
+const capacityStopped = new WeakMap<object, Set<string>>();
+
+function capacityKey(provider: PageImageReaderProvider, documentId: string): string {
+  return `${provider.id}\u0000${documentId}`;
+}
+
+function readerCapacityStopped(ledger: object, provider: PageImageReaderProvider, documentId: string): boolean {
+  return capacityStopped.get(ledger)?.has(capacityKey(provider, documentId)) === true;
+}
+
+/**
+ * Backstop on the provider's no-compute assertion: at most this many give-way releases per organization per UTC day in one
+ * worker process. Past it, a give-way settles at its reservation again, so a plugin that wrongly asserts no compute cannot
+ * keep failed-job spend outside the daily cap.
+ */
+export const PAGE_READER_MAX_RELEASES_PER_ORG_DAY = 200;
+const releasesByOrgDay = new Map<string, number>();
+
+/** Take one of the organization's releases for today; false when the backstop is spent. */
+function takeRelease(orgId: string, now = new Date()): boolean {
+  const day = now.toISOString().slice(0, 10);
+  for (const key of releasesByOrgDay.keys()) if (!key.startsWith(`${day}\u0000`)) releasesByOrgDay.delete(key);
+  const key = `${day}\u0000${orgId}`;
+  const used = releasesByOrgDay.get(key) ?? 0;
+  if (used >= PAGE_READER_MAX_RELEASES_PER_ORG_DAY) return false;
+  releasesByOrgDay.set(key, used + 1);
+  return true;
+}
+
+/** Tests only: forget the per-organization release counts. */
+export function resetPageReaderReleasesForTest(): void {
+  releasesByOrgDay.clear();
+}
+
+function stopReaderForCapacity(ledger: object, provider: PageImageReaderProvider, documentId: string): void {
+  let stopped = capacityStopped.get(ledger);
+  if (!stopped) capacityStopped.set(ledger, (stopped = new Set()));
+  stopped.add(capacityKey(provider, documentId));
+}
 
 function bump(map: Record<string, number>, key: string, by = 1): void {
   if (by > 0) map[key] = (map[key] ?? 0) + by;
@@ -196,6 +249,8 @@ function recordProviderUsage(
         documentId: ctx.documentId,
         purpose: metric,
         reader: provider.id,
+        // The ocr capability pool member this reader serves (capability-pools.ts poolMemberId), for per-page records.
+        ...(poolMemberForBackend("ocr", provider.id) ? { poolMemberId: poolMemberForBackend("ocr", provider.id)!.id } : {}),
         pages: details.pages,
         outcome: details.outcome,
         costSource: "provider",
@@ -221,7 +276,7 @@ export function pageReaderPagesRemaining(ledger: object, documentId: string, max
 }
 
 /** Skip reasons after which no further job of this document (or organization) can be sent now. */
-export const PAGE_READER_STOP_REASONS = ["no-scope", "privacy", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable", "no-cost-estimate"] as const;
+export const PAGE_READER_STOP_REASONS = ["no-scope", "privacy", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable", "no-cost-estimate", "reader-capacity"] as const;
 
 /** One page image the host sends to the reader. */
 export interface PageImageInput {
@@ -261,7 +316,7 @@ export async function readPageImagesWithProvider(
   use: PageImageReadUse,
 ): Promise<PageReaderSummary> {
   const summary: PageReaderSummary = {
-    mode: ctx.mode, provider: provider.id, attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0,
+    mode: ctx.mode, provider: provider.id, ...(poolMemberForBackend("ocr", provider.id) ? { poolMemberId: poolMemberForBackend("ocr", provider.id)!.id } : {}), attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0,
   };
   if (!pages.length) return summary;
   const run = ctx.state.run;
@@ -276,6 +331,12 @@ export async function readPageImagesWithProvider(
   if (!readerAllowedForRun(provider, run)) {
     bump(summary.skipped, "privacy", pages.length);
     console.warn(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the project's privacy mode admits only a registered private reader`);
+    return logSummary(summary, ctx, use);
+  }
+  // The reader gave way at its capacity for this document earlier in the run: its pages go to the fallback, no new job.
+  if (readerCapacityStopped(ctx.state.usageLedger, provider, ctx.documentId)) {
+    bump(summary.skipped, "reader-capacity", pages.length);
+    console.log(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the reader gave way at its capacity earlier in this run`);
     return logSummary(summary, ctx, use);
   }
   const scope = { orgId: run.orgId, runId: run.id };
@@ -311,6 +372,12 @@ export async function readPageImagesWithProvider(
   for (let start = 0; start < ready.length; start += provider.maxPagesPerJob) {
     ctx.signal?.throwIfAborted();
     const chunk = ready.slice(start, start + provider.maxPagesPerJob);
+    if (readerCapacityStopped(ctx.state.usageLedger, provider, ctx.documentId)) {
+      bump(summary.skipped, "reader-capacity", ready.length - start);
+      console.warn(`${use.logTag} stopped document=${ctx.documentId}: the reader gave way at its capacity; ${ready.length - start} pages keep their fallback`);
+      release(sent, ctx.documentId, ready.length - start);
+      break;
+    }
     if (isCostCapExceeded(ctx.state as WorkflowState)) {
       bump(summary.skipped, "cost-cap", ready.length - start);
       console.warn(`${use.logTag} stopped document=${ctx.documentId}: run cost cap reached`);
@@ -330,6 +397,9 @@ export async function readPageImagesWithProvider(
     // A job that throws may have run a VM it could not report (a lease that failed while booting, an abort): it keeps at
     // least its reservation, so cancelling jobs never releases spend the ledger did not see.
     let jobFailed = true;
+    // Set only when the provider asserted the job gave way before any compute ran and it carried no cost: the ticket is
+    // released (settled at 0) instead. Anything unclear keeps the charge above.
+    let gaveWayBeforeCompute = false;
     try {
       const byKey = new Map<string, PageImageInput>();
       const job: PageImageReadJob = { scope: { ...scope }, pages: [], ...(use.requireReady ? { requireReady: true } : {}) };
@@ -348,7 +418,12 @@ export async function readPageImagesWithProvider(
         jobCostCents += tokens.costCents;
         logAiUsage(provider, tokens, summary, use.metric);
         if (ctx.signal?.aborted) throw error;
-        const reason = jobFailureReason(error);
+        const capacity = pageReaderJobFailureOf(error) === "capacity";
+        // A warm-start (requireReady) miss is a momentary race for a ready VM: it never stops the document, and a give-way
+        // there runs nothing, so it is released below. Any other capacity failure sends the rest of the document to its fallback.
+        if (capacity && !use.requireReady) stopReaderForCapacity(ctx.state.usageLedger, provider, ctx.documentId);
+        gaveWayBeforeCompute = capacity && pageReaderGaveWayBeforeCompute(error) && tokens.costCents === 0;
+        const reason = capacity ? "capacity" : jobFailureReason(error);
         bump(summary.failed, reason, chunk.length);
         console.warn(`${use.logTag} job failed document=${ctx.documentId} pages=${chunk.map((page) => page.pageNumber).join(",")} reason=${reason}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
         continue;
@@ -392,7 +467,13 @@ export async function readPageImagesWithProvider(
         summary.replaced += 1;
       }
     } finally {
-      await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents, use);
+      if (jobFailed && gaveWayBeforeCompute && (await releaseUnusedJob(ctx, ticket, run.orgId, reservedCents, use))) {
+        summary.released = (summary.released ?? 0) + 1;
+        // Nothing was read: the pages go back to the document's page budget too.
+        release(sent, ctx.documentId, chunk.length);
+      } else {
+        await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents, use);
+      }
     }
   }
   return logSummary(summary, ctx, use);
@@ -476,6 +557,29 @@ async function settleJob(ctx: PageReaderContext, ticket: string, costCents: numb
   }
 }
 
+/**
+ * Release the ticket of a job its provider gave way before any compute ran (settled at 0, scoped to the run's organization).
+ * False when the ledger refuses (not this organization's, already settled, carries cost) or fails: the caller then settles
+ * at no less than the reservation (fail closed).
+ */
+async function releaseUnusedJob(ctx: PageReaderContext, ticket: string, orgId: string, reservedCents: number, use: Pick<PageImageReadUse, "logTag">): Promise<boolean> {
+  const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
+  if (!budget) return false;
+  if (!takeRelease(orgId)) {
+    console.error(`${use.logTag} reservation release refused document=${ctx.documentId} org=${orgId}: ${PAGE_READER_MAX_RELEASES_PER_ORG_DAY} give-way releases today; settling at the reservation`);
+    return false;
+  }
+  try {
+    const released = (await budget.releaseUnused(ticket, orgId)) === true;
+    if (released) console.log(`${use.logTag} reservation released document=${ctx.documentId} org=${orgId} reserved_cents=${reservedCents.toFixed(4)}: the reader gave way before any compute ran`);
+    else console.warn(`${use.logTag} reservation release refused document=${ctx.documentId}; settling at the reservation`);
+    return released;
+  } catch (error) {
+    console.error(`${use.logTag} reservation release failed document=${ctx.documentId}; settling at the reservation: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+    return false;
+  }
+}
+
 function logAiUsage(provider: PageImageReaderProvider, tokens: { inputTokens: number; outputTokens: number }, summary: PageReaderSummary, metric: string): void {
   summary.inputTokens += tokens.inputTokens;
   summary.outputTokens += tokens.outputTokens;
@@ -485,7 +589,7 @@ function logAiUsage(provider: PageImageReaderProvider, tokens: { inputTokens: nu
 function logSummary(summary: PageReaderSummary, ctx: PageReaderContext, use: Pick<PageImageReadUse, "logTag">): PageReaderSummary {
   console.log(
     `${use.logTag} document=${ctx.documentId} mode=${summary.mode} provider=${summary.provider} jobs=${summary.jobs} attempted=${summary.attempted} ` +
-      `replaced=${summary.replaced} empty=${summary.empty} failed=${JSON.stringify(summary.failed)} skipped=${JSON.stringify(summary.skipped)}`,
+      `replaced=${summary.replaced} empty=${summary.empty} released=${summary.released ?? 0} failed=${JSON.stringify(summary.failed)} skipped=${JSON.stringify(summary.skipped)}`,
   );
   return summary;
 }
@@ -537,7 +641,7 @@ export async function readOcrPagesWithConfiguredReader(
 async function readOcrPagesWarm(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext, minPages: number): Promise<PageReaderSummary> {
   const candidates = outcome.pages.filter((page) => page.image).length;
   const run = ctx.state.run;
-  const summary: PageReaderSummary = { mode: ctx.mode, provider: provider.id, attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0 };
+  const summary: PageReaderSummary = { mode: ctx.mode, provider: provider.id, ...(poolMemberForBackend("ocr", provider.id) ? { poolMemberId: poolMemberForBackend("ocr", provider.id)!.id } : {}), attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0 };
   if (!candidates || !run?.id || typeof run.orgId !== "string" || !run.orgId) return await readPagesWithProvider(outcome, provider, ctx, { requireReady: true });
   const scope = { orgId: run.orgId, runId: run.id };
   const gate = await pageReaderWarmGate(provider, {

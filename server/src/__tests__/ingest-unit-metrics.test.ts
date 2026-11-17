@@ -14,21 +14,47 @@ describe("ingest spend metrics", () => {
     for (const metric of PAGE_CHARGE_METRICS) expect(INGEST_UNIT_METRICS).toContain(metric);
   });
 
-  it("reports OCR pages beside Fast and Rich, scoped to the organization it was asked for", async () => {
+  it("reports page counts by final class and credits as summed charges, scoped to the organization it was asked for", async () => {
     const calls: unknown[][] = [];
     // A stand-in SQL client: fragments resolve to themselves, the final query returns per-metric sums.
-    const client = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const stub = ((strings: TemplateStringsArray, ...values: unknown[]) => {
       calls.push(values);
+      // Per-metric sums with each class's final page count (one upgraded page already moved from Scan to Vision).
       const rows = [
-        { metric: BILLABLE_UNIT_METRICS.fastPage, amount: 10, cost_cents: 0.05, events: 1 },
-        { metric: BILLABLE_UNIT_METRICS.ocrPage, amount: 4, cost_cents: 0.16, events: 4 },
-        { metric: BILLABLE_UNIT_METRICS.richPage, amount: 2, cost_cents: 0.5, events: 2 },
+        { metric: BILLABLE_UNIT_METRICS.fastPage, amount: 10, cost_cents: 0.05, events: 0, final_pages: 10 },
+        { metric: BILLABLE_UNIT_METRICS.ocrPage, amount: 4, cost_cents: 0.16, events: 0, final_pages: 3 },
+        { metric: BILLABLE_UNIT_METRICS.richPage, amount: 2, cost_cents: 0.5, events: 0, final_pages: 2 },
       ];
-      return strings.join("").includes("group by au.metric") ? Promise.resolve(rows) : { strings, values };
-    }) as never;
+      const text = strings.join("");
+      if (text.includes("current_setting('jit')")) return Promise.resolve([{ jit: "on" }]);
+      if (text.includes("set_config('jit'")) return Promise.resolve([]);
+      return text.includes("with charges as materialized") ? Promise.resolve(rows) : { strings, values };
+    }) as unknown as Record<string, unknown>;
+    // A transaction handle (postgres.js TransactionSql): the read switches JIT off and restores it.
+    const client = Object.assign(stub, { savepoint: () => undefined }) as never;
     const usage = await orgUnitUsage("org-a", null, client);
-    expect(usage).toMatchObject({ fastPages: 10, ocrPages: 4, richPages: 2 });
+    expect(usage).toMatchObject({ fastPages: 10, ocrPages: 3, richPages: 2 });
     expect(usage.ingestCredits).toBeCloseTo(0.71);
-    expect(calls.at(-1)).toContain("org-a");
+    // One pass, bound to the organization asked for (the indexed prefilter, the derived org and the outer filter).
+    expect(calls.flat().filter((value) => value === "org-a").length).toBeGreaterThanOrEqual(3);
+    expect(calls.flat()).not.toContain("org-b");
+  });
+
+  it("refuses a handle that cannot scope the JIT setting to the read", async () => {
+    const reserved = ((strings: TemplateStringsArray) => ({ strings })) as never;
+    await expect(orgUnitUsage("org-a", null, reserved)).rejects.toThrow(/JIT-scoped read/);
+  });
+
+  it("keeps the read's error when restoring the setting fails in an aborted transaction", async () => {
+    let read = false;
+    const stub = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join("");
+      if (text.includes("current_setting('jit')")) return Promise.resolve([{ jit: "on" }]);
+      if (text.includes("set_config('jit'")) return read ? Promise.reject(new Error("current transaction is aborted")) : Promise.resolve([]);
+      if (text.includes("with charges as materialized")) { read = true; return Promise.reject(new Error("read failed")); }
+      return { strings, values };
+    }) as unknown as Record<string, unknown>;
+    const tx = Object.assign(stub, { savepoint: () => undefined }) as never;
+    await expect(orgUnitUsage("org-a", null, tx)).rejects.toThrow("read failed");
   });
 });

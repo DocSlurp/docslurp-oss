@@ -13,7 +13,7 @@ import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime } from "../tools/vision-runtime.js";
 import { resetStreamingSupportForTest } from "../tools/vision-stream.js";
 
-const FALLBACK = "llm://openai/gpt-4.1-mini";
+const FALLBACK = "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct";
 
 // The fallback's own privacy check throws during fallback setup (after the primary was billed). In practice this
 // setup cannot fail once the earlier checks pass; the mock stands in for any setup error there.

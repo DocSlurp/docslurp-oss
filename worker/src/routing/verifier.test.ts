@@ -1,3 +1,4 @@
+import { inAllowingRun } from "../test/provider-scope.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
@@ -643,14 +644,27 @@ describe("createDecisionVerifier usage recording", () => {
       health: new DecisionModelHealthRegistry(),
       loadImage: async () => PNG,
       documentId: "doc-1",
+      // Request-shape test: stated US evidence for the upstream (none states one today).
+      upstreamRegion: () => ({ region: "US" }),
     });
-    const verdict = await v.verify({ pageNumber: 1, targetId: "native:pdf-text", text: "x".repeat(answers.textLength), imagePath: "/p.png" });
+    const verdict = await inAllowingRun(() => v.verify({ pageNumber: 1, targetId: "native:pdf-text", text: "x".repeat(answers.textLength), imagePath: "/p.png" }));
     expect(verdict).not.toBeNull();
     // 2 canaries + 2 verifier calls, all priced from the catalog (omni 0.15, flash 0.038 USD/MTok)
     expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(verdict!.costUsd).toBeCloseTo((2000 / 1e6) * (0.15 + 0.038), 9);
     expect(ledger.snapshot().some((event) => Number(event.metadata?.providerCostCents) > 0)).toBe(true);
     expect(ledger.pendingBillableCents).toBe(0);
+  });
+
+  it("abstains and sends nothing when the verifier's upstream states no US or EU region (the default today)", async () => {
+    const fetchImpl = vi.fn();
+    const v = createDecisionVerifier({
+      ledger: new PipelineUsageEventLedger(), privacyMode: "standard", gate: { valueUsdPerQualityUnit: 1 },
+      env: { OPENROUTER_API_KEY: "k" } as NodeJS.ProcessEnv, fetchImpl: fetchImpl as unknown as typeof fetch,
+      health: new DecisionModelHealthRegistry(), loadImage: async () => PNG, documentId: "doc-1",
+    });
+    expect(await inAllowingRun(() => v.verify({ pageNumber: 1, targetId: "native:pdf-text", text: "x".repeat(GOLDEN[1]!.textLength), imagePath: "/p.png" }))).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("refuses hosted calls outside standard privacy mode and abstains", async () => {

@@ -1,5 +1,7 @@
 import type { PageLayoutImage, PageTable } from "@docslurp/shared";
 
+import { parsePageEncodingRoute, type PageEncodingRoute } from "./doppler-encoding-facts.js";
+
 /** One page of pdf-layout-facts@1 as routing reads it (worker/scripts/pdf_layout_facts.py `layout_facts`). */
 export interface PageLayoutFacts {
   /** Placed images; null when the image listing or the walk is unknown for the page. */
@@ -24,6 +26,12 @@ export interface PageLayoutFacts {
    * ruled grid (settleUnknownGrids). Routing then takes the table path: an unknown grid is never read as "no table".
    */
   gridsUnknown?: true;
+  /**
+   * What Doppler's math and table encoding facts say about the page (lib/doppler-encoding-facts.ts pageEncodingRoute), from
+   * the same job's page facts: absent when they are unknown (not computed, truncated, a bit this build does not name).
+   * Routing reads it only with DOCSLURP_ENCODING_FACTS_ROUTING on (routing/flags.ts).
+   */
+  encodings?: PageEncodingRoute;
 }
 
 const TEXT_LAYERS = new Set(["none", "invisible", "visible", "mixed"]);
@@ -61,10 +69,13 @@ export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<n
     const invisible = num(page.invisibleWords);
     const invisibleWords = invisible !== null && Number.isSafeInteger(invisible) && invisible >= 0 ? invisible : null;
     const textLayer = typeof page.textLayer === "string" && TEXT_LAYERS.has(page.textLayer) ? page.textLayer as NonNullable<PageLayoutFacts["textLayer"]> : null;
+    // Encodings stored with the page: re-derived from their flags (never trusted as a stored route), unknown when malformed.
+    const encodings = page.encodings === undefined ? undefined : parsePageEncodingRoute(page.encodings);
     out.set(pageNumber, { images, tables, words: num(page.words), grids, tableCoverage: num(page.tableCoverage),
       ...(grids === null && page.gridsUnknown === true ? { gridsUnknown: true as const } : {}),
       ...(widthPt !== null && heightPt !== null ? { widthPt, heightPt } : {}),
-      ...(invisibleWords !== null ? { invisibleWords } : {}), ...(textLayer !== null ? { textLayer } : {}) });
+      ...(invisibleWords !== null ? { invisibleWords } : {}), ...(textLayer !== null ? { textLayer } : {}),
+      ...(encodings ? { encodings } : {}) });
   }
   return out;
 }

@@ -9,7 +9,7 @@ import { DEFAULT_PAGE_EQUIVALENT_ALLOWANCE, defaultPipelineFeatures } from "@doc
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import type { PageEquivalentRow } from "../db/page-equivalents.js";
 import type { Document, ProjectRun } from "../models.js";
-import { PageBasis, type CountedImageFrames, type MeasuredRunDocument, type PageBasisLedger, type PageBasisRun, type PageBasisState, type SpendOutcome } from "./page-basis.js";
+import { PageBasis, type PageBasisLedger, type PageBasisRun, type PageBasisState, type RunMeasurements, type SpendOutcome } from "./page-basis.js";
 
 /** One documents row, as far as the page basis reads it. */
 export interface MemoryPageBasisDocument {
@@ -151,25 +151,26 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
     return row.billingPages;
   }
 
-  async measuredPagesAboveIntake(runId: string): Promise<number> {
-    return this.ofRun(runId)
-      .filter((row) => row.status !== "failed" && !/^(image|audio|video)\//.test(row.mimeType))
-      .reduce((sum, row) => sum + Math.max(0, (row.billingPages ?? row.pageCount) - (row.intakePageCount ?? row.pageCount)), 0);
-  }
-
-  async measuredDocuments(runId: string): Promise<MeasuredRunDocument[]> {
-    return this.ofRun(runId)
-      .filter((row) => row.billingPages !== null && row.status !== "failed")
-      .map((row) => ({ pageCount: row.pageCount, billingPages: row.billingPages!, method: row.billingPagesMethod }));
-  }
-
-  async countedImageFrames(runId: string): Promise<CountedImageFrames[]> {
-    return this.ofRun(runId)
-      .filter((row) => row.pageCount > 1 && ["image/tiff", "image/tiff-fx"].includes(row.mimeType.split(";")[0]!.trim().toLowerCase()))
-      .map((row) => ({ documentId: row.id, pageCount: row.pageCount, chargedPages: row.chargedPages }));
+  /** The one run-wide sum, by run_measured_pages' rules (migration 0190). */
+  async runMeasurements(runId: string, excludeDocumentId: string, _readMetrics: readonly string[]): Promise<RunMeasurements> {
+    let fastPages = 0;
+    let ocrFrames = 0;
+    let documentChargedPages = 0;
+    for (const row of this.ofRun(runId)) {
+      if (row.status === "failed") continue;
+      if (row.id === excludeDocumentId) { documentChargedPages = row.chargedPages; continue; }
+      const mime = row.mimeType.toLowerCase();
+      if (mime.startsWith("image/")) {
+        if (row.pageCount > 1) ocrFrames += Math.max(0, row.pageCount - Math.max(1, row.chargedPages));
+      } else if (!mime.startsWith("audio/") && !mime.startsWith("video/")) {
+        fastPages += Math.max(0, (row.billingPages ?? row.pageCount) - (row.intakePageCount ?? row.pageCount));
+      }
+    }
+    return { fastPages, ocrFrames, documentChargedPages };
   }
 
   async checkCharge(run: PageBasisRun, credits: number): Promise<SpendOutcome> {
+    if (!Number.isFinite(credits)) throw new SpendCheckUnavailableError(`run ${run.id} charge check got a non-finite amount (${credits})`);
     if (!this.spendCheckEnabled || !(credits > 0)) return { paused: false, blocked: false };
     if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to check a ${credits.toFixed(2)}-credit charge against`);
     this.checks.push(credits);
@@ -183,7 +184,10 @@ export class MemoryPageBasisLedger implements PageBasisLedger {
     if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to size a charge against`);
     this.sizings.push(creditsFor(max));
     this.failIf("balance");
-    for (let n = max; n >= 1; n -= 1) if (this.balance - creditsFor(n) >= this.floor) return n;
+    for (let n = max; n >= 1; n -= 1) {
+      const credits = creditsFor(n);
+      if (Number.isFinite(credits) && this.balance - credits >= this.floor) return n;
+    }
     return 0;
   }
 

@@ -282,6 +282,8 @@ export interface CreateVerifierOptions {
   health?: DecisionModelHealthRegistry;
   loadImage?: DecisionVerifierOptions["loadImage"];
   signal?: AbortSignal;
+  /** Region evidence for an upstream (tests); default: none is stated, so hosted verifier calls are refused. */
+  upstreamRegion?: (upstream: string) => unknown;
 }
 
 /**
@@ -293,6 +295,7 @@ export function createDecisionVerifier(options: CreateVerifierOptions): Decision
     privacyMode: options.privacyMode,
     ...(options.env ? { env: options.env } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    ...(options.upstreamRegion ? { upstreamRegion: options.upstreamRegion } : {}),
     onUsage: (model, result) =>
       recordDecisionUsage(options.ledger, model, result, {
         ...(options.documentId ? { documentId: options.documentId } : {}),
@@ -304,6 +307,7 @@ export function createDecisionVerifier(options: CreateVerifierOptions): Decision
     privacyMode: options.privacyMode,
     ...(options.env ? { env: options.env } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    ...(options.upstreamRegion ? { upstreamRegion: options.upstreamRegion } : {}),
     onUsage: (model, result) =>
       recordDecisionUsage(options.ledger, model, result, {
         ...(options.documentId ? { documentId: options.documentId } : {}),

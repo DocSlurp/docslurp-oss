@@ -11,6 +11,7 @@ export * from "./billing.js";
 export * from "./pricing-provider.js";
 export { OPEN_PRICING, OPEN_CREDITS_PER_PAGE, openStoredBytes } from "./pricing-open.js";
 export * from "./file-profile.js";
+export * from "./pdf-page-encoding.js";
 export * from "./estimate-quote.js";
 export { assembleEstimateQuote, profiledPageArea, profiledTextChars, type StoredBytesModel } from "./estimate-assembly.js";
 export { installTestPricing, DISTINCT_TEST_PRICING, TEST_PAGE_CREDITS } from "./pricing-testing.js";
@@ -108,6 +109,7 @@ export * from "./chat-model-prices.js";
 
 export * from "./project-state.js";
 export * from "./ingest-report.js";
+export * from "./page-extracts.js";
 export * from "./organization-management.js";
 export * from "./worker-autoscale.js";
 export * from "./worker-capabilities.js";
@@ -154,3 +156,4 @@ export type { ComputeExecutionScope, ComputeCohortGrant } from "./compute-observ
 export type { ComputeAllocationAdmission, ComputeAllocationPending, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "./compute-observations.js";
 export type { ComputeJobAdmission, ComputeJobAdmitResult, ComputeJobDemand, ComputeJobDemandCounts, ComputeJobTicket, ComputeJobTicketState } from "./compute-observations.js";
 export * from "./ocr-escalation-routes.js";
+export * from "./capability-pools.js";

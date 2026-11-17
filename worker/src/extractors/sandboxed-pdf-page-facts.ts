@@ -18,15 +18,15 @@ import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 /** The job object of a run (extractors/plugins.ts SandboxedPdfJob); only its identity is used here. */
 type Job = object;
 
-const accepted = new WeakMap<Job, { facts: DopplerPageFactsDocument; layout: Map<number, PageLayoutFacts> | null }>();
+const accepted = new WeakMap<Job, { facts: DopplerPageFactsDocument; layout: Map<number, PageLayoutFacts> | null; mathRead: boolean }>();
 
 /**
  * Parse a run's raw `pageFacts` for `job` (replacing anything an earlier result left), bounded by `pages`, the host's own
  * page count. Never throws on provider input: unusable facts are dropped with a warning.
  *
  * `glyphs`: the run read math (`pdftomarkdown --math`, so its pdftotext ran with `-glyphs`). Doppler's walker-parity fields
- * (thin-rule grid counts, centred words inside) hold only for a run without `-glyphs`, so they are stripped and the facts
- * map as an older build's would. The single-file guest never passes `--math`; the batch guest does when the job asks.
+ * (thin-rule grid counts, centred words inside) hold only for a run without `-glyphs`, so they are stripped with the whole
+ * grid list: the page's grids are unknown (the table path), never an older build's "no table". The single-file guest never passes `--math`; the batch guest does when the job asks.
  */
 export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: number, env: NodeJS.ProcessEnv = process.env, options: { glyphs?: boolean } = {}): void {
   accepted.delete(job);
@@ -54,8 +54,9 @@ export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: numbe
   if (facts.summary.linesDropped > 0 || !facts.summary.complete) {
     console.warn(`[vm-pdf] page facts partial pagesKnown=${facts.summary.pagesKnown} linesDropped=${facts.summary.linesDropped} complete=${facts.summary.complete}`);
   }
-  const layout = mode === "use" ? pageLayoutFactsFromDopplerFacts(facts) : null;
-  accepted.set(job, { facts, layout: layout && layout.size > 0 ? layout : null });
+  const mathRead = options.glyphs === true;
+  const layout = mode === "use" ? pageLayoutFactsFromDopplerFacts(facts, { mathRead }) : null;
+  accepted.set(job, { facts, layout: layout && layout.size > 0 ? layout : null, mathRead });
 }
 
 /** Forget what an earlier result of `job` left (before anything about a new result can throw). */
@@ -66,6 +67,11 @@ export function clearSandboxedPdfPageFacts(job: Job): void {
 /** The validated page facts of a finished job, or undefined when it returned none usable (or they are off). */
 export function sandboxedPdfPageFacts(job: Job): DopplerPageFactsDocument | undefined {
   return accepted.get(job)?.facts;
+}
+
+/** Whether the job's run read math (`--math`): its unmapped math glyphs were the math reader's to read (encoding routes). */
+export function sandboxedPdfPageFactsMathRead(job: Job): boolean {
+  return accepted.get(job)?.mathRead ?? false;
 }
 
 /** Layout facts mapped from the job's page facts: only in `use` mode, and only when any page is known. */

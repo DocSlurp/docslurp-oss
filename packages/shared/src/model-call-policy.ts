@@ -70,7 +70,7 @@ export class AutomaticCallRefusedError extends ModelCallRefusedError {
 export function assertAutomaticModelCallAllowed(
   ref: string | null | undefined,
   label: string,
-  margin?: { kind: AutomaticCallKind; route?: AutomaticCallRoute; at?: Date; role?: AutomaticCallRole },
+  margin?: { kind: AutomaticCallKind; route?: AutomaticCallRoute; at?: Date; role?: AutomaticCallRole; primaryBilled?: boolean; billsPage?: boolean },
 ): AutomaticCallDecision | null {
   const problem = automaticModelCallProblem(ref);
   if (problem) {
@@ -78,7 +78,7 @@ export function assertAutomaticModelCallAllowed(
     throw new ModelCallRefusedError(label, problem);
   }
   if (!margin || !ref?.trim()) return null;
-  const decision = admitAutomaticCall(margin.kind, margin.route ?? { model: ref }, label, { ...(margin.at ? { at: margin.at } : {}), ...(margin.role ? { role: margin.role } : {}) });
+  const decision = admitAutomaticCall(margin.kind, margin.route ?? { model: ref }, label, { ...(margin.at ? { at: margin.at } : {}), ...(margin.role ? { role: margin.role } : {}), ...(margin.primaryBilled !== undefined ? { primaryBilled: margin.primaryBilled } : {}), ...(margin.billsPage !== undefined ? { billsPage: margin.billsPage } : {}) });
   if (!decision.allowed) throw new AutomaticCallRefusedError(label, decision);
   return decision;
 }

@@ -35,6 +35,7 @@ import { RunNotifications, type CanonicalReplacement } from "./run-notifications
 import type { PageBasisLedger } from "../pipeline/page-basis.js";
 import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
+import { finalizePageExtracts, logFinalizeOutcome, pageExtractStatements } from "../pipeline/page-extracts.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { bindDocumentUpload, resolveDocumentSource } from "../lib/parse-source.js";
 import {
@@ -287,11 +288,19 @@ function completeRunDocumentStatements(client: Sql<Record<string, unknown>>, run
   ] as const;
 }
 
-async function completeRunDocuments(client: Sql<Record<string, unknown>>, runId: string): Promise<string[]> {
+async function completeRunDocuments(
+  client: Sql<Record<string, unknown>>,
+  runId: string,
+  after: readonly [PendingQuery<any>, PendingQuery<{ run_found: number; changed: number }[]>],
+): Promise<{ ids: string[]; finalized: Array<{ run_found: number; changed: number }> }> {
   const [retire, cancel, completed] = completeRunDocumentStatements(client, runId);
   await retire;
   await cancel;
-  return (await completed).map((row) => row.id);
+  // Pipelined: sent together, run in order on the transaction's connection.
+  completed.execute();
+  for (const statement of after) statement.execute();
+  const [rows, , finalized] = await Promise.all([completed, after[0], after[1]]);
+  return { ids: rows.map((row) => row.id), finalized };
 }
 
 /**
@@ -624,6 +633,7 @@ export class PostgresRunLedger implements CheckpointStore {
     for (const vector of state.vectorIndexes) referenced.add(vector.documentId);
     for (const event of state.pendingPerformance) if (event.documentId) referenced.add(event.documentId);
     for (const evaluation of state.pendingParserEvaluations) referenced.add(evaluation.documentId);
+    for (const row of state.pendingPageExtracts) referenced.add(row.document_id);
     if (referenced.size === 0) return false;
     const live = new Set((await this.sql<{ id: string }[]>`select id from documents where id = any(${[...referenced]})`).map((row) => row.id));
     const missing = new Set([...referenced].filter((id) => !live.has(id)));
@@ -631,6 +641,8 @@ export class PostgresRunLedger implements CheckpointStore {
     console.warn(`[store] dropping checkpoint rows for deleted documents run=${state.run.id} documents=${[...missing].join(",")}`);
     state.vectorIndexes = state.vectorIndexes.filter((vector) => !missing.has(vector.documentId));
     state.pendingParserEvaluations = state.pendingParserEvaluations.filter((evaluation) => !missing.has(evaluation.documentId));
+    state.pendingPageExtracts = state.pendingPageExtracts.filter((row) => !missing.has(row.document_id));
+    state.pendingPageExtractTags = state.pendingPageExtractTags.filter((row) => !missing.has(row.document_id));
     // Performance samples stay (stage timings still describe real work), detached from the deleted document.
     state.pendingPerformance = state.pendingPerformance.map((event) => (event.documentId && missing.has(event.documentId) ? { ...event, documentId: undefined } : event));
     return true;
@@ -646,6 +658,8 @@ export class PostgresRunLedger implements CheckpointStore {
     const usageBatch = state.usageLedger.checkpoint();
     const vectors = state.vectorIndexes.slice();
     const performance = state.pendingPerformance.slice();
+    const pageExtracts = state.pendingPageExtracts.slice();
+    const pageExtractTags = state.pendingPageExtractTags.slice();
     const parserEvaluations = state.pendingParserEvaluations.length > 0 && (await this.tableExists("parser_eval_results"))
       ? state.pendingParserEvaluations.slice()
       : [];
@@ -776,6 +790,7 @@ export class PostgresRunLedger implements CheckpointStore {
         statements.push(...this.vectorIndexStatements(vectors, client));
         statements.push(...this.performanceRowStatements(client, state, performance));
         statements.push(...this.parserEvaluationStatements(client, parserEvaluations));
+        statements.push(...pageExtractStatements(client, pageExtracts, pageExtractTags));
         if (options.readControlState) {
           controlIndex = statements.length;
           statements.push(client<{ control_state: string | null }[]>`select control_state from project_runs where id = ${state.run.id}`);
@@ -827,6 +842,8 @@ export class PostgresRunLedger implements CheckpointStore {
     state.vectorIndexes = without(state.vectorIndexes, vectors);
     state.pendingPerformance = without(state.pendingPerformance, performance);
     state.pendingParserEvaluations = without(state.pendingParserEvaluations, parserEvaluations);
+    state.pendingPageExtracts = without(state.pendingPageExtracts, pageExtracts);
+    state.pendingPageExtractTags = without(state.pendingPageExtractTags, pageExtractTags);
     };
     if (transaction) {
       transaction.afterCommit.push(commit);
@@ -953,8 +970,13 @@ export class PostgresRunLedger implements CheckpointStore {
         // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
         state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
-        const completed = await completeRunDocuments(client, state.run.id);
-        const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
+        // Documents completed here (pipelines without an index stage) get their page extract records' finals too: the two
+        // finalization statements go out right behind the statement that completes the documents (one flight; the
+        // documents UPDATE holds their row locks first).
+        const finalizeScope = { orgId: owner.orgId, runId: state.run.id, documentIds: "completed-in-run" as const };
+        const completed = await completeRunDocuments(client, state.run.id, finalizePageExtracts(client, finalizeScope));
+        logFinalizeOutcome(completed.finalized, finalizeScope);
+        const replacements = await supersededInThisTransaction(client, completed.ids.filter(id => !adopted.has(id)));
         await this.notifications.announceReplacements(state, replacements, client, logicalId);
         // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
         const stamps = runStampsIngestVersion(state.run.kind);
@@ -1543,8 +1565,12 @@ export class PostgresRunLedger implements CheckpointStore {
                   ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
                   : client``}
             where d.id = ${documentId}`,
+          // The document's page extract records get their one final row per page, in the transaction that publishes it
+          // (after the documents UPDATE above, which holds the document's row lock: documents first, then extract rows).
+          ...(state.run.orgId ? finalizePageExtracts(client, { orgId: state.run.orgId, runId: state.run.id, documentIds: [documentId] }) : []),
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
+        if (state.run.orgId) logFinalizeOutcome(results.at(-2) as Array<{ run_found: number; changed: number }>, { runId: state.run.id, documentIds: [documentId] });
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
       });
     } else if (geoFinalSource) {

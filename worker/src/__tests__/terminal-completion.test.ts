@@ -21,7 +21,7 @@ async function complete(statuses: string[]) {
   // Lazy like postgres.js queries: pipelineTransaction starts them with execute().
   const lazy = (rows: unknown[] = []) => Object.assign(Promise.resolve(rows), { execute() { return this; } });
   const reserved = Object.assign(vi.fn(() => lazy()), { unsafe: () => lazy(), array: (values: unknown[]) => values, release() {} });
-  const sql = Object.assign(vi.fn(async () => []), {
+  const sql = Object.assign(vi.fn(() => lazy()), {
     begin: async (callback: (tx: unknown) => Promise<unknown>) => await callback(sql),
     reserve: async () => reserved,
     json: (value: unknown) => value,

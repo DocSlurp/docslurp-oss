@@ -47,6 +47,7 @@ import {
   stageWorksOn,
   WORKER_SLOT_UNAVAILABLE,
   FIRST_PASS_RUN_POLICY_FAILURE,
+  PAGE_TASK_SPEND_PAUSED,
   type PipelineWorkflowInput,
   type PipelineWorkflowOutput,
   type RunProgress,
@@ -166,6 +167,21 @@ function isSlotUnavailable(error: unknown): boolean {
   return error instanceof ActivityFailure
     && error.cause instanceof ApplicationFailure
     && error.cause.type === WORKER_SLOT_UNAVAILABLE;
+}
+
+/** A page task refused because the run is out of funds (activities.ts pageTaskSpendPausedFailure). */
+function isPageTaskSpendPaused(error: unknown): boolean {
+  return error instanceof ActivityFailure
+    && error.cause instanceof ApplicationFailure
+    && error.cause.type === PAGE_TASK_SPEND_PAUSED;
+}
+
+/**
+ * Whether this workflow requeues spend-paused page tasks until the run resumes. Patched: a run whose history already holds
+ * such a failure (from before the rule) replays the old path (the failure fails the fan-out).
+ */
+function pageTaskSpendPauseRule(): ((error: unknown) => boolean) | undefined {
+  return patched("page-task-spend-pause-v1") ? isPageTaskSpendPaused : undefined;
 }
 
 function addUsage(left: UsageSummary, right: UsageSummary): UsageSummary {
@@ -482,16 +498,27 @@ export async function documentPipeline(
         const concurrency = Math.max(1, Math.floor(Math.min(128, input.pageConcurrency!) / Math.min(2, bundleSize)));
         let cursor = 0;
         let pageFailure: unknown;
+        const spendPaused = pageTaskSpendPauseRule();
+        // Bundles refused for funds, dispatched again once the run resumes (before any not yet started).
+        const requeued: typeof bundles = [];
         await Promise.all(Array.from({ length: Math.min(bundles.length, concurrency) }, async () => {
-          while (cursor < bundles.length && !pageFailure) {
+          while ((requeued.length > 0 || cursor < bundles.length) && !pageFailure) {
             while (paused && !cancelled) await condition(() => !paused || cancelled);
             if (cancelled) return;
-            const bundle = bundles[cursor++]!;
+            const bundle = requeued.shift() ?? bundles[cursor++]!;
             try {
               const pageUsage = bundleSize > 1 ? await runVisionPageBundle(bundle) : await runVisionPageTask(bundle[0]!);
               usage = { inputTokens: usage.inputTokens + pageUsage.inputTokens, outputTokens: usage.outputTokens + pageUsage.outputTokens, costCents: usage.costCents + pageUsage.costCents };
               progress = { ...progress, usage: { ...usage } };
-            } catch (error) { pageFailure = error; }
+            } catch (error) {
+              if (spendPaused?.(error) && !cancelled) {
+                // Wait for the pause signal (the loop then waits for the resume); retry after a minute if it never comes.
+                requeued.push(bundle);
+                await Promise.race([condition(() => paused || cancelled), sleep(60_000)]);
+                continue;
+              }
+              pageFailure = error;
+            }
           }
         }));
         // Drain in-flight pages before any whole-run write, including the failure path.
@@ -717,6 +744,7 @@ export async function visionPageBatch(input: VisionPageBatchInput): Promise<Usag
       : activities.pages.runVisionPageTask(bundle[0]!),
     onUsage: (pageUsage) => { usage = addUsage(usage, pageUsage); },
     isSlotUnavailable: (error) => input.slotGate && isSlotUnavailable(error),
+    isSpendPaused: pageTaskSpendPauseRule(),
     waitFor: (predicate) => condition(predicate),
     sleep: (ms) => sleep(ms),
     now: () => Date.now(),

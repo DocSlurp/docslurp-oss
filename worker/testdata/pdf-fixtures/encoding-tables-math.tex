@@ -1,0 +1,51 @@
+% Generator for worker/testdata/pdf-fixtures/encoding-tables-math.pdf (DocSlurp synthetic fixture, no third-party content).
+% Page 1: a booktabs table (horizontal rules only, no vertical rules); page 2: typeset display math with fractions;
+% page 3: a matrix (a grid of math glyphs, not a table) beside prose; page 4: prose only (control).
+% Build: pdflatex -interaction=nonstopmode encoding-tables-math.tex (twice is not needed: no references).
+\documentclass[11pt]{article}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\pdfinfoomitdate=1
+\pdftrailerid{}
+\pdfsuppressptexinfo=-1
+\pagestyle{empty}
+\begin{document}
+\section*{Quarterly results}
+Revenue grew in every region this quarter, and the expansion into two new markets finished ahead of plan.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Region & Q1 & Q2 & Q3 \\
+\midrule
+North & 120 & 135 & 151 \\
+South & 98 & 104 & 117 \\
+East & 143 & 150 & 166 \\
+West & 87 & 95 & 109 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\newpage
+\section*{Growth model}
+The quarterly growth rate follows from the ratio of consecutive revenues:
+\[
+  g_t = \frac{R_t - R_{t-1}}{R_{t-1}}, \qquad
+  \bar{g} = \frac{1}{n}\sum_{t=1}^{n} g_t, \qquad
+  \sigma^2 = \frac{1}{n-1}\sum_{t=1}^{n} \left(g_t - \bar{g}\right)^2 .
+\]
+Compounded over a year the rate is
+\[
+  G = \prod_{t=1}^{4} \left(1 + g_t\right) - 1 = \exp\!\Big(\sum_{t=1}^{4} \ln(1+g_t)\Big) - 1 .
+\]
+\newpage
+\section*{Transition matrix}
+Customers move between plans each quarter with these probabilities:
+\[
+  P = \begin{pmatrix} 0.82 & 0.15 & 0.03 \\ 0.10 & 0.80 & 0.10 \\ 0.02 & 0.18 & 0.80 \end{pmatrix},
+  \qquad \pi P = \pi .
+\]
+\newpage
+\section*{Outlook}
+The team expects the new offices to open early next year, and the product launch to reach customers in London and
+Singapore by the spring. Hiring continues in engineering and support.
+\end{document}

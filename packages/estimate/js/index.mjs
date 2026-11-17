@@ -82,7 +82,7 @@ export async function createEstimator(options = {}) {
 
   function call(name, ...inputs) {
     if (dead) throw new EstimatorError("crashed", `the estimator is unavailable after a trap (${dead})`);
-    if (detailActive && name === "ds_probe") throw new EstimatorError("invalid_request", "close the detailed profile before a legacy probe");
+    if (detailActive && (name === "ds_probe" || name === "ds_probe_pages")) throw new EstimatorError("invalid_request", "close the detailed profile before a legacy probe");
     const exports = instance.exports;
     exports.ds_clear_trap?.();
     let packed;
@@ -163,6 +163,20 @@ export async function createEstimator(options = {}) {
         } catch {
           throw error;
         }
+      }
+    },
+    /**
+     * `profile`, plus the per-page stat stream of a PDF's sampled pages: `{ profile, pageStats }`, where `pageStats` is
+     * JSONL, one `{ page, mask, counts }` object a line (`PDF_PAGE_ENCODING_BITS` and `PDF_PAGE_STAT_COUNTS` in
+     * `@docslurp/shared`), empty for other files. Local output only: never send it as the profile.
+     */
+    profileWithPageStats(file, head, tail) {
+      try {
+        return call("ds_probe_pages", json(meta(file)), head, tail);
+      } catch (error) {
+        if (!(error instanceof EstimatorError) || (error.code !== "out_of_memory" && error.code !== "crashed")) throw error;
+        // The bounded retry measures no page facts, so it has no page stats.
+        return { profile: estimator.profile(file, head, tail), pageStats: "" };
       }
     },
     /** Read and profile a `Blob`/`File` (browsers, Deno, Node 20+), reading only the bytes the profile needs. */

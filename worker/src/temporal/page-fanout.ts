@@ -23,6 +23,15 @@ export interface PageFanOutOptions<B> {
   run: (bundle: B) => Promise<UsageSummary>;
   onUsage: (usage: UsageSummary) => void;
   isSlotUnavailable: (error: unknown) => boolean;
+  /**
+   * A bundle refused because the run is out of funds (the activity paused it, or found it paused): the bundle goes back on
+   * the queue, nothing is recorded as a page failure, and dispatch waits for the pause signal and then for the resume that
+   * isPaused already waits on. When the pause signal is slow or lost, the lane tries again after `spendPauseWaitMs` (the
+   * activity re-checks the balance before any work, so a still-unfunded retry is refused again at no cost).
+   * Unset (runs started before this rule): such a bundle fails the fan-out as before.
+   */
+  isSpendPaused?: (error: unknown) => boolean;
+  spendPauseWaitMs?: number;
   waitFor: (predicate: () => boolean) => Promise<void>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -39,6 +48,8 @@ export interface PageFanOutStats {
   dispatched: number;
   slotDenials: number;
   minWindow: number;
+  /** Bundles requeued because the run was paused for funds. */
+  spendPauses: number;
 }
 
 /** Jittered exponential backoff for slot denials: 1–2 s, 2–4 s, … capped at 15–30 s. */
@@ -51,7 +62,7 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
   const max = Math.max(1, Math.floor(options.concurrency));
   const quietPeriodMs = options.quietPeriodMs ?? 10_000;
   const pending = [...options.bundles];
-  const stats: PageFanOutStats = { dispatched: 0, slotDenials: 0, minWindow: max };
+  const stats: PageFanOutStats = { dispatched: 0, slotDenials: 0, minWindow: max, spendPauses: 0 };
   let limit = max;
   let inFlight = 0;
   let backingOff = 0;
@@ -82,6 +93,20 @@ export async function runPageFanOut<B>(options: PageFanOutOptions<B>): Promise<P
         options.onUsage(usage);
       } catch (error) {
         inFlight -= 1;
+        if (options.isSpendPaused?.(error) && !options.isCancelled()) {
+          stats.spendPauses += 1;
+          pending.unshift(bundle);
+          backingOff += 1;
+          try {
+            await Promise.race([
+              options.waitFor(() => options.isPaused() || options.isCancelled()),
+              options.sleep(options.spendPauseWaitMs ?? 60_000),
+            ]);
+          } finally {
+            backingOff -= 1;
+          }
+          continue;
+        }
         if (!options.isSlotUnavailable(error) || options.isCancelled()) {
           failure ??= { error };
           return;

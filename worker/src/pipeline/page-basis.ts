@@ -9,9 +9,11 @@
  * then it is unbound and refuses every operation (fail closed): there is no code path on which a missing store skips a check.
  */
 import {
-  pageCredits,
+  PAGE_READ_METRICS,
   pageUpgradeCredits,
+  runMeasuredPagesCredits,
   speedBoostMultiplier,
+  type RunMeasuredPages,
 } from "@docslurp/shared";
 
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
@@ -28,11 +30,14 @@ export interface PageBasisRun {
   userId: string;
 }
 
-/** A document of the run the worker measured (billing_pages set) that still bills at completion. */
-export interface MeasuredRunDocument { pageCount: number; billingPages: number; method: string | null }
-
-/** A multi-frame image of the run whose counted frames raised its page count, with the pages a page-read charge already covers. */
-export interface CountedImageFrames { documentId: string; pageCount: number; chargedPages: number }
+/**
+ * What the run measured above admission's priced counts and no charge covers yet, over every document of the run except one
+ * (the database's run_measured_pages, migration 0190), plus that one document's charged pages.
+ */
+export interface RunMeasurements extends RunMeasuredPages {
+  /** Distinct pages of the excluded document a page-read charge already covers. */
+  documentChargedPages: number;
+}
 
 export interface SpendOutcome { paused: boolean; blocked: boolean }
 
@@ -50,12 +55,13 @@ export interface PageBasisLedger {
   recordPageEquivalents(runId: string, documentId: string, rows: readonly PageEquivalentRow[], allowance: number): Promise<number | null>;
   /** Raises a whole-document text format's billing_pages (db/page-equivalents.ts recordWholeDocumentPages); returns billing_pages. */
   recordWholeDocumentPages(runId: string, documentId: string, pages: number): Promise<number | null>;
-  /** Pages of the run's paged, non-media documents measured above what admission priced (documents.intake_page_count). */
-  measuredPagesAboveIntake(runId: string): Promise<number>;
-  /** The run's documents with billing_pages set that still bill at completion. */
-  measuredDocuments(runId: string): Promise<MeasuredRunDocument[]>;
-  /** The run's multi-frame images whose page count was raised above one, with their pages already charged. */
-  countedImageFrames(runId: string): Promise<CountedImageFrames[]>;
+  /**
+   * The one run-wide sum every spend check weighs: Fast pages of the run's paged, non-media documents above their intake count
+   * and frames of its multi-frame images no page-read charge covers, over every document except `excludeDocumentId` (whose
+   * pages the caller adds from its own state), and that document's charged pages. Failed and deduplicated documents never bill
+   * and are not counted. `readMetrics` are the page-read charge metrics.
+   */
+  runMeasurements(runId: string, excludeDocumentId: string, readMetrics: readonly string[]): Promise<RunMeasurements>;
   /**
    * Pauses the run when `credits` more would take the organization below what a running job needs. Throws
    * SpendCheckUnavailableError (retryable) when it cannot decide or cannot pause. `blocked` without `paused`: the run was
@@ -107,6 +113,14 @@ export class UnfundedPagesError extends RunPolicyError {
   }
 }
 
+/** A page basis invariant broke (a missing pipeline or document, an impossible count): refused loudly, nothing recorded or charged. */
+export class PageBasisInvariantError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PageBasisInvariantError";
+  }
+}
+
 /**
  * The page basis was used before a store was bound (WorkflowState.bindStore): a wiring fault, refused loudly. It is a spend
  * check that cannot decide, so every caller treats it as one: retryable, never a verdict on the document, never a skipped check.
@@ -131,12 +145,19 @@ export function intakePagesOf(document: Pick<Document, "pageCount" | "intakePage
 }
 
 /**
- * The credits a document's measurement owes once the run's other measured documents are counted: its own feature extra plus the
- * larger of its own base extra and the run's (whose rows include this document once it is recorded). The one place the run-wide
- * sum is taken, for measured Office pages and for counted image frames alike.
+ * The pages one document owes above what admission priced and no charge covers, by the same rule as run_measured_pages:
+ * an image's frames past the larger of its intake and its charged pages (OCR), any other non-media document's billing or page
+ * count past its intake (Fast). Audio and video bill by duration elsewhere.
  */
-function runWideCredits(own: number, ownBase: number, runBase: number): number {
-  return own - ownBase + Math.max(ownBase, runBase);
+function documentMeasuredPages(document: Document, chargedPages: number, intake: number): RunMeasuredPages {
+  const mime = (document.mimeType ?? "").toLowerCase();
+  if (mime.startsWith("audio/") || mime.startsWith("video/")) return { fastPages: 0, ocrFrames: 0 };
+  const pageCount = Math.max(0, Math.trunc(Number(document.pageCount)) || 0);
+  if (mime.startsWith("image/")) {
+    return { fastPages: 0, ocrFrames: pageCount > 1 ? Math.max(0, pageCount - Math.max(intake, chargedPages)) : 0 };
+  }
+  const measured = document.billingPages ?? pageCount;
+  return { fastPages: Math.max(0, Math.trunc(Number(measured)) - Math.trunc(intake)), ocrFrames: 0 };
 }
 
 export class PageBasis {
@@ -154,12 +175,14 @@ export class PageBasis {
 
   /**
    * Record what a measurement found for a document of this run: persist the right columns (after the floors), update the
-   * in-memory document and run, and re-check the run's spend for what the change owes. Throws UnfundedPagesError (the run is
-   * paused or stopped) or SpendCheckUnavailableError (retryable) before anything is charged for the new pages.
-   *  - page-count: page_count; a raise is authorized like `authorize`, a lowering never is.
-   *  - image-frames: page_count; frames past intake are checked at the OCR rate with the run's other images' uncharged frames.
-   *  - billing-pages: billing_pages, never below an intake count taken from the bytes; the Fast extra is checked with every
-   *    measured document of the run, the feature extra for this document alone.
+   * in-memory document and run, and re-check the run's spend. Every check weighs one run-wide sum (runMeasurements: Fast pages
+   * and uncharged image frames of every document of the run) plus this document's own pages and, for Office pages and image
+   * frames, its feature extra, so the order documents are measured in never decides whether the run overdraws. Throws
+   * UnfundedPagesError (the run is paused or stopped) or SpendCheckUnavailableError (retryable) before anything is charged.
+   *  - page-count: page_count; authorized whenever it stands above intake, on every attempt (a retry that finds the raised
+   *    count already persisted is checked again), never skipped because the in-memory count already matched.
+   *  - image-frames: page_count; frames past intake are checked at the OCR rate, on every attempt.
+   *  - billing-pages: billing_pages, never below an intake count taken from the bytes.
    *  - page-equivalents / whole-document: raise billing_pages (never lowered), then `authorize`.
    */
   async record(document: Document, measurement: PageMeasurement): Promise<PageBasisChange> {
@@ -167,13 +190,13 @@ export class PageBasis {
     switch (measurement.kind) {
       case "page-count": {
         const pages = measurement.pages;
-        if (!Number.isSafeInteger(pages) || pages < 0) throw new Error(`invalid page count ${pages} for document ${document.id}`);
+        if (!Number.isSafeInteger(pages) || pages < 0) throw new PageBasisInvariantError(`invalid page count ${pages} for document ${document.id}`);
         const before = Math.max(1, Math.trunc(Number(document.pageCount)) || 1);
         const persisted = await this.ledger.setPageCount(run.id, document.id, pages);
         document.pageCount = pages;
         document.pageCountSource = "counted";
         run.pagesTotal = Math.max(0, (Number(run.pagesTotal) || 0) + pages - before);
-        if (pages > before) await this.authorize(document);
+        await this.authorize(document);
         return { persisted, pageCount: pages, billingPages: document.billingPages ?? null };
       }
       case "image-frames":
@@ -198,22 +221,22 @@ export class PageBasis {
 
   /**
    * Authorize a document's measured pages, on every attempt (a retry that finds the measurement already persisted included):
-   * when the document measured above what admission priced, check the balance for every Fast page the run measured above its
-   * intake counts (durable state), none of which is charged before completion. Never inferred from page_count_source.
+   * when the document measured above what admission priced, check the balance for everything the run measured above its
+   * intake counts and has not been charged (the one run-wide sum), none of which is charged before completion or the read.
+   * Never inferred from page_count_source or from whether this attempt changed a count.
    */
   async authorize(document: Document): Promise<{ checkedPages: number } | null> {
     const measured = Math.max(Number(document.billingPages) || 0, Math.trunc(Number(document.pageCount)) || 0);
     if (!(measured > intakePagesOf(document))) return null;
     const run = this.chargeableRun();
-    const pages = await this.ledger.measuredPagesAboveIntake(run.id);
-    if (!(pages > 0)) return { checkedPages: 0 };
-    const credits = pageCredits("fast", pages) * this.boost();
-    const outcome = await this.ledger.checkCharge(run, credits);
+    const owed = await this.runOwed(document, intakePagesOf(document));
+    if (!(owed.credits > 0)) return { checkedPages: 0 };
+    const outcome = await this.checkCharge(run, owed.credits);
     if (outcome.paused || outcome.blocked) {
-      console.warn(`[page-auth] run=${run.id} document=${document.id} stopped: ${pages} measured pages above intake owe ${credits.toFixed(2)} credits more than the balance holds (paused=${outcome.paused})`);
-      throw unfunded(document, outcome.paused, credits, intakePagesOf(document));
+      console.warn(`[page-auth] run=${run.id} document=${document.id} stopped: ${owed.pages} measured pages above intake owe ${owed.credits.toFixed(2)} credits more than the balance holds (paused=${outcome.paused})`);
+      throw unfunded(document, outcome.paused, owed.credits, intakePagesOf(document));
     }
-    return { checkedPages: pages };
+    return { checkedPages: owed.pages };
   }
 
   /**
@@ -222,15 +245,18 @@ export class PageBasis {
    */
   async fund(charge: Extract<PageCharge, { kind: "page-read" }>): Promise<{ funded: boolean; paused: boolean; credits: number }> {
     const run = this.chargeableRun();
-    const credits = pageCredits(charge.mode, Math.max(1, charge.pages)) * this.boost() + this.state.usageLedger.pendingBillableCents;
-    const outcome = await this.ledger.checkCharge(run, credits);
+    const pages = Math.max(1, charge.pages);
+    if (!Number.isSafeInteger(pages)) throw new PageBasisInvariantError(`invalid page-read count ${charge.pages}`);
+    const credits = runMeasuredPagesCredits({ fastPages: 0, ocrFrames: pages }, this.speedBoost()) + this.state.usageLedger.pendingBillableCents;
+    const outcome = await this.checkCharge(run, credits);
     return { funded: !outcome.paused && !outcome.blocked, paused: outcome.paused, credits };
   }
 
   /**
    * How many units of `charge` (pages, frames) the run can afford, 0..max, counting the charges still buffered in this
-   * activity and, for image frames, every other image of the run's uncharged frames. Read-only: nothing is paused. An image
-   * is always granted its first frame (`fund` covered it before the read). Throws SpendCheckUnavailableError when it cannot decide.
+   * activity and, for image frames, everything else the run measured and has not been charged. Read-only: nothing is paused.
+   * An image is always granted its first frame (`fund` covered it before the read). Throws SpendCheckUnavailableError when it
+   * cannot decide.
    */
   async affordable(charge: Exclude<PageCharge, { kind: "page-read" }>, max: number): Promise<number> {
     const run = this.chargeableRun();
@@ -239,14 +265,13 @@ export class PageBasis {
       const perPage = pageUpgradeCredits(charge.from, charge.to) * this.boost();
       return await this.ledger.largestFundedCharge(run, max, (n) => perPage * n + pending);
     }
-    const pipeline = this.state.run.pipeline;
+    const pipeline = this.pipeline();
     // What admission priced (durable), never the frames a previous attempt recorded as the page count.
     const intake = intakePagesOf(charge.document);
-    const others = (await this.ledger.countedImageFrames(run.id))
-      .filter((row) => row.documentId !== charge.document.id)
-      .reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "ocr", features: false }), 0);
+    const others = await this.ledger.runMeasurements(run.id, charge.document.id, PAGE_READ_METRICS);
+    const othersOwe = runMeasuredPagesCredits(others, this.speedBoost());
     const frames = await this.ledger.largestFundedCharge(run, max,
-      (n) => extraCreditsForMeasuredPages(pipeline, intake, n, null, { mode: "ocr" }) + others + pending);
+      (n) => extraCreditsForMeasuredPages(pipeline, intake, n, null, { mode: "ocr" }) + othersOwe + pending);
     return Math.max(1, Math.min(max, frames));
   }
 
@@ -259,13 +284,15 @@ export class PageBasis {
   }
 
   private async recordImageFrames(document: Document, frames: number): Promise<PageBasisChange> {
+    // Validated before anything is written or the run total moves: a frame count that is not a positive integer is refused.
+    if (!Number.isSafeInteger(frames) || frames < 1) throw new PageBasisInvariantError(`invalid frame count ${frames} for image ${document.id}`);
     const run = this.state.run;
     // What admission priced (durable, migration 0130): a retry finds the frames an earlier attempt recorded as the page count,
     // and must still authorize them; it never treats them as already priced.
     const intake = intakePagesOf(document);
     const recorded = Math.max(1, Math.trunc(document.pageCount) || 1);
     let persisted = false;
-    if (Number.isSafeInteger(frames) && frames >= 1 && document.pageCount !== frames) {
+    if (document.pageCount !== frames) {
       persisted = await this.ledger.setPageCount(run.id, document.id, frames);
       console.log(`[ocr] image-frames document=${document.id} pages=${frames} intake=${document.pageCount}`);
       document.pageCount = frames;
@@ -274,50 +301,74 @@ export class PageBasis {
     if (frames !== recorded) run.pagesTotal = Math.max(0, Number(run.pagesTotal) || 0) + frames - recorded;
     const change = { persisted, pageCount: document.pageCount, billingPages: document.billingPages ?? null };
     if (frames <= intake) return change;
-    const pipeline = run.pipeline;
+    const pipeline = this.pipeline();
     const own = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "ocr" });
     if (!(own > 0)) return change;
     const chargeable = this.chargeableRun();
-    const ownRead = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "ocr", features: false });
-    // Frames of the run's images no page-read charge covers yet (page 1 was priced at admission).
-    const runRead = (await this.ledger.countedImageFrames(run.id))
-      .reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "ocr", features: false }), 0);
-    const credits = runWideCredits(own, ownRead, runRead);
-    const outcome = await this.ledger.checkCharge(chargeable, credits);
+    // The frames themselves are in the run-wide sum (uncharged frames past intake); only the feature extra is added here.
+    const features = own - extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "ocr", features: false });
+    const owed = await this.runOwed(document, intake);
+    const credits = features + owed.credits;
+    const outcome = await this.checkCharge(chargeable, credits);
     if (outcome.paused || outcome.blocked) throw unfunded(document, outcome.paused, credits, intake);
     return change;
   }
 
   private async recordBillingPages(document: Document, measurement: Extract<PageMeasurement, { kind: "billing-pages" }>): Promise<PageBasisChange> {
     const run = this.state.run;
+    if (!Number.isSafeInteger(measurement.pages) || measurement.pages < 0) {
+      throw new PageBasisInvariantError(`invalid billing pages ${measurement.pages} for document ${document.id}`);
+    }
+    const pipeline = this.pipeline();
     const intakePages = document.pageCount;
     // Never bill below a page basis intake counted from the bytes; an assumed intake (these formats' one page) is no floor, so
     // an empty file measures 0 pages.
     const floor = document.pageCountSource === "counted" ? Math.max(1, Math.floor(intakePages) || 1) : 0;
     const pages = Math.max(measurement.pages, floor);
-    if (!Number.isSafeInteger(pages) || pages < 0) throw new Error(`invalid billing pages ${pages} for document ${document.id}`);
     console.log(`[page-count] document=${document.id} format=${measurement.format} counted by ${measurement.method}: ${pages} pages (intake ${intakePages})`);
     const persisted = await this.ledger.setBillingPages(run.id, document.id, pages, measurement.method);
     document.billingPages = pages;
     document.billingPagesMethod = measurement.method;
     const change = { persisted, pageCount: document.pageCount, billingPages: pages };
-    // Admission priced the intake count. The Fast fee on measured pages is charged only when the run completes, so the balance
-    // shows no measured document's extra pages yet: the run's measured documents are added, not just this one. Features are
-    // charged as their stages run (and checked there), so only this document's feature extra is added.
-    const pipeline = run.pipeline;
+    // The Fast fee on measured pages is charged only when the run completes, so the balance shows none of them yet: the one
+    // run-wide sum adds every document of the run. Features are charged as their stages run (and checked there), so only this
+    // document's feature extra is added.
     const own = extraCreditsForMeasuredPages(pipeline, intakePages, pages, measurement.method);
     if (!(own > 0)) return change;
     const chargeable = this.chargeableRun();
-    const ownFast = extraCreditsForMeasuredPages(pipeline, intakePages, pages, measurement.method, { features: false });
-    const runFast = (await this.ledger.measuredDocuments(run.id))
-      .reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, row.pageCount, row.billingPages, row.method, { features: false }), 0);
-    const credits = runWideCredits(own, ownFast, runFast);
-    const outcome = await this.ledger.checkCharge(chargeable, credits);
+    const features = own - extraCreditsForMeasuredPages(pipeline, intakePages, pages, measurement.method, { features: false });
+    const owed = await this.runOwed(document, Math.max(1, Math.trunc(Number(intakePages)) || 1));
+    const credits = features + owed.credits;
+    const outcome = await this.checkCharge(chargeable, credits);
     if (outcome.paused || outcome.blocked) {
       console.warn(`[page-count] run=${run.id} document=${document.id} stopped (paused=${outcome.paused}): measured ${pages} pages (intake ${intakePages}) owes ${credits.toFixed(2)} more credits than the balance holds`);
       throw unfunded(document, outcome.paused, credits, intakePages);
     }
     return change;
+  }
+
+  /**
+   * What the run owes for measured pages no charge covers yet: every other document of the run (durable, run_measured_pages)
+   * plus this document from its in-memory state, so a document whose write the ledger did not take (a deduplicated copy) or
+   * an attempt racing another is still counted.
+   */
+  private async runOwed(document: Document, intake: number): Promise<{ credits: number; pages: number }> {
+    const others = await this.ledger.runMeasurements(this.state.run.id, document.id, PAGE_READ_METRICS);
+    const own = documentMeasuredPages(document, Math.max(0, Number(others.documentChargedPages) || 0), intake);
+    const total = { fastPages: others.fastPages + own.fastPages, ocrFrames: others.ocrFrames + own.ocrFrames };
+    return { credits: runMeasuredPagesCredits(total, this.speedBoost()), pages: total.fastPages + total.ocrFrames };
+  }
+
+  /** The ledger's charge check; a credit amount that is not a finite number is refused, never read as nothing owed. */
+  private async checkCharge(run: PageBasisRun, credits: number): Promise<SpendOutcome> {
+    if (!Number.isFinite(credits)) throw new SpendCheckUnavailableError(`run ${run.id} charge check got a non-finite amount (${credits})`);
+    return await this.ledger.checkCharge(run, credits);
+  }
+
+  private pipeline(): ProjectRun["pipeline"] {
+    const pipeline = this.state.run.pipeline;
+    if (!pipeline) throw new PageBasisInvariantError(`run ${this.state.run.id} has no pipeline to price measured pages with`);
+    return pipeline;
   }
 
   /**
@@ -334,8 +385,12 @@ export class PageBasis {
     return { id: run.id, orgId: run.orgId ?? null, projectId: run.projectId ?? null, userId: run.userId };
   }
 
+  private speedBoost(): boolean {
+    return this.state.run.pipeline?.speedBoost === true;
+  }
+
   private boost(): number {
-    return speedBoostMultiplier(this.state.run.pipeline?.speedBoost === true);
+    return speedBoostMultiplier(this.speedBoost());
   }
 }
 
@@ -353,9 +408,7 @@ function unboundLedger(runId: () => string): PageBasisLedger {
     setBillingPages: async () => refuse("setBillingPages"),
     recordPageEquivalents: async () => refuse("recordPageEquivalents"),
     recordWholeDocumentPages: async () => refuse("recordWholeDocumentPages"),
-    measuredPagesAboveIntake: async () => refuse("measuredPagesAboveIntake"),
-    measuredDocuments: async () => refuse("measuredDocuments"),
-    countedImageFrames: async () => refuse("countedImageFrames"),
+    runMeasurements: async () => refuse("runMeasurements"),
     checkCharge: async () => refuse("checkCharge"),
     largestFundedCharge: async () => refuse("largestFundedCharge"),
     pauseForFunds: async () => refuse("pauseForFunds"),
