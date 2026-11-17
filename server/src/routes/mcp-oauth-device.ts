@@ -15,7 +15,8 @@ import {
   findPendingDeviceRequest,
   formatUserCode,
   lockDeviceAttempts,
-  mcpOrigin,
+  mcpBrowserOrigin,
+  mcpBrowserRedirect,
   normalizeUserCode,
   recordDeviceAttemptFailure,
   transaction,
@@ -40,7 +41,7 @@ import {
  *   requested scope (chat, ingest, web) is an unticked opt-in on the page.
  * - Approval is one-time: the row stops being pending, so a second approval
  *   (or a denial after approval) is refused.
- * - POSTs require the canonical Origin (an absent or `null` Origin is refused
+ * - POSTs require the browser origin of the flow (the issuer, or MCP_BROWSER_URL) as Origin (an absent or `null` Origin is refused
  *   with an explanation); the page cannot be framed.
  */
 export const deviceVerificationRoutes = new Hono();
@@ -119,6 +120,8 @@ function ago(date: Date): string {
 }
 
 deviceVerificationRoutes.get("/", async (c) => {
+  const elsewhere = mcpBrowserRedirect(c.req.url);
+  if (elsewhere) return c.redirect(elsewhere, 307);
   const actor = await sessionOrSignIn(c);
   if (actor instanceof Response) return actor;
   // Any user_code in the query is ignored: the code is always typed.
@@ -131,7 +134,7 @@ type Outcome =
 
 deviceVerificationRoutes.post("/", async (c) => {
   const origin = c.req.header("origin");
-  if (origin !== mcpOrigin(c.req.url)) {
+  if (origin !== mcpBrowserOrigin(c.req.url)) {
     return page(c, "Request refused", `<h1>Request refused</h1>
 <p>${origin === undefined || origin === "null"
       ? "Your browser did not say which site sent this form, so it was refused. Open this page directly in your browser, not from another app or a privacy extension that strips it, and try again."
