@@ -274,6 +274,28 @@ export interface OrgUnitUsage {
 }
 
 /**
+ * Runs one read with JIT compilation off, scoped to that read. On a large org the unit-usage query's plan cost passes
+ * `jit_above_cost`, and compiling it took longer (~1.2 s measured) than executing it. On a pool or connection the read
+ * runs in its own transaction with `SET LOCAL jit = off`; inside a caller's transaction the setting is switched for the
+ * read and restored after it, so the caller's later statements keep their own setting.
+ */
+async function withoutJit<T>(client: SqlClient, read: (db: SqlClient) => Promise<T>): Promise<T> {
+  if (typeof (client as { begin?: unknown }).begin === "function") {
+    return await client.begin(async (tx) => {
+      await tx`set local jit = off`;
+      return read(tx as unknown as SqlClient);
+    }) as T;
+  }
+  const [previous] = await client<{ jit: string }[]>`select current_setting('jit') as jit`;
+  await client`select set_config('jit', 'off', true)`;
+  try {
+    return await read(client);
+  } finally {
+    await client`select set_config('jit', ${previous?.jit ?? "on"}, true)`;
+  }
+}
+
+/**
  * Units and credits the price card charged an org since `since` (the billing
  * forecast's last-30-day pace), in one pass over the org's rows. Unit events
  * record the count in `amount`: chat answers as 1 per call, searches as 1 per
@@ -296,7 +318,7 @@ export async function orgUnitUsage(orgId: string, since: UsageWindow, client: Sq
   const ocr = BILLABLE_UNIT_METRICS.ocrPage;
   const rich = BILLABLE_UNIT_METRICS.richPage;
   const chat = BILLABLE_UNIT_METRICS.chatAnswer;
-  const rows = await client<{ metric: string; amount: number; cost_cents: number; events: number; final_pages: number }[]>`
+  const rows = await withoutJit(client, (db) => db<{ metric: string; amount: number; cost_cents: number; events: number; final_pages: number }[]>`
     with charges as materialized (
       select au.id, au.metric, au.amount, au.cost_cents, au.source_run_id,
         case when au.metric in (${fast}, ${ocr}, ${rich}) then au.metadata ->> 'documentId' end as document_id,
@@ -307,7 +329,7 @@ export async function orgUnitUsage(orgId: string, since: UsageWindow, client: Sq
             and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
           then coalesce(au.source_run_id, '') || ':' || (au.metadata ->> 'documentId') || ':' || ((au.metadata ->> 'pageNumber')::int)::text
         end as rich_page
-      from ${orgAttributedUsage(orgId, since, client)} au
+      from ${orgAttributedUsage(orgId, since, db)} au
       where au.org_id = ${orgId}
         and au.metric = any(${[...INGEST_UNIT_METRICS, BILLABLE_UNIT_METRICS.search, chat]}::text[])
     ),
@@ -334,7 +356,7 @@ export async function orgUnitUsage(orgId: string, since: UsageWindow, client: Sq
       (m.unlinked_pages + case when m.metric = ${rich}
         then (select count(distinct c.rich_page) from charges c where c.rich_page is not null) else 0 end)::double precision as final_pages
     from by_metric m
-  `;
+  `);
   const by = new Map(rows.map((row) => [row.metric, {
     amount: Number(row.amount ?? 0), cost: Number(row.cost_cents ?? 0), events: Number(row.events ?? 0), pages: Number(row.final_pages ?? 0),
   }]));
