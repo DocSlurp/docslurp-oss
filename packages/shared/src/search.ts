@@ -172,7 +172,6 @@ export const aggregateProjectRagSearchRequestSchema = z
     mmrLambda: z.number().min(0).max(1).optional(),
     /** Relevance floor, 0..1; 0 disables it. Omitted: project default, else SEARCH_MIN_SCORE. */
     minScore: z.number().min(0).max(1).optional(),
-    compression: z.boolean().default(false),
     /** Provider-backed steps stay off unless requested, as on POST /v1/search. */
     queryRewrite: z.boolean().default(false),
     queryDecompose: z.boolean().default(false),

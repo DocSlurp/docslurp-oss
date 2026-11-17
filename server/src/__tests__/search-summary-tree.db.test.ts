@@ -263,7 +263,7 @@ afterAll(async () => {
 
 const baseOptions = {
   limit: 10, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false, parentRetrieval: false,
-  useContextualCompression: false, useHyDE: false, stepback: false, iterativeMultiHop: false, useMmr: false,
+  useHyDE: false, stepback: false, iterativeMultiHop: false, useMmr: false,
   enableGraphExpansion: false, enableCommunityExpansion: false, queryVector: QUERY,
 };
 

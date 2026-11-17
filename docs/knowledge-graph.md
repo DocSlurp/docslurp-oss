@@ -133,6 +133,6 @@ by full-text search; Postgres keeps no vectors (see migration 0008).
 
 Document tags work with every graph configuration: they do not change the graph's domain, entity types, extraction depth, or rebuild settings. Tag filters restrict document evidence, including graph-neighbor passages. Entity query expansion draws terms from matching tagged documents. Vector candidate selection also respects tags before retrieval, so unrelated documents cannot crowd tagged candidates out.
 
-Community summaries remain available as broader project context. In a tagged search, each returned summary explicitly says that it is **not restricted to the selected tags**, may include documents outside the selection, and does not establish what a tagged document says. This qualification is preserved after contextual compression. Tags organize retrieval; they are not document access controls.
+Community summaries remain available as broader project context. In a tagged search, each returned summary explicitly says that it is **not restricted to the selected tags**, may include documents outside the selection, and does not establish what a tagged document says. Tags organize retrieval; they are not document access controls.
 
 With self-query planning enabled, explicit `tag:finance` or `tag:"finance team"` query syntax derives tag filters. Explicit API tag filters take precedence, so planning cannot broaden a caller's tag selection. List available labels with `GET /v1/projects/{projectId}/tags` or `client.listProjectTags()`.

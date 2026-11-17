@@ -16,7 +16,6 @@ export interface RetrievalQueryFlags {
   parentRetrieval?: boolean;
   summarySeed?: boolean;
   summaryTree?: SummaryTreeSearchMode;
-  useContextualCompression?: boolean;
   queryRewrite?: boolean;
   queryDecompose?: boolean;
   stepback?: boolean;
@@ -91,7 +90,6 @@ export function parseRetrievalQueryFlags(read: (name: string) => string | undefi
     useMmr: flag("mmr"),
     parentRetrieval: flag("parentRetrieval"),
     summarySeed: flag("summarySeed"),
-    useContextualCompression: flag("compression"),
     queryRewrite: flag("queryRewrite"),
     queryDecompose: flag("queryDecompose"),
     stepback: flag("stepback"),

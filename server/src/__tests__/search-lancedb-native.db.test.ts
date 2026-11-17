@@ -145,7 +145,7 @@ afterAll(async () => {
 
 const baseOptions = {
   limit: 8, minScore: 0, useRerank: false, queryRewrite: false, selfQuery: false, parentRetrieval: false,
-  useContextualCompression: false, useHyDE: false, stepback: false, iterativeMultiHop: false,
+  useHyDE: false, stepback: false, iterativeMultiHop: false,
   enableGraphExpansion: false, enableCommunityExpansion: false,
 };
 

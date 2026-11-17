@@ -55,7 +55,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "server/src/search/eligible-documents.ts#lastInvalidatedAt": { class: "tenant-id", why: "invalidation timestamps by project" },
   "server/src/search/eligible-documents.ts#pendingInvalidations": { class: "tenant-id", why: "invalidation timers by project" },
   "server/src/search/eligible-documents.ts#runProjects": { class: "tenant-id", why: "run id to its project" },
-  "server/src/search/embedding-cache.ts#OrgPartitionedTtlLru": { class: "org", why: "embeddingCacheKey requires and hashes the org id; one bounded partition per org" },
+  "server/src/search/embedding-cache.ts#TtlLruCache": { class: "org", why: "embeddingCacheKey requires and hashes the org id" },
   "server/src/search/lancedb.ts#connections": { class: "operational", why: "connections per database URI" },
   "server/src/search/lancedb.ts#lastPrewarm": { class: "tenant-id", why: "prewarm timestamps per project table" },
   "server/src/search/lancedb.ts#missingTables": { class: "tenant-id", why: "negative lookups per per-org/project table URI" },
@@ -64,9 +64,8 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "server/src/search/lean-logging.ts#open": { class: "org", why: "usage batches keyed by user, org, project and key" },
   "server/src/search/relevance.ts#preparedQueries": { class: "org", why: "tokenized query terms keyed by request org + query; no org, no cache" },
   "server/src/search/response-cache.ts#generations": { class: "tenant-id", why: "invalidation generation per project" },
-  "server/src/search/response-cache.ts#partitionBytes": { class: "org", why: "byte totals per org partition" },
-  "server/src/search/response-cache.ts#partitions": { class: "org", why: "partitioned by org; key hashes orgs, user, key, projects, request" },
-  "server/src/search/result-cache.ts#OrgPartitionedTtlLru": { class: "org", why: "resultCacheKey requires and hashes the org id; one bounded partition per org" },
+  "server/src/search/response-cache.ts#entries": { class: "org", why: "key hashes orgs, user, key, projects, request; the stored org key is checked on read" },
+  "server/src/search/result-cache.ts#TtlLruCache": { class: "org", why: "resultCacheKey requires and hashes the org id" },
   "server/src/search/session.ts#backgroundQueues": { class: "org", why: "session write queues per org" },
   "server/src/search/session.ts#pendingSessionWrites": { class: "per-job", why: "per search session id" },
   "server/src/search/session.ts#waitingByOrg": { class: "org", why: "counters per org" },
@@ -123,11 +122,11 @@ function sourceFiles(dir: string): string[] {
   return files;
 }
 
-/** Module-level `const|let name = new Map()` (empty, so mutable) and any `new TtlLruCache`/`new OrgPartitionedTtlLru`/`new LRUCache`. */
+/** Module-level `const|let name = new Map()` (empty, so mutable) and any `new TtlLruCache`/`new LRUCache`. */
 function discoveredCaches(): string[] {
   const found = new Set<string>();
   const moduleMap = /^(?:export\s+)?(?:const|let)\s+(\w+)\b[^=]*=\s*new\s+Map\s*(?:<.*>)?\s*\(\s*\)\s*;?\s*(?:\/\/.*)?$/;
-  const lru = /\bnew\s+(?:TtlLruCache|OrgPartitionedTtlLru|LRUCache)\b/;
+  const lru = /\bnew\s+(?:TtlLruCache|LRUCache)\b/;
   for (const root of SOURCE_ROOTS) {
     for (const file of sourceFiles(join(repoRoot, root))) {
       const path = relative(repoRoot, file).split("\\").join("/");
@@ -137,7 +136,7 @@ function discoveredCaches(): string[] {
       for (const line of joined.split("\n")) {
         const map = moduleMap.exec(line);
         if (map) found.add(`${path}#${map[1]}`);
-        if (lru.test(line)) found.add(`${path}#${/OrgPartitionedTtlLru/.test(line) ? "OrgPartitionedTtlLru" : /LRUCache/.test(line) && !/TtlLruCache/.test(line) ? "LRUCache" : "TtlLruCache"}`);
+        if (lru.test(line)) found.add(`${path}#${/LRUCache/.test(line) && !/TtlLruCache/.test(line) ? "LRUCache" : "TtlLruCache"}`);
       }
     }
   }

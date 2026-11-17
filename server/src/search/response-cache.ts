@@ -26,9 +26,9 @@ import { ensureInvalidationListener, onSearchProjectInvalidated } from "./eligib
  *   id, the resolved project ids and the exact request (filters, retrieval
  *   options, the query as sent), so answers never cross callers, keys,
  *   tenants, projects or options.
- * - Entries are partitioned by organization with per-organization entry and
- *   byte caps. Global pressure drops expired answers, then only the writer's
- *   own answers (`evict`): one tenant never pushes out another's live entries.
+ * - One bounded LRU (entry and byte caps) shared by every organization; the
+ *   organizations are part of the key and are checked again on read, so an
+ *   answer is only ever served to the organizations it was computed for.
  *   Oversized answers are not kept.
  * - Settings, pipeline and document changes drop a project's entries through
  *   the search invalidation hints (eligible-documents.ts); answers are otherwise
@@ -64,7 +64,7 @@ export interface ResponseCacheTicket {
   readonly generations: readonly number[];
 }
 
-type Entry = { at: number; data: unknown; bytes: number; projectIds: readonly string[] };
+type Entry = { at: number; data: unknown; bytes: number; orgKey: string; projectIds: readonly string[] };
 
 /** Access and privacy lookups slower than this skip the cache (SEARCH_RESPONSE_CACHE_LOOKUP_TIMEOUT_MS, default 250). */
 function keyResolutionTimeoutMs(): number {
@@ -74,21 +74,17 @@ function keyResolutionTimeoutMs(): number {
 const defaultLimits = {
   maxEntries: 500,
   maxBytes: 32 * 1024 * 1024,
-  perOrgMaxEntries: 100,
-  perOrgMaxBytes: 8 * 1024 * 1024,
   maxEntryBytes: 1024 * 1024,
 };
 let limits = { ...defaultLimits };
-/** Entries per organization key; each map's insertion order is its eviction order. */
-const partitions = new Map<string, Map<string, Entry>>();
-const partitionBytes = new Map<string, number>();
-let totalEntries = 0;
+/** Every cached answer; the map's insertion order is its eviction order (LRU). */
+const entries = new Map<string, Entry>();
 let totalBytes = 0;
 const generations = new Map<string, number>();
 
 onSearchProjectInvalidated({
   invalidate: invalidateSearchResponseCacheProject,
-  active: () => totalEntries > 0,
+  active: () => entries.size > 0,
 });
 
 export function searchResponseCacheTtlMs(): number {
@@ -98,12 +94,9 @@ export function searchResponseCacheTtlMs(): number {
 }
 
 export function clearSearchResponseCacheForTests(): void {
-  partitions.clear();
-  partitionBytes.clear();
+  entries.clear();
   generations.clear();
-  totalEntries = 0;
   totalBytes = 0;
-  lastPurgeAt = Number.NEGATIVE_INFINITY;
   limits = { ...defaultLimits };
 }
 
@@ -111,17 +104,15 @@ export function configureSearchResponseCacheLimitsForTests(next: Partial<typeof 
   limits = { ...limits, ...next };
 }
 
-export function searchResponseCacheStatsForTests(): { entries: number; bytes: number; byOrg: Record<string, number> } {
-  return { entries: totalEntries, bytes: totalBytes, byOrg: Object.fromEntries([...partitions].map(([org, entries]) => [org, entries.size])) };
+export function searchResponseCacheStatsForTests(): { entries: number; bytes: number } {
+  return { entries: entries.size, bytes: totalBytes };
 }
 
 /** Drops every cached answer that read the project, and fails in-flight writes for it. */
 export function invalidateSearchResponseCacheProject(projectId: string): void {
   generations.set(projectId, (generations.get(projectId) ?? 0) + 1);
-  for (const [orgKey, entries] of partitions) {
-    for (const [key, entry] of entries) {
-      if (entry.projectIds.includes(projectId)) removeEntry(orgKey, key);
-    }
+  for (const [key, entry] of entries) {
+    if (entry.projectIds.includes(projectId)) removeEntry(key);
   }
 }
 
@@ -201,11 +192,11 @@ export async function responseCacheTicket(args: {
 }
 
 export function readCachedResponse(ticket: ResponseCacheTicket, ttlMs: number): unknown {
-  const entries = partitions.get(ticket.orgKey);
-  const cached = entries?.get(ticket.key);
-  if (!entries || !cached) return undefined;
+  const cached = entries.get(ticket.key);
+  // The key already hashes the organizations; the stored org key is compared too, so an answer never leaves them.
+  if (!cached || cached.orgKey !== ticket.orgKey) return undefined;
   if (Date.now() - cached.at >= ttlMs) {
-    removeEntry(ticket.orgKey, ticket.key);
+    removeEntry(ticket.key);
     return undefined;
   }
   // Refresh recency: the map's insertion order is the eviction order.
@@ -232,68 +223,27 @@ export async function storeResponse(ticket: ResponseCacheTicket, data: unknown, 
   } catch {
     return false;
   }
-  if (bytes > limits.maxEntryBytes || bytes > limits.perOrgMaxBytes || bytes > limits.maxBytes) return false;
+  if (bytes > limits.maxEntryBytes || bytes > limits.maxBytes) return false;
   const changed = () => ticket.projectIds.some((id, index) => (generations.get(id) ?? 0) !== ticket.generations[index]);
   if (changed()) return false;
   const orgIds = await withTimeout(cacheableScope(ticket.projectIds, ticket.userId), keyResolutionTimeoutMs());
   if (!orgIds || orgIds.join(",") !== ticket.orgKey || changed()) return false;
 
-  removeEntry(ticket.orgKey, ticket.key);
-  let entries = partitions.get(ticket.orgKey);
-  if (!entries) {
-    entries = new Map();
-    partitions.set(ticket.orgKey, entries);
-  }
-  entries.set(ticket.key, { at: Date.now(), data, bytes, projectIds: ticket.projectIds });
-  partitionBytes.set(ticket.orgKey, (partitionBytes.get(ticket.orgKey) ?? 0) + bytes);
-  totalEntries += 1;
+  removeEntry(ticket.key);
+  entries.set(ticket.key, { at: Date.now(), data, bytes, orgKey: ticket.orgKey, projectIds: ticket.projectIds });
   totalBytes += bytes;
   ensureInvalidationListener();
-  evict(ticket.orgKey);
+  while (entries.size > limits.maxEntries || totalBytes > limits.maxBytes) {
+    const oldest = entries.keys().next().value;
+    if (oldest === undefined) break;
+    removeEntry(oldest);
+  }
   return true;
 }
 
-function removeEntry(orgKey: string, key: string): void {
-  const entries = partitions.get(orgKey);
-  const entry = entries?.get(key);
-  if (!entries || !entry) return;
+function removeEntry(key: string): void {
+  const entry = entries.get(key);
+  if (!entry) return;
   entries.delete(key);
-  totalEntries -= 1;
   totalBytes -= entry.bytes;
-  if (entries.size === 0) {
-    partitions.delete(orgKey);
-    partitionBytes.delete(orgKey);
-  } else {
-    partitionBytes.set(orgKey, (partitionBytes.get(orgKey) ?? 0) - entry.bytes);
-  }
-}
-
-function evictOldest(orgKey: string): void {
-  const oldest = partitions.get(orgKey)?.keys().next().value;
-  if (oldest !== undefined) removeEntry(orgKey, oldest);
-}
-
-/**
- * An organization first trims to its own caps. Global pressure then reclaims expired answers (at most once per tenth
- * of the TTL), and after that the writer evicts its own oldest answers, finally the new one (not kept). No write ever
- * removes another organization's live answer.
- */
-function evict(orgKey: string): void {
-  while ((partitions.get(orgKey)?.size ?? 0) > limits.perOrgMaxEntries || (partitionBytes.get(orgKey) ?? 0) > limits.perOrgMaxBytes) {
-    evictOldest(orgKey);
-  }
-  if (totalEntries > limits.maxEntries || totalBytes > limits.maxBytes) purgeExpired(searchResponseCacheTtlMs());
-  while ((totalEntries > limits.maxEntries || totalBytes > limits.maxBytes) && partitions.has(orgKey)) evictOldest(orgKey);
-}
-
-let lastPurgeAt = Number.NEGATIVE_INFINITY;
-
-function purgeExpired(ttlMs: number): void {
-  const now = Date.now();
-  if (ttlMs <= 0 || now - lastPurgeAt < Math.max(1, ttlMs / 10)) return;
-  lastPurgeAt = now;
-  const cutoff = now - ttlMs;
-  for (const [orgKey, entries] of partitions) {
-    for (const [key, entry] of entries) if (entry.at <= cutoff) removeEntry(orgKey, key);
-  }
 }

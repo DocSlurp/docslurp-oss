@@ -58,8 +58,7 @@ export const privateEndpointModelSchema = z.object({
   vision: visionRequestProfileSchema.optional(),
   /**
    * Text models only. `false` for a model whose chat template rejects (or misreads) the system role: requests carry
-   * no system message, the instructions open the user turn, and the per-organization prompt salt goes as vLLM's
-   * `cache_salt` instead of a system line. Default true. Vision models set this in `vision`.
+   * no system message and the instructions open the user turn. Default true. Vision models set this in `vision`.
    */
   systemMessage: z.boolean().optional(),
 }).strict().superRefine((value, ctx) => {
@@ -429,9 +428,10 @@ export function createPrivateEndpointFetch(
     baseFetch?: typeof fetch;
     env?: EnvLike;
     chatTemplateKwargs?: Record<string, unknown>;
-    /** Sent as `cache_salt` on chat/completions requests (vLLM prefix-cache isolation per organization). */
-    cacheSalt?: string;
-    /** `false`: fold any system message into the first user turn, for models whose template rejects the system role. */
+    /**
+     * `false`: fold any system message into the first user turn of a JSON chat/completions body, for models whose
+     * template rejects the system role. Other paths and bodies pass through unchanged.
+     */
     systemMessage?: boolean;
   } = {},
 ): typeof fetch {
@@ -447,28 +447,19 @@ export function createPrivateEndpointFetch(
     headers.delete("authorization");
     for (const [key, value] of Object.entries(privateEndpointAuthHeaders(route.endpoint, options.env))) headers.set(key, value);
     let body = init?.body;
-    const isolation = Boolean(options.cacheSalt) || options.systemMessage === false;
-    const rewrites = options.chatTemplateKwargs || isolation;
+    const rewrites = options.chatTemplateKwargs || options.systemMessage === false;
     const chat = rewrites && chatCompletionsPath(url);
-    if (isolation && !chat && body !== undefined && body !== null) {
-      // Fail closed: a no-system-role model's request must carry the org cache salt and no system message.
-      throw new PrivateEndpointResolutionError(`refusing request to ${url}: only chat/completions requests can carry the organization cache salt`);
-    }
     if (chat) {
       let parsed: Record<string, unknown> | null = null;
       try {
         parsed = typeof body === "string" ? JSON.parse(body) as Record<string, unknown> : null;
       } catch { /* Not JSON. */ }
-      if (isolation && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) {
-        throw new PrivateEndpointResolutionError(`refusing request to ${url}: the body could not be given the organization cache salt`);
-      }
       if (parsed && typeof parsed === "object") {
         if (options.chatTemplateKwargs) {
           const existing = parsed.chat_template_kwargs && typeof parsed.chat_template_kwargs === "object" ? parsed.chat_template_kwargs as Record<string, unknown> : {};
           parsed = { ...parsed, chat_template_kwargs: { ...options.chatTemplateKwargs, ...existing } };
         }
         if (options.systemMessage === false && Array.isArray(parsed.messages)) parsed = { ...parsed, messages: foldSystemMessages(parsed.messages) };
-        if (options.cacheSalt) parsed = { ...parsed, cache_salt: options.cacheSalt };
         body = JSON.stringify(parsed);
       }
     }

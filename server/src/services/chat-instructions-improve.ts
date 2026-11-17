@@ -222,7 +222,6 @@ export async function improveChatInstructions(args: {
       privacyMode,
       model,
       operation: "chat-instructions-improve",
-      orgId: args.orgId,
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       prompt: buildImprovePrompt(args),
       signal,
