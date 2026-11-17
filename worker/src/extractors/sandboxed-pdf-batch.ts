@@ -37,10 +37,16 @@ export interface SandboxedPdfBatchFile {
 }
 
 export interface SandboxedPdfBatchOptions {
-  /** Read typeset math as LaTeX (the project asked for it). */
+  /**
+   * Read typeset math as LaTeX (`pdftomarkdown --math`): the default for PDFs unless the project opts out
+   * (pipeline/first-pass.ts firstPassBatchOptions). A math run's facts lose Doppler's walker-parity fields; its math and
+   * table encoding words stand.
+   */
   math: boolean;
   /** Extract figures into each file's `figures.dir` after its text. */
   figures: boolean;
+  /** Page facts families to add to basic for every file (SandboxedPdfJob.pageFacts); omitted when page facts are off. */
+  pageFacts?: { include: import("../lib/doppler-page-facts.js").DopplerPageFactsFamily[] };
 }
 
 export interface SandboxedPdfBatchJob {

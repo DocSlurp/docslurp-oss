@@ -147,7 +147,10 @@ export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSche
  */
 export const vmPdfExtractorOptionsSchema = z.object({
   images: extractionImageConfigSchema.strict().optional(),
-  /** Read typeset math as LaTeX (inline and display); off unless the project asks, since it costs extra CPU per page. */
+  /**
+   * Read typeset math as LaTeX (inline and display). On by default for PDFs (the worker's DOCSLURP_DOPPLER_MATH_DEFAULT);
+   * `false` opts the project out, which saves the math reader's CPU (about a fifth more per page on small documents).
+   */
   math: z.boolean().optional(),
   pdf: extractionPdfOptionsSchema.pick({ extractImages: true }).strict().optional(),
 }).strict();

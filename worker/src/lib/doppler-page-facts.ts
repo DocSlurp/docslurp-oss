@@ -1106,6 +1106,20 @@ export function dopplerPageFactsJsonl(facts: Pick<DopplerPageFactsDocument, "doc
   return lines.map((line) => JSON.stringify(line) + "\n").join("");
 }
 
+// ── Request ──
+
+/**
+ * The families the host asks a provider to add to basic page facts: `mathtables` is Doppler's cheap router form (the basic
+ * line plus three integers a page: mathBits, tableBits, encodingCounts). Passed as `pdftomarkdown --page-facts-include`
+ * (pdftotext `-page-facts-include`, pdfpagefacts `-include`).
+ */
+export const DOPPLER_ROUTING_FACTS_INCLUDE: readonly DopplerPageFactsFamily[] = ["mathtables"];
+
+/** What a provider should compute for a job's page facts, or undefined when page facts are off (they would be dropped). */
+export function dopplerPageFactsRequest(env: NodeJS.ProcessEnv = process.env): { include: DopplerPageFactsFamily[] } | undefined {
+  return dopplerPageFactsMode(env) === "off" ? undefined : { include: [...DOPPLER_ROUTING_FACTS_INCLUDE] };
+}
+
 // ── Mode ──
 
 export const DOPPLER_PAGE_FACTS_ENV = "DOCSLURP_DOPPLER_PAGE_FACTS";

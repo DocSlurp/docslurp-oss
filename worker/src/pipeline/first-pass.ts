@@ -25,6 +25,7 @@ import {
 import { markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { pageFactsForResend } from "../extractors/sandboxed-pdf-page-facts.js";
+import { dopplerPageFactsRequest } from "../lib/doppler-page-facts.js";
 import { DopplerFigureRejection, disposeDopplerFigureSet, dopplerFigureUris, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
 import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
@@ -59,17 +60,34 @@ export function firstPassDrainConcurrency(env: NodeJS.ProcessEnv = process.env):
   return Number.isSafeInteger(value) ? Math.max(1, Math.min(16, value)) : 4;
 }
 
+export const DOPPLER_MATH_DEFAULT_ENV = "DOCSLURP_DOPPLER_MATH_DEFAULT";
+
 /**
- * The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has
- * them and the project did not opt out (`figures: false`).
+ * DOCSLURP_DOPPLER_MATH_DEFAULT (default on): whether a project that says nothing about math gets Doppler's math reader
+ * (`pdftomarkdown --math`). Doppler's table-safe `--math` scores the same as without it on every table class and reads
+ * typeset math as LaTeX, so it is the default; a project opts out with the vm-pdf option `math: false`. `off`, `0` or
+ * `false` restores opt-in (`math: true` only). Anything else keeps the default.
+ */
+export function dopplerMathDefault(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env[DOPPLER_MATH_DEFAULT_ENV]?.trim().toLowerCase();
+  return !(value === "off" || value === "0" || value === "false");
+}
+
+/**
+ * The batch options a project's pipeline asks for: math by default (DOCSLURP_DOPPLER_MATH_DEFAULT) unless the project opts
+ * out (`math: false`), figures when the deploy has them and the project did not opt out (`figures: false`), and the page
+ * facts routing reads (`mathtables`) unless page facts are off.
  */
 export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.ProcessEnv = process.env): SandboxedPdfBatchJob["options"] {
   const vmOptions = (pipeline.documentExtraction?.options as Record<string, { math?: unknown } | undefined> | undefined)?.["vm-pdf"];
+  const projectWantsMath = dopplerMathDefault(env) ? vmOptions?.math !== false : vmOptions?.math === true;
+  const pageFacts = dopplerPageFactsRequest(env);
   return {
-    // Math reading stays behind its own deploy flag (default off) until the open council follow-up on the math reader is
-    // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
-    math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
+    // Math reading also stays behind its deploy flag (DOCSLURP_FIRST_PASS_MATH, default off) until the open council
+    // follow-up on the math reader is closed (TODO.md: bound its scan on hostile pages); no project setting turns it on.
+    math: projectWantsMath && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
     figures: figuresEnabled(pipeline as { figures?: boolean | null }, env) && !!sandboxedPdfProvider()?.figures,
+    ...(pageFacts ? { pageFacts } : {}),
   };
 }
 

@@ -6,6 +6,7 @@ import {
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
 import { dopplerConverterPath } from "./doppler.js";
+import { dopplerPageFactsRequest } from "../lib/doppler-page-facts.js";
 import { localOcrCommandArgs, localOcrPaths } from "../ocr/local.js";
 import { localOcrRefusal, resolveOcrMode, OcrRefusedError } from "../ocr/mode.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
@@ -865,7 +866,8 @@ export class CommandRunner {
     }
     const provider = requireSandboxedPdfProvider();
     provider.assertConfigured();
-    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output } };
+    const pageFacts = dopplerPageFactsRequest();
+    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output, ...(pageFacts ? { pageFacts } : {}) } };
   }
 
   async extractText(source: string, pages: number, preservePageBreaks = false): Promise<CommandPlan> {

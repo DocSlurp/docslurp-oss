@@ -35,6 +35,7 @@ import { currentPerfContext } from "../lib/perf-context.js";
 import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout, sandboxedPdfPageFactsMathRead } from "./sandboxed-pdf-page-facts.js";
 import { settleUnknownGrids, withEncodingRoutes } from "../lib/doppler-page-facts-layout.js";
+import type { DopplerPageFactsFamily } from "../lib/doppler-page-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -48,6 +49,14 @@ export const VM_PDF_EXTRACTOR_ID = "vm-pdf";
 export interface SandboxedPdfJob {
   input: string;
   output: string;
+  /**
+   * The page facts to compute beside the Markdown: Doppler families added to the basic level (`pdftomarkdown
+   * --page-facts-include`, comma-separated), returned as `pageFacts`. Set by the host unless DOCSLURP_DOPPLER_PAGE_FACTS
+   * is off (lib/doppler-page-facts.ts dopplerPageFactsRequest: `mathtables`, the math and table encoding words). A
+   * provider that cannot compute a family returns facts without it (unknown, never zero); a provider that returns no page
+   * facts at all ignores this.
+   */
+  pageFacts?: { include: DopplerPageFactsFamily[] };
   /** Return embedded images beside the Markdown, from the same VM job. Bounds in pixels, 1..4096. */
   embeddedImages?: { minWidth: number; minHeight: number };
   /**
