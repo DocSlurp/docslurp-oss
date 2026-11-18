@@ -209,10 +209,15 @@ export async function createMultipartUpload(key: string, contentType: string, si
   return response.UploadId;
 }
 
+/**
+ * A signed part URL. With `contentLength`, the length is a signed header: storage refuses a body of any
+ * other size (SignatureDoesNotMatch), so a client cannot store more than it declared.
+ */
 export async function signMultipartUploadPart(args: {
   key: string;
   uploadId: string;
   partNumber: number;
+  contentLength?: number;
   expiresInSeconds?: number;
 }): Promise<string> {
   await ensureBucketExists();
@@ -222,15 +227,21 @@ export async function signMultipartUploadPart(args: {
       Bucket: uploadTarget.bucket,
       Key: args.key,
       UploadId: args.uploadId,
-      PartNumber: args.partNumber
+      PartNumber: args.partNumber,
+      ...(args.contentLength === undefined ? {} : { ContentLength: args.contentLength })
     }),
     { expiresIn: args.expiresInSeconds ?? 900 }
   );
 }
 
+/**
+ * A signed single PUT bound to exactly `contentLength` bytes (a signed header). Content-Type is not
+ * signed (the presigner never signs it); ingestion uses the session's declared type, not the object's.
+ */
 export async function signSingleUploadPut(args: {
   key: string;
   contentType: string;
+  contentLength: number;
   expiresInSeconds?: number;
 }): Promise<string> {
   await ensureBucketExists();
@@ -239,7 +250,8 @@ export async function signSingleUploadPut(args: {
     new PutObjectCommand({
       Bucket: uploadTarget.bucket,
       Key: args.key,
-      ContentType: args.contentType
+      ContentType: args.contentType,
+      ContentLength: args.contentLength
     }),
     { expiresIn: args.expiresInSeconds ?? 900 }
   );

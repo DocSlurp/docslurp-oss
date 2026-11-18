@@ -42,6 +42,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { MAX_URL_TTL_SECONDS } from "../lib/upload-transfer-policy.js";
 import { recordCostEvent } from "../lib/ai-usage.js";
 import { apiKeyCanUseProject, type RequestActor } from "../lib/request-actor.js";
 import { deleteObjectsUnderPrefix, deleteUploadedObject, signDownloadGet } from "../lib/storage.js";
@@ -682,8 +683,11 @@ interface DeletionClaim {
   stored_bytes: string | number | null;
 }
 
-/** Upper bound on a presigned direct-upload PUT (direct-upload-session.ts SIGNED_UPLOAD_TTL_SECONDS) plus a margin. */
-const LATE_WRITE_GRACE_MINUTES = 30;
+/**
+ * Longer than any presigned direct-upload URL can stay valid, plus a margin. The maximum, not the current setting:
+ * URLs signed before UPLOAD_URL_TTL_SECONDS was lowered (or by another host) are still live.
+ */
+const LATE_WRITE_GRACE_MINUTES = Math.ceil(MAX_URL_TTL_SECONDS / 60) + 15;
 /** A deleted extract's prefix is listed once more this long after deletion, for writes that landed after the purge. */
 const RELIST_AFTER_HOURS = 6;
 /** Failed passes back off 2^attempts minutes, up to this. */

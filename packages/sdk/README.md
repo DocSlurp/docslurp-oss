@@ -1239,7 +1239,7 @@ if (!accepted) {
 await client.waitForRun(accepted.run.id);
 ```
 
-Signed URLs expire after 15 minutes. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Known-size sessions reconcile automatically. For an unknown-size file, omit `sizeBytes` at creation, use `signUploadParts(sessionId, fileId, partNumbers)` as bytes arrive, and call `completeUploadFile(sessionId, { fileId, sizeBytes, parts })` at end of stream. `parts` contains ordered `{ partNumber, etag }` entries. Poll `getUploadSession()` for its persisted `result`. Use `abortUploadSession(sessionId)` to clean up an abandoned session.
+For known-size files, `upload()` sends files and the parts of large files in parallel, 6 storage PUTs at a time (`transferConcurrency`, 1–32); a stream keeps 3 parts in flight. Signed URLs expire after 3 hours and are bound to each file's or part's exact size. Treat them as credentials and never attach the DocSlurp API key to a storage request. `getUploadSession(sessionId)` refreshes pending transfer URLs. Known-size sessions reconcile automatically. For an unknown-size file, omit `sizeBytes` at creation, use `signUploadParts(sessionId, fileId, partNumbers)` as bytes arrive, and call `completeUploadFile(sessionId, { fileId, sizeBytes, parts })` at end of stream. `parts` contains ordered `{ partNumber, etag }` entries. Poll `getUploadSession()` for its persisted `result`. Use `abortUploadSession(sessionId)` to clean up an abandoned session.
 
 The HTTP upload prefix is `/v1/uploads`. `POST /v1/search` accepts either `{ q, ...filters }` or `{ queries, concurrency? }`. Use `search` for retrieval and `upload` for files or public URLs.
 

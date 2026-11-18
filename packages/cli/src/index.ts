@@ -633,9 +633,9 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
   for (let attempt = 0; ; attempt++) {
     try {
       const response = await storageSlot(() => fetch(url, {
-        // A presigned target is final: a redirect would re-send the bytes somewhere else.
+        // 16 KB/s floor: several large parts may share a slow uplink. A presigned target is final: a redirect would re-send the bytes somewhere else.
         method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined, redirect: "error",
-        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 100_000) * 1000))),
+        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 16_000) * 1000))),
       }));
       if (response.ok) return response.headers.get("etag");
       if (attempt >= 2 || !RETRYABLE_STATUSES.has(response.status)) throw await responseFailure(response);
