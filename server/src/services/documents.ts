@@ -1,4 +1,4 @@
-import { piiWithholdsPageImageSlot, publicDocumentFailure } from "@docslurp/shared";
+import { publicDocumentFailure } from "@docslurp/shared";
 import { MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
 import { ingestRecordFields, ingestStatus, missingServingCapabilities, type IngestStatus } from "@docslurp/shared";
 
@@ -1248,7 +1248,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
 
   const artifacts = await Promise.all(
     Array.from(artifactUris.entries())
-      .filter(([slot, uri]) => !withheld.has(uri) && !piiWithholdsPageImageSlot(row.metadata, docId, slot))
+      .filter(([, uri]) => !withheld.has(uri))
       .map(async ([slot, uri]) => ({
         slot,
         uri,
@@ -1596,7 +1596,7 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
     const withheld = withheldArtifactUrisFromMetadata(doc.metadata);
     const entries = Object.entries(run?.artifacts ?? {})
       .filter(([slot]) => slot === `${doc.id}:heatmap` || slot.startsWith(`${doc.id}:`))
-      .filter(([slot, uri]) => !withheld.has(uri) && !piiWithholdsPageImageSlot(doc.metadata, doc.id, slot));
+      .filter(([, uri]) => !withheld.has(uri));
     result[doc.id] = await Promise.all(
       entries.map(async ([slot, uri]) => ({
         slot,

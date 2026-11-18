@@ -199,8 +199,7 @@ document artifact slot: `<document>:doppler-figure:<id>` per file, `<document>:d
 `/v1/artifacts/preview` refuse it by name. The slots are what authorize the objects: the file proxy (`/v1/files/<token>/<name>`)
 serves an artifact only when its exact URI is one of the caller's documents' recorded slots, within the caller's projects and
 organization, with the API key's `artifacts` scope, and not withheld by the project's PII policy (every slot of the document
-written before the PII stage is withheld under `redact_artifacts` and `block_indexing`, these included; page images alone are
-page-scoped under `redact_artifacts`, see [page images](../document-page-images.md)). The first pass
+written before the PII stage is withheld under `redact_artifacts` and `block_indexing`, these included). The first pass
 stores its figures after the PII stage has run, so when that stage's outcome withheld anything (it redacted or blocked),
 every file the first pass stores joins `metadata.pii.withheldArtifactUris` before any slot is recorded (if that write
 fails, the objects are deleted, never a committed one), and no `document.md` is stored; a store that cannot say stores

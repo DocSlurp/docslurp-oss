@@ -19,8 +19,6 @@ import {
   type PiiMatch,
   type PiiPolicy,
   type PiiPatternType,
-  pageImageSlotPage,
-  pageOfTextOffset,
   piiPatternTypeSchema,
 } from "@docslurp/shared";
 import { createPiiTextScanner, redactCanonicalDocument, redactJsonText, type PiiTextScanner } from "../lib/pii-redaction.js";
@@ -77,57 +75,7 @@ export type PiiDocumentOutcome = {
    * candidates, raw vision output, page images, parser JSON, the source file).
    */
   withheldArtifactUris: string[];
-  /** Redaction recorded its match pages: page images withhold only on `withheldPages` (piiPageWithholding). */
-  pageScoped?: boolean;
-  /** Pages with a match (redact_artifacts, page-scoped only). */
-  withheldPages?: number[];
 };
-
-type ScanFindings = {
-  canonicalResult: { matches: PiiMatch[] } | null;
-  markdownResult: { matches: PiiMatch[] } | null;
-  htmlResult: { matches: PiiMatch[] } | null;
-  contractResult: { matches: PiiMatch[] } | null;
-  fallbackResult: { matches: PiiMatch[] } | null;
-};
-
-/**
- * Pages a redaction's matches are on. The paged source is the canonical document (block page numbers), else the
- * markdown, else the source text (page breaks). `unknown` names why the pages cannot be trusted: a match with no page,
- * or another source holding a value the paged one lacks (a value only in the HTML or the structured result).
- */
-export function matchPageScope(
-  document: Pick<Document, "pageCount">,
-  findings: ScanFindings,
-  markdownText: string | null,
-  fallbackText: string,
-): { pages: Set<number>; unknown: string | null } {
-  const pages = new Set<number>();
-  const source = findings.canonicalResult
-    ? { name: "canonical-document", matches: findings.canonicalResult.matches, page: (match: PiiMatch) => match.pageNumber }
-    : findings.markdownResult
-      ? { name: "markdown", matches: findings.markdownResult.matches, page: (match: PiiMatch) => match.pageNumber ?? pageOfTextOffset(markdownText ?? "", match.charOffset, document.pageCount) }
-      : findings.fallbackResult
-        ? { name: "source-text", matches: findings.fallbackResult.matches, page: (match: PiiMatch) => match.pageNumber ?? pageOfTextOffset(fallbackText, match.charOffset, document.pageCount) }
-        : null;
-  if (!source) return { pages, unknown: "no-paged-source" };
-  for (const match of source.matches) {
-    const page = source.page(match);
-    if (page === null || !Number.isInteger(page) || page < 1) return { pages, unknown: `${source.name}-match-without-page` };
-    pages.add(page);
-  }
-  const others: Array<[string, { matches: PiiMatch[] } | null]> = [
-    ["markdown", findings.markdownResult], ["html", findings.htmlResult], ["extraction-contract", findings.contractResult], ["source-text", findings.fallbackResult],
-  ];
-  // Every other source renders the same text: a value it holds that the paged source lacks (by match fingerprint)
-  // came from somewhere the pages cannot place.
-  const known = new Set(source.matches.map((match) => `${match.patternType}:${match.matchedPrefix}`));
-  for (const [name, result] of others) {
-    if (name === source.name || !result) continue;
-    if (result.matches.some((match) => !known.has(`${match.patternType}:${match.matchedPrefix}`))) return { pages, unknown: `${name}-holds-unplaced-value` };
-  }
-  return { pages, unknown: null };
-}
 
 /** A scan could not look at text it was supposed to check. The stage fails; "no PII found" is not an answer. */
 export class PiiScanIncompleteError extends Error {
@@ -204,7 +152,6 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             redacted: outcome.redacted,
             reason: outcome.reason,
             withheldArtifactUris: outcome.withheldArtifactUris,
-            ...(outcome.pageScoped ? { pageScoped: true, withheldPages: outcome.withheldPages ?? [] } : {}),
             detectedAt: new Date().toISOString(),
           }
         : null;
@@ -454,23 +401,8 @@ export class PiiDetectStage implements Stage {
     // Under redact_artifacts the scanned sources are now clean (redacted or
     // matchless) and stay servable; under block_indexing nothing written
     // before this stage is served.
-    // Redaction is page-scoped (owner rule): page images withhold only on pages a match is on. Pages come from the
-    // canonical blocks, else the page breaks of the scanned text. A match whose page cannot be known, or a value only
-    // a source without pages holds (HTML, the structured result), withholds every page image, as before (logged).
-    const scope = redacted ? matchPageScope(document, findings, markdown?.text ?? null, fallbackText) : null;
-    if (scope?.unknown) {
-      console.warn(`[pii-detect] document=${document.id} run=${state.run.id} match page unknown (${scope.unknown}): every page image withheld`);
-    }
-    const pageScoped = Boolean(scope && !scope.unknown);
-    const withheldPages = pageScoped ? [...scope!.pages].sort((a, b) => a - b) : [];
-    const keepPageImage = pageScoped
-      ? (slot: string) => {
-          const page = pageImageSlotPage(document.id, slot);
-          return page !== null && !scope!.pages.has(page);
-        }
-      : () => false;
     const withheldArtifactUris = blocked || redacted
-      ? this.withheldArtifactUris(state, document, redacted ? servableUris : new Set(), keepPageImage)
+      ? this.withheldArtifactUris(state, document, redacted ? servableUris : new Set())
       : [];
 
     const reason = blocked
@@ -488,8 +420,6 @@ export class PiiDetectStage implements Stage {
       redacted,
       reason,
       withheldArtifactUris,
-      pageScoped,
-      withheldPages,
     });
     if (blocked) document.status = PII_BLOCKED_DOCUMENT_STATUS;
 
@@ -527,24 +457,18 @@ export class PiiDetectStage implements Stage {
         redacted,
         redactedArtifacts,
         withheldArtifactCount: withheldArtifactUris.length,
-        ...(redacted ? { pageScoped, withheldPages } : {}),
         ...(reason ? { reason } : {}),
       },
     };
   }
 
   /** Every artifact URI recorded for this document so far, minus the ones known to be clean. */
-  private withheldArtifactUris(state: WorkflowState, document: Document, servable: Set<string>, keepSlot: (slot: string) => boolean = () => false): string[] {
+  private withheldArtifactUris(state: WorkflowState, document: Document, servable: Set<string>): string[] {
     const uris = new Set<string>();
-    const kept = new Set<string>();
     const prefix = `${document.id}:`;
     for (const [slot, uri] of Object.entries(state.artifactLedger.all())) {
-      if (!slot.startsWith(prefix) || slot === `${prefix}pii-detect` || !uri.includes("://")) continue;
-      if (keepSlot(slot)) kept.add(uri);
-      else uris.add(uri);
+      if (slot.startsWith(prefix) && slot !== `${prefix}pii-detect` && uri.includes("://")) uris.add(uri);
     }
-    // A URI recorded under both a kept page slot and another slot stays withheld.
-    for (const uri of kept) if (!uris.has(uri)) servable.add(uri);
     for (const stage of state.documentStages.get(document.id)?.values() ?? []) {
       if (stage.stageName !== this.name && stage.artifactUri) uris.add(stage.artifactUri);
     }

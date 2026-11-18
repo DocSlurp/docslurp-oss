@@ -13,26 +13,6 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { assertParseSourceDecided } from "../lib/parse-source.js";
 
-/**
- * SQL: does document `d`'s PII outcome withhold this page's image (piiPageWithholding)? A redaction that recorded its
- * match pages withholds only those; any other withholding outcome (a block, a redaction of unknown pages, a malformed
- * or pre-page-scoping record) withholds every page, fail closed.
- */
-function piiWithholdsPageSql(client: Store["stageSql"], pageNumber: number) {
-  return client`(case
-    when d.metadata->'pii' is null or jsonb_typeof(d.metadata->'pii') <> 'object' then false
-    when d.metadata->'pii'->>'blocked' = 'true' then true
-    when not (d.metadata->'pii'->>'redacted' = 'true'
-      or jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') is distinct from 'array'
-        and d.metadata->'pii'->'withheldArtifactUris' is not null
-      or (jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array' and jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris') > 0)) then false
-    when d.metadata->'pii'->>'pageScoped' = 'true' and jsonb_typeof(d.metadata->'pii'->'withheldPages') = 'array'
-      and not exists (select 1 from jsonb_array_elements(d.metadata->'pii'->'withheldPages') as page(value)
-        where jsonb_typeof(page.value) <> 'number' or (page.value)::text !~ '^[1-9][0-9]*$')
-      then d.metadata->'pii'->'withheldPages' @> to_jsonb(${pageNumber}::int)
-    else true end)`;
-}
-
 /** Revalidate the live document before rendering and under the final write lock. */
 export async function renderDocumentPage(deps: { store: Store; storage: ArtifactStore; runner: CommandRunner }, input: RenderDocumentPageInput, signal?: AbortSignal) {
   signal?.throwIfAborted();
@@ -51,7 +31,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   }
   const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; page_images: boolean; low: string | null; high: string | null }[]>`
     select d.org_id, d.project_id,
-      ${piiWithholdsPageSql(sql, input.pageNumber)} as withheld,
+      coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
       ((case when jsonb_typeof(p.pipeline->'pageImages') = 'boolean' then (p.pipeline->'pageImages')::boolean else true end)
         or (coalesce(p.pipeline->>'quality', 'auto') = 'auto' and p.pipeline->'ladder'->>'maxRung' = 'intelligent')
         or p.pipeline->>'quality' = 'good') as page_images,
@@ -98,7 +78,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
     const client = tx as unknown as typeof sql;
     const live = await client`select d.id from documents d
       where d.id=${document.id} and d.run_id=${input.runId} and d.status='completed'
-      and not ${piiWithholdsPageSql(client, input.pageNumber)} for update of d`;
+      and coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'),0)=0 for update of d`;
     if (!live.length) throw new Error("Document page is unavailable");
     signal?.throwIfAborted();
     await client`update project_runs set artifacts=coalesce(artifacts,'{}'::jsonb) || ${client.json({ [slot]: page.artifactUri, ...(quality === "reader" ? { [`${document.id}:page-${input.pageNumber}`]: page.artifactUri } : {}) })}::jsonb where id=${input.runId}`;

@@ -2,9 +2,7 @@
 
 Opening a PDF citation shows its cited page in the page reader. Existing images load immediately. For native PDFs that have text but no page images, the reader requests only the selected page and shows the excerpt while that image renders. Arrow keys and Home/End navigate pages; Escape closes the reader and returns focus.
 
-Rendering needs a completed PDF with a retained source, a known page count, project edit access and available interactive credits. Read-only users can view existing images. Withheld originals are never recreated as unredacted images.
-
-**PII is page-scoped.** Under the PII policy `redact_artifacts`, only the pages a match is on lose their images: their stored images are refused and never rendered again, while every other page keeps its images and may still be rendered from the original (which itself stays withheld). The pages come from the document's blocks or the page breaks of its text (`metadata.pii.pageScoped`, `metadata.pii.withheldPages`). When a match's page cannot be placed (text without page breaks, or a value found only in the HTML or the structured result), every page image is withheld, as is every page under `block_indexing` and any PII record written before page scoping. Figures and other document-level artifacts written before the PII stage stay withheld for the whole document under either action. Unsupported files or unavailable sources retain an excerpt and, when permitted, an original-file link.
+Rendering needs a completed PDF with a retained source, a known page count, project edit access and available interactive credits. Read-only users can view existing images. Withheld originals are never recreated as unredacted images. Unsupported files or unavailable sources retain an excerpt and, when permitted, an original-file link.
 
 The reader waits for up to about one minute. If rendering takes longer, reopening the page retries; a previously completed image is reused. A busy queue or service failure leaves the document and excerpt usable.
 
