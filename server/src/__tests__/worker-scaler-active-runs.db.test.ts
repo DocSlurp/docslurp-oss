@@ -4,7 +4,7 @@ import { queryWorkerScalerSnapshot, type ScalerSql } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
- * 0194: the autoscaler snapshot reads only active runs (queued or processing),
+ * 0195: the autoscaler snapshot reads only active runs (queued or processing),
  * through the partial index project_runs_org_active_idx, so its cost follows
  * live work rather than run history. The same index serves an organization's
  * active runs (org_id leading).
@@ -29,7 +29,7 @@ function captureSql(): { sql: ScalerSql; text: () => string; values: () => unkno
   };
 }
 
-describe("worker scaler snapshot over active runs (0194)", () => {
+describe("worker scaler snapshot over active runs (0195)", () => {
   it("reads active runs through the partial index with a million finished runs, and counts only live work", async () => {
     const pg = external ? null : await startMigratedPostgres();
     const sql = postgres(external ?? pg!.url, { max: 1, prepare: false, onnotice: () => {} });

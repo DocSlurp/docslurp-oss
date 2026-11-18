@@ -205,7 +205,7 @@ export const EMPTY_WORKER_SCALER_SNAPSHOT: WorkerScalerSnapshot = {
 /**
  * One read of queue state and per-org slot demand. Every project_runs read is
  * restricted to active runs (queued or processing), which the partial index
- * project_runs_org_active_idx (migration 0194) serves, so the poll's cost
+ * project_runs_org_active_idx (migration 0195) serves, so the poll's cost
  * follows live work, not run history.
  */
 export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerScalerQueryParams): Promise<WorkerScalerSnapshot> {
