@@ -183,7 +183,6 @@ export interface WorkerScalerSnapshot {
   processing_pages: number;
   stale_leases: number;
   worker_active: number;
-  pages_processed_total: number;
   oldest_queued_run_age_seconds: number | null;
   oldest_queued_run_created_at_seconds: number | null;
   /** [{ org_key, slots, demand }]: see calculateWorkerTargetMachines. */
@@ -199,12 +198,16 @@ export const EMPTY_WORKER_SCALER_SNAPSHOT: WorkerScalerSnapshot = {
   processing_pages: 0,
   stale_leases: 0,
   worker_active: 0,
-  pages_processed_total: 0,
   oldest_queued_run_age_seconds: null,
   oldest_queued_run_created_at_seconds: null,
 };
 
-/** One read of queue state and per-org slot demand. */
+/**
+ * One read of queue state and per-org slot demand. Every project_runs read is
+ * restricted to active runs (queued or processing), which the partial index
+ * project_runs_org_active_idx (migration 0195) serves, so the poll's cost
+ * follows live work, not run history.
+ */
 export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerScalerQueryParams): Promise<WorkerScalerSnapshot> {
   const graceSeconds = Math.max(0, Math.floor(params.staleLeaseGraceSeconds ?? 900));
   const rows = await sql`
@@ -237,9 +240,10 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
               (select count(*) from page_work_tasks p where p.run_id = r.id and p.status in ('queued','processing')) as page_demand
             from project_runs r
             left join organizations o on o.id = r.org_id
-            where (r.status = 'queued' and coalesce(r.control_state,'') not in ('paused','cancelled'))
+            where r.status in ('queued', 'processing')
+              and ((r.status = 'queued' and coalesce(r.control_state,'') not in ('paused','cancelled'))
               or (r.status = 'processing' and coalesce(r.control_state,'') not in ('paused','cancel_requested','cancelled')
-                and coalesce(r.lease_expires_at, now()) >= now() - (${graceSeconds} * interval '1 second'))
+                and coalesce(r.lease_expires_at, now()) >= now() - (${graceSeconds} * interval '1 second')))
             union all
             select p.org_id as org_key, coalesce(o.worker_slots, ${params.defaultOrgSlots}) as slots,
               0 as shard_demand, 2 as fanout_cap, 1 as page_demand
@@ -270,7 +274,6 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
           and coalesce(control_state, '') not in ('paused', 'cancel_requested', 'cancelled')
           and coalesce(lease_expires_at, now()) >= now() - (${graceSeconds} * interval '1 second')
       )::int as worker_active,
-      coalesce(sum(pages_processed), 0)::int as pages_processed_total,
       extract(epoch from (
         now() - min(created_at) filter (
           where status = 'queued'
@@ -282,6 +285,7 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
           and coalesce(control_state, '') not in ('paused', 'cancelled')
       )) as oldest_queued_run_created_at_seconds
     from project_runs
+    where status in ('queued', 'processing')
   `;
   return (rows[0] as WorkerScalerSnapshot | undefined) ?? EMPTY_WORKER_SCALER_SNAPSHOT;
 }
