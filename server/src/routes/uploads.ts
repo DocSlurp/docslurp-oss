@@ -429,7 +429,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedProjectIds: actorAllowedProjectIds(actor) });
             // ... and the user may still contribute to that project (a share revoked since gets no URLs).
             await assertSessionProjectStillContributable(loaded.session, userId);
-            return await getDirectUploadSessionDescription(sessionId, userId);
+            return await getDirectUploadSessionDescription(sessionId, userId, false, undefined, undefined, c.get("apiKey")?.keyId ?? null);
           },
         });
         if (replayed) c.header("Idempotency-Replayed", "true");
@@ -450,7 +450,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     if (fileIds && (fileIds.length > MAX_DESCRIBE_FILE_IDS || fileIds.some(id => !id || id.length > 64))) {
       return apiStatusError(c, 400, `fileId may be given at most ${MAX_DESCRIBE_FILE_IDS} times, each a file id`);
     }
-    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true", c.req.raw.signal, fileIds?.length ? [...new Set(fileIds)] : undefined);
+    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true", c.req.raw.signal, fileIds?.length ? [...new Set(fileIds)] : undefined, c.get("apiKey")?.keyId ?? null);
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
@@ -460,7 +460,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
   .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
     async c => {
-      try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers)); }
+      try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers, c.get("apiKey")?.keyId ?? null)); }
       catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
     })
   .post(

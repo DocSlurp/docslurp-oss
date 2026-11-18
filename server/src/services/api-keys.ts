@@ -703,15 +703,20 @@ export async function validateApiKey(
  * Null when the key is revoked, gone, or its owner left the organization.
  */
 /**
- * A live key for intake: getLiveApiKeyById, and refused (null) when the OAuth grant it backs (device login, MCP) was
- * revoked; a grant can be revoked without its key.
+ * A key as authorized right now, in one statement (one snapshot): not revoked, not expired at statement time, its owner
+ * still a member of its organization, and no revoked OAuth grant behind it (device login, MCP; a grant can be revoked
+ * without its key). Null when any of that fails. Callers check the scope they need on the result.
  */
 export async function getLiveIntakeKey(keyId: string): Promise<Awaited<ReturnType<typeof getLiveApiKeyById>>> {
-  const [key, [revokedGrant]] = await Promise.all([
-    getLiveApiKeyById(keyId),
-    sql<Array<{ one: number }>>`select 1 as one from mcp_oauth_grants where api_key_id = ${keyId} and revoked_at is not null limit 1`,
-  ]);
-  return revokedGrant ? null : key;
+  const [row] = await sql<ApiKeyRow[]>`
+    select k.* from api_keys k
+    where k.id = ${keyId} and k.revoked_at is null
+      and (k.expires_at is null or k.expires_at > clock_timestamp())
+      and exists (select 1 from org_memberships om where om.org_id = k.org_id and om.user_id = k.user_id)
+      and not exists (select 1 from mcp_oauth_grants g where g.api_key_id = k.id and g.revoked_at is not null)
+  `;
+  const keyType = row ? parseApiKeyType(row.key_type) : null;
+  return row && keyType ? { orgId: row.org_id, keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.project_ids ?? []), projectIds: row.project_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
 }
 
 export async function getLiveApiKeyById(keyId: string): Promise<{ orgId: string; keyType: ApiKeyType; scopes: string[]; projectIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {

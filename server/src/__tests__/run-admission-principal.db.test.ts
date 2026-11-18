@@ -9,11 +9,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
 /** Stalls external work (a remote fetch, a storage write) until the test releases it. */
-const gates = vi.hoisted(() => ({ fetchStalled: false, releaseFetch: null as null | (() => void), putStalled: false, releasePut: null as null | (() => void), stallPuts: false }));
+const gates = vi.hoisted(() => ({ fetchStalled: false, releaseFetch: null as null | (() => void), putStalled: false, releasePut: null as null | (() => void), stallPuts: false,
+  /** Dispatches started: URL fetches and storage writes. Only the first of each stalls, when asked. */
+  fetches: 0, puts: 0, stallFirstOnly: false }));
 vi.mock("../lib/network-security.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/network-security.js")>(),
   assertSafeExternalUrl: async (url: string) => url,
   safeExternalFetch: async () => {
+    gates.fetches += 1;
+    if (gates.stallFirstOnly && gates.fetches > 1) return new Response("Quarterly results beat expectations.", { headers: { "content-type": "text/plain" } });
     gates.fetchStalled = true;
     await new Promise<void>(resolve => { gates.releaseFetch = resolve; });
     return new Response("Quarterly results beat expectations.", { headers: { "content-type": "text/plain" } });
@@ -273,7 +277,8 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
       const storage = createProjectIntakeFakes().ports.storage;
       // Real records and run creation; storage is in memory, and its writes can be stalled.
       ports = { ...intake.projectIntakePorts, storage: { ...storage, async put(...args: Parameters<typeof storage.put>) {
-        if (gates.stallPuts) { gates.putStalled = true; await new Promise<void>(resolve => { gates.releasePut = resolve; }); }
+        gates.puts += 1;
+        if (gates.stallPuts && !(gates.stallFirstOnly && gates.puts > 1)) { gates.putStalled = true; await new Promise<void>(resolve => { gates.releasePut = resolve; }); }
         return storage.put(...args);
       } } as typeof storage };
       await sql`insert into mcp_oauth_clients (id, name, redirect_uris) values ('adm-client', 'Device login', '[]') on conflict do nothing`;
@@ -287,7 +292,7 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
         values ('adm-oi', 'adm-u', 'adm-o', 'hash-adm-oi', 'OAuth: Device login', 'server', ${sql.array(["ingest"])}, '{}', ${sql.array([P2])})`;
       await sql`insert into mcp_oauth_grants (id, client_id, user_id, org_id, resource, scopes, api_key_id)
         values ('adm-grant-i', 'adm-client', 'adm-u', 'adm-o', 'https://api.example.test', '["ingest"]', 'adm-oi')`;
-      Object.assign(gates, { fetchStalled: false, releaseFetch: null, putStalled: false, releasePut: null, stallPuts: false });
+      Object.assign(gates, { fetchStalled: false, releaseFetch: null, putStalled: false, releasePut: null, stallPuts: false, fetches: 0, puts: 0, stallFirstOnly: false });
     });
     const target = { userId: "adm-u", orgId: "adm-o", project: P2, apiKeyId: "adm-oi", allowedProjectIds: [P2] } as const;
     const runCount = async () => (await sql<Array<{ n: number }>>`select count(*)::int as n from project_runs where project_id = ${P2}`)[0]!.n;
@@ -327,6 +332,53 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
       await revokeDuringExternalWork(() => actions.createBulkProjectIntake({
         ...target, files: [new File(["Quarterly results beat expectations."], "results.txt", { type: "text/plain" })],
       }, ports), () => gates.putStalled, () => { gates.stallPuts = false; gates.releasePut?.(); });
+    }, 30_000);
+
+    const midLoopChanges: Array<[string, string]> = [
+      ["the grant is revoked", "update mcp_oauth_grants set revoked_at = now() where id = 'adm-grant-i'"],
+      ["the key expires", "update api_keys set expires_at = now() - interval '1 second' where id = 'adm-oi'"],
+      ["the key loses its ingest scope", "update api_keys set scopes = '{search:hybrid}' where id = 'adm-oi'"],
+    ];
+
+    /** Runs an intake of three items whose first dispatch stalls; `change` commits during the stall, then it resumes. */
+    async function changeMidLoop(start: () => Promise<unknown>, stalled: () => boolean, release: () => void, change: string) {
+      const before = await runCount();
+      gates.stallFirstOnly = true;
+      const outcome = start().then(() => null, (error: unknown) => error);
+      await vi.waitFor(() => expect(stalled()).toBe(true), { timeout: 10_000 });
+      await sql.unsafe(change);
+      const dispatched = { fetches: gates.fetches, puts: gates.puts };
+      release();
+      const error = await outcome;
+      expect(error).toMatchObject({ statusCode: 403 });
+      expect(await runCount()).toBe(before);
+      return dispatched;
+    }
+
+    it.each(midLoopChanges)("stops a bulk upload mid-loop when %s: no later storage write starts", async (_label, change) => {
+      gates.stallPuts = true;
+      const files = ["one", "two", "three"].map(name => new File([`${name}: results beat expectations`], `${name}.txt`, { type: "text/plain" }));
+      const dispatched = await changeMidLoop(() => actions.createBulkProjectIntake({ ...target, files }, ports),
+        () => gates.putStalled, () => { gates.stallPuts = false; gates.releasePut?.(); }, change);
+      expect(dispatched.puts).toBe(1);
+      expect(gates.puts).toBe(1);
+    }, 30_000);
+
+    it.each(midLoopChanges)("stops a URL intake mid-loop when %s: no later fetch or write starts", async (_label, change) => {
+      const urls = ["one", "two", "three"].map(name => `https://docs.example.com/${name}.txt`);
+      await changeMidLoop(() => actions.createRemoteUrlProjectIntake({ ...target, urls }, ports),
+        () => gates.fetchStalled, () => gates.releaseFetch?.(), change);
+      // The fetch in flight when the change committed was the last: its bytes are not stored, nothing else is fetched.
+      expect(gates.fetches).toBe(1);
+      expect(gates.puts).toBe(0);
+    }, 30_000);
+
+    it.each(midLoopChanges)("stops writing a crawl's pages when %s: no later page write starts", async (_label, change) => {
+      gates.stallPuts = true;
+      const pages = ["one", "two", "three"].map(name => ({ url: `https://docs.example.com/${name}`, title: name, markdown: `${name}: results beat expectations` }));
+      await changeMidLoop(() => actions.createWebsiteProjectIntake({ ...target, startUrl: "https://docs.example.com/", crawlOptions: {}, crawl: async () => ({ pages, credits: 0 }) }, ports),
+        () => gates.putStalled, () => { gates.stallPuts = false; gates.releasePut?.(); }, change);
+      expect(gates.puts).toBe(1);
     }, 30_000);
   });
 });

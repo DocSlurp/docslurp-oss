@@ -28,6 +28,7 @@ import { discardUnstartedRun, RunAdmissionRefusedError } from "./run-creation.js
 import { type ProjectRunRow } from "./run-records.js";
 import { canContributeToProject, getProjectAccess } from "./organizations.js";
 import { getLiveApiKeyById, getLiveIntakeKey } from "./api-keys.js";
+import { IntakeCredentialRefusedError } from "./project-intake.js";
 
 import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
@@ -87,27 +88,46 @@ type IntakeTargetArgs = Pick<
 >;
 
 /**
- * The credential of an idempotent intake (bulk, URL, website), rechecked right before its external work (storage
- * writes, fetches, a crawl) starts: a live key with `ingest` whose OAuth grant, if it backs one, is not revoked. Run
- * admission repeats the check in its transaction (`principalAtAdmission`), so a revocation during the work still
- * refuses the run.
+ * The credential check of a bulk, URL or website intake, from one snapshot (getLiveIntakeKey: live, unexpired, owner a
+ * member, OAuth grant unrevoked) plus the `ingest` scope. Run before the external work starts and again immediately
+ * before every external dispatch (each URL fetch, each storage write of a file or crawled page); a refusal stops all
+ * remaining work. Run admission repeats it in its transaction (`principalAtAdmission`).
  */
-async function assertIntakeCredentialLive(apiKeyId: string | null | undefined): Promise<void> {
-  if (!apiKeyId) return;
-  const key = await getLiveIntakeKey(apiKeyId);
-  if (!key || !key.scopes.includes("ingest")) throw new ProjectIntakeError("API key no longer permits this upload", 403);
+function intakeCredentialGuard(apiKeyId: string | null | undefined): () => Promise<void> {
+  return async () => {
+    if (!apiKeyId) return;
+    const key = await getLiveIntakeKey(apiKeyId);
+    if (!key || !key.scopes.includes("ingest")) throw new IntakeCredentialRefusedError();
+  };
+}
+
+/** The public answer for a credential refused before an external dispatch or at run admission. */
+function credentialRefused(): ProjectIntakeError {
+  return new ProjectIntakeError("API key no longer permits this upload", 403);
 }
 
 /** Key types these intake routes accept (server keys, and client keys with `ingest`); admission rechecks the same. */
 const INTAKE_KEY_TYPES = ["server", "client"] as const;
 
-/** Intake whose run admission re-validates the principal inside its transaction; a refusal there is a 403. */
+/**
+ * Intake that checks its credential before every external dispatch and re-validates the principal inside its run's
+ * admission transaction; a refusal at either point is a 403 and stops the remaining work.
+ */
 async function admittedIntake(request: ProjectIntakeRequest, ports: ProjectIntakePorts): ReturnType<typeof requiredIntake> {
-  return await requiredIntake({ ...request, principalAtAdmission: { scope: "ingest", keyTypes: INTAKE_KEY_TYPES } }, ports)
-    .catch((error: unknown) => {
-      if (error instanceof RunAdmissionRefusedError) throw new ProjectIntakeError("API key no longer permits this upload", 403);
-      throw error;
-    });
+  return await requiredIntake({
+    ...request,
+    authorizeExternalWork: intakeCredentialGuard(request.apiKeyId),
+    principalAtAdmission: { scope: "ingest", keyTypes: INTAKE_KEY_TYPES },
+  }, ports).catch((error: unknown) => {
+    if (error instanceof RunAdmissionRefusedError || error instanceof IntakeCredentialRefusedError) throw credentialRefused();
+    throw error;
+  });
+}
+
+/** The check before an intake's external work begins (a crawl, the first fetch or write). */
+async function assertIntakeCredentialLive(apiKeyId: string | null | undefined): Promise<void> {
+  try { await intakeCredentialGuard(apiKeyId)(); }
+  catch (error) { if (error instanceof IntakeCredentialRefusedError) throw credentialRefused(); throw error; }
 }
 
 /**
@@ -527,7 +547,8 @@ export async function createRemoteUrlProjectIntake(
         {
           ...target,
           kind: "url-ingest",
-          items: remoteUrlIntakeItems(args.urls, { canonicalIds }),
+          // Each URL is fetched only while the credential still permits it.
+          items: remoteUrlIntakeItems(args.urls, { canonicalIds, beforeFetch: intakeCredentialGuard(args.apiKeyId) }),
           urls: args.urls,
           audit,
         },

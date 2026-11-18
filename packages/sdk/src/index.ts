@@ -1322,7 +1322,9 @@ export type DirectUploadDescriptor = {
   headers?: Record<string, string>;
   expiresInSeconds?: number;
   partSize?: number;
-  pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  /** A part without `url` (the server signs at most a bounded number per session read; see `partUrlsOmitted`) is signed with parts/sign. */
+  pendingParts?: Array<{ partNumber: number; sizeBytes: number; url?: string }>;
+  partUrlsOmitted?: boolean;
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
@@ -2524,6 +2526,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    * Sends one file's bytes. When a part or the single PUT fails after its own retries, the session is read again: storage knows which
    * parts arrived, so the transfer resumes from the server's pendingParts (with fresh signed URLs) instead of restarting.
    */
+  /** Every pending part's URL: the ones the session described, and the rest signed through parts/sign (100 per call). */
+  async function partUrls(sessionPath: string, descriptor: DirectUploadDescriptor, options: UploadOptions): Promise<Map<number, string>> {
+    const urls = new Map<number, string>();
+    const unsigned: number[] = [];
+    for (const part of descriptor.pendingParts ?? []) {
+      if (part.url) urls.set(part.partNumber, part.url); else unsigned.push(part.partNumber);
+    }
+    for (let start = 0; start < unsigned.length; start += 100) {
+      const signed = await requestSessionCall<{ parts: Array<{ partNumber: number; url: string }> }>(
+        `${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: unsigned.slice(start, start + 100) }), options);
+      for (const part of signed.parts) urls.set(part.partNumber, part.url);
+    }
+    for (const partNumber of unsigned) if (!urls.has(partNumber)) throw new Error(`No upload URL for part ${partNumber}`);
+    return urls;
+  }
+
   async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions): Promise<void> {
     let descriptor = first;
     for (let round = 0; ; round++) {
@@ -2532,9 +2550,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType, options);
           return;
         }
+        const urls = await partUrls(sessionPath, descriptor, options);
         for (const part of descriptor.pendingParts ?? []) {
           const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          await putToStorage(part.url, blob.slice(start, start + part.sizeBytes), undefined, options);
+          await putToStorage(urls.get(part.partNumber)!, blob.slice(start, start + part.sizeBytes), undefined, options);
         }
         return;
       } catch (error) {

@@ -112,7 +112,17 @@ export type ProjectIntakeAudit = {
   metadata?: Record<string, unknown>;
 };
 
+/** The credential behind an intake no longer permits it, found right before an external dispatch: stop everything. */
+export class IntakeCredentialRefusedError extends Error {
+  constructor() { super("The credential that started this upload no longer permits it"); this.name = "IntakeCredentialRefusedError"; }
+}
+
 export interface ProjectIntakeRequest {
+  /**
+   * Runs immediately before every external dispatch (each storage write, and each URL fetch of a remote intake): a
+   * refusal (IntakeCredentialRefusedError) aborts the remaining items, so no fetch or write follows a revocation.
+   */
+  authorizeExternalWork?: () => Promise<void>;
   /** Re-validate the principal inside the run's admission transaction (CreateRunInput.principalAtAdmission). */
   principalAtAdmission?: { scope: string; keyTypes?: readonly string[] };
   speedBoost?: boolean;
@@ -527,6 +537,8 @@ async function storeItem(
   }
 
   const key = rawSourceKey(request.userId, admitted.filename, request.extract);
+  // Never write for a credential that no longer permits it (checked per write, not once per request).
+  await request.authorizeExternalWork?.();
   written.push(key);
   if ("bytes" in content) {
     await storage.put(key, content, admitted.mimeType);

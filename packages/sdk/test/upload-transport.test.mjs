@@ -209,3 +209,32 @@ test("a stream upload never aborts its session when the session stays busy", asy
   assert.ok(calls.filter(call => call.endsWith("/files/complete")).length > 1, "the busy complete was retried");
   assert.equal(calls.some(call => call.endsWith("/abort")), false, "a busy session is never aborted");
 });
+
+test("parts the session describes without a URL are signed through parts/sign before they are sent", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const calls = [];
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const fetch = async (url, init = {}) => {
+    const href = String(url);
+    calls.push({ method: init.method ?? "GET", href, body: init.body ? String(init.body) : "" });
+    if (href.endsWith("/direct/sessions") && init.method === "POST") {
+      // The server's part-URL budget ran out: part 1 carries its URL, parts 2 and 3 do not.
+      return json({ sessionId: "s1", files: [{ index: 0, clientId: "0", id: "f0", filename: "ten.txt", mimeType: "text/plain", sizeBytes: 10, mode: "multipart", partSize: 4, partUrlsOmitted: true, pendingParts: [
+        { partNumber: 1, sizeBytes: 4, url: "https://storage.invalid/a/1" }, { partNumber: 2, sizeBytes: 4 }, { partNumber: 3, sizeBytes: 2 }] }] }, 201);
+    }
+    if (href.endsWith("/files/f0/parts/sign")) {
+      const { partNumbers } = JSON.parse(String(init.body));
+      return json({ parts: partNumbers.map((partNumber) => ({ partNumber, url: `https://storage.invalid/signed/${partNumber}` })) });
+    }
+    if (href.startsWith("https://storage.invalid/")) return new Response(null, { status: 200 });
+    if (href.endsWith("?statusOnly=true")) return json({ status: "completed", result: { run: { id: "r1" }, project: { id: "p1" }, documents: [] } });
+    return json({ error: "unexpected" }, 500);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  await client.upload(new Blob(["0123456789"]), { directUpload: true, filename: "ten.txt" });
+  const sign = calls.filter((call) => call.href.endsWith("/parts/sign"));
+  assert.equal(sign.length, 1);
+  assert.deepEqual(JSON.parse(sign[0].body).partNumbers, [2, 3]);
+  const puts = calls.filter((call) => call.method === "PUT").map((call) => call.href);
+  assert.deepEqual(puts, ["https://storage.invalid/a/1", "https://storage.invalid/signed/2", "https://storage.invalid/signed/3"]);
+});

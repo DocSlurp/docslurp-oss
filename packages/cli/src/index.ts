@@ -456,7 +456,8 @@ type DirectUploadDescriptor = {
   id: string; filename: string; mimeType: string; sizeBytes: number; mode: "single" | "multipart";
   /** Position in the create request and the client id sent with it: how a file is matched, never by (sanitized) filename. */
   index?: number | null; clientId?: string | null; status?: string;
-  putUrl?: string; partSize?: number; pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  // A part without `url` (the server signs a bounded number per session read; see partUrlsOmitted) is signed with parts/sign.
+  putUrl?: string; partSize?: number; pendingParts?: Array<{ partNumber: number; sizeBytes: number; url?: string }>; partUrlsOmitted?: boolean;
   completedParts?: Array<{ partNumber: number; etag: string }>;
 };
 type UploadRejection = { index?: number; clientId?: string; filename: string; statusCode: number; code: string; message: string };
@@ -634,19 +635,28 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
 }
 
 /** Sends one file (or its remaining parts). Returns the completion body for `files/complete`. */
-async function sendFile(descriptor: DirectUploadDescriptor, blob: Blob): Promise<Record<string, unknown>> {
+async function sendFile(descriptor: DirectUploadDescriptor, blob: Blob, signParts?: (partNumbers: number[]) => Promise<Array<{ partNumber: number; url: string }>>): Promise<Record<string, unknown>> {
   if (descriptor.mode === "single") {
     const etag = await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType);
     return { fileId: descriptor.id, ...(etag ? { etag } : {}) };
   }
   const parts: Array<{ partNumber: number; etag: string }> = [...(descriptor.completedParts ?? [])];
   const pending = descriptor.pendingParts ?? [];
+  // Parts the session described without a URL are signed through parts/sign, 100 at a time.
+  const urls = new Map(pending.flatMap((part) => part.url ? [[part.partNumber, part.url] as const] : []));
+  const unsigned = pending.filter((part) => !part.url).map((part) => part.partNumber);
+  for (let start = 0; start < unsigned.length; start += 100) {
+    if (!signParts) throw new Error(`No upload URL for ${descriptor.filename} part ${unsigned[start]}`);
+    for (const part of await signParts(unsigned.slice(start, start + 100))) urls.set(part.partNumber, part.url);
+  }
   let sent = 0;
   // Parts share the upload's storage slots. A failed part stops new ones and waits for those in flight, so a resume never
   // races a PUT of the same part.
   await forEachLimited(pending, uploadConcurrency(), async (part) => {
     const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-    const etag = await putToStorage(part.url, blob.slice(start, start + part.sizeBytes));
+    const url = urls.get(part.partNumber);
+    if (!url) throw new Error(`No upload URL for ${descriptor.filename} part ${part.partNumber}`);
+    const etag = await putToStorage(url, blob.slice(start, start + part.sizeBytes));
     if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
     parts.push({ partNumber: part.partNumber, etag });
     console.error(`Uploaded ${descriptor.filename} part ${part.partNumber} (${++sent}/${pending.length})`);
@@ -836,7 +846,13 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
       let complete: Record<string, unknown> | null = null;
       for (let round = 0; complete === null; round++) {
         try {
-          complete = await sendFile(descriptor, match.file.blob);
+          const fileId = descriptor.id;
+          complete = await sendFile(descriptor, match.file.blob, async (partNumbers) => {
+            const signed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/${encodeURIComponent(fileId)}/parts/sign`, flags,
+              { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ partNumbers }) }), flags, async () => "retry");
+            if (!signed.ok) throw await responseFailure(signed);
+            return ((await signed.json()) as { parts: Array<{ partNumber: number; url: string }> }).parts;
+          });
         } catch (error) {
           if (round >= 2 || !(isLostResponse(error) || (error instanceof CliApiError && (error.status === 403 || RETRYABLE_STATUSES.has(error.status))))) throw error;
           // Resume from what storage holds: the session lists the parts still missing, with fresh signed URLs.

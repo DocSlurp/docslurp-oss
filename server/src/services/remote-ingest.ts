@@ -28,11 +28,17 @@ function rejectedUrl(url: string, message: string): ProjectIntakeItem {
  */
 export async function* remoteUrlIntakeItems(
   urls: string[],
-  options: { signal?: AbortSignal; canonicalIds?: Array<string | null | undefined> } = {},
+  options: {
+    signal?: AbortSignal;
+    canonicalIds?: Array<string | null | undefined>;
+    /** Runs right before each fetch; a refusal ends the iteration (no later URL is fetched). */
+    beforeFetch?: () => Promise<void>;
+  } = {},
 ): AsyncGenerator<ProjectIntakeItem> {
   for (const [index, url] of urls.entries()) {
     let response: Response;
     let safeUrl: string;
+    await options.beforeFetch?.();
     try {
       safeUrl = await assertSafeExternalUrl(url);
       response = await safeExternalFetch(safeUrl, {

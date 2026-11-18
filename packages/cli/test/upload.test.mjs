@@ -446,3 +446,33 @@ test("resuming a file after an expired storage URL reads only that file from the
     for (const read of reads) assert.match(read.url, /[?&]fileId=f1(&|$)/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("parts the session describes without a URL are signed through parts/sign before they are sent", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const file = join(dir, "big.pdf");
+    await writeFile(file, Buffer.alloc(21 * 1024 * 1024, 0x41));
+    const partSize = 8 * 1024 * 1024;
+    const result = await invoke(["upload", file], (request, _count, base) => {
+      if (request.url === "/v1/uploads/direct/sessions") {
+        // The server's part-URL budget ran out: part 1 carries its URL, parts 2 and 3 do not.
+        return { status: 201, body: { sessionId: "s1", files: [{ index: 0, clientId: "0", id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024,
+          mode: "multipart", partSize, partUrlsOmitted: true, pendingParts: [
+            { partNumber: 1, sizeBytes: partSize, url: `${base}/storage/1` }, { partNumber: 2, sizeBytes: partSize }, { partNumber: 3, sizeBytes: 5 * 1024 * 1024 }] }] } };
+      }
+      if (request.url === "/v1/uploads/direct/sessions/s1/files/f0/parts/sign") {
+        const { partNumbers } = JSON.parse(request.body.toString());
+        return { body: { parts: partNumbers.map((partNumber) => ({ partNumber, url: `${base}/storage/${partNumber}` })) } };
+      }
+      if (request.url.startsWith("/storage/")) return { headers: { etag: `"e${request.url.slice(-1)}"` }, body: {} };
+      if (request.url.endsWith("/files/complete")) return { body: { ok: true } };
+      if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
+      return { status: 404, body: {} };
+    }, { killAfterMs: 60_000 });
+    assert.equal(result.code, 0, result.stderr);
+    const signs = result.requests.filter((request) => request.url.endsWith("/parts/sign"));
+    assert.equal(signs.length, 1);
+    assert.deepEqual(JSON.parse(signs[0].body.toString()).partNumbers, [2, 3]);
+    assert.deepEqual(result.requests.filter((request) => request.url.startsWith("/storage/")).map((request) => request.url).sort(), ["/storage/1", "/storage/2", "/storage/3"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

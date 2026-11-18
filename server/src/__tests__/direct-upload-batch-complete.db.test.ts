@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   headDelayMs: 0,
   /** Every lock reservation: `class:tenant`. */
   tenants: [] as string[],
+  partSignatures: 0,
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -68,7 +69,7 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   deleteUploadedObject: async (key: string) => { mocks.objects.delete(key); },
   abortMultipartUpload: async () => {},
   signSingleUploadPut: async ({ key }: { key: string }) => `https://storage.example/${key}`,
-  signMultipartUploadPart: async () => "https://storage.example/part",
+  signMultipartUploadPart: async () => { mocks.partSignatures += 1; return "https://storage.example/part"; },
   listMultipartUploadParts: async () => [],
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
@@ -117,6 +118,7 @@ beforeEach(async () => {
   mocks.onHead = null;
   mocks.headDelayMs = 0;
   mocks.tenants.length = 0;
+  mocks.partSignatures = 0;
   // A held lock is answered at once here (production waits DOCSLURP_UPLOAD_LOCK_WAIT_MS first).
   (await import("../config.js")).env.directUploadLockWaitMs = 0;
   mocks.heads.length = 0;
@@ -542,5 +544,97 @@ describe("lock accounting uses the principal's organization, never a stored or r
     expect(mocks.tenants.length).toBeGreaterThanOrEqual(4);
     // Every reservation counted against u's own organization ('o', its membership), none against the victim's.
     for (const tenant of mocks.tenants) expect(tenant.endsWith(":org:o")).toBe(true);
+  });
+});
+
+describe("minting targets re-checks the caller under the lock (H2)", () => {
+  beforeEach(async () => {
+    await db.query("delete from api_keys where id = 'k-u'");
+    await db.query(`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes, allowed_domains, project_ids)
+      values ('k-u', 'u', 'o', 'hash-k-u', 'Ingest', 'server', '{ingest}', '{}', '{}')`);
+    await db.query("update upload_sessions set api_key_id = 'k-u' where id = $1", [SESSION]);
+  });
+
+  it("returns no targets when the key is revoked while the read waits for the lock", async () => {
+    await seedFile(SESSION, "a", null);
+    await expect(getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u")).resolves.toMatchObject({ files: [{ id: "a", putUrl: expect.any(String) }] });
+    mocks.onLock = async () => { await db.query("update api_keys set revoked_at = now() where id = 'k-u'"); };
+    await expect(getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u")).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it("signs no parts when the key loses its scope while signing waits for the lock", async () => {
+    await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+      values ('mp', $1, 'big.pdf', 'application/pdf', $2, $3, 'multipart', 'up-1', $4, 'pending')`, [SESSION, 20 * 1024 * 1024, `u/${SESSION}/raw/big.pdf`, 8 * 1024 * 1024]);
+    mocks.onLock = async () => { await db.query("update api_keys set scopes = '{search:hybrid}' where id = 'k-u'"); };
+    await expect(signDirectUploadParts(SESSION, "u", "mp", [1, 2], "k-u")).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.partSignatures).toBe(0);
+  });
+});
+
+describe("a session read signs a bounded number of part URLs (M1)", () => {
+  it("signs at most 1,000 part URLs and describes the rest without one, for parts/sign", async () => {
+    // Three open multipart files of 500 parts each: 1,500 parts a read could sign.
+    for (const id of ["x", "y", "z"]) {
+      await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+        values ($1, $2, 'big.pdf', 'application/pdf', $3, $4, 'multipart', $5, $6, 'pending')`, [id, SESSION, 500 * 8 * 1024 * 1024, `u/${SESSION}/raw/${id}.pdf`, `up-${id}`, 8 * 1024 * 1024]);
+    }
+    const described = await getDirectUploadSessionDescription(SESSION, "u");
+    const files = described!.files as Array<{ pendingParts: Array<{ url?: string }>; partUrlsOmitted?: boolean }>;
+    const parts = files.flatMap(file => file.pendingParts);
+    expect(parts).toHaveLength(1_500);
+    expect(parts.filter(part => part.url)).toHaveLength(1_000);
+    expect(mocks.partSignatures).toBe(1_000);
+    expect(files.some(file => file.partUrlsOmitted === true)).toBe(true);
+    // Every part is still described (number and size), so a client can sign the rest.
+    expect(parts.every(part => typeof (part as { partNumber?: number }).partNumber === "number")).toBe(true);
+  });
+});
+
+describe("the fileId filter at the route (boundaries)", () => {
+  async function read(query: string) {
+    const { Hono } = await import("hono");
+    const { createUploadsRoutes } = await import("../routes/uploads.js");
+    const app = new Hono().use("*", async (c, next) => { c.set("sessionUser", { id: "u", email: "uploader@example.test", name: "Uploader" } as never); await next(); })
+      .route("/uploads", createUploadsRoutes());
+    return await app.request(`/uploads/direct/sessions/${SESSION}?${query}`);
+  }
+
+  it("never returns or inspects a file of another session of the same user", async () => {
+    const OTHER = "33333333-3333-4333-8333-000000000001";
+    await db.query(`insert into upload_sessions (id,user_id,org_id,status,next_reconcile_at) values ($1,'u','o','pending', now() + interval '1 hour')`, [OTHER]);
+    const key = await seedFile(OTHER, "elsewhere", { size: 10, etag: "\"e\"" });
+    await seedFile(SESSION, "mine", null);
+    const response = await read("fileId=elsewhere&fileId=mine");
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { files: Array<{ id: string }> }).files.map(file => file.id)).toEqual(["mine"]);
+    expect(mocks.heads).not.toContain(key);
+  });
+
+  it("never returns or inspects a file of another organization's session", async () => {
+    const key = await seedFile(FOREIGN, "theirs", { size: 10, etag: "\"t\"" });
+    const response = await read("fileId=theirs");
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { files: unknown[] }).files).toEqual([]);
+    expect(mocks.heads).not.toContain(key);
+    expect(await fileRow("theirs")).toMatchObject({ status: "pending", source_key: key });
+  });
+
+  it("returns a completed file in a filtered read as completed, with no upload target", async () => {
+    await seedFile(SESSION, "done", { size: 10, etag: "\"d\"" });
+    await db.query("update upload_session_files set status = 'completed' where id = 'done'");
+    const response = await read("fileId=done");
+    const [file] = ((await response.json()) as { files: Array<Record<string, unknown>> }).files;
+    expect(file).toMatchObject({ id: "done", status: "completed", transferState: "complete" });
+    expect(file).not.toHaveProperty("putUrl");
+    expect(file).not.toHaveProperty("pendingParts");
+  });
+
+  it.each([
+    ["an empty fileId", "fileId="],
+    ["an over-long fileId", `fileId=${"x".repeat(65)}`],
+    ["more than 1,000 fileIds", Array.from({ length: 1_001 }, (_, i) => `fileId=f${i}`).join("&")],
+  ])("refuses %s with 400", async (_label, query) => {
+    expect((await read(query)).status).toBe(400);
+    expect(mocks.heads).toEqual([]);
   });
 });

@@ -212,7 +212,11 @@ async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: n
     && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
 }
 
-export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow, ttl = SIGNED_UPLOAD_TTL_SECONDS, expiresAt?: Date | string, options: { uninspected?: boolean } = {}) {
+/** The most multipart part URLs one session description signs; the bounded parts/sign endpoint signs the rest. */
+export const MAX_PART_URLS_PER_READ = 1_000;
+type PartUrlBudget = { remaining: number; signal?: AbortSignal };
+
+export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow, ttl = SIGNED_UPLOAD_TTL_SECONDS, expiresAt?: Date | string, options: { uninspected?: boolean; partUrls?: PartUrlBudget } = {}) {
   // Not inspected by this read: no provider call (every part is offered again), and the client is told so.
   const inspection = options.uninspected ? { inspected: false as const } : {};
   const remainingTtl = () => expiresAt ? assertUploadSessionActive({ status: "pending", expires_at: expiresAt } as UploadSessionRow) : ttl;
@@ -252,8 +256,10 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   const pendingParts: Array<{
     partNumber: number;
     sizeBytes: number;
-    url: string;
+    /** Absent once the read's part-URL budget is spent: sign it with parts/sign. */
+    url?: string;
   }> = [];
+  let partUrlsOmitted = false;
 
   for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
     if (completed.has(partNumber)) {
@@ -262,6 +268,13 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     const offset = (partNumber - 1) * partSize;
     const remaining = Math.max(0, file.size_bytes - offset);
     const sizeBytes = Math.min(partSize, remaining);
+    const budget = options.partUrls;
+    if (budget && (budget.remaining <= 0 || budget.signal?.aborted)) {
+      partUrlsOmitted = true;
+      pendingParts.push({ partNumber, sizeBytes });
+      continue;
+    }
+    if (budget) budget.remaining -= 1;
     pendingParts.push({
       partNumber,
       sizeBytes,
@@ -283,6 +296,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     sizeBytes: file.size_bytes,
     mode: "multipart" as const,
     status: file.status,
+    ...(partUrlsOmitted ? { partUrlsOmitted: true as const } : {}),
     uploadId: file.upload_id,
     partSize,
     partCount,
@@ -440,11 +454,14 @@ export async function describeDirectUploadSession(
   loaded: LoadedDirectUploadSession,
   statusOnly = false,
   /** Files this read did not inspect: described without provider calls, marked `inspected: false`. */
-  options: { uninspected?: ReadonlySet<string> } = {},
+  options: { uninspected?: ReadonlySet<string>; signal?: AbortSignal } = {},
 ) {
+  // At most MAX_PART_URLS_PER_READ part URLs are signed per read (and none once the read's deadline passes or its
+  // client disconnects); later parts are described without a URL, for the client to sign through parts/sign.
+  const partUrls: PartUrlBudget = { remaining: MAX_PART_URLS_PER_READ, signal: options.signal };
   const ttl = statusOnly || ["confirmed", "failed", "aborted", "expired"].includes(loaded.session.status) ? SIGNED_UPLOAD_TTL_SECONDS : assertUploadSessionActive(loaded.session);
   const files = await Promise.all(
-    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file, ttl, loaded.session.expires_at, { uninspected: options.uninspected?.has(file.id) === true })),
+    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file, ttl, loaded.session.expires_at, { uninspected: options.uninspected?.has(file.id) === true, partUrls })),
   );
   return {
     expiresAt: loaded.session.expires_at ? new Date(loaded.session.expires_at).toISOString() : null,
@@ -462,6 +479,24 @@ export async function directUploadSessionBelongsToOrganization(sessionId: string
   return Boolean(apiKeyId) && session?.org_id === orgId && session.api_key_id === apiKeyId && (!allowedProjectIds?.length || Boolean(session.project_id && allowedProjectIds.includes(session.project_id)));
 }
 
+/**
+ * Right before minting upload targets (the session read, part signing), under the session lock: the caller may still
+ * contribute to the session's project, and the request's own key, if any, is still authorized in one snapshot
+ * (getLiveIntakeKey), with `ingest`, for the session's organization and inside its project allowlist. Whatever the
+ * route checked before the lock wait may have gone stale.
+ */
+async function assertMayMintTargets(session: UploadSessionRow, userId: string, credentialKeyId: string | null | undefined): Promise<void> {
+  const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
+  await assertSessionProjectStillContributable(session, userId);
+  if (!credentialKeyId) return;
+  const { getLiveIntakeKey } = await import("./api-keys.js");
+  const key = await getLiveIntakeKey(credentialKeyId);
+  if (!key || !key.scopes.includes("ingest") || key.orgId !== session.org_id
+    || (key.projectIds.length > 0 && !(session.project_id && key.projectIds.includes(session.project_id)))) {
+    throw new ProjectIntakeError("API key no longer permits this upload", 403);
+  }
+}
+
 /** The most files one full session read may name with `fileId`. */
 export const MAX_DESCRIBE_FILE_IDS = 1_000;
 
@@ -472,6 +507,8 @@ export async function getDirectUploadSessionDescription(
   signal?: AbortSignal,
   /** Describe (and inspect) only these files of the session; omitted: all of them. */
   fileIds?: readonly string[],
+  /** The request's API key (rechecked under the lock before any target is minted). */
+  credentialKeyId?: string | null,
 ) {
   if (statusOnly) {
     const loaded = await loadDirectUploadSession(sessionId, userId);
@@ -510,9 +547,10 @@ export async function getDirectUploadSessionDescription(
       const failure = inspected.find(result => result.status === "rejected" && result.reason !== NOT_STARTED);
       if (failure) throw (failure as PromiseRejectedResult).reason;
       loaded = (await load())!;
-      return await describeDirectUploadSession(loaded, false, { uninspected });
+      await assertMayMintTargets(loaded.session, userId, credentialKeyId);
+      return await describeDirectUploadSession(loaded, false, { uninspected, signal: budget.signal });
     } catch (error) {
-      if (error instanceof ProjectIntakeError && error.code === "intake_reconciliation_required") throw error;
+      if (error instanceof ProjectIntakeError && (error.code === "intake_reconciliation_required" || error.statusCode === 403)) throw error;
       throw new ProjectIntakeError("Upload storage evidence is unavailable; retry status later", 503, undefined, "upload_storage_unavailable");
     }
   }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id) });
@@ -931,7 +969,7 @@ export async function completeDirectUploadFiles(input: { sessionId: string; user
 /** How long part signing may spend on provider reads while it holds a short lock connection. */
 export const SIGN_PROVIDER_BUDGET_MS = 2_000;
 
-export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[]) {
+export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[], credentialKeyId?: string | null) {
   const owned = await loadDirectUploadSessionRow(sessionId, userId);
   if (!owned) throw new ProjectIntakeError("Upload session not found", 404);
   return withDirectUploadLock(sessionId, async () => {
@@ -957,6 +995,7 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
   }
   try { await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id, signal }); }
   catch { throw new ProjectIntakeError("Upload storage evidence is unavailable", 503, undefined, "upload_storage_unavailable"); }
+  await assertMayMintTargets(session, userId, credentialKeyId);
   return { parts: await Promise.all(partNumbers.map(async partNumber => {
     if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
     return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(session) }) };
