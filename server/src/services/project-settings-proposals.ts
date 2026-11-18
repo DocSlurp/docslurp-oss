@@ -114,10 +114,10 @@ export async function proposeProjectSettings(args: { actor: RequestActor; projec
   let changes = projectSettingsProposalInputSchema.shape.changes.parse(args.changes);
   const access = await authorize(args.actor, args.projectId, args.sessionId);
   let proposed = await plan(args.actor, args.projectId, changes);
-  // A retired `vision: { forceAllPages: false }` means Auto on a Good project; re-plan with it so the token
+  // A retired `vision: { forceAllPages: false }` means Fastest on a Smartest project; re-plan with it so the token
   // seals the resolved change.
   const rawPipeline = (args.changes as { pipeline?: unknown } | null | undefined)?.pipeline;
-  const resolvedPipeline = resolveLegacyQualityPatch(changes.pipeline ?? {}, rawPipeline, proposed.config.project.pipeline.quality);
+  const resolvedPipeline = resolveLegacyQualityPatch(changes.pipeline ?? {}, rawPipeline, proposed.config.project.pipeline);
   if (resolvedPipeline.quality !== changes.pipeline?.quality) {
     changes = { ...changes, pipeline: resolvedPipeline };
     proposed = await plan(args.actor, args.projectId, changes);

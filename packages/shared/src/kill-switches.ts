@@ -33,7 +33,7 @@ export type DisableToken = (typeof DISABLE_TOKENS)[number];
 
 /**
  * What each switch also turns off. `ai` turns off every model read in extraction: rescue, escalation, the page image
- * reader, decision models (deterministic routing only) and AI chart reads; `smart` runs as `balanced` without AI
+ * reader, decision models (deterministic routing only) and AI chart reads; `smartest` runs as `fastest` (OCR, no vision)
  * (applyKillSwitchesToPipeline). `charts` turns off all chart export, including AI chart reads.
  */
 const IMPLIES: Readonly<Partial<Record<DisableToken, readonly DisableToken[]>>> = {

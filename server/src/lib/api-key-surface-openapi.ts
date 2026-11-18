@@ -38,7 +38,7 @@ function operation(path: string, tag: string, summary: string, scope: string, su
 const jsonBody = { requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } } };
 const reprocessBody = { requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: {
   stageFrom: { type: "string" }, stages: { type: "array", items: { type: "string" } }, speedBoost: { type: "boolean" },
-  quality: { type: "string", enum: ["fastest", "balanced", "smart"] },
+  quality: { type: "string", enum: ["fastest", "smartest"] },
   visuals: { type: "string", enum: ["none", "figures", "charts", "charts-ai"] },
   chartExport: { type: "object", deprecated: true, properties: { tier: { type: "string", enum: ["off", "free", "models"] } } },
 } } } } } };

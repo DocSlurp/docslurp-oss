@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { qualityModeSchema } from "./quality.js";
+import { pipelineProfileIdSchema } from "./billing.js";
 import { defaultPipelineFeatures, pipelineFeaturesSchema } from "./pipeline.js";
 import { searchCitationSchema } from "./chunks.js";
 import {
@@ -239,7 +239,8 @@ export type RunProcessingPreviewQualityLabel = z.infer<
 >;
 
 export const runProcessingPreviewScenarioSchema = z.object({
-  quality: qualityModeSchema,
+  /** The scenario's quality as a pricing profile: `fastest` or `smartest` (billing.ts QUALITY_MODE_ORDER). */
+  quality: pipelineProfileIdSchema,
   label: z.string(),
   estimatedCost: z.object({
     minCents: z.number(),

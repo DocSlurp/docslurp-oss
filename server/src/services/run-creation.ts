@@ -967,7 +967,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       let clamped = clampRunLadder(input.pipeline, projectPipeline, mayLoosen);
       // A replay (reprocess, bulk reprocess, retry as new) carries an older run's snapshot: the project's limits as they are
       // now tighten it whoever asks, as the chart tier caps a replay at what the project resolves to now.
-      // Quality is capped too while the project has a limit, so a snapshot at Good cannot read past it.
+      // Quality is capped too while the project has a limit, so a snapshot cannot read past it.
       if (reprocessing || request.chartExportReplay) clamped = clampRunLadder(clamped, projectPipeline, false);
       if (clamped !== input.pipeline && (JSON.stringify(clamped.ladder) !== JSON.stringify(input.pipeline.ladder) || clamped.quality !== input.pipeline.quality)) {
         console.log(`[run-creation] ladder override clamped to the project's limits project=${input.projectId} quality=${input.pipeline.quality}->${clamped.quality}`);

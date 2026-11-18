@@ -83,7 +83,7 @@ export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privac
   // the fast rung (pipeline.ladder) reads as Fast.
   if (pageReadingQuality(pipeline) === "fast") {
     throw new IndexingModeError(
-      "Visual mode embeds page images, which bill Rich; Fast quality reads no page. Choose Auto or Good quality, or another indexing mode.",
+      "Visual mode embeds page images, which bill as Vision pages; Fastest with Read scans off reads no page. Choose Smartest, or another indexing mode.",
       400,
       "visual_mode_quality",
     );
@@ -91,7 +91,7 @@ export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privac
   // Visual mode embeds every page image: no Auto ladder limit (a rung below intelligent, a share cap) could hold.
   if (effectiveLadder(pipeline).active) {
     throw new IndexingModeError(
-      "Visual mode embeds every page image, which an Auto ladder limit (pipeline.ladder) does not allow. Remove the limit or choose another indexing mode.",
+      "Visual mode embeds every page image with a model, which Fastest (it never sends a page to a model beyond OCR) and an escalation share limit (pipeline.ladder) do not allow. Choose Smartest without a share limit, or another indexing mode.",
       400,
       "visual_mode_quality",
     );

@@ -3,7 +3,9 @@ import { z } from "zod";
 import type { QualityMode } from "./quality.js";
 
 /*
- * The Auto ladder: in `auto` quality every page is read on the lowest rung that keeps it faithful.
+ * The Auto ladder: in `auto` quality every page is read on a rung, and the highest rung allowed is the public quality
+ * level (extraction-config.ts): `ocr` is Fastest (the default), `intelligent` is Smartest, `fast` is Fastest with
+ * "Read scans" off.
  *
  * - `fast`: the file's own text layer and structure (native extraction): Markdown, images, metadata. No model reads the page.
  * - `ocr`: transcription of pixels: scanned and image pages, text drawn as paths, table rescue. Read by the OCR engine
@@ -15,7 +17,11 @@ import type { QualityMode } from "./quality.js";
  * that may go above `fast` and above `ocr`. A capped page stays on the highest rung it is allowed: a chart page under
  * `maxRung: "ocr"` is transcribed, a scan under `maxRung: "fast"` is kept as its page image (as Fast keeps it). Limits
  * never fail a document and never change prices: a page bills Rich only when a model reads it, as without limits.
- * They apply to `auto` only (Fast reads no page, Good reads every page).
+ * They apply to `auto` only (Fast reads no page).
+ *
+ * Under Smartest (`intelligent`) there is no OCR step: a page triage would send to `ocr` (a scan, an image page, text
+ * drawn as paths or in a broken font, a table rescue) is read on `intelligent` by the vision model. A page an
+ * above-ocr share cap lowers is read on `ocr` instead. Under Fastest (`ocr`) no page reaches a vision model.
  */
 
 export const LADDER_RUNGS = ["fast", "ocr", "intelligent"] as const;
@@ -39,20 +45,22 @@ export const ladderEscalationShareSchema = z.strictObject({
 export type LadderEscalationShare = z.infer<typeof ladderEscalationShareSchema>;
 
 export const pipelineLadderSchema = z.strictObject({
-  /** Highest rung a page may be read on. `intelligent` (the default) leaves Auto unchanged. */
-  maxRung: ladderRungSchema.default("intelligent"),
+  /** Highest rung a page may be read on: `ocr` (the default) is Fastest, `intelligent` is Smartest, `fast` reads no page. */
+  maxRung: ladderRungSchema.default("ocr"),
   /** Escalation share caps per document; unset (the default) caps nothing. */
   maxEscalationShare: ladderEscalationShareSchema.nullable().optional(),
 });
 export type PipelineLadder = z.infer<typeof pipelineLadderSchema>;
 
-export const defaultPipelineLadder: PipelineLadder = { maxRung: "intelligent" };
+/** The rung an unset `maxRung` means: Fastest. */
+export const DEFAULT_LADDER_MAX_RUNG: LadderRung = "ocr";
+export const defaultPipelineLadder: PipelineLadder = { maxRung: DEFAULT_LADDER_MAX_RUNG };
 
 type LadderPipeline = { quality?: QualityMode | null; ladder?: Partial<PipelineLadder> | null };
 
 /** The ladder limits in force for a run's pipeline, normalized: a zero share lowers the highest rung. */
 export interface EffectiveLadder {
-  /** True when any limit can change what Auto reads (quality auto and a rung below intelligent or a share cap). */
+  /** True when any limit can change what Auto reads (quality auto and a rung below intelligent or a share cap). Fastest is always active. */
   active: boolean;
   maxRung: LadderRung;
   /** Share caps in force (undefined: no cap). */
@@ -69,8 +77,8 @@ export function effectiveLadder(pipeline: LadderPipeline | null | undefined): Ef
   if ((pipeline?.quality ?? "auto") !== "auto") return { active: false, maxRung: "intelligent" };
   const ladder = pipeline?.ladder ?? null;
   const parsed = ladderRungSchema.safeParse(ladder?.maxRung);
-  // Unset is the default (intelligent); a value that is set but not a rung fails closed to the tightest rung.
-  let maxRung: LadderRung = parsed.success ? parsed.data : ladder?.maxRung === undefined || ladder?.maxRung === null ? "intelligent" : "fast";
+  // Unset is the default (ocr, Fastest); a value that is set but not a rung fails closed to the tightest rung.
+  let maxRung: LadderRung = parsed.success ? parsed.data : ladder?.maxRung === undefined || ladder?.maxRung === null ? DEFAULT_LADDER_MAX_RUNG : "fast";
   let aboveFast = share(ladder?.maxEscalationShare?.aboveFast);
   let aboveOcr = share(ladder?.maxEscalationShare?.aboveOcr);
   // A share of 0 is a rung limit: no page may go above that rung.
@@ -87,6 +95,20 @@ export function effectiveLadder(pipeline: LadderPipeline | null | undefined): Ef
     ...(aboveFast !== undefined ? { aboveFast } : {}),
     ...(aboveOcr !== undefined ? { aboveOcr } : {}),
   };
+}
+
+/**
+ * True when the run reads as Smartest: `auto` with the intelligent rung allowed. A page that needs a read then goes to
+ * the vision model with no OCR step first (extraction leaves scans and image pages to vision).
+ */
+export function ladderSkipsOcr(pipeline: LadderPipeline | null | undefined): boolean {
+  return (pipeline?.quality ?? "auto") === "auto" && effectiveLadder(pipeline).maxRung === "intelligent";
+}
+
+/** True when no page may reach a vision model: Fastest (`ocr`) or Fastest with Read scans off (`fast`), or quality `fast`. */
+export function ladderForbidsVision(pipeline: LadderPipeline | null | undefined): boolean {
+  if ((pipeline?.quality ?? "auto") !== "auto") return true;
+  return effectiveLadder(pipeline).maxRung !== "intelligent";
 }
 
 /**
@@ -137,8 +159,8 @@ export function ladderChartExportTier<T extends string | null | undefined>(pipel
  * it can only tighten the project's limits, never loosen them.
  */
 export function tighterLadder(project: Partial<PipelineLadder> | null | undefined, run: Partial<PipelineLadder> | null | undefined): PipelineLadder {
-  // Unset is the default (intelligent); a value that is set but not a rung fails closed to the tightest rung.
-  const rung = (value: unknown): LadderRung => (ladderRungSchema.safeParse(value).success ? value as LadderRung : value === undefined || value === null ? "intelligent" : "fast");
+  // Unset is the default (ocr); a value that is set but not a rung fails closed to the tightest rung.
+  const rung = (value: unknown): LadderRung => (ladderRungSchema.safeParse(value).success ? value as LadderRung : value === undefined || value === null ? DEFAULT_LADDER_MAX_RUNG : "fast");
   const a = rung(project?.maxRung);
   const b = rung(run?.maxRung);
   const maxRung = LADDER_RUNG_RANK[a] <= LADDER_RUNG_RANK[b] ? a : b;
@@ -159,8 +181,9 @@ export function tighterLadder(project: Partial<PipelineLadder> | null | undefine
 
 /**
  * A run pipeline from a caller who cannot change the project's spend settings, held to the project's ladder: the ladder
- * no looser than the project's (tighterLadder), and, while the project has a limit, quality no higher than the
- * project's (Good would read every page past the limits). Editors (`mayLoosen`) keep the run pipeline as asked.
+ * no looser than the project's (tighterLadder), so the run never reads on a higher rung (Smartest over a Fastest
+ * project), and, while the project has a limit, quality no higher than the project's. Editors (`mayLoosen`) keep the
+ * run pipeline as asked.
  */
 export function clampRunLadder<T extends { quality: QualityMode; ladder?: Partial<PipelineLadder> | null }>(
   run: T,
@@ -171,7 +194,7 @@ export function clampRunLadder<T extends { quality: QualityMode; ladder?: Partia
   const ladder = tighterLadder(project?.ladder ?? null, run.ladder ?? null);
   const projectQuality = project?.quality ?? "auto";
   const projectLimited = effectiveLadder({ quality: projectQuality, ladder: project?.ladder ?? null }).active;
-  const rank: Record<QualityMode, number> = { fast: 0, auto: 1, good: 2 };
+  const rank: Record<QualityMode, number> = { fast: 0, auto: 1 };
   const quality = projectLimited && rank[run.quality] > rank[projectQuality] ? projectQuality : run.quality;
   return { ...run, quality, ladder };
 }
@@ -304,6 +327,13 @@ export function planLadder(args: {
         pageNumber: need.pageNumber, need: need.need, rung: "fast", reason: need.reason,
         cappedBy: args.policy.ladder.maxRung === "fast" ? "max-rung" : "share-above-fast",
       });
+    }
+  }
+  // Smartest has no OCR step: a page that needs a read at all needs the vision model (an above-ocr cap still lowers it).
+  if (allowIntelligent) {
+    for (let index = 0; index < admitted.length; index += 1) {
+      const need = admitted[index]!;
+      if (need.need === "ocr" && !already.has(need.pageNumber)) admitted[index] = { ...need, need: "intelligent", reason: `smartest:${need.reason}` };
     }
   }
   // Above ocr: intelligent needs keep the rung in priority order while the budget lasts.

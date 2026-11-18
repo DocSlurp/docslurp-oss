@@ -35,6 +35,8 @@ import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   type ProjectRecord,
   partialExtractionMessage,
   pageReadingQuality,
+  ladderForbidsVision,
+  pipelineProfileIdFor,
   normalizePageExtractTags,
   PAGE_EXTRACT_METHODS,
   PAGE_EXTRACT_PASSES,
@@ -245,11 +247,16 @@ export function visionModelUri(pipeline: PipelineFeatures): string {
   return applyDefaultVisionOverride(pipeline).vision.modelUri ?? visionProfileCatalog[pipeline.vision.profile]?.config.modelUri ?? "";
 }
 
-/** Whether the project's quality lets vision read pages at all (fast never does; there is no per-file page count). */
+/** Whether the project's quality lets OCR or vision read pages at all (Read scans off never does). */
 export function qualityAllowsVision(pipeline: PipelineFeatures): boolean {
   // Auto capped at the fast rung (pipeline.ladder) reads no page, as Fast.
   return qualityAllowsPageReading(pageReadingQuality(pipeline));
 }
+
+/** The stored patch that switches a project to Smartest (pipelineFieldsForQuality). */
+const SMARTEST_PATCH = { visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } } as const;
+/** The stored patch that turns Fastest's Read scans on (OCR for scans and image pages). */
+const READ_SCANS_PATCH = { quality: "auto", ladder: { maxRung: "ocr" } } as const;
 
 interface PageView extends IngestReportPage {
   kind: FileKind;
@@ -727,9 +734,10 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
         ? "Page triage picks pages with little or unusable text and reads them from the page image."
         : "Pages without a text layer (scans, photos of text) produce no text and cannot be found.",
     });
+    const profile = pipelineProfileIdFor(pipeline);
     items.push({
-      key: "quality", label: "Processing quality", value: QUALITY_MODES[pipeline.quality].label,
-      note: `${QUALITY_MODES[pipeline.quality].description} ${qualityModePriceRange(pipeline.quality)} per 1,000 pages.`,
+      key: "quality", label: "Processing quality", value: QUALITY_MODES[profile].label,
+      note: `${QUALITY_MODES[profile].description} ${qualityModePriceRange(profile)} per 1,000 pages.`,
     });
     items.push({
       // The profile (a category), never the backend model id behind it.
@@ -874,9 +882,9 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   const totalScanned = observed.scannedPages.length;
   const recordedPages = observed.textPages;
 
-  // Never suggest a rung the project's constraints rule out (design 5): smart needs a reader the privacy mode allows.
+  // Never suggest a rung the project's constraints rule out (design 5): smartest needs a reader the privacy mode allows.
   const smartAllowed = pipeline.privacyMode === "standard" || visionReaderIsLocal(pipeline.vision);
-  const patchForAffected = { visionFallback: true, quality: "good" as const };
+  const patchForAffected = SMARTEST_PATCH;
   if (affected.length > 0 && (smartAllowed || patchHolds(pipeline, patchForAffected))) {
     const patch = patchForAffected;
     // Already configured this way: the pages predate the setting, so only reprocessing helps.
@@ -888,14 +896,16 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     const why = !pipeline.visionFallback
       ? "Vision is off, so nothing reads text from page images."
       : !qualityAllowsVision(pipeline)
-        ? "Fast quality never reads pages with OCR or vision."
-        : "Page triage did not send them to vision.";
+        ? "Fastest with Read scans off never reads pages with OCR or vision."
+        : ladderForbidsVision(pipeline)
+          ? "Fastest reads scans with OCR only and never sends a page to vision."
+          : "Page triage did not send them to vision.";
     recs.push({
       id: settingInPlace ? "reprocess-with-vision" : pipeline.visionFallback ? "vision-all-pages" : "turn-on-vision",
       severity: "high",
-      title: settingInPlace ? "Reprocess scanned pages with vision" : pipeline.visionFallback ? "Read every page with vision" : "Turn on vision for scanned pages",
+      title: settingInPlace ? "Reprocess scanned pages with vision" : "Switch to Smartest for scanned pages",
       reason: settingInPlace
-        ? `${evidence}. Vision already reads every page, so these files were processed before that setting (or before the per-file vision page limit was removed).`
+        ? `${evidence}. The project already uses Smartest, so these files were processed before that setting (or before the per-file vision page limit was removed).`
         : `${evidence}. ${why}`,
       effect: settingInPlace
         ? `Reprocess the ${plural(affectedDocIds.length, "affected file")} so ${agree(affectedDocIds.length, "its", "their")} scanned pages are read from the page images.`
@@ -914,22 +924,22 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
 
   if (keptAsImage.length > 0) {
     const ids = [...new Set(keptAsImage.map((page) => page.documentId))];
-    const patch = { visionFallback: true, quality: "auto" as const };
-    const settingInPlace = patchHolds(pipeline, patch) || pipeline.quality === "good";
+    const patch = READ_SCANS_PATCH;
+    const settingInPlace = qualityAllowsVision(pipeline);
     const estimate = reprocessEstimate(observed, ids, (doc) => keptAsImage.filter((page) => page.documentId === doc.id).length, vision.cents);
     recs.push({
       id: "fast-kept-as-image", severity: "medium",
       title: settingInPlace ? "Reprocess pages kept as images" : "Make pages kept as images searchable",
-      reason: `${plural(keptAsImage.length, "page")} in ${plural(ids.length, "file")} had no text layer and ${agree(keptAsImage.length, "was", "were")} kept as ${agree(keptAsImage.length, "a page image", "page images")} in Fast mode, so ${agree(keptAsImage.length, "its", "their")} text was not read and cannot be searched.${
-        settingInPlace ? " The project no longer uses Fast, so these files were processed before that change." : ""}`,
+      reason: `${plural(keptAsImage.length, "page")} in ${plural(ids.length, "file")} had no text layer and ${agree(keptAsImage.length, "was", "were")} kept as ${agree(keptAsImage.length, "a page image", "page images")} with Read scans off, so ${agree(keptAsImage.length, "its", "their")} text was not read and cannot be searched.${
+        settingInPlace ? " The project now reads scans, so these files were processed before that change." : ""}`,
       effect: settingInPlace
         ? `Reprocess the ${plural(ids.length, "affected file")} so ${agree(keptAsImage.length, "this page is", "these pages are")} read.`
-        : `Switch processing quality to Auto (reads only the pages that need it, ${qualityModePriceRange("auto")} per 1,000 pages) or Good (a vision model reads every page, ${qualityModePriceRange("good")} per 1,000 pages). Applies to new uploads; reprocess the ${plural(ids.length, "affected file")} to read existing pages.`,
+        : `Turn Read scans on (Fastest reads scans and images with OCR, ${qualityModePriceRange("fastest")} per 1,000 pages) or switch to Smartest (a vision model reads them, ${qualityModePriceRange("smartest")} per 1,000 pages). Applies to new uploads; reprocess the ${plural(ids.length, "affected file")} to read existing pages.`,
       affectedPages: keptAsImage.length, affectedDocuments: ids.length,
       cost: {
         centsPer100Pages: round(vision.cents * 100, 2),
         reprocessCents: round(estimate.cents, 2),
-        basis: `Pages read by a vision model bill as Vision pages (${qualityModePriceRange("good")} per 1,000 pages); vision about ${formatCents(vision.cents)} per page (${vision.basis}).`,
+        basis: `Pages read by OCR bill as Scan pages and pages read by a vision model as Vision pages (${qualityModePriceRange("smartest")} per 1,000 pages under Smartest); vision about ${formatCents(vision.cents)} per page (${vision.basis}).`,
       },
       patch: settingInPlace ? null : patch,
       reprocessDocumentIds: ids,
@@ -995,21 +1005,21 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   }
 
   const capped = ocrEscalationCapped(observed);
-  // Under Good a vision model reads every page anyway: the cap is not what kept these pages on their OCR read.
-  if (capped.pages > 0 && pipeline.quality !== "good") {
+  // Under Smartest a vision model reads scans directly: the cap is not what kept these pages on their OCR read.
+  if (capped.pages > 0 && !patchHolds(pipeline, SMARTEST_PATCH)) {
     const rich = pageCredits("rich", capped.pages);
     recs.push({
       id: "ocr-escalation-cap", severity: "medium",
       title: "Some scanned pages kept their first OCR read",
       reason: `${plural(capped.pages, "page")} in ${plural(capped.documentIds.length, "file")} read poorly by OCR kept ${agree(capped.pages, "its", "their")} first OCR read because the per-document second-read cap (pages or attempts) was reached, so ${agree(capped.pages, "its", "their")} text may be incomplete or garbled.`,
-      effect: `Reprocess the ${plural(capped.documentIds.length, "affected file")} with quality Good (or switch the project to Good) so a vision model reads every page, these included. Good reads bill as Vision pages (${qualityModePriceRange("good")} per 1,000 pages).`,
+      effect: `Reprocess the ${plural(capped.documentIds.length, "affected file")} with quality Smartest (or switch the project to Smartest) so a vision model reads scanned pages directly, these included. Pages a vision model reads bill as Vision pages (${qualityModePriceRange("smartest")} per 1,000 pages for Smartest).`,
       affectedPages: capped.pages, affectedDocuments: capped.documentIds.length,
       cost: {
         centsPer100Pages: round(pageCredits("rich", 100), 2),
         reprocessCents: round(rich, 2),
-        basis: `Reprocessing is a new run: reading these ${plural(capped.pages, "page")} with a vision model bills them as Vision pages, about ${formatCents(rich)}, and the files' other pages are read with vision at Good too.`,
+        basis: `Reprocessing is a new run: reading these ${plural(capped.pages, "page")} with a vision model bills them as Vision pages, about ${formatCents(rich)}, and the files' other scanned or hard pages are read with vision under Smartest too.`,
       },
-      patch: { quality: "good" },
+      patch: SMARTEST_PATCH,
       reprocessDocumentIds: capped.documentIds,
     });
   }
