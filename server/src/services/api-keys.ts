@@ -9,7 +9,7 @@ import { sql } from "../db.js";
 import { ipInRange, parseCidr, parseIp } from "@docslurp/shared/client-ip";
 import { AllowedOriginError, normalizeAllowedOriginEntry, originMatchesAllowlist } from "../lib/allowed-origins.js";
 import { recordApiKeyRequest } from "./api-key-usage.js";
-import { boundedLookup } from "../lib/bounded-lookup.js";
+import { boundedLookup, LOOKUP_STATEMENT_TIMEOUT_MS } from "../lib/bounded-lookup.js";
 import { resolveDefaultOrganization, getOrganization, OrganizationError, withOrganizationLock } from "./organizations.js";
 
 type ApiKeyRow = {
@@ -663,14 +663,16 @@ export async function validateApiKey(
   requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
   /**
    * `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts).
-   * `timeoutMs` runs the lookup on the dedicated pool (selectKeyRowBounded): connection acquisition and a
-   * database-side statement_timeout, each with its own bound; it then rejects with a LookupTimeoutError (57014).
+   * The lookup always runs on the dedicated pool (selectKeyRowBounded): connection acquisition and a database-side
+   * statement_timeout, each with its own bound; it then rejects with a LookupTimeoutError (57014). `timeoutMs`
+   * (at most the statement bound) sets the hard timer.
    */
   options: { recordUsage?: boolean; timeoutMs?: number } = {},
 ): Promise<ValidatedKey | null> {
   const keyHash = hashKey(rawKey);
 
-  const rows = options.timeoutMs ? await selectKeyRowBounded(keyHash, options.timeoutMs) : await selectKeyRow(sql, keyHash);
+  // Every key lookup is bounded; there is no unbounded path (a stall must never hold the caller).
+  const rows = await selectKeyRowBounded(keyHash, options.timeoutMs ?? LOOKUP_STATEMENT_TIMEOUT_MS);
   const [row] = rows;
 
   // api_keys.org_id is NOT NULL (0125); refusing a key without one anyway keeps this fail-closed if that ever changes.

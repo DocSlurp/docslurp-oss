@@ -41,12 +41,17 @@ describe.skipIf(!url)("credential lookups under a database stall (real PostgreSQ
     const { requestContextMiddleware } = await import("../lib/request-context.js");
     const { mcpAuth } = await import("../middleware/mcp-auth.js");
     const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
+    const { sessionAuth } = await import("../middleware/session-auth.js");
+    const { whoamiRoutes } = await import("../routes/whoami.js");
     app = new Hono();
     app.use("*", requestContextMiddleware);
     app.use("/v1/mcp", mcpAuth);
     app.post("/v1/mcp", (c) => c.text("ok"));
-    app.use("/v1/whoami", apiKeyAuth);
-    app.get("/v1/whoami", (c) => c.text("ok"));
+    app.use("/v1/keyed", apiKeyAuth);
+    app.get("/v1/keyed", (c) => c.text("ok"));
+    // REST routes that accept bearers authenticate them in sessionAuth (API keys and `dscli_` tokens).
+    app.use("/v1/whoami", sessionAuth);
+    app.route("/v1/whoami", whoamiRoutes);
   }, 120_000);
   afterAll(async () => { await lookup?.end(); await sql?.end(); await authPool?.end(); });
 
@@ -75,7 +80,7 @@ describe.skipIf(!url)("credential lookups under a database stall (real PostgreSQ
         ...Array.from({ length: 3 }, (_, i) => timed(app.request("/v1/mcp", {
           method: "POST", headers: { "content-type": "application/json", Authorization: `Bearer dsmcp_${"x".repeat(40)}${i}` }, body: "{}",
         }))),
-        ...Array.from({ length: 3 }, () => timed(app.request("/v1/whoami", { headers: { Authorization: `Bearer ${KEY}` } }))),
+        ...Array.from({ length: 3 }, () => timed(app.request("/v1/keyed", { headers: { Authorization: `Bearer ${KEY}` } }))),
       ];
       await new Promise((resolve) => setTimeout(resolve, 200));
       // Mid-stall: lookups hold only the lookup pool's connections.
@@ -98,6 +103,39 @@ describe.skipIf(!url)("credential lookups under a database stall (real PostgreSQ
       holder.release();
     }
     // The stall ends: the pool is healthy and the key authenticates.
+    expect((await app.request("/v1/keyed", { headers: { Authorization: `Bearer ${KEY}` } })).status).toBe(200);
+  }, 30_000);
+
+  it("bounds REST bearer auth in sessionAuth (dscli_ on /v1/whoami) under an OAuth stall, and serves sign-in", async () => {
+    const holder = await sql.reserve();
+    await holder`begin`;
+    await holder`lock table mcp_oauth_tokens in access exclusive mode`;
+    try {
+      const started = Date.now();
+      const requests = Array.from({ length: 6 }, (_, i) => Promise.resolve(app.request("/v1/whoami", {
+        headers: { Authorization: `Bearer dscli_${"y".repeat(40)}${i}` },
+      })).then((response: Response) => ({ status: response.status, retryAfter: response.headers.get("Retry-After"), ms: Date.now() - started })));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const [{ count }] = await sql`select count(*)::int as count from pg_stat_activity where application_name = 'docslurp-auth-lookup'`;
+      expect(count).toBeLessThanOrEqual(LOOKUP_POOL_MAX);
+      // Sign-in's pool is not the lookups' pool: served at once, mid-stall.
+      const signInStarted = Date.now();
+      await authPool.query(`select id from "user" where id = 'bu'`);
+      expect(Date.now() - signInStarted).toBeLessThan(500);
+      for (const outcome of await Promise.all(requests)) {
+        expect(outcome.status).toBe(503);
+        expect(outcome.retryAfter).toBeTruthy();
+        expect(outcome.ms).toBeLessThan(8_500);
+      }
+    } finally {
+      await holder`rollback`;
+      holder.release();
+    }
+    // After the stall the lookup runs: an unknown token is refused as invalid (401), never unavailable,
+    // and a real key reads its identity through the same middleware.
+    const refused = await app.request("/v1/whoami", { headers: { Authorization: `Bearer dscli_${"y".repeat(41)}` } });
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get("www-authenticate")).toContain("invalid_token");
     expect((await app.request("/v1/whoami", { headers: { Authorization: `Bearer ${KEY}` } })).status).toBe(200);
   }, 30_000);
 });

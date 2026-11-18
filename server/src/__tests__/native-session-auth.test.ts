@@ -49,7 +49,8 @@ const headers = { authorization: "Bearer native-fixture" };
 describe("native resource bearer authentication boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.apiKey.mockResolvedValue({ type: "apiKey" });
+    // A resolved key actor carries its key (session auth records one usage for it).
+    mocks.apiKey.mockResolvedValue({ type: "apiKey", userId: "u", apiKey: { keyId: "k" } });
     mocks.session.mockResolvedValue(null);
   });
 
