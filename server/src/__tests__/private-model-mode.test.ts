@@ -98,6 +98,68 @@ describe("private model mode: reranking", () => {
   });
 });
 
+describe("private model mode: rerank response handling", () => {
+  beforeEach(() => {
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    vi.stubEnv("DOCSLURP_PRIVATE_RERANK_MODEL", RERANK);
+  });
+
+  it("accepts the text-embeddings-inference bare array shape", async () => {
+    http.mockResolvedValue(Response.json([{ index: 0, score: 0.2 }, { index: 1, score: 0.8 }]));
+    const input = rerankArgs();
+    expect((await rerankHosted(input)).map((chunk) => chunk.id)).toEqual(["b", "a"]);
+    expect(input.session.diagnostics().hostedRerank).toMatchObject({ provider: "private", status: "success" });
+  });
+
+  it.each([
+    ["a duplicate index", [{ index: 0, score: 0.2 }, { index: 0, score: 0.8 }]],
+    ["a non-finite score", { results: [{ index: 0, relevance_score: 0.5 }, { index: 1, relevance_score: "Infinity" }] }],
+    ["an index out of range", { results: [{ index: 0, relevance_score: 0.5 }, { index: 7, relevance_score: 0.4 }] }],
+  ])("falls back to keyword ranking on %s", async (_label, body) => {
+    http.mockResolvedValue(Response.json(body));
+    const input = rerankArgs();
+    expect(await rerankHosted(input)).toEqual(rerankBM25(input.query, chunks));
+    expect(input.session.diagnostics().hostedRerank).toMatchObject({ reason: "invalid_scores" });
+  });
+
+  it("refuses an oversized response", async () => {
+    http.mockResolvedValue(new Response(JSON.stringify({ results: [{ index: 0, relevance_score: 0.5 }, { index: 1, relevance_score: 0.4 }], pad: "x".repeat(300_000) })));
+    const input = rerankArgs();
+    expect(await rerankHosted(input)).toEqual(rerankBM25(input.query, chunks));
+    expect(input.session.diagnostics().hostedRerank).toMatchObject({ reason: "invalid_scores" });
+  });
+
+  it("sends nothing for too many candidates or an oversized document", async () => {
+    const many = Array.from({ length: 51 }, (_, index) => ({ id: `c${index}`, text: `candidate ${index}`, score: 1 }));
+    await rerankHosted({ ...rerankArgs(), chunks: many });
+    await rerankHosted({ ...rerankArgs(), chunks: [{ id: "big", text: "x".repeat(30_001), score: 1 }] });
+    expect(http).not.toHaveBeenCalled();
+  });
+
+  it("names no endpoint alias, model or host in caller-visible diagnostics", async () => {
+    http.mockResolvedValue(Response.json({ results: [{ index: 0, relevance_score: 0.9 }, { index: 1, relevance_score: 0.1 }] }));
+    const input = rerankArgs();
+    await rerankHosted(input);
+    expect(JSON.stringify(input.session.diagnostics().hostedRerank)).not.toMatch(/gpu|acme|example\.com/);
+  });
+});
+
+describe("private model mode: query embedding", () => {
+  it("an unmapped embedding service skips the vector leg with a distinct diagnostic", async () => {
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    const { prepareSearchSessionRetrievalPlan } = await import("../search/session-planner.js");
+    const { normalizePipelineFeatures } = await import("@docslurp/shared");
+    const journal = session();
+    const plan = await prepareSearchSessionRetrievalPlan({
+      query: "flight to London", userId: "u", options: { searchMode: "hybrid" } as never, effectiveOptions: { searchMode: "hybrid" } as never,
+      projectId: "w", orgId: "o", projectSettings: {}, embedding: normalizePipelineFeatures({}).embedding, privacyMode: "standard", session: journal,
+    });
+    expect(await plan.queryVector).toBeNull();
+    expect(journal.diagnostics().embeddingUnmapped).toMatchObject({ reason: "privacy-mode" });
+    expect(http).not.toHaveBeenCalled();
+  });
+});
+
 describe("private model mode: text and speech-to-text", () => {
   it("chat text uses the mapped model for every project in private mode and none when unmapped", () => {
     vi.stubEnv("DOCSLURP_MODEL_MODE", "private");

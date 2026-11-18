@@ -64,6 +64,22 @@ export function parseIndexConfigs(value: unknown): IndexConfigMap {
   return out;
 }
 
+/**
+ * A project's pipeline and index configs as search uses them under the effective model mode. Where the operator's
+ * private model replaces the stored embedding route, documents built before the switch carry the stored config's hash,
+ * which `index_configs` never recorded when the project's config did not change; the stored config is added for them, so
+ * search serves them through it (or skips them, with a diagnostic, when its model is now refused) instead of refusing
+ * the whole search as an unknown index.
+ */
+export function effectiveProjectIndexing(stored: PipelineFeatures, indexConfigs: IndexConfigMap): { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap } {
+  const pipeline = applyPrivateModelMode(stored);
+  if (pipeline === stored) return { pipeline, indexConfigs };
+  const storedConfig = indexConfigOf(stored);
+  const storedHash = indexConfigHash(storedConfig);
+  if (storedHash === indexConfigHash(indexConfigOf(pipeline)) || indexConfigs[storedHash]) return { pipeline, indexConfigs };
+  return { pipeline, indexConfigs: { ...indexConfigs, [storedHash]: storedConfig } };
+}
+
 /** The embedding config that reproduces a stored index config's query vectors. */
 export function embeddingConfigFor(current: EmbeddingConfig, config: IndexConfig): EmbeddingConfig {
   if (config.normalize === undefined) throw new Error("Stored index normalization is unknown; rebuild the index before vector search");

@@ -40,11 +40,39 @@ export function privateRerankModelFor(privacyMode: PrivacyMode): string | undefi
   return privateServiceModelFor("rerank", privacyMode);
 }
 
-// The `/rerank` response vLLM, TEI-compatible routers, Jina and Cohere serve.
-const privateRerankResponseSchema = z.object({
-  results: z.array(z.object({ index: z.number().int().nonnegative(), relevance_score: z.number().finite() }).passthrough()),
-  usage: z.object({ total_tokens: z.number().int().nonnegative().optional(), prompt_tokens: z.number().int().nonnegative().optional() }).passthrough().optional(),
-}).passthrough();
+// The `/rerank` responses private servers return: vLLM, Jina and Cohere (`{results: [{index, relevance_score}]}`) and
+// text-embeddings-inference (a bare `[{index, score}]` array).
+const rerankUsageSchema = z.object({ total_tokens: z.number().int().nonnegative().optional(), prompt_tokens: z.number().int().nonnegative().optional() }).passthrough();
+const privateRerankResponseSchema = z.union([
+  z.object({
+    results: z.array(z.object({ index: z.number().int().nonnegative(), relevance_score: z.number().finite() }).passthrough()),
+    usage: rerankUsageSchema.optional(),
+  }).passthrough().transform((body) => ({ results: body.results.map((result) => ({ index: result.index, score: result.relevance_score })), usage: body.usage })),
+  z.array(z.object({ index: z.number().int().nonnegative(), score: z.number().finite() }).passthrough())
+    .transform((results) => ({ results: results.map((result) => ({ index: result.index, score: result.score })), usage: undefined })),
+]);
+/** Largest private rerank response read; a scores list for 50 candidates is a few KB. */
+export const PRIVATE_RERANK_MAX_RESPONSE_BYTES = 256 * 1024;
+
+async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) throw Error("response too large");
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw Error("response too large");
+    }
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
 
 /**
  * Model reranking on the operator's private endpoint (`POST <baseUrl>/rerank`). The route, URL and credentials come
@@ -62,10 +90,10 @@ async function rerankPrivate(args: {
   const startedAt = performance.now();
   const limits = hostedRerankLimits();
   let reason = "missing_scope";
-  let alias: string | undefined;
   let inputTokens = 0;
+  // Diagnostics reach the caller: they name no endpoint alias, model or host.
   const diagnostic = (status: "success" | "fallback") => args.session.recordDiagnostic("hostedRerank", {
-    provider: "private", ...(alias ? { endpointAlias: alias } : {}), status,
+    provider: "private", status,
     ...(status === "fallback" ? { reason, fallback: "bm25" } : {}),
     candidates: args.chunks.length, requests: 1, inputTokens, durationMs: performance.now() - startedAt,
   });
@@ -74,7 +102,7 @@ async function rerankPrivate(args: {
     if (!scope?.orgId || !scope.projectId) throw Error();
     reason = "invalid_input";
     if (!args.query.trim() || args.chunks.length > HOSTED_RERANK_MAX_CANDIDATES || new Set(args.chunks.map(c => c.id)).size !== args.chunks.length
-      || args.chunks.some(c => !c.id || !c.text.trim())) throw Error();
+      || args.chunks.some(c => !c.id || !c.text.trim() || Buffer.byteLength(args.query) + Buffer.byteLength(c.text) > 30_000)) throw Error();
     reason = "spend_blocked";
     await assertCanSpend(scope.orgId, scope.projectId, { kind: "interactive" });
     reason = "privacy_blocked";
@@ -82,7 +110,6 @@ async function rerankPrivate(args: {
       privacyMode: args.privacyMode, modelUri: args.modelUri, capability: "rerank", operation: "api.search.rerank",
       auditScope: { projectId: scope.projectId },
     });
-    alias = call.route.alias;
     reason = "provider_error";
     const requestStarted = Date.now();
     const response = await call.fetch(`${call.baseUrl}/rerank`, {
@@ -93,13 +120,13 @@ async function rerankPrivate(args: {
     reason = "provider_http";
     if (!response.ok) throw Error();
     reason = "invalid_scores";
-    const parsed = privateRerankResponseSchema.safeParse(await response.json().catch(() => null));
+    const parsed = privateRerankResponseSchema.safeParse(await readBoundedJson(response, PRIVATE_RERANK_MAX_RESPONSE_BYTES).catch(() => null));
     if (!parsed.success) throw Error();
     // Filled, not sparse: `some` skips holes, so a missing index must read as undefined.
     const scores = Array.from<number | undefined>({ length: args.chunks.length });
     for (const result of parsed.data.results) {
       if (result.index >= args.chunks.length || scores[result.index] !== undefined) throw Error();
-      scores[result.index] = result.relevance_score;
+      scores[result.index] = result.score;
     }
     if (scores.some(score => score === undefined)) throw Error();
     inputTokens = parsed.data.usage?.prompt_tokens ?? parsed.data.usage?.total_tokens ?? 0;

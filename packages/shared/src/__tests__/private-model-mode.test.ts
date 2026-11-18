@@ -17,6 +17,12 @@ import {
   privateServiceModelFor,
   PrivateModelModeConfigError,
   resetPrivateModelModeReportsForTests,
+  resetPrivateModelPipelineReportsForTests,
+  effectiveModelMode,
+  lookupPrivateServiceModel,
+  parsePrivateModelEndpointRegistry,
+  runModelModeStamp,
+  stampRunModelMode,
   resolveEmbeddingRoute,
   setPrivateModelEndpointRegistryForTests,
   validatePrivateModelModeAtStartup,
@@ -55,7 +61,10 @@ const fullMap = {
 beforeEach(() => {
   setPrivateModelEndpointRegistryForTests([endpoint]);
   resetPrivateModelModeReportsForTests();
+  resetPrivateModelPipelineReportsForTests();
 });
+
+const parsedEndpoint = () => parsePrivateModelEndpointRegistry(JSON.stringify([endpoint])).endpoints[0]!;
 
 afterEach(() => {
   setPrivateModelEndpointRegistryForTests(undefined);
@@ -104,9 +113,11 @@ describe("service map", () => {
     ["rerank", "DOCSLURP_PRIVATE_RERANK_MODEL", "llm://openrouter/acme/rerank"],
     ["router", "DOCSLURP_PRIVATE_ROUTER_MODEL", EMBED],
     ["stt", "DOCSLURP_PRIVATE_STT_MODEL", "llm://private/gpu/acme/missing"],
-  ] as const)("an invalid %s mapping fails startup and reads as unmapped", (service, name, value) => {
+  ] as const)("an invalid %s mapping fails startup in private mode, warns in hosted mode, and reads as unmapped", (service, name, value) => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    expect(() => validatePrivateModelModeAtStartup({ [name]: value })).toThrow(PrivateModelModeConfigError);
+    expect(() => validatePrivateModelModeAtStartup({ DOCSLURP_MODEL_MODE: "private", [name]: value })).toThrow(PrivateModelModeConfigError);
+    // An existing hosted deployment keeps starting: the service is unmapped, with a warning.
+    expect(validatePrivateModelModeAtStartup({ [name]: value }).warnings.join("\n")).toMatch(/invalid mapping ignored/);
     vi.stubEnv(name, value);
     expect(privateServiceModel(service)).toBeUndefined();
     vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
@@ -130,15 +141,27 @@ describe("service map", () => {
   it("startup lists unmapped services in private mode and refuses hosted provider keys", () => {
     const env = { DOCSLURP_MODEL_MODE: "private", DOCSLURP_PRIVATE_TEXT_MODEL: TEXT };
     const result = validatePrivateModelModeAtStartup(env);
-    expect(result.info[0]).toContain(`text=${TEXT}`);
-    expect(result.warnings[0]).toMatch(/vision \(DOCSLURP_PRIVATE_VISION_MODEL\).*embedding.*rerank.*router.*stt/);
-    expect(() => validatePrivateModelModeAtStartup({ ...env, OPENROUTER_API_KEY: "sk-or-secret" })).toThrow(/unset OPENROUTER_API_KEY/);
+    expect(result.info[0]).toMatch(new RegExp(`map_digest=[0-9a-f]{8} mapped=text=${TEXT.replace(/[/.]/g, "\\$&")}`));
+    expect(result.warnings[0]).toMatch(/vision \(DOCSLURP_PRIVATE_VISION_MODEL\).*embedding.*rerank.*stt/);
+    expect(result.warnings.join("\n")).toMatch(/DOCSLURP_PRIVATE_ROUTER_MODEL is reserved/);
+    for (const key of ["OPENROUTER_API_KEY", "HF_TOKEN", "TAVILY_API_KEY", "EXA_API_KEY", "FIRECRAWL_API_KEY"]) {
+      expect(() => validatePrivateModelModeAtStartup({ ...env, [key]: "secret-value" })).toThrow(new RegExp(`unset ${key}`));
+    }
     expect(() => validatePrivateModelModeAtStartup({ ...env, OPENROUTER_API_KEY: "sk-or-secret" })).not.toThrow(/sk-or-secret/);
-    // A registered endpoint's own token variable is not a hosted key.
+    // An explicit operator opt-out keeps a key for a non-model use, with a warning.
+    const allowed = validatePrivateModelModeAtStartup({ ...env, DEEPINFRA_API_KEY: "k", DOCSLURP_PRIVATE_MODE_ALLOW_KEYS: "DEEPINFRA_API_KEY" });
+    expect(allowed.warnings.join("\n")).toMatch(/keeps hosted credentials DEEPINFRA_API_KEY/);
+    // A registered endpoint may not borrow a hosted provider's key name for its token.
     setPrivateModelEndpointRegistryForTests([{ ...endpoint, auth: { tokenEnv: "OPENAI_API_KEY" } }]);
-    expect(() => validatePrivateModelModeAtStartup({ ...env, OPENAI_API_KEY: "vllm-token" })).not.toThrow();
+    expect(() => validatePrivateModelModeAtStartup({ ...env, OPENAI_API_KEY: "vllm-token" })).toThrow(/must not reuse a hosted provider key name/);
     // Hosted mode keeps hosted keys and warns about nothing.
     expect(validatePrivateModelModeAtStartup({ OPENROUTER_API_KEY: "k" }).warnings).toEqual([]);
+  });
+
+  it("the map digest differs between modes and maps", () => {
+    const hosted = validatePrivateModelModeAtStartup({ DOCSLURP_PRIVATE_TEXT_MODEL: TEXT }).info[0];
+    const privateMode = validatePrivateModelModeAtStartup({ DOCSLURP_MODEL_MODE: "private", DOCSLURP_PRIVATE_TEXT_MODEL: TEXT }).info[0];
+    expect(hosted!.match(/map_digest=(\w+)/)![1]).not.toBe(privateMode!.match(/map_digest=(\w+)/)![1]);
   });
 });
 
@@ -182,6 +205,81 @@ describe("applyPrivateModelMode", () => {
       .toThrow(PrivacyModeViolationError);
   });
 
+  it("a stored private route is kept only when it is the service's mapped URI", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    setPrivateModelEndpointRegistryForTests([endpoint, { ...endpoint, alias: "other" }]);
+    stubEnv({ DOCSLURP_MODEL_MODE: "private", DOCSLURP_PRIVATE_TEXT_MODEL: TEXT });
+    const other = "llm://private/other/acme/text-llm";
+    const base = standard();
+    const pipeline = {
+      ...base,
+      textGeneration: { model: other, models: { "document-summary": other } },
+      structuredExtraction: { ...base.structuredExtraction, model: other },
+      vision: { ...base.vision, modelUri: "llm://private/other/acme/vision-vlm", target: "private" as const },
+      embedding: { ...base.embedding, modelUri: "llm://private/other/acme/embed", target: "private" as const },
+    };
+    const next = applyPrivateModelMode(pipeline);
+    // Text is mapped: the other alias is replaced by the mapped model.
+    expect(next.textGeneration).toMatchObject({ model: TEXT, models: {} });
+    expect(next.structuredExtraction.model).toBe(TEXT);
+    // Vision and embedding are unmapped: the other alias is dropped back to the profile's route, which the guard refuses.
+    expect(next.vision.modelUri).not.toContain("private/other");
+    expect(next.embedding.modelUri).not.toContain("private/other");
+    expect(warn).toHaveBeenCalled();
+    // The mapped URI itself is kept.
+    vi.stubEnv("DOCSLURP_PRIVATE_VISION_MODEL", VISION);
+    expect(applyPrivateModelMode({ ...pipeline, vision: { ...pipeline.vision, modelUri: VISION } }).vision.modelUri).toBe(VISION);
+  });
+
+  it("unmapped text keeps a hosted route (refused by the guard) and drops another private alias", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    const base = standard();
+    expect(applyPrivateModelMode({ ...base, textGeneration: { model: "openai/gpt-5-mini", models: {} } }).textGeneration.model).toBe("openai/gpt-5-mini");
+    expect(applyPrivateModelMode({ ...base, textGeneration: { model: TEXT, models: {} } }).textGeneration.model).toBeNull();
+  });
+
+  it("the private embedding drops the hosted profile's settings", () => {
+    stubEnv({ ...fullMap, DOCSLURP_MODEL_MODE: "private" });
+    const base = standard();
+    const next = applyPrivateModelMode({ ...base, embedding: { ...base.embedding, normalize: false, lateChunking: true, task: "query" as const } });
+    expect(next.embedding).toMatchObject({ modelUri: EMBED, target: "private", normalize: true, lateChunking: false });
+    expect(next.embedding).not.toHaveProperty("task");
+    expect(next.embedding).not.toHaveProperty("dimensions");
+  });
+
+  it("an embedding mapping without dimensions is refused", () => {
+    const lookup = lookupPrivateServiceModel("embedding", {
+      env: { DOCSLURP_PRIVATE_EMBEDDING_MODEL: EMBED },
+      registry: { endpoints: [{ ...parsedEndpoint(), models: [{ id: "acme/embed", capability: "embedding" } as never] }] },
+    });
+    expect(lookup).toMatchObject({ ok: false, unmapped: false, reason: expect.stringMatching(/declares no dimensions/) });
+  });
+
+  it("a run stamped private is private in a worker whose env says hosted", () => {
+    stubEnv({ DOCSLURP_MODEL_MODE: "private" });
+    const stamped = stampRunModelMode(standard());
+    expect(stamped.modelMode).toBe("private");
+    expect(runModelModeStamp(JSON.parse(JSON.stringify(stamped)))).toEqual({ modelMode: "private" });
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "hosted");
+    expect(stampRunModelMode(standard())).not.toHaveProperty("modelMode");
+    vi.stubEnv("DOCSLURP_PRIVATE_TEXT_MODEL", TEXT);
+    const next = applyPrivateModelMode(stamped);
+    expect(next.privacyMode).toBe("local-only");
+    expect(next.textGeneration.model).toBe(TEXT);
+    expect(() => assertProviderAllowed(next.privacyMode, { provider: "openrouter", model: "x/y", operation: "t", target: "hosted" })).toThrow(PrivacyModeViolationError);
+    expect(effectiveModelMode(stamped)).toBe("private");
+    // An unstamped standard run in hosted mode is unchanged.
+    const plain = standard();
+    expect(applyPrivateModelMode(plain)).toBe(plain);
+  });
+
+  it("refusals in private mode name the deployment mode", () => {
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    expect(() => assertProviderAllowed("standard", { provider: "openrouter", model: "x/y", operation: "t", target: "hosted" }))
+      .toThrow(/Deployment model mode 'private'/);
+  });
+
   it("does not apply the hosted DOCSLURP_VISION_MODEL_URI default in private mode", () => {
     const pipeline = standard();
     const env = { DOCSLURP_VISION_MODEL_URI: "llm://openrouter/qwen/qwen3-vl-8b-instruct", DOCSLURP_MODEL_MODE: "private" };
@@ -194,7 +292,8 @@ describe("index identity and provenance", () => {
     stubEnv({ ...fullMap, DOCSLURP_MODEL_MODE: "private" });
     const hosted = normalizePipelineFeatures({ privacyMode: "standard" });
     const privateIndex = indexConfigOf(applyPrivateModelMode(hosted));
-    expect(privateIndex).toMatchObject({ embeddingModel: EMBED, dims: 768 });
+    expect(privateIndex).toMatchObject({ embeddingModel: EMBED, normalize: true });
+    expect(privateIndex.chunking.lateChunking).toBe(false);
     expect(indexConfigHash(privateIndex)).not.toBe(indexConfigHash(indexConfigOf(hosted)));
   });
 

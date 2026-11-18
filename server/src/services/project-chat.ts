@@ -3,7 +3,7 @@ import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/cha
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForProject, openRouterCall, privateTextModelForProject } from "../lib/privacy.js";
-import { type admitAutomaticCall, BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, reportAutomaticCallOutcome, requestsIngestReport } from "@docslurp/shared";
+import { type admitAutomaticCall, BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, privacyModeAllowsHosted, reportAutomaticCallOutcome, requestsIngestReport } from "@docslurp/shared";
 import { admittedChatFailover, failoverCandidates } from "./chat-failover.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
@@ -1158,7 +1158,9 @@ async function chatProjectInTurn(args: {
   if (args.model?.trim() && !isAdmin) throw new ChatModelNotAllowedError();
   const tierModels = await loadProjectChatTierModels(args.projectId);
   const resolved = resolveChatModelRequest({ requested: args.model, tier: args.tier, reasoning: args.reasoning, isAdmin, tierModels });
-  if (args.speedBoost === true && context.privacyMode !== "standard") throw new ChatModelNotAllowedError();
+  // Speed boost and eval models are hosted: refused where hosted models are not allowed (privacy mode or private model mode).
+  if (args.speedBoost === true && !privacyModeAllowsHosted(context.privacyMode)) throw new ChatModelNotAllowedError();
+  if (args.model?.trim() && parsePrivateModelUri(args.model.trim()) === null && !privacyModeAllowsHosted(context.privacyMode)) throw new ChatModelNotAllowedError();
   const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true, tierModels);
   const policy: ChatTurnPolicy = {
     model: turnModel, failover: args.speedBoost !== true && resolved.source !== "eval",

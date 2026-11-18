@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import {
   apiError,
+  stampRunModelMode,
   chartTierForVisuals,
   extractionPolicyFromEnv,
   legacyQualityModeFor,
@@ -165,9 +166,10 @@ export function withRunEffective<T extends PipelineFeatures>(pipeline: T, env: R
     constraints: { privacyMode: pipeline.privacyMode, vision: pipeline.vision },
     policy: { ...extractionPolicyFromEnv(env), explicitChartsAllowed: true },
   });
-  if (!result.ok) return { ...pipeline, effective: runEffectiveExtraction(pipeline) };
+  // A run created in private model mode is stamped so: the worker then treats it as private whatever its own env says.
+  if (!result.ok) return stampRunModelMode({ ...pipeline, effective: runEffectiveExtraction(pipeline) }, env);
   const effective = runEffectiveExtraction(pipeline, result.capsApplied);
-  return { ...pipeline, effective: { ...effective, quality: result.quality, visuals: result.visuals, readsPages: effective.readsPages && result.quality !== "fastest" } };
+  return stampRunModelMode({ ...pipeline, effective: { ...effective, quality: result.quality, visuals: result.visuals, readsPages: effective.readsPages && result.quality !== "fastest" } }, env);
 }
 
 export type { QualityLevel, VisualsLevel };

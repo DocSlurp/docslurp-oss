@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyPrivateModelMode,
   normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   resolvePipelineTextModel,
+  runModelModeStamp,
+  stampRunModelMode,
   resolveVisionRoute,
   setPrivateModelEndpointRegistryForTests,
 } from "@docslurp/shared";
@@ -59,6 +62,18 @@ describe("worker private model mode", () => {
       model: resolvePipelineTextModel(pipeline, "document-summary"), privacyMode: pipeline.privacyMode,
     })).rejects.toMatchObject({ code: "PRIVACY_MODE_VIOLATION" });
     expect(http).not.toHaveBeenCalled();
+  });
+
+  it("a run stamped private by the API stays private in a worker whose env says hosted (as run-ledger loads it)", () => {
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    const stored = JSON.parse(JSON.stringify(stampRunModelMode(normalizePipelineFeatures({ privacyMode: "standard" }))));
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "hosted");
+    vi.stubEnv("DOCSLURP_PRIVATE_TEXT_MODEL", TEXT);
+    const pipeline = applyPrivateModelMode({ ...normalizeStoredPipelineFeatures(stored, "run r"), ...runModelModeStamp(stored) });
+    expect(pipeline.privacyMode).toBe("local-only");
+    expect(resolvePipelineTextModel(pipeline, "document-summary")).toBe(TEXT);
+    expect(buildRuntimeCatalog({ env: { OPENROUTER_API_KEY: "x" }, privacyMode: pipeline.privacyMode }).decisionModels
+      .filter((m) => m.availability.privacyClass === "hosted")).toEqual([]);
   });
 
   it("the page router admits no hosted target or decision model in private mode", () => {

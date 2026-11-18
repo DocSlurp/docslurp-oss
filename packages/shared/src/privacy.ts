@@ -11,7 +11,7 @@ import {
   type PrivateModelCapability,
   type PrivateModelRoute,
 } from "./private-endpoints.js";
-import { hostedModelsAllowed } from "./private-model-mode.js";
+import { hostedModelsAllowed, MODEL_MODE_ENV, modelMode } from "./private-model-mode.js";
 
 /**
  * Project privacy execution modes (`pipeline.privacyMode`).
@@ -118,8 +118,11 @@ export class PrivacyModeViolationError extends Error {
     readonly call: ProviderCallDescriptor,
   ) {
     super(
-      `Project privacy mode '${privacyMode}' blocks hosted AI call ${call.operation} ` +
-        `(${call.provider}/${call.model}); configure a local model route or switch the project to standard.`,
+      modelMode() === "private"
+        ? `Deployment model mode 'private' (${MODEL_MODE_ENV}) blocks hosted AI call ${call.operation} ` +
+          `(${call.provider}/${call.model}) for project privacy mode '${privacyMode}'; map the service to a private endpoint (DOCSLURP_PRIVATE_*_MODEL).`
+        : `Project privacy mode '${privacyMode}' blocks hosted AI call ${call.operation} ` +
+          `(${call.provider}/${call.model}); configure a local model route or switch the project to standard.`,
     );
     this.name = "PrivacyModeViolationError";
   }
@@ -169,7 +172,7 @@ export function buildBlockedPrivacyAuditEntry(args: {
 
 /** Console line for blocked calls, mirroring the `[ai-usage]` convention. */
 export function formatPrivacyBlockLog(mode: string, call: ProviderCallDescriptor): string {
-  return `[privacy] blocked operation=${call.operation} provider=${call.provider} model=${call.model} privacy_mode=${mode}`;
+  return `[privacy] blocked operation=${call.operation} provider=${call.provider} model=${call.model} privacy_mode=${mode} model_mode=${modelMode()}`;
 }
 
 // ---------------------------------------------------------------------------

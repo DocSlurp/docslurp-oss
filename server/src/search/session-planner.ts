@@ -1,6 +1,6 @@
 import type { PrivacyMode } from "@docslurp/shared";
 import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
-import { resolveEmbeddingRoute, type EmbeddingConfig } from "@docslurp/shared";
+import { isPrivacyModeViolation, resolveEmbeddingRoute, type EmbeddingConfig } from "@docslurp/shared";
 import {
   embedConfiguredText,
   generateOpenRouterText,
@@ -228,7 +228,13 @@ export async function prepareSearchSessionRetrievalPlan(args: {
     ? Promise.resolve(null)
     : options.queryVector
     ? Promise.resolve(options.queryVector)
-    : timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, projectId, orgId));
+    : timePhase("embed", () => embedQuery(effectiveQuery, embedding, session, privacyMode, projectId, orgId)).catch((error: unknown) => {
+      // The current index's model is refused (an unmapped embedding service in private model mode): the vector leg
+      // skips, visibly, and the lexical legs still answer.
+      if (!isPrivacyModeViolation(error)) throw error;
+      session.recordDiagnostic("embeddingUnmapped", { reason: "privacy-mode", service: "embedding" });
+      return null;
+    });
   queryVector.catch(() => undefined);
 
   // An explicit document selection already defines the retrieval scope. Summary

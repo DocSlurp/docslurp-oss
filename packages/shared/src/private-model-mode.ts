@@ -54,9 +54,11 @@ const SERVICE_CAPABILITIES: Readonly<Record<PrivateModelService, readonly Privat
 };
 
 /**
- * Hosted model-provider credentials. A private-mode deployment refuses to start while any is set (unless it is a
- * registered endpoint's own `auth.tokenEnv`), so no hosted call can authenticate even where a code path forgot the
- * privacy guard.
+ * Credentials of hosted model providers and other hosted services that receive content or queries. A private-mode
+ * deployment refuses to start while any is set, so no hosted call can authenticate even where a code path forgot the
+ * privacy guard. A registered endpoint may not use one of these names as its `auth.tokenEnv`. An operator who needs
+ * one for a non-model consumer (for example the DeepInfra capacity provider or vendor balance alerts) names it in
+ * `DOCSLURP_PRIVATE_MODE_ALLOW_KEYS`; startup then warns instead of refusing.
  */
 export const HOSTED_MODEL_PROVIDER_KEY_ENVS = [
   "OPENROUTER_API_KEY",
@@ -65,11 +67,26 @@ export const HOSTED_MODEL_PROVIDER_KEY_ENVS = [
   "DEEPINFRA_API_KEY",
   "DEEPINFRA_TOKEN",
   "GOOGLE_GENERATIVE_AI_API_KEY",
+  "GEMINI_API_KEY",
   "JINA_API_KEY",
   "PERPLEXITYAI_API_KEY",
   "PERPLEXITY_API_KEY",
   "LIQUID_API_KEY",
+  "MISTRAL_API_KEY",
+  "COHERE_API_KEY",
+  "VOYAGE_API_KEY",
+  "TOGETHER_API_KEY",
+  "FIREWORKS_API_KEY",
+  "GROQ_API_KEY",
+  "HF_TOKEN",
+  "HUGGINGFACE_API_KEY",
+  "TAVILY_API_KEY",
+  "EXA_API_KEY",
+  "FIRECRAWL_API_KEY",
 ] as const;
+
+/** Comma-separated hosted key names a private-mode deployment may keep (logged as a warning at startup). */
+export const PRIVATE_MODE_ALLOW_KEYS_ENV = "DOCSLURP_PRIVATE_MODE_ALLOW_KEYS";
 
 type EnvLike = Record<string, string | undefined>;
 
@@ -141,6 +158,9 @@ export function lookupPrivateServiceModel(
   for (const capability of SERVICE_CAPABILITIES[service]) {
     const lookup = lookupPrivateModelRoute({ ref: raw, capability, registry: options.registry });
     if (lookup.ok) {
+      if (service === "embedding" && !lookup.route.model.dimensions) {
+        return { ok: false, unmapped: false, reason: `${name}: embedding model '${lookup.route.model.id}' declares no dimensions` };
+      }
       return { ok: true, model: { service, modelUri: lookup.route.modelUri, capability, route: lookup.route } };
     }
     reasons.push(lookup.reason);
@@ -178,38 +198,60 @@ export function privateServiceModelFor(
   return privateServiceModel(service, env)?.modelUri;
 }
 
-/** Log line for a call refused because its service has no private mapping. */
-export function formatUnmappedServiceRefusal(service: PrivateModelService, operation: string, privacyMode: string | null | undefined): string {
-  return `[private-model-mode] refused operation=${operation} service=${service} mode=${modelMode()} privacy_mode=${privacyMode ?? "standard"} reason=${JSON.stringify(`${PRIVATE_SERVICE_MODEL_ENV[service]} is not set`)}`;
+/** Short, stable digest of the effective mode and map, logged by the API and the worker so a mismatch is visible. */
+export function privateModelMapDigest(mode: ModelMode, mapped: readonly string[]): string {
+  let hash = 0x811c9dc5;
+  for (const char of `${mode}|${[...mapped].sort().join(",")}`) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
 }
 
 /**
- * Startup validation for the API and the worker. Throws on an invalid mode, an invalid mapping (unknown alias, model
- * not registered with the service's capability, not a private URI) or, in private mode, a hosted model-provider key
- * that is set. Returns log lines; unmapped services in private mode are returned as warnings.
+ * Startup validation for the API and the worker. Throws on an invalid mode. In private mode it also throws on an
+ * invalid mapping (unknown alias, model not registered with the service's capability, not a private URI, an embedding
+ * model without dimensions), on a hosted provider key that is set and not allowed by `DOCSLURP_PRIVATE_MODE_ALLOW_KEYS`,
+ * and on a registered endpoint whose `tokenEnv` is a hosted provider key name. In hosted mode an invalid mapping is a
+ * warning and the service reads as unmapped, so a deployment that never used the map keeps starting. Returns log lines.
  */
 export function validatePrivateModelModeAtStartup(env: EnvLike = processEnv(), registry?: PrivateModelEndpointRegistry): { info: string[]; warnings: string[] } {
   const mode = parseModelMode(env[MODEL_MODE_ENV]);
   const resolvedRegistry = registry ?? privateModelEndpointRegistryFor(env);
   const problems: string[] = [];
+  const warnings: string[] = [];
   const mapped: string[] = [];
   const unmapped: PrivateModelService[] = [];
   for (const service of PRIVATE_MODEL_SERVICES) {
     const lookup = lookupPrivateServiceModel(service, { env, registry: resolvedRegistry });
     if (lookup.ok) mapped.push(`${service}=${lookup.model.modelUri}`);
     else if (lookup.unmapped) unmapped.push(service);
-    else problems.push(lookup.reason);
+    else if (mode === "private") problems.push(lookup.reason);
+    else warnings.push(`[private-model-mode] mode=hosted invalid mapping ignored (service unmapped): ${lookup.reason}`);
   }
   if (mode === "private") {
-    const tokenEnvs = new Set(resolvedRegistry.endpoints.map((endpoint) => endpoint.auth.tokenEnv));
-    const hostedKeys = HOSTED_MODEL_PROVIDER_KEY_ENVS.filter((name) => Boolean(env[name]?.trim()) && !tokenEnvs.has(name));
-    if (hostedKeys.length) problems.push(`${MODEL_MODE_ENV}=private refuses hosted model-provider credentials; unset ${hostedKeys.join(", ")}`);
+    const hostedNames = new Set<string>(HOSTED_MODEL_PROVIDER_KEY_ENVS);
+    const colliding = resolvedRegistry.endpoints.filter((endpoint) => hostedNames.has(endpoint.auth.tokenEnv));
+    if (colliding.length) {
+      problems.push(`private endpoint token variables must not reuse a hosted provider key name: ${colliding.map((endpoint) => `${endpoint.alias} (${endpoint.auth.tokenEnv})`).join(", ")}`);
+    }
+    const allowed = new Set((env[PRIVATE_MODE_ALLOW_KEYS_ENV] ?? "").split(",").map((name) => name.trim()).filter(Boolean));
+    const set = HOSTED_MODEL_PROVIDER_KEY_ENVS.filter((name) => Boolean(env[name]?.trim()));
+    const refused = set.filter((name) => !allowed.has(name));
+    const kept = set.filter((name) => allowed.has(name));
+    if (refused.length) problems.push(`${MODEL_MODE_ENV}=private refuses hosted provider credentials; unset ${refused.join(", ")} (or name them in ${PRIVATE_MODE_ALLOW_KEYS_ENV} for a non-model use)`);
+    if (kept.length) warnings.push(`[private-model-mode] mode=private keeps hosted credentials ${kept.join(", ")} (${PRIVATE_MODE_ALLOW_KEYS_ENV}); model calls stay refused by the privacy guard`);
   }
   if (problems.length) throw new PrivateModelModeConfigError(`private model configuration is invalid: ${problems.join("; ")}`);
-  const info = [`[private-model-mode] mode=${mode} mapped=${mapped.join(",") || "-"}`];
-  const warnings = mode === "private" && unmapped.length
-    ? [`[private-model-mode] mode=private unmapped services are unavailable (refused, never sent to a hosted model): ${unmapped.map((service) => `${service} (${PRIVATE_SERVICE_MODEL_ENV[service]})`).join(", ")}`]
-    : [];
+  const labels = mapped.map((entry) => (entry.startsWith("router=") ? `${entry} (reserved: no private decision adapter yet)` : entry));
+  const info = [`[private-model-mode] mode=${mode} map_digest=${privateModelMapDigest(mode, mapped)} mapped=${labels.join(",") || "-"}`];
+  if (mode === "private") {
+    const unavailable = unmapped.filter((service) => service !== "router");
+    if (unavailable.length) {
+      warnings.push(`[private-model-mode] mode=private unmapped services are unavailable (refused, never sent to a hosted model): ${unavailable.map((service) => `${service} (${PRIVATE_SERVICE_MODEL_ENV[service]})`).join(", ")}`);
+    }
+    warnings.push("[private-model-mode] mode=private page-router decisions use the heuristic or baseline router (DOCSLURP_PRIVATE_ROUTER_MODEL is reserved)");
+  }
   return { info, warnings };
 }
 

@@ -11,6 +11,7 @@ import {
   foldFullWidthAscii,
   type ProjectSearchSettings,
   normalizeHostedModelRef,
+  privacyModeAllowsHosted,
 } from "@docslurp/shared";
 
 import { generateOpenRouterText, resolveOpenRouterApiKey } from "../lib/ai.js";
@@ -207,7 +208,7 @@ export async function improveChatInstructions(args: {
     projectId: args.projectId,
     call: openRouterCall("api.chat-instructions.improve", model),
   });
-  if (!apiKey) throw new ImproveUnavailableError(privacyMode === "standard" ? "no_model_key" : "privacy_mode");
+  if (!apiKey) throw new ImproveUnavailableError(privacyModeAllowsHosted(privacyMode) ? "no_model_key" : "privacy_mode");
   // Spend admission before the call (402 when out of credits). It takes a short
   // interactive hold, so parallel Improve calls near a zero balance see each
   // other instead of all passing on the last credit.

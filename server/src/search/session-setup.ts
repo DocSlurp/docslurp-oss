@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveGeoDocumentScope } from "./geo-scope.js";
 import {
-  applyPrivateModelMode,
   defaultProjectSearchSettings,
   normalizePipelineFeatures,
   normalizeStoredPipelineFeatures,
@@ -24,7 +23,7 @@ import { loadCachedSearchAvailability, searchLanceDbNativeEnabled } from "./elig
 import type { SearchOptions } from "../services/search.js";
 import { createSearchSessionJournal, searchSessionWriteBehindEnabled, type SearchSessionJournal } from "./session.js";
 import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
-import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
+import { effectiveProjectIndexing, parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 import { clampToSearchMode, effectiveSearchMode } from "./search-mode.js";
 import { planSummaryTreeSearch, type SummaryTreeSearchPlan } from "./summary-tree.js";
@@ -319,7 +318,7 @@ async function readSearchProjectContext(projectId: string, userId: string, acces
   }
   let indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   try {
-    indexing = { pipeline: applyPrivateModelMode(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`)), indexConfigs: parseIndexConfigs(row.index_configs) };
+    indexing = effectiveProjectIndexing(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`), parseIndexConfigs(row.index_configs));
   } catch {
     // Fail closed, as loadProjectIndexing does.
     indexing = { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
@@ -540,11 +539,11 @@ export async function loadProjectIndexing(
       limit 1
     `;
     // Queries embed with the model new documents index with: the operator's private model where hosted ones are not allowed.
-    return { pipeline: applyPrivateModelMode(normalizeStoredPipelineFeatures(row?.pipeline ?? null, `project ${projectId}`)), indexConfigs: parseIndexConfigs(row?.index_configs) };
+    return effectiveProjectIndexing(normalizeStoredPipelineFeatures(row?.pipeline ?? null, `project ${projectId}`), parseIndexConfigs(row?.index_configs));
   } catch {
     // Fail closed: an unreadable or invalid pipeline must not fall back to the
     // standard (hosted-allowed) default and leak a private project's queries.
-    return { pipeline: applyPrivateModelMode({ ...normalizePipelineFeatures(null), privacyMode: "local-only" as const }), indexConfigs: {} };
+    return { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
   }
 }
 
