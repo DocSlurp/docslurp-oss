@@ -30,6 +30,7 @@ import {
   type PipelineFeatures,
   MAX_LOCATOR_BOXES,
   resolveEmbeddingRoute,
+  embeddingRouteSpaceUri,
   normalizePageNumber,
   normalizePageNumbers,
 } from "@docslurp/shared";
@@ -998,6 +999,7 @@ async function vectorSearch(
         and v.backend = 'lancedb'
         and v.embedding_model = ${embedding.model}
         and v.dimension = ${queryVector.length}
+        and coalesce(v.embedding_model_uri = ${embeddingRouteSpaceUri(embedding, queryVector.length)}::text, true)
     ),
     chain as (
       select c.id, d.id as node, d.deduped_from_document_id as next, 0 as depth
@@ -1181,7 +1183,7 @@ async function nativeVectorSearch(
 ): Promise<SearchChunk[] | null> {
   if (!nativeScopeSupported(options.filters)) return null;
   const embedding = resolveEmbeddingRoute(serving?.embedding ?? context.pipeline.embedding);
-  const set = await timePhase("vecEligible", () => loadEligibleDocuments({ projectId: context.projectId, embeddingModel: embedding.model, dimension: queryVector.length }));
+  const set = await timePhase("vecEligible", () => loadEligibleDocuments({ projectId: context.projectId, embeddingModel: embedding.model, dimension: queryVector.length, embeddingModelUri: embeddingRouteSpaceUri(embedding, queryVector.length) }));
   const documents = scopeEligibleDocuments(set, options.filters, options.runId)
     .filter((document) => document.vectorReady && matchesServingHash(document, serving?.hash));
   if (documents.length === 0) return [];
@@ -1263,7 +1265,7 @@ async function nativeTextSearch(
   if (Object.entries(context.indexConfigs).some(([hash, config]) => hash !== currentHash && !sameExceptNormalization(config, current))) return null;
   const embedding = resolveEmbeddingRoute(context.pipeline.embedding);
   const limit = options.limit ?? 20;
-  const set = await loadEligibleDocuments({ projectId: context.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions });
+  const set = await loadEligibleDocuments({ projectId: context.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, embeddingModelUri: embeddingRouteSpaceUri(embedding, embedding.dimensions) });
   const inScope = scopeEligibleDocuments(set, options.filters, options.runId);
   const native = inScope.filter((document) => document.vectorReady && !document.lanceStale);
   // Postgres FTS covers documents not in LanceDB yet (early lexical) and those whose rows are stale.
@@ -2145,7 +2147,7 @@ async function executeHybridSearch(
   const pageOnlyCompleted = async (): Promise<boolean> => {
     if (!native) return true;
     const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
-    const set = await loadEligibleDocuments({ projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions });
+    const set = await loadEligibleDocuments({ projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, embeddingModelUri: embeddingRouteSpaceUri(embedding, embedding.dimensions) });
     return set.pageOnlyCompletedDocuments > 0;
   };
 
@@ -2170,7 +2172,7 @@ async function executeHybridSearch(
         void warmLanceDbSearch({ orgId: native.orgId, projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
         // The summaries table too, but only when Postgres (the cached eligible set) reports ready trees: never a probe.
         if (treeMode) {
-          void loadEligibleDocuments({ projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions }).then((set) => {
+          void loadEligibleDocuments({ projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, embeddingModelUri: embeddingRouteSpaceUri(embedding, embedding.dimensions) }).then((set) => {
             const documentIds = set.documents.filter((document) => document.treeReady && !document.lanceStale).map((document) => document.id);
             if (documentIds.length === 0) return;
             return warmLanceDbSummaries({ orgId: native.orgId, projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, documentIds });

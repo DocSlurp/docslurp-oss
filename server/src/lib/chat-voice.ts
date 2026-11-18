@@ -8,6 +8,12 @@ import { recordUsageEvent, type UsageScope } from "./ai-usage.js";
 import { resolveOpenRouterApiKey } from "./ai.js";
 import { allowHostedCallForProject, openRouterCall } from "./privacy.js";
 
+
+/** The level and fixed request settings of a voice transcription, on its usage row (shared model-provenance.ts). */
+const VOICE_CALL_RECORD = {
+  modelClass: { role: "chat-voice" },
+  modelConfig: { operation: "chat-transcription", format: "wav", responseFormat: "json" },
+};
 export class ChatVoiceError extends Error {
   constructor(message: string, public status: 400 | 403 | 413 | 415 | 502 | 503, options?: ErrorOptions) {
     super(message, options);
@@ -186,6 +192,7 @@ export class ProjectChatVoice extends MastraVoice {
           audioBytes: audio.size,
           audioFormat: "wav",
           providerResponseMs: Math.round(performance.now() - providerStarted),
+          ...VOICE_CALL_RECORD,
         },
       },
     });
@@ -256,6 +263,7 @@ export class ProjectChatVoice extends MastraVoice {
           secondsSource: reportedSeconds !== undefined ? "provider" : "wav-header",
           tokenUsageReported: inputTokens !== undefined && outputTokens !== undefined,
           audioBytes: audio.size,
+          ...VOICE_CALL_RECORD,
         },
       },
     });

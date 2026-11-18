@@ -93,7 +93,7 @@ export async function markPages(
   documentId: string,
   pages: number[],
   state: PageLedgerState,
-  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string; claimedBy?: string } = {},
+  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string; embeddingModelUri?: string | null; claimedBy?: string } = {},
 ): Promise<number[]> {
   if (pages.length === 0) return [];
   const releases = state === "indexed" || state === "failed" || state === "blocked-pii" || state === "unseen";
@@ -103,6 +103,9 @@ export async function markPages(
         cost_credits = coalesce(${extra.costCredits ?? null}::numeric, cost_credits),
         failure_reason = ${state === "failed" || state === "blocked-pii" ? (extra.failureReason ?? null) : null},
         embedding_model = case when ${state} = 'indexed' then coalesce(${extra.embeddingModel ?? null}, embedding_model) else embedding_model end,
+        -- A new bare id without a URI clears the old URI: it no longer describes the model on the row.
+        embedding_model_uri = case when ${state} = 'indexed' and ${extra.embeddingModel ?? null}::text is not null
+          then ${extra.embeddingModelUri ?? null}::text else embedding_model_uri end,
         claimed_by_run = case when ${releases} then null else claimed_by_run end,
         claim_expires_at = case when ${releases} then null else claim_expires_at end,
         -- A kept read (read_text) is spent once the page indexes, and a PII-blocked page keeps no text.
@@ -154,12 +157,12 @@ export async function indexedPages(sql: Sql, documentId: string, pages: number[]
   return rows.map((row) => row.page_number);
 }
 
-/** Stamps `embedded_at`/`embedding_model` on the given pages in one statement (leaves `state` untouched). */
-export async function markPagesEmbedded(sql: Sql, documentId: string, pages: number[], model: string): Promise<void> {
+/** Stamps `embedded_at`/`embedding_model`/`embedding_model_uri` on the given pages in one statement (leaves `state` untouched). */
+export async function markPagesEmbedded(sql: Sql, documentId: string, pages: number[], model: string, modelUri: string | null = null): Promise<void> {
   if (pages.length === 0) return;
   await sql`
     update document_page_states
-    set embedded_at = now(), embedding_model = ${model}, updated_at = now()
+    set embedded_at = now(), embedding_model = ${model}, embedding_model_uri = ${modelUri}::text, updated_at = now()
     where document_id = ${documentId} and page_number = any(${pages}::int[])
   `;
 }

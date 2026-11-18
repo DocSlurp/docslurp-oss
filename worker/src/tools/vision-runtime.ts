@@ -19,7 +19,7 @@ import {
   visionPromptKeyForModel,
   visionModelProfile,
 } from "./vision-model-profiles.js";
-import { attachVisionBilledUsage, estimateTokens, findVisionBilledUsage, findVisionOutputRejected, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal, type TokenCounts } from "./vision-stream.js";
+import { attachVisionBilledUsage, attachVisionModelConfig, estimateTokens, findVisionBilledUsage, findVisionOutputRejected, runGuardedChatCompletion, VisionOutputRejectedError, type DegenerateSignal, type TokenCounts } from "./vision-stream.js";
 import { findVisionGuardStop, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import {
   attachVisionServedRoute,
@@ -699,12 +699,14 @@ async function sendRouteVisionRequest(
   if (!isPrivate) {
     const hosted = await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy,
       maxPrice: cappedMaxPrice(pricing.maxPrice, args.priceCeiling), streaming: args.cfg.visionStreaming,
-      ...(args.priceCeiling && pricing.maxPrice ? { providerOnly: args.priceCeiling.hosts } : {}) });
+      ...(args.priceCeiling && pricing.maxPrice ? { providerOnly: args.priceCeiling.hosts } : {}) })
+      .catch((error: unknown) => { attachVisionModelConfig(error, modelConfig); throw error; });
     return { ...hosted, costMetadata: { ...hosted.costMetadata, modelConfig } };
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   onUsageModel(call.usageModel);
-  const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, streaming: args.cfg.visionStreaming });
+  const result = await runVisionRequest({ ...base, runtime: "openai-compatible", model: call.model, baseUrl: call.baseUrl, apiKey: "", fetchImpl: call.fetch, providerLabel: `private:${call.route.alias}`, streaming: args.cfg.visionStreaming })
+    .catch((error: unknown) => { attachVisionModelConfig(error, modelConfig); throw error; });
   const cost = call.cost({ inputTokens: result.inputTokens, outputTokens: result.outputTokens, durationMs: result.latencyMs });
   // The registry's price is an explicit charge for every token of the call.
   const { chargedTokens: _chargedTokens, ...rest } = result;

@@ -51,7 +51,10 @@ export async function transcribeChunk(args: {
       amount: input.durationSeconds, unit: "audio-seconds", costCents,
       inputTokens: result.inputTokens, outputTokens: result.outputTokens,
       metadata: { ...scope, mediaJobId: id, providerRequestId: result.requestId, costSource: result.costSource,
-        accounting: result.accounting, providerCostUsd: result.costUsd, pricingMismatch: result.pricingMismatch, expectedCostUsd: result.expectedCostUsd, offsetSeconds: args.offset, priceUsdPerMinute: provider.priceUsdPerMinute } }),
+        accounting: result.accounting, providerCostUsd: result.costUsd, pricingMismatch: result.pricingMismatch, expectedCostUsd: result.expectedCostUsd, offsetSeconds: args.offset, priceUsdPerMinute: provider.priceUsdPerMinute,
+        // The request settings (no audio, no transcript): operation, container, sample shape and timestamp granularity.
+        modelConfig: { operation, format: input.format ?? "wav", sampleRateHz: input.format === "mp3" ? undefined : 16000,
+          wordTimestamps: input.wordTimestamps === true, chunkSeconds: Math.round(input.durationSeconds * 1000) / 1000 } } }),
       // Audio-seconds events log too (`[ai-usage] <metric> model=... input_tokens=0 output_tokens=0`), per the repo usage-logging rule.
       { logAiUsage: true });
     state.artifactLedger.record(`media-usage:${id}`, resultKey);

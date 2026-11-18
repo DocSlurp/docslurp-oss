@@ -83,6 +83,7 @@ export async function adoptBackfillDocuments(
           mapped = src.mapped or tmp.mapped,
           embedded_at = coalesce(tmp.embedded_at, src.embedded_at),
           embedding_model = case when tmp.embedded_at is not null then tmp.embedding_model else src.embedding_model end,
+          embedding_model_uri = case when tmp.embedded_at is not null then tmp.embedding_model_uri else src.embedding_model_uri end,
           state = case
             when tmp.state = 'blocked-pii' and src.state in ('unseen', 'failed', 'parsed') then 'blocked-pii'
             when tmp.state = 'parsed' and src.state in ('unseen', 'failed') then 'parsed'

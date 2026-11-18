@@ -160,6 +160,29 @@ describe("private model mode: query embedding", () => {
   });
 });
 
+describe("private model mode: page-image query embeddings", () => {
+  it("never calls the hosted page embedder in private mode, even with its key", async () => {
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    const { embedPageQuery } = await import("../search/deferred/page-query-embedder.js");
+    const fetchImpl = vi.fn();
+    const result = await embedPageQuery(
+      { model: "gemini-embedding-2", query: "earnings beat", journal: session(), privacyMode: "standard" },
+      { fetchImpl: fetchImpl as never, geminiApiKey: "g-key" },
+    );
+    expect(result).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(http).not.toHaveBeenCalled();
+  });
+
+  it("resolves a stored page-vector model id only to an operator-registered embedding route", async () => {
+    const { privatePageQueryModel } = await import("../search/deferred/page-query-embedder.js");
+    setPrivateModelEndpointRegistryForTests([{ ...registry[0]!, models: [...registry[0]!.models, { id: "acme/page-embed", capability: "embedding", dimensions: 768 }] }]);
+    expect(privatePageQueryModel("acme/page-embed")).toBe("llm://private/gpu/acme/page-embed");
+    expect(privatePageQueryModel("acme/text-llm")).toBeNull();
+    expect(privatePageQueryModel("someone/else")).toBeNull();
+  });
+});
+
 describe("private model mode: text and speech-to-text", () => {
   it("chat text uses the mapped model for every project in private mode and none when unmapped", () => {
     vi.stubEnv("DOCSLURP_MODEL_MODE", "private");

@@ -124,3 +124,35 @@ export function withModelProvenance<Event extends { provider?: string | null; mo
     return event;
   }
 }
+
+/** What makes two vectors comparable: the model that made them, and the settings that change the space it maps into. */
+export interface EmbeddingSpaceInput {
+  provider?: string | null;
+  model?: string | null;
+  dimensions?: number | null;
+  /** `cls` or `mean`; only a non-default (`cls`) pooling changes the space, so `mean` and unset name the same one. */
+  pooling?: string | null;
+}
+
+/**
+ * The record of an embedding space as one `llm://` URI: `llm://<provider>/<model>?dimensions=<n>[&pooling=cls]`.
+ * Vector tables store it next to the bare model id: two models that share a bare id (another provider, other
+ * dimensions or pooling) get different URIs, while rows written before the URI existed still match on the bare id.
+ * Null when there is no plain provider and model to name. Never throws.
+ */
+export function embeddingSpaceUri(input: EmbeddingSpaceInput): string | null {
+  const dimensions = typeof input.dimensions === "number" && Number.isInteger(input.dimensions) && input.dimensions > 0 ? input.dimensions : undefined;
+  return modelRecordUri({
+    provider: input.provider ?? null,
+    model: input.model ?? null,
+    config: { dimensions, pooling: input.pooling === "cls" ? "cls" : undefined },
+  });
+}
+
+/**
+ * True when a stored vector row can serve a query in `expected`'s space. A row (or a caller) without a URI falls
+ * back to the bare-id match the caller already made; when both carry one, they must be equal.
+ */
+export function embeddingSpaceMatches(storedUri: string | null | undefined, expectedUri: string | null | undefined): boolean {
+  return !storedUri || !expectedUri || storedUri === expectedUri;
+}

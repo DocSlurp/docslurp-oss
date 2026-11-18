@@ -66,7 +66,10 @@ it.each(["headers", "heartbeat"])("ends a stalled %s response at the first-token
     expect(fetchMock.mock.calls.filter(call => String(call[0]).includes("chat/completions"))).toHaveLength(1);
     await vi.waitFor(() => expect(record).toHaveBeenCalledOnce());
     expect(record.mock.calls[0]![0]).toMatchObject({ scope: { orgId: "org", projectId: "ws", sessionId: "conversation" },
-      usage: { metadata: { turnOutcome: "aborted", usageEstimated: true } } });
+      usage: { metadata: { turnOutcome: "aborted", usageEstimated: true,
+        // The level and the settings every step ran with (model-provenance.ts).
+        modelClass: { answer: "tool-agent" },
+        modelConfig: { operation: "chat-tool-agent", reasoning: "none", maxOutputTokens: 100, maxSteps: expect.any(Number) } } } });
   } finally { vi.unstubAllEnvs(); }
 });
 

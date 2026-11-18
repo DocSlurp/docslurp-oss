@@ -137,6 +137,11 @@ export function withChatReasoning(model: string, reasoning: ChatReasoningLevel):
  */
 export const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
 export type ChatTier = (typeof CHAT_TIERS)[number];
+
+/** `value` when it is a chat tier word, else undefined: records name a tier, never a caller-supplied model or string. */
+export function chatTierLabel(value: string | null | undefined): ChatTier | undefined {
+  return (CHAT_TIERS as readonly string[]).includes(value ?? "") ? value as ChatTier : undefined;
+}
 export const DEFAULT_CHAT_TIER: ChatTier = "fastest";
 
 /**

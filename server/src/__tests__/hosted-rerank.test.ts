@@ -28,7 +28,8 @@ describe("optional hosted reranking", () => {
     const [url, request] = http.mock.calls[0];
     expect(url).toBe("https://api.deepinfra.com/v1/inference/Qwen/Qwen3-Reranker-0.6B"); expect(request.redirect).toBe("error");
     expect(JSON.parse(request.body)).toEqual({ queries: [input.query, input.query], documents: chunks.map(c => c.text) });
-    expect(input.session.usageEvents()).toMatchObject([{ inputTokens: 174, metadata: { providerCostCents: 174 * 0.01 / 1e6 * 100 } }]);
+    expect(input.session.usageEvents()).toMatchObject([{ inputTokens: 174, metadata: { providerCostCents: 174 * 0.01 / 1e6 * 100,
+      modelConfig: { operation: "rerank", batchSize: 25, maxCandidates: 50 }, modelClass: { rerank: "hosted" } } }]);
     expect(input.session.diagnostics().hostedRerank).toMatchObject({ status: "success", requests: 1 });
   });
   it.each(["local-only", "strict-privacy"] as const)("blocks %s before spend/HTTP", async privacyMode => {

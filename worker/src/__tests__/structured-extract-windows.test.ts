@@ -92,6 +92,11 @@ describe("structured extraction of long documents", () => {
     expect(envelope.coverage.truncated).toBe(envelope.coverage.pagesRead < 300);
     // The total is on page 2: found, and it survives the merge with the windows that returned null.
     expect(envelope.fields.total!.value).toBe(4200);
+    // Each window's usage row names the request settings (no schema, no prompt text).
+    const reads = state.usageLedger.snapshot().filter((event) => event.metric === "structured-extract");
+    expect(reads).toHaveLength(calls.length);
+    expect(reads[0]!.metadata?.modelConfig).toMatchObject({ operation: "structured-extraction", windows: calls.length, windowChars: expect.any(Number) });
+    expect(JSON.stringify(reads.map((event) => event.metadata))).not.toContain("Lorem ipsum");
 
     // Billed on the pages actually read, not on all 300.
     const charged = structuredCredits(enqueue);

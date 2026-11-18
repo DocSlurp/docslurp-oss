@@ -1,4 +1,4 @@
-import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneHit } from "../pipeline/run-milestones.js";
+import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneExtra, type RunMilestoneHit } from "../pipeline/run-milestones.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { type GeoFinalSource } from "./geo-final-source.js";
@@ -1822,6 +1822,8 @@ export class PostgresRunLedger implements CheckpointStore {
       path: vector.path,
       embedding_model: vector.embeddingModel,
       dimension: vector.dimension,
+      embedding_model_uri: vector.embeddingModelUri ?? null,
+      embedding_model_class: vector.embeddingModelClass ?? null,
     }));
 
     const statements: PendingQuery<any>[] = batchedRows(rows).map((batch) => client`
@@ -1834,9 +1836,12 @@ export class PostgresRunLedger implements CheckpointStore {
         "path",
         "embedding_model",
         "dimension",
+        "embedding_model_uri",
+        "embedding_model_class",
       )}
       on conflict (document_id, backend, embedding_model, dimension)
-      do update set bucket = excluded.bucket, path = excluded.path
+      do update set bucket = excluded.bucket, path = excluded.path,
+        embedding_model_uri = excluded.embedding_model_uri, embedding_model_class = excluded.embedding_model_class
     `);
     // Search serves each document from the index config it was built with (projects.index_configs).
     const hashes = new Map(vectors.filter((vector) => vector.indexConfigHash).map((vector) => [vector.documentId, vector.indexConfigHash!]));
@@ -1851,10 +1856,13 @@ export class PostgresRunLedger implements CheckpointStore {
   }
 
   /** Stamps a run milestone the first time it happens; null when it was already stamped (pipeline/run-milestones.ts). */
-  async markRunMilestone(runId: string, milestone: RunMilestone): Promise<RunMilestoneHit | null> {
+  async markRunMilestone(runId: string, milestone: RunMilestone, extra?: RunMilestoneExtra): Promise<RunMilestoneHit | null> {
     const column = this.sql(RUN_MILESTONE_COLUMNS[milestone]);
+    // The first-pickup stamp also records the run's resolved models (same row, same once-only condition), so
+    // recording them costs no extra statement.
+    const models = extra?.resolvedModels && Object.keys(extra.resolvedModels).length > 0 ? extra.resolvedModels : null;
     const [row] = await this.sql<{ seconds: number; pages: number }[]>`
-      update project_runs set ${column} = now()
+      update project_runs set ${column} = now()${models ? this.sql`, resolved_models = coalesce(resolved_models, ${this.sql.json(models as never)})` : this.sql``}
       where id = ${runId} and ${column} is null
       returning extract(epoch from (now() - created_at))::float8 as seconds, coalesce(pages_total, 0)::int as pages
     `;
