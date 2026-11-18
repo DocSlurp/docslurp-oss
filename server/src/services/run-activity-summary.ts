@@ -112,15 +112,14 @@ export async function computeOrgActivitySummary(scope: ActivitySummaryScope, now
       select cs.project_id, cs.completed_run_pages_processed as pages, cs.completed_run_runtime_ms as runtime_ms
       from project_corpus_stats cs join projects p on p.id = cs.project_id
       where cs.project_id = any(${sql.array(projectIds)}) and p.org_id = ${orgId}`,
-    // Bounded by the (org_id, created_at) index: runs created in the last day that completed in the window.
+    // project_runs_org_finished_idx (0200): runs that finished in the window, an exact and bounded index range.
     visible.length === 0 ? Promise.resolve([{ runs: 0, documents: 0, pages: 0 }] as RecentRow[]) : sql<RecentRow[]>`
       select count(*)::int as runs, coalesce(sum(processed_documents), 0)::bigint as documents, coalesce(sum(pages_processed), 0)::bigint as pages
       from (
         select processed_documents, pages_processed from project_runs
-        where org_id = ${orgId} and created_at > now() - interval '1 day' and project_id = any(${sql.array(visible)})
-          and status = 'completed' and updated_at > now() - ${ACTIVITY_SUMMARY_RECENT_MINUTES}::int * interval '1 minute'
-        order by created_at desc
-        limit 1000
+        where org_id = ${orgId} and finished_at > now() - ${ACTIVITY_SUMMARY_RECENT_MINUTES}::int * interval '1 minute'
+          and status = 'completed' and project_id = any(${sql.array(visible)})
+        limit 5000
       ) recent`,
   ]);
   const history = new Map(historyRows.map(row => [row.project_id, { pages: Number(row.pages), runtimeMs: Number(row.runtime_ms) }]));

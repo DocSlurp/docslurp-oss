@@ -54,6 +54,8 @@ beforeEach(async () => {
     values ('admission-org', 'Admission', 'admission', 'admission-user', 1000)`;
   await sql`insert into projects(id, org_id, user_id, name) values
     ('admission-w1', 'admission-org', 'admission-user', 'One'), ('admission-w2', 'admission-org', 'admission-user', 'Two')`;
+  // getRun checks project access in SQL (docslurp_project_access): the user owns the organization.
+  await sql`insert into org_memberships(org_id, user_id, role) values ('admission-org', 'admission-user', 'owner') on conflict do nothing`;
 });
 
 function admit(runId: string, speedBoost = true, projectId = "admission-w1") {

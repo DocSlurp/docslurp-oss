@@ -135,11 +135,24 @@ export const realtimeBackend: RealtimeBackend = {
         return realtimeRunProgress(await buildRunProgressSnapshot(mapProjectRun(row), { recentEventLimit: 100, readOnly: true, operator: await isConfiguredAdminUserSql(sql, userId) }));
       }
       case "activity": {
+        // Active runs first (project_runs_org_active_idx, 0195), then blocked ones (not admitted yet), then the most recently finished
+        // (project_runs_org_finished_idx, 0200), each read in index order and stopped at the limit: never a sort of the
+        // organization's whole history.
         const runs = await sql<ProjectRunRow[]>`
-          select r.*, w.name as project_name
-          from project_runs r join projects w on w.id = r.project_id
-          where r.org_id = ${orgId} and docslurp_project_access(w.id, ${userId})
-          order by (r.status in ('queued','processing')) desc, r.updated_at desc, r.id limit 201`;
+          select r.*, w.name as project_name from (
+            (select r.*, 0 as part from project_runs r
+              where r.org_id = ${orgId} and r.status in ('queued', 'processing') and docslurp_project_access(r.project_id, ${userId})
+              order by r.updated_at desc, r.id limit 201)
+            union all
+            (select r.*, 1 as part from project_runs r
+              where r.org_id = ${orgId} and r.status = 'blocked' and docslurp_project_access(r.project_id, ${userId})
+              order by r.updated_at desc, r.id limit 201)
+            union all
+            (select r.*, 2 as part from project_runs r
+              where r.org_id = ${orgId} and r.finished_at is not null and docslurp_project_access(r.project_id, ${userId})
+              order by r.finished_at desc, r.id limit 201)
+          ) r join projects w on w.id = r.project_id
+          order by r.part, (case when r.part = 2 then r.finished_at else r.updated_at end) desc, r.id limit 201`;
         const costs = await runUsageCostSummaries(runs.slice(0, 200).map(run => run.id));
         // Customers never see backend models: run pipelines lose their managed model fields, and model keys and ids go,
         // exactly as on the REST and SSE activity paths. Platform operators see the raw records.

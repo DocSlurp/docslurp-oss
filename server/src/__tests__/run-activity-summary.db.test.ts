@@ -23,9 +23,9 @@ async function addRun(id: string, args: { org: string; project: string; user: st
   const updated = minutesAgo(args.updatedMinutesAgo ?? 0);
   const started = args.startedMinutesAgo === undefined || args.startedMinutesAgo === null ? null : minutesAgo(args.startedMinutesAgo);
   await sql`insert into project_runs (id, user_id, project_id, org_id, kind, status, stage, total_documents, processed_documents,
-      pages_total, pages_processed, worker_started_at, created_at, updated_at, monthly_reservation_cents)
+      pages_total, pages_processed, worker_started_at, created_at, updated_at, finished_at, monthly_reservation_cents)
     values (${id}, ${args.user}, ${args.project}, ${args.org}, 'direct-upload', ${args.status}, 'extract-markdown', ${args.docs ?? 1},
-      ${args.docsDone ?? 0}, ${args.pages ?? 0}, ${args.pagesDone ?? 0}, ${started}, ${created}, ${updated}, 1)`;
+      ${args.docsDone ?? 0}, ${args.pages ?? 0}, ${args.pagesDone ?? 0}, ${started}, ${created}, ${updated}, ${["completed", "failed"].includes(args.status) ? updated : null}, 1)`;
 }
 
 beforeAll(async () => {

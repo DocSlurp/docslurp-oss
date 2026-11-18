@@ -36,6 +36,7 @@ import {
   type ProjectRunRow,
 } from "./run-records.js";
 import { sql } from "../db.js";
+import { currentRequestApiKeyProjectIds } from "../lib/request-context.js";
 import { loadManagedPipelineOverrides } from "./projects.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
@@ -162,12 +163,20 @@ export async function listRuns(userId: string, activityOnly = false): Promise<Pr
 
   if (activityOnly) {
     // Include every active upload, even when it is older than the history window.
+    // Three index ranges, never a project's whole run history: active runs (project_runs_project_active_idx), runs
+    // that finished in the last five minutes (project_runs_project_finished_idx, 0200; finished_at changes once per
+    // run, unlike updated_at), and blocked runs touched recently. The parts are disjoint by status.
+    const ids = sql.array(projectIds);
     const rows = await sql<ProjectRunRow[]>`
       select runs.*, projects.name as project_name
-      from project_runs runs
+      from (
+        (select * from project_runs where project_id = any(${ids}) and status in ('queued', 'processing'))
+        union all
+        (select * from project_runs where project_id = any(${ids}) and finished_at > now() - interval '5 minutes')
+        union all
+        (select * from project_runs where project_id = any(${ids}) and status = 'blocked' and updated_at > now() - interval '5 minutes')
+      ) runs
       join projects on projects.id = runs.project_id
-      where runs.project_id = any(${sql.array(projectIds)})
-        and (runs.status in ('queued', 'processing') or runs.updated_at > now() - interval '5 minutes')
       order by runs.updated_at desc
     `;
     // Reading inventory has no authority to terminate or retry work. A cold
@@ -219,22 +228,21 @@ export async function getRun(
   /** `cost: false` skips the usage aggregate (costCents 0) for callers that never return the run. */
   options: { cost?: boolean } = {},
 ): Promise<ProjectRun | null> {
-  const projectIds = await listAccessibleProjectIds(userId);
-  if (projectIds.length === 0) {
-    return null;
-  }
-
+  // One run by primary key, checked against the same rule listAccessibleProjectIds applies (docslurp_project_access,
+  // migration 0124, plus an API key's project allowlist), without rebuilding the caller's whole project list per poll.
   const [row] = await sql<ProjectRunRow[]>`
     select
       runs.*,
       projects.name as project_name
     from project_runs runs
     join projects on projects.id = runs.project_id
-    where runs.id = ${runId} and runs.project_id = any(${sql.array(projectIds)})
+    where runs.id = ${runId} and docslurp_project_access(runs.project_id, ${userId})
     limit 1
   `;
 
   if (!row) return null;
+  const allowlist = currentRequestApiKeyProjectIds();
+  if (allowlist && !allowlist.includes(row.project_id)) return null;
   const run = mapProjectRun(row);
   // Progress snapshots compute the cost themselves (buildRunProgressSnapshot).
   return options.cost === false ? run : (await withRunCosts([run]))[0]!;
