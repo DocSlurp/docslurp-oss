@@ -813,6 +813,13 @@ export async function saveDocumentCorrection(args: {
   await sql.begin(async tx => {
     const transaction = tx as unknown as typeof sql;
     await transaction`select id from projects where id=${document.project_id} and org_id=${document.org_id} for share`;
+    // The document as this transaction sees it (locked until commit): the audit record's org, project, document and
+    // run come from this row, so the record names what the save actually changed.
+    const [locked] = await transaction<{ id: string; org_id: string; project_id: string; run_id: string | null }[]>`
+      select id, org_id, project_id, run_id from documents
+      where id=${args.docId} and project_id=${document.project_id} and org_id=${document.org_id}
+      for share`;
+    if (!locked) throw new Error(`document ${args.docId} is no longer in its project`);
     // The tags are part of the save: replaced in its transaction, so they commit (or roll back) with the correction
     // and its audit record. Editing was checked above (assertCanEditCorrection).
     if (args.tags) await replaceDocumentTagsIn(transaction, { docId: args.docId, userId: args.userId, projectId: document.project_id, tags: args.tags });
@@ -857,7 +864,7 @@ export async function saveDocumentCorrection(args: {
     if (args.structuredData !== undefined || corrected !== null) await publishGeoCorrection(transaction, {
       documentId: args.docId, projectId: document.project_id, orgId: document.org_id,
     }, corrected);
-    if (args.audit) await appendAuditLog({ ...args.audit(), orgId: document.org_id, projectId: document.project_id, documentId: args.docId }, transaction);
+    if (args.audit) await appendAuditLog({ ...args.audit(), orgId: locked.org_id, projectId: locked.project_id, documentId: locked.id, runId: locked.run_id }, transaction);
   });
 
   return await getCorrectionWorkbench(args.docId, args.userId);

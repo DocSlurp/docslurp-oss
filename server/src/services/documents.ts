@@ -26,7 +26,7 @@ import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import { runCreation, urlSourceIdentity } from "./run-creation.js";
+import { runCreation, urlSourceIdentity, type PublishedVersion } from "./run-creation.js";
 import { appendAuditLog } from "./audit-log.js";
 import { HTTPException } from "hono/http-exception";
 import { boundLockWaits, lockChainKeys, withLockRetry } from "../lib/lock-retry.js";
@@ -1865,10 +1865,12 @@ export async function bulkReprocessDocuments(
         sources: { kind: "versionsOf", documentIds: group.map((doc) => doc.id) },
         // Each run's audit record commits with its publication.
         // (the documents asked to be reprocessed, with the run made from them).
-        ...(options.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {
-          // A group is one project (so one organization): the record is scoped to it and to the published run.
-          await appendOrgScopedAudits(client, group, (doc) => ({ orgId: doc.org_id, projectId: doc.project_id }),
-            (docs) => ({ ...options.audit!({ runId: run.runId, documentIds: docs.map((doc) => doc.id) }), runId: run.runId }));
+        ...(options.audit ? { onPublish: async (client: typeof sql, run: { runId: string; versions: PublishedVersion[] }) => {
+          // Built from what the run actually published (each version's source and scope), not the requested group: a
+          // source that did not become a version is not listed.
+          const made = run.versions.filter((version) => version.sourceDocumentId !== null);
+          await appendOrgScopedAudits(client, made, (version) => ({ orgId: version.orgId, projectId: version.projectId }),
+            (versions) => ({ ...options.audit!({ runId: run.runId, documentIds: versions.map((version) => version.sourceDocumentId!) }), runId: run.runId }));
         } } : {}),
       });
       result.runs.push(created.run);

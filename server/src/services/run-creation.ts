@@ -90,12 +90,23 @@ export class RunAdmissionRefusedError extends Error {
   constructor() { super("The credential that started this upload no longer permits it"); this.name = "RunAdmissionRefusedError"; }
 }
 
+/**
+ * A document the publishing Run holds, as the publish transaction reads it: its scope and, for a new version of an
+ * existing document (reprocess), the source it was made from (null for a new upload).
+ */
+export interface PublishedVersion {
+  documentId: string;
+  sourceDocumentId: string | null;
+  orgId: string;
+  projectId: string;
+}
+
 export interface CreateRunInput {
   /**
    * Runs inside the transaction that publishes the Run (creation_ready_at), so what it writes commits exactly
    * when the Run does; a failure rolls the publication back and the Run is discarded (bulk reprocess's audit).
    */
-  onPublish?: (client: SqlClient, run: { runId: string }) => Promise<void>;
+  onPublish?: (client: SqlClient, run: { runId: string; versions: PublishedVersion[] }) => Promise<void>;
   /**
    * Re-validate the principal at billable admission: inside the admission transaction, after the organization's spend
    * lock is held, the requesting user's access and the API key (live, this organization, `scope`, project allowlist,
@@ -735,6 +746,7 @@ async function publishRunCreation(
   totalDocuments: number,
   sql: SqlClient,
   onPublish?: CreateRunInput["onPublish"],
+  versionSources?: ReadonlyMap<string, string>,
 ): Promise<{ pagesTotal: number }> {
   return await sql.begin(async (tx) => {
     const client = tx as unknown as SqlClient;
@@ -752,7 +764,15 @@ async function publishRunCreation(
           creation_ready_at = now(), creation_expires_at = null, creation_source_keys = '{}', updated_at = now()
       where id = ${runId}
     `;
-    if (onPublish) await onPublish(client, { runId });
+    if (onPublish) {
+      // What this Run actually publishes, read in the publish transaction: each version with its source (as run
+      // creation made it) and its own scope.
+      const rows = await client<{ id: string; org_id: string; project_id: string }[]>`
+        select id, org_id, project_id from documents where run_id = ${runId} order by id`;
+      await onPublish(client, { runId, versions: rows.map((row) => ({
+        documentId: row.id, sourceDocumentId: versionSources?.get(row.id) ?? null, orgId: row.org_id, projectId: row.project_id,
+      })) });
+    }
     return { pagesTotal: manifest.pages };
   });
 }
@@ -1094,6 +1114,8 @@ export function createRunCreation(deps: RunCreationDeps) {
     reuse: boolean,
     indexingMode: IndexingMode,
   ) {
+    /** Each new version's source, as made here; publication reports it to onPublish. */
+    const versionSources = new Map<string, string>();
     const documents: DocumentRow[] = [];
     for (const source of sources) {
       // A URL-provenance source (stored sourceUrl, and its chain under that URL's legacy or opaque key) is
@@ -1188,8 +1210,9 @@ export function createRunCreation(deps: RunCreationDeps) {
       }
       if (!row) throw new Error(`[run-creation] source ${source.id} kept changing its canonical ID; retry the reprocess`);
       documents.push(row);
+      versionSources.set(row.id, source.id);
     }
-    return { documents, unreadable: [] as UnreadableSource[] };
+    return { documents, unreadable: [] as UnreadableSource[], versionSources };
   }
 
   /** Keep slow preparation alive, publish on success, and discard partial work on failure. */
@@ -1212,7 +1235,8 @@ export function createRunCreation(deps: RunCreationDeps) {
     timer.unref();
     try {
       const prepared = await prepare();
-      const { pagesTotal } = await publishRunCreation(runId, prepared.documents.length, sql, onPublish);
+      const versionSources = (prepared as { versionSources?: ReadonlyMap<string, string> }).versionSources;
+      const { pagesTotal } = await publishRunCreation(runId, prepared.documents.length, sql, onPublish, versionSources);
       return { ...prepared, pagesTotal };
     } catch (error) {
       await discardUnstartedRun(runId, sql).catch((cleanupError: unknown) => {

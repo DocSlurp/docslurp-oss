@@ -137,7 +137,8 @@ describe("human-correction reindex", () => {
     await saveDocumentCorrection({ docId: "d", userId: "u", markdown: before, tags: ["new"],
       audit: () => ({ userId: "u", action: "document.correction.saved", resourceType: "document", resourceId: "d", metadata: { marker } }) });
     expect(await sql`select tag from document_tags where document_id = 'd' order by tag`).toEqual([{ tag: "new" }]);
-    expect(await sql`select org_id, project_id, document_id from audit_log where metadata ->> 'marker' = ${marker}`)
-      .toEqual([{ org_id: "o", project_id: "w", document_id: "d" }]);
+    // Scope comes from the document row locked in the save's transaction, its run included.
+    expect(await sql`select org_id, project_id, document_id, run_id from audit_log where metadata ->> 'marker' = ${marker}`)
+      .toEqual([{ org_id: "o", project_id: "w", document_id: "d", run_id: "r" }]);
   });
 });

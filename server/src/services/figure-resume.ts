@@ -101,8 +101,12 @@ export async function requestDocumentFigureResume(
 ): Promise<FigureResumeRequestResult> {
   assertScope(scope);
   const maxGrants = figureResumeBudgetConfig().maxGrants;
-  const record = (result: FigureResumeRequestResult, client: typeof sql = sql) => audit
-    ? appendAuditLog({ ...audit(result), orgId: scope.orgId, projectId: scope.projectId, documentId: scope.documentId }, client)
+  // A queued document's record takes its scope from the level row the UPDATE changed (org, project, document, run);
+  // an outcome that changes nothing is scoped to the request.
+  type Changed = { document_id: string; org_id: string; project_id: string; run_id: string | null };
+  const record = (result: FigureResumeRequestResult, client: typeof sql = sql, changed?: Changed) => audit
+    ? appendAuditLog({ ...audit(result), orgId: changed?.org_id ?? scope.orgId, projectId: changed?.project_id ?? scope.projectId,
+      documentId: changed?.document_id ?? scope.documentId, runId: changed?.run_id ?? null }, client)
     : Promise.resolve();
   // An outcome that changes nothing is audited on its own; a grant commits with its record (below).
   const answer = (status: FigureResumeRequestStatus, reason: FigureResumeBlockReason | null = null, granted = false, grants = 0): FigureResumeRequestResult =>
@@ -130,7 +134,7 @@ export async function requestDocumentFigureResume(
   // its audit record commits with it.
   const { updated, result } = await sql.begin(async (tx) => {
   const client = tx as unknown as typeof sql;
-  const [updated] = await client<{ grants: number; granted: boolean }[]>`
+  const [updated] = await client<Array<{ grants: number; granted: boolean } & Changed>>`
     update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null,
       resume_grants = l.resume_grants + case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 1 else 0 end,
       resume_stalls = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 0 else l.resume_stalls end,
@@ -138,9 +142,9 @@ export async function requestDocumentFigureResume(
     from documents d
     where l.document_id = ${scope.documentId} and ${resumableWhere(scope, "grantable")}
       and l.resume_blocked is not distinct from ${level.blocked}::text
-    returning l.resume_grants as grants, l.resume_grants > ${level.grants} as granted`;
+    returning l.resume_grants as grants, l.resume_grants > ${level.grants} as granted, l.document_id, l.org_id, l.project_id, l.run_id`;
   const result = updated ? answer("queued", level.blocked, updated.granted, updated.grants) : answer("not-resumable", level.blocked, false, level.grants);
-  await record(result, client);
+  await record(result, client, updated);
   return { updated, result };
   });
   console.log(`[doppler-figures] resume requested doc=${scope.documentId} org=${scope.orgId} status=${result.status} reason=${level.blocked ?? "none"} granted=${result.granted} grants=${updated?.grants ?? level.grants}/${maxGrants}`);
@@ -172,10 +176,27 @@ export async function requestProjectFigureResumes(
 ): Promise<ProjectFigureResumeResult> {
   assertScope(scope);
   const limit = Math.min(Math.max(Math.floor(scope.limit ?? FIGURE_RESUME_LIMITS.bulkMax) || 1, 1), FIGURE_RESUME_LIMITS.bulkMax);
-  const record = async (result: ProjectFigureResumeResult, ids: string[], client: typeof sql = sql) => {
+  // One record per run the UPDATE queued documents of, scoped from those rows and listing only that run's ids; an
+  // outcome that queues nothing gets one record scoped to the request.
+  type Queued = { document_id: string; org_id: string; project_id: string; run_id: string | null };
+  const record = async (result: ProjectFigureResumeResult, rows: Queued[], client: typeof sql = sql) => {
     if (!audit) return;
-    const built = audit(result, ids);
-    await appendAuditLog({ ...built, orgId: scope.orgId, projectId: scope.projectId, metadata: { ...(built.metadata ?? {}), queuedDocumentIds: ids } }, client);
+    const groups = new Map<string, Queued[]>();
+    for (const row of rows) {
+      const key = `${row.org_id}\u0000${row.project_id}\u0000${row.run_id ?? ""}`;
+      groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+    if (groups.size === 0) {
+      const built = audit(result, []);
+      await appendAuditLog({ ...built, orgId: scope.orgId, projectId: scope.projectId, runId: null, metadata: { ...(built.metadata ?? {}), queuedDocumentIds: [] } }, client);
+      return;
+    }
+    for (const group of groups.values()) {
+      const ids = group.map((row) => row.document_id);
+      const built = audit(result, ids);
+      await appendAuditLog({ ...built, orgId: group[0]!.org_id, projectId: group[0]!.project_id, runId: group[0]!.run_id,
+        metadata: { ...(built.metadata ?? {}), queuedDocumentIds: ids } }, client);
+    }
   };
   const mode = await projectMode(scope);
   if (!mode || mode === "off") {
@@ -201,14 +222,14 @@ export async function requestProjectFigureResumes(
   // The queueing UPDATE and its audit record commit together; the record names the rows the UPDATE actually queued.
   const result = await sql.begin(async (tx) => {
     const client = tx as unknown as typeof sql;
-    const queued = ids.length === 0 ? [] : await client<{ document_id: string }[]>`
+    const queued = ids.length === 0 ? [] : await client<Queued[]>`
       update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null
       from documents d
       where l.document_id = any(${client.array(ids)}::text[]) and ${resumableWhere(scope)} and l.resume_after is null
-      returning l.document_id`;
+      returning l.document_id, l.org_id, l.project_id, l.run_id`;
     const count = Math.min(queued.length, limit);
     const outcome: ProjectFigureResumeResult = { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped, blocked };
-    await record(outcome, queued.map((row) => row.document_id), client);
+    await record(outcome, queued, client);
     return outcome;
   });
   const skipped = blockedRows.map((row) => `${row.reason}:${row.n}`).join(",") || "none";

@@ -331,9 +331,14 @@ describe("projectsRoutes validation", () => {
     // org, project and run), built by this builder.
     expect(appendAuditLogMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "documents.bulk_reprocessed" }));
     const input = reprocessIngestRecommendationMock.mock.calls.at(-1)?.[0] as { audit: (run: { runId: string; documentIds: string[] }) => Record<string, unknown> };
-    expect(input.audit({ runId: "run-2", documentIds: ["d1"] })).toMatchObject({
+    const first = input.audit({ runId: "run-2", documentIds: ["d1"] });
+    expect(first).toMatchObject({
       action: "documents.bulk_reprocessed", resourceId: "d1", metadata: expect.objectContaining({ source: "ingest-report", runs: ["run-2"], documentIds: ["d1"] }),
     });
+    // The per-run records of one request share its batchId.
+    const second = input.audit({ runId: "run-3", documentIds: ["d2"] });
+    expect((first.metadata as { batchId: string }).batchId).toEqual(expect.any(String));
+    expect((second.metadata as { batchId: string }).batchId).toBe((first.metadata as { batchId: string }).batchId);
   });
 
   it("returns 400 for unsupported embedding models on project create", async () => {

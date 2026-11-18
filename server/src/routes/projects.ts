@@ -1015,7 +1015,8 @@ export const projectsRoutes = new Hono()
     const body = c.req.valid("json");
     try {
       // Each published run's audit record commits with its publication (the service scopes it to the run's org,
-      // project and run, from the run's documents).
+      // project and run, from the run's documents). One batchId per request correlates its runs' records.
+      const batchId = randomUUID();
       const result = await reprocessIngestRecommendation({
         project, userId, speedBoost: body.speedBoost === true, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null,
         audit: (run) => ({
@@ -1026,6 +1027,7 @@ export const projectsRoutes = new Hono()
           resourceId: bulkAuditResourceId(run.documentIds),
           ipAddress: requestIp(c),
           metadata: {
+            batchId,
             source: "ingest-report",
             recommendationId: body.recommendationId,
             documentIds: run.documentIds,
