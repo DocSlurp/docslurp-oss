@@ -321,14 +321,18 @@ document has been processed. Direct uploads have three milestones:
 2. Transfer each file using its returned `mode`. For `single`, PUT the bytes to
    `putUrl` with the supplied `headers`. For `multipart`, PUT each byte range to
    its `pendingParts[].url`; the range starts at
-   `(partNumber - 1) * partSize` and contains that part's `sizeBytes`.
+   `(partNumber - 1) * partSize` and contains that part's `sizeBytes`. Parts
+   are independent: send several at once (the SDK and CLI send 6 at a time).
 3. Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` until
    `result` is non-null, or the session becomes `failed` or `aborted`.
 4. Follow `result.run.id` through the run status or progress endpoints.
 
-The server uses a single PUT below 32 MiB and multipart at or above 32 MiB,
-with 8 MiB parts. Use the returned descriptors rather than hard-coding those
-values. The reconciler reads storage's part list, checks the part numbers and
+A file up to 64 MiB gets one signed PUT; a larger file gets multipart with
+64 MiB parts, larger when a file would otherwise need more than 10,000 parts.
+Send `singlePart: true` for one PUT of any file up to 5 GiB (simpler, but it
+cannot resume or upload in parallel). Use the returned descriptors rather than
+hard-coding those values. Each signed URL is bound to its exact byte count:
+storage refuses a body of any other size with `403 SignatureDoesNotMatch`. The reconciler reads storage's part list, checks the part numbers and
 sizes, assembles the object, and verifies the stored file. It starts ingestion
 after all files in the session are ready. Clients do not need to call
 `/files/complete` or `/confirm` for known-size files.
@@ -507,7 +511,8 @@ A part or file that fails mid-transfer resumes: read the session without
 storage does not yet hold at their expected size, with fresh signed URLs, and
 `completedParts` the ones it does.
 
-Signed URLs expire after 15 minutes. A session GET without `statusOnly=true`
+Signed URLs expire after 3 hours, or when the session does if that is sooner.
+A session GET without `statusOnly=true`
 returns fresh transfer URLs for pending files; use `statusOnly=true` when you only
 need status. Treat signed URLs as credentials. Send your DocSlurp bearer key to
 the API, never to storage.
