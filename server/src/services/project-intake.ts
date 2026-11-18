@@ -588,8 +588,20 @@ async function resolveIntakeTarget(
   return existing ? { existing } : create({ name: ref.name, slug: ref.slug });
 }
 
+const allRejectedErrors = new WeakSet<ProjectIntakeError>();
+/** An error from `allRejectedError`: every file of the request was refused for its own reason (not the request's). */
+export function isAllRejectedError(error: unknown): error is ProjectIntakeError {
+  return error instanceof ProjectIntakeError && allRejectedErrors.has(error);
+}
+
 /** Every file was rejected: fail the request, naming each file. */
 export function allRejectedError(rejected: RejectedIntakeFile[]): ProjectIntakeError {
+  const error = buildAllRejectedError(rejected);
+  allRejectedErrors.add(error);
+  return error;
+}
+
+function buildAllRejectedError(rejected: RejectedIntakeFile[]): ProjectIntakeError {
   const statuses = new Set(rejected.map((file) => file.statusCode));
   const statusCode = (statuses.size === 1 ? rejected[0]!.statusCode : 422) as ProjectIntakeStatusCode;
   const message = rejected.length === 1

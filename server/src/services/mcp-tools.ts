@@ -282,7 +282,8 @@ const mcpAdapterRoutes = new Hono()
         (loaded.session.project_id ? !await loadActorScopedProject(loaded.session.project_id, actor) : Boolean(apiKey.projectIds?.length))))) {
         return adapterError(c, 404, "Upload session not found");
       }
-      if (!["pending", "uploading"].includes(loaded.session.status)) return adapterError(c, 409, "Upload session is already confirmed or closed");
+      // A session the storage webhook already finished is confirmed: completing it again answers its runs.
+      if (!["pending", "uploading", "confirmed"].includes(loaded.session.status)) return adapterError(c, 409, "Upload session is already confirmed or closed");
       if (loaded.files.length > 10 || loaded.files.some(file => file.upload_mode !== "single") ||
         new Set(parsed.data.fileIds).size !== loaded.files.length || loaded.files.some(file => !parsed.data.fileIds.includes(file.id))) {
         return adapterError(c, 400, "Provide all file IDs from this upload session");

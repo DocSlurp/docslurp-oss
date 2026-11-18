@@ -36,11 +36,7 @@ import {
   scopedIdempotencyKey,
   storeIdempotentResponse,
 } from "./idempotency.js";
-import {
-  prepareDirectUploadProjectIntake,
-  loadDirectUploadSession,
-  withDirectUploadLock,
-} from "./direct-upload-session.js";
+import { withDirectUploadLock } from "./direct-upload-session.js";
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
 import { attachExtractRun, chargeExtractRetention, describeExtractById, loadIntakeExtract } from "./extracts.js";
 import { remoteUrlIntakeItems } from "./remote-ingest.js";
@@ -88,7 +84,7 @@ type IntakeTargetArgs = Pick<
  * success. (A failed extract request is expired by its route, routes/extracts.ts;
  * a direct upload session may retry its confirm, so its extract keeps its schedule.)
  */
-async function requiredIntake(
+export async function requiredIntake(
   request: ProjectIntakeRequest,
   ports: ProjectIntakePorts,
 ): Promise<ProjectIntakeResult & { extract?: ExtractRecord }> {
@@ -104,7 +100,7 @@ async function requiredIntake(
   return extract ? { ...intake, extract } : intake;
 }
 
-function actionResult(
+export function actionResult(
   intake: ProjectIntakeResult & { extract?: ExtractRecord },
   extra: Partial<ProjectIntakePayload> = {},
 ): ProjectIntakeActionResult {
@@ -128,7 +124,7 @@ function actionResult(
   };
 }
 
-async function authorizeReceiptProject(projectId: string, userId: string, orgId?: string | null, apiKeyId?: string | null): Promise<void> {
+export async function authorizeReceiptProject(projectId: string, userId: string, orgId?: string | null, apiKeyId?: string | null): Promise<void> {
   const access = await getProjectAccess(projectId, userId);
   if (!access || !canContributeToProject(access, userId) || (orgId && access.orgId !== orgId)) {
     throw new ProjectIntakeError("Upload project is no longer accessible", 403);
@@ -273,83 +269,7 @@ export function parseFormProjectIntakePipeline(raw: unknown): PipelineFeatureOve
   }
 }
 
-export async function confirmDirectUploadProjectIntake(
-  /** `lockWaitMs`: how long to wait out a reconciler pass or another request holding the session (0: answer busy at once). */
-  args: { sessionId: string; userId: string; audit?: ProjectIntakeAudit; lockWaitMs?: number },
-  ports: ProjectIntakePorts = projectIntakePorts,
-): Promise<ProjectIntakeActionResult> {
-  return withDirectUploadLock(args.sessionId, async () => {
-    const loaded = await loadDirectUploadSession(args.sessionId, args.userId);
-    if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
-    if (["aborted", "failed"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
-    if (loaded.session.result) {
-      const result = loaded.session.result as ProjectIntakeActionResult;
-      await authorizeReceiptProject(result.payload.project.id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
-      return result;
-    }
-    if (!loaded.files.every(file => file.status === "completed")) throw new ProjectIntakeError("Upload session still has incomplete files", 409);
-
-    // Run identity is chosen before intake. A process crash after publication can
-    // recover the same manifest rather than creating a second billable run.
-    const [existing] = await sql<Array<ProjectRunRow & { creation_ready_at?: string | null }>>`select * from project_runs where id = ${args.sessionId} and user_id = ${args.userId}`;
-    if (existing && existing.creation_ready_at) {
-      await authorizeReceiptProject(existing.project_id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
-      throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
-    }
-    if (existing) await discardUnstartedRun(args.sessionId);
-    const { session, items } = await prepareDirectUploadProjectIntake(args.sessionId, args.userId);
-    // An extract session lands only while its extract is live; its sources are already under the extract prefix.
-    const extract = session.extract_id ? await loadIntakeExtract(session.extract_id, args.userId) : null;
-    if (session.extract_id && !extract) throw new ProjectIntakeError("This extract expired before its files were confirmed.", 409);
-    await sql`update upload_sessions set status = 'ingesting' where id = ${args.sessionId}`;
-    const intakePorts: ProjectIntakePorts = { ...ports, records: {
-      ...ports.records,
-      async discardProject(projectId) {
-        await ports.records.discardProject(projectId);
-        await sql`update upload_sessions set project_id = null where id = ${args.sessionId} and project_id = ${projectId}`;
-      },
-      async createProject(input) {
-        const project = await ports.records.createProject(input);
-        await sql`update upload_sessions set project_id = ${project.id}, org_id = ${project.orgId} where id = ${args.sessionId}`;
-        return project;
-      },
-    } };
-    const sessionPipeline = session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined;
-    // Re-checked at confirm: a session opened before the deployment stopped offering a tier (or before migration 0151
-    // mapped enabled:true to models) is refused with the same code, not run at a tier no estimate showed.
-    // A stored session pipeline is already converted; the deprecated tier code stays for it (the request named a tier then).
-    assertIntakeChartExportTier((sessionPipeline as { chartExport?: { tier?: ChartExportTier } } | undefined)?.chartExport?.tier, `upload session ${args.sessionId}`);
-    const intake = await requiredIntake({
-      userId: args.userId,
-      orgId: session.org_id,
-      project: session.project_id ?? session.project_name,
-      newProject: !session.project_id && !session.project_name,
-      templateKey: session.template_key ? projectTemplateKeySchema.parse(session.template_key) : undefined,
-      // Stored with the session; a session created before an extractor schema tightened is read leniently.
-      speedBoost: session.pipeline?.speedBoost === true,
-      pipeline: sessionPipeline,
-      tags: session.tags ?? [],
-      apiKeyId: session.api_key_id,
-      // Recorded from the principal that opened the session (never a request field); older rows are machine.
-      origin: session.origin === "app" ? "app" : "machine",
-      allowedProjectIds: session.allowed_project_ids,
-      runId: args.sessionId,
-      kind: "direct-upload",
-      items,
-      audit: args.audit,
-      ...(extract ? { extract } : {}),
-    }, intakePorts);
-    const result = actionResult(intake);
-    await persistDirectUploadResult(args.sessionId, result);
-    return result;
-  }, undefined, undefined, args.lockWaitMs ?? 0);
-}
-
-async function persistDirectUploadResult(sessionId: string, result: ProjectIntakeActionResult) {
-  await sql`update upload_sessions set status = 'confirmed', result = ${sql.json(JSON.parse(JSON.stringify(result)))},
-    project_id = ${result.payload.project.id}, org_id = ${result.payload.project.orgId}, last_error = null, updated_at = now()
-    where id = ${sessionId}`;
-}
+// Direct-upload confirm (and its waves of runs) lives in direct-upload-waves.ts.
 
 export async function createBulkProjectIntake(
   args: IntakeTargetArgs & {

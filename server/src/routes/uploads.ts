@@ -49,8 +49,8 @@ import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
 import { ProjectAccessError } from "../services/default-project.js";
+import { confirmDirectUploadProjectIntake } from "../services/direct-upload-waves.js";
 import {
-  confirmDirectUploadProjectIntake,
   createBulkProjectIntake,
   createRemoteUrlProjectIntake,
   parseFormProjectIntakePipeline,
@@ -67,7 +67,6 @@ import {
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
 import { isTransientStorageError } from "../lib/storage-retry.js";
-import { kickDirectUploadReconcile } from "../services/direct-upload-reconciler.js";
 import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 import { findDefaultProject, getProject } from "../services/projects.js";
 import { IndexingModeError } from "../services/project-indexing-mode.js";
@@ -428,16 +427,15 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       if ("files" in body && body.files) {
         // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
         try {
+          // Finalized files start runs (waves) on their own; the service schedules them.
           const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files });
-          // The last file is in: start ingestion now rather than at the next sweep (after this request's lock is released).
-          if (result.sessionComplete) kickDirectUploadReconcile(sessionId);
           return c.json({ ok: result.failedCount === 0, ...result });
         } catch (error) {
           return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
         }
       }
       try {
-        const completed = await completeDirectUploadFile({
+        await completeDirectUploadFile({
           sessionId,
           userId,
           fileId: body.fileId,
@@ -445,7 +443,6 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           sizeBytes: body.sizeBytes,
           parts: body.parts,
         });
-        if (completed?.sessionComplete) kickDirectUploadReconcile(sessionId);
       } catch (error) {
         // Never a 400 for a server-side failure: a client would treat it as permanent and abandon the upload.
         return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);

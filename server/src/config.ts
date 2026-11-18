@@ -243,6 +243,19 @@ export const env = {
    */
   directUploadFinalizeConcurrency: Math.min(32, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY, 8)))),
   /**
+   * Early ingestion: a direct upload starts a run (a wave) once this many finalized files are waiting, `directUploadWaveDelayMs`
+   * after the first of them was finalized, or when its last file is finalized, whichever comes first.
+   */
+  directUploadWaveFiles: Math.min(10_000, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WAVE_FILES, 5)))),
+  directUploadWaveDelayMs: Math.min(600_000, Math.max(0, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WAVE_DELAY_MS, 10_000)))),
+  /**
+   * How long after a file is declared the fallback reconciler first checks storage for it itself. The storage upload
+   * webhook and client `files/complete` calls normally finalize a file well before this; the fallback covers lost events.
+   */
+  directUploadFinalizeGraceSeconds: Math.min(3_600, Math.max(0, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_FINALIZE_GRACE_SECONDS, 60)))),
+  /** Files finalized at once in the background after storage upload webhooks, per API process. */
+  directUploadWebhookFinalizeConcurrency: Math.min(64, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WEBHOOK_FINALIZE_CONCURRENCY, 8)))),
+  /**
    * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct
    * upload sessions (/v1/uploads/direct/sessions), which go straight to storage.
