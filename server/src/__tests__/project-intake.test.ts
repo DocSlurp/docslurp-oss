@@ -648,7 +648,7 @@ describe("Project Intake from remote URLs", () => {
       // Telemetry keeps the raw reason (owner decision 2026-11-18).
       const logs = warn.mock.calls.map((call) => String(call[0])).join("\n");
       expect(logs).toMatch(/\[intake\] source_refused ref=urls\[1\] code=unsupported_type .*GRANT1SECRET/);
-      expect(logs).toMatch(/\[remote-ingest\] url_fetch_failed ref=urls\[4\] failure=timeout cause=.*TimeoutError/);
+      expect(logs).toMatch(/\[remote-ingest\] url_fetch_failed ref=urls\[4\] failure=timeout codes=TimeoutError/);
     } finally {
       warn.mockRestore();
     }

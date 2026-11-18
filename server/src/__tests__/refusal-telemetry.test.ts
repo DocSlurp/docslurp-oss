@@ -125,6 +125,14 @@ describe("refusal telemetry never carries credentials", () => {
     }
   });
 
+  it("keeps resource ids for correlation and catches compound credential names and parenthesised paths", () => {
+    const id = "0f5c3a5e-3b7e-4c43-9a59-2d3c0e1b9a10";
+    const sanitized = sanitizeRejectionReason(`document ${id}: client_secret=CS1SECRET aws_secret_access_key=AK2SECRET fetching https://h.example.com/a(b)/GRANT3SECRET`);
+    expect(sanitized).toContain(id);
+    expect(sanitized).toContain("https://h.example.com");
+    expect(sanitized).not.toMatch(/CS1SECRET|AK2SECRET|GRANT3SECRET/);
+  });
+
   it("redacts before it truncates", () => {
     const sanitized = sanitizeRejectionReason(`${"x ".repeat(140)}password=PAIRSECRET and https://h.example.com/${"a".repeat(40)}`);
     expect(sanitized.length).toBeLessThanOrEqual(MAX_REJECTION_REASON_CHARS);

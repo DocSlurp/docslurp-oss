@@ -20,20 +20,53 @@ function urlRef(index: number) {
 }
 
 /** Why a URL could not be fetched, as clients are told it: a fixed vocabulary. */
-export type UrlFetchFailure = "blocked" | "timeout" | "unreachable" | "http_status";
+export type UrlFetchFailure = "blocked" | "timeout" | "dns" | "refused" | "tls" | "redirect" | "unreachable" | "http_status";
 
-/** Classifies a fetch failure; the raw cause goes to the logs, never to the client. */
-export function classifyUrlFetchFailure(error: unknown): { failure: UrlFetchFailure; message: string } {
-  // Our own URL policy messages are fixed text ("Only https URLs are allowed", ...).
-  if (error instanceof UnsafeExternalUrlError) return { failure: "blocked", message: error.message };
-  const name = error instanceof Error ? error.name : "";
-  if (name === "TimeoutError" || name === "AbortError") return { failure: "timeout", message: "The URL did not respond in time" };
-  return { failure: "unreachable", message: "The URL could not be fetched" };
+const URL_FETCH_FAILURE_MESSAGES: Record<Exclude<UrlFetchFailure, "blocked" | "http_status">, string> = {
+  timeout: "The URL did not respond in time",
+  dns: "The URL's host could not be resolved",
+  refused: "The URL's server refused or dropped the connection",
+  tls: "The URL's server failed the TLS handshake or certificate check",
+  redirect: "The URL redirected; redirects are not followed",
+  unreachable: "The URL could not be fetched",
+};
+
+/** The error and its causes (undici wraps network failures as `TypeError: fetch failed` with the reason in `cause`). */
+function errorChain(error: unknown): Array<{ name: string; code: string; message: string }> {
+  const chain: Array<{ name: string; code: string; message: string }> = [];
+  for (let current: unknown = error, depth = 0; current && depth < 4; depth++) {
+    const record = current as { name?: unknown; code?: unknown; message?: unknown; cause?: unknown };
+    chain.push({ name: String(record.name ?? ""), code: String(record.code ?? ""), message: String(record.message ?? "") });
+    current = record.cause;
+  }
+  return chain;
 }
 
-function rejectedUrl(index: number, failure: UrlFetchFailure, message: string, cause: unknown): ProjectIntakeItem {
-  const raw = cause instanceof Error ? `${cause.name}: ${cause.message}${cause.cause instanceof Error ? ` (cause: ${cause.cause.message})` : ""}` : String(cause);
-  console.warn(`[remote-ingest] url_fetch_failed ref=urls[${index}] failure=${failure} cause=${JSON.stringify(raw)}`);
+/**
+ * Classifies a fetch failure from error names and `cause.code`, never from URL
+ * text. The class and its fixed copy go to the client; the codes go to the logs.
+ */
+export function classifyUrlFetchFailure(error: unknown): { failure: UrlFetchFailure; message: string; codes: string[] } {
+  const chain = errorChain(error);
+  const codes = chain.flatMap(({ name, code }) => [name, code]).filter(Boolean);
+  // Our own URL policy refusals are fixed text ("Only https URLs are allowed", ...).
+  if (error instanceof UnsafeExternalUrlError) {
+    return { failure: "blocked", message: error.message, codes };
+  }
+  const has = (test: (entry: { name: string; code: string; message: string }) => boolean) => chain.some(test);
+  const failure: Exclude<UrlFetchFailure, "blocked" | "http_status"> =
+    has(({ name, code }) => name === "TimeoutError" || name === "AbortError" || /^(?:ETIMEDOUT|UND_ERR_(?:CONNECT|HEADERS|BODY)_TIMEOUT)$/.test(code)) ? "timeout"
+    : has(({ code, message }) => /^(?:ENOTFOUND|EAI_AGAIN|EAI_NONAME|ENODATA)$/.test(code) || message === "Unable to resolve URL host") ? "dns"
+    : has(({ code }) => /^(?:CERT_|ERR_SSL_|ERR_TLS_|UNABLE_TO_|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|HOSTNAME_MISMATCH)/.test(code)) ? "tls"
+    : has(({ message }) => /\bredirect\b/i.test(message)) ? "redirect"
+    : has(({ code, message }) => /^(?:ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|UND_ERR_SOCKET)$/.test(code) || message === "Unable to connect to URL host") ? "refused"
+    : "unreachable";
+  return { failure, message: URL_FETCH_FAILURE_MESSAGES[failure], codes };
+}
+
+function rejectedUrl(index: number, failure: UrlFetchFailure, message: string, codes: string[]): ProjectIntakeItem {
+  // The class and the error names and codes only: no URL text, which can carry an access grant.
+  console.warn(`[remote-ingest] url_fetch_failed ref=urls[${index}] failure=${failure} codes=${codes.join(",") || "none"}`);
   return { filename: `urls[${index}]`, refusalRef: urlRef(index), content: { rejected: new ProjectIntakeError(message, 400) } };
 }
 
@@ -59,14 +92,14 @@ export async function* remoteUrlIntakeItems(
         signal: options.signal ?? AbortSignal.timeout(15_000),
       });
     } catch (error) {
-      const { failure, message } = classifyUrlFetchFailure(error);
-      yield rejectedUrl(index, failure, message, error);
+      const { failure, message, codes } = classifyUrlFetchFailure(error);
+      yield rejectedUrl(index, failure, message, codes);
       continue;
     }
 
     try {
       if (!response.ok) {
-        yield rejectedUrl(index, "http_status", `The URL's server answered HTTP ${response.status}`, `HTTP ${response.status} ${response.statusText}`);
+        yield rejectedUrl(index, "http_status", `The URL's server answered HTTP ${response.status}`, [`HTTP_${response.status}`]);
         continue;
       }
       const filename = path.basename(new URL(safeUrl).pathname) || `remote-${randomUUID()}`;

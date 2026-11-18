@@ -140,12 +140,14 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
 
   it("refuses a declared non-form body before reading any of it", async () => {
     const { hono, reached } = v1App(64 * 1024);
-    // Reading this stream would hang the test.
-    const stalled = new ReadableStream({ pull: () => new Promise(() => {}) });
+    // Reading this stream would hang the test; highWaterMark 0 so it is pulled only when read.
+    const pull = vi.fn(() => new Promise<void>(() => {}));
+    const stalled = new ReadableStream({ pull }, { highWaterMark: 0 });
     for (const headers of [{ "content-type": "text/plain", "content-length": "5" }, { "transfer-encoding": "chunked" }] as Array<Record<string, string>>) {
       const response = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", { method: "POST", headers, body: stalled, duplex: "half" } as RequestInit));
       expect(response.status).toBe(400);
     }
+    expect(pull).not.toHaveBeenCalled();
     expect(reached).not.toHaveBeenCalled();
   });
 

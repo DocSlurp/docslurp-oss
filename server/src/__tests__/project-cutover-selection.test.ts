@@ -49,12 +49,14 @@ describe("project cutover rejects stale scope instead of selecting default", () 
     const route = new Hono().use("*", rejectLegacyProjectSelection).post("/", c => c.json({ ok: true }));
     const post = (headers: Record<string, string>, body: ReadableStream) =>
       route.request(new Request("http://localhost/", { method: "POST", headers, body, duplex: "half" } as RequestInit));
-    // A stream that never delivers: any read of it would hang the test.
-    const stalled = () => new ReadableStream({ pull: () => new Promise(() => {}) });
+    // A stream that never delivers; highWaterMark 0 so it is pulled only when something reads it.
+    const pull = vi.fn(() => new Promise<void>(() => {}));
+    const stalled = () => new ReadableStream({ pull }, { highWaterMark: 0 });
     // A declared body that never arrives is refused from the headers alone, without reading.
     expect((await post({ "content-type": "text/plain", "content-length": "5" }, stalled())).status).toBe(400);
     expect((await post({ "content-type": "text/plain", "transfer-encoding": "chunked" }, stalled())).status).toBe(400);
     expect((await post({ "content-length": "0" }, stalled())).status).toBe(200);
+    expect(pull).not.toHaveBeenCalled();
     // A zero-length first chunk followed by data is content.
     const late = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(0)); controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } });
     expect((await post({ "content-type": "text/plain" }, late)).status).toBe(400);

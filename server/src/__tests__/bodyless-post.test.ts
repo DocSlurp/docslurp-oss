@@ -100,8 +100,11 @@ describe("requests with neither Content-Length nor Transfer-Encoding on the wire
       for (const headers of [["Content-Type: application/json"], []]) {
         const response = await wire("POST", "/v1/validated", headers);
         expect(response.status).toBe(400);
-        const line = warn.mock.calls.map(call => String(call[0])).filter(text => text.startsWith("[api] ") && text.includes("path=/v1/validated")).at(-1) ?? "";
+        const line = warn.mock.calls.map(call => String(call[0])).filter(text => text.startsWith("[api] ") && text.includes("path=/v1/validated")).at(-1);
+        // The line must exist, or the next assertion would pass vacuously.
+        expect(line).toMatch(/^\[api\] .*status=400/);
         expect(line).not.toContain("JSON API requests require");
+        warn.mockClear();
       }
     } finally {
       warn.mockRestore();
