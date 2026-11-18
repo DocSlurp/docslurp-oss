@@ -16,3 +16,9 @@ ALTER TABLE vector_indexes
 ALTER TABLE document_page_states ADD COLUMN IF NOT EXISTS embedding_model_uri text;
 
 ALTER TABLE document_page_vectors ADD COLUMN IF NOT EXISTS model_uri text;
+
+-- Which models served a run, per service, as the worker resolved them when it first picked the run up: the project
+-- names levels and the deployment's environment maps them to models, so the run snapshot (`pipeline`) does not say.
+-- `{ "<service>": { "uri": "llm://…", "class": "name=value;…" } }`, set once; every model call still records its
+-- own model on its usage row. Operator-facing only: no customer run response selects it.
+ALTER TABLE project_runs ADD COLUMN IF NOT EXISTS resolved_models jsonb;

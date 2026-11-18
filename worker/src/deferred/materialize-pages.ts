@@ -11,6 +11,7 @@ import {
   calculateAiUsageCostCents,
   embeddingRequestConfig,
   embeddingRouteSpaceUri,
+  modelRecordUri,
   pageCredits,
   ladderAllowsOffPlanReads,
   qualityAllowsPageReading,
@@ -349,6 +350,8 @@ export async function materializePageRange(
   const prepared = new Map<number, PreparedPage>();
   /** Pages a model read with non-empty content, and the Rich pages each read is worth. */
   const modelReads = new Map<number, number>();
+  // The model that read each page here, as its usage row names it, for the page extract record.
+  const readModelUris = new Map<number, string>();
   /** Customer credits of each page's read (Rich charges buffered in the ledger). */
   const readCents = new Map<number, number>();
   /** Read text of pages this call read with no PII match, kept on the page row if the page then fails. */
@@ -465,6 +468,8 @@ export async function materializePageRange(
     else {
       prepared.set(page, { page, text: ocr.text });
       modelReads.set(page, richPages);
+      const uri = modelRecordUri({ provider: ocr.provider ?? "vision-runtime", model: ocr.model });
+      if (uri) readModelUris.set(page, uri);
     }
   });
 
@@ -716,6 +721,8 @@ export async function materializePageRange(
           published: owned, modelRead: (page) => modelReads.has(page) || storedReads.has(page),
           blocked: ownedBlocked, failed: [...failed].filter(([page]) => held.has(page) && !released.includes(page)),
           keptAsImageReason: KEPT_AS_IMAGE_REASON,
+          // A kept read from an earlier claim has no model in hand here: its own run's usage row names it.
+          readModelUri: (page) => readModelUris.get(page),
         }));
         if (extracts.pendingPageExtracts.length > 0) {
           for (const statement of pageExtractStatements(client as unknown as Sql<Record<string, unknown>>, extracts.pendingPageExtracts, [])) await statement;

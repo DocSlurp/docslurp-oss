@@ -1,3 +1,4 @@
+import { resolvedRunModels } from "./resolved-models.js";
 import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import type { PreloadedRunState } from "../db/run-ledger.js";
@@ -308,6 +309,13 @@ export function createStageExecution(deps: {
 
     // First pickup only (the stamp is conditional): start latency, split by whether this worker was already running.
     await noteRunMilestone(store, run.id, "worker_started", { start: workerStartKind() });
+    // Which models serve the run, per service (first pickup only). A record, never a reason to fail the run.
+    const recordResolved = (store as { recordResolvedModels?(runId: string, models: Record<string, unknown>): Promise<void> }).recordResolvedModels;
+    if (recordResolved) {
+      await recordResolved.call(store, run.id, resolvedRunModels(config, run.pipeline)).catch((error: unknown) => {
+        console.warn(`[run-models] run=${run.id} resolved models not recorded: ${error instanceof Error ? error.name : "error"}`);
+      });
+    }
 
     // Log start event
     await store.appendEvent(

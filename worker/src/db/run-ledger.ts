@@ -1856,6 +1856,15 @@ export class PostgresRunLedger implements CheckpointStore {
   }
 
   /** Stamps a run milestone the first time it happens; null when it was already stamped (pipeline/run-milestones.ts). */
+  /** Records the models that serve the run (`project_runs.resolved_models`, migration 0192), once: a resume keeps the first map. */
+  async recordResolvedModels(runId: string, models: Record<string, unknown>): Promise<void> {
+    if (Object.keys(models).length === 0) return;
+    await this.sql`
+      update project_runs set resolved_models = ${this.sql.json(models as never)}
+      where id = ${runId} and resolved_models is null
+    `;
+  }
+
   async markRunMilestone(runId: string, milestone: RunMilestone): Promise<RunMilestoneHit | null> {
     const column = this.sql(RUN_MILESTONE_COLUMNS[milestone]);
     const [row] = await this.sql<{ seconds: number; pages: number }[]>`

@@ -2380,6 +2380,8 @@ export const projectRuns = pgTable(
      */
     spentCents: numeric("spent_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     pipeline: jsonb().default({}).notNull(),
+    /** Models that served the run per service, as resolved at its first pickup (migration 0192). Operator-facing. */
+    resolvedModels: jsonb("resolved_models"),
     /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
     origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),

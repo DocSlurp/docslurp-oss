@@ -126,7 +126,7 @@ describe("embedding spaces", () => {
       lateChunking: false, modelUri: "llm://ollama/nomic?baseUrl=http://127.0.0.1:11434/v1&pooling=cls", runtime: "local" }, { inputTokenLimit: 8192 });
     expect(config).toEqual({ task: "document", inputType: undefined, normalize: true, pooling: "cls", dimensions: 1024, requestedDimensions: 512,
       batchSize: 64, lateChunking: false, truncateAtTokens: 8192 });
-    const stamped = withModelProvenance({ provider: "ollama", model: "nomic", metadata: { modelConfig: config } });
+    const stamped = withModelProvenance({ provider: "ollama", model: "nomic", metadata: { modelConfig: config } as Record<string, unknown> });
     expect(stamped.metadata?.modelUri).toBe("llm://ollama/nomic?batchSize=64&dimensions=1024&lateChunking=false&normalize=true&pooling=cls&requestedDimensions=512&task=document&truncateAtTokens=8192");
     expect(JSON.stringify(stamped)).not.toContain("127.0.0.1");
   });
