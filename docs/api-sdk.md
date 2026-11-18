@@ -374,13 +374,28 @@ session lock, several files at a time, and answers per file:
             { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "rejected", "message": "..." } }] }
 ```
 
-A file's failure carries the status the single-file call would have answered;
-only a session-level problem (not found, closed, no longer permitted, or `409`
-`upload_session_busy` while another request holds the session) fails the whole
-request. Repeat a busy request shortly. While a client is completing files, the
-background reconciler leaves the session alone for 30 seconds after each call;
-the call that completes the last file makes the session ready at once. The SDK's
-`completeUploadFiles()` splits larger lists into batches. The `/confirm` endpoint remains available as an
+A file's failure carries the status the single-file call would have answered,
+and `retryable`. Only a session-level problem (not found, closed, no longer
+permitted, or `409` `upload_session_busy` while another request holds the
+session) fails the whole request. While a client is completing files, the
+background reconciler leaves the session alone for 30 seconds after each call.
+The call that completes the last file starts ingestion within a second or two;
+calling `/confirm` yourself is still fine and returns the same run. The SDK's
+`completeUploadFiles()` splits larger lists into batches.
+
+Retry rules for session calls (`/files/complete`, `/confirm`, `/abort`):
+
+- `503` `upload_storage_unavailable` (with `Retry-After`): storage was briefly
+  unavailable after the server's own retries. Repeat the same request, or the
+  files marked `retryable`, after `Retry-After`. Nothing was completed for those
+  files.
+- `409` `upload_session_busy` (with `Retry-After`): another request or the
+  reconciler holds the session. Repeat the same request shortly. `/confirm` and
+  `/abort` wait a few seconds for the session before answering this.
+- Other `4xx`: the file or session needs attention; repeating will not help.
+
+Rate limits count requests, not files: a batch of 100 files costs one request
+in the upload category, the same as completing one file. The `/confirm` endpoint remains available as an
 explicit fallback, but automatic ingestion does not require it.
 
 ### Matching files, partial acceptance and idempotency

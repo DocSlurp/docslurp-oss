@@ -1332,7 +1332,8 @@ export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag
 /** One file's answer from a batched completion: completed, or failed with the status the single-file call would have answered. */
 export type UploadFileCompletion =
   | { fileId: string; status: "completed" }
-  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string } };
+  /** `retryable`: repeat this file later (storage briefly unavailable); otherwise the file needs a fresh upload. */
+  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string; retryable: boolean } };
 export type CompleteUploadFilesResult = { ok: boolean; files: UploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean };
 /** The most files the server finalizes in one `files/complete` call; `completeUploadFiles` splits larger lists. */
 export const UPLOAD_COMPLETE_BATCH_SIZE = 100;
@@ -2928,7 +2929,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           } catch (error) {
             // A busy or closed session is the caller's to retry or abandon, not a per-file answer.
             if (!(error instanceof DocSlurpApiError) || ![400, 404, 409, 413, 415].includes(error.status) || error.code === "upload_session_busy") throw error;
-            results.push({ fileId: file.fileId, status: "failed", error: { statusCode: error.status, code: error.code ?? "rejected", message: error.message } });
+            results.push({ fileId: file.fileId, status: "failed", error: { statusCode: error.status, code: error.code ?? "rejected", message: error.message, retryable: false } });
           }
         }
       }

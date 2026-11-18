@@ -304,6 +304,54 @@ describe("Direct Upload Session Module", () => {
     expect(lockMock.release).toHaveBeenCalled();
   });
 
+  it("waits out a held lock when asked, retrying on a released connection, then answers busy", async () => {
+    lockMock.mockClear(); lockMock.release.mockClear();
+    lockMock.mockResolvedValueOnce([{acquired:false}]).mockResolvedValueOnce([{acquired:false}]);
+    const work = vi.fn(async () => "done");
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, 2_000)).resolves.toBe("done");
+    expect(work).toHaveBeenCalledOnce();
+    // Each failed try released its connection before waiting.
+    expect(lockMock.release).toHaveBeenCalledTimes(3);
+    lockMock.mockResolvedValue([{acquired:false}]);
+    const started = Date.now();
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, 300)).rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    expect(work).toHaveBeenCalledOnce();
+    lockMock.mockReset().mockResolvedValue([{acquired:true}]);
+  });
+
+  it("verifies the assembled object when a retried multipart completion finds the upload closed", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u1", part_size: 8, size_bytes: 20 };
+    sqlMock.mockReset().mockResolvedValue([]);
+    const notFound = Object.assign(new Error("missing"), { name: "NotFound" });
+    // Absent before completion; present after the completion whose answer was lost.
+    getUploadedObjectMetadata.mockReset().mockRejectedValueOnce(notFound).mockResolvedValue({ contentLength: 20, etag: "e" });
+    listMultipartUploadParts.mockReset().mockResolvedValue([{ partNumber: 1, sizeBytes: 8, etag: "a" }, { partNumber: 2, sizeBytes: 8, etag: "b" }, { partNumber: 3, sizeBytes: 4, etag: "c" }]);
+    completeMultipartUpload.mockReset()
+      .mockRejectedValueOnce(Object.assign(new Error("reset"), { code: "ECONNRESET" }))
+      .mockRejectedValueOnce(Object.assign(new Error("closed"), { name: "NoSuchUpload", $metadata: { httpStatusCode: 404 } }));
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
+    expect(completeMultipartUpload).toHaveBeenCalledTimes(2);
+    expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
+    // A closed upload with no assembled object is still the client's 400.
+    getUploadedObjectMetadata.mockReset().mockRejectedValue(notFound);
+    completeMultipartUpload.mockReset().mockRejectedValue(Object.assign(new Error("closed"), { name: "NoSuchUpload", $metadata: { httpStatusCode: 404 } }));
+    await expect(finalizeDirectUploadFile(file)).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("no longer open") });
+    listMultipartUploadParts.mockReset(); completeMultipartUpload.mockReset();
+  });
+
+  it("turns a storage failure while finalizing into a retryable 503, never a client error", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
+    sqlMock.mockReset().mockResolvedValue([]);
+    getUploadedObjectMetadata.mockReset().mockRejectedValue(Object.assign(new Error("secret provider detail"), { name: "AccessDenied", $metadata: { httpStatusCode: 403 } }));
+    const failure = await finalizeDirectUploadFile(file).catch(error => error);
+    expect(failure).toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
+    expect(failure.message).not.toContain("secret");
+    // A definite answer is not retried.
+    expect(getUploadedObjectMetadata).toHaveBeenCalledOnce();
+    getUploadedObjectMetadata.mockReset();
+  });
+
   it("returns the persisted intake payload without signing completed sessions", async () => {
     const payload = {run:{id:"run-1"}};
     signSingleUploadPut.mockClear();

@@ -54,7 +54,7 @@ test("completeUploadFiles sends batches of 100 and returns per-file answers", as
     const body = JSON.parse(init.body);
     bodies.push(body);
     return json({ ok: true, completedCount: body.files.length, failedCount: 0, sessionComplete: bodies.length === 3,
-      files: body.files.map(file => file.fileId === "f7" ? { fileId: file.fileId, status: "failed", error: { statusCode: 409, code: "rejected", message: "changed" } } : { fileId: file.fileId, status: "completed" }) });
+      files: body.files.map(file => file.fileId === "f7" ? { fileId: file.fileId, status: "failed", error: { statusCode: 409, code: "rejected", message: "changed", retryable: false } } : { fileId: file.fileId, status: "completed" }) });
   } });
   const files = Array.from({ length: 250 }, (_, i) => ({ fileId: `f${i}` }));
   const result = await client.completeUploadFiles("s1", files);
@@ -63,7 +63,7 @@ test("completeUploadFiles sends batches of 100 and returns per-file answers", as
   assert.equal(result.failedCount, 1);
   assert.equal(result.ok, false);
   assert.equal(result.sessionComplete, true);
-  assert.deepEqual(result.files[7], { fileId: "f7", status: "failed", error: { statusCode: 409, code: "rejected", message: "changed" } });
+  assert.deepEqual(result.files[7], { fileId: "f7", status: "failed", error: { statusCode: 409, code: "rejected", message: "changed", retryable: false } });
 });
 
 test("completeUploadFiles falls back to one call per file on a server without batches", async () => {

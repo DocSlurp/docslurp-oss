@@ -2,11 +2,12 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Request validation for POST /direct/sessions/:id/files/complete. The service is replaced: a refused body never reaches it.
-const mocks = vi.hoisted(() => ({ single: vi.fn(), batch: vi.fn(), row: vi.fn() }));
+const mocks = vi.hoisted(() => ({ single: vi.fn(), batch: vi.fn(), row: vi.fn(), abort: vi.fn(), kick: vi.fn() }));
+vi.mock("../services/direct-upload-reconciler.js", () => ({ kickDirectUploadReconcile: mocks.kick }));
 vi.mock("../services/direct-upload-session.js", () => ({
   completeDirectUploadFile: mocks.single, completeDirectUploadFiles: mocks.batch,
   loadDirectUploadSessionRow: mocks.row, loadDirectUploadSession: vi.fn(),
-  directUploadSessionBelongsToOrganization: vi.fn(), abortDirectUploadSession: vi.fn(),
+  directUploadSessionBelongsToOrganization: vi.fn(), abortDirectUploadSession: mocks.abort,
   createDirectUploadSession: vi.fn(), getDirectUploadSessionDescription: vi.fn(), signDirectUploadParts: vi.fn(),
 }));
 const { createUploadsRoutes } = await import("../routes/uploads.js");
@@ -22,7 +23,8 @@ const complete = (body: unknown) => app.request(`/uploads/direct/sessions/${sess
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.row.mockResolvedValue(null);
-  mocks.single.mockResolvedValue(undefined);
+  mocks.single.mockResolvedValue({ sessionComplete: false });
+  mocks.abort.mockResolvedValue(true);
   mocks.batch.mockImplementation(async ({ files }: { files: Array<{ fileId: string }> }) => ({
     files: files.map(file => ({ fileId: file.fileId, status: "completed" })), completedCount: files.length, failedCount: 0, sessionComplete: false,
   }));
@@ -75,5 +77,59 @@ describe("files/complete request shapes", () => {
     const response = await complete({ files: [{ fileId: "f1" }] });
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: { code: "upload_session_busy" } });
+  });
+});
+
+describe("files/complete starts ingestion when the last file is in", () => {
+  it("kicks a reconcile only when the session became complete", async () => {
+    await complete({ files: [{ fileId: "f1" }] });
+    expect(mocks.kick).not.toHaveBeenCalled();
+    mocks.batch.mockResolvedValueOnce({ files: [{ fileId: "f2", status: "completed" }], completedCount: 1, failedCount: 0, sessionComplete: true });
+    await complete({ files: [{ fileId: "f2" }] });
+    expect(mocks.kick).toHaveBeenCalledWith(session);
+    mocks.kick.mockClear();
+    mocks.single.mockResolvedValueOnce({ sessionComplete: true });
+    await complete({ fileId: "f3" });
+    expect(mocks.kick).toHaveBeenCalledWith(session);
+  });
+});
+
+describe("files/complete and abort never answer a server failure as a client error", () => {
+  const providerOutage = () => Object.assign(new Error("The specified bucket does not exist"), { name: "NoSuchBucket", $metadata: { httpStatusCode: 404 } });
+  it("maps an unclassified storage outage on complete to 503 with Retry-After", async () => {
+    mocks.single.mockRejectedValueOnce(providerOutage());
+    const response = await complete({ fileId: "f1" });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toMatchObject({ error: { code: "upload_storage_unavailable" } });
+  });
+  it("answers an unexpected non-storage failure with 500, never 400", async () => {
+    mocks.single.mockRejectedValueOnce(new TypeError("x is not a function"));
+    expect((await complete({ fileId: "f1" })).status).toBe(500);
+  });
+
+  const abort = () => app.request(`/uploads/direct/sessions/${session}/abort`, { method: "POST" });
+  it("answers abort during a reconciler pass with a retryable 409 upload_session_busy", async () => {
+    mocks.abort.mockRejectedValueOnce(new ProjectIntakeError("Upload session is being finalized; retry shortly", 409, undefined, "upload_session_busy"));
+    const response = await abort();
+    expect(response.status).toBe(409);
+    expect(response.headers.get("retry-after")).toBe("1");
+    expect(await response.json()).toMatchObject({ error: { code: "upload_session_busy" } });
+    // The route waits out a short holder before answering busy.
+    expect(mocks.abort).toHaveBeenCalledWith(session, "u", expect.any(Number));
+    expect(mocks.abort.mock.calls[0]![2]).toBeGreaterThan(0);
+  });
+  it("answers abort of an ingested session with 409", async () => {
+    mocks.abort.mockRejectedValueOnce(new ProjectIntakeError("Ingested uploads cannot be aborted", 409));
+    expect((await abort()).status).toBe(409);
+  });
+  it("answers abort during a storage outage with 503", async () => {
+    mocks.abort.mockRejectedValueOnce(providerOutage());
+    expect((await abort()).status).toBe(503);
+  });
+  it("still answers 404 and 200", async () => {
+    mocks.abort.mockResolvedValueOnce(false);
+    expect((await abort()).status).toBe(404);
+    expect((await abort()).status).toBe(200);
   });
 });

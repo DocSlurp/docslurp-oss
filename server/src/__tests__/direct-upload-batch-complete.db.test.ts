@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   /** Keys whose bytes are replaced between the HEAD that verified them and the sealing copy. */
   replacedBeforeCopy: new Set<string>(),
   copies: [] as Array<{ fromKey: string; toKey: string; ifMatch?: string }>,
+  /** Remaining copy attempts per source key that fail with the provider's spurious "bucket does not exist". */
+  copyOutages: new Map<string, number>(),
   heads: [] as string[],
   confirm: vi.fn(),
 }));
@@ -35,6 +37,11 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   },
   copyUploadedObject: async (input: { fromKey: string; toKey: string; ifMatch?: string }) => {
     mocks.copies.push(input);
+    const outage = mocks.copyOutages.get(input.fromKey) ?? 0;
+    if (outage > 0) {
+      mocks.copyOutages.set(input.fromKey, outage - 1);
+      throw Object.assign(new Error("The specified bucket does not exist"), { name: "NoSuchBucket", $metadata: { httpStatusCode: 404 } });
+    }
     if (mocks.replacedBeforeCopy.has(input.fromKey)) mocks.objects.set(input.fromKey, { ...mocks.objects.get(input.fromKey)!, etag: "\"replaced\"" });
     const source = mocks.objects.get(input.fromKey);
     if (!source || (input.ifMatch && source.etag !== input.ifMatch)) throw Object.assign(new Error("precondition"), { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } });
@@ -46,7 +53,7 @@ vi.mock("../lib/storage.js", async importOriginal => ({
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
 
-const { completeDirectUploadFiles, completeDirectUploadFile, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
+const { completeDirectUploadFiles, completeDirectUploadFile, abortDirectUploadSession, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
 const { reconcileDirectUploads } = await import("../services/direct-upload-reconciler.js");
 
 const SESSION = "11111111-1111-4111-8111-111111111111";
@@ -84,6 +91,7 @@ beforeEach(async () => {
   mocks.objects.clear();
   mocks.replacedBeforeCopy.clear();
   mocks.copies.length = 0;
+  mocks.copyOutages.clear();
   mocks.heads.length = 0;
   mocks.confirm.mockReset().mockResolvedValue({});
   await db.exec(`delete from upload_session_files; delete from upload_sessions; delete from storage_cleanup_queue; delete from upload_cleanup_owners;
@@ -261,4 +269,75 @@ describe("per-call cost does not grow with session size", () => {
     expect(largeRun.rows[0]).toBeLessThan(10);
     expect(fullLoad).toBe(1000);
   }, 120_000);
+});
+
+describe("storage outages and held locks are retryable, never client errors", () => {
+  async function routeApp() {
+    const { Hono } = await import("hono");
+    const { createUploadsRoutes } = await import("../routes/uploads.js");
+    return new Hono().use("*", async (c, next) => { c.set("sessionUser", { id: "u", email: "uploader@example.test", name: "Uploader" } as never); await next(); })
+      .route("/uploads", createUploadsRoutes());
+  }
+  const post = async (path: string, body?: unknown) => (await routeApp()).request(`/uploads/direct/sessions/${SESSION}/${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+
+  it("retries a transient seal-copy failure and completes the file", async () => {
+    const key = await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    mocks.copyOutages.set(key, 1);
+    const response = await post("files/complete", { fileId: "a" });
+    expect(response.status).toBe(200);
+    expect(mocks.copies.filter(copy => copy.fromKey === key)).toHaveLength(2);
+    expect((await fileRow("a")).status).toBe("completed");
+  });
+
+  it("answers a persistent outage on the single body with 503 upload_storage_unavailable and Retry-After", async () => {
+    const key = await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    mocks.copyOutages.set(key, 99);
+    const response = await post("files/complete", { fileId: "a" });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    const body = await response.json() as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("upload_storage_unavailable");
+    expect(body.error.message).not.toContain("bucket");
+    // Bounded: three attempts, and the file stays open for a retry.
+    expect(mocks.copies.filter(copy => copy.fromKey === key)).toHaveLength(3);
+    expect((await fileRow("a")).status).toBe("pending");
+  });
+
+  it("reports a persistent outage per file in a batch while the other files complete", async () => {
+    const key = await seedFile(SESSION, "down", { size: 10, etag: "\"d\"" });
+    await seedFile(SESSION, "up", { size: 10, etag: "\"u\"" });
+    mocks.copyOutages.set(key, 99);
+    const response = await post("files/complete", { files: [{ fileId: "down" }, { fileId: "up" }] });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: false, completedCount: 1, files: [
+      { fileId: "down", status: "failed", error: { statusCode: 503, code: "upload_storage_unavailable", retryable: true } },
+      { fileId: "up", status: "completed" },
+    ] });
+    expect((await fileRow("down")).status).toBe("pending");
+  });
+
+  it("keeps a precondition failure (bytes replaced) a per-file 409, not retryable", async () => {
+    const key = await seedFile(SESSION, "r", { size: 10, etag: "\"r\"" });
+    mocks.replacedBeforeCopy.add(key);
+    const response = await post("files/complete", { files: [{ fileId: "r" }] });
+    expect(await response.json()).toMatchObject({ files: [{ fileId: "r", status: "failed", error: { statusCode: 409, retryable: false } }] });
+    expect(mocks.copies.filter(copy => copy.fromKey === key)).toHaveLength(1);
+  });
+
+  it("answers abort of an ingested session with 409, not 500", async () => {
+    await db.query("update upload_sessions set status = 'confirmed' where id = $1", [SESSION]);
+    const response = await post("abort");
+    expect(response.status).toBe(409);
+  });
+
+  it("abort refuses a held lock with upload_session_busy, or waits it out", async () => {
+    mocks.lockHeld = true;
+    await expect(abortDirectUploadSession(SESSION, "u")).rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
+    expect((await sessionRow()).status).toBe("pending");
+    setTimeout(() => { mocks.lockHeld = false; }, 300);
+    await expect(abortDirectUploadSession(SESSION, "u", 3_000)).resolves.toBe(true);
+    expect((await sessionRow()).status).toBe("aborted");
+  });
 });
