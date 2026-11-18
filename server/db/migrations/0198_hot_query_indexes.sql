@@ -9,39 +9,6 @@
 SET LOCAL lock_timeout = '5s';
 --> statement-breakpoint
 
--- Exact duplicates from the initial schema (0000 created each of these twice; 0008 already dropped the vector ones).
--- Every insert paid for both copies, including two GIN builds per chunk and proposition.
-DROP INDEX IF EXISTS document_chunks_ts_content_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS document_chunks_user_id_run_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS document_pages_document_id_page_number_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS document_pages_run_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS document_summaries_user_id_run_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS document_propositions_document_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS document_propositions_user_id_run_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS document_propositions_ts_content_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS search_sessions_user_id_created_at_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS search_session_results_session_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS search_session_results_chunk_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS search_eval_fixtures_user_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS search_index_staleness_user_id_detected_at_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS search_index_staleness_run_id_idx1;
---> statement-breakpoint
-DROP INDEX IF EXISTS search_experiments_user_id_active_idx1;
---> statement-breakpoint
-
 -- usage_attribution.source_run_id is coalesce(run_id, metadata->>'runId') (the run key that survives run deletion).
 -- No index served it, so pending_monthly_capacity (one subquery per active run), the monthly_run_capacity trigger on
 -- every run insert, run readmission, materialization capacity and the run cost panels each scanned usage_events. The
@@ -117,3 +84,38 @@ BEGIN
  END IF;
  RETURN NEW;
 END $$;
+--> statement-breakpoint
+
+-- Last on purpose: DROP INDEX takes ACCESS EXCLUSIVE on search and chunk tables until the batch commits, so dropping
+-- after the builds keeps reads of those tables blocked only for the remaining statements, not for every build.
+-- Exact duplicates from the initial schema (0000 created each of these twice; 0008 already dropped the vector ones).
+-- Every insert paid for both copies, including two GIN builds per chunk and proposition.
+DROP INDEX IF EXISTS document_chunks_ts_content_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS document_chunks_user_id_run_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS document_pages_document_id_page_number_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS document_pages_run_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS document_summaries_user_id_run_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS document_propositions_document_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS document_propositions_user_id_run_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS document_propositions_ts_content_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS search_sessions_user_id_created_at_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS search_session_results_session_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS search_session_results_chunk_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS search_eval_fixtures_user_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS search_index_staleness_user_id_detected_at_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS search_index_staleness_run_id_idx1;
+--> statement-breakpoint
+DROP INDEX IF EXISTS search_experiments_user_id_active_idx1;
