@@ -1,3 +1,10 @@
+## Private model mode: one env map from each service to a private endpoint (2026-11-18)
+
+- `DOCSLURP_MODEL_MODE=hosted|private` (default `hosted`) and one variable per service, `DOCSLURP_PRIVATE_{TEXT,VISION,EMBEDDING,RERANK,ROUTER,STT}_MODEL`, each an `llm://private/<alias>/<model>` registered with the service's capability (`packages/shared/src/private-model-mode.ts`). The API and the worker refuse to start on an invalid mode or mapping and, in private mode, on a hosted model-provider key; unmapped services are listed at startup.
+- In private mode no project reaches a hosted model: the privacy guard treats every project as restricted, and an unmapped service is refused, never sent to a hosted model. In hosted mode the map serves `local-only`/`strict-privacy` projects (text, vision, embedding, rerank and STT; chat and voice used only text and STT before).
+- Runs and searches read their pipeline through `applyPrivateModelMode`; projects keep only their level, and a project row's private `textGeneration.model` no longer selects chat's model. Resolves the TODO that `DOCSLURP_VISION_MODEL_URI` could not name a private endpoint (`DOCSLURP_PRIVATE_VISION_MODEL`).
+- Private reranking (`POST <base>/rerank`); private embedding index identity takes the registry's dimensions, and search skips an older index whose model is now refused.
+
 ## Page evidence: one module owns what is known about a page (2026-11-17)
 
 - `worker/src/lib/page-evidence.ts` owns, per page, each quantity known or unknown (words, text layer, images and furniture, grids, rule score, math glyphs, garbling, page size), the whole-page states (failed, low confidence, locked) and the routing decisions: the table decision (unknown grids take the table path; encodings only add), the router's table rule score, text-layer trust rules, the one math-glyph gate with its three purposes, readable image boxes and the page cost route. Adapters for Doppler facts (`lib/page-evidence-doppler.ts`, replacing `doppler-page-facts-layout.ts` and `routing/probe/doppler-facts.ts`), walker layout pages and native probe rows.
