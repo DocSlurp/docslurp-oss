@@ -134,6 +134,7 @@ function usage(): void {
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
+  docslurp reindex [--project <id|slug|name>] [--embedding-profile <profile>] [--late-chunking <on|off>] [--late-chunking-window <1-6>] [--chunk-overlap <on|off>] [--contextual-preambles <on|off>] [--vector-backends <a,b>] [--confirm <signature>] [--estimate] [--json]
   docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
   docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
   docslurp summary-tree status [--project <id|slug|name>] [--json]
@@ -354,7 +355,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
   "template", "document", "stage-from", "retention-days", "download", "quality", "visuals", "chart-export", "idempotency-key",
   "timeout", "limit", "cursor", "mode", "summary-tree", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
-  "max-cost-cents",
+  "max-cost-cents", "embedding-profile", "chunk-overlap", "contextual-preambles", "confirm", "late-chunking", "late-chunking-window", "vector-backends",
 ]);
 
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
@@ -1106,6 +1107,83 @@ async function fullIndexCommand(flags: Record<string, string | boolean>): Promis
   await startWork(base, {}, flags);
 }
 
+/** `on`/`off` (or true/false) for a reindex switch; anything else is refused. */
+function onOff(flag: string, value: string | boolean | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (value === "on" || value === "true") return true;
+  if (value === "off" || value === "false") return false;
+  throw new Error(`--${flag} must be on or off.`);
+}
+
+/** The reindex body: the index settings the flags change (none: a plain rebuild) and the confirmed estimate signature. */
+export function reindexBody(flags: Record<string, string | boolean>): { pipeline?: Record<string, unknown>; confirmEstimate?: string } {
+  const pipeline: Record<string, unknown> = {};
+  const embedding: Record<string, unknown> = {};
+  if (typeof flags.embeddingProfile === "string" && flags.embeddingProfile) embedding.profile = flags.embeddingProfile;
+  const late = onOff("late-chunking", flags.lateChunking);
+  if (late !== undefined) embedding.lateChunking = late;
+  if (flags.lateChunkingWindow !== undefined) {
+    const window = Number(flags.lateChunkingWindow);
+    if (!Number.isInteger(window) || window < 1 || window > 6) throw new Error("--late-chunking-window must be a whole number from 1 to 6.");
+    embedding.lateChunkingWindow = window;
+  }
+  if (Object.keys(embedding).length) pipeline.embedding = embedding;
+  if (flags.vectorBackends !== undefined) {
+    const backends = String(flags.vectorBackends).split(",").map((name) => name.trim()).filter(Boolean);
+    if (backends.length === 0) throw new Error("--vector-backends takes a comma-separated list, for example lancedb.");
+    pipeline.vectorBackends = backends;
+  }
+  const overlap = onOff("chunk-overlap", flags.chunkOverlap);
+  if (overlap !== undefined) pipeline.chunkOverlap = overlap;
+  const preambles = onOff("contextual-preambles", flags.contextualPreambles);
+  if (preambles !== undefined) pipeline.contextualChunkPreambles = preambles;
+  return {
+    ...(Object.keys(pipeline).length ? { pipeline } : {}),
+    ...(typeof flags.confirm === "string" && flags.confirm ? { confirmEstimate: flags.confirm } : {}),
+  };
+}
+
+/**
+ * `docslurp reindex`: changes the project's locked index settings (embedding, chunking) and re-indexes its documents in
+ * one step, or rebuilds the index as is. `--estimate` prices it and prints the signature to pass back with `--confirm`.
+ */
+async function reindexCommand(flags: Record<string, string | boolean>): Promise<void> {
+  const base = `/v1/projects/${encodeURIComponent(resolveProject(flags))}/reindex`;
+  const body = reindexBody(flags);
+  if (flags.estimate === true) {
+    const { confirmEstimate: _confirm, ...estimateBody } = body;
+    const response = await apiFetch(`${base}/estimate`, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(estimateBody) });
+    if (!response.ok) {
+      printFailure(await responseFailure(response));
+      process.exitCode = 1;
+      return;
+    }
+    const result = await response.json() as { estimate: CostEstimate | null; impact?: { kind: string }; lockedSettings?: string[]; signature?: string };
+    if (flags.json === true) console.log(JSON.stringify(result, null, 2));
+    else {
+      if (result.lockedSettings?.length) console.log(`Changes:   ${result.lockedSettings.join(", ")}`);
+      if (result.estimate) console.log(formatEstimate(result.estimate));
+      else console.log("Nothing to re-index.");
+      if (result.signature) console.log(`Signature: ${result.signature}\nRun the same command with --confirm ${result.signature} to start it; a changed estimate is refused.`);
+      console.log("Estimate only: nothing was started.");
+    }
+    return;
+  }
+  const response = await apiFetch(base, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    printFailure(await responseFailure(response));
+    process.exitCode = 1;
+    return;
+  }
+  const result = await response.json() as { changedSettings?: string[]; runIds?: string[]; job?: JobStatus | null };
+  if (flags.json === true) console.log(JSON.stringify(result, null, 2));
+  else {
+    console.log(result.changedSettings?.length ? `Changed:   ${result.changedSettings.join(", ")}` : "Rebuilding the index with the current settings.");
+    if (result.job) printJob(result.job);
+    else console.log("No documents to re-index; the settings apply to new uploads.");
+  }
+}
+
 async function reprocessCommand(runId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
   if (!runId) {
     console.error("Error: run ID required");
@@ -1392,7 +1470,7 @@ async function urlEstimateFiles(urls: string[]): Promise<Array<{ name: string; s
 }
 
 /** Commands that read `--estimate`; anywhere else the flag is refused, so it can never silently run billed work. */
-const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess", "summary-tree"]);
+const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reindex", "reprocess", "summary-tree"]);
 
 /** `docslurp extract`: files or URLs (not both), with the retention options. */
 async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -2095,6 +2173,9 @@ async function main(): Promise<void> {
       break;
     case "full-index":
       await fullIndexCommand(flags);
+      break;
+    case "reindex":
+      await reindexCommand(flags);
       break;
     case "reprocess":
       await reprocessCommand(positional[0], flags);

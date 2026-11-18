@@ -11,13 +11,17 @@ export class PolicyTransitionUnavailableError extends HTTPException {
  * The run-admission trigger takes the same project row lock and checks the admitted policy after it.
  * Existing runs prevent tightening even before their first document arrives or after documents are purged.
  */
-export async function assertPolicyTransitionAllowed(client: typeof sql, current: ProjectRecord, next: PipelineFeatures) {
-  const tightening = (["privacyMode", "piiPolicy"] as const).some(field => {
-    if (JSON.stringify(current.pipeline[field]) === JSON.stringify(next[field])) return false;
+/** Whether `next` tightens the privacy mode or PII policy (refused over retained documents or runs). Pure. */
+export function isPolicyTightening(current: PipelineFeatures, next: PipelineFeatures): boolean {
+  return (["privacyMode", "piiPolicy"] as const).some(field => {
+    if (JSON.stringify(current[field]) === JSON.stringify(next[field])) return false;
     const classify = PIPELINE_FIELD_IMPACT[field];
-    return typeof classify === "function" && classify(current.pipeline, next) === "reindex-required";
+    return typeof classify === "function" && classify(current, next) === "reindex-required";
   });
-  if (!tightening) return;
+}
+
+export async function assertPolicyTransitionAllowed(client: typeof sql, current: ProjectRecord, next: PipelineFeatures) {
+  if (!isPolicyTightening(current.pipeline, next)) return;
   // Admission takes the organization spend lock before the project row lock. Keep that order.
   await client`select pg_advisory_xact_lock(spend_admission_lock_key(${current.orgId}))`;
   const [project] = await client`select id from projects where id=${current.id} and org_id=${current.orgId} for update`;
