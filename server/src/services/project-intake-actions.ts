@@ -24,10 +24,11 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
-import { discardUnstartedRun } from "./run-creation.js";
+import { discardUnstartedRun, RunAdmissionRefusedError } from "./run-creation.js";
 import { type ProjectRunRow } from "./run-records.js";
 import { canContributeToProject, getProjectAccess } from "./organizations.js";
-import { getLiveApiKeyById } from "./api-keys.js";
+import { getLiveApiKeyById, getLiveIntakeKey } from "./api-keys.js";
+import { IntakeCredentialRefusedError, type IntakeAuthTarget } from "./project-intake.js";
 
 import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
@@ -39,6 +40,9 @@ import {
 import {
   prepareDirectUploadProjectIntake,
   loadDirectUploadSession,
+  loadDirectUploadSessionRow,
+  lockTenant,
+  principalLockTenant,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
@@ -82,6 +86,66 @@ type IntakeTargetArgs = Pick<
   ProjectIntakeRequest,
   "speedBoost" | "userId" | "orgId" | "project" | "newProject" | "templateKey" | "allowedProjectIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId" | "origin"
 >;
+
+/** Run admission admits server keys only (fail closed), whatever the intake route accepted before it. */
+const INTAKE_KEY_TYPES = ["server"] as const;
+
+/** A credential check for one intake request; called with a resolved target, it checks against that target from then on. */
+type IntakeCredentialGuard = (resolved?: IntakeAuthTarget) => Promise<void>;
+
+/**
+ * The credential check of a bulk, URL or website intake, from one snapshot (getLiveIntakeKey: live, unexpired, owner a
+ * member, OAuth grant unrevoked): a server key with the `ingest` scope, of the target's organization, whose project
+ * allowlist (if any) still covers the target project (a restricted key never covers a project the intake creates).
+ * Before the project is resolved, `initial` is the target (a website crawl's preflighted project, or the organization
+ * alone). A refusal stops all remaining work.
+ *
+ * Revocation semantics: authorization is checked immediately before each external dispatch (a URL fetch, a crawl
+ * provider attempt, a storage write). A step already dispatched (one fetch, one write, a provider request already
+ * accepted) may complete after a revocation; nothing new starts. Run admission repeats the check in its transaction
+ * (`principalAtAdmission`), so no run starts and nothing bills.
+ */
+function intakeCredentialGuard(apiKeyId: string | null | undefined, initial: IntakeAuthTarget, requiredScopes: readonly string[] = ["ingest"]): IntakeCredentialGuard {
+  let target = initial;
+  return async (resolved) => {
+    if (resolved) target = resolved;
+    if (!apiKeyId) return;
+    const key = await getLiveIntakeKey(apiKeyId);
+    if (!key || !(INTAKE_KEY_TYPES as readonly string[]).includes(key.keyType) || !key.scopes.includes("ingest")
+      || requiredScopes.some(scope => !key.scopes.includes(scope))) throw new IntakeCredentialRefusedError();
+    if (target.orgId && key.orgId !== target.orgId) throw new IntakeCredentialRefusedError();
+    if (target.projectId !== undefined && key.projectIds.length > 0 && (!target.projectId || !key.projectIds.includes(target.projectId))) {
+      throw new IntakeCredentialRefusedError();
+    }
+  };
+}
+
+/** The public answer for a credential refused before an external dispatch or at run admission. */
+function credentialRefused(): ProjectIntakeError {
+  return new ProjectIntakeError("API key no longer permits this upload", 403);
+}
+
+function refusedAs403(error: unknown): never {
+  if (error instanceof RunAdmissionRefusedError || error instanceof IntakeCredentialRefusedError) throw credentialRefused();
+  throw error;
+}
+
+/**
+ * Intake that checks its credential (`guard`) before every external dispatch and re-validates the principal inside its
+ * run's admission transaction; a refusal at either point is a 403 and stops the remaining work.
+ */
+async function admittedIntake(request: ProjectIntakeRequest, ports: ProjectIntakePorts, guard: IntakeCredentialGuard): ReturnType<typeof requiredIntake> {
+  return await requiredIntake({
+    ...request,
+    authorizeExternalWork: guard,
+    principalAtAdmission: { scope: "ingest", keyTypes: INTAKE_KEY_TYPES },
+  }, ports).catch(refusedAs403);
+}
+
+/** The check before an intake's external work begins (a crawl, the first fetch or write). */
+async function assertIntakeCredentialLive(guard: IntakeCredentialGuard): Promise<void> {
+  await guard().catch(refusedAs403);
+}
 
 /**
  * Intake, plus extract bookkeeping: the run is linked to its extract on
@@ -140,6 +204,37 @@ async function authorizeReceiptProject(projectId: string, userId: string, orgId?
       throw new ProjectIntakeError("API key no longer permits this upload", 403);
     }
   }
+}
+
+/**
+ * Re-validates a direct-upload session's principal at billable admission: the user may still contribute to the
+ * session's project (or, for a session that creates its project, still belongs to its organization); a session opened
+ * with an API key needs that key live (not revoked or expired, owner still a member), a server key of the session's
+ * organization with the `ingest` scope, and a project allowlist that still admits the target. The allowlist used is
+ * the live one narrowed by the session's own, never wider than either. Refusals are 403s: no run starts, nothing bills.
+ */
+export async function liveDirectUploadAdmission(
+  session: { org_id: string | null; project_id: string | null; project_name?: string | null; api_key_id?: string | null; allowed_project_ids?: string[] | null },
+  userId: string,
+): Promise<{ allowedProjectIds: string[] | null }> {
+  const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
+  await assertSessionProjectStillContributable(session, userId);
+  const stored = session.allowed_project_ids ?? [];
+  if (!session.api_key_id) return { allowedProjectIds: stored.length ? stored : null };
+  const key = await getLiveApiKeyById(session.api_key_id);
+  const [revokedGrant] = await sql<Array<{ one: number }>>`select 1 as one from mcp_oauth_grants
+    where api_key_id = ${session.api_key_id} and revoked_at is not null limit 1`;
+  if (!key || revokedGrant || key.keyType !== "server" || !session.org_id || key.orgId !== session.org_id || !key.scopes.includes("ingest")) {
+    throw new ProjectIntakeError("API key no longer permits this upload", 403);
+  }
+  const live = key.projectIds;
+  const allowed = stored.length && live.length ? stored.filter(id => live.includes(id)) : stored.length ? stored : live;
+  if ((stored.length || live.length) && (allowed.length === 0 || (session.project_id && !allowed.includes(session.project_id)))) {
+    throw new ProjectIntakeError("API key no longer permits this upload", 403);
+  }
+  // A project-scoped key never creates a project (SEC-2026-10-07).
+  if (allowed.length && !session.project_id && !session.project_name) throw new ProjectIntakeError("API key no longer permits this upload", 403);
+  return { allowedProjectIds: allowed.length ? allowed : null };
 }
 
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
@@ -219,7 +314,10 @@ async function idempotently(
       body: result.payload as unknown as Record<string, unknown>,
     });
     return result;
-  }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight");
+  }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
+  // Holds its Idempotency-Key lock for the whole request (crawl, fetch, storage writes, run creation) so a concurrent
+  // repeat is refused rather than run twice: its own capped class, so it never takes a run-start slot.
+  { lockClass: "intake", tenant: await principalLockTenant(args.userId, args.apiKeyId) });
 }
 
 /**
@@ -280,9 +378,21 @@ export function isReplayedDirectUploadConfirm(result: unknown): boolean {
 }
 
 export async function confirmDirectUploadProjectIntake(
-  args: { sessionId: string; userId: string; audit?: ProjectIntakeAudit },
+  /** `lockWaitMs`: how long to wait out a reconciler pass or another request holding the session (0: answer busy at once). */
+  args: { sessionId: string; userId: string; audit?: ProjectIntakeAudit; lockWaitMs?: number },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
+  // The organization a run start counts against is known before the lock (the row is scoped to this user).
+  const owned = await loadDirectUploadSessionRow(args.sessionId, args.userId);
+  if (!owned) throw new ProjectIntakeError("Upload session not found", 404);
+  // Confirm is idempotent. A session already confirmed answers its stored result without the lock (re-authorized as in
+  // the locked replay below), so a repeated confirm never waits on, or is refused by, a lock holder.
+  if (owned.result) {
+    const result = owned.result as ProjectIntakeActionResult;
+    await authorizeReceiptProject(result.payload.project.id, args.userId, owned.org_id, owned.api_key_id);
+    return result;
+  }
+  if (["aborted", "failed"].includes(owned.status)) throw new ProjectIntakeError("Upload session is closed", 409);
   return withDirectUploadLock(args.sessionId, async () => {
     const loaded = await loadDirectUploadSession(args.sessionId, args.userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
@@ -304,6 +414,9 @@ export async function confirmDirectUploadProjectIntake(
     }
     if (existing) await discardUnstartedRun(args.sessionId);
     const { session, items } = await prepareDirectUploadProjectIntake(args.sessionId, args.userId);
+    // Billable admission: whoever starts it (the client's confirm, the reconciler's sweep or kick), the run is admitted
+    // only under the principal's rights as they are now, never as stored when the session was opened.
+    const admission = await liveDirectUploadAdmission(session, args.userId);
     // An extract session lands only while its extract is live; its sources are already under the extract prefix.
     const extract = session.extract_id ? await loadIntakeExtract(session.extract_id, args.userId) : null;
     if (session.extract_id && !extract) throw new ProjectIntakeError("This extract expired before its files were confirmed.", 409);
@@ -338,17 +451,24 @@ export async function confirmDirectUploadProjectIntake(
       apiKeyId: session.api_key_id,
       // Recorded from the principal that opened the session (never a request field); older rows are machine.
       origin: session.origin === "app" ? "app" : "machine",
-      allowedProjectIds: session.allowed_project_ids,
+      allowedProjectIds: admission.allowedProjectIds,
+      // The check above can go stale while admission waits on the organization's spend lock: repeat it there.
+      principalAtAdmission: { scope: "ingest" },
       runId: args.sessionId,
       kind: "direct-upload",
       items,
       audit: args.audit,
       ...(extract ? { extract } : {}),
-    }, intakePorts);
+    }, intakePorts).catch(async (error: unknown) => {
+      if (!(error instanceof RunAdmissionRefusedError)) throw error;
+      // Refused inside admission (nothing reserved or created): leave the session as it was, so the refusal is final.
+      await sql`update upload_sessions set status = ${session.status} where id = ${args.sessionId} and status = 'ingesting'`;
+      throw new ProjectIntakeError("API key no longer permits this upload", 403);
+    });
     const result = actionResult(intake);
     await persistDirectUploadResult(args.sessionId, result);
     return result;
-  });
+  }, undefined, undefined, { waitMs: args.lockWaitMs ?? 0, lockClass: "start", tenant: await principalLockTenant(args.userId, owned.api_key_id) });
 }
 
 async function persistDirectUploadResult(sessionId: string, result: ProjectIntakeActionResult) {
@@ -406,9 +526,11 @@ export async function createBulkProjectIntake(
 
   return await idempotently(
     { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId, apiKeyId: args.apiKeyId, project: args.project },
-    async () =>
-      actionResult(
-        await requiredIntake(
+    async () => {
+      const guard = intakeCredentialGuard(args.apiKeyId, { orgId: args.orgId ?? null });
+      await assertIntakeCredentialLive(guard);
+      return actionResult(
+        await admittedIntake(
           {
             ...target,
             kind: "bulk-upload",
@@ -416,8 +538,10 @@ export async function createBulkProjectIntake(
             audit,
           },
           ports,
+          guard,
         ),
-      ),
+      );
+    },
   );
 }
 
@@ -444,15 +568,19 @@ export async function createRemoteUrlProjectIntake(
       project: args.project,
     },
     async () => {
-      const intake = await requiredIntake(
+      const guard = intakeCredentialGuard(args.apiKeyId, { orgId: args.orgId ?? null });
+      await assertIntakeCredentialLive(guard);
+      const intake = await admittedIntake(
         {
           ...target,
           kind: "url-ingest",
-          items: remoteUrlIntakeItems(args.urls, { canonicalIds }),
+          // Each URL is fetched only while the credential still covers the resolved project (checked last before its request).
+          items: remoteUrlIntakeItems(args.urls, { canonicalIds, beforeFetch: () => guard() }),
           urls: args.urls,
           audit,
         },
         ports,
+        guard,
       );
       return actionResult(intake, {
         ingested: intake.documents.map((document) => ({
@@ -481,14 +609,28 @@ function webPageFilename(rawUrl: string): string {
 export async function createWebsiteProjectIntake(
   args: IntakeTargetArgs & {
     startUrl: string;
-    crawl: () => Promise<{ pages: Array<{ url: string; title?: string; markdown?: string }>; credits: number }>;
+    /**
+     * Runs the crawl. `beforeProviderAttempt` is the credential check the crawl must run immediately before every
+     * provider request, failovers and retries included (runWebCapability's `beforeProviderAttempt`).
+     */
+    crawl: (beforeProviderAttempt: () => Promise<void>) => Promise<{ pages: Array<{ url: string; title?: string; markdown?: string }>; credits: number }>;
+    /**
+     * The project the crawl is for, preflighted by the caller (null: a project the intake will create; omitted:
+     * unknown). The credential check covers it until the intake resolves its target.
+     */
+    crawlProjectId?: string | null;
+    /**
+     * Every scope the route required of the caller's key (`ingest`, plus `web` for a CLI OAuth token): the credential
+     * checks before each provider attempt and each write require them all, not just `ingest`.
+     */
+    requiredScopes?: readonly string[];
     crawlOptions: Record<string, unknown>;
     idempotencyKey?: string;
     audit?: ProjectIntakeAudit;
   },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
-  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, ...target } = args;
+  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, crawlProjectId, requiredScopes, ...target } = args;
   return await idempotently(
     {
       idempotencyKey,
@@ -503,10 +645,14 @@ export async function createWebsiteProjectIntake(
       const receipt = intakeReceiptContext.getStore();
       if (receipt) await sql`update intake_request_receipts set external_effect_started = true
         where idempotency_key = ${receipt.key} and route_key = ${receipt.route}`;
-      const crawled = await crawl();
+      const guard = intakeCredentialGuard(args.apiKeyId, {
+        orgId: args.orgId ?? null, ...(crawlProjectId !== undefined ? { projectId: crawlProjectId } : {}),
+      }, requiredScopes ?? ["ingest"]);
+      await assertIntakeCredentialLive(guard);
+      const crawled = await crawl(() => guard()).catch(refusedAs403);
       const pages = crawled.pages.filter((page) => page.markdown?.trim());
       if (!pages.length) throw new ProjectIntakeError("The crawl found no readable pages at this URL.", 422);
-      const intake = await requiredIntake(
+      const intake = await admittedIntake(
         {
           ...target,
           kind: "url-ingest",
@@ -524,6 +670,7 @@ export async function createWebsiteProjectIntake(
           audit,
         },
         ports,
+        guard,
       );
       return actionResult(intake, {
         ingested: intake.documents.map((document) => ({ filename: document.filename, mimeType: document.mimeType })),

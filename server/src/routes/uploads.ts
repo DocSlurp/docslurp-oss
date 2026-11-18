@@ -36,9 +36,12 @@ import { validationErrorResponse, type ValidationErrorSource, validationHook } f
 import {
   abortDirectUploadSession,
   completeDirectUploadFile,
+  completeDirectUploadFiles,
   createDirectUploadSession,
   getDirectUploadSessionDescription,
+  MAX_DESCRIBE_FILE_IDS,
   loadDirectUploadSession,
+  loadDirectUploadSessionRow,
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
@@ -57,7 +60,6 @@ import {
   assertIntakeChartExportTier,
   parseProjectIntakeTemplateKey,
 } from "../services/project-intake-actions.js";
-import { confirmCompletedDirectUploadSoon } from "../services/direct-upload-reconciler.js";
 import {
   assertUploadKeepsIndexIdentity,
   uploadOverridesTouchIndexIdentity,
@@ -66,6 +68,10 @@ import {
   type ProjectIntakePorts,
 } from "../services/project-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
+import { env } from "../config.js";
+import { isTransientStorageError } from "../lib/storage-retry.js";
+import { kickDirectUploadReconcile } from "../services/direct-upload-reconciler.js";
 import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 import { findDefaultProject, getProject } from "../services/projects.js";
 import { IndexingModeError } from "../services/project-indexing-mode.js";
@@ -155,8 +161,64 @@ const completeDirectFileSchema = z.object({
         etag: z.string().min(1),
       }),
     )
+    .max(10_000)
     .optional(),
 });
+
+/**
+ * One batch entry: only what completion uses. Storage's own part list is authoritative, so a batch carries no part
+ * manifest; unknown fields are refused rather than walked.
+ */
+const completeBatchEntrySchema = z.object({
+  fileId: z.string().min(1).max(64),
+  etag: z.string().max(128).optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+}).strict();
+
+/** `{ files: [...] }`: up to 100 entries, each fileId once. */
+export const completeDirectFilesBatchSchema = z.object({
+  files: z.array(completeBatchEntrySchema).min(1).max(MAX_DIRECT_UPLOAD_COMPLETE_BATCH),
+}).strict().superRefine((body, ctx) => {
+  if (new Set(body.files.map(file => file.fileId)).size !== body.files.length) {
+    ctx.addIssue({ code: "custom", path: ["files"], message: "Each fileId may appear once per request" });
+  }
+});
+
+/** The legacy single-file body, a 10,000-part manifest included: about 0.7 MB at most. */
+const COMPLETE_SINGLE_BODY_MAX_BYTES = 1024 * 1024;
+/** 100 entries of the largest allowed shape (about 250 bytes each) fit in 32 KiB. */
+export const COMPLETE_BATCH_BODY_MAX_BYTES = 32 * 1024;
+
+type CompleteBody =
+  | { kind: "batch"; files: z.infer<typeof completeBatchEntrySchema>[] }
+  | { kind: "single"; body: z.infer<typeof completeDirectFileSchema> };
+
+/**
+ * Parses `files/complete` (one file, or `{ files }`) with cheap structural checks first, so an oversized or deeply
+ * nested payload is refused before schema validation walks it. A body naming both shapes is refused.
+ */
+async function parseCompleteBody(c: Context): Promise<CompleteBody | Response> {
+  const text = await c.req.text();
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { return apiStatusError(c, 400, "Invalid JSON body"); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return apiStatusError(c, 400, "Invalid request");
+  const record = body as Record<string, unknown>;
+  if ("files" in record) {
+    if (Buffer.byteLength(text) > COMPLETE_BATCH_BODY_MAX_BYTES) {
+      return apiErrorResponse(c, 413, "payload_too_large", `A completion batch body may not exceed ${COMPLETE_BATCH_BODY_MAX_BYTES} bytes`, { maxBytes: COMPLETE_BATCH_BODY_MAX_BYTES });
+    }
+    if (!Array.isArray(record.files) || record.files.length < 1 || record.files.length > MAX_DIRECT_UPLOAD_COMPLETE_BATCH) {
+      return apiStatusError(c, 400, `files must list between 1 and ${MAX_DIRECT_UPLOAD_COMPLETE_BATCH} entries`);
+    }
+    const parsed = completeDirectFilesBatchSchema.safeParse(record);
+    if (!parsed.success) return validationErrorResponse(c, parsed.error, "Invalid request", 400);
+    return { kind: "batch", files: parsed.data.files };
+  }
+  if (Array.isArray(record.parts) && record.parts.length > 10_000) return apiStatusError(c, 400, "parts may list at most 10000 entries");
+  const parsed = completeDirectFileSchema.safeParse(record);
+  if (!parsed.success) return validationErrorResponse(c, parsed.error, "Invalid request", 400);
+  return { kind: "single", body: parsed.data };
+}
 
 export const uploadValidationHook = (
   result: { success: boolean; error?: ValidationErrorSource },
@@ -233,7 +295,36 @@ export function projectIntakeErrorResponse(
     return null;
   }
 
+  // Retryable session states tell the client when to repeat the same request.
+  if (error.code === "upload_storage_unavailable") c.header("Retry-After", String(UPLOAD_STORAGE_RETRY_AFTER_SECONDS));
+  if (error.code === "upload_session_busy") c.header("Retry-After", "1");
   return apiStatusError(c, error.statusCode, error.message, { ...(error.code ? { code: error.code } : {}), ...(error.issues ? { details: { issues: error.issues } } : {}) });
+}
+
+const UPLOAD_STORAGE_RETRY_AFTER_SECONDS = 5;
+/** How long confirm and abort wait out another holder of the session lock before answering 409 upload_session_busy. */
+const CONFIRM_LOCK_WAIT_MS = 10_000;
+/** Abort waits like the other short session calls (DOCSLURP_UPLOAD_LOCK_WAIT_MS). */
+const abortLockWaitMs = () => env.directUploadLockWaitMs;
+
+/**
+ * The answer for an unexpected failure on an upload-session route. A storage provider or network failure is a
+ * retryable 503 (`upload_storage_unavailable`, Retry-After), never a client error; anything else is a 500. Either way
+ * the raw error goes to the log only.
+ */
+/** Answered (unread) when the client disconnected before its request finished. */
+const CLIENT_CLOSED_REQUEST = 499;
+
+export function uploadServerErrorResponse(c: Context, error: unknown): Response {
+  // The client went away (it disconnected while waiting for the session lock, or mid-request): nobody reads the
+  // answer, and nothing failed on our side. End quietly, without an error report.
+  if (c.req.raw.signal.aborted) return new Response(null, { status: CLIENT_CLOSED_REQUEST });
+  if (isTransientStorageError(error)) {
+    reportPublicError(error);
+    c.header("Retry-After", String(UPLOAD_STORAGE_RETRY_AFTER_SECONDS));
+    return apiStatusError(c, 503, "Upload storage is temporarily unavailable; retry shortly", { code: "upload_storage_unavailable" });
+  }
+  return apiStatusError(c, 500, reportPublicError(error));
 }
 
 /**
@@ -244,23 +335,6 @@ export function projectIntakeErrorResponse(
 export function apiKeyMayCreateProject(c: Context): boolean {
   const apiKey = c.get("apiKey");
   return !apiKey || (apiKey.projectIds ?? []).length === 0;
-}
-
-/** How long `/confirm` waits for another holder of the session's lock (an immediate confirm, the sweep) to finish. */
-export const CONFIRM_BUSY_WAIT_MS = 15_000;
-
-/** Retries a session-locked call while the session is busy, up to `waitMs`; then the busy 409 stands. */
-export async function whenUploadSessionFree<T>(run: () => Promise<T>, waitMs = CONFIRM_BUSY_WAIT_MS): Promise<T> {
-  const deadline = Date.now() + waitMs;
-  for (let delay = 100; ; delay = Math.min(1_000, delay * 2)) {
-    try {
-      return await run();
-    } catch (error) {
-      const busy = error instanceof ProjectIntakeError && error.code === "upload_session_busy";
-      if (!busy || Date.now() + delay > deadline) throw error;
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
 }
 
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
@@ -297,10 +371,10 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       }
     }
     if (sessionMatch && c.req.method === "GET" && c.req.query("statusOnly") === "true") {
-      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
-      if (loaded) {
+      const session = await loadDirectUploadSessionRow(sessionMatch[1], actor.userId);
+      if (session) {
         try {
-          await assertSessionProjectStillReadable(loaded.session, actor.userId);
+          await assertSessionProjectStillReadable(session, actor.userId);
         } catch (error) {
           return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
         }
@@ -309,10 +383,10 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     // Every route that mints signed upload URLs for an existing session, or ingests it, re-checks that this user may still
     // contribute to its project (a revoked or demoted share gets 403 and no URLs). Status-only reads and abort do not.
     if (sessionMatch && sessionRouteNeedsContribute(c.req.method, c.req.path, c.req.query("statusOnly") === "true")) {
-      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
-      if (loaded) {
+      const session = await loadDirectUploadSessionRow(sessionMatch[1], actor.userId);
+      if (session) {
         try {
-          await assertSessionProjectStillContributable(loaded.session, actor.userId);
+          await assertSessionProjectStillContributable(session, actor.userId);
         } catch (error) {
           return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
         }
@@ -361,6 +435,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             files: input.files,
             tags: input.tags,
           }),
+          discard: async (created) => { await abortDirectUploadSession(created.sessionId, userId); },
           describe: async (sessionId) => {
             // A replay is authorized like any session route: same organization, same key, inside the key's project allowlist.
             const loaded = await loadDirectUploadSession(sessionId, userId);
@@ -368,7 +443,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedProjectIds: actorAllowedProjectIds(actor) });
             // ... and the user may still contribute to that project (a share revoked since gets no URLs).
             await assertSessionProjectStillContributable(loaded.session, userId);
-            return await getDirectUploadSessionDescription(sessionId, userId);
+            return await getDirectUploadSessionDescription(sessionId, userId, false, c.req.raw.signal, undefined, c.get("apiKey")?.keyId ?? null);
           },
         });
         if (replayed) c.header("Idempotency-Replayed", "true");
@@ -384,48 +459,66 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
     try {
-    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true");
+    // `fileId` (repeatable) narrows a full read to the files a resuming client wants.
+    const fileIds = c.req.queries("fileId");
+    // statusOnly reads stored state only; a file filter belongs to the full read.
+    if (fileIds && c.req.query("statusOnly") === "true") return apiStatusError(c, 400, "fileId applies to the full session read, not statusOnly");
+    if (fileIds && (fileIds.length > MAX_DESCRIBE_FILE_IDS || fileIds.some(id => !id || id.length > 64))) {
+      return apiStatusError(c, 400, `fileId may be given at most ${MAX_DESCRIBE_FILE_IDS} times, each a file id`);
+    }
+    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true", c.req.raw.signal, fileIds?.length ? [...new Set(fileIds)] : undefined, c.get("apiKey")?.keyId ?? null);
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
     return c.json(await withPayloadCanEdit(c, session));
-    } catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
+    } catch (error) { return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error); }
   })
   .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
     async c => {
-      try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers)); }
-      catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
+      try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers, c.get("apiKey")?.keyId ?? null, c.req.raw.signal)); }
+      catch (error) { return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error); }
     })
   .post(
     "/direct/sessions/:sessionId/files/complete",
-    zValidator("json", completeDirectFileSchema, validationHook),
+    nativeBodyLimit(COMPLETE_SINGLE_BODY_MAX_BYTES),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const sessionId = c.req.param("sessionId");
-      const body = c.req.valid("json");
+      const parsedBody = await parseCompleteBody(c);
+      if (parsedBody instanceof Response) return parsedBody;
+      // The caller's own key (REST, or MCP's in-process call with its actor): rechecked before each storage write.
+      const actor = getRequestActor(c);
+      const credentialKeyId = actor.type === "apiKey" ? actor.apiKey.keyId : null;
+      if (parsedBody.kind === "batch") {
+        const body = parsedBody;
+        // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
+        try {
+          // A client that disconnects cancels this hold's storage work (fenced, so nothing half-published).
+          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files, signal: c.req.raw.signal, credentialKeyId });
+          // The last file is in: start ingestion now rather than at the next sweep (after this request's lock is released).
+          if (result.sessionComplete) kickDirectUploadReconcile(sessionId);
+          return c.json({ ok: result.failedCount === 0, ...result });
+        } catch (error) {
+          return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
+        }
+      }
+      const body = parsedBody.body;
       try {
-        const completion = await completeDirectUploadFile({
+        const completed = await completeDirectUploadFile({
           sessionId,
           userId,
           fileId: body.fileId,
           etag: body.etag,
           sizeBytes: body.sizeBytes,
           parts: body.parts,
+          signal: c.req.raw.signal,
+          credentialKeyId,
         });
-        // The last file is in: start ingestion now rather than at the next reconciler sweep. Best effort and not
-        // awaited; a client that also confirms gets the same run (confirmation is idempotent under the session lock).
-        if (completion?.allFilesCompleted) {
-          confirmCompletedDirectUploadSoon({
-            sessionId, userId, ports,
-            audit: { ipAddress: requestIp(c), userAgent: requestUserAgent(c), metadata: { sessionId, trigger: "last-file-completed" } },
-          });
-        }
+        if (completed?.sessionComplete) kickDirectUploadReconcile(sessionId);
       } catch (error) {
-        return (
-          projectIntakeErrorResponse(c, error) ??
-          apiStatusError(c, 400, reportPublicError(error))
-        );
+        // Never a 400 for a server-side failure: a client would treat it as permanent and abandon the upload.
+        return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
       }
 
       return c.json({ ok: true });
@@ -434,7 +527,13 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
   .post("/direct/sessions/:sessionId/abort", async (c) => {
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
-    const aborted = await abortDirectUploadSession(sessionId, userId);
+    let aborted: boolean;
+    try {
+      aborted = await abortDirectUploadSession(sessionId, userId, abortLockWaitMs());
+    } catch (error) {
+      // A held lock (the reconciler or another request) is a retryable 409 upload_session_busy; an ingested session 409.
+      return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
+    }
     if (!aborted) {
       return apiStatusError(c, 404, "Upload session not found");
     }
@@ -446,22 +545,22 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     const sessionId = c.req.param("sessionId");
     let result;
     try {
-      // The last files/complete starts intake itself; a confirm sent right after it waits for that (bounded) and
-      // answers with the same run instead of a 409.
-      result = await whenUploadSessionFree(() => confirmDirectUploadProjectIntake({
+      result = await confirmDirectUploadProjectIntake({
         sessionId,
         userId,
+        // A reconciler pass (or the kick after the last complete) may hold the session briefly: wait it out.
+        lockWaitMs: CONFIRM_LOCK_WAIT_MS,
         audit: {
           ipAddress: requestIp(c),
           userAgent: requestUserAgent(c),
           metadata: { sessionId },
         },
-      }, ports));
+      }, ports);
     } catch (error) {
       return (
         projectIntakeErrorResponse(c, error) ??
         runCreationErrorResponse(c, error) ??
-        apiStatusError(c, 500, reportPublicError(error))
+        uploadServerErrorResponse(c, error)
       );
     }
 

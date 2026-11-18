@@ -5,11 +5,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../services/direct-upload-session.js", () => ({
   loadDirectUploadSession: mocks.load, finalizeDirectUploadFile: mocks.finalize,
+  abortAbandonedMultipartUploads: async () => 0,
+  lockHoldBudget: () => ({ signal: new AbortController().signal, shouldStart: () => true }),
   abortDirectUploadSession: mocks.abort, queueAbandonedDirectUploadCleanup: mocks.cleanup,
   withDirectUploadLock: async (_id: string, work: () => Promise<unknown>) => work(),
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm, isReplayedDirectUploadConfirm: (result: { replayed?: boolean }) => result?.replayed === true }));
-vi.mock("../lib/direct-upload-locks.js", () => ({ inBackgroundUploadLane: (run: () => Promise<unknown>) => run() }));
 vi.mock("../services/project-intake.js", () => ({ ProjectIntakeError: class extends Error { constructor(message: string, public statusCode: number) { super(message); } } }));
 import { reconcileDirectUploads, stopDirectUploadReconciler } from "../services/direct-upload-reconciler.js";
 import { ProjectIntakeError } from "../services/project-intake.js";
@@ -18,7 +19,13 @@ let scheduled: typeof session[];
 beforeEach(() => {
   vi.clearAllMocks();
   scheduled = [{ ...session }];
-  mocks.sql.mockImplementation(async (strings: TemplateStringsArray) => strings.join("").includes("select id, user_id, status") ? scheduled : []);
+  mocks.sql.mockImplementation(async (strings: TemplateStringsArray) => {
+    const text = strings.join("");
+    if (text.includes("select id, user_id, status")) return scheduled;
+    // The guarded terminal transition finds the session as observed.
+    if (text.includes("set status = 'failed'")) return [{ id: "session-1" }];
+    return [];
+  });
   mocks.load.mockResolvedValue({ session:{status:"pending"},files:[{id:"file-1"}] });
   mocks.finalize.mockResolvedValue(true);
   mocks.confirm.mockResolvedValue({});
@@ -59,6 +66,43 @@ describe("automatic upload reconciler", () => {
     expect(mocks.cleanup).toHaveBeenCalledWith("session-1");
     log.mockRestore();
   });
+  it("skips sessions a client is completing, except expired ones", async () => {
+    await reconcileDirectUploads();
+    const [selection] = mocks.sql.mock.calls.find(([strings]) => strings.join("").includes("select id, user_id, status"))!;
+    expect(selection.join("")).toContain("(client_finalizing_until is null or client_finalizing_until <= now() or expires_at < now())");
+  });
+  it("finalizes a session's files a few at a time, attempting every file before acting on a failure", async () => {
+    const log = vi.spyOn(console,"error").mockImplementation(() => {});
+    const files = Array.from({ length: 20 }, (_, i) => ({ id: `file-${i}` }));
+    mocks.load.mockResolvedValue({ session:{status:"pending"}, files });
+    let inFlight = 0, peak = 0;
+    mocks.finalize.mockImplementation(async (file: { id: string }) => {
+      inFlight++; peak = Math.max(peak, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      inFlight--;
+      if (file.id === "file-3") throw new ProjectIntakeError("size mismatch", 400);
+      return true;
+    });
+    await reconcileDirectUploads();
+    expect(mocks.finalize).toHaveBeenCalledTimes(20);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+    expect(queryValues("set status = 'failed'")).toHaveLength(1);
+    expect(mocks.confirm).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
+  it("measures due to confirmed, and not for a confirm another path already made", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    scheduled = [{ ...session, due_at: new Date(Date.now() - 2_000).toISOString() } as typeof session];
+    await reconcileDirectUploads();
+    const line = log.mock.calls.map(([text]) => String(text)).find(text => text.includes("confirmed session=session-1 path=sweep"));
+    expect(Number(line?.match(/lag_ms=(\d+)/)?.[1])).toBeGreaterThanOrEqual(1_900);
+    log.mockClear();
+    mocks.confirm.mockResolvedValue({ replayed: true });
+    await reconcileDirectUploads();
+    expect(log.mock.calls.some(([text]) => String(text).includes("confirmed session="))).toBe(false);
+    log.mockRestore();
+  });
   it("does not overlap sweeps while a provider operation is pending", async () => {
     let resume!: () => void;
     mocks.finalize.mockReturnValueOnce(new Promise(resolve => { resume = () => resolve(true); }));
@@ -69,38 +113,12 @@ describe("automatic upload reconciler", () => {
     resume();
     await first;
   });
-  it("finalizes due sessions side by side, at most eight at a time", async () => {
-    scheduled = Array.from({ length: 12 }, (_, index) => ({ ...session, id: `session-${index}` }));
-    const resumes: Array<() => void> = [];
-    mocks.finalize.mockImplementation(() => new Promise(resolve => { resumes.push(() => resolve(true)); }));
-    const sweep = reconcileDirectUploads();
-    await vi.waitFor(() => expect(mocks.finalize).toHaveBeenCalledTimes(8));
-    await new Promise(resolve => setTimeout(resolve, 20));
-    expect(mocks.finalize).toHaveBeenCalledTimes(8);
-    resumes.splice(0).forEach(resume => resume());
-    await vi.waitFor(() => expect(mocks.finalize).toHaveBeenCalledTimes(12));
-    resumes.splice(0).forEach(resume => resume());
-    await sweep;
-    expect(mocks.confirm).toHaveBeenCalledTimes(12);
-    expect(new Set(mocks.confirm.mock.calls.map(([args]) => args.sessionId)).size).toBe(12);
-  });
-  it("treats a session another process holds as busy, not failed", async () => {
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    const busy = Object.assign(new ProjectIntakeError("busy", 409), { code: "upload_session_busy" });
-    mocks.confirm.mockRejectedValueOnce(busy);
-    await reconcileDirectUploads();
-    expect(queryValues("last_error = 'Upload finalization is retrying'")).toHaveLength(0);
-    expect(queryValues("next_reconcile_at = now() +")[0]?.[0]).toBe(30);
-    expect(log).not.toHaveBeenCalled();
-    log.mockRestore();
-  });
   it("waits for active provider work and prevents another reservation during shutdown", async () => {
     let resume!: () => void;
-    // Nine due sessions: the pool starts eight; shutdown must keep the ninth from starting.
-    scheduled = Array.from({ length: 9 }, (_, index) => ({ ...session, id: `session-${index}` }));
-    mocks.finalize.mockReturnValue(new Promise(resolve => { resume = () => resolve(true); }));
+    scheduled = [{...session},{...session,id:"session-2"}];
+    mocks.finalize.mockReturnValueOnce(new Promise(resolve => { resume = () => resolve(true); }));
     const sweep = reconcileDirectUploads();
-    await vi.waitFor(() => expect(mocks.finalize).toHaveBeenCalledTimes(8));
+    await vi.waitFor(() => expect(mocks.finalize).toHaveBeenCalledOnce());
     let stopped = false;
     const stopping = stopDirectUploadReconciler().then(() => { stopped = true; });
     await Promise.resolve();
@@ -109,7 +127,7 @@ describe("automatic upload reconciler", () => {
     await Promise.all([sweep,stopping]);
     expect(stopped).toBe(true);
     expect(mocks.confirm).not.toHaveBeenCalled();
-    expect(mocks.load).toHaveBeenCalledTimes(8);
+    expect(mocks.load).toHaveBeenCalledOnce();
   });
 
 });
