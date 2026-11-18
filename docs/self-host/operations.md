@@ -21,15 +21,20 @@ batches, with per-file backoff up to five minutes, so self-hosted S3/MinIO
 installations do not require notifications. Waves start when
 `DOCSLURP_UPLOAD_WAVE_FILES` finalized files (default 5) are waiting, after
 `DOCSLURP_UPLOAD_WAVE_DELAY_MS` (default 10000) from the first of them, or when
-the last file is finalized. `DOCSLURP_UPLOAD_WAVE_GROWTH` (default 1) multiplies
-the file count each later wave waits for: 2 makes waves of 5, 10, 20, ... files,
-so a 1,000-file upload becomes a handful of runs instead of one per 5 files. Unfinished transfers expire after 24 hours: files no
-run took become `aborted`, and runs already started continue. Keep the API
-process running; a process that sleeps between requests cannot execute
-background sweeps or wave timers.
-Allow up to two additional on-demand database connections per API process for
-upload advisory locks, beyond `DATABASE_POOL_MAX` and existing listener/probe
-connections. These locks use a separate pool so finalization cannot exhaust the
+the last file is finalized. `DOCSLURP_UPLOAD_WAVE_GROWTH` (default 2) multiplies
+the file count each later wave waits for (waves of 5, 10, 20, ... files), so a
+1,000-file upload becomes a handful of runs; `1` keeps every wave at 5 files.
+
+Unfinished transfers expire after 24 hours. At expiry, files that were finalized
+but are in no run yet go into one last run, through the same admission, billing
+and budget checks as any run; only when that run is refused (credits, a budget
+cap, revoked rights) are they aborted and cleaned up. Files never finalized are
+aborted. Runs already started continue. An upload aborted by its client starts
+no last run. Keep the API process running; a process that sleeps between
+requests cannot execute background sweeps or wave timers.
+Allow up to `DOCSLURP_UPLOAD_LOCK_POOL_MAX` (default 6) additional on-demand
+database connections per API process for upload advisory locks, beyond
+`DATABASE_POOL_MAX` and existing listener/probe connections. These locks use a separate pool so finalization cannot exhaust the
 query pool while waiting for its own queries.
 
 For a bucket-specific custom domain, set

@@ -349,10 +349,10 @@ prove that an unknown-size stream has ended.
 ### Runs in waves
 
 A direct upload starts runs while it is still uploading. A run (a wave) takes
-every finalized file not yet in a run, once 5 such files are waiting, about 10
-seconds after the first of them was finalized, or when the last file is
-finalized, whichever comes first. A 1,000-file upload becomes several runs, all
-in the same project:
+every finalized file not yet in a run, once enough such files are waiting (5
+for the first run, then 10, 20, 40, ...), about 10 seconds after the first of
+them was finalized, or when the last file is finalized, whichever comes first.
+A 1,000-file upload becomes a handful of runs, all in the same project:
 
 - The first run resolves the project. `newProject`, `projectName` and
   `templateKey` apply once, and a new project is titled once, from the first
@@ -365,6 +365,20 @@ in the same project:
   a run or marked `failed` with its own `error`.
 - Aborting a session stops later runs. Runs that already started, and their
   files, are left alone.
+- When a session expires (24 hours after creation), files that were finalized
+  but are in no run yet go into one last run, through the same billing, budget
+  and admission checks. Only when that run is refused are they aborted. Files
+  never finalized are aborted, and an aborted session starts no last run.
+- A `failed` file is final. When the server finds a file's stored bytes refused
+  (the wrong size, or a type or size intake does not accept), whether from a
+  storage notification or its own check after the client stopped completing
+  files, it fails that file permanently: it joins no run, and a later PUT or
+  complete cannot revive it (a complete answers its stored error with
+  `action: "none"`). The session's other files go on. To retry such a file,
+  upload it in a new session. With storage notifications the refusal usually
+  lands as soon as the bytes do. Without them, a client completing the file is
+  first answered `action: "reupload"` and can put the bytes again, until the
+  server's own check fails the file.
 
 Session status (`GET ...?statusOnly=true`) adds:
 
@@ -373,7 +387,8 @@ Session status (`GET ...?statusOnly=true`) adds:
   "runs": [{ "runId": "SESSION_ID", "wave": 1, "status": "started", "fileCount": 5, "documentCount": 5, "createdAt": "..." },
            { "runId": "RUN_2", "wave": 2, "status": "starting", "fileCount": 7, "documentCount": null, "createdAt": "..." }],
   "files": [{ "id": "FILE_ID", "status": "completed", "runId": "SESSION_ID" },
-            { "id": "FILE_ID_2", "status": "failed", "error": { "statusCode": 400, "code": "rejected", "message": "..." } }] }
+            { "id": "FILE_ID_2", "status": "failed", "error": { "statusCode": 400, "code": "rejected", "message": "...",
+              "retryable": false, "action": "none", "blocksSession": false } }] }
 ```
 
 `result` keeps its meaning: the first run's response (its `run.id` is the
