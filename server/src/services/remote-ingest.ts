@@ -31,21 +31,31 @@ export async function* remoteUrlIntakeItems(
   options: {
     signal?: AbortSignal;
     canonicalIds?: Array<string | null | undefined>;
-    /** Runs right before each fetch; a refusal ends the iteration (no later URL is fetched). */
+    /**
+     * The caller's authorization, run after each URL's DNS validation as the last step before its request is sent
+     * (safeExternalFetch's beforeDispatch). A refusal ends the iteration: neither this URL nor any later one is fetched.
+     */
     beforeFetch?: () => Promise<void>;
   } = {},
 ): AsyncGenerator<ProjectIntakeItem> {
   for (const [index, url] of urls.entries()) {
     let response: Response;
     let safeUrl: string;
-    await options.beforeFetch?.();
+    let refusal: { error: unknown } | null = null;
+    const beforeFetch = options.beforeFetch;
     try {
       safeUrl = await assertSafeExternalUrl(url);
       response = await safeExternalFetch(safeUrl, {
         redirect: "error",
         signal: options.signal ?? AbortSignal.timeout(15_000),
-      });
+      }, beforeFetch ? {
+        beforeDispatch: async () => {
+          try { await beforeFetch(); } catch (error) { refusal = { error }; throw error; }
+        },
+      } : {});
     } catch (error) {
+      // A refused credential stops the whole intake; only a URL's own failure is a rejected item.
+      if (refusal) throw (refusal as { error: unknown }).error;
       yield rejectedUrl(url, error instanceof Error ? error.message : "Invalid URL");
       continue;
     }

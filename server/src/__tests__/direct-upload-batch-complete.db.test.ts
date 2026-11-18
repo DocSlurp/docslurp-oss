@@ -26,6 +26,10 @@ const mocks = vi.hoisted(() => ({
   /** Every lock reservation: `class:tenant`. */
   tenants: [] as string[],
   partSignatures: 0,
+  putSignatures: 0,
+  /** Runs inside each ListParts (a slow provider read during part signing). */
+  onListParts: null as null | (() => Promise<void>),
+  listParts: 0,
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -68,9 +72,9 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   },
   deleteUploadedObject: async (key: string) => { mocks.objects.delete(key); },
   abortMultipartUpload: async () => {},
-  signSingleUploadPut: async ({ key }: { key: string }) => `https://storage.example/${key}`,
+  signSingleUploadPut: async ({ key }: { key: string }) => { mocks.putSignatures += 1; return `https://storage.example/${key}`; },
   signMultipartUploadPart: async () => { mocks.partSignatures += 1; return "https://storage.example/part"; },
-  listMultipartUploadParts: async () => [],
+  listMultipartUploadParts: async () => { mocks.listParts += 1; if (mocks.onListParts) await mocks.onListParts(); return []; },
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
 
@@ -119,6 +123,9 @@ beforeEach(async () => {
   mocks.headDelayMs = 0;
   mocks.tenants.length = 0;
   mocks.partSignatures = 0;
+  mocks.putSignatures = 0;
+  mocks.onListParts = null;
+  mocks.listParts = 0;
   // A held lock is answered at once here (production waits DOCSLURP_UPLOAD_LOCK_WAIT_MS first).
   (await import("../config.js")).env.directUploadLockWaitMs = 0;
   mocks.heads.length = 0;
@@ -568,6 +575,61 @@ describe("minting targets re-checks the caller under the lock (H2)", () => {
     mocks.onLock = async () => { await db.query("update api_keys set scopes = '{search:hybrid}' where id = 'k-u'"); };
     await expect(signDirectUploadParts(SESSION, "u", "mp", [1, 2], "k-u")).rejects.toMatchObject({ statusCode: 403 });
     expect(mocks.partSignatures).toBe(0);
+  });
+
+  async function seedMultipart() {
+    await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+      values ('mp', $1, 'big.pdf', 'application/pdf', $2, $3, 'multipart', 'up-1', $4, 'pending')`, [SESSION, 20 * 1024 * 1024, `u/${SESSION}/raw/big.pdf`, 8 * 1024 * 1024]);
+  }
+
+  it("signs no parts when the key is revoked during a slow ListParts (checked after it, right before signing)", async () => {
+    await seedMultipart();
+    mocks.onListParts = async () => {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await db.query("update api_keys set revoked_at = now() where id = 'k-u'");
+    };
+    await expect(signDirectUploadParts(SESSION, "u", "mp", [1, 2], "k-u")).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.listParts).toBe(1);
+    expect(mocks.partSignatures).toBe(0);
+  });
+
+  it("signs no parts when the key's project allowlist stops covering the session during ListParts", async () => {
+    await db.query("insert into projects (id, org_id, user_id, name) values ('44444444-4444-4444-8444-444444444444', 'o', 'u', 'Results') on conflict do nothing");
+    await db.query("update upload_sessions set project_id = '44444444-4444-4444-8444-444444444444' where id = $1", [SESSION]);
+    await db.query("update api_keys set project_ids = '{44444444-4444-4444-8444-444444444444}' where id = 'k-u'");
+    await seedMultipart();
+    mocks.onListParts = async () => { await db.query("update api_keys set project_ids = '{33333333-3333-4333-8333-333333333333}' where id = 'k-u'"); };
+    await expect(signDirectUploadParts(SESSION, "u", "mp", [1], "k-u")).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.partSignatures).toBe(0);
+  });
+
+  it("starts nothing when the client disconnects while signing waits for the lock", async () => {
+    await seedMultipart();
+    const client = new AbortController();
+    mocks.onLock = async () => { client.abort(); };
+    await expect(signDirectUploadParts(SESSION, "u", "mp", [1], "k-u", client.signal)).rejects.toBeTruthy();
+    expect(mocks.heads).toHaveLength(0);
+    expect(mocks.listParts).toBe(0);
+    expect(mocks.partSignatures).toBe(0);
+  });
+
+  it("seals no uploaded object when the key is revoked after the read's HEAD (checked before each seal)", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    mocks.onHead = async () => { await db.query("update api_keys set revoked_at = now() where id = 'k-u'"); };
+    await expect(getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u")).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.copies).toHaveLength(0);
+    expect((await fileRow("a")).status).toBe("pending");
+    expect(mocks.putSignatures).toBe(0);
+  });
+
+  it("signs no targets in a fresh create whose key was revoked after provider setup, and aborts that session", async () => {
+    await db.query("update api_keys set revoked_at = now() where id = 'k-u'");
+    const { createDirectUploadSession } = await import("../services/direct-upload-session.js");
+    await expect(createDirectUploadSession({ userId: "u", orgId: "o", apiKeyId: "k-u", pipeline: {},
+      files: [{ filename: "results.pdf", mimeType: "application/pdf", sizeBytes: 10, singlePart: true }] })).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.putSignatures).toBe(0);
+    const created = (await db.query<{ status: string }>("select status from upload_sessions where id <> $1 and id <> $2 and api_key_id = 'k-u'", [SESSION, FOREIGN])).rows;
+    expect(created.map(row => row.status)).toEqual(["aborted"]);
   });
 });
 

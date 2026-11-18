@@ -73,14 +73,18 @@ test("completeUploadFiles falls back to one call per file on a server without ba
     bodies.push(body);
     // The older server's zod refusal of a body without fileId.
     if (body.files) return new Response(JSON.stringify({ error: { code: "invalid_request", message: "Invalid request", details: { issues: [{ path: "fileId", code: "invalid_type", message: "Required" }] } } }), { status: 400, headers: { "Content-Type": "application/json" } });
-    if (body.fileId === "bad") return new Response(JSON.stringify({ error: { message: "Upload parts are incomplete or have incorrect sizes" } }), { status: 409, headers: { "Content-Type": "application/json" } });
+    if (body.fileId === "bad") return new Response(JSON.stringify({ error: { code: "upload_parts_incomplete", message: "Upload parts are incomplete or have incorrect sizes" } }), { status: 409, headers: { "Content-Type": "application/json" } });
+    // An uncoded 409 is never read as "send the bytes again".
+    if (body.fileId === "odd") return new Response(JSON.stringify({ error: { message: "Conflict" } }), { status: 409, headers: { "Content-Type": "application/json" } });
     return json({ ok: true });
   } });
-  const result = await client.completeUploadFiles("s1", [{ fileId: "a" }, { fileId: "bad" }, { fileId: "c", sizeBytes: 3 }]);
-  assert.deepEqual(bodies.slice(1), [{ fileId: "a" }, { fileId: "bad" }, { fileId: "c", sizeBytes: 3 }]);
-  assert.deepEqual(result.files.map(file => [file.fileId, file.status]), [["a", "completed"], ["bad", "failed"], ["c", "completed"]]);
+  const result = await client.completeUploadFiles("s1", [{ fileId: "a" }, { fileId: "bad" }, { fileId: "c", sizeBytes: 3 }, { fileId: "odd" }]);
+  assert.deepEqual(bodies.slice(1), [{ fileId: "a" }, { fileId: "bad" }, { fileId: "c", sizeBytes: 3 }, { fileId: "odd" }]);
+  assert.deepEqual(result.files.map(file => [file.fileId, file.status]), [["a", "completed"], ["bad", "failed"], ["c", "completed"], ["odd", "failed"]]);
   assert.equal(result.files[1].error.statusCode, 409);
+  assert.equal(result.files[1].error.code, "upload_parts_incomplete");
   assert.equal(result.files[1].error.action, "reupload");
+  assert.equal(result.files[3].error.action, "none");
 });
 
 test("completeUploadFiles does not fall back on a 400 that is not the older server's refusal", async () => {

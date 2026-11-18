@@ -28,7 +28,7 @@ import { discardUnstartedRun, RunAdmissionRefusedError } from "./run-creation.js
 import { type ProjectRunRow } from "./run-records.js";
 import { canContributeToProject, getProjectAccess } from "./organizations.js";
 import { getLiveApiKeyById, getLiveIntakeKey } from "./api-keys.js";
-import { IntakeCredentialRefusedError } from "./project-intake.js";
+import { IntakeCredentialRefusedError, type IntakeAuthTarget } from "./project-intake.js";
 
 import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
@@ -87,17 +87,35 @@ type IntakeTargetArgs = Pick<
   "speedBoost" | "userId" | "orgId" | "project" | "newProject" | "templateKey" | "allowedProjectIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId" | "origin"
 >;
 
+/** Run admission admits server keys only (fail closed), whatever the intake route accepted before it. */
+const INTAKE_KEY_TYPES = ["server"] as const;
+
+/** A credential check for one intake request; called with a resolved target, it checks against that target from then on. */
+type IntakeCredentialGuard = (resolved?: IntakeAuthTarget) => Promise<void>;
+
 /**
  * The credential check of a bulk, URL or website intake, from one snapshot (getLiveIntakeKey: live, unexpired, owner a
- * member, OAuth grant unrevoked) plus the `ingest` scope. Run before the external work starts and again immediately
- * before every external dispatch (each URL fetch, each storage write of a file or crawled page); a refusal stops all
- * remaining work. Run admission repeats it in its transaction (`principalAtAdmission`).
+ * member, OAuth grant unrevoked): a server key with the `ingest` scope, of the target's organization, whose project
+ * allowlist (if any) still covers the target project (a restricted key never covers a project the intake creates).
+ * Before the project is resolved, `initial` is the target (a website crawl's preflighted project, or the organization
+ * alone). A refusal stops all remaining work.
+ *
+ * Revocation semantics: authorization is checked immediately before each external dispatch (a URL fetch, a crawl
+ * provider attempt, a storage write). A step already dispatched (one fetch, one write, a provider request already
+ * accepted) may complete after a revocation; nothing new starts. Run admission repeats the check in its transaction
+ * (`principalAtAdmission`), so no run starts and nothing bills.
  */
-function intakeCredentialGuard(apiKeyId: string | null | undefined): () => Promise<void> {
-  return async () => {
+function intakeCredentialGuard(apiKeyId: string | null | undefined, initial: IntakeAuthTarget): IntakeCredentialGuard {
+  let target = initial;
+  return async (resolved) => {
+    if (resolved) target = resolved;
     if (!apiKeyId) return;
     const key = await getLiveIntakeKey(apiKeyId);
-    if (!key || !key.scopes.includes("ingest")) throw new IntakeCredentialRefusedError();
+    if (!key || !(INTAKE_KEY_TYPES as readonly string[]).includes(key.keyType) || !key.scopes.includes("ingest")) throw new IntakeCredentialRefusedError();
+    if (target.orgId && key.orgId !== target.orgId) throw new IntakeCredentialRefusedError();
+    if (target.projectId !== undefined && key.projectIds.length > 0 && (!target.projectId || !key.projectIds.includes(target.projectId))) {
+      throw new IntakeCredentialRefusedError();
+    }
   };
 }
 
@@ -106,28 +124,26 @@ function credentialRefused(): ProjectIntakeError {
   return new ProjectIntakeError("API key no longer permits this upload", 403);
 }
 
-/** Run admission admits server keys only (fail closed), whatever the intake route accepted before it. */
-const INTAKE_KEY_TYPES = ["server"] as const;
+function refusedAs403(error: unknown): never {
+  if (error instanceof RunAdmissionRefusedError || error instanceof IntakeCredentialRefusedError) throw credentialRefused();
+  throw error;
+}
 
 /**
- * Intake that checks its credential before every external dispatch and re-validates the principal inside its run's
- * admission transaction; a refusal at either point is a 403 and stops the remaining work.
+ * Intake that checks its credential (`guard`) before every external dispatch and re-validates the principal inside its
+ * run's admission transaction; a refusal at either point is a 403 and stops the remaining work.
  */
-async function admittedIntake(request: ProjectIntakeRequest, ports: ProjectIntakePorts): ReturnType<typeof requiredIntake> {
+async function admittedIntake(request: ProjectIntakeRequest, ports: ProjectIntakePorts, guard: IntakeCredentialGuard): ReturnType<typeof requiredIntake> {
   return await requiredIntake({
     ...request,
-    authorizeExternalWork: intakeCredentialGuard(request.apiKeyId),
+    authorizeExternalWork: guard,
     principalAtAdmission: { scope: "ingest", keyTypes: INTAKE_KEY_TYPES },
-  }, ports).catch((error: unknown) => {
-    if (error instanceof RunAdmissionRefusedError || error instanceof IntakeCredentialRefusedError) throw credentialRefused();
-    throw error;
-  });
+  }, ports).catch(refusedAs403);
 }
 
 /** The check before an intake's external work begins (a crawl, the first fetch or write). */
-async function assertIntakeCredentialLive(apiKeyId: string | null | undefined): Promise<void> {
-  try { await intakeCredentialGuard(apiKeyId)(); }
-  catch (error) { if (error instanceof IntakeCredentialRefusedError) throw credentialRefused(); throw error; }
+async function assertIntakeCredentialLive(guard: IntakeCredentialGuard): Promise<void> {
+  await guard().catch(refusedAs403);
 }
 
 /**
@@ -503,7 +519,8 @@ export async function createBulkProjectIntake(
   return await idempotently(
     { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId, apiKeyId: args.apiKeyId, project: args.project },
     async () => {
-      await assertIntakeCredentialLive(args.apiKeyId);
+      const guard = intakeCredentialGuard(args.apiKeyId, { orgId: args.orgId ?? null });
+      await assertIntakeCredentialLive(guard);
       return actionResult(
         await admittedIntake(
           {
@@ -513,6 +530,7 @@ export async function createBulkProjectIntake(
             audit,
           },
           ports,
+          guard,
         ),
       );
     },
@@ -542,17 +560,19 @@ export async function createRemoteUrlProjectIntake(
       project: args.project,
     },
     async () => {
-      await assertIntakeCredentialLive(args.apiKeyId);
+      const guard = intakeCredentialGuard(args.apiKeyId, { orgId: args.orgId ?? null });
+      await assertIntakeCredentialLive(guard);
       const intake = await admittedIntake(
         {
           ...target,
           kind: "url-ingest",
-          // Each URL is fetched only while the credential still permits it.
-          items: remoteUrlIntakeItems(args.urls, { canonicalIds, beforeFetch: intakeCredentialGuard(args.apiKeyId) }),
+          // Each URL is fetched only while the credential still covers the resolved project (checked last before its request).
+          items: remoteUrlIntakeItems(args.urls, { canonicalIds, beforeFetch: () => guard() }),
           urls: args.urls,
           audit,
         },
         ports,
+        guard,
       );
       return actionResult(intake, {
         ingested: intake.documents.map((document) => ({
@@ -581,14 +601,23 @@ function webPageFilename(rawUrl: string): string {
 export async function createWebsiteProjectIntake(
   args: IntakeTargetArgs & {
     startUrl: string;
-    crawl: () => Promise<{ pages: Array<{ url: string; title?: string; markdown?: string }>; credits: number }>;
+    /**
+     * Runs the crawl. `beforeProviderAttempt` is the credential check the crawl must run immediately before every
+     * provider request, failovers and retries included (runWebCapability's `beforeProviderAttempt`).
+     */
+    crawl: (beforeProviderAttempt: () => Promise<void>) => Promise<{ pages: Array<{ url: string; title?: string; markdown?: string }>; credits: number }>;
+    /**
+     * The project the crawl is for, preflighted by the caller (null: a project the intake will create; omitted:
+     * unknown). The credential check covers it until the intake resolves its target.
+     */
+    crawlProjectId?: string | null;
     crawlOptions: Record<string, unknown>;
     idempotencyKey?: string;
     audit?: ProjectIntakeAudit;
   },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
-  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, ...target } = args;
+  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, crawlProjectId, ...target } = args;
   return await idempotently(
     {
       idempotencyKey,
@@ -603,8 +632,11 @@ export async function createWebsiteProjectIntake(
       const receipt = intakeReceiptContext.getStore();
       if (receipt) await sql`update intake_request_receipts set external_effect_started = true
         where idempotency_key = ${receipt.key} and route_key = ${receipt.route}`;
-      await assertIntakeCredentialLive(args.apiKeyId);
-      const crawled = await crawl();
+      const guard = intakeCredentialGuard(args.apiKeyId, {
+        orgId: args.orgId ?? null, ...(crawlProjectId !== undefined ? { projectId: crawlProjectId } : {}),
+      });
+      await assertIntakeCredentialLive(guard);
+      const crawled = await crawl(() => guard()).catch(refusedAs403);
       const pages = crawled.pages.filter((page) => page.markdown?.trim());
       if (!pages.length) throw new ProjectIntakeError("The crawl found no readable pages at this URL.", 422);
       const intake = await admittedIntake(
@@ -625,6 +657,7 @@ export async function createWebsiteProjectIntake(
           audit,
         },
         ports,
+        guard,
       );
       return actionResult(intake, {
         ingested: intake.documents.map((document) => ({ filename: document.filename, mimeType: document.mimeType })),

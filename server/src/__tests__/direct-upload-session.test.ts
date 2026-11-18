@@ -20,6 +20,7 @@ vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnect
 } }));
 vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signMultipartUploadPart, signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
+vi.mock("../services/direct-session-idempotency.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/direct-session-idempotency.js")>(), assertSessionProjectStillContributable: async () => {} }));
 
 import {
   getDirectUploadSessionDescription,

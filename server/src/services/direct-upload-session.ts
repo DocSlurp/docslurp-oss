@@ -456,6 +456,14 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
   if (!loaded) {
     throw new ProjectIntakeError("Upload session not found", 404);
   }
+  // As on a replay: after provider setup, immediately before the first targets are signed, the credential that opened
+  // the session must still permit it. A refused session gets no targets; its opened uploads are aborted by the sweep.
+  await assertMayMintTargets(loaded.session, input.userId, input.apiKeyId).catch(async (error: unknown) => {
+    await sql`update upload_sessions set status = 'aborted', updated_at = now() where id = ${sessionId}`;
+    await sql`update upload_session_files set status = 'aborted', updated_at = now() where session_id = ${sessionId}`;
+    await queueAbandonedDirectUploadCleanup(sessionId);
+    throw error;
+  });
   return { ...(await describeDirectUploadSession(loaded)), ...(rejected.length > 0 ? { rejected } : {}) };
 }
 
@@ -506,6 +514,18 @@ async function assertMayMintTargets(session: UploadSessionRow, userId: string, c
   }
 }
 
+/**
+ * The last check before upload targets are signed, after the authorization check: the caller's client is still there
+ * and the hold's deadline has not passed. A late caller signs nothing and may retry (409 `upload_session_busy`).
+ */
+function assertMaySignNow(signal: AbortSignal, requestSignal?: AbortSignal): void {
+  requestSignal?.throwIfAborted();
+  if (signal.aborted) {
+    if (signal.reason instanceof Error && signal.reason.name !== "TimeoutError") throw signal.reason;
+    throw new ProjectIntakeError("Upload targets were not signed within this request's time budget; retry", 409, undefined, "upload_session_busy");
+  }
+}
+
 /** The most files one full session read may name with `fileId`. */
 export const MAX_DESCRIBE_FILE_IDS = 1_000;
 
@@ -543,11 +563,15 @@ export async function getDirectUploadSessionDescription(
     try {
       const open = loaded.files.filter(file => file.status === "pending" && !file.unknown_size);
       const budget = lockHoldBudget(signal);
+      const sessionRow = loaded.session;
       const inspected = await settleBounded(open, env.directUploadFinalizeConcurrency, async file => {
         let exists = false;
         try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, budget.signal), undefined, budget.signal); exists = true; }
         catch (error) { if (!isStorageNotFound(error)) throw error; }
-        if (exists) await finalizeDirectUploadFile(file, undefined, { signal: budget.signal });
+        if (!exists) return;
+        // Sealing an uploaded object is an external dispatch: authorized immediately before it, per file.
+        await assertMayMintTargets(sessionRow, userId, credentialKeyId);
+        await finalizeDirectUploadFile(file, undefined, { signal: budget.signal });
       }, { shouldStart: budget.shouldStart });
       for (const [i, result] of inspected.entries()) {
         if (result.status === "rejected" && result.reason === NOT_STARTED) uninspected.add(open[i]!.id);
@@ -557,9 +581,11 @@ export async function getDirectUploadSessionDescription(
       if (failure) throw (failure as PromiseRejectedResult).reason;
       loaded = (await load())!;
       await assertMayMintTargets(loaded.session, userId, credentialKeyId);
+      assertMaySignNow(budget.signal);
       return await describeDirectUploadSession(loaded, false, { uninspected, signal: budget.signal });
     } catch (error) {
-      if (error instanceof ProjectIntakeError && (error.code === "intake_reconciliation_required" || error.statusCode === 403)) throw error;
+      if (error instanceof ProjectIntakeError && (error.code === "intake_reconciliation_required" || error.code === "upload_session_busy" || error.statusCode === 403)) throw error;
+      if (signal?.aborted) throw error;
       throw new ProjectIntakeError("Upload storage evidence is unavailable; retry status later", 503, undefined, "upload_storage_unavailable");
     }
   }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id), signal });
@@ -629,7 +655,13 @@ export async function withDirectUploadLock<T>(sessionId: string, run: () => Prom
     try {
       const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
       if (lock?.acquired) {
-        try { return await run(); }
+        try {
+          // Right after the lock is acquired: a caller whose client went away, or whose stated wait has already run
+          // out, starts nothing under it.
+          options.signal?.throwIfAborted();
+          if (waitMs > 0 && Date.now() > deadline) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
+          return await run();
+        }
         finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
       }
     } finally { release(); }
@@ -697,7 +729,7 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
   try {
     verified = await verifyCompletedDirectUpload(file, signal);
   } catch (error) {
-    if (!isStorageNotFound(error) && !(error instanceof ProjectIntakeError && error.message.startsWith("No object found"))) throw error;
+    if (!isStorageNotFound(error) && !(error instanceof ProjectIntakeError && error.code === "upload_object_missing")) throw error;
     // A finalizer holding a stale row may find the original already gone because another one published it.
     if (file.upload_mode !== "multipart" || !file.upload_id) return await completedMeanwhile(file);
     const assembled = await assembleMultipartUpload(file, file.upload_id, signal);
@@ -813,7 +845,7 @@ async function recoverClosedMultipart(file: UploadSessionFileRow, closed: unknow
   try {
     return await verifyCompletedDirectUpload(file, signal);
   } catch (error) {
-    if (error instanceof ProjectIntakeError && error.message.startsWith("No object found")) throw multipartCompletionError(closed, file.filename);
+    if (error instanceof ProjectIntakeError && error.code === "upload_object_missing") throw multipartCompletionError(closed, file.filename);
     throw error;
   }
 }
@@ -878,12 +910,13 @@ const REUPLOAD_MESSAGES = ["Upload parts are incomplete", "No object found", "Up
 export function describeFileFailure(error: ProjectIntakeError): DirectUploadFileError {
   const code = error.code ?? rejectionCode(error);
   const retryable = error.statusCode >= 500 || code === "upload_session_busy";
-  const reupload = !retryable && (error.message.includes("changed while its upload was being completed")
+  const reupload = !retryable && (code === "upload_object_missing" || code === "upload_parts_incomplete"
+    || error.message.includes("changed while its upload was being completed")
     || REUPLOAD_MESSAGES.some(prefix => error.message.startsWith(prefix)));
   // Mirrors the reconciler's terminal rule (a 4xx other than 409) for what it meets on its own: an absent object is
   // only "not yet", and an unknown file or a changed declared size never reaches it.
   const blocksSession = error.statusCode < 500 && error.statusCode !== 409 && error.statusCode !== 404
-    && !error.message.startsWith("No object found") && error.message !== DECLARED_SIZE_CHANGE_MESSAGE;
+    && code !== "upload_object_missing" && error.message !== DECLARED_SIZE_CHANGE_MESSAGE;
   return { statusCode: error.statusCode, code, message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession };
 }
 
@@ -929,7 +962,7 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
     const settled = await settleBounded(entries, env.directUploadFinalizeConcurrency, async entry => {
       const file = byId.get(entry.fileId);
       if (!file) throw new ProjectIntakeError("Upload file not found", 404);
-      if (!await finalizeDirectUploadFile(file, entry.sizeBytes, { signal: budget.signal })) throw new ProjectIntakeError(PARTS_INCOMPLETE_MESSAGE, 409);
+      if (!await finalizeDirectUploadFile(file, entry.sizeBytes, { signal: budget.signal })) throw new ProjectIntakeError(PARTS_INCOMPLETE_MESSAGE, 409, undefined, "upload_parts_incomplete");
     }, { shouldStart: budget.shouldStart });
     const outcomes = settled.map((result, i): FinalizeOutcome => result.status === "fulfilled"
       ? { fileId: entries[i]!.fileId, completed: true }
@@ -995,7 +1028,8 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
   const [file] = await loadDirectUploadSessionFiles(sessionId, [fileId]);
   if (!file || file.status !== "pending" || !file.upload_id) throw new ProjectIntakeError("Open multipart file not found", 404);
   // Short work: the provider reads below share one tight budget, so a stalled provider cannot hold this connection.
-  const signal = AbortSignal.timeout(SIGN_PROVIDER_BUDGET_MS);
+  const budget = AbortSignal.timeout(SIGN_PROVIDER_BUDGET_MS);
+  const signal = requestSignal ? AbortSignal.any([requestSignal, budget]) : budget;
   try {
     await getUploadedObjectMetadata(file.source_key, signal);
     // A completed object closes the transfer; completion will seal it without another PUT.
@@ -1007,12 +1041,21 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
     }
   }
   try { await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id, signal }); }
-  catch { throw new ProjectIntakeError("Upload storage evidence is unavailable", 503, undefined, "upload_storage_unavailable"); }
+  catch {
+    requestSignal?.throwIfAborted();
+    throw new ProjectIntakeError("Upload storage evidence is unavailable", 503, undefined, "upload_storage_unavailable");
+  }
+  const maxPart = Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES)));
+  for (const partNumber of partNumbers) {
+    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > maxPart || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
+  }
+  const expiresInSeconds = assertUploadSessionActive(session);
+  // Immediately before signing, after every provider read: the credential still permits it, the client is still
+  // there and the budget has not run out. Nothing but the signing itself follows the check.
   await assertMayMintTargets(session, userId, credentialKeyId);
-  return { parts: await Promise.all(partNumbers.map(async partNumber => {
-    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
-    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(session) }) };
-  })) };
+  assertMaySignNow(signal, requestSignal);
+  return { parts: await Promise.all(partNumbers.map(async partNumber =>
+    ({ partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds }) }))) };
   }, undefined, undefined, { tenant: await principalLockTenant(userId, owned.api_key_id), signal: requestSignal });
 }
 
@@ -1154,6 +1197,8 @@ async function verifyCompletedDirectUpload(
           ? `No object found in storage for ${file.filename}: this file uses single-part mode, so PUT its bytes to the file's putUrl before completing (the session has no parts to upload)`
           : `No object found in storage for ${file.filename} after completing the multipart upload`,
         400,
+        undefined,
+        "upload_object_missing",
       );
     }
     throw error;
@@ -1191,11 +1236,11 @@ function isStorageNotFound(error: unknown): boolean {
 function multipartCompletionError(error: unknown, filename: string): unknown {
   switch (storageErrorName(error)) {
     case "InvalidPart":
-      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a part is missing or its etag does not match the uploaded part (InvalidPart)`, 400);
+      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a part is missing or its etag does not match the uploaded part (InvalidPart)`, 400, undefined, "upload_parts_incomplete");
     case "InvalidPartOrder":
       return new ProjectIntakeError(`Multipart completion for ${filename} failed: parts must be in ascending partNumber order (InvalidPartOrder)`, 400);
     case "EntityTooSmall":
-      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a non-final part is smaller than the storage provider's minimum part size (EntityTooSmall)`, 400);
+      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a non-final part is smaller than the storage provider's minimum part size (EntityTooSmall)`, 400, undefined, "upload_parts_incomplete");
     case "NoSuchUpload":
       return new ProjectIntakeError(`Multipart upload for ${filename} is no longer open (expired, aborted or already completed); create a new upload session`, 400);
     default:

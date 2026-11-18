@@ -15,7 +15,8 @@ const gates = vi.hoisted(() => ({ fetchStalled: false, releaseFetch: null as nul
 vi.mock("../lib/network-security.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/network-security.js")>(),
   assertSafeExternalUrl: async (url: string) => url,
-  safeExternalFetch: async () => {
+  safeExternalFetch: async (_url: string, _init: unknown, options: { beforeDispatch?: () => Promise<void> } = {}) => {
+    await options.beforeDispatch?.();
     gates.fetches += 1;
     if (gates.stallFirstOnly && gates.fetches > 1) return new Response("Quarterly results beat expectations.", { headers: { "content-type": "text/plain" } });
     gates.fetchStalled = true;
@@ -347,6 +348,8 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
       ["the grant is revoked", "update mcp_oauth_grants set revoked_at = now() where id = 'adm-grant-i'"],
       ["the key expires", "update api_keys set expires_at = now() - interval '1 second' where id = 'adm-oi'"],
       ["the key loses its ingest scope", "update api_keys set scopes = '{search:hybrid}' where id = 'adm-oi'"],
+      // The key stays live with `ingest`, but its project allowlist no longer covers the intake's project.
+      ["the key's project allowlist drops the target project", "update api_keys set project_ids = '{99999999-9999-4999-8999-999999999999}' where id = 'adm-oi'"],
     ];
 
     /** Runs an intake of three items whose first dispatch stalls; `change` commits during the stall, then it resumes. */
@@ -380,6 +383,27 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
       // The fetch in flight when the change committed was the last: its bytes are not stored, nothing else is fetched.
       expect(gates.fetches).toBe(1);
       expect(gates.puts).toBe(0);
+    }, 30_000);
+
+    it.each(midLoopChanges)("stops a crawl between provider attempts when %s: the failover is never dispatched", async (_label, change) => {
+      const before = await runCount();
+      let providerRequests = 0;
+      const error = await actions.createWebsiteProjectIntake({
+        ...target, startUrl: "https://docs.example.com/", crawlOptions: {}, crawlProjectId: P2,
+        crawl: async (beforeProviderAttempt) => {
+          // The first provider's request is dispatched, the change commits while it runs, it fails over.
+          await beforeProviderAttempt();
+          providerRequests += 1;
+          await sql.unsafe(change);
+          await beforeProviderAttempt();
+          providerRequests += 1;
+          return { pages: [{ url: "https://docs.example.com/results", title: "Results", markdown: "Results beat expectations." }], credits: 0 };
+        },
+      }, ports).then(() => null, (failure: unknown) => failure);
+      expect(error).toMatchObject({ statusCode: 403 });
+      expect(providerRequests).toBe(1);
+      expect(gates.puts).toBe(0);
+      expect(await runCount()).toBe(before);
     }, 30_000);
 
     it.each(midLoopChanges)("stops writing a crawl's pages when %s: no later page write starts", async (_label, change) => {

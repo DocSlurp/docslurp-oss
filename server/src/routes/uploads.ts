@@ -429,7 +429,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedProjectIds: actorAllowedProjectIds(actor) });
             // ... and the user may still contribute to that project (a share revoked since gets no URLs).
             await assertSessionProjectStillContributable(loaded.session, userId);
-            return await getDirectUploadSessionDescription(sessionId, userId, false, undefined, undefined, c.get("apiKey")?.keyId ?? null);
+            return await getDirectUploadSessionDescription(sessionId, userId, false, c.req.raw.signal, undefined, c.get("apiKey")?.keyId ?? null);
           },
         });
         if (replayed) c.header("Idempotency-Replayed", "true");
