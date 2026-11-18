@@ -22,7 +22,7 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  */
 import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { activeCapabilityPools, capabilityPoolsInitialized, isDevelopmentEnvironment, normalizeEnvSetting, registerServicePoolMember, serviceProfileFromEnv, type CapabilityPoolServiceRegistration, type ServicePoolMember } from "@docslurp/shared";
+import { activeCapabilityPools, capabilityPoolsInitialized, isDevelopmentEnvironment, normalizeEnvSetting, orgScopedCacheKey, registerServicePoolMember, serviceProfileFromEnv, type CapabilityPoolServiceRegistration, type ServicePoolMember } from "@docslurp/shared";
 import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
@@ -341,7 +341,7 @@ export function setExtractorRunBacklog(lookup: RunBacklogLookup | undefined): vo
 export function runBacklogHint(scope: { orgId: string; runId: string }, now: () => number = Date.now): Promise<RunBacklogHint | undefined> {
   const lookup = runBacklogLookup;
   if (!lookup || !scope.orgId || !scope.runId) return Promise.resolve(undefined);
-  const key = `${scope.orgId}\u0000${scope.runId}`;
+  const key = orgScopedCacheKey(scope.orgId, "run-backlog", scope.runId);
   const at = now();
   const cached = runBacklogCache.get(key);
   if (cached && at - cached.at >= 0 && at - cached.at < RUN_BACKLOG_CACHE_MS) return cached.value;
