@@ -11,7 +11,7 @@ vi.mock("../services/project-intake.js", () => ({
   ProjectIntakeError: class extends Error { constructor(message: string, public statusCode: number, public issues?: unknown, public code?: string) { super(message); } },
 }));
 import { AsyncLocalStorage } from "node:async_hooks";
-import { confirmCompletedDirectUploadSoon, settleImmediateConfirms } from "../services/direct-upload-reconciler.js";
+import { confirmCompletedDirectUploadSoon, requestDirectUploadSweep, settleImmediateConfirms, startDirectUploadReconciler, stopDirectUploadReconciler } from "../services/direct-upload-reconciler.js";
 import { ProjectIntakeError } from "../services/project-intake.js";
 
 beforeEach(() => { vi.clearAllMocks(); });
@@ -81,6 +81,32 @@ describe("immediate confirm when the last file completes", () => {
     });
     await settleImmediateConfirms();
     expect(seen).toEqual([null]);
+    log.mockRestore();
+  });
+
+  it("sweeps outside the request that asked for it, directly or past the immediate-confirm cap", async () => {
+    const storage = new AsyncLocalStorage<{ apiKeyId: string }>();
+    const seen: unknown[] = [];
+    mocks.sql.mockImplementation((async (strings: TemplateStringsArray) => {
+      if (strings.join("").includes("from upload_sessions")) seen.push(storage.getStore() ?? null);
+      return [];
+    }) as never);
+    startDirectUploadReconciler();
+    await vi.waitFor(() => expect(seen).toHaveLength(1));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await storage.run({ apiKeyId: "key-of-org-a" }, async () => { requestDirectUploadSweep(); });
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const resumes: Array<() => void> = [];
+    mocks.confirm.mockImplementation(() => new Promise(resolve => { resumes.push(() => resolve({})); }));
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await storage.run({ apiKeyId: "key-of-org-a" }, async () => {
+      for (let index = 0; index < 5; index += 1) confirmCompletedDirectUploadSoon({ sessionId: `cap-${index}`, userId: "u-1" });
+    });
+    await vi.waitFor(() => expect(seen).toHaveLength(3));
+    expect(seen).toEqual([null, null, null]);
+    resumes.forEach(resume => resume());
+    await stopDirectUploadReconciler();
     log.mockRestore();
   });
 });
