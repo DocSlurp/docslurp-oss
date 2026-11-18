@@ -4,6 +4,8 @@ import {
   attestedRegion,
   authorizePrivateModelCall,
   embeddingSpaceUri,
+  formatPrivateModelUri,
+  getPrivateModelEndpointRegistry,
   isPrivateModelUri,
   l2Normalize,
   privacyModeAllowsHosted,
@@ -36,8 +38,8 @@ export function pageQuerySpaceUri(model: string, dimensions: number): string | n
 /**
  * Embed a text query into the same space as stored page-image vectors. The
  * model must match `document_page_vectors.model`: Gemini Embedding 2 takes the
- * raw text (no task prefix), the Jina v5 omni nano private endpoint takes
- * `"Query: " + text`. Any failure or unsupported model returns null so the
+ * raw text (no task prefix), a private endpoint (stored as its model id or URI) takes
+ * `"Query: " + text` for Jina v5 models. Any failure or unsupported model returns null so the
  * caller degrades to text-only search instead of blocking.
  */
 export async function embedPageQuery(
@@ -46,8 +48,9 @@ export async function embedPageQuery(
 ): Promise<Float32Array | null> {
   try {
     args.signal?.throwIfAborted();
-    if (args.model.endsWith("jina-embeddings-v5-omni-nano") && isPrivateModelUri(args.model)) {
-      return await embedWithJina(args, deps);
+    const privateModel = privatePageQueryModel(args.model);
+    if (privateModel) {
+      return await embedWithPrivateEndpoint({ ...args, model: privateModel }, deps);
     }
     if (args.model.includes("gemini-embedding-2")) {
       return await embedWithGemini(args, deps);
@@ -60,7 +63,27 @@ export async function embedPageQuery(
   }
 }
 
-async function embedWithJina(
+/**
+ * The private route that embeds queries for page vectors stored under `model`, or null. The worker's private page
+ * embedder records the served model id (`jinaai/...`), not the `llm://private/<alias>/<id>` URI, so a bare id resolves
+ * to the first registered endpoint serving that id as an embedding model: one model id gives one vector space,
+ * whichever endpoint serves it. A full private URI is used as given (the call is still checked against the registry).
+ */
+export function privatePageQueryModel(model: string): string | null {
+  if (isPrivateModelUri(model)) return model;
+  for (const endpoint of getPrivateModelEndpointRegistry().endpoints) {
+    const served = endpoint.models.find((candidate) => candidate.capability === "embedding" && candidate.id === model);
+    if (served) return formatPrivateModelUri({ alias: endpoint.alias, model: served.id });
+  }
+  return null;
+}
+
+/** Jina v5 page models expect the `"Query: "` task prefix on query text; other private embedders take it verbatim. */
+function privateQueryPrefix(modelUri: string): string {
+  return /jina-embeddings-v5/i.test(modelUri) ? JINA_QUERY_PREFIX : "";
+}
+
+async function embedWithPrivateEndpoint(
   args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode; signal?: AbortSignal },
   deps: PageQueryEmbedderDeps,
 ): Promise<Float32Array | null> {
@@ -81,10 +104,10 @@ async function embedWithJina(
   const response = await call.fetch(`${call.baseUrl.replace(/\/+$/, "")}/embeddings`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: call.model, input: `${JINA_QUERY_PREFIX}${args.query}` }),
+    body: JSON.stringify({ model: call.model, input: `${privateQueryPrefix(args.model)}${args.query}` }),
     signal: args.signal ? AbortSignal.any([args.signal, AbortSignal.timeout(EMBED_TIMEOUT_MS)]) : AbortSignal.timeout(EMBED_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`jina embeddings ${response.status}`);
+  if (!response.ok) throw new Error(`private page-query embeddings ${response.status}`);
   const body = (await response.json()) as { data?: Array<{ embedding?: number[] }>; usage?: { prompt_tokens?: number; total_tokens?: number } };
   const embedding = body.data?.[0]?.embedding;
   if (!Array.isArray(embedding) || embedding.length === 0) return null;
@@ -97,7 +120,7 @@ async function embedWithJina(
     inputTokens,
     costCents: cost.costCents,
     metadata: { ...cost.metadata, servedModel: call.model, embedding: true,
-      modelConfig: { inputType: "query", queryPrefix: true, dimensions: embedding.length, normalize: true, timeoutMs: EMBED_TIMEOUT_MS } },
+      modelConfig: { inputType: "query", queryPrefix: privateQueryPrefix(args.model) !== "", dimensions: embedding.length, normalize: true, timeoutMs: EMBED_TIMEOUT_MS } },
   });
   return l2Normalize(embedding);
 }
