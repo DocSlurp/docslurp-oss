@@ -1,3 +1,4 @@
+import { chatTierLabel } from "@docslurp/shared/project-chat-models";
 import { env } from "../config.js";
 import { allowHostedCallForProject, loadProjectPrivacyMode, openRouterCall } from "../lib/privacy.js";
 import { resolveProjectRef } from "./projects.js";
@@ -398,6 +399,11 @@ export async function runChatMcpAgent(args: {
   };
   // The chat model reference's `?reasoning=` option; none (each model's lowest setting) unless it asked for more.
   const turnReasoning = args.reasoning ?? DEFAULT_CHAT_REASONING;
+  // The level that chose the model and the settings every step ran with, on each step's usage row (model-provenance.ts).
+  const callRecord = {
+    modelClass: { tier: chatTierLabel(args.requestedModel), answer: "tool-agent" },
+    modelConfig: { operation: "chat-tool-agent", reasoning: turnReasoning, maxOutputTokens, maxSteps: limits.maxSteps, maxToolCalls: limits.maxToolCalls },
+  };
   agentSpan.set({ "docslurp.chat.mode.web": modes.web, "docslurp.chat.mode.suggestions": modes.suggestions, "docslurp.chat.reasoning": turnReasoning });
   const accounting = createOpenRouterUsageCapture();
   // costCents: provider cost of the agent's own model calls. Tool work is reported separately in toolCostCents.
@@ -531,7 +537,7 @@ export async function runChatMcpAgent(args: {
     await recordUsageEvent({ userId: args.actor.userId,
       scope: { orgId: args.orgId, projectId: args.projectId, sessionId: args.sessionId },
       usage: { ...actual, provider: "openrouter", model: args.model, metric: "project-chat-tools",
-        metadata: { ...actual.metadata, chatSessionId: args.sessionId, toolCalls: step.toolCalls.map(call => call.toolName),
+        metadata: { ...actual.metadata, ...callRecord, chatSessionId: args.sessionId, toolCalls: step.toolCalls.map(call => call.toolName),
           ...(responseModel ? { responseModel } : {}), ...(cacheRead ? { cacheReadInputTokens: cacheRead } : {}) } },
     });
     addUsage(actual);
@@ -592,7 +598,7 @@ export async function runChatMcpAgent(args: {
       await recordUsageEvent({ userId: args.actor.userId,
         scope: { orgId: args.orgId, projectId: args.projectId, sessionId: args.sessionId },
         usage: { ...actual, provider: "openrouter", model: args.model, metric: "project-chat-tools",
-          metadata: { ...actual.metadata, chatSessionId: args.sessionId, toolCalls: step.toolCalls,
+          metadata: { ...actual.metadata, ...callRecord, chatSessionId: args.sessionId, toolCalls: step.toolCalls,
             ...(step.responseModel ? { responseModel: step.responseModel } : {}),
             turnOutcome: "aborted", abortReason: reason, usageSource, usageEstimated,
             ...(usageEstimated ? { estimateMethod: `chars/${CHARS_PER_TOKEN_ESTIMATE}` } : {}),

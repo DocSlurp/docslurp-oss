@@ -226,8 +226,10 @@ describe("usage recording", () => {
     expect(event).toMatchObject({
       model: "perplexity/pplx-decider-v1.1-27b",
       inputTokens: 5000,
-      metadata: { documentId: "doc-1", role: "triage", endpoint: "perplexity-decisions" },
+      metadata: { documentId: "doc-1", role: "triage", endpoint: "perplexity-decisions",
+        modelConfig: { operation: "page-route-decision", route: "perplexity-decisions", role: "triage", questions: Object.keys(questions).length, images: 0, pages: 1 } },
     });
+    expect(String(event!.metadata?.modelUri)).toMatch(/^llm:\/\/perplexity\/perplexity\/pplx-decider-v1\.1-27b\?images=0&operation=page-route-decision/);
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[ai-usage\] page-route-decision model=perplexity\/pplx-decider-v1\.1-27b input_tokens=5000/));
     // Provider cost is recorded for our reports; routing decisions bill no credits.
     expect(Number(event!.metadata?.providerCostCents)).toBeGreaterThan(0);

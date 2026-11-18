@@ -600,11 +600,13 @@ export function materializedPageRecords(args: {
   blocked: readonly number[];
   failed: ReadonlyArray<readonly [number, string]>;
   keptAsImageReason: string;
+  /** The model that read a page in this materialization (its usage row's provider and model); unknown stays unset. */
+  readModelUri?: (page: number) => string | null | undefined;
 }): PageExtractInput[] {
   const records: PageExtractInput[] = [];
   for (const page of args.published) {
     records.push(args.modelRead(page)
-      ? { pageNumber: page, pass: "vision", method: "vision", engine: "vision-model", billedClass: "rich" }
+      ? { pageNumber: page, pass: "vision", method: "vision", engine: "vision-model", billedClass: "rich", modelUri: args.readModelUri?.(page) ?? null }
       : { pageNumber: page, pass: "extract", method: "text-layer", engine: "page-text", billedClass: "fast" });
   }
   for (const page of args.blocked) records.push({ pageNumber: page, pass: "extract", method: "none", tags: ["pii-withheld"], adopted: false });

@@ -436,6 +436,14 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                   documentId: document.id,
                   window: windowIndex + 1,
                   windows: plan.windows.length,
+                  // The request settings (the text call's, plus how the document was windowed), never the schema or prompt.
+                  modelConfig: {
+                    operation: "structured-extraction",
+                    maxOutputTokens: extractionConfig.maxOutputTokens,
+                    ...recordOf(result.usage.metadata?.modelConfig),
+                    windows: plan.windows.length,
+                    windowChars: window.text.length,
+                  },
                 },
               });
             };
@@ -703,4 +711,8 @@ export function buildStructuredFieldsEnvelopeSchema(outputSchema: Record<string,
     },
     required: ["fields"],
   };
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

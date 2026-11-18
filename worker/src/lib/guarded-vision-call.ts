@@ -10,7 +10,7 @@ import {
   type VisionExecutionResult,
   type VisionPrimaryFailure,
 } from "../tools/vision-runtime.js";
-import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
+import { findVisionBilledUsage, findVisionModelConfig, findVisionOutputRejected } from "../tools/vision-stream.js";
 import { findVisionServedRoute, priceVisionServedUsage, type VisionServedRoute } from "./vision-pricing.js";
 import {
   findVisionGuardStop,
@@ -71,6 +71,9 @@ function billedFailureUsage(
   cfg: PricingConfig,
   metadata: Record<string, unknown>,
 ): VisionFailureUsage | null {
+  // The settings the failed call ran with: a billed failure is a model call too (shared model-provenance.ts).
+  const modelConfig = findVisionModelConfig(error);
+  if (modelConfig) metadata = { modelConfig, ...metadata };
   const rejected = findVisionOutputRejected(error);
   if (rejected) {
     const costCents = priceVisionServedUsage(route, cfg, {
