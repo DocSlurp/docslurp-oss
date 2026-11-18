@@ -28,7 +28,10 @@ vi.mock("../services/documents.js", () => ({
   listDocumentOwners: listDocumentOwnersMock,
   removeDocumentTags: removeDocumentTagsMock,
   setDocumentTags: setDocumentTagsMock,
-  DocumentMutationForbiddenError: class DocumentMutationForbiddenError extends Error {}
+  DocumentMutationForbiddenError: class DocumentMutationForbiddenError extends Error {},
+  DocumentDeletionPartialError: class DocumentDeletionPartialError extends Error {
+    constructor(readonly deleted: Array<{ documentId: string }>, readonly remainingDocumentIds: string[], override readonly cause: unknown) { super("partial"); }
+  },
 }));
 
 vi.mock("../services/document-review.js", () => ({
@@ -85,6 +88,36 @@ describe("documentsRoutes bulk actions", () => {
     listDocumentsWithFiltersMock.mockReset();
     removeDocumentTagsMock.mockReset();
     setDocumentTagsMock.mockReset();
+  });
+
+  it("refuses more than 500 documents with a 400 and public copy, before any lookup", async () => {
+    listDocumentOwnersMock.mockClear();
+    const documentIds = Array.from({ length: 501 }, (_, i) => `doc-${i}`);
+    const response = await app.request("/documents/bulk", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "apply-tags", documentIds, tags: ["t"] }),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: { code: string; message: string; details: Record<string, unknown> } };
+    expect(body.error).toMatchObject({ code: "invalid_request", details: { policy: "bulk_documents_limit", limit: 500 } });
+    expect(body.error.message).toContain("at most 500");
+    expect(listDocumentOwnersMock).not.toHaveBeenCalled();
+    expect(deleteDocumentsMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a delete that stopped part-way: what was deleted (audited) and what remains, retryable when busy", async () => {
+    const { DocumentDeletionPartialError } = await import("../services/documents.js");
+    const { HTTPException } = await import("hono/http-exception");
+    appendAuditLogMock.mockClear();
+    const busy = new HTTPException(503, { message: "busy" });
+    deleteDocumentsMock.mockRejectedValue(new DocumentDeletionPartialError([{ documentId: "doc-1" }], ["doc-2", "doc-3"], busy));
+    const response = await app.request("/documents/bulk", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", documentIds: ["doc-1", "doc-2", "doc-3"] }),
+    });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("2");
+    const body = await response.json() as { error: { details: Record<string, unknown> } };
+    expect(body.error.details).toMatchObject({ policy: "bulk_delete_partial", deleted: 1, deletedDocumentIds: ["doc-1"], remainingDocumentIds: ["doc-2", "doc-3"] });
+    expect(appendAuditLogMock).toHaveBeenCalledWith(expect.objectContaining({ action: "documents.deleted", resourceId: "doc-1", metadata: expect.objectContaining({ count: 1, documentIds: ["doc-1"] }) }));
   });
 
   it("removes tags across the selected documents", async () => {

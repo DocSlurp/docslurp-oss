@@ -26,6 +26,7 @@ import {
   addDocumentTags,
   bulkReprocessDocuments,
   DocumentMutationForbiddenError,
+  DocumentDeletionPartialError,
   deleteDocument,
   deleteDocuments,
   exportDocumentArtifacts,
@@ -45,7 +46,8 @@ import { isReprocessRejectedError } from "../services/reprocess-errors.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
-import { deferredProfilesEnabled } from "@docslurp/shared";
+import { BULK_DOCUMENTS_MAX, deferredProfilesEnabled, publicApiErrorMessage } from "@docslurp/shared";
+import { HTTPException } from "hono/http-exception";
 import { getRun } from "../services/runs.js";
 import { runLifecycle } from "../services/run-lifecycle.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
@@ -63,6 +65,17 @@ import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
 import { DocumentPageExtractQueryError, getDocumentPageExtracts } from "../services/document-page-extracts.js";
 import { redactOperatorRun } from "../services/progress-snapshot.js";
+
+/**
+ * The audit record's resource id for a bulk action: the ids themselves for a short list, else the first
+ * BULK_AUDIT_LISTED and a count. A bulk request may name 500 documents, and the joined list would exceed what
+ * the audit log's resource index can hold (8 KB); the full list goes in the record's metadata (`documentIds`).
+ */
+const BULK_AUDIT_LISTED = 20;
+function bulkAuditResourceId(documentIds: string[]): string {
+  if (documentIds.length <= BULK_AUDIT_LISTED) return documentIds.join(",");
+  return `${documentIds.slice(0, BULK_AUDIT_LISTED).join(",")},+${documentIds.length - BULK_AUDIT_LISTED} more`;
+}
 
 const bulkSchema = z.object({
   speedBoost: z.boolean().optional(),
@@ -633,6 +646,11 @@ export const documentsRoutes = new Hono()
   .post("/bulk", zValidator("json", bulkSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
+    // At most BULK_DOCUMENTS_MAX documents per request, checked before any lookup; the SDK splits larger batches.
+    if (body.documentIds.length > BULK_DOCUMENTS_MAX) {
+      const details = { policy: "bulk_documents_limit", limit: BULK_DOCUMENTS_MAX };
+      return apiErrorResponse(c, 400, "invalid_request", publicApiErrorMessage("invalid_request", details), details);
+    }
     const denied = await denyOutOfScopeDocuments(c, body.documentIds, userId);
     if (denied) return denied;
     const apiKeyId = c.get("apiKey")?.keyId ?? null;
@@ -657,9 +675,10 @@ export const documentsRoutes = new Hono()
         apiKeyId,
         action: "documents.tags.bulk_applied",
         resourceType: "document-bulk",
-        resourceId: body.documentIds.join(","),
+        resourceId: bulkAuditResourceId(body.documentIds),
         ipAddress: requestIp(c),
         metadata: {
+          documentIds: body.documentIds,
           count: body.documentIds.length,
           tags: body.tags ?? [],
           userAgent: requestUserAgent(c)
@@ -676,9 +695,10 @@ export const documentsRoutes = new Hono()
         apiKeyId,
         action: "documents.tags.bulk_removed",
         resourceType: "document-bulk",
-        resourceId: body.documentIds.join(","),
+        resourceId: bulkAuditResourceId(body.documentIds),
         ipAddress: requestIp(c),
         metadata: {
+          documentIds: body.documentIds,
           count: body.documentIds.length,
           tags: body.tags ?? [],
           userAgent: requestUserAgent(c)
@@ -688,20 +708,37 @@ export const documentsRoutes = new Hono()
     }
 
     if (body.action === "delete") {
-      let deleted: number;
-      try { deleted = await deleteDocuments(body.documentIds, userId); } catch (error) { return forbidden(error); }
-      await appendAuditLog({
+      const audit = (documentIds: string[], count: number) => appendAuditLog({
         userId,
         apiKeyId,
         action: "documents.deleted",
         resourceType: "document-bulk",
-        resourceId: body.documentIds.join(","),
+        resourceId: bulkAuditResourceId(documentIds),
         ipAddress: requestIp(c),
         metadata: {
-          count: deleted,
+          documentIds,
+          count,
           userAgent: requestUserAgent(c)
         }
       });
+      let deleted: number;
+      try {
+        deleted = await deleteDocuments(body.documentIds, userId);
+      } catch (error) {
+        // Deleted in chunks: a later chunk failed after earlier ones committed. Record and report what was deleted,
+        // with the failure's own status (a busy chunk is a retryable 503), so a retry names only the remaining ones.
+        if (error instanceof DocumentDeletionPartialError) {
+          const deletedIds = error.deleted.map((document) => document.documentId);
+          await audit(deletedIds, deletedIds.length);
+          reportPublicError(error.cause, { surface: "documents.bulk-delete" });
+          const status = error.cause instanceof HTTPException && error.cause.status === 503 ? 503 : 500;
+          if (status === 503) c.header("Retry-After", "2");
+          const details = { policy: "bulk_delete_partial", deleted: deletedIds.length, deletedDocumentIds: deletedIds, remainingDocumentIds: error.remainingDocumentIds };
+          return apiErrorResponse(c, status, status === 503 ? "unavailable" : "internal", publicApiErrorMessage("unavailable", details), details);
+        }
+        return forbidden(error);
+      }
+      await audit(body.documentIds, deleted);
       return c.json({ deleted, documentIds: body.documentIds });
     }
 
@@ -740,9 +777,10 @@ export const documentsRoutes = new Hono()
       apiKeyId,
       action: "documents.bulk_reprocessed",
       resourceType: "document-bulk",
-      resourceId: body.documentIds.join(","),
+      resourceId: bulkAuditResourceId(body.documentIds),
       ipAddress: requestIp(c),
       metadata: {
+        documentIds: body.documentIds,
         count: body.documentIds.length,
         runs: runs.map((run) => run.id),
         failedDocuments: failed.reduce((total, group) => total + group.documentIds.length, 0),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDocSlurpClient } from "../dist/index.js";
+import { BULK_DOCUMENTS_MAX, createDocSlurpClient, DocSlurpBulkDocumentsPartialError } from "../dist/index.js";
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const estimate = { pages: 3, documents: 1, billing: "disabled", credits: null, seconds: { low: 1, high: 2 }, basis: "test" };
@@ -201,6 +201,36 @@ test("reindexProject and its estimate hit the reindex routes; a locked update su
     assert.equal(error.code, "reindex_required");
     assert.deepEqual(error.reindex?.lockedSettings, ["embedding"]);
     assert.equal(error.reindex?.signature, signature);
+    return true;
+  });
+});
+
+test("bulkDocuments splits deletes and tag changes into requests of at most 500 and merges them; reprocess over 500 is refused", async () => {
+  const ids = Array.from({ length: 1_050 }, (_, i) => `d${i}`);
+  const { calls, client } = recorder((call) => json({ deleted: call.body.documentIds.length, documentIds: call.body.documentIds }));
+  assert.equal(BULK_DOCUMENTS_MAX, 500);
+  assert.deepEqual(await client.bulkDocuments({ action: "delete", documentIds: ids }), { deleted: 1_050, documentIds: ids });
+  assert.deepEqual(calls.map((call) => call.body.documentIds.length), [500, 500, 50]);
+  // Up to the limit, one request as before.
+  calls.length = 0;
+  await client.bulkDocuments({ action: "delete", documentIds: ids.slice(0, 500) });
+  assert.equal(calls.length, 1);
+  // Reprocess and export cannot be merged across requests: refused before anything is sent.
+  calls.length = 0;
+  await assert.rejects(client.bulkDocuments({ action: "reprocess", documentIds: ids.slice(0, 501) }), RangeError);
+  assert.equal(calls.length, 0);
+});
+
+test("a bulkDocuments request failing part-way reports what completed and what remains", async () => {
+  const ids = Array.from({ length: 1_200 }, (_, i) => `d${i}`);
+  let sent = 0;
+  const { client } = recorder((call) => (sent++ === 1
+    ? json({ error: { code: "unavailable", message: "busy", requestId: "q" } }, 503)
+    : json({ updated: call.body.documentIds.length, documentIds: call.body.documentIds })));
+  await assert.rejects(client.bulkDocuments({ action: "apply-tags", documentIds: ids, tags: ["t"] }), (error) => {
+    assert.ok(error instanceof DocSlurpBulkDocumentsPartialError);
+    assert.deepEqual(error.completed, { updated: 500, documentIds: ids.slice(0, 500) });
+    assert.deepEqual(error.remainingDocumentIds, ids.slice(500));
     return true;
   });
 });

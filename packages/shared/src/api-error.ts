@@ -310,6 +310,9 @@ const REQUEST_BODY_MEDIA_TYPE_COPY = {
   "request_body:form": "Send the request body as application/x-www-form-urlencoded.",
 } as const;
 
+/** The most documents one bulk document request (`POST /v1/documents/bulk`) may name. */
+export const BULK_DOCUMENTS_MAX = 500;
+
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
   const base = API_ERROR_PUBLIC_MESSAGES[code];
   // A request body of a media type the endpoint does not read (details.policy names the one it does).
@@ -317,6 +320,14 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
     return REQUEST_BODY_MEDIA_TYPE_COPY[details.policy as keyof typeof REQUEST_BODY_MEDIA_TYPE_COPY];
   }
   // A caller canonical ID in a namespace the server reserves.
+  // A bulk document request over the per-request limit (BULK_DOCUMENTS_MAX).
+  if (code === "invalid_request" && details?.policy === "bulk_documents_limit") {
+    return `A bulk document request can name at most ${BULK_DOCUMENTS_MAX} documents. Split larger batches into requests of ${BULK_DOCUMENTS_MAX} or fewer.`;
+  }
+  // A bulk delete that stopped part-way: details.deletedDocumentIds were deleted, details.remainingDocumentIds were not.
+  if (details?.policy === "bulk_delete_partial") {
+    return "Some of the documents were deleted before the request stopped; details lists which were deleted and which remain. Retry with the remaining documents.";
+  }
   if (code === "invalid_request" && details?.policy === "canonical_id_reserved") {
     return "canonicalId values that start with docslurp:, that look like url: followed by a 64-character hex hash, or that are the version key of an earlier URL import in this project, are reserved for DocSlurp. Choose another canonicalId, or omit it.";
   }

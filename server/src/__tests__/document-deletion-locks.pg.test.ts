@@ -1,6 +1,8 @@
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
+import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { canonicalIdForUrl } from "../lib/canonical-id.js";
 
 /**
  * Real PostgreSQL, concurrent sessions: document deletion against itself and
@@ -163,5 +165,53 @@ describe.skipIf(!url)("document deletion under concurrency (real PostgreSQL)", (
         .toEqual([{ previous_version_id: null }, { previous_version_id: null }]);
     }
     expect(await dangling()).toEqual([]);
+  }, 120_000);
+
+  it("deletes 500 URL documents through the bulk route in chunks, holding one chunk's keys at a time; 501 ids get a 400", async () => {
+    const { documentsRoutes } = await import("../routes/documents.js");
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("sessionUser", { id: user } as never); await next(); });
+    app.route("/documents", documentsRoutes);
+    const bulk = (documentIds: string[]) => app.request("/documents/bulk", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", documentIds }),
+    });
+    // 250 two-version URL chains: 500 URL documents (three chain keys each), each chain's newer version pointing at its older.
+    const tag = randomUUID().slice(0, 8);
+    const ids: string[] = [];
+    for (let chainIndex = 0; chainIndex < 250; chainIndex++) {
+      const sourceUrl = `https://example.com/${tag}/doc-${chainIndex}`;
+      const [older, newer] = [randomUUID(), randomUUID()];
+      for (const [index, id] of [older, newer].entries()) {
+        await pool`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, metadata,
+            version_number, previous_version_id, created_at)
+          values (${id}, 'del-o', ${user}, ${project}, 'del-run', 'doc.html', 'text/html', ${`k/${id}`}, 'completed', ${canonicalIdForUrl(sourceUrl)},
+            ${pool.json({ sourceUrl })}, ${index + 1}, ${index ? older : null}, ${new Date(Date.UTC(2026, 0, 1 + index))})`;
+      }
+      ids.push(older, newer);
+    }
+    // 501 ids: refused before any lookup, with the limit in the public copy.
+    const over = await bulk([...ids, randomUUID()]);
+    expect(over.status).toBe(400);
+    const body = await over.json() as { error: { code: string; message: string; details: { policy: string; limit: number } } };
+    expect(body.error).toMatchObject({ code: "invalid_request", details: { policy: "bulk_documents_limit", limit: 500 } });
+    expect(body.error.message).toContain("at most 500");
+    // 500: deleted in chunks; a sampler records the most advisory locks any one backend held at once.
+    let peak = 0;
+    const sampler = setInterval(() => {
+      void pool<{ n: number }[]>`select coalesce(max(n), 0)::int as n from (select count(*) as n from pg_locks where locktype = 'advisory' and granted group by pid) s`
+        .then(([row]) => { peak = Math.max(peak, row!.n); }, () => {});
+    }, 5);
+    let response: Response;
+    try {
+      response = await bulk(ids);
+    } finally {
+      clearInterval(sampler);
+    }
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ deleted: 500 });
+    expect(await pool`select id from documents where id = any(${pool.array(ids)})`).toEqual([]);
+    // One chunk of 100 URL documents holds at most its own keys (3 per document), never all 1,500.
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThanOrEqual(300);
   }, 120_000);
 });

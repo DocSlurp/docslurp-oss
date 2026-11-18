@@ -1414,6 +1414,20 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
  */
 export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "autoTopUp" | "apiKeys" | "docs", string>>;
 
+/** The most documents one `bulkDocuments` request may name (the server's limit). */
+export const BULK_DOCUMENTS_MAX = 500;
+
+/**
+ * A `bulkDocuments` call split into several requests stopped part-way: `completed` is the merged result of the
+ * requests that succeeded, `remainingDocumentIds` were not sent (or their request failed), `cause` the failure.
+ */
+export class DocSlurpBulkDocumentsPartialError extends Error {
+  constructor(readonly completed: BulkDocumentsResult, readonly remainingDocumentIds: string[], override readonly cause: unknown) {
+    super(`bulkDocuments stopped after ${completed.documentIds instanceof Array ? completed.documentIds.length : 0} documents`);
+    this.name = "DocSlurpBulkDocumentsPartialError";
+  }
+}
+
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
   /** Reviewed structured retry timing, independent of raw diagnostics in body. */
@@ -3336,9 +3350,31 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /**
      * Reprocesses, retags, deletes or exports many documents at once. Server keys need `ingest` (`artifacts` for
      * `export-artifacts`), and every document must be in a project the key can use (404 before any change otherwise).
+     * The server takes at most BULK_DOCUMENTS_MAX (500) documents per request: `delete`, `apply-tags` and
+     * `remove-tags` are sent in requests of that size and their results merged (a later request's failure throws
+     * DocSlurpBulkDocumentsPartialError with what completed); `reprocess` and `export-artifacts` over the limit are
+     * refused before sending.
      */
-    bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
-      return request(`/v1/documents/bulk`, jsonRequest("POST", input), requestOptions);
+    async bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
+      const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`, jsonRequest("POST", { ...input, documentIds }), requestOptions);
+      if (input.documentIds.length <= BULK_DOCUMENTS_MAX) return send(input.documentIds);
+      if (input.action === "reprocess" || input.action === "export-artifacts") {
+        throw new RangeError(`${input.action} takes at most ${BULK_DOCUMENTS_MAX} documents per request; split the batch`);
+      }
+      const counted = input.action === "delete" ? "deleted" : "updated";
+      let total = 0;
+      const done: string[] = [];
+      for (let start = 0; start < input.documentIds.length; start += BULK_DOCUMENTS_MAX) {
+        const chunk = input.documentIds.slice(start, start + BULK_DOCUMENTS_MAX);
+        try {
+          const result = await send(chunk);
+          total += typeof result[counted] === "number" ? (result[counted] as number) : 0;
+          done.push(...chunk);
+        } catch (error) {
+          throw new DocSlurpBulkDocumentsPartialError({ [counted]: total, documentIds: done }, input.documentIds.slice(start), error);
+        }
+      }
+      return { [counted]: total, documentIds: done };
     },
 
     uploadUrls,

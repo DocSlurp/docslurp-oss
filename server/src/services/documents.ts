@@ -1502,6 +1502,20 @@ class ChainKeysChangedError extends Error {
   }
 }
 
+/** Documents deleted per transaction (and so the most chain keys one transaction holds, three per URL document). */
+const DELETE_CHUNK = 100;
+
+/**
+ * A deletion stopped after some chunks committed: `deleted` are gone, `remainingDocumentIds` (the failed chunk's and
+ * every later one) are untouched. The route answers the cause's status with both lists, so a retry names only the rest.
+ */
+export class DocumentDeletionPartialError extends Error {
+  constructor(readonly deleted: DeletedDocumentResult[], readonly remainingDocumentIds: string[], override readonly cause: unknown) {
+    super(`deleted ${deleted.length} documents before a later chunk failed`);
+    this.name = "DocumentDeletionPartialError";
+  }
+}
+
 /** Deletion could not take its locks in time (a concurrent writer held them): retryable, 503 with Retry-After. */
 export class DocumentDeletionBusyError extends HTTPException {
   readonly code = "unavailable";
@@ -1527,6 +1541,24 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   const editableProjectIds = [...new Set(editable.map((row) => row.project_id))];
 
   const targetIds = editable.map((row) => row.id);
+  // Transactions of at most DELETE_CHUNK documents, each with its own chain keys and its own retry, and no lock held
+  // between them, so one request never holds more than a chunk's keys (a URL document has three) in the shared lock
+  // table. A chunk that fails after earlier ones committed reports both sides (DocumentDeletionPartialError).
+  const deleted: DeletedDocumentResult[] = [];
+  for (let start = 0; start < targetIds.length; start += DELETE_CHUNK) {
+    const chunk = targetIds.slice(start, start + DELETE_CHUNK);
+    try {
+      deleted.push(...await deleteDocumentChunk(chunk, editableProjectIds));
+    } catch (error) {
+      if (start === 0) throw error;
+      throw new DocumentDeletionPartialError(deleted, targetIds.slice(start), error);
+    }
+  }
+  return deleted;
+}
+
+/** One chunk of a deletion, in one transaction (see deleteDocumentRows). */
+async function deleteDocumentChunk(targetIds: string[], editableProjectIds: string[]): Promise<DeletedDocumentResult[]> {
   return await withLockRetry(() => sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
     // Lock order (lib/lock-retry.ts): the version chains' advisory keys first, the same keys run creation and the

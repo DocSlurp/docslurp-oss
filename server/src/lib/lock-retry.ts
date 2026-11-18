@@ -15,9 +15,10 @@ export const LOCK_ATTEMPTS = 6;
 /** The minimal tagged-template client these helpers need (postgres.js transaction or pool). */
 type TaggedClient = (strings: TemplateStringsArray, ...values: never[]) => PromiseLike<unknown>;
 
+/** A lock conflict (55P03), a deadlock (40P01), or a full shared lock table (53200, out of shared memory): retryable. */
 export function isLockConflict(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
-  return code === "55P03" || code === "40P01";
+  return code === "55P03" || code === "40P01" || code === "53200";
 }
 
 /** Runs one transaction, retrying the whole of it on lock conflicts; `busy` makes the error after the last attempt. */
@@ -39,8 +40,14 @@ export async function boundLockWaits(client: TaggedClient): Promise<void> {
   await (client as unknown as (s: TemplateStringsArray, ...v: unknown[]) => PromiseLike<unknown>)`select set_config('lock_timeout', ${LOCK_TIMEOUT}, true)`;
 }
 
-/** Takes the advisory lock of each chain key (`<project>:<key>`), deduplicated and in sorted order. */
+/**
+ * Takes the advisory lock of each chain key (`<project>:<key>`), deduplicated and in sorted order, in one statement
+ * (the same hash, hashtextextended(key, 0), as run creation and the supersession trigger). The lock function is
+ * volatile, so it runs on the sorted rows in order.
+ */
 export async function lockChainKeys(client: TaggedClient, keys: Iterable<string>): Promise<void> {
-  const tag = client as unknown as (s: TemplateStringsArray, ...v: unknown[]) => PromiseLike<unknown>;
-  for (const key of [...new Set(keys)].sort()) await tag`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+  const sorted = [...new Set(keys)].sort();
+  if (!sorted.length) return;
+  const tag = client as unknown as ((s: TemplateStringsArray, ...v: unknown[]) => PromiseLike<unknown>) & { array: (values: string[]) => unknown };
+  await tag`select pg_advisory_xact_lock(hashtextextended(k, 0)) from (select unnest(${tag.array(sorted)}::text[]) as k order by k) s`;
 }

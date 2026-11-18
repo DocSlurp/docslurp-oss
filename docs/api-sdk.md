@@ -878,7 +878,7 @@ A server key with the `ingest` scope can keep the documents it uploads current w
 | Price it first | `POST /v1/runs/:runId/reprocess/estimate` | `reprocessEstimate` |
 | Delete a document | `DELETE /v1/documents/:docId` | `deleteDocument` |
 | Replace a document's tags | `PUT /v1/documents/:docId/tags` with `{ tags }` | `setDocumentTags` |
-| Reprocess, retag or delete many documents | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
+| Reprocess, retag or delete many documents (at most 500 per request; the SDK splits deletes and tag changes) | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
 | Act on an ingest report recommendation | `POST /v1/projects/:project/ingest-report/reprocess` (`ingest`) or `…/apply` (`projects:manage`) | `reprocessIngestRecommendation` / `applyIngestRecommendation` |
 
 - Browser keys never get these, whatever their scopes.
