@@ -50,3 +50,17 @@ it("executes no monthly usage scan without caps, but executes the capped project
   expect(capped.status?.projectBudgetPaused).toBe(true);
   expect(capped.loops).toBeGreaterThan(0);
 });
+
+it("pauses an org over its monthly cap through the correlated org filter, and only that org", async () => {
+  await sql`update projects set monthly_budget_cents=null where id='lazy-p'`;
+  await sql`update organizations set monthly_budget_cents=100 where id='lazy-o'`;
+  await sql`insert into "user"(id,name,email) values('lazy-u2','Other org','lazy-other@example.test')`;
+  await sql`insert into organizations(id,name,created_by_user_id,credit_balance_cents,monthly_budget_cents) values('lazy-o2','Other org','lazy-u2',1000,100)`;
+  await sql`insert into projects(id,org_id,user_id,name) values('lazy-p2','lazy-o2','lazy-u2','Other org')`;
+  const capped = await decisionAndPlan();
+  expect(capped.status?.orgBudgetPaused).toBe(true);
+  expect(capped.status?.projectBudgetPaused).toBe(false);
+  expect(capped.loops).toBeGreaterThan(0);
+  const other = await load('lazy-o2','lazy-p2',{client: sql as unknown as SqlClient});
+  expect(other?.orgBudgetPaused).toBe(false);
+});
