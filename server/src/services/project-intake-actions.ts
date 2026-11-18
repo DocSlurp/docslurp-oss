@@ -43,7 +43,7 @@ import {
 } from "./direct-upload-session.js";
 import { canonicalIdForUrl, opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
 import { attachExtractRun, chargeExtractRetention, describeExtractById, loadIntakeExtract } from "./extracts.js";
-import { extensionForMimeType, looksLikeUrlFilename, remoteUrlIntakeItems } from "./remote-ingest.js";
+import { extensionForMimeType, remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
   intakeIntoProject,
   REFERENCED_REFUSAL_MESSAGES,
@@ -161,8 +161,8 @@ export function sanitizeReplayedUrlIntake(payload: ProjectIntakePayload): Projec
     const index = typeof file.index === "number" ? file.index : position;
     return { ...file, index, filename: `urls[${index}]`, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
   });
-  const safeName = (filename: string, position: number, mimeType: string) =>
-    looksLikeUrlFilename(filename) ? filename : `url-${position}${extensionForMimeType(mimeType)}`;
+  // No name from a legacy receipt is trusted: every URL-derived name becomes the generic one.
+  const safeName = (_filename: string, position: number, mimeType: string) => `url-${position}${extensionForMimeType(mimeType)}`;
   const documents = payload.documents.map((document, position) => ({
     ...document,
     filename: safeName(document.filename, position, document.mimeType),

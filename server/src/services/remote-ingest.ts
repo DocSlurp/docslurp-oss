@@ -1,4 +1,3 @@
-import path from "node:path";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
@@ -6,21 +5,12 @@ import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
 import { MIME_BY_EXTENSION, canonicalMimeType, bareMimeType } from "@docslurp/shared";
 import { assertSafeExternalUrl, safeExternalFetch, UnsafeExternalUrlError } from "../lib/network-security.js";
 import { inferMimeType } from "./documents.js";
-import { ProjectIntakeError, type ProjectIntakeItem } from "./project-intake.js";
+import { ProjectIntakeError, urlRefusalMessage, type ProjectIntakeItem, type UrlRefusal } from "./project-intake.js";
 
 function parseKnownContentLength(raw: string | null): number | undefined {
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-/** At most this long, with an extension, and no run of 24+ base64 or hex characters (a grant, key or signature). */
-const MAX_URL_FILENAME_CHARS = 100;
-const OPAQUE_RUN = /[A-Za-z0-9+/=]{24,}|[0-9a-fA-F]{24,}/;
-
-/** Whether a URL's last path segment reads as a filename rather than an opaque token. */
-export function looksLikeUrlFilename(segment: string): boolean {
-  return segment.length > 0 && segment.length <= MAX_URL_FILENAME_CHARS && /\.[A-Za-z0-9]{1,10}$/.test(segment) && !OPAQUE_RUN.test(segment);
 }
 
 /** The first extension whose canonical MIME type is `mimeType` (`.pdf`), or `.bin`. */
@@ -30,14 +20,13 @@ export function extensionForMimeType(mimeType: string): string {
 }
 
 /**
- * The stored name of the file fetched from `url` (the `index`-th URL): its last
- * path segment when that looks like a filename, otherwise `<host>-<index><ext>`
- * with the extension of the sniffed type.
+ * The stored name (and so the source key) of the file fetched from `url`, the
+ * `index`-th URL: always `<host>-<index><ext>`, the extension from the sniffed
+ * type. Never any part of the path or query: no heuristic can tell a filename
+ * from an access grant that looks like one.
  */
 export function urlDerivedFilename(url: URL, index: number, mimeType: string): string {
-  let segment = path.basename(url.pathname);
-  try { segment = decodeURIComponent(segment); } catch { /* keep the encoded form */ }
-  return looksLikeUrlFilename(segment) ? segment : `${url.hostname}-${index}${extensionForMimeType(mimeType)}`;
+  return `${url.hostname}-${index}${extensionForMimeType(mimeType)}`;
 }
 
 /** How refusals name the URL at `index`: never the URL or its path, which can carry its access grant. */
@@ -45,16 +34,18 @@ function urlRef(index: number) {
   return { name: `urls[${index}]`, index };
 }
 
-/** Why a URL could not be fetched, as clients are told it: a fixed vocabulary. */
+/** Why a URL could not be fetched, as a class for logs and tests. */
 export type UrlFetchFailure = "blocked" | "timeout" | "dns" | "refused" | "tls" | "redirect" | "unreachable" | "http_status";
 
-const URL_FETCH_FAILURE_MESSAGES: Record<Exclude<UrlFetchFailure, "blocked" | "http_status">, string> = {
-  timeout: "The URL did not respond in time",
-  dns: "The URL's host could not be resolved",
-  refused: "The URL's server refused or dropped the connection",
-  tls: "The URL's server failed the TLS handshake or certificate check",
-  redirect: "The URL redirected; redirects are not followed",
-  unreachable: "The URL could not be fetched",
+/** Our URL policy's fixed refusal texts, as approved structured reasons. */
+const POLICY_REFUSALS: Record<string, UrlRefusal> = {
+  "Invalid URL": { reason: "blocked_invalid" },
+  "Only https URLs are allowed": { reason: "blocked_scheme" },
+  "URLs with embedded credentials are not allowed": { reason: "blocked_credentials" },
+  "Custom URL ports are not allowed": { reason: "blocked_port" },
+  "Private or loopback IP addresses are not allowed": { reason: "blocked_private_address" },
+  "URL resolves to a private or loopback address": { reason: "blocked_private_address" },
+  "Unable to resolve URL host": { reason: "dns" },
 };
 
 /** The error and its causes (undici wraps network failures as `TypeError: fetch failed` with the reason in `cause`). */
@@ -72,12 +63,13 @@ function errorChain(error: unknown): Array<{ name: string; code: string; message
  * Classifies a fetch failure from error names and `cause.code`, never from URL
  * text. The class and its fixed copy go to the client; the codes go to the logs.
  */
-export function classifyUrlFetchFailure(error: unknown): { failure: UrlFetchFailure; message: string; codes: string[] } {
+export function classifyUrlFetchFailure(error: unknown): { failure: UrlFetchFailure; refusal: UrlRefusal; message: string; codes: string[] } {
   const chain = errorChain(error);
   const codes = chain.flatMap(({ name, code }) => [name, code]).filter(Boolean);
-  // Our own URL policy refusals are fixed text ("Only https URLs are allowed", ...).
+  // Our own URL policy refusals map to approved reasons by their fixed text; anything else is "blocked".
   if (error instanceof UnsafeExternalUrlError) {
-    return { failure: "blocked", message: error.message, codes };
+    const refusal = POLICY_REFUSALS[error.message] ?? { reason: "blocked" };
+    return { failure: "blocked", refusal, message: urlRefusalMessage(refusal), codes };
   }
   const has = (test: (entry: { name: string; code: string; message: string }) => boolean) => chain.some(test);
   const failure: Exclude<UrlFetchFailure, "blocked" | "http_status"> =
@@ -87,13 +79,18 @@ export function classifyUrlFetchFailure(error: unknown): { failure: UrlFetchFail
     : has(({ message }) => /\bredirect\b/i.test(message)) ? "redirect"
     : has(({ code, message }) => /^(?:ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|UND_ERR_SOCKET)$/.test(code) || message === "Unable to connect to URL host") ? "refused"
     : "unreachable";
-  return { failure, message: URL_FETCH_FAILURE_MESSAGES[failure], codes };
+  const refusal: UrlRefusal = { reason: failure };
+  return { failure, refusal, message: urlRefusalMessage(refusal), codes };
 }
 
-function rejectedUrl(index: number, failure: UrlFetchFailure, message: string, codes: string[]): ProjectIntakeItem {
+function rejectedUrl(index: number, failure: UrlFetchFailure, refusal: UrlRefusal, codes: string[]): ProjectIntakeItem {
   // The class and the error names and codes only: no URL text, which can carry an access grant.
   console.warn(`[remote-ingest] url_fetch_failed ref=urls[${index}] failure=${failure} codes=${codes.join(",") || "none"}`);
-  return { filename: `urls[${index}]`, refusalRef: urlRef(index), content: { rejected: new ProjectIntakeError(message, 400) } };
+  return {
+    filename: `urls[${index}]`,
+    refusalRef: urlRef(index),
+    content: { rejected: new ProjectIntakeError(urlRefusalMessage(refusal), 400), urlRefusal: refusal },
+  };
 }
 
 /**
@@ -120,14 +117,14 @@ export async function* remoteUrlIntakeItems(
         signal: options.signal ?? AbortSignal.timeout(15_000),
       });
     } catch (error) {
-      const { failure, message, codes } = classifyUrlFetchFailure(error);
-      yield rejectedUrl(index, failure, message, codes);
+      const { failure, refusal, codes } = classifyUrlFetchFailure(error);
+      yield rejectedUrl(index, failure, refusal, codes);
       continue;
     }
 
     try {
       if (!response.ok) {
-        yield rejectedUrl(index, "http_status", `The URL's server answered HTTP ${response.status}`, [`HTTP_${response.status}`]);
+        yield rejectedUrl(index, "http_status", { reason: "http_status", httpStatus: response.status }, [`HTTP_${response.status}`]);
         continue;
       }
       const mimeType = inferMimeType(url, response.headers.get("content-type"));

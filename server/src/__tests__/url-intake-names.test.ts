@@ -2,25 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db.js", () => ({ sql: Object.assign(vi.fn(), { json: (value: unknown) => value, array: (value: unknown) => value }) }));
 
-const { looksLikeUrlFilename, urlDerivedFilename } = await import("../services/remote-ingest.js");
+const { urlDerivedFilename } = await import("../services/remote-ingest.js");
 const { opaqueCanonicalIdForUrl } = await import("../lib/canonical-id.js");
 const { sanitizeReplayedUrlIntake } = await import("../services/project-intake-actions.js");
 
 describe("URL-derived names", () => {
-  it.each<[string, string]>([
-    ["https://example.com/reports/q1-pipeline.txt?token=secret", "q1-pipeline.txt"],
-    ["https://example.com/docs/Annual%20Report%202025.pdf", "Annual Report 2025.pdf"],
-    ["https://files.example.com/d/GRANTSECRET0123456789abcdef.pdf", "files.example.com-3.pdf"],
-    ["https://files.example.com/d/0123456789abcdef0123456789abcdef", "files.example.com-3.pdf"],
-    ["https://files.example.com/", "files.example.com-3.pdf"],
-    [`https://files.example.com/${"a-".repeat(60)}.pdf`, "files.example.com-3.pdf"],
-  ])("%s → %s", (url, name) => {
-    expect(urlDerivedFilename(new URL(url), 3, "application/pdf")).toBe(name);
-  });
-
-  it("keeps ordinary word-separated filenames", () => {
-    expect(looksLikeUrlFilename("quarterly_report_2024_final_version.pdf")).toBe(true);
-    expect(looksLikeUrlFilename("README")).toBe(false);
+  it.each<string>([
+    "https://example.com/reports/q1-pipeline.txt?token=secret",
+    "https://example.com/docs/Annual%20Report%202025.pdf",
+    // Grant-shaped paths with an extension and separators: no heuristic can tell them from filenames.
+    "https://files.example.com/d/share-7f3k-q9zx-report.pdf",
+    "https://files.example.com/d/GRANT-SECRET_x1.y2.pdf",
+    "https://files.example.com/",
+  ])("%s → <host>-<index><ext>", (url) => {
+    expect(urlDerivedFilename(new URL(url), 3, "application/pdf")).toBe(`${new URL(url).hostname}-3.pdf`);
   });
 
   it("gives a URL an opaque canonical ID that still matches on re-ingest", () => {
@@ -52,7 +47,7 @@ describe("replayed URL-intake receipts", () => {
   it("leaves a current receipt's fixed copy alone", () => {
     const current = {
       project: { id: "p1" }, run: { id: "r1" },
-      documents: [{ id: "d1", filename: "notes.txt", mimeType: "text/plain", canonicalId: "url:abc" }],
+      documents: [{ id: "d1", filename: "url-0.txt", mimeType: "text/plain", canonicalId: "url:abc" }],
       warnings: ["1 of 2 files were not accepted: urls[1]."],
       rejected: [{ index: 1, filename: "urls[1]", statusCode: 400, code: "rejected", message: "The URL's host could not be resolved" }],
     } as never;

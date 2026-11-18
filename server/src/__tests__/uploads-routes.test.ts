@@ -200,7 +200,20 @@ describe("uploadsRoutes over Project Intake", () => {
     const body = JSON.parse(text);
     expect(body.project.name).toBe("Import from files.example.com");
     expect(body.rejected).toEqual([expect.objectContaining({ index: 0, filename: "urls[0]" })]);
-    expect(body.documents.map((document: { filename: string }) => document.filename)).toEqual(["notes.txt", "docs.example.com-2.txt"]);
+    expect(body.documents.map((document: { filename: string }) => document.filename)).toEqual(["docs.example.com-1.txt", "docs.example.com-2.txt"]);
+  });
+
+  it("never uses a grant-shaped path with an extension and separators as a name, source key or response text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("%PDF-1.7", { status: 200, headers: { "content-type": "text/plain" } })));
+    const { app, fakes } = setup();
+    const grant = "share-7f3k_Q9zx-GRANTPART.report.txt";
+    const response = await app.request("/uploads/url", json({ project: "ws-1", urls: [`https://files.example.com/d/${grant}`] }));
+    expect(response.status).toBe(201);
+    const text = await response.text();
+    expect(text).not.toContain("GRANTPART");
+    expect(fakes.runs[0].files.map((file) => file.filename)).toEqual(["files.example.com-0.txt"]);
+    expect(JSON.stringify(fakes.runs[0].files.map((file) => file.sourceKey))).not.toContain("GRANTPART");
+    expect(JSON.stringify([...fakes.objects.keys()])).not.toContain("GRANTPART");
   });
 
   it("reports what URL ingest fetched", async () => {
@@ -208,7 +221,7 @@ describe("uploadsRoutes over Project Intake", () => {
     const { app } = setup();
     const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/contracts.txt?token=secret"] }));
     expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toMatchObject({ ingested: [{ filename: "contracts.txt", mimeType: "text/plain" }] });
+    await expect(response.json()).resolves.toMatchObject({ ingested: [{ filename: "example.com-0.txt", mimeType: "text/plain" }] });
   });
 
   it("defaults URL canonical IDs to the URL and accepts per-URL overrides", async () => {

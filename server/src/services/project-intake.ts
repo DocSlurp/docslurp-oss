@@ -91,7 +91,41 @@ export type ProjectIntakeContent =
   | { bytes: Buffer }
   | { stream: Readable; contentLength?: number }
   | { storedKey: string; /** Object-store size verified by the server, never a client declaration. */ verifiedSizeBytes?: number }
-  | { rejected: ProjectIntakeError };
+  | {
+      rejected: ProjectIntakeError;
+      /** An adapter's approved, structured reason; clients get only its fixed copy (urlRefusalMessage), never message text. */
+      urlRefusal?: UrlRefusal;
+    };
+
+/** The approved reasons a URL source adapter may give for refusing a URL. */
+export type UrlRefusal =
+  | { reason: "blocked_invalid" | "blocked_scheme" | "blocked_credentials" | "blocked_port" | "blocked_private_address" | "blocked" | "timeout" | "dns" | "refused" | "tls" | "redirect" | "unreachable" }
+  | { reason: "http_status"; httpStatus: number };
+
+const URL_REFUSAL_MESSAGES: Record<Exclude<UrlRefusal["reason"], "http_status">, string> = {
+  blocked_invalid: "The URL is not valid",
+  blocked_scheme: "Only https URLs are allowed",
+  blocked_credentials: "URLs with embedded credentials are not allowed",
+  blocked_port: "Custom URL ports are not allowed",
+  blocked_private_address: "The URL points to a private or loopback address",
+  blocked: "The URL is not allowed",
+  timeout: "The URL did not respond in time",
+  dns: "The URL's host could not be resolved",
+  refused: "The URL's server refused or dropped the connection",
+  tls: "The URL's server failed the TLS handshake or certificate check",
+  redirect: "The URL redirected; redirects are not followed",
+  unreachable: "The URL could not be fetched",
+};
+
+/** The client copy for an approved URL refusal (an out-of-range or unknown value gets the generic copy). */
+export function urlRefusalMessage(refusal: UrlRefusal): string {
+  if (refusal.reason === "http_status") {
+    return Number.isInteger(refusal.httpStatus) && refusal.httpStatus >= 100 && refusal.httpStatus <= 599
+      ? `The URL's server answered HTTP ${refusal.httpStatus}`
+      : URL_REFUSAL_MESSAGES.unreachable;
+  }
+  return URL_REFUSAL_MESSAGES[refusal.reason] ?? URL_REFUSAL_MESSAGES.unreachable;
+}
 
 export interface ProjectIntakeItem {
   filename: string;
@@ -695,8 +729,11 @@ export async function intakeIntoProject(
             statusCode: error.statusCode,
             code: rejectionCode(error),
             rawMessage: error.message,
-            // An adapter's own refusal (a fetch failure) is already fixed copy.
-            ...("rejected" in item.content ? { fixedMessage: error.message } : {}),
+            // Only an approved structured reason from the adapter, and only for a known ref:
+            // a missed ref (urls[?]) always gets the per-code copy. Item message text never reaches the client.
+            ...(ref !== UNKNOWN_URL_REF && "rejected" in item.content && item.content.urlRefusal
+              ? { fixedMessage: urlRefusalMessage(item.content.urlRefusal) }
+              : {}),
           }));
           continue;
         }

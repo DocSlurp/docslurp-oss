@@ -560,7 +560,8 @@ describe("Project Intake from remote URLs", () => {
     await intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
 
     const [file] = fakes.runs[0].files;
-    expect(file).toMatchObject({ filename: "q1-pipeline.txt", mimeType: "text/plain" });
+    // Never a path segment: every remote URL's file is <host>-<index><ext>.
+    expect(file).toMatchObject({ filename: "docs.example.com-0.txt", mimeType: "text/plain" });
     expect(fakes.objects.get(file.sourceKey)).toMatchObject({ via: "stream", body: Buffer.from("hello from upstream") });
     // Never the path or query (a grant can live there): the content phases of auto-titling rename it later.
     expect(fakes.createdProjects[0].name).toBe("Import from docs.example.com");
@@ -600,7 +601,7 @@ describe("Project Intake from remote URLs", () => {
     const fakes = createProjectIntakeFakes();
     const urls = ["https://example.com/missing.txt", "https://example.com/found.txt"];
     const result = await intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
-    expect(result?.documents.map((document) => document.filename)).toEqual(["found.txt"]);
+    expect(result?.documents.map((document) => document.filename)).toEqual(["example.com-1.txt"]);
     expect(result?.rejected).toEqual([
       expect.objectContaining({ filename: "urls[0]", statusCode: 400, message: expect.stringContaining("404") }),
     ]);
@@ -640,7 +641,7 @@ describe("Project Intake from remote URLs", () => {
     ];
     try {
       const result = await intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
-      expect(result?.documents.map((document) => document.filename)).toEqual(["fine.txt"]);
+      expect(result?.documents.map((document) => document.filename)).toEqual(["example.com-0.txt"]);
       expect(result?.rejected).toEqual(expect.arrayContaining([
         { index: 1, filename: "urls[1]", statusCode: 415, code: "unsupported_type", message: "The URL's content is not a supported file type" },
         { index: 3, filename: "urls[3]", statusCode: 413, code: "file_too_large", message: "The URL's content exceeds the upload size limit" },
@@ -681,6 +682,37 @@ describe("Project Intake from remote URLs", () => {
       }), createProjectIntakeFakes().ports));
       expect(unreffed).toMatchObject({ issues: [{ path: "urls[?]", code: "unsupported_type" }] });
       expect(JSON.stringify({ message: unreffed.message, issues: unreffed.issues })).not.toContain("GRANTSECRET");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("gives refused URLs only approved copy: structured reasons for known refs, per-code copy otherwise", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const rejectedItem = (index: number | null, message: string, urlRefusal?: { reason: "dns" }) => ({
+        filename: index === null ? "x" : `urls[${index}]`,
+        ...(index === null ? {} : { refusalRef: { name: `urls[${index}]`, index } }),
+        content: { rejected: new ProjectIntakeError(message, 400), ...(urlRefusal ? { urlRefusal } : {}) },
+      });
+      const error = await rejection(intakeIntoProject(request({
+        kind: "url-ingest",
+        items: [
+          // A known ref with an approved reason: that reason's copy, never the message text.
+          rejectedItem(0, "GRANTSECRET message one", { reason: "dns" }),
+          // A known ref without one: the per-code copy.
+          rejectedItem(1, "GRANTSECRET message two"),
+          // A missed ref (urls[?]): the per-code copy even with an approved reason.
+          rejectedItem(null, "GRANTSECRET message three", { reason: "dns" }),
+        ],
+        urls: ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+      }), createProjectIntakeFakes().ports));
+      expect(error.issues).toEqual([
+        expect.objectContaining({ path: "urls[0]", message: "The URL's host could not be resolved" }),
+        expect.objectContaining({ path: "urls[1]", message: "The URL's content could not be taken" }),
+        expect.objectContaining({ path: "urls[?]", message: "The URL's content could not be taken" }),
+      ]);
+      expect(JSON.stringify({ message: error.message, issues: error.issues })).not.toContain("GRANTSECRET");
     } finally {
       warn.mockRestore();
     }
