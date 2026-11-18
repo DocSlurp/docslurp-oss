@@ -56,7 +56,7 @@ import { finalizePageExtracts, logFinalizeOutcome, materializedPageRecords, page
 
 /** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
 export const KEPT_AS_IMAGE_REASON = "kept-as-image";
-/** A query-time OCR read found no words on the page: final, never claimed again. */
+/** A query-time read found no words on the page (final when the OCR engine read it). */
 export const EMPTY_PAGE_REASON = "empty-page";
 /** Pages with fewer non-space characters than this have no usable text layer. */
 export const MIN_TEXT_LAYER_CHARS = 40;
@@ -431,6 +431,8 @@ export async function materializePageRange(
     && offPlanReads && document.mimeType === "application/pdf";
   const ocrPages: number[] = [];
   const ocrEnginePages: number[] = [];
+  // Pages the OCR engine read and found empty: final (an OCR read is not charged, so a re-read would be free VM work).
+  const ocrEmptyPages = new Set<number>();
   const keptUnread: number[] = [];
   for (const page of pages) {
     const stored = storedReads.get(page);
@@ -472,7 +474,10 @@ export async function materializePageRange(
           }
           const text = returned.get(page);
           if (text === undefined) failed.set(page, "ocr-unread");
-          else if (text.replace(/\s+/g, "").length === 0) failed.set(page, EMPTY_PAGE_REASON);
+          else if (text.replace(/\s+/g, "").length === 0) {
+            failed.set(page, EMPTY_PAGE_REASON);
+            ocrEmptyPages.add(page);
+          }
           else {
             prepared.set(page, { page, text });
             ocrReads.add(page);
@@ -782,8 +787,14 @@ export async function materializePageRange(
         if (!held.has(page) || released.includes(page)) continue;
         byReason.set(reason, [...(byReason.get(reason) ?? []), page]);
       }
-      // An OCR read that found an empty page is final: re-reading it would only spend VM time for no charge.
-      for (const [reason, group] of byReason) await markPages(client, documentId, group, "failed", { failureReason: reason, claimedBy, ...(reason === EMPTY_PAGE_REASON ? { exhausted: true } : {}) });
+      // An OCR-engine read that found an empty page is final: re-reading it would only spend VM time for no charge. An
+      // empty vision read stays claimable (its one charge is recorded; a later read adds none).
+      for (const [reason, group] of byReason) {
+        const final = group.filter((page) => ocrEmptyPages.has(page));
+        const retry = group.filter((page) => !ocrEmptyPages.has(page));
+        if (final.length > 0) await markPages(client, documentId, final, "failed", { failureReason: reason, claimedBy, exhausted: true });
+        if (retry.length > 0) await markPages(client, documentId, retry, "failed", { failureReason: reason, claimedBy });
+      }
       const ownedReleased = released.filter((page) => held.has(page));
       if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
       owned = moved.sort((a, b) => a - b);
