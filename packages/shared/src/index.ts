@@ -73,6 +73,7 @@ export * from "./model-provenance.js";
 export * from "./live-model-prices.js";
 export * from "./graph.js";
 export * from "./run.js";
+export * from "./run-eta.js";
 export * from "./run-failure.js";
 export * from "./project.js";
 export * from "./project-slug.js";

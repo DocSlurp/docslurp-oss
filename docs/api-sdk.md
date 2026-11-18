@@ -270,6 +270,7 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | Wait for successful run | Poll `GET /v1/runs/:runId/progress` | `waitForRun` | `status --watch` |
 | List runs (paged: `limit` 1-100, `cursor`; returns `hasMore`, `nextCursor`) | `GET /v1/runs` | `listRunsPage`, `iterateRuns`, `listRuns` (all pages) | `runs` |
 | Account activity (SSE) | `GET /v1/runs/activity/stream` | `streamActivity` | Use SDK/HTTP |
+| Organization activity summary (queued, in progress, recently completed; pages per minute; ETA bucket) | `GET /v1/runs?activity=true` (`summary`); the stream's `activity` and `activity-summary` events | `getActivitySummary` | Use SDK/HTTP |
 | Project state | `GET /v1/projects/:project/state` | `getProjectState` | Use SDK/HTTP |
 | Ingest report | `GET /v1/projects/:project/ingest-report` (also MCP `getUploadStatus`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
 | List projects | `GET /v1/projects` | `listProjects()` | Use HTTP |
@@ -326,12 +327,21 @@ document has been processed. Direct uploads have three milestones:
    `result` is non-null, or the session becomes `failed` or `aborted`.
 4. Follow `result.run.id` through the run status or progress endpoints.
 
+The session response carries `progress`: `files` and `bytes` received so far,
+then, once ingestion has started, `run` with documents and pages processed,
+`pagesPerMinute` and `eta`. An ETA is a bucket (`<1m`, `1-5m`, `5-15m`,
+`15-60m`, `1-3h`, `>3h`), never a countdown. `eta.estimate` is `true` when it
+comes from the project's completed runs rather than this run's own progress,
+and `eta` is `null` while there is no basis yet (show "estimating").
+
 The server uses a single PUT below 32 MiB and multipart at or above 32 MiB,
 with 8 MiB parts. Use the returned descriptors rather than hard-coding those
 values. The reconciler reads storage's part list, checks the part numbers and
 sizes, assembles the object, and verifies the stored file. It starts ingestion
 after all files in the session are ready. Clients do not need to call
-`/files/complete` or `/confirm` for known-size files.
+`/files/complete` or `/confirm` for known-size files. A client that does call
+`/files/complete` for the last file starts ingestion at once; otherwise the
+reconciler starts it within seconds of the last object landing.
 
 The API checks pending sessions every 15 seconds in bounded batches, with
 backoff between attempts. This is not a completion-time guarantee. A Tigris

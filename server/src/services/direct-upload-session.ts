@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { RunOrigin } from "@docslurp/shared";
+import type { RunOrigin, UploadSessionProgress } from "@docslurp/shared";
+import { estimateRunEta, observedPagesPerMinute } from "@docslurp/shared";
 import type { PipelineFeatureOverrides, ProjectTemplateKey } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
+import { notePrediction } from "./run-activity-summary.js";
 import { env } from "../config.js";
 import { reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
@@ -424,7 +426,58 @@ export async function describeDirectUploadSession(
     result: (loaded.session.result as { payload?: unknown } | null)?.payload ?? null,
     error: loaded.session.last_error ?? null,
     files,
+    progress: await directUploadSessionProgress(loaded),
   };
+}
+
+/**
+ * Transfer progress from the session's own files, then the run it started (the run id is the session id), with its
+ * pages per minute and ETA bucket. The run is read only for the session's own user and organization. A progress read
+ * never fails the status response: an unreadable run is reported as null and the error goes to telemetry.
+ */
+export async function directUploadSessionProgress(loaded: LoadedDirectUploadSession, now = Date.now()): Promise<UploadSessionProgress> {
+  const completed = loaded.files.filter(file => file.status === "completed");
+  const progress: UploadSessionProgress = {
+    files: { total: loaded.files.length, completed: completed.length },
+    bytes: {
+      total: loaded.files.reduce((sum, file) => sum + (Number.isFinite(file.size_bytes) ? file.size_bytes : 0), 0),
+      completed: completed.reduce((sum, file) => sum + (Number.isFinite(file.size_bytes) ? file.size_bytes : 0), 0),
+    },
+    run: null,
+  };
+  const { session } = loaded;
+  if (!session.org_id || !["ingesting", "confirmed"].includes(session.status)) return progress;
+  try {
+    const [run] = await sql<Array<{
+      id: string; status: string; total_documents: number | string; processed_documents: number | string;
+      pages_total: number | string; pages_processed: number | string; worker_started_at: string | Date | null;
+      history_pages: number | string | null; history_runtime_ms: number | string | null;
+    }>>`
+      select r.id, r.status, r.total_documents, r.processed_documents, r.pages_total, r.pages_processed, r.worker_started_at,
+        cs.completed_run_pages_processed as history_pages, cs.completed_run_runtime_ms as history_runtime_ms
+      from project_runs r
+      left join project_corpus_stats cs on cs.project_id = r.project_id
+      where r.id = ${session.id} and r.user_id = ${session.user_id} and r.org_id = ${session.org_id}
+      limit 1`;
+    if (!run) return progress;
+    const pagesTotal = Math.max(0, Number(run.pages_total) || 0);
+    const pagesProcessed = Math.min(pagesTotal, Math.max(0, Number(run.pages_processed) || 0));
+    const history = run.history_pages === null ? null : { pages: Number(run.history_pages), runtimeMs: Number(run.history_runtime_ms) };
+    const eta = estimateRunEta({ status: run.status, pagesTotal, pagesProcessed, startedAt: run.worker_started_at, history, now });
+    if (eta) notePrediction(run.id, session.org_id, eta);
+    const observed = run.status === "processing" ? observedPagesPerMinute({ pagesProcessed, startedAt: run.worker_started_at, now }) : null;
+    progress.run = {
+      id: run.id,
+      status: run.status,
+      documents: { total: Math.max(0, Number(run.total_documents) || 0), processed: Math.max(0, Number(run.processed_documents) || 0) },
+      pages: { total: pagesTotal, processed: pagesProcessed },
+      pagesPerMinute: observed === null ? null : Math.round(observed * 10) / 10,
+      eta: eta ? { ...eta, seconds: Math.round(eta.seconds), pagesPerMinute: Math.round(eta.pagesPerMinute * 10) / 10 } : null,
+    };
+  } catch (error) {
+    console.error(`[upload-progress] session=${session.id} run progress unavailable`, error instanceof Error ? error.name : "unknown");
+  }
+  return progress;
 }
 
 /** A native key may only operate on sessions created in its organization. */
@@ -576,8 +629,9 @@ async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null)
   return sealed;
 }
 
-export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput) {
-  await withDirectUploadLock(input.sessionId, async () => {
+/** Resolves with whether every file of the session is now complete (the session can be confirmed). */
+export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput): Promise<{ allFilesCompleted: boolean }> {
+  return await withDirectUploadLock(input.sessionId, async () => {
     const loaded = await loadDirectUploadSession(input.sessionId, input.userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
     assertUploadSessionActive(loaded.session);
@@ -588,6 +642,10 @@ export async function completeDirectUploadFile(input: CompleteDirectUploadFileIn
     if (!file) throw new ProjectIntakeError("Upload file not found", 404);
     if (!await finalizeDirectUploadFile(file, input.sizeBytes)) throw new ProjectIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
     await sql`update upload_sessions set next_reconcile_at = now() where id = ${input.sessionId}`;
+    return {
+      allFilesCompleted: ["pending", "uploading"].includes(loaded.session.status)
+        && loaded.files.every(item => item.id === file.id || item.status === "completed"),
+    };
   });
 }
 

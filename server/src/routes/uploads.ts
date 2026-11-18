@@ -57,6 +57,7 @@ import {
   assertIntakeChartExportTier,
   parseProjectIntakeTemplateKey,
 } from "../services/project-intake-actions.js";
+import { confirmCompletedDirectUploadSoon } from "../services/direct-upload-reconciler.js";
 import {
   ProjectIntakeError,
   projectIntakePorts,
@@ -379,7 +380,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       const sessionId = c.req.param("sessionId");
       const body = c.req.valid("json");
       try {
-        await completeDirectUploadFile({
+        const completion = await completeDirectUploadFile({
           sessionId,
           userId,
           fileId: body.fileId,
@@ -387,6 +388,14 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           sizeBytes: body.sizeBytes,
           parts: body.parts,
         });
+        // The last file is in: start ingestion now rather than at the next reconciler sweep. Best effort and not
+        // awaited; a client that also confirms gets the same run (confirmation is idempotent under the session lock).
+        if (completion?.allFilesCompleted) {
+          confirmCompletedDirectUploadSoon({
+            sessionId, userId, ports,
+            audit: { ipAddress: requestIp(c), userAgent: requestUserAgent(c), metadata: { sessionId, trigger: "last-file-completed" } },
+          });
+        }
       } catch (error) {
         return (
           projectIntakeErrorResponse(c, error) ??

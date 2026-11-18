@@ -188,7 +188,8 @@ describe("Direct Upload Session Module", () => {
       getUploadedObjectMetadata.mockResolvedValue({ contentLength: actualSize, etag: "etag" });
       const completing = completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1" });
       if (actualSize === 42) {
-        await expect(completing).resolves.toBeUndefined();
+        // The session's only file is now complete: the route confirms it at once.
+        await expect(completing).resolves.toEqual({ allFilesCompleted: true });
         expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
       } else {
         await expect(completing).rejects.toThrow();

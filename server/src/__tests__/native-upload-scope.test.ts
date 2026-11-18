@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ intake: vi.fn(), direct: vi.fn(), sessionAccess: vi.fn(), project: vi.fn(), lookup: vi.fn(), requireProject: vi.fn() }));
+const mocks = vi.hoisted(() => ({ intake: vi.fn(), direct: vi.fn(), sessionAccess: vi.fn(), project: vi.fn(), lookup: vi.fn(), requireProject: vi.fn(), complete: vi.fn(), confirmSoon: vi.fn() }));
+vi.mock("../services/direct-upload-reconciler.js", () => ({ confirmCompletedDirectUploadSoon: mocks.confirmSoon }));
 vi.mock("../lib/request-actor.js", () => ({
   getRequestActor: (c: any) => ({ type: "apiKey", userId: "user-a", apiKey: c.get("apiKey") }),
   actorHasAnyApiKeyScope: (actor: any, scopes: string[]) => scopes.some(scope => actor.apiKey.scopes.includes(scope)),
@@ -15,7 +16,8 @@ vi.mock("../services/project-intake-actions.js", () => ({
 }));
 vi.mock("../services/direct-upload-session.js", () => ({
   createDirectUploadSession: mocks.direct, directUploadSessionBelongsToOrganization: mocks.sessionAccess,
-  abortDirectUploadSession: vi.fn(), completeDirectUploadFile: vi.fn(), getDirectUploadSessionDescription: vi.fn(),
+  abortDirectUploadSession: vi.fn(), completeDirectUploadFile: mocks.complete, getDirectUploadSessionDescription: vi.fn(),
+  loadDirectUploadSession: vi.fn(async () => null),
 }));
 vi.mock("../services/runs.js", () => ({ isRunCreationBlockedError: vi.fn(() => false) }));
 vi.mock("../services/projects.js", () => ({
@@ -101,6 +103,27 @@ describe("native key ingestion organization isolation", () => {
     mocks.sessionAccess.mockResolvedValue(false);
     expect((await app().request(path, { method: path.endsWith("/11111111-1111-4111-8111-111111111111") ? "GET" : "POST" })).status).toBe(404);
     expect(mocks.sessionAccess).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", "user-a", "org-a", null, "key-a");
+  });
+  it("starts intake at once when the key completes its own session's last file, and not before", async () => {
+    mocks.sessionAccess.mockResolvedValue(true);
+    const path = "/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/files/complete";
+    const request = () => app().request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileId: "file-1" }) });
+    mocks.complete.mockResolvedValueOnce({ allFilesCompleted: false });
+    expect((await request()).status).toBe(200);
+    expect(mocks.confirmSoon).not.toHaveBeenCalled();
+    mocks.complete.mockResolvedValueOnce({ allFilesCompleted: true });
+    expect((await request()).status).toBe(200);
+    expect(mocks.confirmSoon).toHaveBeenCalledOnce();
+    expect(mocks.confirmSoon).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "11111111-1111-4111-8111-111111111111", userId: "user-a" }));
+  });
+  it("never starts intake for a foreign session's completion", async () => {
+    mocks.sessionAccess.mockResolvedValue(false);
+    const response = await app().request("/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/files/complete", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileId: "file-1" }),
+    });
+    expect(response.status).toBe(404);
+    expect(mocks.complete).not.toHaveBeenCalled();
+    expect(mocks.confirmSoon).not.toHaveBeenCalled();
   });
   it("rejects keys without an organization", async () => {
     expect((await app(null).request("/uploads/bulk", upload())).status).toBe(403);
