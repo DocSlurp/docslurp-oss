@@ -115,6 +115,15 @@ describe("platform-admin managed model route", () => {
     expect(sqlMock).not.toHaveBeenCalled();
   });
 
+  it("refuses an override naming a catalog vision model that is no longer admitted", async () => {
+    for (const vision of [{ modelUri: "llm://openai/gpt-4.1-mini" }, { remoteFallbackModelUri: "llm://openai/gpt-4.1-mini" }]) {
+      const response = await put(adminSession, { pipeline: { vision } });
+      expect(response.status, JSON.stringify(vision)).toBe(400);
+      expect((await response.json()).error.message).toContain("not admitted");
+    }
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
   it("refuses an override that conflicts with the project's privacy mode", async () => {
     sqlMock.mockResolvedValueOnce(projectRow({ pipeline: { privacyMode: "local-only", vision: { profile: "cheapest-local" }, embedding: { profile: "cheapest-local" } } }));
     const response = await put(adminSession, { pipeline: { vision: { remoteFallbackModelUri: "llm://openrouter/z-ai/glm-5.3-flash" } } });

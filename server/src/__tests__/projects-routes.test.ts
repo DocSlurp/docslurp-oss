@@ -1321,6 +1321,20 @@ describe("managed model fields on project routes", () => {
     expect(updateProjectMock).not.toHaveBeenCalled();
   });
 
+  it("refuses a write naming a vision model that is no longer admitted (stored rows read with the default instead)", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    for (const [path, method, body] of [
+      ["/projects", "POST", { name: "Contracts", pipeline: { vision: { modelUri: "llm://openai/gpt-4.1-mini" } } }],
+      ["/projects/ws-1", "PATCH", { pipeline: { vision: { remoteFallbackModelUri: "llm://openai/gpt-4.1-mini" } } }],
+    ] as const) {
+      const response = await send(buildApp(), path, method, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect(JSON.stringify(await response.json())).not.toContain("gpt-4.1-mini");
+    }
+    expect(createProjectMock).not.toHaveBeenCalled();
+    expect(updateProjectMock).not.toHaveBeenCalled();
+  });
+
   it("checks the key's organization and scope before reading the body", async () => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     const body = { pipeline: { textGeneration: { model: "z-ai/glm-5.3-flash" } } };
