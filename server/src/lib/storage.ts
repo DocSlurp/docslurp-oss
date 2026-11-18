@@ -24,7 +24,17 @@ import { env } from "../config.js";
 import { resolveS3ClientTuning, rfc5987Encode, s3ClientConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { uploadSigningTarget } from "./upload-signing-target.js";
 
-const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
+/**
+ * A connection attempt that hangs must not hold an upload-session lock: connect within 5 s unless
+ * S3_CONNECTION_TIMEOUT_MS says otherwise. Request deadlines are per call (see UPLOAD_STORAGE_TIMEOUTS_MS).
+ */
+function serverS3ClientConfig() {
+  const config = s3ClientConfig(env.storage);
+  const handler = (config.requestHandler ?? {}) as Record<string, unknown>;
+  return { ...config, requestHandler: { connectionTimeout: 5_000, ...handler } };
+}
+
+const s3Client = instrumentS3Client(new S3Client(serverS3ClientConfig()), env.storage.endpoint);
 
 /** Storage config for signing browser-facing URLs: STORAGE_PUBLIC_ENDPOINT replaces the endpoint when set. */
 export function presignStorageConfig(storage: ObjectStorageConfig, publicEndpoint: string | null): ObjectStorageConfig {
@@ -181,14 +191,15 @@ export async function uploadFileStream(args: {
   }
 }
 
-export async function createMultipartUpload(key: string, contentType: string): Promise<string> {
+export async function createMultipartUpload(key: string, contentType: string, signal?: AbortSignal): Promise<string> {
   await ensureBucketExists();
   const response = await s3Client.send(
     new CreateMultipartUploadCommand({
       Bucket: env.s3Bucket,
       Key: key,
       ContentType: contentType
-    })
+    }),
+    { abortSignal: storageCallSignal("create", signal) }
   );
 
   if (!response.UploadId) {
@@ -259,7 +270,14 @@ export async function signDownloadGet(args: { key: string; filename: string; exp
   );
 }
 
-export async function getUploadedObjectMetadata(key: string): Promise<{
+/** Per-call deadlines for upload finalization's storage calls, combined with the caller's own cancellation. */
+const UPLOAD_STORAGE_TIMEOUTS_MS = { head: 10_000, list: 30_000, copy: 60_000, complete: 120_000, abort: 10_000, create: 10_000 } as const;
+function storageCallSignal(kind: keyof typeof UPLOAD_STORAGE_TIMEOUTS_MS, signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(UPLOAD_STORAGE_TIMEOUTS_MS[kind]);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+export async function getUploadedObjectMetadata(key: string, signal?: AbortSignal): Promise<{
   contentLength: number | null;
   contentType: string | null;
   etag: string | null;
@@ -270,7 +288,7 @@ export async function getUploadedObjectMetadata(key: string): Promise<{
       Bucket: env.s3Bucket,
       Key: key
     }),
-    { abortSignal: AbortSignal.timeout(30_000) }
+    { abortSignal: storageCallSignal("head", signal) }
   );
 
   return {
@@ -286,7 +304,7 @@ export async function getUploadedObjectMetadata(key: string): Promise<{
  * PreconditionFailed instead of being copied. Single-part sources only (CopyObject's 5 GiB limit
  * matches a single PUT's).
  */
-export async function copyUploadedObject(args: { fromKey: string; toKey: string; ifMatch: string }): Promise<{ etag: string | null }> {
+export async function copyUploadedObject(args: { fromKey: string; toKey: string; ifMatch: string; signal?: AbortSignal }): Promise<{ etag: string | null }> {
   await ensureBucketExists();
   const response = await s3Client.send(
     new CopyObjectCommand({
@@ -295,7 +313,8 @@ export async function copyUploadedObject(args: { fromKey: string; toKey: string;
       CopySource: `${env.s3Bucket}/${args.fromKey.split("/").map(encodeURIComponent).join("/")}`,
       CopySourceIfMatch: args.ifMatch,
       MetadataDirective: "COPY"
-    })
+    }),
+    { abortSignal: storageCallSignal("copy", args.signal) }
   );
   return { etag: response.CopyObjectResult?.ETag ?? null };
 }
@@ -314,6 +333,7 @@ export async function completeMultipartUpload(args: {
   key: string;
   uploadId: string;
   parts: Array<{ partNumber: number; etag: string }>;
+  signal?: AbortSignal;
 }): Promise<void> {
   await ensureBucketExists();
   await s3Client.send(
@@ -329,18 +349,20 @@ export async function completeMultipartUpload(args: {
             ETag: part.etag
           }))
       }
-    })
+    }),
+    { abortSignal: storageCallSignal("complete", args.signal) }
   );
 }
 
-export async function abortMultipartUpload(args: { key: string; uploadId: string }): Promise<void> {
+export async function abortMultipartUpload(args: { key: string; uploadId: string; signal?: AbortSignal }): Promise<void> {
   await ensureBucketExists();
   await s3Client.send(
     new AbortMultipartUploadCommand({
       Bucket: env.s3Bucket,
       Key: args.key,
       UploadId: args.uploadId
-    })
+    }),
+    { abortSignal: storageCallSignal("abort", args.signal) }
   );
 }
 
@@ -350,9 +372,9 @@ export async function headStorageBucket(signal?: AbortSignal): Promise<void> {
 }
 
 /** Consume every provider page; multipart sessions can contain up to 10,000 parts. */
-export async function listMultipartUploadParts(args: { key: string; uploadId: string }) {
+export async function listMultipartUploadParts(args: { key: string; uploadId: string; signal?: AbortSignal }) {
   const parts: Array<{ partNumber: number; etag: string; sizeBytes: number }> = [];
-  const abortSignal = AbortSignal.timeout(30_000);
+  const abortSignal = storageCallSignal("list", args.signal);
   let marker: string | undefined;
   // Some S3-compatible providers return a terminal marker even when IsTruncated
   // is false. The SDK paginator follows that marker indefinitely while intake
