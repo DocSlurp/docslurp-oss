@@ -13,7 +13,6 @@ import type { RequestActor } from "../lib/request-actor.js";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import { openSettingsProposal, sealSettingsProposal } from "../lib/settings-proposal-tokens.js";
 import { canEditProject, getProjectAccess } from "./organizations.js";
-import { appendAuditLog } from "./audit-log.js";
 import { countResumableFigureDocuments, requestDocumentFigureResume, requestProjectFigureResumes, resumableWhere, type FigureResumeRequestStatus } from "./figure-resume.js";
 
 const claimsSchema = z.object({
@@ -82,17 +81,21 @@ export async function applyFigureResumeProposal(args: { actor: RequestActor; pro
   const scope = { orgId: claims.orgId, projectId: claims.projectId };
   let status: FigureResumeRequestStatus | "queued" | "off";
   let queued: number;
+  // The audit record is written by the resume itself, in the transaction that queues (scope from the queued rows).
+  const record = (resultStatus: string, resultQueued: number) => ({
+    userId: args.actor.userId, action: "project.figures.resume_requested",
+    resourceType: claims.documentId ? "document" : "project", resourceId: claims.documentId ?? claims.projectId, apiKeyId: null,
+    metadata: { source: "chat-figure-resume-proposal", sessionId: claims.sessionId, status: resultStatus, queued: resultQueued },
+  });
   if (claims.documentId) {
-    const result = await requestDocumentFigureResume({ ...scope, documentId: claims.documentId });
+    const result = await requestDocumentFigureResume({ ...scope, documentId: claims.documentId },
+      (outcome) => record(outcome.status, outcome.status === "queued" ? 1 : 0));
     status = result.status;
     queued = result.status === "queued" ? 1 : 0;
   } else {
-    const result = await requestProjectFigureResumes(scope);
+    const result = await requestProjectFigureResumes(scope, (outcome) => record(outcome.status, outcome.queued));
     status = result.status;
     queued = result.queued;
   }
-  await appendAuditLog({ orgId: claims.orgId, userId: args.actor.userId, projectId: claims.projectId, ...(claims.documentId ? { documentId: claims.documentId } : {}),
-    action: "project.figures.resume_requested", resourceType: claims.documentId ? "document" : "project", resourceId: claims.documentId ?? claims.projectId,
-    apiKeyId: null, metadata: { source: "chat-figure-resume-proposal", sessionId: claims.sessionId, status, queued } });
   return { applied: true, projectId: claims.projectId, documentId: claims.documentId, status, queued };
 }

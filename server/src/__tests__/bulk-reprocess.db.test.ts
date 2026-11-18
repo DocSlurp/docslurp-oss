@@ -297,3 +297,32 @@ describe("document audit records: written in their change's transaction, scoped 
     expect(byOrg).toHaveLength(actions.length);
   });
 });
+
+describe("onPublish receives what the run published (#513)", () => {
+  it("each published version with the source it was made from and its own scope; the reprocess audit lists those sources", async () => {
+    await seedDocument("m1", defaultPipelineFeatures);
+    await seedDocument("m2", defaultPipelineFeatures);
+    const { runCreation } = await import("../services/run-creation.js");
+    const onPublish = vi.fn(async () => {});
+    const created = await runCreation.create({
+      userId: "u", projectId: "w", kind: "bulk-reprocess", pipeline: defaultPipelineFeatures,
+      sources: { kind: "versionsOf", documentIds: ["m1", "m2"] }, onPublish,
+    } as never);
+    expect(onPublish).toHaveBeenCalledTimes(1);
+    const published = (onPublish.mock.calls[0] as unknown as [unknown, { runId: string; versions: Array<Record<string, unknown>> }])[1];
+    expect(published.runId).toBe(created.run.id);
+    const versions = await sql<{ id: string }[]>`select id from documents where run_id = ${created.run.id} order by id`;
+    expect(published.versions.map((version) => version.documentId).sort()).toEqual(versions.map((row) => row.id));
+    expect(published.versions.map((version) => version.sourceDocumentId).sort()).toEqual(["m1", "m2"]);
+    for (const version of published.versions) expect(version).toMatchObject({ orgId: "o", projectId: "w" });
+    // Bulk reprocess builds its record from that mapping: the sources that became versions, with the run's scope.
+    const marker = `published-${Math.random()}`;
+    const result = await bulkReprocessDocuments(["m1"], "u", {
+      audit: (run) => ({ userId: "u", action: "documents.bulk_reprocessed", resourceType: "document-bulk", metadata: { marker, documentIds: run.documentIds } }),
+    });
+    const [row] = await sql<{ org_id: string; project_id: string; run_id: string; ids: string[] }[]>`
+      select org_id, project_id, run_id, array(select jsonb_array_elements_text(metadata -> 'documentIds')) as ids
+      from audit_log where metadata ->> 'marker' = ${marker}`;
+    expect(row).toEqual({ org_id: "o", project_id: "w", run_id: result.runs[0]!.id, ids: ["m1"] });
+  });
+});

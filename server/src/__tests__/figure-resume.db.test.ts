@@ -312,3 +312,74 @@ describe("the chat's proposal", () => {
     await expect(proposals.proposeFigureResume({ actor: keyActor, projectId: "proj-a", sessionId: "chat-a" })).rejects.toMatchObject({ status: 403 });
   });
 });
+
+describe("#512: resume audit records commit with the queueing", () => {
+  const failing = (marker: string) => () => ({ userId: "ua", action: null as unknown as string, resourceType: "project", metadata: { marker } });
+  const records = (marker: string) => sql<{ org_id: string; project_id: string; document_id: string | null; run_id: string | null; queued: string[] | null }[]>`
+    select org_id, project_id, document_id, run_id,
+      case when metadata ? 'queuedDocumentIds' then array(select jsonb_array_elements_text(metadata -> 'queuedDocumentIds')) end as queued
+    from audit_log where metadata ->> 'marker' = ${marker}`;
+
+  it("project-wide: a failed audit insert leaves nothing queued; written ones are one per run, each listing its queued ids", async () => {
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values ('run-a2', 'org-a', 'ua', 'proj-a', 'upload', 'completed', 'completed', '{}') on conflict do nothing`;
+    await resumableDocument("p-1");
+    await resumableDocument("p-2", "proj-a", "org-a", "run-a2");
+    const marker = `project-${Math.random()}`;
+    await expect(service.requestProjectFigureResumes({ orgId: "org-a", projectId: "proj-a" }, failing(marker))).rejects.toBeTruthy();
+    expect([await queued("p-1"), await queued("p-2")]).toEqual([false, false]);
+    expect(await records(marker)).toEqual([]);
+    const result = await service.requestProjectFigureResumes({ orgId: "org-a", projectId: "proj-a" },
+      (outcome) => ({ userId: "ua", action: "project.figures.resume_requested", resourceType: "project", resourceId: "proj-a", metadata: { marker, queued: outcome.queued } }));
+    expect(result).toMatchObject({ status: "queued", queued: 2 });
+    // Scope from the queued rows: one record per run, each with only its own ids.
+    const rows = (await records(marker)).sort((a, b) => a.run_id!.localeCompare(b.run_id!));
+    expect(rows).toEqual([
+      { org_id: "org-a", project_id: "proj-a", document_id: null, run_id: "run-a", queued: ["p-1"] },
+      { org_id: "org-a", project_id: "proj-a", document_id: null, run_id: "run-a2", queued: ["p-2"] },
+    ]);
+  });
+
+  it("the direct project endpoint records the request in the queueing transaction, scoped to the project", async () => {
+    await resumableDocument("p-3");
+    const res = await app.request("/projects/proj-a/figures/resume", { method: "POST", headers: { "x-test-user": "ua" } });
+    expect(res.status).toBe(202);
+    const rows = await sql<{ org_id: string; project_id: string; run_id: string; queued: string[] }[]>`
+      select org_id, project_id, run_id, array(select jsonb_array_elements_text(metadata -> 'queuedDocumentIds')) as queued
+      from audit_log where action = 'project.figures.resume_requested' and metadata -> 'queuedDocumentIds' ? 'p-3'`;
+    expect(rows).toEqual([{ org_id: "org-a", project_id: "proj-a", run_id: "run-a", queued: ["p-3"] }]);
+  });
+
+  it("one document: a failed audit insert rolls back the queueing", async () => {
+    await resumableDocument("p-4");
+    const marker = `document-${Math.random()}`;
+    await expect(service.requestDocumentFigureResume({ orgId: "org-a", projectId: "proj-a", documentId: "p-4" }, failing(marker))).rejects.toBeTruthy();
+    expect(await queued("p-4")).toBe(false);
+    expect(await records(marker)).toEqual([]);
+    // A written record takes the queued level row's scope, its run included.
+    await service.requestDocumentFigureResume({ orgId: "org-a", projectId: "proj-a", documentId: "p-4" },
+      () => ({ userId: "ua", action: "document.figures.resume_requested", resourceType: "document", resourceId: "p-4", metadata: { marker } }));
+    expect(await queued("p-4")).toBe(true);
+    expect(await records(marker)).toEqual([{ org_id: "org-a", project_id: "proj-a", document_id: "p-4", run_id: "run-a", queued: null }]);
+  });
+
+  it("the chat proposal's Apply writes its record in the queueing transaction, scoped to the org and project", async () => {
+    await resumableDocument("p-5");
+    await sql`insert into chat_sessions (id, project_id, user_id) values ('chat-512', 'proj-a', 'ua')`;
+    vi.doMock("../lib/first-party-app.js", () => ({ isFirstPartyAppActor: (a: { type: string }) => a.type === "session" }));
+    vi.resetModules();
+    vi.doMock("../db.js", () => ({ sql }));
+    try {
+      const fresh = await import("../services/figure-resume-proposals.js");
+      const actor = { type: "session", userId: "ua", sessionId: "auth-1", user: { id: "ua", email: "", name: "" } } as never;
+      const proposal = await fresh.proposeFigureResume({ actor, projectId: "proj-a", sessionId: "chat-512" });
+      expect(await fresh.applyFigureResumeProposal({ actor, projectId: "proj-a", token: proposal.token })).toMatchObject({ applied: true, queued: 1 });
+      const rows = await sql<{ org_id: string; project_id: string; run_id: string; queued: string[] }[]>`
+        select org_id, project_id, run_id, array(select jsonb_array_elements_text(metadata -> 'queuedDocumentIds')) as queued
+        from audit_log where metadata ->> 'source' = 'chat-figure-resume-proposal' and metadata ->> 'sessionId' = 'chat-512'`;
+      expect(rows).toEqual([{ org_id: "org-a", project_id: "proj-a", run_id: "run-a", queued: ["p-5"] }]);
+    } finally {
+      vi.doUnmock("../lib/first-party-app.js");
+    }
+  });
+});

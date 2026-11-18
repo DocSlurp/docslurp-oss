@@ -1620,12 +1620,18 @@ export async function applyIngestRecommendation(args: RecommendationAction): Pro
 export const INGEST_REPORT_REPROCESS_LIMIT = 100;
 
 /** Reprocesses a recommendation's affected files (at most 100) with the project's current settings. */
-export async function reprocessIngestRecommendation(args: RecommendationAction & { speedBoost?: boolean }): Promise<{ runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null; failed: BulkReprocessResult["failed"]; warnings: string[] }> {
+export async function reprocessIngestRecommendation(args: RecommendationAction & {
+  speedBoost?: boolean;
+  /** Each published run's audit record, written in its publish transaction (scope and ids from that run's documents). */
+  audit?: (run: { runId: string; documentIds: string[] }) => Parameters<typeof import("./audit-log.js").appendAuditLog>[0];
+}): Promise<{ runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null; failed: BulkReprocessResult["failed"]; warnings: string[] }> {
   const recommendation = await editableRecommendation(args);
   const ids = recommendation.reprocessDocumentIds.slice(0, INGEST_REPORT_REPROCESS_LIMIT);
   if (ids.length === 0) throw new IngestReportActionError("No files to reprocess for this recommendation.", 409);
   const { bulkReprocessDocuments } = await import("./documents.js");
-  const { runs, failed, warnings } = await bulkReprocessDocuments(ids, args.userId, { useProjectPipeline: true, speedBoost: args.speedBoost === true });
+  const { runs, failed, warnings } = await bulkReprocessDocuments(ids, args.userId, {
+    useProjectPipeline: true, speedBoost: args.speedBoost === true, ...(args.audit ? { audit: args.audit } : {}),
+  });
   return {
     runs: runs.map((run) => ({ id: run.id })),
     documentIds: ids,

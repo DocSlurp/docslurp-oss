@@ -189,9 +189,31 @@ describe("ingest report on a migrated database", () => {
     // Vision already reads every page now, so the recommendation is a reprocess only.
     const after = await report.loadIngestReport({ project: asOwner, canEdit: true });
     expect(after.recommendations.find((rec) => rec.id === "reprocess-with-vision")?.patch).toBeNull();
-    const result = await report.reprocessIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "reprocess-with-vision" });
+    // A run whose audit record cannot be written is not published: no run, no new versions, no record (#512).
+    const counts = async () => (await sql<{ runs: number; docs: number }[]>`
+      select (select count(*)::int from project_runs) as runs, (select count(*)::int from documents) as docs`)[0];
+    const before = await counts();
+    const marker = `ingest-report-${Math.random()}`;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(report.reprocessIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "reprocess-with-vision",
+        audit: () => ({ userId: "owner", action: null as unknown as string, resourceType: "document-bulk", metadata: { marker } }) })).rejects.toBeTruthy();
+    } finally {
+      errors.mockRestore();
+    }
+    expect(await counts()).toEqual(before);
+    expect(await sql`select id from audit_log where metadata ->> 'marker' = ${marker}`).toEqual([]);
+    // With a record that can be written, each published run commits with one, scoped from the run's documents.
+    const result = await report.reprocessIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "reprocess-with-vision",
+      audit: (run) => ({ userId: "owner", action: "documents.bulk_reprocessed", resourceType: "document-bulk", metadata: { marker, documentIds: run.documentIds } }) });
     expect(result.documentIds.sort()).toEqual(["mixed", "scan"]);
     expect(result.runs).toHaveLength(1);
+    const records = await sql<{ org_id: string; project_id: string; run_id: string; ids: string[] }[]>`
+      select org_id, project_id, run_id, array(select jsonb_array_elements_text(metadata -> 'documentIds')) as ids
+      from audit_log where metadata ->> 'marker' = ${marker}`;
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ org_id: "o1", project_id: "w1", run_id: result.runs[0]!.id });
+    expect([...records[0]!.ids].sort()).toEqual(["mixed", "scan"]);
     const [run] = await sql<{ pipeline: { quality: string }; project_id: string }[]>`
       select pipeline, project_id from project_runs where id = ${result.runs[0]!.id}`;
     expect(run).toMatchObject({ project_id: "w1", pipeline: { quality: "auto", ladder: { maxRung: "intelligent" } } });

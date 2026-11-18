@@ -26,7 +26,7 @@ import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import { runCreation, urlSourceIdentity } from "./run-creation.js";
+import { runCreation, urlSourceIdentity, type PublishedVersion } from "./run-creation.js";
 import { appendAuditLog } from "./audit-log.js";
 import { HTTPException } from "hono/http-exception";
 import { boundLockWaits, lockChainKeys, withLockRetry } from "../lib/lock-retry.js";
@@ -1395,22 +1395,35 @@ async function editableDocumentsOrForbid(documentIds: string[], userId: string):
   return rows;
 }
 
+/**
+ * Replaces a document's tags inside the caller's transaction (`client`), for a caller that has already checked the
+ * document is editable: the document row is locked first, so replacements serialize even when it has no tags yet.
+ * Returns the stored (trimmed, deduplicated) tags.
+ */
+export async function replaceDocumentTagsIn(
+  client: typeof sql,
+  args: { docId: string; userId: string; projectId: string; tags: string[] },
+): Promise<string[]> {
+  const normalized = Array.from(new Set(args.tags.map((tag) => tag.trim()).filter(Boolean)));
+  await client`select id from documents where id = ${args.docId} for update`;
+  await client`delete from document_tags where document_id = ${args.docId}`;
+  for (const tag of normalized) {
+    await client`insert into document_tags (document_id, user_id, tag) values (${args.docId}, ${args.userId}, ${tag})`;
+  }
+  // Native search caches each document's tags with its eligibility.
+  await notifySearchEligibilityChanged(client, [args.projectId]);
+  return normalized;
+}
+
 export async function setDocumentTags(docId: string, userId: string, tags: string[], audit?: InTransactionAudit<string[]>): Promise<string[] | null> {
   const document = await getDocumentRow(docId, userId);
   if (!document || (await editableDocumentsOrForbid([docId], userId)).length === 0) {
     return null;
   }
 
-  const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
+  let normalized: string[] = [];
   await sql.begin(async (tx) => {
-    // Serialize replacements, including when the document currently has no tags.
-    await tx`select id from documents where id = ${docId} for update`;
-    await tx`delete from document_tags where document_id = ${docId}`;
-    for (const tag of normalized) {
-      await tx`insert into document_tags (document_id, user_id, tag) values (${docId}, ${userId}, ${tag})`;
-    }
-    // Native search caches each document's tags with its eligibility.
-    await notifySearchEligibilityChanged(tx as unknown as typeof sql, [document.project_id]);
+    normalized = await replaceDocumentTagsIn(tx as unknown as typeof sql, { docId, userId, projectId: document.project_id, tags });
     // The audit record commits with the replacement, scoped to the document's organization and project.
     if (audit) {
       await appendOrgScopedAudits(tx as unknown as typeof sql, [document], (row) => ({ orgId: row.org_id, projectId: row.project_id }),
@@ -1852,10 +1865,12 @@ export async function bulkReprocessDocuments(
         sources: { kind: "versionsOf", documentIds: group.map((doc) => doc.id) },
         // Each run's audit record commits with its publication.
         // (the documents asked to be reprocessed, with the run made from them).
-        ...(options.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {
-          // A group is one project (so one organization): the record is scoped to it and to the published run.
-          await appendOrgScopedAudits(client, group, (doc) => ({ orgId: doc.org_id, projectId: doc.project_id }),
-            (docs) => ({ ...options.audit!({ runId: run.runId, documentIds: docs.map((doc) => doc.id) }), runId: run.runId }));
+        ...(options.audit ? { onPublish: async (client: typeof sql, run: { runId: string; versions: PublishedVersion[] }) => {
+          // Built from what the run actually published (each version's source and scope), not the requested group: a
+          // source that did not become a version is not listed.
+          const made = run.versions.filter((version) => version.sourceDocumentId !== null);
+          await appendOrgScopedAudits(client, made, (version) => ({ orgId: version.orgId, projectId: version.projectId }),
+            (versions) => ({ ...options.audit!({ runId: run.runId, documentIds: versions.map((version) => version.sourceDocumentId!) }), runId: run.runId }));
         } } : {}),
       });
       result.runs.push(created.run);
