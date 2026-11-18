@@ -13,6 +13,7 @@ import { isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { tableCellsArtifactKey } from "../pipeline/html-table-cells-cache.js";
 import {
   PII_BLOCKED_DOCUMENT_STATUS,
   type PiiMatch,
@@ -212,6 +213,15 @@ export class PiiDetectStage implements Stage {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
       const artifactSlot = `${document.id}:pii-detect`;
       const artifactKey = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.json`;
+
+      // Stored HTML table cells hold table text from before this stage. They are never written on a PII-policy run
+      // (tableCellsCacheActive); delete any that exist anyway on every redact or block run: unconditionally, before
+      // anything is read or redacted, and also when a completed checkpoint is replayed (one DeleteObject). Matches or
+      // not: a retry after a failed delete sees already-redacted text and finds nothing, so the delete must not depend
+      // on what an attempt finds. A failed delete fails the stage, which is retried; nothing is redacted before it.
+      if (policy.action === "redact_artifacts" || policy.action === "block_indexing") {
+        await this.storage.deleteKeys([tableCellsArtifactKey(state.run, document)]);
+      }
 
       await runDocumentStage(
         state,

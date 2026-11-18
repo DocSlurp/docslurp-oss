@@ -417,3 +417,61 @@ describe("piiPolicy detections carry honest offsets", () => {
     expect(piiArtifact(storage, prefix, documentId).matches[0]).toMatchObject({ byteOffset: match?.byteOffset, charOffset: match?.charOffset });
   });
 });
+
+describe("piiPolicy and stored HTML table cells", () => {
+  // Stored cells are never written on a PII-policy run; one left behind (an older worker, a toggled flag) must not
+  // outlive the redaction or block of its document.
+  it.each(["redact_artifacts", "block_indexing"] as const)("%s deletes the document's stored table cells", async (action) => {
+    const { storage, state, stage, prefix, documentId } = setup(action);
+    const key = `${prefix}/table-cells/${documentId}.json`;
+    storage.objects.set(key, JSON.stringify({ schema: "docslurp.html-table-cells.v3", tables: [["0".repeat(64), [[1, 1, 1, 1, 0, SSN]]]] }));
+    await stage.run(state);
+    expect(storage.objects.has(key)).toBe(false);
+    if (action === "redact_artifacts") expect([...storage.objects.values()].join("\n")).not.toContain(SSN);
+  });
+
+  it("a failed delete is retried even when the retry finds nothing left to redact", async () => {
+    const { storage, state, stage, prefix, documentId, document } = setup("redact_artifacts");
+    const key = `${prefix}/table-cells/${documentId}.json`;
+    storage.objects.set(key, JSON.stringify({ tables: [["0".repeat(64), [[1, 1, 1, 1, 0, SSN]]]] }));
+    const markdownKey = `${prefix}/markdown/candidate-a.md`;
+    const original = storage.objects.get(markdownKey);
+    const deleteKeys = storage.deleteKeys.bind(storage);
+    let failures = 1;
+    storage.deleteKeys = async (keys: string[]) => {
+      if (failures-- > 0) throw new Error("SlowDown: please reduce your request rate");
+      await deleteKeys(keys);
+    };
+    await stage.run(state).catch(() => undefined);
+    // The delete comes first: the failed attempt left the cells and redacted nothing.
+    expect(storage.objects.has(key)).toBe(true);
+    expect(storage.objects.get(markdownKey)).toBe(original);
+    // Retry, against the same store, after the scanned text was already redacted (as if a redaction write had landed):
+    // it finds no matches and still deletes the cells.
+    for (const [objectKey, value] of storage.objects) {
+      if (objectKey !== key) storage.objects.set(objectKey, value.replaceAll(SSN, "[REDACTED:ssn]").replaceAll(EMAIL, "[REDACTED:email]"));
+    }
+    const retry = WorkflowState.create(state.run, [{ ...document, status: "processing" }]);
+    await stage.run(retry);
+    expect(storage.objects.has(key)).toBe(false);
+  });
+
+  it("also deletes them when a completed pii-detect checkpoint is replayed", async () => {
+    const { storage, state, stage, prefix, documentId } = setup("block_indexing");
+    await stage.run(state);
+    const key = `${prefix}/table-cells/${documentId}.json`;
+    storage.objects.set(key, "{}");
+    // The document's pii-detect checkpoint is complete: the stage skips its scan but still deletes the cells.
+    await stage.run(state);
+    expect(state.documentStage(documentId, "pii-detect")?.status).toBe("completed");
+    expect(storage.objects.has(key)).toBe(false);
+  });
+
+  it("flag_for_review leaves them (nothing is redacted or withheld)", async () => {
+    const { storage, state, stage, prefix, documentId } = setup("flag_for_review");
+    const key = `${prefix}/table-cells/${documentId}.json`;
+    storage.objects.set(key, "{}");
+    await stage.run(state);
+    expect(storage.objects.has(key)).toBe(true);
+  });
+});
