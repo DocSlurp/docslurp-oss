@@ -67,8 +67,8 @@ What it does:
 
 - `openUploader` is read-only. It resolves an existing project (default if omitted), lists up to 50 projects the caller may upload to and returns the limits (10 files per batch; `maxFileBytes` is the server's `MAX_UPLOAD_BYTES`, 500 MB by default). It never creates a project and never returns upload URLs. An unknown project name fails with `Project not found`.
 - The project list and the resolved project follow the same rule as the upload route: members who can write to a project, and viewers of the default project, may upload. Viewers of other read-only shares may not, and those projects are not listed.
-- The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. The widget requests single-part uploads (`singlePart: true`), so every file is one PUT and the 32 MiB multipart threshold does not apply. The server rejects a single-part file over 5 GiB, so larger files fail at `upload`; use the CLI or SDK for those.
-- Presigned URLs live 15 minutes (900 s). The widget does not send file bytes through DocSlurp or the MCP endpoint.
+- The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. The widget requests single-part uploads (`singlePart: true`), so every file is one PUT, whatever its size. The server rejects a single-part file over 5 GiB, so larger files fail at `upload`; use the CLI or SDK for those.
+- Presigned URLs live 3 hours (`UPLOAD_URL_TTL_SECONDS`), or until the session expires if that is sooner. The widget does not send file bytes through DocSlurp or the MCP endpoint.
 - Widget tool calls carry `_meta` `docslurp/origin: "mcp-app-upload"` and `docslurp/widgetVersion`. The server records both values in the MCP request log and span, so widget traffic can be told apart from model traffic. Only these two whitelisted values are recorded, never tool arguments. Hosts may strip `_meta`; a missing tag means the origin is unknown, not that the call came from the model.
 
 ### Enable it
@@ -110,7 +110,7 @@ The browser PUT is cross-origin, so the bucket must answer CORS preflight. Witho
 - No credentials. Presigned URLs need none.
 - `AllowedOrigins`: either `*`, or an allowlist of host sandbox origins.
 
-Why `*` is acceptable: CORS only controls which pages a browser lets read or send cross-origin requests. The presigned signature authorizes the write: it covers one object key and one `Content-Type` and expires after 15 minutes. Anyone holding a URL can already PUT with `curl`, so a wildcard origin gives nobody without a URL any new ability. Keep the rule PUT-only, and keep the bucket private for reads.
+Why `*` is acceptable: CORS only controls which pages a browser lets read or send cross-origin requests. The presigned signature authorizes the write: it covers one object key and that file's exact byte count, and expires after 3 hours (`Content-Type` is not signed; ingestion uses the type declared in the session). Anyone holding a URL can already PUT with `curl`, so a wildcard origin gives nobody without a URL any new ability. Keep the rule PUT-only, and keep the bucket private for reads.
 
 Tighter option: list the host sandbox origins. Claude renders MCP Apps on `*.claudemcpcontent.com` (the subdomain is derived from the MCP server URL), so `https://*.claudemcpcontent.com` covers it. ChatGPT's sandbox domain (documented as `*.oaiusercontent.com`) is unverified; confirm it against OpenAI's current documentation before relying on it. Desktop and IDE hosts may send an opaque `null` origin, which an allowlist cannot match; use `*` if you need those. Add your dashboard origin if the dashboard uploads to the same bucket, since it already PUTs presigned URLs from the browser.
 

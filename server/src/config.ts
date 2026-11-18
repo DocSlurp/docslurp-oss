@@ -8,6 +8,7 @@ import { resolveLanceDbConfig, resolveObjectStorageConfig } from "@docslurp/shar
 import { storageAccessKeyIdProblem } from "./lib/storage-credentials.js";
 import { assertEstimateSigningKeyConfigured } from "./lib/estimate-signing-key.js";
 import { WEAK_SECRET_VALUES } from "./lib/weak-secrets.js";
+import { readUploadTransferPolicy } from "./lib/upload-transfer-policy.js";
 
 const defaultDatabaseUrl = "postgres://docslurp:docslurp@localhost:5432/docslurp";
 
@@ -203,6 +204,7 @@ function validateProductionSecrets(): void {
 validateProductionSecrets();
 
 const storage = resolveObjectStorageConfig();
+const maxUploadBytes = readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024);
 
 /** DOCSLURP_UPLOAD_LOCK_WAIT_MS: how long a session call waits out a held lock; default 10 s, clamped to 0–60 s. */
 export function uploadLockWaitMs(raw: string | undefined): number {
@@ -238,7 +240,9 @@ export const env = {
   s3Bucket: storage.bucket,
   /** LanceDB root and storage options from LANCEDB_URI. */
   lancedb: resolveLanceDbConfig(process.env, storage),
-  maxUploadBytes: readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
+  maxUploadBytes,
+  /** Direct upload part sizes and signed-URL lifetime (UPLOAD_PART_SIZE_MB, UPLOAD_STREAM_PART_SIZE_MB, UPLOAD_URL_TTL_SECONDS). */
+  uploadTransfer: readUploadTransferPolicy(process.env, maxUploadBytes),
   /**
    * How many files of one direct-upload session are verified and sealed at once (a batched `files/complete` call, the
    * reconciler, a recovery read). Storage operations per file are independent; the session lock is held for the batch.
