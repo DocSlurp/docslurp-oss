@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { chartExportConfigOf, FORMAT_MODE } from "../chart-export/config.js";
 import {
+  privacyModeAllowsHosted,
   adaptiveRoutingDecisionSurfaceSchema,
   defaultDocumentExtractionConfig,
   defaultPageRouterConfig,
@@ -539,7 +540,7 @@ export class RoutePagesStage implements Stage {
   }): Promise<{ router: Router; routerNote?: string; chain?: DecisionModelChainRouter }> {
     const { state, document, settings } = args;
     const ids = { documentId: document.id, runId: state.run.id };
-    const disallowedPrivacy = new Set<string>(args.privacyMode === "standard" ? [] : ["hosted"]);
+    const disallowedPrivacy = new Set<string>(privacyModeAllowsHosted(args.privacyMode) ? [] : ["hosted"]);
     // Chart export replaces chart/diagram readings with generator calls: the planner prices those instead.
     const chartExportConfig = chartExportConfigOf(state.run.pipeline);
     // Only the billed `models` tier sends chart crops to a generator; the free tier adds no model output to price.

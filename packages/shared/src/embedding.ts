@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
+import { hostedModelsAllowed } from "./private-model-mode.js";
 import { embeddingSpaceUri, type ModelCallConfig } from "./model-provenance.js";
 
 export const supportedEmbeddingModels = [
@@ -1576,7 +1577,8 @@ export function applyDefaultVisionOverride<T extends { vision: VisionConfig; pri
 ): T {
   const override = readVisionModelUriOverride(env, onError);
   if (!override) return pipeline;
-  if (pipeline.privacyMode && pipeline.privacyMode !== "standard") return pipeline;
+  // Restricted projects, and every project in private model mode, never take a hosted default.
+  if (!hostedModelsAllowed(pipeline.privacyMode, env)) return pipeline;
   const defaults = visionProfileCatalog[DEFAULT_VISION_PROFILE].config;
   const { vision } = pipeline;
   if (vision.profile !== DEFAULT_VISION_PROFILE || vision.modelUri !== defaults.modelUri) return pipeline;
