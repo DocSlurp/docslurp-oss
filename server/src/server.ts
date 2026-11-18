@@ -31,6 +31,7 @@ import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { v1BodyLimit } from "./lib/v1-body-limit.js";
+import { configureBodyReads } from "./lib/bounded-body-limit.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { createBootWarmGate, warmRecentSearchIndexes } from "./search/boot-warm.js";
 import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
@@ -176,6 +177,7 @@ export function createApiApp(): Hono {
   app.use("/oauth/mcp/*", nativeBodyLimit(16 * 1024));
   // Bound actual bytes before NUL inspection or any route reader. Select the
   // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
+  configureBodyReads({ bufferBudgetBytes: env.maxBufferedRequestBytes, minBytesPerSecond: env.bodyReadMinBytesPerSecond });
   app.use("/v1/*", v1BodyLimit(env));
 
   app.use(

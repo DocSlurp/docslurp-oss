@@ -103,7 +103,7 @@ describe("requests with neither Content-Length nor Transfer-Encoding on the wire
         const line = warn.mock.calls.map(call => String(call[0])).filter(text => text.startsWith("[api] ") && text.includes("path=/v1/validated")).at(-1);
         // The line must exist, or the next assertion would pass vacuously.
         expect(line).toMatch(/^\[api\] .*status=400/);
-        expect(line).not.toContain("JSON API requests require");
+        expect(line).not.toMatch(/error_code=unsupported_type/);
         warn.mockClear();
       }
     } finally {
@@ -135,10 +135,10 @@ describe("body-less POSTs reach the route", () => {
 
   it("still refuses a non-JSON body that carries bytes", async () => {
     const response = await raw({ "content-type": "text/plain" }, '{"workspaceId":"other"}');
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(415);
     // The reason stays out of the response; the public copy is generic.
     expect(response.body).not.toContain("application/json");
-    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "invalid_request" } });
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "unsupported_type" } });
   });
 });
 
@@ -169,11 +169,11 @@ describe("refusals reach telemetry, not the client", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const response = await raw({ "content-type": "text/plain" }, "not json");
-      expect(response.status).toBe(400);
-      const line = warn.mock.calls.map(call => String(call[0])).find(text => text.startsWith("[api] ") && text.includes("status=400"));
-      expect(line).toContain("error_code=invalid_request");
-      expect(line).toContain("JSON API requests require application/json");
-      expect(response.body).not.toContain("JSON API requests require");
+      expect(response.status).toBe(415);
+      const line = warn.mock.calls.map(call => String(call[0])).find(text => text.startsWith("[api] ") && text.includes("status=415"));
+      expect(line).toContain("error_code=unsupported_type");
+      expect(line).toContain("This endpoint accepts application/json request bodies.");
+      expect(response.body).not.toContain("This endpoint accepts");
     } finally {
       warn.mockRestore();
     }

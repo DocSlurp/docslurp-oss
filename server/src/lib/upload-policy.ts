@@ -1,7 +1,8 @@
+import type { Context } from "hono";
 import { bareMimeType, isSupportedFileType, resolveSupportedMimeType, SUPPORTED_UPLOAD_MIME_TYPES } from "@docslurp/shared";
 
 import { env } from "../config.js";
-import { apiErrorResponse, bodyTimeoutResponse } from "./api-error.js";
+import { apiErrorResponse, bodyBudgetBusyResponse } from "./api-error.js";
 import { boundedBodyLimit } from "./bounded-body-limit.js";
 
 /** Intake accepts exactly the formats in the shared table the worker, the quote and the estimator card read. */
@@ -67,7 +68,20 @@ export function multipartBodyLimit(maxBytes: number) {
   return boundedBodyLimit(maxBytes, (c) => {
     const { message, details } = multipartTooLarge(maxBytes);
     return apiErrorResponse(c, 413, "payload_too_large", message, details);
-  }, { onTimeout: bodyTimeoutResponse });
+  }, { onTimeout: multipartTimeoutResponse, onBusy: bodyBudgetBusyResponse });
+}
+
+/**
+ * A bulk upload that did not finish within its read deadline (slow but steady
+ * links included): 408 with the direct-upload hint, whose public copy points
+ * clients there (publicApiErrorMessage).
+ */
+function multipartTimeoutResponse(c: Context): Response {
+  const { details } = multipartTooLarge(0);
+  c.header("Connection", "close");
+  return apiErrorResponse(c, 408, "invalid_request",
+    "The upload did not arrive in time. Upload large files or slow connections with a direct upload session: POST /v1/uploads/direct/sessions.",
+    { directUpload: details.directUpload });
 }
 
 export function listSupportedUploadMimeTypes(): string[] {

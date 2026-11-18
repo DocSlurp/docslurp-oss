@@ -1,7 +1,8 @@
-import type { Context, MiddlewareHandler } from "hono";
+import type { MiddlewareHandler } from "hono";
 import { middlewareErrorResponse } from "./api-error.js";
 import { observedBodyBytes } from "./bounded-body-limit.js";
 import { BODY_METHODS, bodyMediaKind, framingDeclaresBody } from "./media-type.js";
+import { acceptedBodyKinds, unsupportedBodyResponse } from "./v1-body-limit.js";
 
 const legacyKeys = new Set(["workspace", "workspaces", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace", "workspace_id", "workspace_ids"]);
 
@@ -14,18 +15,17 @@ export function hasLegacyProjectSelection(value: unknown): boolean {
  * selector disappear during schema parsing and silently choose a default project.
  * Only inspect protocol-owned selection fields; customer metadata stays opaque.
  */
-/** The refusal for a body that is not JSON, form or multipart; shared with the /v1 body limit's early check. */
-export function nonJsonBodyRefusal(c: Context): Response {
-  return middlewareErrorResponse(c, 400, "invalid_request", "JSON API requests require application/json; legacy selection must not bypass validation through Content-Type.");
-}
-
 export const rejectLegacyProjectSelection: MiddlewareHandler = async (c, next) => {
   const reject = () => middlewareErrorResponse(c, 400, "invalid_request", "Workspace selection is no longer supported. Use project, projectId, projectIds, projectName or newProject.");
   if (hasLegacyProjectSelection(c.req.query())) return reject();
   if (BODY_METHODS.has(c.req.method)) {
     const kind = bodyMediaKind(c.req.header("content-type"));
-    // A body-less POST (`fetch` with no body sends no Content-Type) is not content.
-    if ((kind === "other" || kind === "none") && await carriesBytes(c.req.raw)) return nonJsonBodyRefusal(c);
+    // Only a media type the endpoint itself reads (v1-body-limit.ts) is inspected, so this
+    // guard parses the same value the handler consumes. A body-less POST (`fetch` with no
+    // body sends no Content-Type) is not content.
+    if ((kind === "none" || !acceptedBodyKinds(c.req.path).includes(kind)) && await carriesBytes(c.req.raw)) {
+      return unsupportedBodyResponse(c);
+    }
     if (kind === "json") {
       // Clone preserves raw transport consumers such as MCP. Prior limits bound bytes.
       const body: unknown = await c.req.raw.clone().json().catch(() => null);

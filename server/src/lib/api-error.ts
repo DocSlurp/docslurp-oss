@@ -42,7 +42,15 @@ export function apiStatusError(c: Context, status: number, message: string, opti
 export function nativeBodyLimit(maxSize: number): MiddlewareHandler {
   return boundedBodyLimit(maxSize, (c) => middlewareErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }), {
     onTimeout: bodyTimeoutResponse,
+    onBusy: bodyBudgetBusyResponse,
   });
+}
+
+/** The process-wide request-body buffer budget is spent: 503 with Retry-After, in the caller's error shape. */
+export function bodyBudgetBusyResponse(c: Context): Response {
+  c.header("Retry-After", "5");
+  c.header("Connection", "close");
+  return middlewareErrorResponse(c, 503, "unavailable", "Request body buffer budget exhausted; retry shortly");
 }
 
 /** A request body that stalled or trickled past its deadline: 408 in the caller's error shape. */

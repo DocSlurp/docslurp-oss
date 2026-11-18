@@ -53,13 +53,13 @@ describe("project cutover rejects stale scope instead of selecting default", () 
     const pull = vi.fn(() => new Promise<void>(() => {}));
     const stalled = () => new ReadableStream({ pull }, { highWaterMark: 0 });
     // A declared body that never arrives is refused from the headers alone, without reading.
-    expect((await post({ "content-type": "text/plain", "content-length": "5" }, stalled())).status).toBe(400);
-    expect((await post({ "content-type": "text/plain", "transfer-encoding": "chunked" }, stalled())).status).toBe(400);
+    expect((await post({ "content-type": "text/plain", "content-length": "5" }, stalled())).status).toBe(415);
+    expect((await post({ "content-type": "text/plain", "transfer-encoding": "chunked" }, stalled())).status).toBe(415);
     expect((await post({ "content-length": "0" }, stalled())).status).toBe(200);
     expect(pull).not.toHaveBeenCalled();
     // A zero-length first chunk followed by data is content.
     const late = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(0)); controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } });
-    expect((await post({ "content-type": "text/plain" }, late)).status).toBe(400);
+    expect((await post({ "content-type": "text/plain" }, late)).status).toBe(415);
   });
 
   it("refuses a silent header-less body once the peek bound passes", async () => {
@@ -70,7 +70,7 @@ describe("project cutover rejects stale scope instead of selecting default", () 
         method: "POST", body: new ReadableStream({ pull: () => new Promise(() => {}) }), duplex: "half",
       } as RequestInit));
       await vi.advanceTimersByTimeAsync(BODY_PEEK_TIMEOUT_MS);
-      expect((await pending).status).toBe(400);
+      expect((await pending).status).toBe(415);
     } finally {
       vi.useRealTimers();
     }
@@ -78,7 +78,7 @@ describe("project cutover rejects stale scope instead of selecting default", () 
 
   it("cannot hide stale selection behind a non-JSON Content-Type", async () => {
     for (const contentType of ["text/plain", "application/octet-stream"]) {
-      expect((await app().request("/", { method: "POST", headers: { "content-type": contentType }, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(400);
+      expect((await app().request("/", { method: "POST", headers: { "content-type": contentType }, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(415);
     }
   });
 

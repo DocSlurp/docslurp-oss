@@ -13,13 +13,19 @@ export function mediaTypeOf(header: string | null | undefined): string | null {
   return type ? type : null;
 }
 
+/**
+ * JSON exactly as Hono's validator("json") accepts it (the whole header,
+ * parameters included), so the content-type guard never inspects a body the
+ * route's validator would ignore: `application/json`, `application/*+json`.
+ */
+const HONO_JSON_CONTENT_TYPE = /^application\/([a-z-.]+\+)?json(;\s*[a-zA-Z0-9-]+=([^;]+))*$/i;
+
 export function bodyMediaKind(header: string | null | undefined): BodyMediaKind {
   const type = mediaTypeOf(header);
   if (!type) return "none";
   if (type === "multipart/form-data") return "multipart";
   if (type === "application/x-www-form-urlencoded") return "form";
-  const match = /^(?:application|text)\/([a-z0-9.+-]+)$/.exec(type);
-  if (match && (match[1] === "json" || match[1] === "x-json" || match[1]!.endsWith("+json"))) return "json";
+  if (HONO_JSON_CONTENT_TYPE.test(header!.trim())) return "json";
   return "other";
 }
 

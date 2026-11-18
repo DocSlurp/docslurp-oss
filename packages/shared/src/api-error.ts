@@ -289,6 +289,10 @@ export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
  */
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
   const base = API_ERROR_PUBLIC_MESSAGES[code];
+  // A bulk upload body that did not arrive in time (slow links included): point at the direct-upload path.
+  if (code === "invalid_request" && details?.directUpload) {
+    return "The upload did not arrive in time. Upload large files, or files over slow connections, with a direct upload session (POST /v1/uploads/direct/sessions); the SDK and CLI do this automatically.";
+  }
   if (code === "project_not_found" && typeof details?.projectSlug === "string") {
     return `No project matching "${details.projectSlug}" was found. Pass a project ID, slug or name from this organization, or omit project to use the default project.`;
   }

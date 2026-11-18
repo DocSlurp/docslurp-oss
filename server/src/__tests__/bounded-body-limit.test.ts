@@ -1,6 +1,9 @@
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { nativeBodyLimit } from "../lib/api-error.js";
+import { bodyReadDeadlineMs, bufferedBodyBytes, configureBodyReads } from "../lib/bounded-body-limit.js";
+import { multipartBodyLimit } from "../lib/upload-policy.js";
+import { safeErrorResponse } from "../lib/public-errors.js";
 import { rejectNulBytes } from "../lib/reject-nul.js";
 
 function app() {
@@ -62,5 +65,71 @@ describe("bounded request bodies before readers", () => {
     const body = new ReadableStream({ start(controller) { controller.close(); } });
     await limited.request(new Request("http://localhost/v1/x", { method: "POST", body, duplex: "half", signal: client.signal } as RequestInit));
     expect(seen).toEqual({ body: false, aborted: true });
+  });
+});
+
+describe("process-wide body buffer budget", () => {
+  it("answers 503 with Retry-After once concurrent buffered bodies exceed the budget, and releases it after", async () => {
+    configureBodyReads({ bufferBudgetBytes: 100 * 1024 });
+    try {
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const budget = new Hono();
+      budget.use("*", nativeBodyLimit(1024 * 1024));
+      budget.post("/v1/hold", async c => { await held; return c.text("ok"); });
+      budget.post("/v1/quick", c => c.text("ok"));
+      const body = () => new Uint8Array(60 * 1024);
+      const first = budget.request("/v1/hold", { method: "POST", headers: { "content-type": "application/json" }, body: body() });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(bufferedBodyBytes()).toBe(60 * 1024);
+      const second = await budget.request("/v1/quick", { method: "POST", headers: { "content-type": "application/json" }, body: body() });
+      expect(second.status).toBe(503);
+      expect(second.headers.get("Retry-After")).toBe("5");
+      expect(await second.json()).toMatchObject({ error: { code: "unavailable" } });
+      release();
+      expect((await first).status).toBe(200);
+      expect(bufferedBodyBytes()).toBe(0);
+      expect((await budget.request("/v1/quick", { method: "POST", headers: { "content-type": "application/json" }, body: body() })).status).toBe(200);
+    } finally {
+      configureBodyReads({ bufferBudgetBytes: 256 * 1024 * 1024 });
+    }
+  });
+});
+
+describe("body read deadline", () => {
+  it("gives a slow but steady near-cap bulk upload time to finish (80 KiB/s on a 25 MiB cap)", () => {
+    const cap = 25 * 1024 * 1024;
+    expect(bodyReadDeadlineMs(cap)).toBeGreaterThan((cap / (80 * 1024)) * 1000);
+    configureBodyReads({ minBytesPerSecond: 100 * 1024 });
+    try {
+      expect(bodyReadDeadlineMs(cap)).toBeLessThan((cap / (80 * 1024)) * 1000);
+    } finally {
+      configureBodyReads({ minBytesPerSecond: 32 * 1024 });
+    }
+  });
+
+  it("answers a bulk upload past its deadline with 408 whose public copy points to direct upload", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const bulk = new Hono();
+      bulk.use("*", multipartBodyLimit(1024 * 1024));
+      bulk.post("/v1/uploads/bulk", c => c.text("ok"));
+      // Progressing (one chunk every 10 s, inside the idle timeout) but past the overall deadline.
+      const trickle = new ReadableStream<Uint8Array>({ async pull(controller) {
+        await new Promise(resolve => setTimeout(resolve, 10_000));
+        controller.enqueue(new Uint8Array(1));
+      } }, { highWaterMark: 0 });
+      const pending = bulk.request(new Request("http://localhost/v1/uploads/bulk", {
+        method: "POST", headers: { "content-type": "multipart/form-data; boundary=x" }, body: trickle, duplex: "half",
+      } as RequestInit));
+      await vi.advanceTimersByTimeAsync(bodyReadDeadlineMs(1024 * 1024) + 10_000);
+      const response = await pending;
+      expect(response.status).toBe(408);
+      const envelope = await (await safeErrorResponse(response, "req-1", true)).json();
+      expect(envelope.error).toMatchObject({ code: "invalid_request", details: { directUpload: { createSession: "/v1/uploads/direct/sessions" } } });
+      expect(envelope.error.message).toContain("direct upload session (POST /v1/uploads/direct/sessions)");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

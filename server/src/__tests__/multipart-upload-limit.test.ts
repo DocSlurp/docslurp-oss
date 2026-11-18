@@ -79,7 +79,7 @@ describe("multipart upload cap", () => {
 function v1App(maxMultipartUploadBytes: number) {
   const reached = vi.fn();
   const hono = new Hono();
-  hono.use("/v1/*", v1BodyLimit({ maxUploadBytes: 500 * 1024 * 1024, maxMultipartUploadBytes }));
+  hono.use("/v1/*", v1BodyLimit({ maxMultipartUploadBytes }));
   hono.use("/v1/*", rejectLegacyProjectSelection);
   hono.post("/v1/uploads/bulk", async (c) => {
     reached();
@@ -145,7 +145,7 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
     const stalled = new ReadableStream({ pull }, { highWaterMark: 0 });
     for (const headers of [{ "content-type": "text/plain", "content-length": "5" }, { "transfer-encoding": "chunked" }] as Array<Record<string, string>>) {
       const response = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", { method: "POST", headers, body: stalled, duplex: "half" } as RequestInit));
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(415);
     }
     expect(pull).not.toHaveBeenCalled();
     expect(reached).not.toHaveBeenCalled();
@@ -153,12 +153,17 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
 
   it("applies the multipart cap to the bulk route whatever the content-type parameters say", async () => {
     const { hono } = v1App(64 * 1024);
-    for (const type of ["application/json", "multipart/form-data; x=json", "Multipart/Form-Data; boundary=x"]) {
+    for (const type of ["multipart/form-data; x=json", "Multipart/Form-Data; boundary=x", "multipart/form-data; boundary=x; charset=application/json"]) {
       const response = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", {
         method: "POST", headers: { "content-type": type }, body: streamOf(65 * 1024), duplex: "half",
       } as RequestInit));
       expect({ type, status: response.status }).toEqual({ type, status: 413 });
     }
+    // JSON is not a bulk media type: refused (415), never read under the multipart cap.
+    const json = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", {
+      method: "POST", headers: { "content-type": "application/json" }, body: streamOf(1024), duplex: "half",
+    } as RequestInit));
+    expect(json.status).toBe(415);
   });
 
   it("decides emptiness from the bytes counted, not a lying Content-Length", async () => {
@@ -167,7 +172,7 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
     const response = await hono.fetch(new Request("http://localhost/v1/uploads/direct/sessions", {
       method: "POST", headers: { "content-type": "text/plain", "content-length": "0" }, body, duplex: "half",
     } as RequestInit));
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(415);
     expect(reached).not.toHaveBeenCalled();
   });
 
@@ -190,6 +195,25 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
       expect(reached).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("refuses a body the endpoint's handler would read differently (JSON labelled as a form, text/json)", async () => {
+    const { hono } = v1App(64 * 1024);
+    for (const type of ["application/x-www-form-urlencoded", "text/json", "application/json; garbage"]) {
+      const response = await hono.fetch(new Request("http://localhost/v1/search/aggregate", {
+        method: "POST", headers: { "content-type": type }, body: JSON.stringify({ workspaceId: "other", q: "x" }),
+      }));
+      expect({ type, status: response.status }).toEqual({ type, status: 415 });
+    }
+  });
+
+  it("lets the multipart voice route and the form-posted SAML callback through", async () => {
+    const { hono } = v1App(64 * 1024);
+    for (const [path, type] of [["/v1/projects/p1/chat/transcribe", "multipart/form-data; boundary=x"], ["/v1/auth/saml/acme/callback", "application/x-www-form-urlencoded"]]) {
+      const response = await hono.fetch(new Request(`http://localhost${path}`, { method: "POST", headers: { "content-type": type, "content-length": "5" }, body: "a=b&c" }));
+      // No such route in this test app: 404 means the body was accepted for that endpoint.
+      expect({ path, status: response.status }).toEqual({ path, status: 404 });
     }
   });
 });

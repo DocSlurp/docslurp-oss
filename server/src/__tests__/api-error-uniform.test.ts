@@ -165,12 +165,26 @@ describe("one error shape for the native API (real middleware stack)", () => {
   });
 
   it("answers oversized uploads with payload_too_large", async () => {
-    for (const path of ["/v1/uploads/bulk", "/v1/ingest/bulk", "/v1/uploads/url"]) {
+    for (const path of ["/v1/uploads/bulk", "/v1/ingest/bulk"]) {
       const response = await app.request(path, { method: "POST", headers: { ...bearer, "content-type": "multipart/form-data; boundary=x", "content-length": String(10 * 1024 * 1024 * 1024) }, body: "--x--" });
       expect(response.status, path).toBe(413);
       const error = await envelope(response);
       expect(error.code, path).toBe("payload_too_large");
       expect(error.details, path).toMatchObject({ maxBytes: expect.any(Number) });
+    }
+  });
+
+  it("refuses a form-typed body on a JSON-only upload endpoint before reading it", async () => {
+    for (const path of ["/v1/uploads/url", "/v1/uploads/direct/sessions"]) {
+      const pull = vi.fn();
+      const response = await app.request(new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: { ...bearer, "content-type": "multipart/form-data; boundary=x", "content-length": String(400 * 1024 * 1024) },
+        body: new ReadableStream({ pull }, { highWaterMark: 0 }), duplex: "half",
+      } as RequestInit));
+      expect(response.status, path).toBe(415);
+      expect((await envelope(response)).code, path).toBe("unsupported_type");
+      expect(pull, path).not.toHaveBeenCalled();
     }
   });
 

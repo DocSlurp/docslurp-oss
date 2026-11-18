@@ -246,6 +246,16 @@ export const env = {
     readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),
     readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
   ),
+  /**
+   * Request-body bytes the API buffers at once across all requests (the bulk
+   * multipart and JSON body limits). Past it a request gets 503 + Retry-After.
+   */
+  maxBufferedRequestBytes: readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES, 256 * 1024 * 1024),
+  /**
+   * Slowest sustained upload rate a buffered request body may arrive at: its
+   * read deadline is 60 s plus its cap at this rate (25 MiB bulk: ~14 min).
+   */
+  bodyReadMinBytesPerSecond: readNumber(process.env.BODY_READ_MIN_BYTES_PER_SECOND, 32 * 1024),
   remoteIngestComplexFormatsEnabled: readBoolean(process.env.REMOTE_INGEST_COMPLEX_FORMATS_ENABLED, false),
   web: resolveWebConfig(),
   metricsSecret: process.env.METRICS_SECRET?.trim() || null,
