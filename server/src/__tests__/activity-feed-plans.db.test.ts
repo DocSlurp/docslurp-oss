@@ -93,6 +93,29 @@ describe("activity feed plans (0199)", () => {
     expect(await getRun("af-r77", "nobody")).toBeNull();
   }, 120_000);
 
+  it("getRun refuses another organization's run and a run outside an API key's project allowlist", async () => {
+    const { getRun } = await import("../services/runs.js");
+    const { Hono } = await import("hono");
+    const { requestContextMiddleware, setCurrentRequestApiKeyProjectIds } = await import("../lib/request-context.js");
+    await sql.unsafe(`
+      INSERT INTO "user" (id,name,email) VALUES ('af-other','O','af-other@example.test') ON CONFLICT DO NOTHING;
+      INSERT INTO organizations (id,name,slug,created_by_user_id) VALUES ('af-org2','B','af-org2','af-other') ON CONFLICT DO NOTHING;
+      INSERT INTO org_memberships (org_id,user_id,role) VALUES ('af-org2','af-other','owner') ON CONFLICT DO NOTHING;
+      INSERT INTO projects (id,org_id,user_id,name,slug) VALUES ('af-foreign','af-org2','af-other','F','af-foreign') ON CONFLICT DO NOTHING;
+      INSERT INTO project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage)
+        VALUES (100, 'af-foreign-run', 'af-org2', 'af-other', 'af-foreign', 'bulk-upload', 'processing', 'extract') ON CONFLICT DO NOTHING;
+    `);
+    expect(await getRun("af-foreign-run", "af-user", { cost: false })).toBeNull();
+    expect((await getRun("af-foreign-run", "af-other", { cost: false }))?.id).toBe("af-foreign-run");
+    const app = new Hono()
+      .use("*", requestContextMiddleware)
+      .use("*", async (_c, next) => { setCurrentRequestApiKeyProjectIds(["af-small"]); await next(); })
+      .get("/run/:id", async c => c.json({ run: (await getRun(c.req.param("id"), "af-user", { cost: false }))?.id ?? null }));
+    // r50 is in af-small (every 50th run), r77 in af-big: the key may use af-small only.
+    expect(await (await app.request("/run/af-r50")).json()).toEqual({ run: "af-r50" });
+    expect(await (await app.request("/run/af-r77")).json()).toEqual({ run: null });
+  }, 120_000);
+
   it("the realtime activity projection reads active, then recently finished runs, in index order", async () => {
     const { realtimeBackend } = await import("../realtime/backend.js");
     let result: { runs: Array<{ id: string }>; truncated: boolean } | undefined;
