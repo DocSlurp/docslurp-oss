@@ -17,10 +17,22 @@ vi.mock("../db.js", () => ({ sql: Object.assign(
     return { then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
       mocks.query(text, values).then((result: { rows: unknown[] }) => result.rows).then(resolve, reject) };
   }, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) }));
+// Session advisory locks as in Postgres: one holder per key (the waves' timers and a client's confirm contend for real).
+const held = vi.hoisted(() => new Set<string>());
 vi.mock("../lib/direct-upload-locks.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/direct-upload-locks.js")>(),
   reserveDirectUploadLockConnection: async () => ({
-    connection: async (strings: TemplateStringsArray) => strings.join("").includes("pg_try_advisory_lock") ? [{ acquired: true }] : [],
+    connection: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join("");
+      const key = String(values[0]);
+      if (text.includes("pg_try_advisory_lock")) {
+        if (held.has(key)) return [{ acquired: false }];
+        held.add(key);
+        return [{ acquired: true }];
+      }
+      if (text.includes("pg_advisory_unlock")) held.delete(key);
+      return [];
+    },
     release: () => {},
   }),
 }));

@@ -86,7 +86,45 @@ returns 401. A successful authenticated empty `{"events":[]}` request returns
 Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` for `status`,
 `error`, per-file state and `result`. A timeout after bytes were uploaded does
 not imply failure: retain the session ID and check it before submitting again.
-Look for `[upload-reconcile]` errors when handoff stalls. Configure the bucket's
+Look for `[upload-reconcile]` errors when handoff stalls; errors are logged by
+class (`intake:<status>:<code>`, `billing:<code>`, `postgres:<sqlstate>`,
+`storage:<name>`), never with provider text.
+
+### Upload metrics
+
+Meter `docslurp.uploads`; every event also writes one structured log with
+`event.name` `docslurp.upload.<event>` (session, run and file ids on the log,
+never on the metric):
+
+| Metric | Kind | Labels | Meaning |
+| --- | --- | --- | --- |
+| `docslurp.upload.waves` | counter | `outcome` (committed, adopted, refused, rejected, failed, fenced), `protocol`, `trigger` (count, delay, last, flush, expiry, recovery), `error_class` | Runs a session started or tried to start. `adopted`: the run committed although its intake reported an error. `fenced`: a wave of a crashed or lock-less holder. |
+| `docslurp.upload.wave_files` | histogram | `protocol`, `trigger` | Files per started run. |
+| `docslurp.upload.webhook_keys` | counter | `outcome` (queued, duplicate, refused_key, unknown_key, dropped) | Keys named by storage notifications. |
+| `docslurp.upload.webhook_finalizes` | counter | `outcome` (completed, not_ready, failed, busy, retry, skipped), `error_class` | Finalizations after a notification. |
+| `docslurp.upload.fallback_finalizes` | counter | same | Finalizations by the reconciler's fallback (lost notifications, clients that never complete). |
+| `docslurp.upload.lease_contentions` | counter | `path` (client, webhook, fallback, recovery) | A finalizer found the file held by another. |
+| `docslurp.upload.expiries` | counter | `outcome` (flushed, refused, aborted, confirmed, retry), `error_class` | Expired sessions: a last run, refused, or aborted. |
+| `docslurp.upload.sessions_closed` | counter | `outcome` (confirmed, partial, failed, aborted) | How sessions ended. `partial`: runs started, some files not ingested. |
+| `docslurp.upload.lock_wait` | histogram (s) | `lock_class` (short, wave, reconcile, batch), `outcome` (acquired, busy) | Time to get a session lock. |
+
+### Rolling back waves
+
+Turn waves off first, then roll back code if still needed:
+
+1. Set `DOCSLURP_UPLOAD_WAVES=off` and restart the API. New sessions take one
+   run; sessions already in `waves` keep their waves and finish under them.
+2. Optionally wait for those sessions to finish (`select count(*) from
+   upload_sessions where finalize_protocol = 'waves' and status in ('pending',
+   'uploading', 'ingesting')`), at most their 24-hour expiry.
+3. Rolling back to a server without waves is safe even before they finish:
+   older servers confirm a session only when every file is `completed` and never
+   abort or expire an `ingesting` session, and a `waves` session's finalized
+   files are `finalized` and it is `ingesting` from its first run. Such
+   sessions wait (their files are not ingested again, their runs' sources are
+   not deleted) until a server with waves is back, or are cleared by hand.
+4. Keep migration 0193 when rolling back: its columns, table and triggers are
+   inert for older servers (the triggers act only on waves and their runs). Configure the bucket's
 incomplete-multipart lifecycle expiry as a final safety net: a process crash
 between provider multipart creation and saving its upload ID can leave an orphan
 that the database cannot identify. Normal expired/failed sessions abort known

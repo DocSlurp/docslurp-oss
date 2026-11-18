@@ -21,6 +21,7 @@ Compose passes every variable in `.env.selfhost` to the server and workers (`env
 | `DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY` | `8` (1–32) | Files of one direct-upload session verified and sealed at once (a batched `files/complete`, the fallback reconciler, a recovery read). Each file has its own finalize lease; none holds the session lock. |
 | `DOCSLURP_UPLOAD_WEBHOOK_FINALIZE_CONCURRENCY` | `8` (1–64) | Files finalized at once per API process after storage upload notifications. |
 | `DOCSLURP_UPLOAD_FINALIZE_GRACE_SECONDS` | `60` | How long after a file is declared the fallback reconciler first checks storage for it (then with backoff up to five minutes). |
+| `DOCSLURP_UPLOAD_WAVES` | `off` | `on`: new direct-upload sessions start runs in waves while they upload. `off`: one run per session once every file is in. Recorded on each session when it is created, so switching it off is a safe kill switch: sessions in flight keep their behaviour, new ones take one run. |
 | `DOCSLURP_UPLOAD_WAVE_FILES` | `5` | Finalized files that start an upload's first run (wave) while the upload is still in progress. |
 | `DOCSLURP_UPLOAD_WAVE_GROWTH` | `2` (1–10) | Multiplies the file count each later wave waits for: waves of 5, 10, 20, ... files. `1` keeps every wave at `DOCSLURP_UPLOAD_WAVE_FILES`. |
 | `DOCSLURP_UPLOAD_WAVE_DELAY_MS` | `10000` | A wave also starts this long after the first of its files was finalized, whatever their count. |

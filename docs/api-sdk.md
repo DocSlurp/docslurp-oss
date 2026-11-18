@@ -334,9 +334,10 @@ with 8 MiB parts. Use the returned descriptors rather than hard-coding those
 values. Each file is finalized on its own: the server verifies the stored size,
 seals a single-PUT object by copying exactly the verified version, or reads
 storage's part list, checks the part numbers and sizes and assembles a
-multipart object. Ingestion starts in waves as files are finalized, not only
-after the last one. Clients do not need to call `/files/complete` or `/confirm`
-for known-size files.
+multipart object. Where the deployment enables it, ingestion starts in waves as
+files are finalized, not only after the last one (see
+[Runs in waves](#runs-in-waves)). Clients do not need to call `/files/complete`
+or `/confirm` for known-size files.
 
 Where storage sends upload notifications (Tigris), the notification for an
 object makes the server finalize that file within moments. Without
@@ -348,7 +349,18 @@ prove that an unknown-size stream has ended.
 
 ### Runs in waves
 
-A direct upload starts runs while it is still uploading. A run (a wave) takes
+Each session has a `protocol`, fixed when it is created:
+
+- `single` (the default): one run, started once every file is finalized or
+  refused (or on `/confirm` once none is still open). Its `result` is the
+  whole upload, and its `runs[]` holds at most that one run.
+- `waves`, where the deployment sets `DOCSLURP_UPLOAD_WAVES=on`: the upload
+  starts runs while it is still uploading, as described below.
+
+Both protocols end the same way, and clients written for one work with the
+other: poll until `result` is set, and read `runs[]` for every run.
+
+In a `waves` session the upload starts runs while it is still uploading. A run (a wave) takes
 every finalized file not yet in a run, once enough such files are waiting (5
 for the first run, then 10, 20, 40, ...), about 10 seconds after the first of
 them was finalized, or when the last file is finalized, whichever comes first.
@@ -365,6 +377,12 @@ A 1,000-file upload becomes a handful of runs, all in the same project:
   a run or marked `failed` with its own `error`.
 - Aborting a session stops later runs. Runs that already started, and their
   files, are left alone.
+- A session that started a run never ends `failed` or `aborted`. When it is
+  aborted, expires or is refused after its first run, it ends `confirmed`
+  (partly succeeded): every file is in a run except `failedFileCount` files
+  (refused, see below) and `abortedFileCount` files (the session ended before
+  they joined a run). Upload only those files again, never the whole session.
+- While a `waves` session is ingesting, its `status` is `ingesting`.
 - When a session expires (24 hours after creation), files that were finalized
   but are in no run yet go into one last run, through the same billing, budget
   and admission checks. Only when that run is refused are they aborted. Files
@@ -383,7 +401,8 @@ A 1,000-file upload becomes a handful of runs, all in the same project:
 Session status (`GET ...?statusOnly=true`) adds:
 
 ```json
-{ "status": "pending", "result": null, "projectId": "PROJECT_ID",
+{ "status": "ingesting", "protocol": "waves", "result": null, "projectId": "PROJECT_ID",
+  "failedFileCount": 1, "abortedFileCount": 0,
   "runs": [{ "runId": "SESSION_ID", "wave": 1, "status": "started", "fileCount": 5, "documentCount": 5, "createdAt": "..." },
            { "runId": "RUN_2", "wave": 2, "status": "starting", "fileCount": 7, "documentCount": null, "createdAt": "..." }],
   "files": [{ "id": "FILE_ID", "status": "completed", "runId": "SESSION_ID" },
@@ -398,8 +417,9 @@ next to `run`, and the `onRuns` option is called each time another run starts.
 
 `POST .../confirm` is a flush. It starts a run with every finalized file not yet
 in one, even fewer than 5, and answers the first run's response plus `runs`,
-`sessionStatus` and `pendingFileCount`. Files still uploading start later runs
-on their own. Confirming a session with no finalized file still answers `409`
+`sessionStatus`, `pendingFileCount`, `failedFileCount` and `abortedFileCount`.
+Files still uploading start later runs on their own. In a `single` session,
+`/confirm` with files still open answers `409` (incomplete files), as before. Confirming a session with no finalized file still answers `409`
 (incomplete files), and an extract session still starts its single run only
 once every file is in.
 
