@@ -318,7 +318,7 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
   }
   // A caller canonical ID in a namespace the server reserves.
   if (code === "invalid_request" && details?.policy === "canonical_id_reserved") {
-    return "canonicalId values that start with docslurp:, or that look like url: followed by a 64-character hex hash, are reserved for DocSlurp. Choose another canonicalId, or omit it.";
+    return "canonicalId values that start with docslurp:, that look like url: followed by a 64-character hex hash, or that are the version key of an earlier URL import in this project, are reserved for DocSlurp. Choose another canonicalId, or omit it.";
   }
   // A bulk upload body that did not arrive in time (slow links included): point at the direct-upload path.
   if (code === "invalid_request" && details?.directUpload) {

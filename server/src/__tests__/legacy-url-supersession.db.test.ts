@@ -188,3 +188,37 @@ describe("a URL re-ingest supersedes the URL's legacy documents (createRunCreati
     expect(await sql`select canonical_id, status from documents where id = 'legacy'`).toEqual([{ canonical_id: OPAQUE, status: "completed" }]);
   });
 });
+
+describe("a caller canonicalId that is a legacy URL-intake chain's raw-URL key", () => {
+  /** An upload naming its own canonicalId, as the bulk and direct upload routes hand it over. */
+  const upload = (canonicalId: string, projectId = "w") => runCreation.create({
+    userId: "u", projectId, kind: "bulk-upload", pipeline: defaultPipelineFeatures,
+    sources: { kind: "files", files: [{ filename: "mine.pdf", mimeType: "application/pdf", sourceKey: `u/raw/${Math.random()}`, fileSize: 1000, canonicalId }] },
+  } as never);
+
+  it("is refused as reserved before anything is created, and cannot join the URL's history", async () => {
+    await legacyRun("url-run", "w", "o", "u", "url-ingest");
+    await legacyDoc("legacy", { run: "url-run", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-01" });
+    await expect(upload(LEGACY)).rejects.toBeInstanceOf((await import("../lib/canonical-id.js")).ReservedCanonicalIdError);
+    expect((await rows()).map((row) => row.id)).toEqual(["legacy"]);
+    expect(await sql`select id from project_runs where id <> 'url-run'`).toHaveLength(0);
+    // The URL's next ingest still adopts its chain alone.
+    await ingest();
+    expect((await rows()).find((row) => row.id !== "legacy")).toMatchObject({ canonical_id: OPAQUE, version_number: 2, previous_version_id: "legacy" });
+  });
+
+  it("stays the caller's elsewhere: another project, a chain of the caller's own uploads, or a URL-intake row of another URL", async () => {
+    await legacyRun("url-run", "w", "o", "u", "url-ingest");
+    await legacyRun("upload-run", "w", "o", "u", "bulk-upload");
+    await legacyDoc("legacy", { run: "url-run", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-01" });
+    // Another project of the org has no such chain.
+    await expect(upload(LEGACY, "w2")).resolves.toBeTruthy();
+    // The caller's own earlier upload under a URL-shaped key (no URL-intake provenance).
+    const own = "https://example.com/my-own-key";
+    await legacyDoc("own", { run: "upload-run", canonical: own, created: "2026-01-02" });
+    await expect(upload(own)).resolves.toBeTruthy();
+    // A URL-intake row under this key whose stored source maps to another legacy key is not that key's chain.
+    await legacyDoc("mismatch", { run: "url-run", canonical: "https://example.com/elsewhere", sourceUrl: "https://example.com/other", created: "2026-01-03" });
+    await expect(upload("https://example.com/elsewhere")).resolves.toBeTruthy();
+  });
+});

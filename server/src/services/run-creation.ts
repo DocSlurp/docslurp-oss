@@ -25,7 +25,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
-import { MAX_CANONICAL_ID_LENGTH, normalizeUploadPath, opaqueCanonicalIdForUrl, tryIdentityUrl, tryNormalizedUrl } from "../lib/canonical-id.js";
+import { isCallerReservedCanonicalId, MAX_CANONICAL_ID_LENGTH, normalizeUploadPath, opaqueCanonicalIdForUrl, RESERVED_CANONICAL_ID_MESSAGE, ReservedCanonicalIdError, tryCanonicalIdForUrl, tryIdentityUrl, tryNormalizedUrl } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
@@ -314,6 +314,35 @@ export function urlSourceIdentity(metadata: unknown): { identity: string; opaque
  * then fails, the re-key and its bump stay (C-L2): the rows are still the URL's
  * history, now under its opaque key, and the next ingest continues the chain.
  */
+/**
+ * The latest version of a chain (by creation, as the supersession trigger orders them) with the next number after
+ * the chain's highest, locked FOR KEY SHARE NOWAIT until commit: the new version points at it
+ * (previous_version_id, no foreign key), so a deletion of that row (which locks it FOR UPDATE before it rewires its
+ * children) waits and then rewires the new version too, never leaving it pointing at a deleted row. Run creation
+ * never waits on a row: a conflict aborts the transaction for withLockRetry, and a row deleted between the read and
+ * the lock is read again.
+ */
+async function lockedLatestVersion(
+  client: SqlClient,
+  args: { projectId: string; orgId?: string; canonicalId: string },
+): Promise<{ id: string; next_version: number } | undefined> {
+  const org = () => (args.orgId ? client`and org_id = ${args.orgId}` : client``);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const [latest] = await client<{ id: string; next_version: number }[]>`
+      select id, (select max(version_number) from documents
+        where project_id = ${args.projectId} ${org()} and canonical_id = ${args.canonicalId}) + 1 as next_version
+      from documents
+      where project_id = ${args.projectId} ${org()} and canonical_id = ${args.canonicalId}
+      order by created_at desc, id desc
+      limit 1
+    `;
+    if (!latest) return undefined;
+    const [held] = await client<{ id: string }[]>`select id from documents where id = ${latest.id} for key share nowait`;
+    if (held) return latest;
+  }
+  throw new RunCreationBusyError();
+}
+
 export async function adoptLegacyUrlVersions(
   client: SqlClient,
   args: { projectId: string; orgId: string; canonicalId: string; metadata?: Record<string, unknown> | null },
@@ -347,6 +376,33 @@ export async function adoptLegacyUrlVersions(
     returning id
   `;
   return updated.length;
+}
+
+/**
+ * A caller's canonicalId must not be the raw-URL key of a legacy URL-intake chain in the project: written as an
+ * upload's key it would join that URL's history (and be adopted with it) before the URL's next ingest re-keys the
+ * chain. Refused like the reserved shapes (ReservedCanonicalIdError, 400 canonical_id_reserved), before anything
+ * is created. A chain counts when one of its rows came from a `url-ingest` run and its stored sourceUrl maps to
+ * exactly that legacy key. One indexed read (documents_project_canonical_idx) for the request's caller keys; no
+ * lock, because no new legacy chain is ever written (URL ingests write opaque keys) and adoption only re-keys one
+ * away.
+ */
+export async function assertCallerKeysAvoidLegacyUrlChains(
+  client: SqlClient,
+  args: { projectId: string; orgId: string; canonicalIds: Array<string | null | undefined> },
+): Promise<void> {
+  const callerKeys = [...new Set(args.canonicalIds.flatMap((id) => (typeof id === "string" && id && !isCallerReservedCanonicalId(id) ? [id] : [])))];
+  if (!callerKeys.length) return;
+  const rows = await client<{ canonical_id: string; source_url: string | null }[]>`
+    select d.canonical_id, d.metadata ->> 'sourceUrl' as source_url
+    from documents d
+    join project_runs r on r.id = d.run_id and r.project_id = d.project_id and r.org_id = d.org_id
+    where d.project_id = ${args.projectId} and d.org_id = ${args.orgId}
+      and d.canonical_id = any(${client.array(callerKeys)}) and r.kind = 'url-ingest'
+  `;
+  if (rows.some((row) => row.source_url !== null && tryCanonicalIdForUrl(row.source_url) === row.canonical_id)) {
+    throw new ReservedCanonicalIdError(RESERVED_CANONICAL_ID_MESSAGE);
+  }
 }
 
 export async function enforceLiveBudgetCaps(
@@ -945,14 +1001,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         // The latest version by creation (as the supersession trigger orders them), and the next number after the
         // chain's highest: adopted legacy rows can repeat numbers already used by opaque-keyed ones, so in an
         // adopted chain version_number and created_at can disagree (C-L3); creation order decides the lineage.
-        const [existing] = input.extract ? [] : await client<{ id: string; next_version: number }[]>`
-          select id, (select max(version_number) from documents
-            where project_id = ${input.projectId} and canonical_id = ${canonicalId}) + 1 as next_version
-          from documents
-          where project_id = ${input.projectId} and canonical_id = ${canonicalId}
-          order by created_at desc, id desc
-          limit 1
-        `;
+        const existing = input.extract ? undefined : await lockedLatestVersion(client, { projectId: input.projectId, canonicalId });
 
         // Extract documents keep their own artifacts under the extract prefix, so they never reuse another document's.
         const dedupCandidate = input.extract ? null : await findDedupCandidate(client, {
@@ -1042,12 +1091,17 @@ export function createRunCreation(deps: RunCreationDeps) {
       // reprocessed under the opaque key's lock, as URL ingest is: adoption first, then lineage and insert.
       const identity = urlSourceIdentity(source.metadata);
       const urlChain = identity && (source.canonical_id === identity.opaque || source.canonical_id === identity.legacy) ? identity : null;
-      let canonicalId = urlChain ? urlChain.opaque : await ensureCanonicalId(sql, source);
+      // The key this source is expected under. It changes only between attempts (below), never inside a
+      // transaction body that withLockRetry may run again: each attempt derives its own key from it.
+      let expected = urlChain ? urlChain.opaque : await ensureCanonicalId(sql, source);
       // The source's canonical ID is re-read under the lock (a concurrent re-ingest can re-key its chain); a
       // changed key is retried with the current one.
       let row: (DocumentRow & { tags: string[] }) | null = null;
-      for (let attempt = 0; attempt < 3 && row === null; attempt++) row = await withLockRetry(() => sql.begin(async (tx) => {
+      for (let attempt = 0; attempt < 3 && row === null; attempt++) {
+        const outcome = await withLockRetry(() => sql.begin(async (tx) => {
         const client = tx as unknown as SqlClient;
+        // Per attempt: a URL chain always locks (and adopts under) the opaque key first, however an earlier attempt ended.
+        let canonicalId = urlChain ? urlChain.opaque : expected;
         await boundLockWaits(client);
         await lockRunCreation(runId, client);
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
@@ -1055,8 +1109,9 @@ export function createRunCreation(deps: RunCreationDeps) {
           await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId: source.org_id, canonicalId: urlChain.opaque, metadata: source.metadata });
         }
         // The source row stays locked FOR SHARE through the insert, so a concurrent deletion (which locks the
-        // source's children, then deletes it) waits for this version or has already removed it. NOWAIT: a
-        // conflict retries the whole transaction; a source gone by then fails closed.
+        // source FOR UPDATE before it enumerates and rewires its children) either waits for this version, which it
+        // then rewires, or has already removed the source. NOWAIT: a conflict retries the whole transaction; a
+        // source gone by then fails closed.
         const [current] = await client<{ canonical_id: string | null }[]>`
           select canonical_id from documents where id = ${source.id} and project_id = ${input.projectId} and org_id = ${source.org_id}
           for share nowait`;
@@ -1067,21 +1122,13 @@ export function createRunCreation(deps: RunCreationDeps) {
             canonicalId = current.canonical_id;
             await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
           } else {
-            canonicalId = current.canonical_id;
-            return null;
+            return { retryWith: current.canonical_id };
           }
         }
         // The new version follows the latest in the lineage (by creation, as the supersession trigger orders them),
         // numbered after the chain's highest, whichever version was selected. Version numbers can disagree with
         // creation order in an adopted chain (C-L3: a legacy row and an opaque row both numbered 1); creation wins.
-        const [latest] = await client<{ id: string; next_version: number }[]>`
-          select id, (select max(version_number) from documents
-            where project_id = ${input.projectId} and org_id = ${source.org_id} and canonical_id = ${canonicalId}) + 1 as next_version
-          from documents
-          where project_id = ${input.projectId} and org_id = ${source.org_id} and canonical_id = ${canonicalId}
-          order by created_at desc, id desc
-          limit 1
-        `;
+        const latest = await lockedLatestVersion(client, { projectId: input.projectId, orgId: source.org_id, canonicalId });
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
             id, org_id, user_id, project_id, run_id, filename, mime_type, source_key,
@@ -1123,8 +1170,12 @@ export function createRunCreation(deps: RunCreationDeps) {
           select ${inserted!.id}, ${input.userId}, tag from document_tags where document_id = ${source.id}
           on conflict do nothing`;
         const tags = await client<{ tag: string }[]>`select tag from document_tags where document_id = ${inserted!.id} order by tag`;
-        return { ...inserted!, tags: tags.map((row) => row.tag) };
-      }));
+        return { row: { ...inserted!, tags: tags.map((row) => row.tag) } };
+        }));
+        // A committed attempt that found the source under another key: the next attempt starts from that key.
+        if (outcome.retryWith !== undefined) expected = outcome.retryWith;
+        else row = outcome.row ?? null;
+      }
       if (!row) throw new Error(`[run-creation] source ${source.id} kept changing its canonical ID; retry the reprocess`);
       documents.push(row);
     }
@@ -1308,6 +1359,11 @@ export function createRunCreation(deps: RunCreationDeps) {
       `;
       if (extractSource) throw extractNotReprocessable();
       if (sourceDocuments.length === 0) throw new Error("No documents to create new versions of");
+    }
+
+    // A caller key that is a legacy URL-intake chain's raw-URL key is refused before anything is created.
+    if (sources.kind === "files" && !input.extract) {
+      await assertCallerKeysAvoidLegacyUrlChains(sql, { projectId: input.projectId, orgId: access.orgId, canonicalIds: sources.files.map((file) => file.canonicalId) });
     }
 
     // One admission path for every caller: credit floor, live budget caps, then

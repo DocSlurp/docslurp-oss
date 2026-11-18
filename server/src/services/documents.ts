@@ -1491,11 +1491,18 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   return await sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
 
+    // The rows are locked first (FOR UPDATE, in id order, so concurrent deletions queue rather than cycle), before
+    // their children are enumerated and rewired. A reprocess of one of them holds it FOR SHARE through its insert:
+    // the deletion waits for that version, which the rewiring below then sees (each statement reads the committed
+    // state), or it has already removed the source and the reprocess fails closed (404). Run creation takes every
+    // row lock NOWAIT, so it never waits here while holding one this deletion needs.
     const docs = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "previous_version_id">[]>`
       select id, project_id, filename, run_id, source_key, previous_version_id
       from documents
       where id = any(${transaction.array(editable.map((row) => row.id))})
         and project_id = any(${transaction.array(editableProjectIds)})
+      order by id
+      for update
     `;
 
     if (docs.length === 0) {

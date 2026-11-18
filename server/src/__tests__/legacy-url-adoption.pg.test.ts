@@ -63,7 +63,7 @@ describe.skipIf(!url)("legacy URL adoption under concurrency (real PostgreSQL)",
     const chain = () => pool<{ id: string; canonical_id: string; version_number: number; previous_version_id: string | null; superseded: boolean }[]>`
       select id, canonical_id, version_number, previous_version_id, superseded_at is not null as superseded
       from documents where project_id = ${project} order by created_at, id`;
-    return { project, sourceUrl, opaque: opaqueCanonicalIdForUrl(sourceUrl), legacyDoc, ingest, reprocess, chain, ids: { l1: `l1-${id}`, l2: `l2-${id}` } };
+    return { user, project, sourceUrl, opaque: opaqueCanonicalIdForUrl(sourceUrl), legacyDoc, ingest, reprocess, chain, ids: { l1: `l1-${id}`, l2: `l2-${id}` } };
   }
 
   it("does not deadlock with a worker completing a legacy row: adoption locks newest first and waits for it", async () => {
@@ -121,5 +121,91 @@ describe.skipIf(!url)("legacy URL adoption under concurrency (real PostgreSQL)",
     expect(outcome).toMatchObject({ name: "RunSourceGoneError", status: 404 });
     expect(await s.chain()).toEqual([]);
   });
+
+  /** Waits until a backend running a statement like `pattern` waits on a lock (a session paused where the test wants it). */
+  async function waitForLockWait(pattern: string) {
+    for (let i = 0; i < 100; i++) {
+      const [row] = await pool<{ n: number }[]>`select count(*)::int as n from pg_stat_activity
+        where wait_event_type = 'Lock' and query ilike ${pattern}`;
+      if (row!.n > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`no statement like ${pattern} waited on a lock`);
+  }
+
+  it("delete vs reprocess, reprocess first: the deletion waits for the new version, then rewires it", async () => {
+    const s = await scenario();
+    const { deleteDocuments } = await import("../services/documents.js");
+    await s.legacyDoc(s.ids.l1, "completed", "2026-01-01", 1);
+    // Session X pauses the reprocess after it holds the source FOR SHARE and has inserted its version (its tag copy waits).
+    const blocker = await worker.reserve();
+    await blocker`begin`;
+    await blocker`lock table document_tags in exclusive mode`;
+    const reprocess = s.reprocess(s.ids.l1).then(() => "created", (error: unknown) => error);
+    await waitForLockWait("%insert into document_tags%");
+    // The deletion starts now: it must wait on the source row the reprocess holds.
+    const deletion = deleteDocuments([s.ids.l1], s.user);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await s.chain()).toHaveLength(1);
+    await blocker`commit`;
+    blocker.release();
+    expect(await reprocess).toBe("created");
+    expect(await deletion).toBe(1);
+    // The source is gone, and the version made from it was rewired (its predecessor was the deleted source).
+    const chain = await s.chain();
+    expect(chain).toHaveLength(1);
+    expect(chain[0]).toMatchObject({ previous_version_id: null, version_number: 2 });
+    expect(chain[0]!.id).not.toBe(s.ids.l1);
+  }, 30_000);
+
+  it("delete vs reprocess, deletion first: the reprocess sees the source gone (404) and inserts nothing", async () => {
+    const s = await scenario();
+    const { deleteDocuments } = await import("../services/documents.js");
+    await s.legacyDoc(s.ids.l1, "completed", "2026-01-01", 1);
+    // Session X pauses the deletion after it locked, rewired and deleted the source (its project update waits).
+    const blocker = await worker.reserve();
+    await blocker`begin`;
+    await blocker`select id from projects where id = ${s.project} for update`;
+    const deletion = deleteDocuments([s.ids.l1], s.user);
+    await waitForLockWait("%update projects set retention_changed_at%");
+    const reprocess = s.reprocess(s.ids.l1).then(() => "created", (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await blocker`commit`;
+    blocker.release();
+    expect(await deletion).toBe(1);
+    expect(await reprocess).toMatchObject({ name: "RunSourceGoneError", status: 404 });
+    expect(await s.chain()).toEqual([]);
+  }, 30_000);
+
+  it("a retried reprocess attempt takes the opaque key's lock again (the key is computed per attempt)", async () => {
+    const s = await scenario();
+    // A URL-provenance source under its legacy key without URL-intake history: the chain keeps its own key, so a
+    // reprocess locks the opaque key, then the chain's key.
+    const uploadRun = `upload-${s.ids.l1}`;
+    await pool`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      select 100, ${uploadRun}, org_id, user_id, id, 'bulk-upload', 'completed', 'index', '{}'::jsonb from projects where id = ${s.project}`;
+    await pool`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, metadata, version_number,
+        page_count, page_count_source, billing_pages, file_size)
+      select ${s.ids.l1}, org_id, user_id, id, ${uploadRun}, 'report.pdf', 'application/pdf', 'k/src', 'completed', ${canonicalIdForUrl(s.sourceUrl)},
+        ${pool.json({ sourceUrl: s.sourceUrl })}, 1, 1, 'counted', 1, 1000 from projects where id = ${s.project}`;
+    const heldBy = (key: string) => pool<{ n: number }[]>`
+      with k as (select hashtextextended(${`${s.project}:${key}`}, 0) as h)
+      select count(*)::int as n from pg_locks l, k
+      where l.locktype = 'advisory' and l.granted and l.objsubid = 1 and l.pid <> pg_backend_pid()
+        and l.classid::bigint = ((k.h >> 32) & 4294967295) and l.objid::bigint = (k.h & 4294967295)`;
+    // Session B holds the chain key's lock past one lock_timeout (2 s), so the first attempt times out and retries.
+    const blocker = await worker.reserve();
+    await blocker`begin`;
+    await blocker`select pg_advisory_xact_lock(hashtextextended(${`${s.project}:${canonicalIdForUrl(s.sourceUrl)}`}, 0))`;
+    const reprocess = s.reprocess(s.ids.l1).then(() => "created", (error: unknown) => error);
+    // Mid-retry (after the first attempt's 2 s timeout), the reprocess again holds the opaque key while it waits.
+    await new Promise((resolve) => setTimeout(resolve, 2_600));
+    const [{ n }] = await heldBy(s.opaque);
+    await blocker`commit`;
+    blocker.release();
+    expect(n).toBe(1);
+    expect(await reprocess).toBe("created");
+    expect((await s.chain()).map((row) => row.canonical_id)).toEqual([canonicalIdForUrl(s.sourceUrl), canonicalIdForUrl(s.sourceUrl)]);
+  }, 30_000);
 });
 

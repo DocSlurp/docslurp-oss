@@ -8,7 +8,7 @@ export class InvalidCanonicalIdError extends Error {}
 /** A caller's canonical ID in a namespace the server reserves (`docslurp:`, `url:`). */
 export class ReservedCanonicalIdError extends InvalidCanonicalIdError {}
 
-export const RESERVED_CANONICAL_ID_MESSAGE = "canonicalId must not start with docslurp: or be a url:<sha256> URL identity (reserved for the server)";
+export const RESERVED_CANONICAL_ID_MESSAGE = "canonicalId must not start with docslurp:, be a url:<sha256> URL identity, or be the version key of an earlier URL import in this project (reserved for the server)";
 
 /**
  * `docslurp:` canonical IDs are minted by the server (`docslurp:document:<id>`,
