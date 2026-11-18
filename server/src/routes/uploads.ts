@@ -40,6 +40,7 @@ import {
   createDirectUploadSession,
   getDirectUploadSessionDescription,
   loadDirectUploadSession,
+  loadDirectUploadSessionRow,
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
@@ -298,10 +299,10 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       }
     }
     if (sessionMatch && c.req.method === "GET" && c.req.query("statusOnly") === "true") {
-      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
-      if (loaded) {
+      const session = await loadDirectUploadSessionRow(sessionMatch[1], actor.userId);
+      if (session) {
         try {
-          await assertSessionProjectStillReadable(loaded.session, actor.userId);
+          await assertSessionProjectStillReadable(session, actor.userId);
         } catch (error) {
           return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
         }
@@ -310,10 +311,10 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     // Every route that mints signed upload URLs for an existing session, or ingests it, re-checks that this user may still
     // contribute to its project (a revoked or demoted share gets 403 and no URLs). Status-only reads and abort do not.
     if (sessionMatch && sessionRouteNeedsContribute(c.req.method, c.req.path, c.req.query("statusOnly") === "true")) {
-      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
-      if (loaded) {
+      const session = await loadDirectUploadSessionRow(sessionMatch[1], actor.userId);
+      if (session) {
         try {
-          await assertSessionProjectStillContributable(loaded.session, actor.userId);
+          await assertSessionProjectStillContributable(session, actor.userId);
         } catch (error) {
           return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
         }

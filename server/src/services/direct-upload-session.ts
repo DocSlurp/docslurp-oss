@@ -141,56 +141,56 @@ export function toDirectUploadPartCount(
   return Math.max(1, Math.ceil(sizeBytes / partSize));
 }
 
-export async function loadDirectUploadSession(
+/** The session row alone, scoped to its user: what authorization and session-level checks need, at O(1) in session size. */
+export async function loadDirectUploadSessionRow(
   sessionId: string,
   userId: string,
-): Promise<LoadedDirectUploadSession | null> {
+): Promise<UploadSessionRow | null> {
   const [session] = await sql<UploadSessionRow[]>`
     select expires_at, id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, origin, allowed_project_ids, extract_id
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
   `;
+  return session ?? null;
+}
 
-  if (!session) {
-    return null;
-  }
-
-  const rows = await sql<Array<Omit<UploadSessionFileRow, "size_bytes" | "part_size"> & {
-    size_bytes: number | string;
-    part_size: number | string | null;
-  }>>`
-    select
-      id,
-      session_id,
-      filename,
-      mime_type,
-      size_bytes,
-      source_key,
-      upload_mode,
-      upload_id,
-      part_size,
-      status,
-      completed_parts,
-      canonical_id,
-      source_path,
-      unknown_size,
-      request_index,
-      client_id,
-      content_identity
-    from upload_session_files
-    where session_id = ${sessionId}
-    order by request_index asc nulls last, created_at asc
-  `;
+/**
+ * A session's file rows: every file, or only `fileIds` (looked up by primary key within this session, so a file of
+ * another session never matches). Callers must have loaded the session row with its user scope first.
+ */
+async function loadDirectUploadSessionFiles(sessionId: string, fileIds?: readonly string[]): Promise<UploadSessionFileRow[]> {
+  type RawFileRow = Omit<UploadSessionFileRow, "size_bytes" | "part_size"> & { size_bytes: number | string; part_size: number | string | null };
+  const rows = fileIds
+    ? await sql<RawFileRow[]>`
+      select id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status,
+        completed_parts, canonical_id, source_path, unknown_size, request_index, client_id, content_identity
+      from upload_session_files
+      where session_id = ${sessionId} and id = any(${sql.array([...fileIds])})
+      order by request_index asc nulls last, created_at asc`
+    : await sql<RawFileRow[]>`
+      select id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status,
+        completed_parts, canonical_id, source_path, unknown_size, request_index, client_id, content_identity
+      from upload_session_files
+      where session_id = ${sessionId}
+      order by request_index asc nulls last, created_at asc`;
 
   // PostgreSQL bigint columns arrive as strings; browser file matching and
   // storage size verification require numbers on both sides of the comparison.
-  const files = rows.map((file) => ({
+  return rows.map((file) => ({
     ...file,
     size_bytes: Number(file.size_bytes),
     part_size: file.part_size === null ? null : Number(file.part_size),
   }));
-  return { session, files };
+}
+
+export async function loadDirectUploadSession(
+  sessionId: string,
+  userId: string,
+): Promise<LoadedDirectUploadSession | null> {
+  const session = await loadDirectUploadSessionRow(sessionId, userId);
+  if (!session) return null;
+  return { session, files: await loadDirectUploadSessionFiles(sessionId) };
 }
 
 /** How a client matches a session file to the file it sent: its position in the request and its own id. */
@@ -436,8 +436,8 @@ export async function describeDirectUploadSession(
 
 /** A native key may only operate on sessions created in its organization. */
 export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string, allowedProjectIds?: readonly string[] | null, apiKeyId?: string): Promise<boolean> {
-  const loaded = await loadDirectUploadSession(sessionId, userId);
-  return Boolean(apiKeyId) && loaded?.session.org_id === orgId && loaded.session.api_key_id === apiKeyId && (!allowedProjectIds?.length || Boolean(loaded.session.project_id && allowedProjectIds.includes(loaded.session.project_id)));
+  const session = await loadDirectUploadSessionRow(sessionId, userId);
+  return Boolean(apiKeyId) && session?.org_id === orgId && session.api_key_id === apiKeyId && (!allowedProjectIds?.length || Boolean(session.project_id && allowedProjectIds.includes(session.project_id)));
 }
 
 export async function getDirectUploadSessionDescription(
@@ -613,13 +613,16 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
   // Two finalizers on one file would race the sealing copy and the completion write.
   if (new Set(entries.map(entry => entry.fileId)).size !== entries.length) throw new ProjectIntakeError("Each fileId may appear once per request", 400);
   return withDirectUploadLock(sessionId, async () => {
-    const loaded = await loadDirectUploadSession(sessionId, userId);
-    if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
-    assertUploadSessionActive(loaded.session);
-    if (["aborted", "failed"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
+    // Only the session row and the named files: per-call work must not grow with the session (a 1,000-file session is
+    // completed in 10+ calls, and loading every row on each made the whole upload quadratic).
+    const session = await loadDirectUploadSessionRow(sessionId, userId);
+    if (!session) throw new ProjectIntakeError("Upload session not found", 404);
+    assertUploadSessionActive(session);
+    if (["aborted", "failed"].includes(session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
+    const targeted = await loadDirectUploadSessionFiles(sessionId, entries.map(entry => entry.fileId));
     const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
-    await assertSessionProjectStillContributable(loaded.session, userId);
-    const byId = new Map(loaded.files.map(file => [file.id, file]));
+    await assertSessionProjectStillContributable(session, userId);
+    const byId = new Map(targeted.map(file => [file.id, file]));
     const settled = await settleBounded(entries, env.directUploadFinalizeConcurrency, async entry => {
       const file = byId.get(entry.fileId);
       if (!file) throw new ProjectIntakeError("Upload file not found", 404);
@@ -628,14 +631,15 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
     const outcomes = settled.map((result, i): FinalizeOutcome => result.status === "fulfilled"
       ? { fileId: entries[i]!.fileId, completed: true }
       : { fileId: entries[i]!.fileId, completed: false, error: result.reason });
-    const completedNow = new Set(outcomes.filter(outcome => outcome.completed).map(outcome => outcome.fileId));
-    const sessionComplete = loaded.files.every(file => file.status === "completed" || completedNow.has(file.id));
+    // Stops at the first open file, so it is cheap while the session is still filling; the lock keeps it current.
+    const [open] = await sql<Array<{ open: boolean }>>`select exists (select 1 from upload_session_files where session_id = ${sessionId} and status <> 'completed') as open`;
+    const sessionComplete = open?.open === false;
     // Every file ready: the reconciler confirms on its next sweep. Files still open: this client is finalizing, so hold the
     // reconciler (and webhook nudges, which only move next_reconcile_at) off the session instead of letting a full sweep
     // take the lock between this client's calls.
     if (sessionComplete) {
       await sql`update upload_sessions set next_reconcile_at = now(), client_finalizing_until = null where id = ${sessionId}`;
-    } else if (["pending", "uploading"].includes(loaded.session.status)) {
+    } else if (["pending", "uploading"].includes(session.status)) {
       await sql`update upload_sessions set client_finalizing_until = now() + ${CLIENT_FINALIZING_HOLD_SECONDS}::int * interval '1 second' where id = ${sessionId}`;
     }
     return { outcomes, sessionComplete };

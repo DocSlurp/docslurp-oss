@@ -203,3 +203,62 @@ describe("reconciler while a client completes files", () => {
     expect(CLIENT_FINALIZING_HOLD_SECONDS).toBeLessThanOrEqual(60);
   });
 });
+
+describe("per-call cost does not grow with session size", () => {
+  // The full production request path: route middleware (session ownership and contribute checks) and the complete itself.
+  async function routeApp() {
+    const { Hono } = await import("hono");
+    const { createUploadsRoutes } = await import("../routes/uploads.js");
+    return new Hono().use("*", async (c, next) => { c.set("sessionUser", { id: "u", email: "uploader@example.test", name: "Uploader" } as never); await next(); })
+      .route("/uploads", createUploadsRoutes());
+  }
+  async function seedSession(id: string, count: number) {
+    await db.query(`insert into upload_sessions (id,user_id,org_id,status,next_reconcile_at) values ($1,'u','o','pending', now() + interval '1 hour')`, [id]);
+    await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, status, request_index)
+      select $1 || '-' || i, $1, 'doc.pdf', 'application/pdf', 10, 'u/' || $1 || '/raw/' || i || '-doc.pdf', 'single', 'pending', i
+      from generate_series(0, $2::int - 1) as i`, [id, count]);
+    for (let i = 0; i < count; i++) mocks.objects.set(`u/${id}/raw/${i}-doc.pdf`, { size: 10, etag: `"e${i}"` });
+  }
+  /** Rows fetched from the database and wall time for each of `calls` single-file completes, through the route. */
+  async function measure(sessionId: string, calls: number) {
+    const app = await routeApp();
+    const rows: number[] = [];
+    const ms: number[] = [];
+    for (let i = 0; i < calls; i++) {
+      let fetched = 0;
+      mocks.query.mockImplementation(async (text: string, values: unknown[]) => {
+        const result = await db.query(text, values);
+        fetched += result.rows.length;
+        return result;
+      });
+      const started = performance.now();
+      const response = await app.request(`/uploads/direct/sessions/${sessionId}/files/complete`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fileId: `${sessionId}-${i}` }),
+      });
+      ms.push(performance.now() - started);
+      expect(response.status).toBe(200);
+      rows.push(fetched);
+    }
+    mocks.query.mockImplementation((text: string, values: unknown[]) => db.query(text, values));
+    const median = [...ms].sort((a, b) => a - b)[Math.floor(ms.length / 2)]!;
+    return { rows, median };
+  }
+
+  it("fetches the same rows per complete for a 10-file and a 1,000-file session", async () => {
+    const small = "33333333-3333-4333-8333-333333333333";
+    const large = "44444444-4444-4444-8444-444444444444";
+    await seedSession(small, 10);
+    await seedSession(large, 1000);
+    const { loadDirectUploadSession } = await import("../services/direct-upload-session.js");
+    const fullLoad = (await loadDirectUploadSession(large, "u"))!.files.length;
+
+    const smallRun = await measure(small, 10);
+    const largeRun = await measure(large, 10);
+    console.info(`[upload-complete-cost] files=10 rows/call=${smallRun.rows.join(",")} median_ms=${smallRun.median.toFixed(1)}`);
+    console.info(`[upload-complete-cost] files=1000 rows/call=${largeRun.rows.join(",")} median_ms=${largeRun.median.toFixed(1)} (a full session load alone fetches ${fullLoad + 1} rows)`);
+    // Flat: every call fetches a constant handful of rows, whatever the session size.
+    expect(new Set([...smallRun.rows, ...largeRun.rows]).size).toBe(1);
+    expect(largeRun.rows[0]).toBeLessThan(10);
+    expect(fullLoad).toBe(1000);
+  }, 120_000);
+});

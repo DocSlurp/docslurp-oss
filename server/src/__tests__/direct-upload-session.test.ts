@@ -192,8 +192,8 @@ describe("Direct Upload Session Module", () => {
         expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
       } else {
         await expect(completing).rejects.toThrow();
-        // Session, files, membership, then only the client-finalizing hold: nothing is completed.
-        expect(sqlMock).toHaveBeenCalledTimes(4);
+        // Session, the named file, membership, the open-file check, then only the client-finalizing hold: nothing is completed.
+        expect(sqlMock).toHaveBeenCalledTimes(5);
         expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(false);
         expect(sqlMock.mock.calls.at(-1)?.[0].join("?")).toContain("client_finalizing_until = now() +");
       }
