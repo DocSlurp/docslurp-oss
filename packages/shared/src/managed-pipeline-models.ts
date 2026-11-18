@@ -11,7 +11,7 @@
  */
 import { z } from "zod";
 
-import { DEFAULT_VISION_PROFILE, embeddingProfileCatalog, visionProfileCatalog } from "./embedding.js";
+import { DEFAULT_VISION_PROFILE, embeddingProfileCatalog, visionModelRefusal, visionProfileCatalog } from "./embedding.js";
 import {
   DEFAULT_PAGE_ROUTER_DECISION_MODELS,
   normalizeStoredPipelineFeatures,
@@ -180,7 +180,13 @@ export function resolveManagedPipeline(
 ): ResolvedManagedPipeline {
   const base = stripManagedPipelineFields(record(stored) ?? {}) as PipelineLike;
   const entries = overrideEntries(overrides);
-  const attempt = (kept: readonly OverrideEntry[]) => normalizeStoredPipelineFeatures(overlay(base, kept) as never, source);
+  const attempt = (kept: readonly OverrideEntry[]) => {
+    // The stored-row reader drops a refused vision model quietly so old rows still read; an override naming one is not
+    // an old row, so it is refused here and reported in `dropped`, never counted as applied.
+    const refused = kept.find((entry) => entry.section === "vision" && typeof entry.value === "string" && visionModelRefusal(entry.value) !== null);
+    if (refused) throw new Error(`override ${refused.section}.${refused.key} names a refused vision model`);
+    return normalizeStoredPipelineFeatures(overlay(base, kept) as never, source);
+  };
   const label = (entry: OverrideEntry) => `${entry.section}.${entry.key}`;
   if (entries.length === 0) return { pipeline: attempt([]), applied: [], dropped: [] };
   try {

@@ -18,6 +18,7 @@ import {
   inferenceLaneSchema,
   vectorBackendSchema,
   visionConfigSchema,
+  visionModelCatalog,
   visionModelRefusal,
   parseLlmModelUri,
 } from "./embedding.js";
@@ -1206,17 +1207,24 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
     }
   }
   // A vision model that was allowed when the row was written and is refused now (no stated US or EU hosting region,
-  // an unproven image-token bound): the setting is dropped, so the row reads with the default model. No page is sent to
-  // the refused model either way; without this one such project fails every read, including the owner's project list.
+  // an unproven image-token bound): the setting is dropped, so the row reads with its profile's or the default model.
+  // No page is sent to the refused model either way; without this one such project fails every read, including its
+  // owner's project list. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
   if (isPlainRecord(next.vision)) {
-    const vision = next.vision as Record<string, unknown>;
-    const refused = ["modelUri", "remoteFallbackModelUri"].filter((key) => typeof vision[key] === "string" && visionModelRefusal(vision[key] as string) !== null);
-    // A profile is a named model: with no model of its own on the row, a profile whose model is refused goes too.
-    const profileModel = typeof vision.profile === "string" && Object.hasOwn(visionProfileCatalog, vision.profile)
-      ? visionProfileCatalog[vision.profile as keyof typeof visionProfileCatalog].config.modelUri : null;
-    if (profileModel && visionModelRefusal(profileModel) !== null && (typeof vision.modelUri !== "string" || refused.includes("modelUri"))) refused.push("profile");
+    const vision = { ...next.vision } as Record<string, unknown>;
+    const refused = ["model", "modelUri", "remoteFallbackModel", "remoteFallbackModelUri"]
+      .filter((key) => typeof vision[key] === "string" && visionModelRefusal(vision[key] as string) !== null);
     if (refused.length > 0) {
-      next = { ...next, vision: Object.fromEntries(Object.entries(vision).filter(([key]) => !refused.includes(key))) };
+      for (const key of refused) delete vision[key];
+      if (refused.includes("model")) {
+        // The legacy shape is converted only while `model` is present (stored-model-settings.ts): finish it here.
+        delete vision.runtime;
+        delete vision.baseUrl;
+        const fallback = visionModelCatalog.find((spec) => spec.id === vision.remoteFallbackModel);
+        if (fallback) vision.remoteFallbackModelUri ??= fallback.uri;
+        delete vision.remoteFallbackModel;
+      }
+      next = { ...next, vision };
       dropped.push(...refused.map((key) => `vision.${key}`));
     }
   }
