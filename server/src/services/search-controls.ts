@@ -273,7 +273,7 @@ export function applySearchControls(args: {
   return out;
 }
 
-function readProjectUiSettings(metadata: Record<string, unknown>) {
+export function readProjectUiSettings(metadata: Record<string, unknown>) {
   const defaults = defaultProjectSearchSettings;
   const projectUi = metadata.projectUi;
 
@@ -286,9 +286,29 @@ function readProjectUiSettings(metadata: Record<string, unknown>) {
 
   const uiRecord = projectUi as Record<string, unknown>;
   return {
-    retrievalDefaults: projectSearchSettingsSchema.shape.retrievalDefaults.parse(uiRecord.retrievalDefaults ?? {}),
-    chat: projectSearchSettingsSchema.shape.chat.parse(uiRecord.chat ?? {})
+    retrievalDefaults: readStoredSection("retrievalDefaults", projectSearchSettingsSchema.shape.retrievalDefaults, uiRecord.retrievalDefaults),
+    chat: readStoredSection("chat", projectSearchSettingsSchema.shape.chat, uiRecord.chat)
   };
+}
+
+/**
+ * Stored settings are read, not validated as a request: a value the schema no longer accepts (a retired mode, a
+ * renamed model id) falls back to that field's default and is logged, so the project's chat and search keep working
+ * and its owner can save new settings. Fields that still validate are kept.
+ */
+function readStoredSection<Output>(name: string, schema: { safeParse(value: unknown): { success: true; data: Output } | { success: false; error: { issues: Array<{ path: PropertyKey[] }> } } }, stored: unknown): Output {
+  let value: Record<string, unknown> = stored && typeof stored === "object" && !Array.isArray(stored) ? { ...(stored as Record<string, unknown>) } : {};
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const parsed = schema.safeParse(value);
+    if (parsed.success) return parsed.data;
+    const rejected = [...new Set(parsed.error.issues.map((issue) => String(issue.path[0] ?? "")))].filter((key) => key in value);
+    console.error(`[search-settings] stored ${name} has fields that no longer validate; using defaults for ${rejected.join(", ") || "all of it"}`);
+    if (rejected.length === 0) break;
+    value = Object.fromEntries(Object.entries(value).filter(([key]) => !rejected.includes(key)));
+  }
+  const fallback = schema.safeParse({});
+  if (fallback.success) return fallback.data;
+  throw new Error(`default ${name} settings do not validate`);
 }
 
 export async function recordZeroResultDiagnostics(args: {

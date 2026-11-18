@@ -1,7 +1,7 @@
 import { defaultProjectSearchSettings } from "@docslurp/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { applySearchControls } from "../services/search-controls.js";
+import { applySearchControls, readProjectUiSettings } from "../services/search-controls.js";
 
 describe("applySearchControls", () => {
   const results = [
@@ -162,4 +162,26 @@ it("does not fabricate pinned documents outside filtered candidates", () => {
     settings: { ...defaultProjectSearchSettings, projectId: "w", userId: "u", pinnedResults: [{ queryPattern: "budget", documentId: "outside" }] },
   });
   expect(results).toEqual([]);
+});
+
+describe("stored project search settings", () => {
+  it("fall back per field when a stored value no longer validates, keeping the rest", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const read = readProjectUiSettings({ projectUi: {
+      retrievalDefaults: { resultCount: 5, rerankProvider: "a-retired-provider", rerankModel: "a/renamed-model", summaryTree: "no-such-mode" },
+      chat: { mode: "no-such-mode" },
+    } });
+    expect(read.retrievalDefaults.resultCount).toBe(5);
+    expect(read.retrievalDefaults.rerankProvider).toBe(defaultProjectSearchSettings.retrievalDefaults.rerankProvider);
+    expect(read.retrievalDefaults.rerankModel).toBe(defaultProjectSearchSettings.retrievalDefaults.rerankModel);
+    expect(read.retrievalDefaults.summaryTree).toBe(defaultProjectSearchSettings.retrievalDefaults.summaryTree);
+    expect(read.chat).toEqual(defaultProjectSearchSettings.chat);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("stored retrievalDefaults has fields that no longer validate"));
+    error.mockRestore();
+  });
+
+  it("read valid stored settings unchanged, and defaults when nothing is stored", () => {
+    expect(readProjectUiSettings({})).toEqual({ retrievalDefaults: defaultProjectSearchSettings.retrievalDefaults, chat: defaultProjectSearchSettings.chat });
+    expect(readProjectUiSettings({ projectUi: { retrievalDefaults: { resultCount: 3 } } }).retrievalDefaults.resultCount).toBe(3);
+  });
 });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { defaultVisionConfig, readVisionModelUriOverride, visionModelCatalog } from "../embedding.js";
 import { resolveManagedPipeline } from "../managed-pipeline-models.js";
-import { normalizePipelineFeatures, normalizeStoredPipelineFeatures, sanitizeStoredPipeline } from "../pipeline.js";
+import { normalizePipelineFeatures, normalizeStoredPipelineFeatures, parseStoredPipelineFeatures, sanitizeStoredPipeline } from "../pipeline.js";
 
 const REFUSED = "llm://openai/gpt-4.1-mini";
 
@@ -83,6 +83,25 @@ describe("a stored vision model that is no longer admitted", () => {
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/project p8 names its own vision endpoint/));
   });
 
+  it("an older row's embedding model the catalog no longer has falls back to the profile; a known one is kept", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const gone = normalizeStoredPipelineFeatures({ embedding: { profile: "cheapest-local", model: "retired/embedder", runtime: "local", provider: "transformers.js", batchSize: 32 } } as never, "project p10");
+    expect(gone.embedding.profile).toBe("cheapest-local");
+    expect(gone.embedding.modelUri).toBe(normalizePipelineFeatures({ embedding: { profile: "cheapest-local" } } as never).embedding.modelUri);
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/project p10.*embedding\.model/));
+    // The shape production rows hold: a cataloged model stays the row's model (its vectors were built with it).
+    const kept = normalizeStoredPipelineFeatures({ embedding: { task: "document", model: "Xenova/bge-small-en-v1.5", profile: "balanced", runtime: "local", provider: "transformers.js", batchSize: 32, normalize: true, dimensions: 384 } } as never, "project p11");
+    expect(kept.embedding.modelUri).toBe("llm://transformers.js/Xenova/bge-small-en-v1.5");
+  });
+
+  it("an unreadable stored pipeline keeps its privacy mode when everything else falls back to defaults", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // A stored vision id with its own endpoint is refused by the legacy migration with a plain Error, not a schema issue.
+    const row = { privacyMode: "local-only", vision: { model: "gpt-4.1-mini", baseUrl: "https://eu.example.com/v1" } };
+    const read = parseStoredPipelineFeatures(row, "project p12");
+    expect(read.privacyMode).toBe("local-only");
+  });
+
   it("is never the deployment default either", () => {
     const messages: string[] = [];
     expect(readVisionModelUriOverride({ DOCSLURP_VISION_MODEL_URI: "llm://openrouter/google/gemini-2.5-flash-lite" }, (message) => messages.push(message))).toBeNull();
@@ -108,7 +127,12 @@ describe("a stored vision model that is no longer admitted", () => {
     const admitted = { vision: { modelUri: defaultVisionConfig.modelUri } };
     expect(sanitizeStoredPipeline(admitted, "project p2")).toEqual(admitted);
     expect(error).not.toHaveBeenCalled();
-    // Not a refusal: an unknown hosted model still fails the read, as before.
-    expect(() => normalizeStoredPipelineFeatures({ vision: { modelUri: "llm://openai/not-a-catalog-model" } } as never, "project p3")).toThrow();
+    // A model the catalog no longer has (removed, not refused) reads the same way; a request naming it is still rejected.
+    expect(normalizeStoredPipelineFeatures({ vision: { modelUri: "llm://openai/not-a-catalog-model" } } as never, "project p3").vision.modelUri).toBe(defaultVisionConfig.modelUri);
+    expect(normalizeStoredPipelineFeatures({ vision: { model: "retired-model-id" } } as never, "project p3").vision.modelUri).toBe(defaultVisionConfig.modelUri);
+    expect(() => normalizePipelineFeatures({ vision: { modelUri: "llm://openai/not-a-catalog-model" } } as never)).toThrow();
+    // A local model with its loopback endpoint is a usable stored choice and is kept.
+    const local = "llm://vllm/Qwen/Qwen2-VL-2B-Instruct?baseUrl=http%3A%2F%2F127.0.0.1%3A8000%2Fv1";
+    expect(sanitizeStoredPipeline({ vision: { modelUri: local } }, "run r9")).toEqual({ vision: { modelUri: local } });
   });
 });

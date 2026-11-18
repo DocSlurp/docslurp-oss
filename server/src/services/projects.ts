@@ -387,6 +387,9 @@ export function mapRowsForList<Row extends { id: string }, Result>(kind: "projec
 
 export const mapProjectsForList = (rows: readonly ProjectRow[]) => mapRowsForList("project", rows, (row) => mapProject(row),
   (row) => mapProject(row, parseStoredPipelineFeatures(stripManagedPipelineFields(row.pipeline ?? null), `project ${row.id}`)));
+/** One project or run read for display: the same tolerance as a list, so a page never fails on stored settings. */
+const mapProjectForRead = (row: ProjectRow): ProjectRecord => mapProjectsForList([row])[0] ?? mapProject(row);
+const mapProjectRunForRead = (row: ProjectRunRow): ProjectRun => mapProjectRunsForList([row])[0] ?? mapProjectRun(row);
 const mapProjectRunsForList = (rows: readonly ProjectRunRow[]) => mapRowsForList("run", rows, (row) => mapProjectRun(row),
   (row) => mapProjectRun(row, parseStoredPipelineFeatures(row.pipeline ?? null, `run ${row.id}`)));
 
@@ -837,7 +840,7 @@ async function readProject(projectId: string, orgId: string, client: typeof sql 
     where w.id = ${projectId} and w.org_id = ${orgId}
   `;
 
-  return row ? mapProject(row) : null;
+  return row ? mapProjectForRead(row) : null;
 }
 
 /** Read-only, like getProject. */
@@ -1711,7 +1714,7 @@ export async function getProjectCockpit(
       searchSessions: Number(telemetryRow?.search_sessions ?? 0),
       chatSessions: Number(telemetryRow?.chat_sessions ?? 0),
     },
-    activeRun: activeRunRow ? (await withRunCosts([mapProjectRun(activeRunRow)]))[0]! : null,
+    activeRun: activeRunRow ? (await withRunCosts([mapProjectRunForRead(activeRunRow)]))[0]! : null,
     recentRuns: await withRunCosts(mapProjectRunsForList(recentRunsRows)),
     stageHotspots: stageRows.map((row) => ({
       stage: row.stage_name,

@@ -18,8 +18,11 @@ import {
   inferenceLaneSchema,
   vectorBackendSchema,
   visionConfigSchema,
+  embeddingModelCatalogByUri,
+  llmModelUriSchema,
   visionModelCatalog,
   visionModelRefusal,
+  visionModelUriProblem,
   parseLlmModelUri,
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
@@ -1209,14 +1212,18 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
       reasons.add("extraction-setting-invalid");
     }
   }
-  // A vision model that was allowed when the row was written and is refused now (no stated US or EU hosting region,
-  // an unproven image-token bound): the setting is dropped, so the row reads with its profile's or the default model.
-  // No page is sent to the refused model either way; without this one such project fails every read, including its
-  // owner's project list. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
+  // A vision model that was allowed when the row was written and is not usable now (refused for its hosting region or
+  // image-token bound, removed from the catalog, repriced past the cap, a Pro/Ultra tier): the setting is dropped, so
+  // the row reads with its profile's or the default model. No page is sent to such a model either way; without this one
+  // such row fails every read. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
   if (isPlainRecord(next.vision)) {
     const vision = { ...next.vision } as Record<string, unknown>;
-    const refused = ["model", "modelUri", "remoteFallbackModel", "remoteFallbackModelUri"]
-      .filter((key) => typeof vision[key] === "string" && visionModelRefusal(vision[key] as string) !== null);
+    const unusableUri = (value: unknown) => typeof value === "string" && (!llmModelUriSchema.safeParse(value).success || visionModelUriProblem(value) !== null);
+    const unusableId = (value: unknown) => typeof value === "string" && (visionModelRefusal(value) !== null || !visionModelCatalog.some((spec) => spec.id === value));
+    const refused = [
+      ...(["modelUri", "remoteFallbackModelUri"] as const).filter((key) => unusableUri(vision[key])),
+      ...(["model", "remoteFallbackModel"] as const).filter((key) => unusableId(vision[key])),
+    ] as string[];
     if (refused.length > 0) {
       // A row that pinned its own endpoint is not rerouted to the default one: it keeps failing, as it did before.
       const customEndpoint = typeof vision.baseUrl === "string" && vision.baseUrl !== ""
@@ -1241,6 +1248,13 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
         reasons.add("vision-model-refused");
       }
     }
+  }
+  // The same for an older row's embedding model named by an id the catalog no longer has: the profile decides.
+  if (isPlainRecord(next.embedding) && typeof next.embedding.model === "string"
+    && !Object.values(embeddingModelCatalogByUri).some((spec) => spec.model === (next.embedding as Record<string, unknown>).model)) {
+    const { model: _model, runtime: _runtime, provider: _provider, batchSize: _batchSize, ...rest } = next.embedding as Record<string, unknown>;
+    next = { ...next, embedding: rest };
+    dropped.push("embedding.model");
   }
   if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
     const patterns = stored.piiPolicy.patterns;
@@ -1797,6 +1811,14 @@ export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a sto
         }
       }
     }
+  }
+  // Nothing readable is left. The privacy mode is the one setting never replaced by a weaker default: keep it when it
+  // is valid on its own, with the local profiles a restricted mode requires.
+  const privacyMode = isPlainRecord(stored) ? stored.privacyMode : undefined;
+  for (const candidate of [{ privacyMode }, { privacyMode, embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } }]) {
+    try {
+      if (privacyMode !== undefined) return normalizePipelineFeatures(candidate as PipelineFeatureOverrides);
+    } catch { /* try the next, stricter shape */ }
   }
   return normalizePipelineFeatures(null);
 }

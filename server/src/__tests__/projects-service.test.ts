@@ -116,6 +116,27 @@ describe("listProjects", () => {
     error.mockRestore();
   });
 
+  it("opens one project whose stored settings no longer validate, with defaults for the invalid fields and its privacy mode kept", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { getProject } = await import("../services/projects.js");
+    const { getProjectAccess } = await import("../services/organizations.js");
+    vi.mocked(getProjectAccess).mockResolvedValue({ orgId: "org-1" } as never);
+    sqlMock.mockResolvedValueOnce([{
+      id: "ws-old", org_id: "org-1", user_id: "user-1", name: "Old", template_key: null, system_prompt: null, monthly_budget_cents: null,
+      pipeline: { privacyMode: "local-only", quality: "no-such-quality", embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } },
+      document_count: 0, total_page_count: 0, run_count: 0, latest_run_id: null, latest_run_status: null, archived_at: null,
+      slug: "old", last_activity_at: "2026-04-08T18:00:00.000Z", created_at: "2026-04-08T17:00:00.000Z", updated_at: "2026-04-08T18:00:00.000Z",
+    }]);
+
+    const project = await getProject("ws-old", "user-1");
+
+    expect(project?.id).toBe("ws-old");
+    expect(project?.pipeline.privacyMode).toBe("local-only");
+    expect(project?.pipeline.embedding.profile).toBe("cheapest-local");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("project ws-old has stored settings that no longer validate"));
+    error.mockRestore();
+  });
+
   it("reads corpus totals from counters and in-flight work separately", async () => {
     listAccessibleProjectIdsMock.mockResolvedValue(["ws-1"]);
     sqlMock.mockResolvedValueOnce([
