@@ -15,7 +15,9 @@ import {
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
+import { eligibleCacheTtlMs, ensureInvalidationListener, onSearchProjectInvalidated } from "./eligible-documents.js";
 import { reciprocalRankFusionScored } from "./rrf.js";
+import { TtlLruCache } from "./ttl-lru.js";
 
 /**
  * Index-config serving (spec 6.2). `projects.index_configs` maps `index_config_hash` to the IndexConfig of
@@ -99,6 +101,41 @@ const LIVE_VECTORIZED = (sql: SqlClient) => sql`
   and (d.indexing_mode is null or d.indexing_mode = 'full')
   and exists (select 1 from vector_indexes v where v.document_id = d.id)`;
 
+/**
+ * Per-project counts, cached like the eligible-document set (same TTL, dropped by the same project hints): the count
+ * reads every live document of the project, and ran on every vector search. A document arriving with a new config is
+ * served (or refused as an unknown index) within one TTL, as it becomes eligible at all.
+ */
+let countsCache: TtlLruCache<Promise<Map<string, number>>> | null = null;
+
+function indexCountsCache(): TtlLruCache<Promise<Map<string, number>>> {
+  if (!countsCache) {
+    countsCache = new TtlLruCache(500, eligibleCacheTtlMs());
+    onSearchProjectInvalidated({
+      invalidate: (projectId) => countsCache?.delete(projectId),
+      active: () => (countsCache?.size ?? 0) > 0,
+    });
+    ensureInvalidationListener();
+  }
+  return countsCache;
+}
+
+/** Tests: forget cached counts. */
+export function clearIndexConfigCountsCache(): void {
+  countsCache?.clear();
+}
+
+/** Live vectorized documents per index config hash, cached per project for one eligibility TTL. */
+export async function cachedDocumentCountsByIndexConfig(projectId: string, sql: SqlClient = defaultSql): Promise<Map<string, number>> {
+  const cache = indexCountsCache();
+  const hit = cache.get(projectId);
+  if (hit) return await hit;
+  const loading = documentCountsByIndexConfig(projectId, sql);
+  cache.set(projectId, loading);
+  loading.catch(() => cache.delete(projectId));
+  return await loading;
+}
+
 /** Live vectorized documents per index config hash. */
 export async function documentCountsByIndexConfig(projectId: string, sql: SqlClient = defaultSql): Promise<Map<string, number>> {
   const rows = await sql<{ hash: string | null; n: number }[]>`
@@ -172,8 +209,8 @@ function spaceKey(embedding: EmbeddingConfig): string {
 
 /**
  * Vector search over every index config a live document is built with. With one config (the common case)
- * it is exactly `deps.search(vector, null)` and runs no query: `indexConfigs` arrives with the project
- * pipeline.
+ * it is exactly one `deps.search` restricted to the current hash, after the (cached) per-config document counts
+ * confirm no live document needs a rebuild.
  */
 export async function servedVectorSearch<T extends ChunkLike>(args: {
   projectId: string;
@@ -187,7 +224,7 @@ export async function servedVectorSearch<T extends ChunkLike>(args: {
 }): Promise<T[]> {
   const currentHash = indexConfigHash(indexConfigOf(args.pipeline));
   const hashes = Object.keys(args.indexConfigs).filter((hash) => hash !== currentHash);
-  const counts = await documentCountsByIndexConfig(args.projectId, args.sql);
+  const counts = await cachedDocumentCountsByIndexConfig(args.projectId, args.sql);
   const unknown = [...counts].filter(([hash]) => hash !== currentHash && (!args.indexConfigs[hash] || args.indexConfigs[hash].normalize === undefined));
   if (unknown.length) {
     args.deps.diagnostic?.("indexRebuildRequired", { reason: "normalization-unknown", documents: unknown.reduce((sum, [, n]) => sum + n, 0) });

@@ -27,6 +27,7 @@ vi.mock("../services/organizations.js", () => ({
 // Attribution SQL is covered against real Postgres in usage-attribution.db.test.ts.
 vi.mock("../services/usage-attribution.js", () => ({
   attributedUsage: () => "attributed_usage",
+  projectAttributedUsage: () => "attributed_usage",
 }));
 
 vi.mock("../services/runs.js", () => ({

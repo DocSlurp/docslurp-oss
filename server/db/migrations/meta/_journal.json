@@ -1331,6 +1331,13 @@
       "when": 1798800000017,
       "tag": "0197_upload_sessions_initializing_expiry_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 190,
+      "version": "7",
+      "when": 1798800000018,
+      "tag": "0198_hot_query_indexes",
+      "breakpoints": true
     }
   ]
 }

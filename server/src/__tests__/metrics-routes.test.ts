@@ -95,7 +95,10 @@ describe("healthRoutes /metrics", () => {
     expect(response.headers.get("Content-Type")).toContain("text/plain");
 
     const body = await response.text();
-    expect(body).toContain('docslurp_runs_total{status="completed"} 4');
+    // Active statuses only, zero-filled; finished history is not counted on a scrape.
+    expect(body).not.toContain('docslurp_runs_total{status="completed"}');
+    expect(body).toContain('docslurp_runs_total{status="queued"} 2');
+    expect(body).toContain('docslurp_runs_total{status="processing"} 0');
     expect(body).not.toContain("docslurp_pages_processed_total");
     expect(body).toContain("docslurp_queue_depth 2");
     expect(body).toContain("docslurp_queued_documents 0");
@@ -110,7 +113,7 @@ describe("healthRoutes /metrics", () => {
     expect(body).toContain("docslurp_oldest_queued_run_age_seconds 300");
     expect(body).toContain('docslurp_stage_duration_seconds_p50{stage="extract-markdown"} 0.2');
     expect(body).toContain('docslurp_stage_duration_seconds_p95{stage="extract-markdown"} 0.8');
-    expect(body).toContain('docslurp_cost_cents_total{provider="openai",model="text-embedding-3-small"} 123');
+    expect(body).toContain('docslurp_cost_cents_24h{provider="openai",model="text-embedding-3-small"} 123');
   });
 
   it("exposes a narrow Fly scaler metrics endpoint with the computed worker target", async () => {
@@ -139,7 +142,7 @@ describe("healthRoutes /metrics", () => {
     expect(body).toContain("docslurp_queued_pages 350");
     expect(body).toContain("docslurp_worker_slot_demand 9");
     expect(body).toContain("docslurp_worker_target_machines 2"); // ceil(9 / 8)
-    expect(body).not.toContain("docslurp_cost_cents_total");
+    expect(body).not.toContain("docslurp_cost_cents_24h");
   });
 
   it("caps each org's demand at its plan worker slots", async () => {

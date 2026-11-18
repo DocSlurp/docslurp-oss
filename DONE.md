@@ -1,3 +1,13 @@
+## Hot-path queries read through indexes (2026-11-18)
+
+Owner: "make sure our queries rely on indexes where it should". Audit of periodic loops, scrapes, claim/lease paths, per-request auth, polling, search metadata and spend checks against a seeded Postgres (1M runs, 2M documents, 4M usage events, 4M page tasks and run events).
+
+- Migration 0198: an expression index for `usage_attribution.source_run_id` (`coalesce(run_id, metadata->>'runId')`); BRIN indexes on `usage_events.created_at`, `performance_log.created_at` and `api_key_usage.minute_bucket`; document foreign-key indexes on `usage_events`, `project_run_events` (both partial), `page_work_tasks`, `page_stage_states`, `document_run_stage_states` and `document_summaries`; 15 exact duplicate indexes from the initial schema dropped (two of them GIN).
+- The `monthly_run_capacity` trigger returns as soon as neither the organization nor the project has a monthly cap, and its month sum uses the stamped-column prefilter. A run insert went from about 10 s to 3 ms at this volume.
+- Budgeted spend checks and project usage reads (`loadSpendStatus`, `projectUsageTotals`, project state, settings save and budget read, ingest report) go through `orgAttributedUsage` / the new `projectAttributedUsage` prefilters instead of the derived view columns.
+- `/metrics`: `docslurp_runs_total` counts only queued and processing runs; stage percentiles cover the last 24 hours; `docslurp_cost_cents_total` (lifetime, a full `usage_events` scan per scrape) became `docslurp_cost_cents_24h`. The alert evaluator's queue snapshot reads only active runs.
+- Per-config document counts on the vector search path are cached per project for one eligibility TTL and dropped by the same hints.
+- DB test `hot-query-plans.db.test.ts` EXPLAINs the real statements of `/metrics`, the alert snapshot and a budgeted spend check, plus the run- and document-keyed reads, and asserts no sequential scan of the large tables.
 ## Uploads start at once; organization summary and ETA buckets on the activity feed (2026-11-18)
 
 - Start latency (on top of #482's kick after the last files/complete): a storage notification asks this process's reconciler to sweep now (coalesced) instead of waiting for the 15 s tick; the kick and the requested sweep run outside the triggering request's async context (so intake never borrows that request's API key, allowlist or organization). `docslurp.upload.reconcile_lag.duration` (label `path`: `kick` or `sweep`) and a `[upload-reconcile] confirmed ... lag_ms=` line measure due to confirmed (replayed confirms are not counted). The sweep stays serial under #482's lock classes (one reconcile slot per process); concurrent sweeping is a follow-up.

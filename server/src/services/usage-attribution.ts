@@ -77,6 +77,19 @@ export function attributedUsage(
   )`;
 }
 
+/** A column of the enclosing query (for example `{ column: "p.id" }`), for correlated scope filters. */
+export interface OuterColumn {
+  column: string;
+}
+
+function scopeRef(scope: string | OuterColumn, client: SqlClient): string | SqlFragment {
+  if (typeof scope === "string") return scope;
+  if (!/^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/.test(scope.column)) throw new Error(`Invalid outer column: ${scope.column}`);
+  // A literal template part (not a parameter): any tagged-template client, including test wrappers, can build it.
+  const parts = Object.assign([scope.column], { raw: [scope.column] }) as unknown as TemplateStringsArray;
+  return client(parts);
+}
+
 /**
  * `attributedUsage` limited to one organization's rows. The view's `org_id` is derived (it cannot use an index), so the
  * fragment also filters on the event's stamped columns (migration 0187), which the planner pushes down to
@@ -85,16 +98,39 @@ export function attributedUsage(
  * always attributes to its stamped org. The derived `org_id` then decides, as in `attributedUsage`.
  */
 export function orgAttributedUsage(
-  orgId: string,
+  org: string | OuterColumn,
   window: UsageWindow,
   client: SqlClient = sql,
 ): SqlFragment {
+  const orgId = scopeRef(org, client);
   return client`(
     select au.* from usage_attribution au
     where ${windowPredicate(client, window)}
       and (au.stamped_org_id = ${orgId} or au.stamped_org_id is null
         or (au.stamped_project_id is null and au.metadata ? 'projectIds'))
       and au.org_id = ${orgId}
+  )`;
+}
+
+/**
+ * `attributedUsage` limited to one project's rows. The view's `project_id` comes from a lateral split (it cannot use an
+ * index), so the fragment first filters on the stamped project column, which the planner pushes down to
+ * `usage_events_project_created_idx` and `usage_events_split_created_idx`. That filter is an exact superset: a row
+ * attributes to a project only through its stamped project_id, or, with none stamped, through `metadata.projectIds`.
+ * `project` may name a column of the enclosing query (a correlated budget read).
+ */
+export function projectAttributedUsage(
+  project: string | OuterColumn,
+  window: UsageWindow,
+  client: SqlClient = sql,
+): SqlFragment {
+  const projectId = scopeRef(project, client);
+  return client`(
+    select au.* from usage_attribution au
+    where ${windowPredicate(client, window)}
+      and (au.stamped_project_id = ${projectId}
+        or (au.stamped_project_id is null and au.metadata ? 'projectIds'))
+      and au.project_id = ${projectId}
   )`;
 }
 
@@ -122,8 +158,7 @@ export async function projectUsageTotals(
       coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
       count(distinct au.id)::int as event_count
-    from ${attributedUsage(window, client)} au
-    where au.project_id = ${projectId}
+    from ${projectAttributedUsage(projectId, window, client)} au
   `;
   return toTotals(row);
 }
@@ -438,8 +473,8 @@ export async function projectRunsUsageCost(
   if (runIds.length === 0) return summarizeRunUsageCost();
   const [row] = await client<RunUsageCostTotalsRow[]>`
     select ${runUsageCostColumns(client)}
-    from ${attributedUsage(null, client)} au
-    where au.project_id = ${projectId} and au.source_run_id = any(${client.array([...runIds])}::text[])
+    from ${projectAttributedUsage(projectId, null, client)} au
+    where au.source_run_id = any(${client.array([...runIds])}::text[])
   `;
   return summarizeRunUsageCost(row);
 }
@@ -458,8 +493,12 @@ export async function documentUsageTotals(documentId: string, client: SqlClient 
   return toAggregate(row);
 }
 
-/** Lifetime spend per provider and model across all orgs (health metrics). */
+/**
+ * Spend per provider and model across all orgs over the trailing `hours` (health metrics). A window, not lifetime: the
+ * lifetime sum read every usage event on each scrape. The window is served by `usage_events_created_brin` (0198).
+ */
 export async function spendByProviderModel(
+  hours = 24,
   client: SqlClient = sql,
 ): Promise<Array<{ provider: string; model: string; total_cost_cents: number }>> {
   const rows = await client<{ provider: string; model: string; total_cost_cents: number }[]>`
@@ -468,6 +507,7 @@ export async function spendByProviderModel(
       au.model,
       coalesce(sum(au.cost_cents), 0)::double precision as total_cost_cents
     from usage_attribution au
+    where au.created_at >= now() - make_interval(hours => ${hours})
     group by au.provider, au.model
     order by au.provider, au.model
   `;
