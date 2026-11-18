@@ -290,6 +290,22 @@ export function findVisionBilledUsage(error: unknown): VisionBilledUsage | null 
   return null;
 }
 
+const failedCallConfig = new WeakMap<object, Record<string, unknown>>();
+
+/** Records the request settings of the vision call that raised `error`, for the usage row of a billed failure. */
+export function attachVisionModelConfig(error: unknown, modelConfig: Record<string, unknown>): void {
+  if (error && typeof error === "object" && !failedCallConfig.has(error)) failedCallConfig.set(error, modelConfig);
+}
+
+/** The request settings of the failed vision call behind `error` (it may be wrapped as a `cause`), or null. */
+export function findVisionModelConfig(error: unknown): Record<string, unknown> | null {
+  for (let cur: unknown = error, depth = 0; cur && depth < 8; depth += 1) {
+    if (typeof cur === "object" && failedCallConfig.has(cur)) return failedCallConfig.get(cur)!;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 export interface AttemptSummary {
   generationId?: string | null;
   /** Prompt tokens of this attempt served from / written to the provider's prompt cache (included in inputTokens). */

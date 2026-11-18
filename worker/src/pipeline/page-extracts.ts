@@ -16,7 +16,7 @@ import {
   modelClassLabel,
   modelRecordUri,
   normalizePageExtractTags,
-  PAGE_EXTRACT_PASSES,
+  PAGE_EXTRACT_FINAL_PASSES,
   PAGE_EXTRACT_ENGINE_PATTERN,
   PAGE_EXTRACT_FINISH_REASONS,
   PAGE_EXTRACT_MEMBER_PATTERN,
@@ -289,12 +289,12 @@ export function pageExtractStatements(
   return statements;
 }
 
-/** Pass order within a run is PAGE_EXTRACT_PASSES order: a later pass that adopted a page's text replaces an earlier one. */
 /**
  * Sets each page's one final row for documents that completed in `runId` (`pages` absent), or for the pages a query-time
  * materialization of `runId` just published (`pages` given):
- * - the page's final is the highest-ranked adopted pass of `runId` (so a retry that withdrew a pass restores the one
- *   before it), and every other row of the page, of any run, stops being final, naming that pass as its replacement;
+ * - the page's final is the highest-ranked adopted pass of `runId` in PAGE_EXTRACT_FINAL_PASSES order (so a retry that
+ *   withdrew a pass restores the one before it), and every other row of the page, of any run, stops being final, naming
+ *   that pass as its replacement; a contributing pass outside that list (`video-frames`) has no rank and is never final;
  * - completing a document clears older runs' finals on pages `runId` has no adopted row for (past a shorter reprocess's
  *   page count, or never read); a query-time read leaves them, except on pages it found PII on (`pii-withheld`);
  * - nothing changes on a page a newer run (by creation time) already finalized: an older run's late or retried
@@ -320,7 +320,7 @@ export function finalizePageExtracts(
     : client`and e.document_id = any(${client.array([...(scope.documentIds as readonly string[])])}::text[])`;
   const pagesOnly = scope.pages !== undefined;
   const pages = [...(scope.pages ?? [])];
-  const passes = client.array([...PAGE_EXTRACT_PASSES]);
+  const passes = client.array([...PAGE_EXTRACT_FINAL_PASSES]);
   // One pass over the document's rows (window functions per page, no join between derived row sets), then a primary-key
   // update of the rows that change: linear in the document's rows, whatever its page count.
   const target = () => client`
@@ -343,8 +343,9 @@ export function finalizePageExtracts(
     ),
     target as (
       select document_id, page_number, run_id, pass,
-        (final_rank is not null and run_id = ${scope.runId} and rank = final_rank) as next_final,
-        case when final_rank is not null and adopted and not (run_id = ${scope.runId} and rank = final_rank)
+        -- A contributing pass has no rank (null): never final, and it names the final pass like any other adopted row.
+        coalesce(final_rank is not null and run_id = ${scope.runId} and rank = final_rank, false) as next_final,
+        case when final_rank is not null and adopted and not coalesce(run_id = ${scope.runId} and rank = final_rank, false)
           then (${passes}::text[])[final_rank] end as next_superseded,
         is_final, superseded_by_pass
       from ranked
@@ -555,6 +556,37 @@ export function visionPageRecords(args: {
 }
 
 /**
+ * The record of a video's sampled-frame read (media/extract.ts): one `video-frames` row on the page the media pipeline
+ * gives the file (its one page), named by the vision model that described the frames (the same provider and model as
+ * the reads' `media-vision` usage rows). The descriptions are merged into the transcript, so the row is adopted but never
+ * final: the transcript's `extract` row stays the page's final pass. Null when no frame batch was described.
+ */
+export function videoFramePageRecord(args: {
+  pageNumber: number;
+  provider: string;
+  model: string;
+  /** Each described frame batch's text and its request time. */
+  batches: ReadonlyArray<{ text: string; durationMs: number | null }>;
+}): PageExtractInput | null {
+  if (args.batches.length === 0) return null;
+  let textBytes = 0;
+  let durationMs = 0;
+  let timed = false;
+  for (const batch of args.batches) {
+    textBytes += pageTextBytes(batch.text) ?? 0;
+    if (typeof batch.durationMs === "number" && Number.isFinite(batch.durationMs) && batch.durationMs >= 0) {
+      durationMs += batch.durationMs;
+      timed = true;
+    }
+  }
+  return {
+    pageNumber: args.pageNumber, pass: "video-frames", method: "vision", engine: "media-video-frames",
+    textBytes, durationMs: timed ? durationMs : null, finishReason: textBytes > 0 ? "stop" : "empty", adopted: true,
+    modelUri: modelRecordUri({ provider: args.provider, model: args.model }),
+  };
+}
+
+/**
  * Tags routing learned for each page (classify-route's decision surface): tables, math, a garbled text layer, drawn
  * content, a structured-text yield deficit, a raster page sent to a read, a blank page. Pure; signals are routing tokens.
  */
@@ -600,11 +632,13 @@ export function materializedPageRecords(args: {
   blocked: readonly number[];
   failed: ReadonlyArray<readonly [number, string]>;
   keptAsImageReason: string;
+  /** The model that read a page in this materialization (its usage row's provider and model); unknown stays unset. */
+  readModelUri?: (page: number) => string | null | undefined;
 }): PageExtractInput[] {
   const records: PageExtractInput[] = [];
   for (const page of args.published) {
     records.push(args.modelRead(page)
-      ? { pageNumber: page, pass: "vision", method: "vision", engine: "vision-model", billedClass: "rich" }
+      ? { pageNumber: page, pass: "vision", method: "vision", engine: "vision-model", billedClass: "rich", modelUri: args.readModelUri?.(page) ?? null }
       : { pageNumber: page, pass: "extract", method: "text-layer", engine: "page-text", billedClass: "fast" });
   }
   for (const page of args.blocked) records.push({ pageNumber: page, pass: "extract", method: "none", tags: ["pii-withheld"], adopted: false });

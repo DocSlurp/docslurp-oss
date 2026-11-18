@@ -16,6 +16,7 @@ import {
   type PageExtractBilledClass,
   type PageExtractFinishReason,
   type PageExtractMethod,
+  type PageExtractFinalPass,
   type PageExtractPass,
   type PageExtractRecordView,
 } from "@docslurp/shared";
@@ -87,7 +88,7 @@ type Row = {
   page_number: number; run_id: string; pass: PageExtractPass; method: PageExtractMethod; engine: string | null;
   billed_class: PageExtractBilledClass | null; tags: string[] | null;
   confidence: number | null; plausibility: number | null; text_bytes: number | null; finish_reason: PageExtractFinishReason | null;
-  duration_ms: number | null; adopted: boolean; is_final: boolean; superseded_by_pass: PageExtractPass | null; created_at: string;
+  duration_ms: number | null; adopted: boolean; is_final: boolean; superseded_by_pass: PageExtractFinalPass | null; created_at: string;
   pii_withheld: boolean;
 };
 

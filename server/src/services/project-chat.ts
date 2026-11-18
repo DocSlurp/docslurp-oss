@@ -1,3 +1,4 @@
+import { chatTierLabel } from "@docslurp/shared/project-chat-models";
 import { nitroBaseModel, type ChatReasoningLevel, type ChatTier } from "@docslurp/shared/project-chat-models";
 import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
@@ -1539,7 +1540,7 @@ async function chatProjectTurn(
           wholeCorpusFallbackReason: null,
           ...generated.usage,
           // What selected the model (the tier or reference the caller asked for) and the settings it ran with.
-          metadata: { ...(generated.usage as { metadata?: Record<string, unknown> }).metadata, modelClass: { tier: policy.requestedModel ?? undefined, answer: "whole-corpus" }, modelConfig: { reasoning: policy.reasoning } },
+          metadata: { ...(generated.usage as { metadata?: Record<string, unknown> }).metadata, modelClass: { tier: chatTierLabel(policy.requestedModel), answer: "whole-corpus" }, modelConfig: { reasoning: policy.reasoning } },
         });
 
         const answer = requireGeneratedAnswer(generated.text);
@@ -1784,7 +1785,7 @@ async function chatProjectTurn(
       wholeCorpusFallbackReason: wholeCorpusDebug.fallbackReason,
       ...generated.usage,
       // What selected the model (the tier or reference the caller asked for) and the settings it ran with.
-      metadata: { ...(generated.usage as { metadata?: Record<string, unknown> }).metadata, modelClass: { tier: policy.requestedModel ?? undefined, answer: "retrieval" }, modelConfig: { reasoning: policy.reasoning } },
+      metadata: { ...(generated.usage as { metadata?: Record<string, unknown> }).metadata, modelClass: { tier: chatTierLabel(policy.requestedModel), answer: "retrieval" }, modelConfig: { reasoning: policy.reasoning } },
     });
 
     const answer = requireGeneratedAnswer(generated.text);

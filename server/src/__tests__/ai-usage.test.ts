@@ -210,13 +210,15 @@ describe("Usage Event ledger", () => {
         costCents: 0,
         inputTokens: 1,
         outputTokens: 1,
-        metadata: {},
+        metadata: { modelConfig: { operation: "api.search.stepback", maxOutputTokens: 100 } },
       },
       undefined,
     ]);
 
     expect(log).toHaveBeenCalledTimes(2);
     expect(ledger.events().map((event) => event.metric)).toEqual(["hyde", "stepback"]);
+    // An adopted event is stamped with what ran, like a recorded one.
+    expect(ledger.events()[1]!.metadata).toMatchObject({ modelUri: "llm://openrouter/model-1?maxOutputTokens=100&operation=api.search.stepback" });
     expect(sqlMock).not.toHaveBeenCalled();
 
     const flushed = await ledger.flush({ scope: { sessionId: "session-1" } });

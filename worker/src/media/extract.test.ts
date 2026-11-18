@@ -74,6 +74,30 @@ describe("multimedia extraction pipeline boundary", () => {
     expect(canonical.blocks[0].metadata).toMatchObject({ mode: "shown", mediaKind: "video", startSeconds: 0, endSeconds: 1, frameSeconds: [0, 1], evidenceId: "doc:visual:0" });
   });
 
+  it("records the frame read as its own page extract record, named by the vision model and never the final pass", async () => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","true");vi.stubEnv("DEEPINFRA_API_KEY","test");
+    const f=fixture();f.state.run.pipeline.mediaVideo={enabled:true};f.journal.admitVideo=vi.fn(async()=>{});
+    vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:true,hasVideo:true});
+    await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
+    const records = f.state.pendingPageExtracts.map((row) => ({ page: row.page_number, pass: row.pass, method: row.method, engine: row.engine,
+      adopted: row.adopted, modelUri: row.model_uri, textBytes: row.text_bytes, finish: row.finish_reason }));
+    expect(records).toEqual([
+      { page: 1, pass: "extract", method: "transcription", engine: "media-video", adopted: true, modelUri: expect.stringMatching(/^llm:\/\//),
+        textBytes: expect.any(Number), finish: "stop" },
+      { page: 1, pass: "video-frames", method: "vision", engine: "media-video-frames", adopted: true,
+        modelUri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct", textBytes: Buffer.byteLength("[1s] A visible label"), finish: "stop" },
+    ]);
+    expect(f.state.pendingPageExtracts.every((row) => row.org_id === "org" && row.run_id === "run")).toBe(true);
+  });
+
+  it("records no frame read when frames are off", async () => {
+    vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","false");vi.stubEnv("DEEPINFRA_API_KEY","test");
+    const f=fixture();f.journal.admitVideo=vi.fn(async()=>{});
+    vi.mocked(inspectMedia).mockResolvedValue({duration:2,hasAudio:true,hasVideo:true});
+    await extractMedia({...f,storage:f.storage as unknown as ArtifactStore});
+    expect(f.state.pendingPageExtracts.map((row) => row.pass)).toEqual(["extract"]);
+  });
+
   it("defaults silent videos to frame reading when project configuration is missing", async () => {
     vi.stubEnv("MEDIA_REMOTE_ENABLED","true");vi.stubEnv("MEDIA_VIDEO_ENABLED","true");vi.stubEnv("DEEPINFRA_API_KEY","test");
     const f=fixture();f.journal.admitVideo=vi.fn(async()=>{});

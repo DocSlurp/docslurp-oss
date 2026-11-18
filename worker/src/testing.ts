@@ -12,3 +12,8 @@ export { buildMediaCanonicalDocument } from "./media/canonical.js";
 // and one LanceDB directory.
 export { runSummaryTreeForDocument, type SummaryTreeDocumentRun, type SummaryTreeOverrides, type SummaryTreeStorage } from "./stages/summary-tree.js";
 export { registerSummaryTreeArtifact } from "./summary-tree/state-store.js";
+// The worker's embedding route and page-image embedders, for the server's test that the space a vector row is written
+// in (worker) is the space search looks it up in (server).
+export { resolveEmbeddingModel } from "./embeddings/resolver.js";
+export { createGeminiPageEmbedder, createPrivateEndpointPageEmbedder } from "./deferred/page-image-embedders.js";
+export { fromEnv as workerConfigFromEnv } from "./config.js";

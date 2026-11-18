@@ -22,7 +22,7 @@ import {
   type LegacyPageHints,
   type VisionPageSkip,
 } from "../stages/vision-extract.js";
-import { attachVisionBilledUsage, VisionOutputRejectedError } from "../tools/vision-stream.js";
+import { attachVisionBilledUsage, attachVisionModelConfig, VisionOutputRejectedError } from "../tools/vision-stream.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { buildVisionPageFacts } from "../pipeline/page-facts.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
@@ -483,6 +483,8 @@ describe("vision page loop under the guard", () => {
         // Fails open (the page keeps its text) after the provider billed an attempt.
         const error = new Error("insufficient_quota after a billed attempt");
         attachVisionBilledUsage(error, { inputTokens: 2_000, outputTokens: 300, costCents: 0.75 });
+        // The runtime attaches the failed request's settings (vision-runtime.ts).
+        attachVisionModelConfig(error, { promptMode: "template", temperature: 0, maxTokens: 4096 });
         return error;
       },
     });
@@ -494,7 +496,8 @@ describe("vision page loop under the guard", () => {
     const failures = state.usageLedger.snapshot().filter((event) => event.metric === "page-analysis-attempt");
     expect(failures).toHaveLength(1);
     // Unbilled: 0 credits, the provider cost kept for us.
-    expect(failures[0]).toMatchObject({ costCents: 0, inputTokens: 2_000, metadata: { outcome: "failure", billable: false, providerCostCents: 0.75 } });
+    expect(failures[0]).toMatchObject({ costCents: 0, inputTokens: 2_000, metadata: { outcome: "failure", billable: false, providerCostCents: 0.75,
+      modelConfig: { promptMode: "template", temperature: 0, maxTokens: 4096 } } });
     expect(ledgerOf(state).inspect("run-1", "org-1")).toEqual({ runAttempts: 1, runFailures: 1, orgAttempts: 1, orgSettledAttempts: 1 });
   });
 

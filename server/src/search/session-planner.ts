@@ -1,6 +1,6 @@
 import type { PrivacyMode } from "@docslurp/shared";
 import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
-import { resolveEmbeddingRoute, type EmbeddingConfig } from "@docslurp/shared";
+import { embeddingRequestConfig, resolveEmbeddingRoute, type EmbeddingConfig } from "@docslurp/shared";
 import {
   embedConfiguredText,
   generateOpenRouterText,
@@ -467,6 +467,11 @@ export async function embedQuery(
 
   let usageRecorded = false;
   try {
+    // The request settings and level of the query embedding, on its usage row (shared model-provenance.ts).
+    const callRecord = {
+      modelConfig: embeddingRequestConfig({ ...route, task: embedding.task, normalize, batchSize: 1 }, { inputType: "query" }),
+      modelClass: { embeddingProfile: embedding.profile },
+    };
     const result = await embedConfiguredText({
       value: query,
       runtime,
@@ -483,7 +488,7 @@ export async function embedQuery(
       ...(METERED_EMBEDDING_PROVIDERS.has(provider) ? { onUsage: (actual: { inputTokens: number; costCents?: number; metadata?: Record<string, unknown> }) => {
         // The provider's reported charge when it sent one; otherwise priced from tokens (an estimate).
         usage.record({ provider, model, metric: "embed-query", inputTokens: actual.inputTokens, logOutputTokens: false, costCents: actual.costCents,
-          metadata: { ...actual.metadata, usageSource: "provider" } });
+          metadata: { ...actual.metadata, usageSource: "provider", ...callRecord } });
         usageRecorded = true;
       } } : {}),
     });
@@ -494,8 +499,8 @@ export async function embedQuery(
       metric: "embed-query",
       costCents: runtime === "local" ? 0 : isPrivate ? result.usage.costCents ?? 0 : undefined,
       metadata: isPrivate
-        ? { ...result.usage.metadata, usageSource: "provider" }
-        : { costSource: runtime === "local" ? "local-no-api-charge" : "estimate", usageSource: runtime === "local" ? "estimated" : "provider" },
+        ? { ...result.usage.metadata, usageSource: "provider", ...callRecord }
+        : { costSource: runtime === "local" ? "local-no-api-charge" : "estimate", usageSource: runtime === "local" ? "estimated" : "provider", ...callRecord },
       inputTokens: result.usage.inputTokens,
       logOutputTokens: false,
     });

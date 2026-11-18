@@ -1,7 +1,7 @@
 import { recordPoolFailover } from "../lib/capability-pools.js";
 import type postgres from "postgres";
 import sharp from "../tools/isolated-image.js";
-import { l2Normalize, packSignBits, pageCredits, ladderAllowsOffPlanReads, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
+import { embeddingSpaceUri, l2Normalize, packSignBits, pageCredits, ladderAllowsOffPlanReads, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";
 import {
@@ -33,6 +33,8 @@ export interface PageEmbedDeps {
   storage: Pick<ArtifactStore, "getBytes" | "deleteKeys">;
   embedder: PageImageEmbedder;
   usage: PipelineUsageEventLedger;
+  /** The project's visual-pages route (the level that chose the embedder), for the usage record. */
+  route?: string;
 }
 
 export interface EmbedPageImagesResult {
@@ -200,7 +202,11 @@ export async function embedPageImages(
         unit: "token",
         inputTokens: embedded.inputTokens,
         costCents: embedded.costCents,
-        metadata: { documentId: document.id, pages: currentWindow.pages.length, dims: deps.embedder.dims, tokenSource: "api" },
+        metadata: {
+          documentId: document.id, pages: currentWindow.pages.length, dims: deps.embedder.dims, tokenSource: "api",
+          modelConfig: { inputType: "image", dimensions: deps.embedder.dims, batchSize: currentWindow.pages.length, renderDpi: RENDER_DPI },
+          modelClass: { visualPagesRoute: deps.route ?? "auto" },
+        },
       }
     );
     for (const pageNumber of currentWindow.pages) {
@@ -209,12 +215,14 @@ export async function embedPageImages(
 
     const rows = currentWindow.pages.map((pageNumber, i) => {
       const unit = l2Normalize(embedded.vectors[i]!);
+      const modelUri = embeddingSpaceUri({ provider: deps.embedder.provider, model: deps.embedder.model, dimensions: unit.length });
       const bits = packSignBits(unit);
       const q = quantizeInt8(unit);
       return {
         document_id: document.id,
         page_number: pageNumber,
         model: deps.embedder.model,
+        model_uri: modelUri,
         dims: unit.length,
         bits: Buffer.from(bits),
         int8: Buffer.from(q.values.buffer, q.values.byteOffset, q.values.byteLength),
@@ -226,9 +234,9 @@ export async function embedPageImages(
     await deps.sql`
       insert into document_page_vectors ${deps.sql(rows)}
       on conflict (document_id, page_number, model) do update
-      set dims = excluded.dims, bits = excluded.bits, int8 = excluded.int8, scale = excluded.scale
+      set dims = excluded.dims, bits = excluded.bits, int8 = excluded.int8, scale = excluded.scale, model_uri = excluded.model_uri
     `;
-    await markPagesEmbedded(deps.sql, document.id, currentWindow.pages, deps.embedder.model);
+    await markPagesEmbedded(deps.sql, document.id, currentWindow.pages, deps.embedder.model, rows[0]?.model_uri ?? null);
     result.embeddedPages.push(...currentWindow.pages);
     result.inputTokens += embedded.inputTokens;
     result.costCents += embedded.costCents;
@@ -285,6 +293,7 @@ export class PageEmbedStage implements Stage {
       storage: this.storage,
       embedder,
       usage: state.usageLedger,
+      route: pipeline.visualPages?.route ?? "auto",
     };
     await runDocuments(state.documents, state.docConcurrency, async (document) => {
       await runDocumentStage(

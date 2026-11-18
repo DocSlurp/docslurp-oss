@@ -9,6 +9,9 @@ import type { JSONValue, Sql } from "postgres";
 import {
   buildPricedAiUsageLedgerEvent,
   calculateAiUsageCostCents,
+  embeddingRequestConfig,
+  embeddingRouteSpaceUri,
+  modelRecordUri,
   pageCredits,
   ladderAllowsOffPlanReads,
   ladderForbidsVision,
@@ -347,6 +350,8 @@ export async function materializePageRange(
   const prepared = new Map<number, PreparedPage>();
   /** Pages a model read with non-empty content, and the Rich pages each read is worth. */
   const modelReads = new Map<number, number>();
+  // The model that read each page here, as its usage row names it, for the page extract record.
+  const readModelUris = new Map<number, string>();
   /** Customer credits of each page's read (Rich charges buffered in the ledger). */
   const readCents = new Map<number, number>();
   /** Read text of pages this call read with no PII match, kept on the page row if the page then fails. */
@@ -358,14 +363,24 @@ export async function materializePageRange(
   // 0. Pages an earlier run read (one Rich charge, committed) and then failed after the read: index the kept read,
   // with no model call and no new charge (billLockedMaterializedPages stamps them without one). Retention purge,
   // a PII block and a human correction clear read_text; a purged run's documents never reuse one either way.
-  const storedReads = new Map((await deps.sql<{ page_number: number; read_text: string }[]>`
-    select s.page_number, s.read_text from document_page_states s
+  // The model that made a kept read is the one its reading run's usage row names (`metadata.modelUri`, stamped on every
+  // model call): it goes on this publication's page extract record. Only kept reads look it up (by run id, indexed).
+  const storedRows = await deps.sql<{ page_number: number; read_text: string; read_model_uri: string | null }[]>`
+    select s.page_number, s.read_text, (
+      select au.metadata ->> 'modelUri' from usage_attribution au
+      where au.run_id = s.read_billed_run and au.metadata ->> 'documentId' = s.document_id
+        and au.metadata ->> 'pageNumber' = s.page_number::text and au.metadata ? 'modelUri'
+      order by au.created_at desc limit 1
+    ) as read_model_uri
+    from document_page_states s
     join documents d on d.id = s.document_id
     join project_runs r on r.id = d.run_id
     where s.document_id = ${documentId} and s.page_number = any(${pages}::int[])
       and s.read_billed_run is not null and s.read_text is not null and s.state <> 'blocked-pii'
       and r.artifacts_purged_at is null
-  `).map((row) => [row.page_number, row.read_text]));
+  `;
+  const storedReads = new Map(storedRows.map((row) => [row.page_number, row.read_text]));
+  const storedModelUris = new Map(storedRows.flatMap((row) => row.read_model_uri ? [[row.page_number, row.read_model_uri] as const] : []));
 
   // 1. Text layer per contiguous range, then OCR only pages without one.
   const texts = new Map<number, string>();
@@ -462,6 +477,8 @@ export async function materializePageRange(
     else {
       prepared.set(page, { page, text: ocr.text });
       modelReads.set(page, richPages);
+      const uri = modelRecordUri({ provider: ocr.provider ?? "vision-runtime", model: ocr.model });
+      if (uri) readModelUris.set(page, uri);
     }
   });
 
@@ -547,7 +564,8 @@ export async function materializePageRange(
               provider: profile.provider, model: profile.model, metric: "embedding-tokens",
               amount: inputTokens, unit: "token", inputTokens, costCents: priced.costCents,
               metadata: { ...priced.metadata, documentId, runtime: "remote", dimensions: profile.dimensions, chunks: n,
-                tokenSource: "api", materializedBy: input.reason, sessionId: input.sessionId },
+                tokenSource: "api", materializedBy: input.reason, sessionId: input.sessionId,
+                modelConfig: embeddingRequestConfig({ ...profile, batchSize: EMBED_BATCH_CHUNKS }), modelClass: { embeddingProfile: profile.profile } },
             });
           },
         });
@@ -565,7 +583,8 @@ export async function materializePageRange(
             amount: tokens, unit: "token", inputTokens: tokens,
             costCents: profile.runtime === "remote" ? undefined : 0,
             metadata: { documentId, runtime: profile.runtime, dimensions: profile.dimensions, chunks: batch.length,
-              tokenSource: embedded.totalTokens !== undefined ? "api" : "estimate", materializedBy: input.reason, sessionId: input.sessionId },
+              tokenSource: embedded.totalTokens !== undefined ? "api" : "estimate", materializedBy: input.reason, sessionId: input.sessionId,
+              modelConfig: embeddingRequestConfig({ ...profile, batchSize: EMBED_BATCH_CHUNKS }), modelClass: { embeddingProfile: profile.profile } },
           });
         }
       }
@@ -691,7 +710,7 @@ export async function materializePageRange(
       // its billing decision committed (set below by billLockedMaterializedPages); 0 until then, and for full-index
       // pages, which the run completion fee bills.
       const moved = await markPages(client, documentId, publishedPages.map((p) => p.page), "indexed",
-        { costCredits: 0, embeddingModel: profile.model, claimedBy });
+        { costCredits: 0, embeddingModel: profile.model, embeddingModelUri: embeddingRouteSpaceUri(profile, profile.dimensions), claimedBy });
       const ownedBlocked = blocked.filter((page) => held.has(page));
       if (ownedBlocked.length > 0) await markPages(client, documentId, ownedBlocked, "blocked-pii", { failureReason: "pii-policy", claimedBy });
       const byReason = new Map<string, number[]>();
@@ -711,6 +730,8 @@ export async function materializePageRange(
           published: owned, modelRead: (page) => modelReads.has(page) || storedReads.has(page),
           blocked: ownedBlocked, failed: [...failed].filter(([page]) => held.has(page) && !released.includes(page)),
           keptAsImageReason: KEPT_AS_IMAGE_REASON,
+          // A kept read from an earlier claim is named by its reading run's usage row (looked up with the kept text).
+          readModelUri: (page) => readModelUris.get(page) ?? storedModelUris.get(page),
         }));
         if (extracts.pendingPageExtracts.length > 0) {
           for (const statement of pageExtractStatements(client as unknown as Sql<Record<string, unknown>>, extracts.pendingPageExtracts, [])) await statement;

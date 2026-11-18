@@ -1,4 +1,4 @@
-import { resolveEmbeddingRoute } from "@docslurp/shared";
+import { embeddingRequestConfig, resolveEmbeddingRoute } from "@docslurp/shared";
 
 import { embedConfiguredTexts } from "../lib/ai.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
@@ -85,7 +85,10 @@ export async function prefetchBatchQueryEmbeddings(
           // The provider's reported charge when it sent one (OpenRouter); otherwise priced from tokens.
           costCents: result.usage.costCents,
           // Every hosted batch path reports actual tokens (OpenAI included); only a zero count is not.
-          metadata: { ...result.usage.metadata, usageSource: METERED_EMBEDDING_PROVIDERS.has(route.provider) || (route.runtime === "remote" && result.usage.inputTokens > 0) ? "provider" : "estimate", batchSize: values.length, batch: true },
+          metadata: { ...result.usage.metadata, usageSource: METERED_EMBEDDING_PROVIDERS.has(route.provider) || (route.runtime === "remote" && result.usage.inputTokens > 0) ? "provider" : "estimate", batchSize: values.length, batch: true,
+            modelConfig: embeddingRequestConfig({ ...route, task: pipeline.embedding.task, normalize: route.provider === "deepinfra" ? pipeline.embedding.normalize : true,
+              batchSize: values.length }, { inputType: "query" }),
+            modelClass: { embeddingProfile: pipeline.embedding.profile } },
         },
       });
       [...texts.keys()].forEach((key, index) => cache.set(key, result.embeddings[index]!.slice()));

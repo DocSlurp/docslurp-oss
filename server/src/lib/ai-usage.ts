@@ -257,7 +257,9 @@ export function createUsageLedger(args: {
     adopt(adopted) {
       for (const event of adopted) {
         if (event && hasAiUsageLedgerTokens(event)) {
-          events.push({ ...priceAiUsageEvent(event), id: event.id ?? randomUUID() });
+          // Re-stamped like a recorded event: a child (a sub-search, a worker reply) may not have stamped what ran.
+          // Idempotent, so an event that was already stamped is unchanged.
+          events.push(withModelProvenance({ ...priceAiUsageEvent(event), id: event.id ?? randomUUID() }));
         }
       }
     },

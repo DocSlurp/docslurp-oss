@@ -48,7 +48,8 @@ describe("canonical cutover", () => {
       run: { id: "run-2", userId: "u1", projectId: "w", stats: {} },
       documents: [{ id: "v2", pageCount: 4 }],
       vectorIndexes: [
-        { documentId: "v2", backend: "lancedb", bucket: "b", path: "p2", embeddingModel: "m", dimension: 4 },
+        { documentId: "v2", backend: "lancedb", bucket: "b", path: "p2", embeddingModel: "m", dimension: 4,
+          embeddingModelUri: "llm://host-a/m?dimensions=4", embeddingModelClass: "embeddingProfile=cheapest-hosted" },
         { documentId: "other", backend: "lancedb", bucket: "b", path: "p3", embeddingModel: "m", dimension: 4 },
       ],
       setDocumentStage: () => {},
@@ -65,6 +66,9 @@ describe("canonical cutover", () => {
         and exists (select 1 from vector_indexes vi where vi.document_id = d.id)
     `);
     expect(live.rows).toEqual([{ id: "v2" }]);
+    // The exact space and the profile that chose it are recorded beside the bare id (migration 0192).
+    expect((await db.query(`select embedding_model, embedding_model_uri, embedding_model_class from vector_indexes where document_id = 'v2'`)).rows)
+      .toEqual([{ embedding_model: "m", embedding_model_uri: "llm://host-a/m?dimensions=4", embedding_model_class: "embeddingProfile=cheapest-hosted" }]);
     expect((await db.query(`select page_count::int as pages from project_corpus_stats where project_id = 'w'`)).rows)
       .toEqual([{ pages: 4 }]);
     // Only this document's vectors were flushed; the rest stay buffered for updateProgress.

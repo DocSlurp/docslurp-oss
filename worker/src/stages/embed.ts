@@ -4,7 +4,7 @@ import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
-import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolveAllowedPipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
+import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, embeddingRequestConfig, resolveAllowedPipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -126,6 +126,11 @@ export class EmbedStage implements Stage {
           const chunkMaxTokens = chunkTokenBudget(profile.modelUri);
           const lateChunkingEnabled = embeddingConfig.lateChunking === true;
           const lateChunkingWindow = Math.max(1, embeddingConfig.lateChunkingWindow ?? 2);
+          // The request settings every embedding call of this document ran with (`metadata.modelConfig`) and its level.
+          const embeddingCallRecord = {
+            modelConfig: embeddingRequestConfig({ ...tunedProfile, lateChunking: lateChunkingEnabled }, { inputTokenLimit }),
+            modelClass: { embeddingProfile: tunedProfile.profile },
+          };
           const reuseStore = state.store?.content;
           const reuseLookup = new EmbeddingReuseLookup({
             storage: this.storage,
@@ -561,7 +566,7 @@ export class EmbedStage implements Stage {
                     metric: "embedding-tokens", amount: inputTokens, unit: "token", logOutputTokens: false,
                     inputTokens, costCents: priced.costCents,
                     metadata: { ...priced.metadata, documentId: document.id, runtime: "remote",
-                      dimensions: tunedProfile.dimensions, chunks, tokenSource: "api", windowIndex },
+                      dimensions: tunedProfile.dimensions, chunks, tokenSource: "api", windowIndex, ...embeddingCallRecord },
                   });
                   // Throws a refused spend check from an earlier background write.
                   progress?.request();
@@ -764,6 +769,7 @@ export class EmbedStage implements Stage {
                 tokenSource,
                 estimatedTokens,
                 ...pricedEmbedding.metadata,
+                ...embeddingCallRecord,
               }
             },
           );

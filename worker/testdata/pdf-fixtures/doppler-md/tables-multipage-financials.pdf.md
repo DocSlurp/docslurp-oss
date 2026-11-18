@@ -1,6 +1,6 @@
 ## continuation markers. Revenue is reported in USD millions.
 
-| Region | Product | Q1 | Q2 | Q3 | Q4 | 2025 2025 2025 2025 Gross Margin |
+| Region | Product | Q1 2025 | Q2 2025 | Q3 2025 | Q4 2025 | Gross Margin |
 | --- | --- | --- | --- | --- | --- | --- |
 | North | Crawler | 120.0 | 124.5 | 131.1 | 139.8 | 41% |
 | South | Indexer | 123.0 | 127.5 | 134.1 | 142.8 | 42% |
@@ -17,7 +17,7 @@
 
 1/3## continuation markers. Revenue is reported in USD millions.
 
-| Region | Product | Q1 | Q2 | Q3 | Q4 | 2025 2025 2025 2025 Gross Margin |
+| Region | Product | Q1 2025 | Q2 2025 | Q3 2025 | Q4 2025 | Gross Margin |
 | --- | --- | --- | --- | --- | --- | --- |
 | North | Archive Sync | 150.0 | 154.5 | 161.1 | 169.8 | 44% |
 | South | Search API | 153.0 | 157.5 | 164.1 | 172.8 | 45% |
@@ -34,7 +34,7 @@
 
 2/3## continuation markers. Revenue is reported in USD millions.
 
-| Region | Product | Q1 | Q2 | Q3 | Q4 | 2025 2025 2025 2025 Gross Margin |
+| Region | Product | Q1 2025 | Q2 2025 | Q3 2025 | Q4 2025 | Gross Margin |
 | --- | --- | --- | --- | --- | --- | --- |
 | North | OCR Kit | 180.0 | 184.5 | 191.1 | 199.8 | 47% |
 | South | Vision QA | 183.0 | 187.5 | 194.1 | 202.8 | 41% |

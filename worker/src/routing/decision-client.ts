@@ -85,6 +85,8 @@ export interface DecisionCallResult {
   costSource?: string;
   model: string;
   provider: string;
+  /** The request's shape (no page content): how many questions and images it carried, for `modelConfig`. */
+  request?: { questions: number; images: number };
 }
 
 export interface DecisionClient {
@@ -426,6 +428,7 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
         costSource: cost.costSource,
         model: model.id,
         provider,
+        request: { questions: questionCount, images },
       };
       options.onUsage?.(model, result);
       return result;
@@ -468,6 +471,15 @@ export function recordDecisionUsage(
         ...(context.role ? { role: context.role } : {}),
         ...(context.pages ? { pages: context.pages } : {}),
         ...(context.format ? { format: context.format } : {}),
+        // The request settings (shared model-provenance.ts): the route kind, the role and the request's shape.
+        modelConfig: {
+          operation: "page-route-decision",
+          route: model.endpoint,
+          role: context.role,
+          questions: result.request?.questions,
+          images: result.request?.images,
+          pages: context.pages?.length,
+        },
       },
     },
   );

@@ -10,6 +10,7 @@ import {
   routingPageTags,
   tagPageExtracts,
   visionPageRecords,
+  videoFramePageRecord,
   type PageExtractState,
   type ScanFillPageRead,
 } from "../pipeline/page-extracts.js";
@@ -37,10 +38,13 @@ beforeAll(async () => {
     (100, 'run-m', 'org-a', 'ua', 'proj-a', 'materialize', 'processing', 'materialize', '{}', now() - interval '1 hour'),
     (100, 'run-m2', 'org-a', 'ua', 'proj-a', 'materialize', 'processing', 'materialize', '{}', now() - interval '30 minutes'),
     (100, 'run-big', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract-markdown', '{}', now()),
+    (100, 'run-v', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract-markdown', '{}', now() - interval '4 hours'),
+    (100, 'run-v2', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract-markdown', '{}', now() - interval '3 hours'),
     (100, 'run-b', 'org-b', 'ub', 'proj-b', 'upload', 'processing', 'extract-markdown', '{}', now())`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
     ('doc-a', 'org-a', 'ua', 'proj-a', 'run-a', 'a.pdf', 'application/pdf', 'ka', 'processing', 5),
     ('doc-big', 'org-a', 'ua', 'proj-a', 'run-big', 'big.pdf', 'application/pdf', 'kbig', 'processing', 20000),
+    ('doc-v', 'org-a', 'ua', 'proj-a', 'run-v', 'launch.mp4', 'video/mp4', 'kv', 'processing', 1),
     ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'processing', 5)`;
 }, 120_000);
 
@@ -244,8 +248,11 @@ describe("page extract records", () => {
     const m = state("run-m", "org-a", "proj-a");
     recordPageExtracts(m, DOC_A, materializedPageRecords({
       published: [2], modelRead: () => true, blocked: [], failed: [[3, "kept-as-image"]], keptAsImageReason: "kept-as-image",
+      readModelUri: (page) => page === 2 ? "llm://openrouter/vendor/vision-1" : null,
     }));
     await flush(m);
+    // The query-time read names the model that read the page, like a run's vision read.
+    expect((await rows("doc-a")).find((row) => row.run_id === "run-m" && row.page_number === 2)).toMatchObject({ model_uri: "llm://openrouter/vendor/vision-1" });
     await finalize("run-m", "doc-a", [2, 3]);
     const now = await finals("doc-a");
     expect(now.filter(([page]) => page <= 3)).toEqual([
@@ -292,11 +299,50 @@ describe("page extract records", () => {
     expect(await rows("doc-a")).toEqual(before);
   });
 
+  it("a video's frame read gets its own record, named by its model, and the transcript stays the page's final pass", async () => {
+    const transcript = { pageNumber: 1, pass: "extract" as const, method: "transcription" as const, engine: "media-video",
+      textBytes: 900, finishReason: "stop", modelUri: "llm://deepinfra/openai/whisper-large-v3-turbo" };
+    const frames = videoFramePageRecord({ pageNumber: 1, provider: "deepinfra", model: "Qwen/Qwen3-VL-30B-A3B-Instruct",
+      batches: [{ text: "[1s] Launch slide: Q3 revenue up 40%", durationMs: 800 }, { text: "[9s] Team on stage", durationMs: 700 }] })!;
+    const s = state("run-v", "org-a", "proj-a");
+    recordPageExtracts(s, { id: "doc-v" }, [transcript, frames]);
+    await flush(s);
+    await finalize("run-v", "doc-v");
+    expect(await finals("doc-v")).toEqual([[1, "run-v", "extract", "transcription"]]);
+    const frameRow = (await rows("doc-v")).find((row) => row.pass === "video-frames");
+    expect(frameRow).toMatchObject({ method: "vision", engine: "media-video-frames", adopted: true, is_final: false,
+      superseded_by_pass: "extract", model_uri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct",
+      model_class: "quality=auto;visionProfile=good-fast-hosted" });
+    // A query-time read of the page (pages given) and a reprocess keep it non-final; the reprocess's transcript wins.
+    await finalize("run-v", "doc-v", [1]);
+    expect(await finals("doc-v")).toEqual([[1, "run-v", "extract", "transcription"]]);
+    const again = state("run-v2", "org-a", "proj-a");
+    recordPageExtracts(again, { id: "doc-v" }, [transcript, frames]);
+    await flush(again);
+    await sql`update documents set run_id = 'run-v2' where id = 'doc-v'`;
+    await finalize("run-v2", "doc-v");
+    expect(await finals("doc-v")).toEqual([[1, "run-v2", "extract", "transcription"]]);
+    expect((await rows("doc-v")).filter((row) => row.pass === "video-frames").map((row) => [row.run_id, row.is_final, row.superseded_by_pass]))
+      .toEqual([["run-v", false, "extract"], ["run-v2", false, "extract"]]);
+  });
+
+  it("a release that ranks no contributing pass (rollback) cannot set is_final to NULL on one", async () => {
+    // Release N-1's finalization gives a `video-frames` row a null rank and writes is_final = NULL; the trigger keeps it false.
+    await sql`update document_page_extracts set is_final = null where document_id = 'doc-v' and pass = 'video-frames'`;
+    expect((await rows("doc-v")).filter((row) => row.pass === "video-frames").every((row) => row.is_final === false)).toBe(true);
+    expect(await finals("doc-v")).toEqual([[1, "run-v2", "extract", "transcription"]]);
+  });
+
   it("refuses values outside the vocabularies", async () => {
     await expect(sql`insert into document_page_extracts (document_id, org_id, project_id, run_id, page_number, pass, method, tags)
       values ('doc-b', 'org-b', 'proj-b', 'run-b', 1, 'extract', 'text-layer', '{secret-text}')`).rejects.toThrow(/check/);
     await expect(sql`insert into document_page_extracts (document_id, org_id, project_id, run_id, page_number, pass, method, engine)
       values ('doc-b', 'org-b', 'proj-b', 'run-b', 1, 'extract', 'text-layer', 'Vendor/Model Name')`).rejects.toThrow(/check/);
+    await expect(sql`insert into document_page_extracts (document_id, org_id, project_id, run_id, page_number, pass, method)
+      values ('doc-b', 'org-b', 'proj-b', 'run-b', 1, 'frames', 'vision')`).rejects.toThrow(/check/);
+    // A contributing pass is never named as the page's final pass.
+    await expect(sql`insert into document_page_extracts (document_id, org_id, project_id, run_id, page_number, pass, method, adopted, superseded_by_pass)
+      values ('doc-b', 'org-b', 'proj-b', 'run-b', 1, 'extract', 'text-layer', true, 'video-frames')`).rejects.toThrow(/check/);
   });
 
   it("queues, writes and finalizes a 20,000-page document quickly", async () => {
@@ -328,6 +374,16 @@ describe("page extract records", () => {
       from document_page_extracts where document_id = 'doc-big'`;
     expect(counts).toEqual({ finals: pageCount, pages: pageCount });
   }, 120_000);
+});
+
+describe("video frame page record (pure)", () => {
+  it("sums the batches' text sizes and request times, and records nothing when no batch was described", () => {
+    expect(videoFramePageRecord({ pageNumber: 1, provider: "deepinfra", model: "Qwen/Qwen3-VL-30B-A3B-Instruct", batches: [] })).toBeNull();
+    expect(videoFramePageRecord({ pageNumber: 1, provider: "deepinfra", model: "Qwen/Qwen3-VL-30B-A3B-Instruct",
+      batches: [{ text: "ab", durationMs: 5 }, { text: "cé", durationMs: null }] }))
+      .toEqual({ pageNumber: 1, pass: "video-frames", method: "vision", engine: "media-video-frames", textBytes: 5, durationMs: 5,
+        finishReason: "stop", adopted: true, modelUri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" });
+  });
 });
 
 describe("extraction page records (pure)", () => {

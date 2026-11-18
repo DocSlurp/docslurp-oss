@@ -153,5 +153,10 @@ describe("configured text models reach worker stages and usage records", () => {
     await stage.run(state);
     expect(generate).toHaveBeenCalledWith(expect.objectContaining({ operation, model: "vendor/task" }));
     expect(record).toHaveBeenCalledWith(expect.objectContaining({ metric, model: "vendor/task", inputTokens: 10, outputTokens: 5 }));
+    if (metric === "proposition-generation") {
+      // The generation calls' settings reach the usage row (they were dropped before), and so do the embedding call's.
+      expect(record).toHaveBeenCalledWith(expect.objectContaining({ metric, metadata: expect.objectContaining({
+        modelConfig: expect.objectContaining({ operation: "proposition-extraction", maxOutputTokens: expect.any(Number), paragraphBatchChars: 3000 }) }) }));
+    }
   });
 });
