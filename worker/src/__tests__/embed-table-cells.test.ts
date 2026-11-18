@@ -77,7 +77,7 @@ function vmRunner() {
 
 const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "testdata", "pdf-fixtures", "doppler-md-html");
 // The HTML fixtures that hold a table (routing-table-bullet-list is a list since Doppler d317bea).
-const FIXTURES = ["routing-table-clean-financial.pdf.md", "routing-table-two-line-header.pdf.md"];
+const FIXTURES = ["routing-table-clean-financial.pdf.md", "routing-table-large-coverage.pdf.md", "routing-table-two-line-header.pdf.md"];
 
 /** A fixture's table grown past the chunk budget (rows repeated), so chunking reads its cells rather than the source. */
 function grown(markdown: string, copies: number): string {
@@ -180,7 +180,7 @@ describe("stored HTML table cells: identity with the VM path", () => {
       if (name.includes("grown") || name.includes("spans")) cellReads++;
     }
     expect(cellReads).toBeGreaterThan(0);
-  });
+  }, 30_000);
 
   it("does no extra work for a document without tables: no artifact, no VM call, no stored-cells read", async () => {
     vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");

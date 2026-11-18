@@ -348,6 +348,11 @@ export interface VisionPageTask {
   fallbackText?: boolean;
   /** A scan beside native text: read by the VM OCR engine (DOCSLURP_OCR_MODE=vm), never a hosted vision model. */
   vmOcr?: boolean;
+  /**
+   * A read only table-leak signals (`table-rescue`) or Doppler's encodings (`encoding-read`) authorized: admitted under the
+   * guard's durable per-document page budget for that purpose (vision-extract budgetedReadPurpose). Absent: a page read.
+   */
+  readPurpose?: "table-rescue" | "encoding-read";
   /** Set by slot-gated workflows only. */
   slotGate?: boolean;
 }

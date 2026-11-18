@@ -61,7 +61,7 @@ import {
   type CanonicalReconciliationDecision,
 } from "../lib/canonical-reconciliation.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
-import { DRAWN_CONTENT_SIGNAL, selectLegacyVisionPages, TABLE_LEAK_ONLY_SIGNAL } from "./classify-route.js";
+import { DRAWN_CONTENT_SIGNAL, ENCODING_READ_ONLY_SIGNAL, encodingReadPageCap, selectLegacyVisionPages, TABLE_LEAK_ONLY_SIGNAL } from "./classify-route.js";
 import { inkCheckVerdict, readPngFileFacts } from "../lib/page-image-evidence.js";
 import {
   findVisionGuardStop,
@@ -171,6 +171,12 @@ export interface LegacyPageHints {
    */
   tableRescuePages?: ReadonlySet<number>;
   /**
+   * Pages authorized by Doppler's encoding facts alone (ENCODING_READ_ONLY_SIGNAL): read under the guard's durable
+   * `encoding-read` budget of encodingReadPageCap(pages) distinct pages per document. classify-route's cap holds for one
+   * routing decision; this one holds across activity retries, worker restarts and re-routed facts that nominate other pages.
+   */
+  encodingReadPages?: ReadonlySet<number>;
+  /**
    * Pages page triage routed as figure- or chart-bearing (`chart-or-figure`, `image-heavy`): the vision page reader, an
    * OCR specialist that skips image insets, leaves them to the hosted route (vision-page-reader.ts).
    */
@@ -195,17 +201,55 @@ export function legacyPageHints(pages: Array<{ pageNumber: number; textDensitySc
   const fallbackTextPages = new Set<number>();
   const vmOcrPages = new Set<number>();
   const tableRescuePages = new Set<number>();
+  const encodingReadPages = new Set<number>();
   const figurePages = new Set<number>();
   for (const page of pages) {
     if (page.route === "chart-or-figure" || page.route === "image-heavy") figurePages.add(page.pageNumber);
-    if (page.ocrDecision?.signals.includes(TABLE_LEAK_ONLY_SIGNAL)) tableRescuePages.add(page.pageNumber);
+    // A read the encodings alone authorized takes their budget, even where a table-leak signal also rides on it.
+    if (page.ocrDecision?.signals.includes(ENCODING_READ_ONLY_SIGNAL)) encodingReadPages.add(page.pageNumber);
+    else if (page.ocrDecision?.signals.includes(TABLE_LEAK_ONLY_SIGNAL)) tableRescuePages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(DRAWN_CONTENT_SIGNAL)) inkCheckPages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(MIXED_SCAN_IMAGE_SIGNAL)) vmOcrPages.add(page.pageNumber);
     if (page.textDensityScore >= USABLE_FALLBACK_DENSITY && !page.signals.includes("garbled-text")) {
       fallbackTextPages.add(page.pageNumber);
     }
   }
-  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages, figurePages, triaged: true };
+  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages, encodingReadPages, figurePages, triaged: true };
+}
+
+/**
+ * The guard purpose and durable per-document page budget a page read is admitted under: `encoding-read`
+ * (encodingReadPageCap) for a read Doppler's encodings alone authorized, `table-rescue` (tableLeakPageCap) for one
+ * table-leak signals alone authorized, else an ordinary `page` read.
+ */
+export function budgetedReadPurpose(hints: Pick<LegacyPageHints, "tableRescuePages" | "encodingReadPages">, pageNumber: number, pageCount: number):
+  [VisionAttemptPurpose, Pick<VisionAttemptTarget, "documentPageLimit">] {
+  if (hints.encodingReadPages?.has(pageNumber)) return ["encoding-read", { documentPageLimit: encodingReadPageCap(pageCount) }];
+  if (hints.tableRescuePages?.has(pageNumber)) return ["table-rescue", { documentPageLimit: tableLeakPageCap(pageCount) }];
+  return ["page", {}];
+}
+
+/** The budgeted purpose a fanned-out page task carries (absent for an ordinary page read). */
+export function taskReadPurpose(hints: Pick<LegacyPageHints, "tableRescuePages" | "encodingReadPages">, pageNumber: number):
+  Pick<import("../temporal/shared.js").VisionPageTask, "readPurpose"> {
+  if (hints.encodingReadPages?.has(pageNumber)) return { readPurpose: "encoding-read" };
+  if (hints.tableRescuePages?.has(pageNumber)) return { readPurpose: "table-rescue" };
+  return {};
+}
+
+/**
+ * A fanned-out page task's hints: what planPageTasks recorded on the task (VisionPageTask), including the budgeted purpose,
+ * so the page is admitted as the document's own run would admit it (budgetedReadPurpose).
+ */
+export function pageTaskHints(task: Pick<import("../temporal/shared.js").VisionPageTask, "pageNumber" | "inkCheck" | "fallbackText" | "vmOcr" | "readPurpose">): LegacyPageHints {
+  const page = (flag: boolean | undefined) => new Set(flag ? [task.pageNumber] : []);
+  return {
+    inkCheckPages: page(task.inkCheck),
+    fallbackTextPages: page(task.fallbackText),
+    vmOcrPages: page(task.vmOcr),
+    tableRescuePages: page(task.readPurpose === "table-rescue"),
+    encodingReadPages: page(task.readPurpose === "encoding-read"),
+  };
 }
 
 /** Errors whose vision attempt `recordFailedVisionAttempt` already recorded (once per call). */
@@ -287,6 +331,8 @@ export class VisionExtractStage implements Stage {
           ...(routing.hints.inkCheckPages.has(pageNumber) ? { inkCheck: true } : {}),
           ...(routing.hints.fallbackTextPages.has(pageNumber) ? { fallbackText: true } : {}),
           ...(routing.hints.vmOcrPages?.has(pageNumber) ? { vmOcr: true } : {}),
+          // The budgeted purpose travels with the task, so a fanned-out page is admitted as the document's run would admit it.
+          ...taskReadPurpose(routing.hints, pageNumber),
         });
       }
     }
@@ -298,11 +344,7 @@ export class VisionExtractStage implements Stage {
     const document = state.documents.find((doc) => doc.id === task.documentId);
     if (!document) throw new Error("Page task document is not part of run");
     const skips = new Map<number, VisionPageSkip>();
-    const hints: LegacyPageHints = {
-      inkCheckPages: new Set(task.inkCheck ? [task.pageNumber] : []),
-      fallbackTextPages: new Set(task.fallbackText ? [task.pageNumber] : []),
-      vmOcrPages: new Set(task.vmOcr ? [task.pageNumber] : []),
-    };
+    const hints = pageTaskHints(task);
     // Defense in depth: page tasks come from the ladder plan (planPageTasks); a page outside this run's plan for the
     // document is not read. Without a pin yet (planning does not persist the ledger) the plan is made again here, from the
     // same stored inputs, once per document and worker process (fail closed: never "no pin, so allowed").
@@ -1538,8 +1580,7 @@ export class VisionExtractStage implements Stage {
             widthPx: image.widthPx, heightPx: image.heightPx },
           signal,
           usageSink,
-          hints.tableRescuePages?.has(page.pageNumber) ? "table-rescue" : "page",
-          hints.tableRescuePages?.has(page.pageNumber) ? { documentPageLimit: tableLeakPageCap(maxInt(1, document.pageCount)) } : {},
+          ...budgetedReadPurpose(hints, page.pageNumber, maxInt(1, document.pageCount)),
         );
         const result = { inputTokens: output.inputTokens, outputTokens: output.outputTokens, latencyMs: output.latencyMs };
         await emitDocumentPageProgress(
@@ -1614,7 +1655,8 @@ export class VisionExtractStage implements Stage {
    */
   private pageReaderCandidates(state: WorkflowState, document: import("../models.js").Document, vision: VisionConfig, pages: readonly number[], hints: LegacyPageHints): number[] {
     if (document.mimeType !== "application/pdf" || !hints.triaged || !visionPageReaderFor(state, vision)) return [];
-    return pages.filter((page) => !hints.inkCheckPages.has(page) && !hints.tableRescuePages?.has(page) && !hints.figurePages?.has(page));
+    return pages.filter((page) => !hints.inkCheckPages.has(page) && !hints.tableRescuePages?.has(page) && !hints.encodingReadPages?.has(page) &&
+      !hints.figurePages?.has(page));
   }
 
   /**

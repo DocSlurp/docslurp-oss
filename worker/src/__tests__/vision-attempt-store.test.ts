@@ -112,6 +112,32 @@ describe("PostgresVisionAttemptBackend", () => {
     expect(await orgCount("o1")).toBe(10);
   }, 60_000);
 
+  // Council (Doppler d317bea pin, adversarial Medium): classify-route caps encoding-only reads per routing decision; this is
+  // the durable bound. A retried activity whose routing ran again on valid facts that nominate other pages reads no more.
+  it("encoding-read: the per-document page cap holds across a retry whose re-routed facts nominate a different page set", async () => {
+    await insertRuns([["run-encoding-budget", "o-budget", "w-budget"]]);
+    const cap = 3;
+    const admit = async (guard: VisionRunGuard, pageNumber: number, purpose: VisionAttemptPurpose = "encoding-read") => {
+      const gate = guard.call({ documentId: "math-doc", pageNumber, purpose, ...(purpose === "encoding-read" ? { documentPageLimit: cap } : {}) });
+      try { await gate.admit({ weightCents: 0.001 }); return true; } catch { return false; } finally { await gate.finish(); }
+    };
+    // First routing decision: pages 1-3 (the cap) are encoding reads.
+    const first = guardOf("run-encoding-budget", null, { orgLimitCents: 1_000 });
+    expect(await Promise.all([1, 2, 3].map((page) => admit(first, page)))).toEqual([true, true, true]);
+    // The retry routes again and nominates pages 4-6 instead: a fresh guard reads the durable rows and refuses every one.
+    const retry = guardOf("run-encoding-budget", null, { orgLimitCents: 1_000 });
+    const second = [];
+    for (const page of [4, 5, 6]) second.push(await admit(retry, page));
+    expect(second).toEqual([false, false, false]);
+    expect(await count("select count(*)::int as n from vision_run_attempts where run_id = 'run-encoding-budget' and purpose = 'encoding-read' and attempts > 0")).toBe(cap);
+    // An already-read page keeps its own page bound; the other purposes have their own budgets.
+    expect(await admit(retry, 1)).toBe(true);
+    expect(await admit(retry, 7, "page")).toBe(true);
+    const leak = retry.call({ documentId: "math-doc", pageNumber: 8, purpose: "table-rescue", documentPageLimit: cap });
+    await expect(leak.admit({ weightCents: 0.001 })).resolves.toBeUndefined();
+    await leak.finish();
+  });
+
   it("holds a per-document page budget across guards (an activity retry or a worker restart) and per document", async () => {
     await insertRuns([["run-doc-budget", "o-budget", "w-budget"]]);
     const admitOne = async (guard: VisionRunGuard, documentId: string, pageNumber: number) => {

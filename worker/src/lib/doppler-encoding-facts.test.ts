@@ -14,7 +14,9 @@ import { pageLayoutFactsFromDopplerPage, routingFactsWithDopplerFacts, withEncod
 import { parsePageLayoutFacts, type PageLayoutFacts } from "./page-layout-facts.js";
 import { buildRoutingPageFacts } from "../pipeline/page-facts.js";
 import { acceptSandboxedPdfResult, sandboxedPdfLayoutFacts, type SandboxedPdfJob } from "../extractors/plugins.js";
-import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, encodingReadDecision, encodingReadPageCap, pageReadReason } from "../stages/classify-route.js";
+import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, ENCODING_READ_ONLY_SIGNAL, encodingReadDecision, encodingReadPageCap, pageReadReason } from "../stages/classify-route.js";
+import { budgetedReadPurpose, legacyPageHints, pageTaskHints, taskReadPurpose } from "../stages/vision-extract.js";
+import { tableLeakPageCap } from "@docslurp/shared";
 import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 
 const word = <T extends string>(names: readonly T[], flags: readonly T[]) => flags.reduce((sum, flag) => sum + dopplerFlagBit(names, flag), 0);
@@ -112,6 +114,19 @@ describe("the reader keeps the words only when they are whole and consistent", (
     expect(page).toMatchObject({ ...booktabs, tableFlags: ["booktabs"], mathFlags: [], mathRegions: [{ kind: "text", bbox: [72, 100, 200, 120] }] });
     expect(page.structure?.tables).toBe(0);
     expect(page.tableLayout?.ruledGrids).toBe(0);
+  });
+
+  it("keeps the released structure family: only the ActualText counts, the tree counts absent (unknown, never 0)", () => {
+    // What d317bea writes on every page at `full` (the per-page structure-tree walk was removed in #51's review).
+    const page = parsePage(encodedPage(1, booktabs, { structure: { actualText: 3, actualTextTexLike: 1, truncated: false } }))!;
+    expect(page.structure).toEqual({ actualText: 3, actualTextTexLike: 1, truncated: false });
+    expect(page.structure?.formulas).toBeUndefined();
+    // The three released keys are required: a structure without them, or with a bad value, is dropped (unknown).
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 3, truncated: false } }))!.structure).toBeUndefined();
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: -1, actualTextTexLike: 0, truncated: false } }))!.structure).toBeUndefined();
+    // A bad optional count is left out; the rest stays.
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 0, actualTextTexLike: 0, truncated: true, formulas: "x" } }))!.structure)
+      .toEqual({ actualText: 0, actualTextTexLike: 0, truncated: true });
   });
 
   it("reads mathtables' fields inside the other families", () => {
@@ -466,5 +481,48 @@ describe("evidence routing by encodings (DOCSLURP_ENCODING_FACTS_ROUTING)", () =
     const capped = pages.filter((page) => page.signals.includes("encoding-read-capped")).map((page) => page.pageNumber);
     expect(capped).toEqual([1, 2, 3, 5, 6, 8, 10]);
     expect(pages.every((page) => !(page.ocrDecision?.signals ?? []).includes("ocr-authorized:encoding-math-unreadable") || read.includes(page.pageNumber))).toBe(true);
+    // The kept reads say they exist only because of the encodings, so execution admits them under the guard's durable
+    // `encoding-read` budget (vision-extract budgetedReadPurpose), not as ordinary page reads.
+    const marked = pages.filter((page) => page.ocrDecision?.signals.includes(ENCODING_READ_ONLY_SIGNAL)).map((page) => page.pageNumber);
+    expect(marked).toEqual(read);
+    const hints = legacyPageHints(pages);
+    expect([...hints.encodingReadPages!].sort((a, b) => a - b)).toEqual(read);
+    expect(read.map((page) => budgetedReadPurpose(hints, page, pageCount))).toEqual(read.map(() => ["encoding-read", { documentPageLimit: 3 }]));
+    expect(budgetedReadPurpose(hints, 1, pageCount)).toEqual(["page", {}]);
+  });
+
+  it("a read the text needs on its own carries no encoding-read mark, with or without encodings", () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    // A page with no words at all is read whatever its encodings say: an ordinary page read, not the encodings' budget.
+    const layout = new Map<number, PageLayoutFacts>([[1, walkerPage({ words: 0, encodings: route(["glyph-outlines"], []) })]]);
+    const [page] = buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "doc.pdf", text: "", pageCount: 1, evidence: { source: "canonical-document", artifactUri: "s3://x" },
+      pageImageEvidence: new Map([[1, { pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 0.95, largestImageCoverage: 0.95 }]]),
+      pageLayout: layout, routingV2: true, encodingRouting: true,
+    }).pages;
+    expect(page!.ocrDecision?.authorized).toBe(true);
+    expect(page!.ocrDecision?.signals).not.toContain(ENCODING_READ_ONLY_SIGNAL);
+    expect(legacyPageHints([page!]).encodingReadPages!.size).toBe(0);
+  });
+});
+
+describe("budgetedReadPurpose: one durable budget per authorizing reason", () => {
+  it("an encoding read takes encoding-read (encodingReadPageCap), a table-leak read table-rescue (tableLeakPageCap), else page", () => {
+    const hints = { encodingReadPages: new Set([2]), tableRescuePages: new Set([3]) };
+    expect(budgetedReadPurpose(hints, 2, 400)).toEqual(["encoding-read", { documentPageLimit: encodingReadPageCap(400) }]);
+    expect(budgetedReadPurpose(hints, 3, 400)).toEqual(["table-rescue", { documentPageLimit: tableLeakPageCap(400) }]);
+    expect(budgetedReadPurpose(hints, 4, 400)).toEqual(["page", {}]);
+    // A page with both reasons takes the encodings' budget (the read exists because of them).
+    expect(budgetedReadPurpose({ encodingReadPages: new Set([5]), tableRescuePages: new Set([5]) }, 5, 400)[0]).toBe("encoding-read");
+    expect(encodingReadPageCap(400)).toBe(20);
+  });
+
+  it("a fanned-out page task keeps its purpose: the task's readPurpose becomes the same budget", () => {
+    for (const readPurpose of ["encoding-read", "table-rescue", undefined] as const) {
+      const hints = pageTaskHints({ pageNumber: 7, ...(readPurpose ? { readPurpose } : {}) });
+      expect(budgetedReadPurpose(hints, 7, 400)[0]).toBe(readPurpose ?? "page");
+      // planPageTasks writes the purpose the routing hints give (taskReadPurpose), and the round trip keeps it.
+      expect(taskReadPurpose(hints, 7)).toEqual(readPurpose ? { readPurpose } : {});
+    }
   });
 });
