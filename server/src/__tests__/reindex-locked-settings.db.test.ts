@@ -377,6 +377,11 @@ describe("re-check fixes", () => {
     await expect(intake.assertUploadKeepsIndexIdentity(project, { summarize: true } as never)).resolves.toBeUndefined();
     const empty = (await getProject("proj-empty", "ua"))!;
     await expect(intake.assertUploadKeepsIndexIdentity(empty, { embedding: { profile: "fastest-local" } } as never)).resolves.toBeUndefined();
+    // Without an identity-moving override the check is pure: no database read (a direct session without overrides).
+    expect(intake.uploadOverridesTouchIndexIdentity({ speedBoost: false, quality: "smart" } as never)).toBe(false);
+    expect(intake.uploadOverridesTouchIndexIdentity(undefined)).toBe(false);
+    expect(intake.uploadOverridesTouchIndexIdentity({ chunkOverlap: true } as never)).toBe(true);
+    expect(intake.uploadOverridesTouchIndexIdentity({ privacyMode: "local-only" } as never)).toBe(true);
     // The direct-upload session check uses the same Postgres records.
     await expect(intake.assertUploadKeepsIndexIdentity(project, { embedding: { profile: "fastest-local" } } as never)).rejects.toMatchObject({ statusCode: 409 });
   });

@@ -20,6 +20,7 @@ import { Transform, type Readable } from "node:stream";
 import {
   applyProjectPipelineOverrides,
   changedIndexIdentitySettings,
+  isIndexIdentitySetting,
   applyPrivateModelMode,
   VM_PDF_MAX_SOURCE_BYTES,
   sandboxedPdfConfigured,
@@ -601,6 +602,15 @@ async function resolveIntakeTarget(
 }
 
 /**
+ * Whether upload overrides name a setting that can move the index identity: an index-identity setting, or the privacy
+ * mode (in private model mode it decides whether the operator's private embedding model replaces the hosted one).
+ * Pure, so a request without such overrides costs no database read.
+ */
+export function uploadOverridesTouchIndexIdentity(overrides: PipelineFeatureOverrides | null | undefined): boolean {
+  return Boolean(overrides) && Object.keys(overrides as object).some((key) => isIndexIdentitySetting(key) || key === "privacyMode");
+}
+
+/**
  * An upload's overrides may not move an existing project's index identity (embedding, chunking, vector backends) once it
  * holds documents or in-flight uploads: the new documents would be embedded in another space. A request-level setting,
  * so the whole request is refused (409 `reindex_required`); change the project with the reindex command instead. Direct
@@ -611,7 +621,7 @@ export async function assertUploadKeepsIndexIdentity(
   overrides: PipelineFeatureOverrides | null | undefined,
   records: Pick<ProjectIntakeRecords, "hasIndexStakes"> = postgresIntakeRecords,
 ): Promise<void> {
-  if (!overrides) return;
+  if (!uploadOverridesTouchIndexIdentity(overrides)) return;
   const base = project.pipeline ?? defaultPipelineFeatures;
   const changed = changedIndexIdentitySettings(applyPrivateModelMode(base), applyPrivateModelMode(applyProjectPipelineOverrides(base, overrides, project.templateKey)));
   if (changed.length === 0 || !(await records.hasIndexStakes?.(project.id))) return;
