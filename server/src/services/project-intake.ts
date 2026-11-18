@@ -221,7 +221,7 @@ export interface RejectedIntakeFile {
 /** What a client is told about a refused source named by an IntakeRefusalRef: fixed text per code. */
 const REFERENCED_REFUSAL_MESSAGES: Record<RejectedIntakeFile["code"], string> = {
   unsupported_type: "The URL's content is not a supported file type",
-  remote_format_disabled: "This file format cannot be ingested from a URL",
+  remote_format_disabled: "The URL's content requires the full parser surface. Remote ingest is lean-only by default; direct upload the file or set REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true to opt into complex remote formats.",
   file_too_large: "The URL's content exceeds the upload size limit",
   unreadable_source: "The URL's content could not be read",
   rejected: "The URL's content could not be taken",
