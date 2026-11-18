@@ -13,12 +13,19 @@ import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 // Only the SQL transport is replaced: authentication and ownership run production queries
 // against an isolated database built from the full migration journal.
 const mocks = vi.hoisted(() => ({ describe: vi.fn(), sign: vi.fn(), query: vi.fn() }));
-vi.mock("../db.js", () => ({ sql: Object.assign(
-  (strings: TemplateStringsArray, ...values: unknown[]) => {
+vi.mock("../db.js", () => {
+  const tag = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.reduce((text, part, index) => text + (index ? `$${index}` : "") + part, "");
     return { then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
       mocks.query(text, values).then((result: { rows: unknown[] }) => result.rows).then(resolve, reject) };
-  }, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) }));
+  };
+  // Bounded credential lookups run on a reserved connection. Here it is the same (pooled) transport,
+  // so its transaction control is a no-op rather than a BEGIN left open on some pooled connection.
+  const reserved = (strings: TemplateStringsArray, ...values: unknown[]) =>
+    /^\s*(?:begin|commit|rollback)\b/i.test(strings.join("")) ? Promise.resolve([]) : tag(strings, ...values);
+  const reserve = async () => Object.assign(reserved, { release: () => {} });
+  return { sql: Object.assign(tag, { reserve, json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) };
+});
 vi.mock("../services/direct-upload-session.js", async importOriginal => ({
   ...await importOriginal<typeof import("../services/direct-upload-session.js")>(),
   // This is the serialization/signing boundary. Denied requests must never reach it.
