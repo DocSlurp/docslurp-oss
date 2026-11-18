@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   release: vi.fn(), end: vi.fn(async () => {}), create: vi.fn(), reserve: vi.fn(),
 }));
-vi.mock("../config.js", () => ({ env: { databaseUrl: "postgres://lock-test" } }));
+const lockEnv = vi.hoisted(() => ({ databaseUrl: "postgres://lock-test" } as { databaseUrl: string; directUploadLockPoolMax?: number }));
+vi.mock("../config.js", () => ({ env: lockEnv }));
 vi.mock("../lib/api-pool.js", () => ({ createApiPool: mocks.create }));
-import { closeDirectUploadLockPool, reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
+import { closeDirectUploadLockPool, directUploadLockLimits, reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
 afterEach(async () => { await closeDirectUploadLockPool(); vi.clearAllMocks(); });
 function setup() {
   mocks.reserve.mockResolvedValue({release:mocks.release});
@@ -14,7 +15,7 @@ describe("separate direct upload lock connections", () => {
   it("uses a lazy bounded pool separate from intake query connections", async () => {
     setup();
     const lock = await reserveDirectUploadLockConnection();
-    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:8,applicationName:"docslurp-upload-locks"});
+    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:5,applicationName:"docslurp-upload-locks"});
     lock.release(); lock.release();
     expect(mocks.release).toHaveBeenCalledOnce();
     await closeDirectUploadLockPool();
@@ -35,36 +36,48 @@ describe("separate direct upload lock connections", () => {
 });
 
 describe("lock classes and deadlines", () => {
-  it("caps batch holders per organization and per process while short operations keep a connection", async () => {
+  it("keeps two short-only connections and one slot per heavy class at the default pool of 5, more at 8", () => {
+    expect(directUploadLockLimits()).toEqual({ poolMax: 5, heavyMax: 3, batchMax: 1, batchPerOrg: 1, startMax: 1, startPerOrg: 1, reconcileMax: 1 });
+    // Below the minimum is raised to it.
+    lockEnv.directUploadLockPoolMax = 3;
+    expect(directUploadLockLimits()).toMatchObject({ poolMax: 5, heavyMax: 3 });
+    lockEnv.directUploadLockPoolMax = 8;
+    expect(directUploadLockLimits()).toEqual({ poolMax: 8, heavyMax: 6, batchMax: 3, batchPerOrg: 2, startMax: 2, startPerOrg: 1, reconcileMax: 1 });
+    for (const pool of [5, 6, 8, 16, 64]) {
+      lockEnv.directUploadLockPoolMax = pool;
+      const limits = directUploadLockLimits();
+      // The heavy classes together never reach the two short-only connections, and each keeps at least one slot.
+      expect(limits.heavyMax).toBe(limits.poolMax - 2);
+      expect(Math.min(limits.batchMax, limits.startMax, limits.reconcileMax)).toBeGreaterThanOrEqual(1);
+      expect(limits.batchMax + limits.startMax + limits.reconcileMax).toBeLessThanOrEqual(limits.heavyMax);
+    }
+    delete lockEnv.directUploadLockPoolMax;
+  });
+
+  it("at the default pool, caps each heavy class and still serves short operations with every heavy slot taken", async () => {
     vi.useFakeTimers();
     try {
       setup();
-      const a1 = await reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-a" });
-      const a2 = await reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-a" });
-      // A third holder for the same organization waits for a slot, then gives up on its deadline.
-      let refused: unknown = null;
-      const a3 = reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-a", deadline: Date.now() + 3_000 }).catch(error => { refused = error; });
-      // Another organization and a short operation are not starved by org-a's batches.
-      const b1 = await reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-b" });
-      const short = await reserveDirectUploadLockConnection();
-      await vi.advanceTimersByTimeAsync(3_100);
-      await a3;
-      expect(refused).toMatchObject({ name: "DirectUploadLockUnavailable" });
-      // The process has 3 batch slots (pool 8: 2 kept for short work; of the other 6, 3 batch, 2 start, 1 reconcile).
-      let processFull: unknown = null;
-      const c1 = reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-c" }).catch(error => { processFull = error; });
-      await vi.advanceTimersByTimeAsync(2_100);
-      await c1;
-      expect(processFull).toMatchObject({ name: "DirectUploadLockUnavailable" });
-      const b2 = short; // keeps the release list below unchanged
-      // Short operations and the reconciler still get connections with every batch slot taken.
+      const batch = await reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-a" });
+      // The one batch slot is taken: another organization's batch waits, then gives up on its deadline.
+      let batchRefused: unknown = null;
+      const batch2 = reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-b", deadline: Date.now() + 2_500 }).catch(error => { batchRefused = error; });
+      const start = await reserveDirectUploadLockConnection({ lockClass: "start", orgId: "org-b" });
       const reconcile = await reserveDirectUploadLockConnection({ lockClass: "reconcile" });
+      // Every heavy slot is taken: another run start is refused, but both short-only connections are served.
+      let startRefused: unknown = null;
+      const start2 = reserveDirectUploadLockConnection({ lockClass: "start", orgId: "org-c" }).catch(error => { startRefused = error; });
+      const short1 = await reserveDirectUploadLockConnection();
       const short2 = await reserveDirectUploadLockConnection();
-      // A released slot is handed to the next waiter.
+      await vi.advanceTimersByTimeAsync(2_600);
+      await Promise.all([batch2, start2]);
+      expect(batchRefused).toMatchObject({ name: "DirectUploadLockUnavailable" });
+      expect(startRefused).toMatchObject({ name: "DirectUploadLockUnavailable" });
+      // A released slot is handed to the next waiter of that class.
       const waiting = reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-c", deadline: Date.now() + 5_000 });
-      a1.release();
-      const c2 = await waiting;
-      for (const lock of [a2, b1, b2, reconcile, short2, c2]) lock.release();
+      batch.release();
+      const batch3 = await waiting;
+      for (const lock of [start, reconcile, short1, short2, batch3]) lock.release();
     } finally { vi.useRealTimers(); }
   });
 

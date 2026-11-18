@@ -2,8 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 /**
  * Direct-upload finalization under real concurrency: the real routes and services against a real, migrated Postgres
- * with the real advisory-lock pool at its default size (8 per process: 3 batch, 2 run-start and 1 reconcile slot, and 2
- * connections only short work may use; per organization, 2 batch and 1 run start). Object storage is an in-memory fake; intake runs through the in-memory project fakes so a run can be counted.
+ * with the real advisory-lock pool at its default size (5 per process: one batch, one run-start and one reconcile slot,
+ * and 2 connections only short work may use). Object storage is an in-memory fake; intake runs through the in-memory project fakes so a run can be counted.
  * Opt-in: TEST_DATABASE_URL (a throwaway database; scripts/run-database-tests.mjs provides one per file).
  */
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -151,13 +151,13 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     expect(await sql`select id, source_key from upload_session_files where session_id = ${id} order by id`).toEqual(keys);
   }, 20_000);
 
-  it("with every batch slot held, another organization's batch is refused on schedule while short work still runs", async () => {
-    // Three slow batches fill the process's three batch slots: two from one organization (its cap), one from another.
-    const holders = [await seedSession(30), await seedSession(30), await seedSession(30, "upl-w", "upl-o3")];
+  it("with the batch slot held, another organization's batch is refused on schedule while short work still runs", async () => {
+    // One slow batch fills the process's only batch slot at the default pool.
+    const holder = await seedSession(30);
     const refusedSession = await seedSession(2, "upl-v", "upl-o2");
-    const abortable = await seedSession(1);
-    store.headDelayMs = 400; // 30 files, 8 at a time, two HEADs each: every holder keeps its slot for a few seconds
-    const holding = holders.map((session, i) => post(`${session.id}/files/complete`, { files: session.fileIds.map(fileId => ({ fileId })) }, i === 2 ? "upl-w" : "upl-u"));
+    const abortable = await seedSession(1, "upl-w", "upl-o3");
+    store.headDelayMs = 400; // 30 files, 8 at a time, two HEADs each: the holder keeps its slot for a few seconds
+    const holding = post(`${holder.id}/files/complete`, { files: holder.fileIds.map(fileId => ({ fileId })) });
     await new Promise(resolve => setTimeout(resolve, 200));
     const started = Date.now();
     const refused = await post(`${refusedSession.id}/files/complete`, { files: refusedSession.fileIds.map(fileId => ({ fileId })) }, "upl-v");
@@ -168,9 +168,9 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     expect(waited).toBeLessThan(3_500);
     // A short operation (abort) gets one of the reserved connections at once.
     const shortStarted = Date.now();
-    expect((await post(`${abortable.id}/abort`)).status).toBe(200);
+    expect((await post(`${abortable.id}/abort`, undefined, "upl-w")).status).toBe(200);
     expect(Date.now() - shortStarted).toBeLessThan(1_000);
-    for (const response of await Promise.all(holding)) expect(response.status).toBe(200);
+    expect((await holding).status).toBe(200);
   }, 30_000);
 
   it("many concurrent run starts from one organization never block another organization's abort or part signing", async () => {

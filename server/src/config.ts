@@ -244,18 +244,19 @@ export const env = {
   directUploadFinalizeConcurrency: Math.min(32, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY, 8)))),
   /**
    * Direct database connections (to DATABASE_URL, opened lazily as needed) that one API process may hold for
-   * upload-session advisory locks: default 8, minimum 5 (smaller values are raised to 5), maximum 64. Two are kept
-   * for short operations; see lib/direct-upload-locks.ts. Count them in the database's max_connections budget per API
-   * machine, twice during a deploy's overlap.
+   * upload-session advisory locks: default 5, which is also the minimum (smaller values are raised to 5), maximum 64.
+   * Two are kept for short operations; at 5 the rest are one slot each for batch, run-start and reconcile holders.
+   * 8 (3 batch, 2 run-start slots) suits deployments with connection headroom. See lib/direct-upload-locks.ts. Count
+   * them in the database's max_connections budget per API machine, twice during a deploy's overlap.
    */
-  directUploadLockPoolMax: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX, 8),
-  /** Concurrent run starts (confirms, idempotent intakes) holding a lock connection per process (default 2 of 8). */
+  directUploadLockPoolMax: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX, 5),
+  /** Concurrent run starts (confirms, idempotent intakes) holding a lock connection per process (default 1 at pool 5, 2 at 8). */
   directUploadLockStartMax: process.env.DOCSLURP_UPLOAD_LOCK_START_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_MAX, 2) : undefined,
   /** Concurrent run starts per organization in one process (default 1). */
   directUploadLockStartPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_PER_ORG, 1),
-  /** Concurrent files/complete holders per process (default 3 of 8). */
+  /** Concurrent files/complete holders per process (default 1 at pool 5, 3 at 8). */
   directUploadLockBatchMax: process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX, 3) : undefined,
-  /** Concurrent files/complete holders per organization in one process (default 2). */
+  /** Concurrent files/complete holders per organization in one process (default 2, at most the batch cap). */
   directUploadLockBatchPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_PER_ORG, 2),
   /**
    * How long one lock hold keeps starting new files (default 5 s); files not started are answered retryable

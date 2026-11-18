@@ -36,7 +36,9 @@ function intOr(value: number | undefined, fallback: number, min: number, max: nu
 const SHORT_RESERVE = 2;
 
 export function directUploadLockLimits() {
-  const poolMax = intOr(env.directUploadLockPoolMax, 8, SHORT_RESERVE + 3, 64);
+  // Default 5, the smallest pool that keeps every invariant: 2 short-only connections, then one slot each for batch,
+  // start and reconcile. Deployments with connection headroom can raise it (8 gives 3 batch and 2 start slots).
+  const poolMax = intOr(env.directUploadLockPoolMax, 5, SHORT_RESERVE + 3, 64);
   // Batch, start and reconcile holders together.
   const heavyMax = poolMax - SHORT_RESERVE;
   const startMax = intOr(env.directUploadLockStartMax, Math.max(1, Math.floor((heavyMax - 1) / 2)), 1, heavyMax - 2);
