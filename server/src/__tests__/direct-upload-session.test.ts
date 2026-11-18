@@ -152,7 +152,7 @@ describe("Direct Upload Session Module", () => {
     const multipart = result.files.find((file) => file.mode === "multipart") as { partSize: number; pendingParts: Array<{ partNumber: number; sizeBytes: number }> };
     expect(multipart.partSize).toBe(64 * MIB);
     expect(multipart.pendingParts.map((part) => [part.partNumber, part.sizeBytes])).toEqual([[1, 64 * MIB], [2, 64 * MIB], [3, 2 * MIB]]);
-    expect(signMultipartUploadPart.mock.calls.map(([args]) => [(args as { partNumber: number }).partNumber, (args as { contentLength: number }).contentLength]))
+    expect((signMultipartUploadPart.mock.calls as unknown as Array<[{ partNumber: number; contentLength: number }]>).map(([args]) => [args.partNumber, args.contentLength]))
       .toEqual([[1, 64 * MIB], [2, 64 * MIB], [3, 2 * MIB]]);
     expect(signSingleUploadPut).toHaveBeenCalledWith(expect.objectContaining({ contentLength: 60 * MIB }));
   });
