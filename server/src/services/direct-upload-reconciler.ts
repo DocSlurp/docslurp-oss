@@ -6,6 +6,7 @@ import { registerDirectUploadWaveCheckHandler, requestDirectUploadWaveCheck, set
 import { advanceDirectUploadWaves, flushExpiredDirectUploadSession, WAVE_BLOCKED_RETRY_SECONDS } from "./direct-upload-waves.js";
 import { ProjectIntakeError } from "./project-intake.js";
 import { isRunCreationBlockedError } from "./run-creation.js";
+import { errorClass, uploadEvent } from "../lib/upload-telemetry.js";
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -23,7 +24,7 @@ const FALLBACK_BUDGET_MS = 10_000;
 /** A file the fallback is looking at is not offered to another sweep for this long. */
 const FALLBACK_CLAIM_SECONDS = 15;
 
-type ScheduledSession = { id: string; user_id: string; org_id: string | null; expired: boolean; status: string; checked_at: Date | string };
+type ScheduledSession = { id: string; user_id: string; org_id: string | null; expired: boolean; status: string; finalize_protocol: string | null; checked_at: Date | string };
 
 /**
  * Two independent passes, each covering lost or skipped work:
@@ -39,7 +40,7 @@ export async function reconcileDirectUploads(): Promise<void> {
   try {
     await reconcilePendingUploadFiles();
     const sessions = await sql<ScheduledSession[]>`
-      select id, user_id, org_id, status, expires_at < now() as expired, now() as checked_at from upload_sessions
+      select id, user_id, org_id, status, finalize_protocol, expires_at < now() as expired, now() as checked_at from upload_sessions
       where (status in ('pending', 'uploading', 'ingesting') or (status = 'initializing' and expires_at < now())) and next_reconcile_at <= now()
       order by next_reconcile_at limit 25`;
     for (const session of sessions) {
@@ -74,7 +75,7 @@ export async function reconcilePendingUploadFiles(options: { budgetMs?: number; 
       returning f.id, f.session_id, s.user_id`;
     if (due.length === 0) break;
     await settleBounded(due, env.directUploadFinalizeConcurrency, row =>
-      finalizeDirectUploadFileInBackground({ fileId: row.id, sessionId: row.session_id, userId: row.user_id }));
+      finalizeDirectUploadFileInBackground({ fileId: row.id, sessionId: row.session_id, userId: row.user_id }, "fallback"));
     checked += due.length;
   }
   return checked;
@@ -85,7 +86,9 @@ async function reconcileSession(session: ScheduledSession, mode: "sweep" | "kick
   let failed = false;
   let reschedule = true;
   try {
-    if (session.expired && session.status !== "ingesting") {
+    // A 'single' session starting its run ('ingesting') finishes that first, as before waves; a 'waves' session expires
+    // whatever its runs are doing.
+    if (session.expired && (session.status !== "ingesting" || session.finalize_protocol === "waves")) {
       await expireSession(session);
       return;
     }
@@ -106,7 +109,7 @@ async function reconcileSession(session: ScheduledSession, mode: "sweep" | "kick
     failed = true;
     // Persist only a generic message: provider errors may contain credentials. A definite refusal of the session was
     // already recorded by the wave (it failed the session); anything else is retried until the session expires.
-    console.error(`[upload-reconcile] session=${session.id} failed`, error instanceof Error ? error.name : "unknown");
+    console.error(`[upload-reconcile] session=${session.id} failed error_class=${errorClass(error)}`);
     await sql`update upload_sessions set last_error = 'Upload finalization is retrying' where id = ${session.id} and status in ('pending', 'uploading', 'ingesting')`;
   } finally {
     if (reschedule && failed) {
@@ -118,7 +121,7 @@ async function reconcileSession(session: ScheduledSession, mode: "sweep" | "kick
       const proposedMs = Math.max(0, nextCheckMs ?? IDLE_CHECK_MS);
       await sql`update upload_sessions set reconcile_attempts = 0,
         next_reconcile_at = least(expires_at, now() + ${proposedMs}::int * interval '1 millisecond',
-          case when next_reconcile_at > ${session.checked_at} then next_reconcile_at else 'infinity'::timestamptz end)
+          case when next_reconcile_at >= ${session.checked_at} then next_reconcile_at else 'infinity'::timestamptz end)
         where id = ${session.id} and status in ('pending', 'uploading', 'ingesting')`;
       if (nextCheckMs !== null) requestDirectUploadWaveCheck(session.id, nextCheckMs);
     }
@@ -133,26 +136,37 @@ async function reconcileSession(session: ScheduledSession, mode: "sweep" | "kick
  * A session the flush finished (every file in a run) is confirmed and stays so.
  */
 async function expireSession(session: ScheduledSession): Promise<void> {
-  if (session.status !== "initializing") {
+  // The last run is a 'waves' session's (owner, 2026-11-17); a 'single' session expires as before waves: aborted.
+  if (session.status !== "initializing" && session.finalize_protocol === "waves") {
     try {
       await flushExpiredDirectUploadSession(session.id, session.user_id, session.org_id);
     } catch (error) {
       const definite = isRunCreationBlockedError(error)
         || (error instanceof ProjectIntakeError && error.statusCode < 500 && error.code !== "upload_session_busy");
-      if (!definite) throw error;
-      console.error(`[upload-reconcile] session=${session.id} expiry flush refused`, error instanceof Error ? error.name : "unknown");
+      if (!definite) {
+        uploadEvent("expiry", { outcome: "retry", error_class: errorClass(error) });
+        throw error;
+      }
+      uploadEvent("expiry", { outcome: "refused", error_class: errorClass(error) }, { severity: "warn", body: `expired upload session ${session.id}: last run refused`,
+        attributes: { "docslurp.upload.session_id": session.id } });
     }
     const [now] = await sql<Array<{ status: string }>>`select status from upload_sessions where id = ${session.id}`;
-    if (now?.status === "confirmed") return;
+    if (now?.status === "confirmed") {
+      uploadEvent("expiry", { outcome: "confirmed" });
+      return;
+    }
   }
   await abortDirectUploadSession(session.id, session.user_id);
+  const [after] = await sql<Array<{ status: string; runs: number }>>`select status,
+    (select count(*)::int from upload_session_runs where session_id = ${session.id} and status = 'committed') as runs from upload_sessions where id = ${session.id}`;
+  uploadEvent("expiry", { outcome: after?.status === "confirmed" ? (Number(after.runs) > 0 ? "flushed" : "confirmed") : "aborted" });
 }
 
 /** The in-process wave timer: one session, now. */
 async function checkSessionWaves(sessionId: string): Promise<void> {
   if (stopped) return;
   const [session] = await sql<ScheduledSession[]>`
-    select id, user_id, org_id, status, expires_at < now() as expired, now() as checked_at from upload_sessions
+    select id, user_id, org_id, status, finalize_protocol, expires_at < now() as expired, now() as checked_at from upload_sessions
     where id = ${sessionId} and status in ('pending', 'uploading', 'ingesting')`;
   if (session) await reconcileSession(session, "kick");
 }
@@ -161,7 +175,7 @@ export function startDirectUploadReconciler(): void {
   if (timer) return;
   stopped = false;
   registerDirectUploadWaveCheckHandler(checkSessionWaves);
-  const tick = () => void reconcileDirectUploads().catch(error => console.error("[upload-reconcile] sweep failed", error instanceof Error ? error.name : "unknown"));
+  const tick = () => void reconcileDirectUploads().catch(error => console.error(`[upload-reconcile] sweep failed error_class=${errorClass(error)}`));
   timer = setInterval(tick, 15_000);
   timer.unref?.();
   tick();

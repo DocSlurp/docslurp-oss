@@ -2261,6 +2261,8 @@ export const uploadSessions = pgTable(
     clientFinalizingSince: timestamp("client_finalizing_since", { withTimezone: true, mode: "string" }),
     /** A wave refused by billing or admission is retried no sooner than this (migration 0193). */
     waveBlockedUntil: timestamp("wave_blocked_until", { withTimezone: true, mode: "string" }),
+    /** 'single' or 'waves', fixed at creation from DOCSLURP_UPLOAD_WAVES (migration 0193). */
+    finalizeProtocol: text("finalize_protocol").default("single").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),
@@ -2375,7 +2377,8 @@ export const uploadSessionRuns = pgTable(
     sessionId: text("session_id").notNull(),
     wave: integer().notNull(),
     runId: text("run_id").notNull(),
-    status: text().default("creating").notNull(),
+    /** 'pending' while its run is created, then 'committed' or 'failed' (a tombstone); guarded by triggers (0193). */
+    status: text().default("pending").notNull(),
     fileCount: integer("file_count").default(0).notNull(),
     result: jsonb(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),

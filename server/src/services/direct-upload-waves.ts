@@ -1,17 +1,22 @@
 /**
- * Early ingestion for direct uploads: a session starts runs ("waves") while its upload is still in progress.
+ * Run creation for direct uploads: waves of runs while the upload is in progress ('waves' sessions), or one run once
+ * every file is in ('single' sessions, and every extract). A session's protocol is fixed when it is created
+ * (DOCSLURP_UPLOAD_WAVES); nothing here reads the live setting, so turning it off never changes a session in flight.
  *
- * A wave takes every finalized file not yet in a run. It is due when `directUploadWaveFiles` such files are waiting (more
- * for later waves when `directUploadWaveGrowth` > 1),
- * `directUploadWaveDelayMs` after the first of them was finalized, when no file is still open, or when the client
- * confirms (a flush). Every wave is an ordinary billable run in the session's one project: the same reservation,
- * budget and admission checks, refused per wave. The first wave resolves the project (creating and self-titling it
- * when asked); later waves reuse it and never re-title it. Wave 1's run id is the session id, so `result` keeps meaning
- * the first run.
+ * A wave takes every finalized file not yet in a run. In a 'waves' session it is due when enough such files are waiting
+ * (`directUploadWaveFiles`, growing by `directUploadWaveGrowth` per committed run), `directUploadWaveDelayMs` after the
+ * first of them was finalized, when no file is still open, on a confirm (a flush) or at expiry (a last flush). A
+ * 'single' session's one wave is due when no file is still open. Every wave is an ordinary billable run in the
+ * session's one project, admitted, reserved and refused on its own. The first run resolves the project (creating and
+ * self-titling it when asked); later runs reuse it and never re-title it.
+ *
+ * Exactly once (enforced by the database, migration 0193): a wave row is 'pending' while its run is created, then
+ * 'committed' (moved there by the run's own publication, in the same transaction) or 'failed' (a tombstone: its run id
+ * can never be published). A file joins only a pending wave and leaves only a failed one. An error after the run
+ * committed adopts the run; a holder that lost its lock is fenced by the next holder and its run is refused at publish.
  *
  * Waves run under the session lock (with abort and confirm), never under a file's finalize lease, so finalizing files
- * never waits for a wave. A file joins a run once (`upload_session_files.run_id`, set only while it is null), so no file
- * is ingested twice; a refused or failed wave releases its files for the next attempt.
+ * never waits for a wave.
  */
 import { randomUUID } from "node:crypto";
 
@@ -22,10 +27,15 @@ import { env } from "../config.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import {
   assertUploadSessionActive,
+  closeDirectUploadSession,
+  describeFileFailure,
   directUploadWaveThreshold,
+  fenceInterruptedWaves,
+  freeFailedWaveFiles,
   listDirectUploadRuns,
   loadDirectUploadSessionRow,
-  queueAbandonedDirectUploadCleanup,
+  sessionProtocol,
+  storedFinalizeFailure,
   withDirectUploadLock,
   type DirectUploadRunSummary,
   type StoredFinalizeError,
@@ -51,6 +61,9 @@ import {
   type ProjectIntakePorts,
 } from "./project-intake.js";
 import { discardUnstartedRun, isRunCreationBlockedError } from "./run-creation.js";
+import { mapDocument, mapProjectRun, type DocumentRow, type ProjectRunRow } from "./run-records.js";
+import { getProject } from "./projects.js";
+import { errorClass, recordWaveFiles, uploadEvent } from "../lib/upload-telemetry.js";
 
 const ACTIVE = ["pending", "uploading", "ingesting"];
 /** A wave refused by billing or admission is retried no sooner than this (a confirm still tries at once). */
@@ -64,6 +77,7 @@ export function setDirectUploadWavePortsForTesting(ports: ProjectIntakePorts | n
 
 type WaitingFile = {
   id: string;
+  status: string;
   filename: string;
   mime_type: string;
   size_bytes: number | string;
@@ -106,16 +120,17 @@ async function advanceLocked(sessionId: string, userId: string, options: Advance
     const session = await loadDirectUploadSessionRow(sessionId, userId);
     if (!session) throw new ProjectIntakeError("Upload session not found", 404);
     if (!ACTIVE.includes(session.status)) return { nextCheckMs: null };
-    await recoverInterruptedWaves(session.id);
+    // We hold the session lock: a pending wave belongs to a holder that crashed or lost the lock. Fence it.
+    if (await fenceInterruptedWaves(session.id) > 0) uploadEvent("wave", { outcome: "fenced", protocol: sessionProtocol(session), trigger: "recovery" });
     const waiting = await sql<WaitingFile[]>`
-      select id, filename, mime_type, size_bytes, source_key, canonical_id, source_path from upload_session_files
-      where session_id = ${session.id} and status = 'completed' and run_id is null
+      select id, status, filename, mime_type, size_bytes, source_key, canonical_id, source_path from upload_session_files
+      where session_id = ${session.id} and status in ('completed', 'finalized') and run_id is null
       order by request_index asc nulls last, created_at asc`;
     const [state] = await sql<Array<{ open: boolean; waves: number; delay_ms: number | null; blocked_ms: number | null }>>`
       select exists (select 1 from upload_session_files where session_id = ${session.id} and status = 'pending') as open,
-        (select count(*)::int from upload_session_runs where session_id = ${session.id}) as waves,
+        (select count(*)::int from upload_session_runs where session_id = ${session.id} and status = 'committed') as waves,
         (select greatest(0, ceil(extract(epoch from (min(finalized_at) + ${env.directUploadWaveDelayMs}::int * interval '1 millisecond' - now())) * 1000))::int
-          from upload_session_files where session_id = ${session.id} and status = 'completed' and run_id is null) as delay_ms,
+          from upload_session_files where session_id = ${session.id} and status in ('completed', 'finalized') and run_id is null) as delay_ms,
         greatest(0, ceil(extract(epoch from (wave_blocked_until - now())) * 1000))::int as blocked_ms
       from upload_sessions where id = ${session.id}`;
     const open = state?.open ?? true;
@@ -123,19 +138,20 @@ async function advanceLocked(sessionId: string, userId: string, options: Advance
       if (!open) await finishSession(session);
       return { nextCheckMs: null };
     }
-    const extract = Boolean(session.extract_id);
-    // An extract owns exactly one run: it starts once every file is in, as before waves existed.
-    if (extract && open) {
+    // One run once every file is in: a 'single' session and an extract (which owns exactly one run), as before waves.
+    const singleRun = sessionProtocol(session) === "single" || Boolean(session.extract_id);
+    if (singleRun && open) {
       if (flush && !options.expiry) throw new ProjectIntakeError("Upload session still has incomplete files", 409);
       return { nextCheckMs: null };
     }
     const delayMs = Number(state?.delay_ms ?? 0);
-    const due = !open || flush || waiting.length >= directUploadWaveThreshold(Number(state?.waves ?? 0)) || delayMs <= 0;
-    if (!due) return { nextCheckMs: delayMs };
+    const trigger = !open ? "last" : options.expiry ? "expiry" : flush ? "flush"
+      : waiting.length >= directUploadWaveThreshold(Number(state?.waves ?? 0)) ? "count" : delayMs <= 0 ? "delay" : null;
+    if (!trigger) return { nextCheckMs: delayMs };
     const blockedMs = Number(state?.blocked_ms ?? 0);
     if (blockedMs > 0 && !flush) return { nextCheckMs: blockedMs };
     try {
-      await startWave(session, waiting, options);
+      await startWave(session, waiting, options, trigger);
     } catch (error) {
       // A flush that billing refused still answers with the runs already started (and says why the rest waits).
       if (flush && isRunCreationBlockedError(error)) return { nextCheckMs: WAVE_BLOCKED_RETRY_SECONDS * 1000, refusal: error };
@@ -146,35 +162,16 @@ async function advanceLocked(sessionId: string, userId: string, options: Advance
   return { nextCheckMs: 0 };
 }
 
-/**
- * A wave whose holder died between taking its files and recording its run: adopt a committed run, otherwise discard
- * the half-created one and give its files back. Runs under the session lock, so no live holder is affected.
- */
-async function recoverInterruptedWaves(sessionId: string): Promise<void> {
-  const stuck = await sql<Array<{ wave: number; run_id: string }>>`
-    select wave, run_id from upload_session_runs where session_id = ${sessionId} and status = 'creating'`;
-  for (const row of stuck) {
-    const [run] = await sql<Array<{ ready: boolean }>>`select creation_ready_at is not null as ready from project_runs where id = ${row.run_id}`;
-    if (run?.ready) {
-      await sql`update upload_session_runs set status = 'started', started_at = now() where session_id = ${sessionId} and wave = ${row.wave}`;
-      continue;
-    }
-    if (run) await discardUnstartedRun(row.run_id);
-    await releaseWave(sessionId, row.wave, row.run_id);
-  }
-}
-
-async function releaseWave(sessionId: string, wave: number, runId: string): Promise<void> {
-  await sql`update upload_session_files set run_id = null where session_id = ${sessionId} and run_id = ${runId}`;
-  await sql`delete from upload_session_runs where session_id = ${sessionId} and wave = ${wave} and status = 'creating'`;
-}
-
-async function startWave(session: UploadSessionRow, waiting: WaitingFile[], options: AdvanceOptions): Promise<void> {
-  const [last] = await sql<Array<{ wave: number | null; started: number }>>`
-    select max(wave) as wave, count(*) filter (where status = 'started')::int as started from upload_session_runs where session_id = ${session.id}`;
+async function startWave(session: UploadSessionRow, waiting: WaitingFile[], options: AdvanceOptions, trigger: string): Promise<void> {
+  const protocol = sessionProtocol(session);
+  const [last] = await sql<Array<{ wave: number | null; attempts: number; committed: number }>>`
+    select max(wave) as wave, count(*)::int as attempts, count(*) filter (where status = 'committed')::int as committed
+    from upload_session_runs where session_id = ${session.id}`;
   const wave = Number(last?.wave ?? 0) + 1;
-  const earlierRuns = Number(last?.started ?? 0) > 0;
-  const runId = wave === 1 ? session.id : randomUUID();
+  const earlierRuns = Number(last?.committed ?? 0) > 0;
+  // The first attempt's run id is the session id (as before waves; a server from before waves confirming the same session
+  // would collide on it). Any other attempt gets a fresh id: a failed wave's id is a tombstone and never commits.
+  const runId = Number(last?.attempts ?? 0) === 0 ? session.id : randomUUID();
 
   // Billable admission per wave: the principal's rights as they are now (the user may still contribute; a key-opened
   // session needs a live server key of its organization with `ingest` and an allowlist that still admits the target),
@@ -188,6 +185,7 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
     if (options.background && error instanceof ProjectIntakeError && [403, 404].includes(error.statusCode)) {
       await failSession(session.id, "Upload rejected: the uploader or API key may no longer add to this project");
     }
+    uploadEvent("wave", { outcome: "refused", protocol, trigger, error_class: errorClass(error) });
     throw error;
   }
   const extract = session.extract_id ? await loadIntakeExtract(session.extract_id, session.user_id) : null;
@@ -196,28 +194,31 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
   // Re-checked per wave: a session opened before the deployment stopped offering a tier is refused with the same code.
   assertIntakeChartExportTier((pipeline as { chartExport?: { tier?: ChartExportTier } } | undefined)?.chartExport?.tier, `upload session ${session.id}`);
 
-  // The wave row first (a crash leaves it `creating` for recovery), then its files, each taken only while untaken.
-  await sql`insert into upload_session_runs (session_id, wave, run_id, status, file_count) values (${session.id}, ${wave}, ${runId}, 'creating', 0)`;
+  // The wave row first ('pending'), then its files, each taken only while untaken (the database admits a file only into a
+  // pending wave of its session). A 'waves' session's files are 'finalized' (a 'completed' one was finalized by a server
+  // from before waves during a deploy), so no older server ever confirms them. The session is 'ingesting' from here:
+  // older servers neither abort it nor let its expiry delete these files.
+  await sql`insert into upload_session_runs (session_id, wave, run_id, status, file_count) values (${session.id}, ${wave}, ${runId}, 'pending', 0)`;
   const taken = await sql<Array<{ id: string }>>`
-    update upload_session_files set run_id = ${runId}, updated_at = now()
-    where session_id = ${session.id} and id = any(${sql.array(waiting.map(file => file.id))}) and status = 'completed' and run_id is null
+    update upload_session_files set run_id = ${runId}, status = case when ${protocol} = 'waves' then 'finalized' else status end, updated_at = now()
+    where session_id = ${session.id} and id = any(${sql.array(waiting.map(file => file.id))}) and status in ('completed', 'finalized') and run_id is null
     returning id`;
   const takenIds = new Set(taken.map(row => row.id));
   const files = waiting.filter(file => takenIds.has(file.id));
   if (files.length === 0) {
-    await releaseWave(session.id, wave, runId);
+    await failWave(session.id, wave);
     return;
   }
   await sql`update upload_session_runs set file_count = ${files.length} where session_id = ${session.id} and wave = ${wave}`;
+  await sql`update upload_sessions set status = 'ingesting', updated_at = now() where id = ${session.id} and status in ('pending', 'uploading')`;
 
-  // A run left by an attempt that died before its wave row existed (a session confirmed before waves): adopt a
-  // committed one, discard a half-created one.
+  // A run already under this id (only the session id: a server from before waves confirmed this session): its
+  // publication committed this wave (the database trigger), or it is discarded before we create ours.
   const [leftover] = await sql<Array<{ ready: boolean }>>`select creation_ready_at is not null as ready from project_runs where id = ${runId}`;
-  if (leftover?.ready) {
-    await sql`update upload_session_runs set status = 'started', started_at = now() where session_id = ${session.id} and wave = ${wave}`;
+  if (leftover && (leftover.ready || !await discardUnstartedRun(runId))) {
+    await adoptCommittedWave(session, wave, runId, options.ports, files.length, protocol, trigger);
     return;
   }
-  if (leftover) await discardUnstartedRun(runId);
 
   const ports = options.ports;
   const sessionId = session.id;
@@ -243,6 +244,16 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
     path: file.source_path ?? "",
     content: { storedKey: file.source_key, verifiedSizeBytes: Number(file.size_bytes) },
   }));
+  // A 'single' session's one run reports the whole upload, as before waves: files refused before it are listed too.
+  if (protocol === "single") {
+    const failed = await sql<Array<{ filename: string; mime_type: string; size_bytes: number | string; finalize_error: StoredFinalizeError | null }>>`
+      select filename, mime_type, size_bytes, finalize_error from upload_session_files where session_id = ${session.id} and status = 'failed'
+      order by request_index asc nulls last, created_at asc`;
+    for (const file of failed) {
+      items.push({ filename: file.filename, mimeType: file.mime_type, sizeBytes: Number(file.size_bytes), canonicalId: null, path: "",
+        content: { rejected: storedFinalizeFailure({ filename: file.filename }, file.finalize_error) } });
+    }
+  }
 
   let result: ProjectIntakeActionResult;
   try {
@@ -268,24 +279,103 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
     }, intakePorts);
     result = actionResult(intake);
   } catch (error) {
-    await releaseWave(session.id, wave, runId);
-    // Files refused one by one fail on their own; the session carries on with the rest.
-    if (await handleWaveRefusal(session, files, error)) return;
-    throw error;
+    await settleFailedWave(session, wave, runId, files, error, options, protocol, trigger);
+    return;
   }
-  await sql`update upload_session_runs set status = 'started', started_at = now(), result = ${sql.json(JSON.parse(JSON.stringify(result)))}
-    where session_id = ${session.id} and wave = ${wave}`;
+  // The run's publication normally committed the wave already (trigger); intake ports that publish no run row (tests)
+  // commit it here. A wave fenced meanwhile (its run was refused at publish) never reaches this point.
+  const committed = await sql<Array<{ wave: number }>>`
+    update upload_session_runs set status = 'committed', started_at = coalesce(started_at, now()), result = ${sql.json(JSON.parse(JSON.stringify(result)))}
+    where session_id = ${session.id} and wave = ${wave} and status in ('pending', 'committed') returning wave`;
+  if (committed.length !== 1) throw new Error(`upload wave ${wave} of session ${session.id} was fenced after its intake returned`);
   await sql`update upload_sessions set project_id = coalesce(project_id, ${result.payload.project.id}), org_id = coalesce(org_id, ${result.payload.project.orgId ?? null}),
       last_error = null, wave_blocked_until = null, updated_at = now()
     where id = ${session.id}`;
-  console.log(`[upload-waves] session=${session.id} wave=${wave} run=${runId} files=${files.length}`);
+  waveCommitted(session.id, wave, runId, files.length, protocol, trigger, "committed");
+}
+
+function waveCommitted(sessionId: string, wave: number, runId: string, files: number, protocol: string, trigger: string, outcome: "committed" | "adopted"): void {
+  recordWaveFiles(files, { protocol, trigger });
+  uploadEvent("wave", { outcome, protocol, trigger }, { body: `upload session ${sessionId} wave ${wave} ${outcome}: run ${runId}, ${files} files`,
+    attributes: { "docslurp.upload.session_id": sessionId, "docslurp.runId": runId, "docslurp.upload.wave": wave, "docslurp.upload.files": files } });
 }
 
 /**
- * Classifies a refused wave (its files are already released). True: handled, the session carries on.
+ * The intake for a wave threw. Its run may still have committed (an error after publication): then the run is adopted
+ * and its files stay in it. Otherwise the wave is failed (its run id becomes a tombstone that can never publish) and its
+ * files wait for the next wave; a wave another holder fenced meanwhile is left to that holder.
+ */
+async function settleFailedWave(session: UploadSessionRow, wave: number, runId: string, files: WaitingFile[], error: unknown, options: AdvanceOptions, protocol: string, trigger: string): Promise<void> {
+  const [run] = await sql<Array<{ ready: boolean }>>`select creation_ready_at is not null as ready from project_runs where id = ${runId}`;
+  // A half-created run is discarded first; a run that published meanwhile cannot be (discardUnstartedRun locks it).
+  const runCommitted = Boolean(run) && (run!.ready || !await discardUnstartedRun(runId));
+  const fenced = runCommitted ? [] : await sql<Array<{ wave: number }>>`
+    update upload_session_runs set status = 'failed' where session_id = ${session.id} and wave = ${wave} and status = 'pending' returning wave`;
+  if (fenced.length === 0) {
+    const [row] = await sql<Array<{ status: string }>>`select status from upload_session_runs where session_id = ${session.id} and wave = ${wave}`;
+    if (row?.status === "committed") {
+      console.error(`[upload-waves] session=${session.id} wave=${wave} run=${runId} committed before its intake failed; adopted error_class=${errorClass(error)}`);
+      await adoptCommittedWave(session, wave, runId, options.ports, files.length, protocol, trigger);
+      return;
+    }
+    // Fenced by another holder (it frees the files): nothing more is ours to do.
+    uploadEvent("wave", { outcome: "fenced", protocol, trigger }, { severity: "warn", body: `upload session ${session.id} wave ${wave} was fenced by another holder`,
+      attributes: { "docslurp.upload.session_id": session.id, "docslurp.runId": runId } });
+    throw error;
+  }
+  await freeFailedWaveFiles(session.id);
+  // With no run yet, the session is no longer being ingested (older servers may abort or expire it again).
+  await sql`update upload_sessions set status = 'pending', updated_at = now() where id = ${session.id} and status = 'ingesting'
+    and not exists (select 1 from upload_session_runs where session_id = ${session.id} and status = 'committed')`;
+  const handled = await handleWaveRefusal(session, files, error);
+  uploadEvent("wave", { outcome: handled ? "rejected" : isRunCreationBlockedError(error) ? "refused" : "failed", protocol, trigger, error_class: errorClass(error) },
+    { severity: handled || isRunCreationBlockedError(error) ? "warn" : "error", body: `upload session ${session.id} wave ${wave} did not start`,
+      attributes: { "docslurp.upload.session_id": session.id, "docslurp.upload.files": files.length } });
+  if (!handled) throw error;
+}
+
+async function failWave(sessionId: string, wave: number): Promise<void> {
+  await sql`update upload_session_runs set status = 'failed' where session_id = ${sessionId} and wave = ${wave} and status = 'pending'`;
+  await freeFailedWaveFiles(sessionId);
+}
+
+/**
+ * A wave whose run committed although its intake did not return a response: the run and its files stand. The session's
+ * response for it is rebuilt from the database (the run, its documents, the project), so `result` and `runs[]` stay
+ * complete.
+ */
+async function adoptCommittedWave(session: UploadSessionRow, wave: number, runId: string, ports: ProjectIntakePorts, files: number, protocol: string, trigger: string): Promise<void> {
+  const result = await rebuiltWaveResult(session, runId);
+  await sql`update upload_session_runs set status = 'committed', started_at = coalesce(started_at, now()), result = coalesce(result, ${sql.json(JSON.parse(JSON.stringify(result)))})
+    where session_id = ${session.id} and wave = ${wave} and status in ('pending', 'committed')`;
+  await sql`update upload_sessions set project_id = coalesce(project_id, ${result.payload.project.id}), org_id = coalesce(org_id, ${result.payload.project.orgId ?? null}),
+      updated_at = now() where id = ${session.id}`;
+  void ports;
+  waveCommitted(session.id, wave, runId, files, protocol, trigger, "adopted");
+}
+
+async function rebuiltWaveResult(session: UploadSessionRow, runId: string): Promise<ProjectIntakeActionResult> {
+  const [run] = await sql<ProjectRunRow[]>`select * from project_runs where id = ${runId}`;
+  const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${runId} order by created_at`;
+  const projectId = (run as { project_id?: string } | undefined)?.project_id ?? session.project_id ?? "";
+  const project = await getProject(projectId, session.user_id).catch(() => null) ?? { id: projectId, orgId: session.org_id };
+  let mappedRun: unknown;
+  try { mappedRun = run ? mapProjectRun(run) : { id: runId }; } catch { mappedRun = { id: runId, projectId }; }
+  let mappedDocuments: unknown[];
+  try { mappedDocuments = documents.map(row => mapDocument(row)); } catch { mappedDocuments = []; }
+  return {
+    status: 201,
+    temporalDeferred: false,
+    payload: { project, run: mappedRun, documents: mappedDocuments, warnings: [] } as unknown as ProjectIntakeActionResult["payload"],
+  };
+}
+
+/**
+ * Classifies a refused wave (already failed, its files waiting again). True: handled, the session carries on.
  * - billing or admission (402): the files wait, retried after a pause or at once by a confirm;
  * - every file of the wave rejected for its own reason: those files fail, the session carries on;
- * - a definite refusal of the session itself (access revoked, project gone): the session fails, started runs stay;
+ * - a definite refusal of the session itself (access revoked, project gone): the session ends (runs already started
+ *   stay, and with any the session ends confirmed);
  * - anything else (storage, database, a busy lock): retried by the reconciler.
  */
 async function handleWaveRefusal(session: UploadSessionRow, files: WaitingFile[], error: unknown): Promise<boolean> {
@@ -300,9 +390,8 @@ async function handleWaveRefusal(session: UploadSessionRow, files: WaitingFile[]
       const issue = byName.get(sanitizeUploadFilename(file.filename));
       const stored: StoredFinalizeError = { statusCode: error.statusCode, code: issue?.code ?? rejectionCode(error), message: issue?.message ?? error.message };
       await sql`update upload_session_files set status = 'failed', finalize_error = ${sql.json(stored)}, updated_at = now()
-        where id = ${file.id} and status = 'completed' and run_id is null`;
+        where id = ${file.id} and status in ('completed', 'finalized') and run_id is null`;
     }
-    console.error(`[upload-waves] session=${session.id} files-rejected=${files.length}`);
     return true;
   }
   if (error instanceof ProjectIntakeError && [400, 401, 403, 404, 413, 415, 422].includes(error.statusCode)) {
@@ -311,17 +400,15 @@ async function handleWaveRefusal(session: UploadSessionRow, files: WaitingFile[]
   return false;
 }
 
-/** Stops the session: no further waves. Runs already started keep running; files no run took are cleaned up. */
+/** Stops the session: no further runs. Runs already started keep running, and with any the session ends confirmed. */
 async function failSession(sessionId: string, message: string): Promise<void> {
-  await sql`update upload_sessions set status = 'failed', last_error = ${message}, updated_at = now()
-    where id = ${sessionId} and status in ('pending', 'uploading', 'ingesting')`;
-  await queueAbandonedDirectUploadCleanup(sessionId);
+  await closeDirectUploadSession(sessionId, "failed", message);
 }
 
 /** Every file is in a run or failed: the session is confirmed (its `result` is the first run), or failed with no run. */
 async function finishSession(session: UploadSessionRow): Promise<void> {
   const [first] = await sql<Array<{ result: unknown }>>`
-    select result from upload_session_runs where session_id = ${session.id} and status = 'started' order by wave limit 1`;
+    select result from upload_session_runs where session_id = ${session.id} and status = 'committed' order by wave limit 1`;
   if (!first) {
     await failSession(session.id, "Upload rejected: no file of this upload could be ingested");
     return;
@@ -329,6 +416,7 @@ async function finishSession(session: UploadSessionRow): Promise<void> {
   await sql`update upload_sessions set status = 'confirmed', result = ${first.result === null ? null : sql.json(JSON.parse(JSON.stringify(first.result)))},
       last_error = null, client_finalizing_until = null, updated_at = now()
     where id = ${session.id} and status in ('pending', 'uploading', 'ingesting')`;
+  uploadEvent("session_closed", { outcome: "confirmed" });
 }
 
 export type DirectUploadConfirmPayload = ProjectIntakePayload & {
@@ -338,6 +426,9 @@ export type DirectUploadConfirmPayload = ProjectIntakePayload & {
   sessionStatus: string;
   /** Files still uploading; each starts a later run as it arrives. */
   pendingFileCount: number;
+  /** Files whose stored bytes were refused (final), and files no run took because the session ended first. */
+  failedFileCount: number;
+  abortedFileCount: number;
 };
 
 /**
@@ -362,7 +453,7 @@ export async function confirmDirectUploadProjectIntake(
       refusal = (await advanceLocked(session.id, args.userId, { flush: true, background: false, audit: args.audit, ports })).refusal;
     }
     const [first] = await sql<Array<{ result: ProjectIntakeActionResult | null }>>`
-      select result from upload_session_runs where session_id = ${session.id} and status = 'started' order by wave limit 1`;
+      select result from upload_session_runs where session_id = ${session.id} and status = 'committed' order by wave limit 1`;
     if (!first) {
       if (refusal) throw refusal;
       const [now] = await sql<Array<{ status: string }>>`select status from upload_sessions where id = ${session.id}`;
@@ -372,14 +463,18 @@ export async function confirmDirectUploadProjectIntake(
     if (!first.result) throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
     await authorizeReceiptProject(first.result.payload.project.id, args.userId, session.org_id, session.api_key_id);
     const runs = await listDirectUploadRuns(session.id);
-    const [state] = await sql<Array<{ status: string; pending: number }>>`
-      select status, (select count(*)::int from upload_session_files where session_id = ${session.id} and status = 'pending') as pending
+    const [state] = await sql<Array<{ status: string; pending: number; failed: number; aborted: number }>>`
+      select status,
+        (select count(*)::int from upload_session_files where session_id = ${session.id} and status = 'pending') as pending,
+        (select count(*)::int from upload_session_files where session_id = ${session.id} and status = 'failed') as failed,
+        (select count(*)::int from upload_session_files where session_id = ${session.id} and status = 'aborted') as aborted
       from upload_sessions where id = ${session.id}`;
     const warnings = [...first.result.payload.warnings];
     if (refusal instanceof Error) warnings.push(`Further files are waiting to start: ${refusal.message}`);
     return {
       ...first.result,
-      payload: { ...first.result.payload, warnings, runs, sessionStatus: state?.status ?? session.status, pendingFileCount: Number(state?.pending ?? 0) },
+      payload: { ...first.result.payload, warnings, runs, sessionStatus: state?.status ?? session.status, pendingFileCount: Number(state?.pending ?? 0),
+        failedFileCount: Number(state?.failed ?? 0), abortedFileCount: Number(state?.aborted ?? 0) },
     };
   }, undefined, undefined, args.lockWaitMs ?? 0);
 }

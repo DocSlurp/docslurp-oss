@@ -263,6 +263,12 @@ export const env = {
    * Early ingestion: a direct upload starts a run (a wave) once this many finalized files are waiting, `directUploadWaveDelayMs`
    * after the first of them was finalized, or when its last file is finalized, whichever comes first.
    */
+  /**
+   * DOCSLURP_UPLOAD_WAVES=on: new direct-upload sessions start runs in waves while they upload ('waves'); off (the
+   * default): one run per session once every file is in ('single'). Recorded on each session at creation, so turning it
+   * off is a safe kill switch: sessions in flight keep their protocol, new ones are single-run.
+   */
+  directUploadWaves: ["on", "true", "1"].includes((process.env.DOCSLURP_UPLOAD_WAVES ?? "off").trim().toLowerCase()),
   directUploadWaveFiles: Math.min(10_000, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WAVE_FILES, 5)))),
   directUploadWaveDelayMs: Math.min(600_000, Math.max(0, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WAVE_DELAY_MS, 10_000)))),
   /**

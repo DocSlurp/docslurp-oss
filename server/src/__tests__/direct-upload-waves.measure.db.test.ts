@@ -62,7 +62,7 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => { await stopDirectUploadReconciler(); setDirectUploadWavePortsForTesting(null); await db?.close(); });
 
-async function measure(count: number, mode: "webhook" | "client" = "webhook") {
+async function measure(count: number, mode: "webhook" | "client" = "webhook", protocol: "single" | "waves" = "waves") {
   const fakes = createProjectIntakeFakes();
   const created: number[] = [];
   const { createRun, createProject } = fakes.ports.records;
@@ -79,8 +79,8 @@ async function measure(count: number, mode: "webhook" | "client" = "webhook") {
   };
   setDirectUploadWavePortsForTesting(fakes.ports);
   const sessionId = randomUUID();
-  await db.query(`insert into upload_sessions (id, user_id, org_id, status, next_reconcile_at, expires_at)
-    values ($1, 'u', 'o', 'pending', now() + interval '1 hour', now() + interval '1 day')`, [sessionId]);
+  await db.query(`insert into upload_sessions (id, user_id, org_id, status, next_reconcile_at, expires_at, finalize_protocol)
+    values ($1, 'u', 'o', 'pending', now() + interval '1 hour', now() + interval '1 day', $2)`, [sessionId, protocol]);
   const keys = Array.from({ length: count }, () => `u/${randomUUID()}/raw/${randomUUID()}-doc.pdf`);
   const ids = keys.map(() => randomUUID());
   for (let start = 0; start < count; start += 500) {
@@ -126,17 +126,16 @@ async function measure(count: number, mode: "webhook" | "client" = "webhook") {
   }
   const ingested = fakes.runs.flatMap(run => run.files.map(file => file.sourceKey));
   expect(new Set(ingested).size).toBe(count);
-  return { mode, files: count, runs: created.length, firstRunMs: created[0]! - lastPut, lastRunMs: created.at(-1)! - lastPut };
+  return { protocol, mode, files: count, runs: created.length, firstRunMs: created[0]! - lastPut, lastRunMs: created.at(-1)! - lastPut };
 }
 
 describe.skipIf(!MEASURE)("LOCAL: last PUT to first and last run (webhook without client completes, or client completes without webhook)", () => {
   it("50 and 1,000 files", async () => {
     startDirectUploadReconciler();
-    for (const growth of [1, 2]) {
-      env.directUploadWaveGrowth = growth;
+    for (const protocol of ["waves", "single"] as const) {
       const results = [];
-      for (const mode of ["webhook", "client"] as const) for (const count of [50, 1000]) for (let i = 0; i < 3; i += 1) results.push(await measure(count, mode));
-      console.log(`[measure] branch=waves K=${env.directUploadWaveFiles} T=${env.directUploadWaveDelayMs}ms growth=${growth}\n${results.map(r => JSON.stringify(r)).join("\n")}`);
+      for (const mode of ["webhook", "client"] as const) for (const count of [50, 1000]) for (let i = 0; i < 3; i += 1) results.push(await measure(count, mode, protocol));
+      console.log(`[measure] branch protocol=${protocol} K=${env.directUploadWaveFiles} T=${env.directUploadWaveDelayMs}ms growth=${env.directUploadWaveGrowth}\n${results.map(r => JSON.stringify(r)).join("\n")}`);
     }
   }, 600_000);
 });

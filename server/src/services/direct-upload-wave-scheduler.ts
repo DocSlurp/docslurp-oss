@@ -46,7 +46,11 @@ function run(sessionId: string): void {
     return;
   }
   const done = current(sessionId)
-    .catch(error => console.error(`[upload-waves] check session=${sessionId} failed`, error instanceof Error ? error.name : "unknown"))
+    .catch(error => {
+      const e = error as { name?: string; code?: unknown; statusCode?: unknown };
+      // Bounded class only (never a provider message): the reconciler's own handler logs the details.
+      console.error(`[upload-waves] check session=${sessionId} failed error_class=${e?.name ?? "unknown"}${e?.statusCode ? `:${String(e.statusCode)}` : ""}${typeof e?.code === "string" ? `:${e.code}` : ""}`);
+    })
     .finally(() => {
       running.delete(sessionId);
       if (again.delete(sessionId)) run(sessionId);

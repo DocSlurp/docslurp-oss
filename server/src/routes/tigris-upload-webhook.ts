@@ -4,6 +4,7 @@ import { z } from "zod";
 import { sql } from "../db.js";
 import { env } from "../config.js";
 import { finalizeDirectUploadFileInBackground } from "../services/direct-upload-session.js";
+import { recordUploadTelemetry } from "@docslurp/shared/observability";
 
 const notification = z.object({ events: z.array(z.object({
   eventVersion: z.literal("1"), eventSource: z.literal("tigris"),
@@ -39,7 +40,7 @@ function pump(): void {
     const [fileId, ref] = queued.entries().next().value as [string, FileRef];
     queued.delete(fileId);
     active.add(fileId);
-    void finalizeDirectUploadFileInBackground(ref).finally(() => {
+    void finalizeDirectUploadFileInBackground(ref, "webhook").finally(() => {
       active.delete(fileId);
       pump();
       if (active.size === 0 && queued.size === 0) for (const resolve of idle.splice(0)) resolve();
@@ -47,12 +48,12 @@ function pump(): void {
   }
 }
 
-function enqueue(ref: FileRef): boolean {
-  if (queued.has(ref.fileId) || active.has(ref.fileId)) return true;
-  if (queued.size >= MAX_QUEUED) return false;
+function enqueue(ref: FileRef): "queued" | "duplicate" | "dropped" {
+  if (queued.has(ref.fileId) || active.has(ref.fileId)) return "duplicate";
+  if (queued.size >= MAX_QUEUED) return "dropped";
   queued.set(ref.fileId, ref);
   pump();
-  return true;
+  return "queued";
 }
 
 /** Waits until every queued webhook finalization has run (tests, shutdown). */
@@ -76,8 +77,11 @@ export const tigrisUploadWebhookRoutes = new Hono().post("/tigris/uploads", asyn
   const parsed = notification.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "Invalid notification" }, 400);
   const created = parsed.data.events.filter(event => event.bucket === env.s3Bucket && ["OBJECT_CREATED_PUT", "OBJECT_CREATED_MULTIPART"].includes(event.eventName));
-  const keys = [...new Set(created.map(event => event.object.key).filter(isDirectUploadSourceKey))];
-  if (created.length > keys.length) console.warn(`[upload-webhook] ignored=${created.length - keys.length} reason=not-an-upload-key-or-duplicate`);
+  const candidates = created.map(event => event.object.key);
+  const refused = candidates.filter(key => !isDirectUploadSourceKey(key)).length;
+  const keys = [...new Set(candidates.filter(isDirectUploadSourceKey))];
+  if (refused > 0) recordUploadTelemetry("webhook_keys", refused, { outcome: "refused_key" });
+  if (candidates.length - refused > keys.length) recordUploadTelemetry("webhook_keys", candidates.length - refused - keys.length, { outcome: "duplicate" });
   if (keys.length === 0) return c.json({ ok: true });
   // Exact key match, open file, live session, and the key inside the session's own prefix (its user, or its extract).
   const files = await sql<Array<{ id: string; session_id: string; user_id: string }>>`
@@ -86,8 +90,11 @@ export const tigrisUploadWebhookRoutes = new Hono().post("/tigris/uploads", asyn
       and s.status in ('pending', 'uploading', 'ingesting') and s.expires_at > now()
       and case when s.extract_id is null then starts_with(f.source_key, s.user_id || '/')
         else starts_with(f.source_key, 'extracts/' || coalesce(s.org_id, '') || '/' || s.extract_id || '/') end`;
-  let dropped = 0;
-  for (const file of files) if (!enqueue({ fileId: file.id, sessionId: file.session_id, userId: file.user_id })) dropped += 1;
-  if (dropped > 0) console.warn(`[upload-webhook] dropped=${dropped} reason=queue-full (left to the reconciler)`);
+  // A key with no open file: unknown, or a file already finalized (a late or repeated event).
+  if (keys.length > files.length) recordUploadTelemetry("webhook_keys", keys.length - files.length, { outcome: "unknown_key" });
+  const outcomes = { queued: 0, duplicate: 0, dropped: 0 };
+  for (const file of files) outcomes[enqueue({ fileId: file.id, sessionId: file.session_id, userId: file.user_id })] += 1;
+  for (const [outcome, count] of Object.entries(outcomes)) if (count > 0) recordUploadTelemetry("webhook_keys", count, { outcome });
+  if (outcomes.dropped > 0) console.warn(`[upload-webhook] dropped=${outcomes.dropped} reason=queue-full (left to the reconciler)`);
   return c.json({ ok: true });
 });

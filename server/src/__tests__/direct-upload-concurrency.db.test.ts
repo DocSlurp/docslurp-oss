@@ -198,6 +198,32 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     expect(Math.max(x.start, y.start)).toBeLessThan(Math.min(x.end, y.end));
   }, 20_000);
 
+  it("enforces exactly-once on real Postgres: a fenced wave's run never publishes, a committed wave keeps its files", async () => {
+    const { id, fileIds } = await seedSession(2, "upl-u", "upl-o", "upl-p");
+    await sql`update upload_sessions set finalize_protocol = 'waves' where id = ${id}`;
+    await sql`update upload_session_files set status = 'finalized' where session_id = ${id}`;
+    const runFor = async (runId: string, wave: number, files: string[]) => {
+      await sql`insert into upload_session_runs (session_id, wave, run_id, status) values (${id}, ${wave}, ${runId}, 'pending')`;
+      await sql`update upload_session_files set run_id = ${runId} where id = any(${files})`;
+      await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, monthly_reservation_cents)
+        values (${runId}, 'upl-o', 'upl-u', 'upl-p', 'direct-upload', 'queued', 'queued', '{}'::jsonb, 1)`;
+    };
+    const fencedRun = `${id.slice(0, -4)}f001`;
+    await runFor(fencedRun, 1, [fileIds[0]!]);
+    // Another holder fences the wave and takes its file back; the old holder's publish is then refused.
+    await sql`update upload_session_runs set status = 'failed' where run_id = ${fencedRun}`;
+    await sql`update upload_session_files set run_id = null where run_id = ${fencedRun}`;
+    await expect(sql`update project_runs set creation_ready_at = now() where id = ${fencedRun}`).rejects.toMatchObject({ code: "DSW01" });
+    // A wave whose run publishes is committed in the same transaction, and its files can no longer move.
+    const committedRun = `${id.slice(0, -4)}c002`;
+    await runFor(committedRun, 2, fileIds);
+    await sql`update project_runs set creation_ready_at = now() where id = ${committedRun}`;
+    const [wave] = await sql<Array<{ status: string }>>`select status from upload_session_runs where run_id = ${committedRun}`;
+    expect(wave!.status).toBe("committed");
+    await expect(sql`update upload_session_files set run_id = null where id = ${fileIds[0]!}`).rejects.toMatchObject({ code: "23514" });
+    await expect(sql`update upload_session_runs set status = 'failed' where run_id = ${committedRun}`).rejects.toMatchObject({ code: "23514" });
+  }, 20_000);
+
   it("repeating a batch whose response was lost changes nothing", async () => {
     const { id, fileIds } = await seedSession(4);
     await post(`${id}/files/complete`, { files: fileIds.map(fileId => ({ fileId })) }); // the answer is "lost"

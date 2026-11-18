@@ -16,12 +16,15 @@ const mocks = vi.hoisted(() => ({
   /** Optional pause inside HEAD, to hold a finalizer mid-flight. */
   headGate: null as null | Promise<void>,
 }));
-vi.mock("../db.js", () => ({ sql: Object.assign(
-  (strings: TemplateStringsArray, ...values: unknown[]) => {
+vi.mock("../db.js", () => {
+  const tag = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = strings.reduce((text, part, index) => text + (index ? `$${index}` : "") + part, "");
     return { then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
       mocks.query(text, values).then((result: { rows: unknown[] }) => result.rows).then(resolve, reject) };
-  }, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) }));
+  };
+  // PGlite has one connection: a "transaction" here runs its statements in order on it.
+  return { sql: Object.assign(tag, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value, begin: async (run: (tx: typeof tag) => unknown) => await run(tag) }) };
+});
 vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({
   connection: async (strings: TemplateStringsArray) => strings.join("").includes("pg_try_advisory_lock") ? [{ acquired: !mocks.lockHeld }] : [],
   release: () => {},
@@ -48,10 +51,12 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   },
   deleteUploadedObject: async (key: string) => { mocks.objects.delete(key); },
   abortMultipartUpload: async () => {},
+  signSingleUploadPut: async ({ key }: { key: string }) => `https://storage.invalid/${key}`,
 }));
 
 const { env } = await import("../config.js");
-const { completeDirectUploadFiles, abortDirectUploadSession, getDirectUploadSessionDescription } = await import("../services/direct-upload-session.js");
+const { completeDirectUploadFiles, abortDirectUploadSession, getDirectUploadSessionDescription, createDirectUploadSession } = await import("../services/direct-upload-session.js");
+const { errorClass } = await import("../lib/upload-telemetry.js");
 const { advanceDirectUploadWaves, confirmDirectUploadProjectIntake, setDirectUploadWavePortsForTesting } = await import("../services/direct-upload-waves.js");
 const { reconcileDirectUploads, reconcilePendingUploadFiles } = await import("../services/direct-upload-reconciler.js");
 const { tigrisUploadWebhookRoutes, drainUploadWebhookFinalizations } = await import("../routes/tigris-upload-webhook.js");
@@ -61,14 +66,35 @@ const { createProjectIntakeFakes } = await import("./helpers/project-intake-fake
 const SECRET = "test-webhook-secret";
 let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
 let fakes: ReturnType<typeof createProjectIntakeFakes>;
-const saved = { files: env.directUploadWaveFiles, delay: env.directUploadWaveDelayMs, grace: env.directUploadFinalizeGraceSeconds, growth: env.directUploadWaveGrowth };
+const saved = { files: env.directUploadWaveFiles, delay: env.directUploadWaveDelayMs, grace: env.directUploadFinalizeGraceSeconds, growth: env.directUploadWaveGrowth, waves: env.directUploadWaves };
 
-/** Intake fakes whose runs carry the run id waves choose, and whose new projects exist in the database (access checks). */
+/** Hooks into the fake run creation: pause before publishing, or fail after the run committed. */
+const runHooks = {
+  beforePublish: null as null | ((runId: string) => Promise<void>),
+  afterPublish: null as null | ((runId: string) => Promise<void>),
+};
+
+/**
+ * Intake fakes whose runs carry the run id waves choose and are published like real ones: a project_runs row whose
+ * creation_ready_at is set (so the database's wave fence runs), discarded when creation fails. New projects exist in the
+ * database (access checks).
+ */
 function installFakes() {
   fakes = createProjectIntakeFakes();
   const { createRun, createProject } = fakes.ports.records;
   fakes.ports.records.createRun = async args => {
-    const created = await createRun(args);
+    await db.query(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, monthly_reservation_cents)
+      select $1, p.org_id, $2, p.id, 'direct-upload', 'queued', 'queued', '{}'::jsonb, 1 from projects p where p.id = $3`, [args.runId, args.userId, args.projectId]);
+    let created: Awaited<ReturnType<typeof createRun>>;
+    try {
+      created = await createRun(args);
+      if (runHooks.beforePublish) await runHooks.beforePublish(args.runId!);
+      await db.query("update project_runs set creation_ready_at = now() where id = $1", [args.runId]);
+    } catch (error) {
+      await db.query("delete from project_runs where id = $1 and creation_ready_at is null", [args.runId]);
+      throw error;
+    }
+    if (runHooks.afterPublish) await runHooks.afterPublish(args.runId!);
     return { ...created, run: { ...created.run, id: args.runId! } };
   };
   fakes.ports.records.createProject = async args => {
@@ -81,11 +107,11 @@ function installFakes() {
 
 type Seeded = { sessionId: string; files: Array<{ id: string; key: string }> };
 
-async function seedSession(count: number, options: { userId?: string; orgId?: string; projectName?: string | null; newProject?: boolean } = {}): Promise<Seeded> {
+async function seedSession(count: number, options: { userId?: string; orgId?: string; projectName?: string | null; protocol?: "single" | "waves" } = {}): Promise<Seeded> {
   const userId = options.userId ?? "u";
   const sessionId = randomUUID();
-  await db.query(`insert into upload_sessions (id, user_id, org_id, project_name, status, next_reconcile_at, expires_at)
-    values ($1, $2, $3, $4, 'pending', now() + interval '1 hour', now() + interval '1 day')`, [sessionId, userId, options.orgId ?? "o", options.projectName ?? null]);
+  await db.query(`insert into upload_sessions (id, user_id, org_id, project_name, status, next_reconcile_at, expires_at, finalize_protocol)
+    values ($1, $2, $3, $4, 'pending', now() + interval '1 hour', now() + interval '1 day', $5)`, [sessionId, userId, options.orgId ?? "o", options.projectName ?? null, options.protocol ?? "waves"]);
   const files = Array.from({ length: count }, (_, index) => ({ id: randomUUID(), key: `${userId}/${randomUUID()}/raw/${randomUUID()}-doc-${index}.pdf` }));
   for (let start = 0; start < files.length; start += 500) {
     const values: unknown[] = [];
@@ -115,9 +141,13 @@ async function files(sessionId: string) {
   return (await db.query<{ id: string; status: string; run_id: string | null; source_key: string; finalize_error: unknown }>(
     "select id, status, run_id, source_key, finalize_error from upload_session_files where session_id = $1 order by request_index", [sessionId])).rows;
 }
+/** The session's runs (waves that committed or are starting); failed waves are tombstones, see `tombstones`. */
 async function runs(sessionId: string) {
   return (await db.query<{ wave: number; run_id: string; status: string; file_count: number }>(
-    "select wave, run_id, status, file_count from upload_session_runs where session_id = $1 order by wave", [sessionId])).rows;
+    "select wave, run_id, status, file_count from upload_session_runs where session_id = $1 and status <> 'failed' order by wave", [sessionId])).rows;
+}
+async function tombstones(sessionId: string) {
+  return (await db.query<{ run_id: string }>("select run_id from upload_session_runs where session_id = $1 and status = 'failed' order by wave", [sessionId])).rows.map(row => row.run_id);
 }
 async function session(sessionId: string) {
   return (await db.query<{ status: string; project_id: string | null; result: unknown; last_error: string | null; blocked: boolean }>(
@@ -137,20 +167,22 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => {
   setDirectUploadWavePortsForTesting(null);
-  Object.assign(env, { directUploadWaveFiles: saved.files, directUploadWaveDelayMs: saved.delay, directUploadFinalizeGraceSeconds: saved.grace, directUploadWaveGrowth: saved.growth });
+  Object.assign(env, { directUploadWaveFiles: saved.files, directUploadWaveDelayMs: saved.delay, directUploadFinalizeGraceSeconds: saved.grace, directUploadWaveGrowth: saved.growth, directUploadWaves: saved.waves });
   await db?.close();
 });
 beforeEach(async () => {
   process.env.DOCSLURP_TIGRIS_UPLOAD_WEBHOOK_SECRET = SECRET;
-  Object.assign(env, { directUploadWaveFiles: 5, directUploadWaveDelayMs: 10_000, directUploadFinalizeGraceSeconds: 60, directUploadWaveGrowth: 1 });
+  Object.assign(env, { directUploadWaveFiles: 5, directUploadWaveDelayMs: 10_000, directUploadFinalizeGraceSeconds: 60, directUploadWaveGrowth: 1, directUploadWaves: true });
   mocks.lockHeld = false;
   mocks.objects.clear();
   mocks.replacedBeforeCopy.clear();
   mocks.copies.length = 0;
   mocks.heads.length = 0;
   mocks.headGate = null;
+  runHooks.beforePublish = null;
+  runHooks.afterPublish = null;
   installFakes();
-  await db.exec(`delete from upload_session_runs; delete from upload_session_files; delete from upload_sessions; delete from storage_cleanup_queue;
+  await db.exec(`delete from upload_session_runs; delete from upload_session_files; delete from upload_sessions; delete from storage_cleanup_queue; delete from project_runs;
     delete from upload_cleanup_owners; delete from projects;
     insert into org_memberships (org_id,user_id,role) values ('o','u','owner') on conflict do nothing;`);
 });
@@ -162,7 +194,7 @@ describe("webhook-driven finalization", () => {
     for (const file of seeded.slice(0, 4)) expect((await webhook([file.key])).status).toBe(200);
     // Four finalized and sealed, none in a run: below the wave size and inside the wave delay.
     let rows = await files(sessionId);
-    expect(rows.filter(row => row.status === "completed")).toHaveLength(4);
+    expect(rows.filter(row => row.status === "finalized")).toHaveLength(4);
     expect(rows.slice(0, 4).every(row => row.source_key.includes("/sealed-"))).toBe(true);
     expect(await advance(sessionId)).toMatchObject({ nextCheckMs: expect.any(Number) });
     expect(await runs(sessionId)).toEqual([]);
@@ -171,10 +203,11 @@ describe("webhook-driven finalization", () => {
     await advance(sessionId);
     const [first] = await runs(sessionId);
     // Wave 1 takes the five waiting files; its run id is the session id, so `result` keeps meaning the first run.
-    expect(first).toMatchObject({ wave: 1, run_id: sessionId, status: "started", file_count: 5 });
+    expect(first).toMatchObject({ wave: 1, run_id: sessionId, status: "committed", file_count: 5 });
     rows = await files(sessionId);
     expect(rows.slice(0, 5).every(row => row.run_id === sessionId)).toBe(true);
-    expect((await session(sessionId)).status).toBe("pending");
+    // 'ingesting' from the first run on: servers from before waves never abort it or let its expiry delete these files.
+    expect((await session(sessionId)).status).toBe("ingesting");
 
     // The last two files: the final wave goes to the same project, and the session is confirmed.
     await webhook(seeded.slice(5).map(file => file.key));
@@ -245,7 +278,7 @@ describe("webhook-driven finalization", () => {
     put(theirs.files[0]!.key);
     // Fields beyond the key (a claimed size, owner or session) are ignored.
     await webhook([theirs.files[0]!.key], SECRET, { size: 1, sessionId: mine.sessionId, userIdentity: "u" });
-    expect((await files(theirs.sessionId))[0]!.status).toBe("completed");
+    expect((await files(theirs.sessionId))[0]!.status).toBe("finalized");
     expect((await files(mine.sessionId))[0]!.status).toBe("pending");
     expect(mocks.heads).not.toContain(mine.files[0]!.key);
   });
@@ -271,7 +304,7 @@ describe("webhook-driven finalization", () => {
     await Promise.all([webhook([seeded[0]!.key, seeded[0]!.key]), webhook([seeded[0]!.key])]);
     await webhook([seeded[0]!.key]);
     expect(mocks.copies).toHaveLength(1);
-    expect((await files(sessionId))[0]!.status).toBe("completed");
+    expect((await files(sessionId))[0]!.status).toBe("finalized");
     await advance(sessionId);
     await advance(sessionId);
     expect(await runs(sessionId)).toHaveLength(1);
@@ -288,7 +321,7 @@ describe("webhook-driven finalization", () => {
     // The replacing PUT sends its own event: storage's current version is verified and sealed.
     await webhook([seeded[0]!.key]);
     [row] = await files(sessionId);
-    expect(row!.status).toBe("completed");
+    expect(row!.status).toBe("finalized");
     expect(mocks.copies.at(-1)).toMatchObject({ ifMatch: "\"replaced\"" });
   });
 
@@ -304,7 +337,7 @@ describe("webhook-driven finalization", () => {
     const [result] = await Promise.all([client, hook]);
     expect(result.files.map(file => file.status)).toEqual(["completed", "completed"]);
     expect(mocks.copies.filter(copy => copy.fromKey === seeded[0]!.key)).toHaveLength(1);
-    expect((await files(sessionId)).every(row => row.status === "completed")).toBe(true);
+    expect((await files(sessionId)).every(row => row.status === "finalized")).toBe(true);
   });
 });
 
@@ -314,7 +347,7 @@ describe("waves", () => {
     for (const file of seeded.slice(0, 2)) put(file.key);
     await webhook(seeded.slice(0, 2).map(file => file.key));
     const first = await confirmDirectUploadProjectIntake({ sessionId, userId: "u" }, fakes.ports);
-    expect(first.payload).toMatchObject({ run: { id: sessionId }, sessionStatus: "pending", pendingFileCount: 2, runs: [expect.objectContaining({ wave: 1, fileCount: 2 })] });
+    expect(first.payload).toMatchObject({ run: { id: sessionId }, sessionStatus: "ingesting", pendingFileCount: 2, runs: [expect.objectContaining({ wave: 1, fileCount: 2 })] });
     for (const file of seeded.slice(2)) put(file.key);
     await webhook(seeded.slice(2).map(file => file.key));
     const second = await confirmDirectUploadProjectIntake({ sessionId, userId: "u" }, fakes.ports);
@@ -344,9 +377,11 @@ describe("waves", () => {
     await advance(sessionId);
     expect(await runs(sessionId)).toHaveLength(1);
     const rows = await files(sessionId);
-    expect(rows.slice(0, 5).every(row => row.status === "completed" && row.run_id === sessionId)).toBe(true);
+    expect(rows.slice(0, 5).every(row => row.status === "finalized" && row.run_id === sessionId)).toBe(true);
     expect(rows.slice(5).every(row => row.status === "aborted" && row.run_id === null)).toBe(true);
-    expect((await session(sessionId)).status).toBe("aborted");
+    // Partly succeeded, never "aborted": a run holds five files, and the status says which three were not ingested.
+    expect((await session(sessionId)).status).toBe("confirmed");
+    expect(await getDirectUploadSessionDescription(sessionId, "u", true)).toMatchObject({ status: "confirmed", abortedFileCount: 3, failedFileCount: 0, runs: [expect.objectContaining({ fileCount: 5 })] });
     // Cleanup names only files no run took: the started run's sealed sources are never deleted.
     const queued = (await db.query<{ artifact_uris: string[] }>("select artifact_uris from storage_cleanup_queue where kind = 'storage_prefix'")).rows[0]!;
     expect(queued.artifact_uris.sort()).toEqual(rows.slice(5).map(row => row.source_key).sort());
@@ -362,8 +397,8 @@ describe("waves", () => {
     await expect(advance(sessionId)).rejects.toMatchObject({ code: "project_budget_paused" });
     expect((await runs(sessionId)).map(run => run.wave)).toEqual([1]);
     let rows = await files(sessionId);
-    expect(rows.slice(5, 10).every(row => row.status === "completed" && row.run_id === null)).toBe(true);
-    expect(await session(sessionId)).toMatchObject({ status: "pending", blocked: true, last_error: expect.stringContaining("project_budget_paused") });
+    expect(rows.slice(5, 10).every(row => row.status === "finalized" && row.run_id === null)).toBe(true);
+    expect(await session(sessionId)).toMatchObject({ status: "ingesting", blocked: true, last_error: expect.stringContaining("project_budget_paused") });
     // While paused, the sweep does not retry; a confirm does, and still answers the started runs with a warning.
     expect((await advance(sessionId)).nextCheckMs).toBeGreaterThan(0);
     expect(fakes.runs).toHaveLength(1);
@@ -392,7 +427,9 @@ describe("waves", () => {
     await webhook(seeded.slice(5).map(file => file.key));
     await expect(advance(sessionId)).rejects.toMatchObject({ statusCode: 403 });
     expect(await runs(sessionId)).toHaveLength(1);
-    expect((await session(sessionId)).status).toBe("failed");
+    // The started run stands, so the session ends confirmed (partly), with the files it could not start aborted.
+    expect(await session(sessionId)).toMatchObject({ status: "confirmed", last_error: expect.stringContaining("may no longer add") });
+    expect((await files(sessionId)).slice(5).every(row => row.status === "aborted")).toBe(true);
     expect(fakes.runs).toHaveLength(1);
   });
 
@@ -421,7 +458,9 @@ describe("waves", () => {
     await webhook(seeded.slice(2).map(file => file.key));
     await advance(sessionId);
     rows = await files(sessionId);
-    expect(rows.slice(2).every(row => row.run_id === sessionId)).toBe(true);
+    // The first attempt's run id (the session id) is a tombstone now: the run that took the rest has its own id.
+    expect(await tombstones(sessionId)).toEqual([sessionId]);
+    expect(rows.slice(2).every(row => row.run_id !== null && row.run_id !== sessionId)).toBe(true);
     expect((await session(sessionId)).status).toBe("confirmed");
     const described = await getDirectUploadSessionDescription(sessionId, "u", true);
     // The same per-file error shape a batched complete answers; a failed file is final.
@@ -435,10 +474,12 @@ describe("waves", () => {
     const { sessionId, files: seeded } = await seedSession(2);
     for (const file of seeded) put(file.key);
     await webhook(seeded.map(file => file.key));
-    await db.query("insert into upload_session_runs (session_id, wave, run_id, status, file_count) values ($1, 1, $1, 'creating', 2)", [sessionId]);
+    await db.query("insert into upload_session_runs (session_id, wave, run_id, status, file_count) values ($1, 1, $1, 'pending', 2)", [sessionId]);
     await db.query("update upload_session_files set run_id = $1 where session_id = $1", [sessionId]);
     await advance(sessionId);
-    expect(await runs(sessionId)).toEqual([expect.objectContaining({ wave: 1, status: "started", file_count: 2 })]);
+    // The dead holder's wave is fenced (a tombstone: its run id can never publish); a new wave takes the files.
+    expect(await tombstones(sessionId)).toEqual([sessionId]);
+    expect(await runs(sessionId)).toEqual([expect.objectContaining({ status: "committed", file_count: 2 })]);
     expect(fakes.runs).toHaveLength(1);
   });
 
@@ -480,7 +521,7 @@ describe("waves", () => {
     mocks.lockHeld = true;
     await expect(advance(sessionId)).rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
     // Finalizing never needed the session lock.
-    expect((await files(sessionId)).every(row => row.status === "completed")).toBe(true);
+    expect((await files(sessionId)).every(row => row.status === "finalized")).toBe(true);
     expect(await runs(sessionId)).toEqual([]);
   });
 });
@@ -501,11 +542,13 @@ describe("session expiry", () => {
     await webhook(seeded.slice(0, 3).map(file => file.key));
     expect(await runs(sessionId)).toEqual([]);
     await expire(sessionId);
-    expect(await runs(sessionId)).toEqual([expect.objectContaining({ wave: 1, status: "started", file_count: 3 })]);
+    expect(await runs(sessionId)).toEqual([expect.objectContaining({ wave: 1, status: "committed", file_count: 3 })]);
     const rows = await files(sessionId);
-    expect(rows.slice(0, 3).every(row => row.status === "completed" && row.run_id === sessionId)).toBe(true);
+    expect(rows.slice(0, 3).every(row => row.status === "finalized" && row.run_id === sessionId)).toBe(true);
     expect(rows[3]).toMatchObject({ status: "aborted", run_id: null });
-    expect((await session(sessionId)).status).toBe("aborted");
+    // The last run holds three files: the session partly succeeded (confirmed), with one file aborted.
+    expect((await session(sessionId)).status).toBe("confirmed");
+    expect(await getDirectUploadSessionDescription(sessionId, "u", true)).toMatchObject({ abortedFileCount: 1, runs: [expect.objectContaining({ fileCount: 3 })] });
     // Only the file no run took is cleaned up.
     expect(await cleanupKeys()).toEqual([rows[3]!.source_key]);
   });
@@ -593,7 +636,7 @@ describe("reconciler fallback", () => {
     await db.query("update upload_sessions set next_reconcile_at = now() where id = $1", [sessionId]);
     await reconcileDirectUploads();
     const rows = await files(sessionId);
-    expect(rows.every(row => row.status === "completed" && row.run_id)).toBe(true);
+    expect(rows.every(row => row.status === "finalized" && row.run_id)).toBe(true);
     const ingested = fakes.runs.flatMap(run => run.files.map(file => file.sourceKey));
     expect(ingested).toHaveLength(1000);
     expect(new Set(ingested).size).toBe(1000);
@@ -609,6 +652,176 @@ describe("reconciler fallback", () => {
     expect(await reconcilePendingUploadFiles()).toBe(0);
     await db.query("update upload_sessions set client_finalizing_until = now() - interval '1 second' where id = $1", [sessionId]);
     expect(await reconcilePendingUploadFiles()).toBe(1);
-    expect((await files(sessionId)).every(row => row.status === "completed")).toBe(true);
+    expect((await files(sessionId)).every(row => row.status === "finalized")).toBe(true);
+  });
+});
+
+describe("the protocol is fixed per session (DOCSLURP_UPLOAD_WAVES)", () => {
+  async function protocolOf(sessionId: string) {
+    return (await db.query<{ finalize_protocol: string }>("select finalize_protocol from upload_sessions where id = $1", [sessionId])).rows[0]!.finalize_protocol;
+  }
+  const declare = (count: number) => Array.from({ length: count }, (_, i) => ({ filename: `doc-${i}.pdf`, mimeType: "application/pdf", sizeBytes: 10 }));
+
+  it("records the setting at creation: off is 'single', on is 'waves'", async () => {
+    env.directUploadWaves = false;
+    const off = await createDirectUploadSession({ userId: "u", orgId: "o", pipeline: {}, files: declare(1) });
+    expect(await protocolOf(off.sessionId)).toBe("single");
+    expect(off).toMatchObject({ protocol: "single", runs: [] });
+    env.directUploadWaves = true;
+    const on = await createDirectUploadSession({ userId: "u", orgId: "o", pipeline: {}, files: declare(1) });
+    expect(await protocolOf(on.sessionId)).toBe("waves");
+  });
+
+  it("'single': no run until every file is in, then one run (the session id) reporting the whole upload", async () => {
+    const { sessionId, files: seeded } = await seedSession(7, { protocol: "single" });
+    for (const file of seeded.slice(0, 6)) put(file.key);
+    put(seeded[6]!.key, 11); // the wrong size: refused, final
+    await webhook(seeded.slice(0, 5).map(file => file.key));
+    await advance(sessionId);
+    expect(await runs(sessionId)).toEqual([]);
+    // Finalized files are 'completed' as before waves; a confirm with files still open is refused as before.
+    expect((await files(sessionId)).slice(0, 5).every(row => row.status === "completed")).toBe(true);
+    await expect(confirmDirectUploadProjectIntake({ sessionId, userId: "u" }, fakes.ports)).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining("incomplete") });
+    await webhook(seeded.slice(5).map(file => file.key));
+    await advance(sessionId);
+    expect(await runs(sessionId)).toEqual([expect.objectContaining({ run_id: sessionId, status: "committed", file_count: 6 })]);
+    const described = await getDirectUploadSessionDescription(sessionId, "u", true);
+    expect(described).toMatchObject({ status: "confirmed", protocol: "single", failedFileCount: 1, runs: [expect.objectContaining({ runId: sessionId })] });
+    // `result` is the whole upload: the refused file is listed with the run's rejections, as before waves.
+    expect((described!.result as { rejected?: Array<{ filename: string }> }).rejected).toEqual([expect.objectContaining({ filename: "doc-6.pdf" })]);
+  });
+
+  it("is a safe kill switch: a 'waves' session keeps its waves after the setting is turned off", async () => {
+    const { sessionId, files: seeded } = await seedSession(6);
+    env.directUploadWaves = false;
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.slice(0, 5).map(file => file.key));
+    await advance(sessionId);
+    expect(await runs(sessionId)).toEqual([expect.objectContaining({ file_count: 5 })]);
+    // ... while a session created now is single-run.
+    const fresh = await createDirectUploadSession({ userId: "u", orgId: "o", pipeline: {}, files: declare(1) });
+    expect(fresh).toMatchObject({ protocol: "single" });
+  });
+});
+
+describe("exactly once", () => {
+  async function committedRuns() {
+    return Number((await db.query<{ n: number }>("select count(*)::int as n from project_runs where creation_ready_at is not null")).rows[0]!.n);
+  }
+
+  it("adopts a run that committed before its intake failed: its files stay in it, no second run", async () => {
+    const { sessionId, files: seeded } = await seedSession(5);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.map(file => file.key));
+    runHooks.afterPublish = async () => { runHooks.afterPublish = null; throw new Error("workflow start lost its answer"); };
+    await advance(sessionId);
+    expect(await runs(sessionId)).toEqual([expect.objectContaining({ run_id: sessionId, status: "committed", file_count: 5 })]);
+    expect((await files(sessionId)).every(row => row.run_id === sessionId)).toBe(true);
+    await advance(sessionId);
+    await reconcileDirectUploads();
+    expect(await committedRuns()).toBe(1);
+    // The response was rebuilt from the database, so `result` and runs[] are complete.
+    const described = await getDirectUploadSessionDescription(sessionId, "u", true);
+    expect(described).toMatchObject({ status: "confirmed", result: { run: { id: sessionId } } });
+  });
+
+  it("fences a holder that lost its lock mid-wave: its run is refused at publish, every file is ingested once", async () => {
+    const { sessionId, files: seeded } = await seedSession(5);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.map(file => file.key));
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let paused!: () => void;
+    const reachedPublish = new Promise<void>(resolve => { paused = resolve; });
+    runHooks.beforePublish = async runId => { if (runId === sessionId) { paused(); await gate; } };
+    // Holder A takes the files and creates its run, then stalls before publishing (its lock connection is gone).
+    const holderA = advance(sessionId);
+    await reachedPublish;
+    // Holder B gets the session (the lock is free) and fences A's pending wave, then ingests the files itself.
+    await advance(sessionId);
+    expect(await tombstones(sessionId)).toEqual([sessionId]);
+    const [bRun] = await runs(sessionId);
+    expect(bRun).toMatchObject({ status: "committed", file_count: 5 });
+    // A resumes: the database refuses to publish a run whose wave was fenced.
+    release();
+    await expect(holderA).rejects.toMatchObject({ code: "DSW01" });
+    expect(await committedRuns()).toBe(1);
+    expect((await files(sessionId)).every(row => row.run_id === bRun!.run_id)).toBe(true);
+    expect((await session(sessionId)).status).toBe("confirmed");
+  });
+
+  it("retries a refused wave under a new run id: one run per file, and the refused id can never publish", async () => {
+    const { sessionId, files: seeded } = await seedSession(5);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.map(file => file.key));
+    fakes.state.blockRunCreation = new RunCreationBlockedError("This organization has reached its monthly budget cap", 402, "org_budget_paused");
+    await expect(advance(sessionId)).rejects.toMatchObject({ code: "org_budget_paused" });
+    fakes.state.blockRunCreation = null;
+    await db.query("update upload_sessions set wave_blocked_until = null where id = $1", [sessionId]);
+    await advance(sessionId);
+    await advance(sessionId);
+    const [run] = await runs(sessionId);
+    expect(run).toMatchObject({ status: "committed", file_count: 5 });
+    expect(run!.run_id).not.toBe(sessionId);
+    expect(await tombstones(sessionId)).toEqual([sessionId]);
+    expect(await committedRuns()).toBe(1);
+    // A late attempt to publish the refused run id (an old holder, a server from before waves) is refused.
+    await db.query(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, monthly_reservation_cents)
+      select $1, 'o', 'u', project_id, 'direct-upload', 'queued', 'queued', '{}'::jsonb, 1 from upload_sessions where id = $1`, [sessionId]);
+    await expect(db.query("update project_runs set creation_ready_at = now() where id = $1", [sessionId])).rejects.toMatchObject({ code: "DSW01" });
+  });
+
+  it("refuses at the database any move that could put a file in two runs", async () => {
+    const { sessionId, files: seeded } = await seedSession(5);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.map(file => file.key));
+    await advance(sessionId);
+    // A file of a committed wave cannot leave it or move to another run.
+    await expect(db.query("update upload_session_files set run_id = null where id = $1", [seeded[0]!.id])).rejects.toMatchObject({ code: "23514" });
+    // A committed wave cannot be failed (which would free its files).
+    await expect(db.query("update upload_session_runs set status = 'failed' where session_id = $1", [sessionId])).rejects.toMatchObject({ code: "23514" });
+    // A file can join only a pending wave of its own session.
+    const other = await seedSession(1);
+    await expect(db.query("update upload_session_files set run_id = $1 where id = $2", [sessionId, other.files[0]!.id])).rejects.toMatchObject({ code: "23514" });
+  });
+});
+
+describe("rolling deploys and rollbacks", () => {
+  it("never leaves a 'waves' session in a state a server from before waves would confirm, abort or expire", async () => {
+    // Before waves, confirm and the reconciler start a run only when every file is 'completed', and abort and expiry
+    // refuse an 'ingesting' session. A waves session's finalized files are 'finalized', and it is 'ingesting' from its
+    // first run on.
+    const { sessionId, files: seeded } = await seedSession(8);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.slice(0, 2).map(file => file.key));
+    let rows = await files(sessionId);
+    expect(rows.some(row => row.status === "completed")).toBe(false);
+    expect(rows.slice(0, 2).every(row => row.status === "finalized")).toBe(true);
+    await webhook(seeded.slice(2, 6).map(file => file.key));
+    await advance(sessionId);
+    rows = await files(sessionId);
+    expect(rows.every(row => row.status !== "completed")).toBe(true);
+    expect((await session(sessionId)).status).toBe("ingesting");
+    // Clients still see 'completed'.
+    const described = await getDirectUploadSessionDescription(sessionId, "u", true);
+    expect(described!.files.slice(0, 5).every(file => file.status === "completed")).toBe(true);
+  });
+
+  it("takes files an older server finalized as 'completed' into a wave as 'finalized'", async () => {
+    const { sessionId, files: seeded } = await seedSession(5);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.slice(0, 4).map(file => file.key));
+    // An older server finalized the last file during the deploy.
+    await db.query("update upload_session_files set status = 'completed', finalized_at = now() where id = $1", [seeded[4]!.id]);
+    await advance(sessionId);
+    expect((await files(sessionId)).every(row => row.status === "finalized" && row.run_id === sessionId)).toBe(true);
+  });
+});
+
+describe("observability", () => {
+  it("classifies errors without their messages", () => {
+    expect(errorClass(new RunCreationBlockedError("cap", 402, "org_budget_paused"))).toBe("billing:org_budget_paused");
+    expect(errorClass(Object.assign(new Error("secret text"), { name: "PostgresError", code: "DSW01" }))).toBe("postgres:DSW01");
+    expect(errorClass(Object.assign(new Error("secret provider text"), { name: "NoSuchBucket", $metadata: { httpStatusCode: 404 } }))).toBe("storage:NoSuchBucket");
   });
 });

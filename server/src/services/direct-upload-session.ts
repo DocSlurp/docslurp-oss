@@ -12,6 +12,7 @@ import { isTransientStorageError, withStorageRetry } from "../lib/storage-retry.
 import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
 import { requestDirectUploadWaveCheck } from "./direct-upload-wave-scheduler.js";
+import { errorClass, recordLockWait, uploadEvent } from "../lib/upload-telemetry.js";
 import {
   abortMultipartUpload,
   completeMultipartUpload,
@@ -103,6 +104,8 @@ export type UploadSessionRow = {
   template_key: string | null;
   pipeline: PipelineFeatureOverrides | null;
   status: string;
+  /** Fixed at creation: 'single' (one run once every file is in) or 'waves' (runs while uploading). */
+  finalize_protocol?: "single" | "waves" | null;
 };
 
 export type UploadSessionFileRow = {
@@ -150,13 +153,33 @@ export function toDirectUploadPartCount(
   return Math.max(1, Math.ceil(sizeBytes / partSize));
 }
 
+/**
+ * A file whose bytes are verified and sealed: 'completed' in a 'single' session, 'finalized' in a 'waves' session.
+ * Servers from before waves confirm a session only when every file is 'completed', so they never confirm (and so never
+ * re-ingest) a waves session during a rolling deploy or after a rollback.
+ */
+export const FINALIZED_FILE_STATUSES = ["completed", "finalized"] as const;
+export function isFinalizedFileStatus(status: string | null | undefined): boolean {
+  return status === "completed" || status === "finalized";
+}
+
+/** Clients see one finalized status: 'completed'. */
+export function publicFileStatus(status: string): string {
+  return status === "finalized" ? "completed" : status;
+}
+
+/** The protocol a session was created with (rows from before waves are 'single'). */
+export function sessionProtocol(session: Pick<UploadSessionRow, "finalize_protocol">): "single" | "waves" {
+  return session.finalize_protocol === "waves" ? "waves" : "single";
+}
+
 /** The session row alone, scoped to its user: what authorization and session-level checks need, at O(1) in session size. */
 export async function loadDirectUploadSessionRow(
   sessionId: string,
   userId: string,
 ): Promise<UploadSessionRow | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select expires_at, id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, origin, allowed_project_ids, extract_id
+    select expires_at, id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, origin, allowed_project_ids, extract_id, finalize_protocol
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -223,7 +246,7 @@ async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: n
 
 export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow, ttl = SIGNED_UPLOAD_TTL_SECONDS, expiresAt?: Date | string) {
   const remainingTtl = () => expiresAt ? assertUploadSessionActive({ status: "pending", expires_at: expiresAt } as UploadSessionRow) : ttl;
-  if (file.status === "completed" || file.status === "aborted") return { transferState: file.status === "completed" ? "complete" as const : "unavailable" as const, verifiedBytes: file.status === "completed" ? file.size_bytes : null, ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
+  if (isFinalizedFileStatus(file.status) || file.status === "aborted") return { transferState: isFinalizedFileStatus(file.status) ? "complete" as const : "unavailable" as const, verifiedBytes: isFinalizedFileStatus(file.status) ? file.size_bytes : null, ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: publicFileStatus(file.status) };
   if (file.upload_mode === "single") {
     return {
       ...fileRef(file),
@@ -349,6 +372,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       origin,
       allowed_project_ids,
       extract_id,
+      finalize_protocol,
       status
     )
     values (
@@ -364,6 +388,9 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${input.origin ?? "machine"},
       ${input.allowedProjectIds ? sql.array([...input.allowedProjectIds]) : null},
       ${input.extract?.id ?? null},
+      -- Recorded once: turning DOCSLURP_UPLOAD_WAVES off later (a kill switch) never changes a session in flight. An
+      -- extract always takes its one run.
+      ${env.directUploadWaves && !input.extract ? "waves" : "single"},
       'initializing'
     )
   `;
@@ -436,7 +463,7 @@ export async function describeDirectUploadSession(
   const ttl = statusOnly || ["confirmed", "failed", "aborted", "expired"].includes(loaded.session.status) ? SIGNED_UPLOAD_TTL_SECONDS : assertUploadSessionActive(loaded.session);
   const files = await Promise.all(
     loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) || file.status === "failed"
-      ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status, ...fileOutcome(file) }
+      ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: publicFileStatus(file.status), ...fileOutcome(file) }
       : { ...await buildDirectUploadFileDescriptor(file, ttl, loaded.session.expires_at), ...fileOutcome(file) }),
   );
   const runs = await listDirectUploadRuns(loaded.session.id);
@@ -444,13 +471,21 @@ export async function describeDirectUploadSession(
     expiresAt: loaded.session.expires_at ? new Date(loaded.session.expires_at).toISOString() : null,
     sessionId: loaded.session.id,
     status: loaded.session.status,
+    /** 'single': one run once every file is in; 'waves': runs while the upload is in progress. */
+    protocol: sessionProtocol(loaded.session),
     /** The first run's intake response, once every file is in a run (or failed); kept for clients that read one run. */
     result: (loaded.session.result as { payload?: unknown } | null)?.payload ?? null,
     error: loaded.session.last_error ?? null,
     /** The project the session's runs went to (set by its first run). */
     projectId: runs.length > 0 ? loaded.session.project_id : null,
-    /** Every run this upload started, in order. Files are ingested in waves while the upload is still in progress. */
+    /** Every run this upload started, in order ('single' sessions: at most one). */
     runs,
+    // A `confirmed` session with failed or aborted files partly succeeded: its runs hold every other file. Never ask
+    // the user to upload the session again; only these files were not ingested.
+    /** Files whose stored bytes were refused (final). */
+    failedFileCount: loaded.files.filter(file => file.status === "failed").length,
+    /** Files no run took because the session was aborted, expired or refused before they joined one. */
+    abortedFileCount: loaded.files.filter(file => file.status === "aborted").length,
     files,
   };
 }
@@ -475,15 +510,18 @@ export type DirectUploadRunSummary = {
   createdAt: string;
 };
 
-/** The runs a session has started (or is starting), in wave order. */
+/**
+ * The runs a session has started (or is starting), in order and numbered from 1. A wave that failed never had a run
+ * (its row is a tombstone that keeps its run id from ever committing) and is not listed.
+ */
 export async function listDirectUploadRuns(sessionId: string): Promise<DirectUploadRunSummary[]> {
   const rows = await sql<Array<{ run_id: string; wave: number; status: string; file_count: number; documents: number | null; created_at: Date | string }>>`
     select run_id, wave, status, file_count, jsonb_array_length(result -> 'payload' -> 'documents') as documents, created_at
-    from upload_session_runs where session_id = ${sessionId} order by wave`;
-  return rows.map(row => ({
+    from upload_session_runs where session_id = ${sessionId} and status <> 'failed' order by wave`;
+  return rows.map((row, index) => ({
     runId: row.run_id,
-    wave: Number(row.wave),
-    status: row.status === "started" ? "started" as const : "starting" as const,
+    wave: index + 1,
+    status: row.status === "committed" ? "started" as const : "starting" as const,
     fileCount: Number(row.file_count),
     documentCount: row.documents === null || row.documents === undefined ? null : Number(row.documents),
     createdAt: new Date(row.created_at).toISOString(),
@@ -525,7 +563,7 @@ export async function getDirectUploadSessionDescription(
       try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, budget.signal), undefined, budget.signal); exists = true; }
       catch (error) { if (!isStorageNotFound(error)) throw error; }
       if (!exists) return;
-      try { if (await finalizeLeasedDirectUploadFile(file, { signal: budget.signal })) finalized += 1; }
+      try { if (await finalizeLeasedDirectUploadFile(file, { signal: budget.signal, path: "recovery" })) finalized += 1; }
       catch (error) {
         // Another finalizer (a webhook, the client, the reconciler) holds this file: it will settle it.
         if (!(error instanceof ProjectIntakeError && error.code === "upload_session_busy")) throw error;
@@ -571,24 +609,31 @@ export interface DirectUploadLockOptions {
  */
 export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy", waitOrOptions: number | DirectUploadLockOptions = 0): Promise<T> {
   const options = typeof waitOrOptions === "number" ? { waitMs: waitOrOptions } : waitOrOptions;
-  const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
+  const startedAt = Date.now();
+  const deadline = startedAt + Math.max(0, options.waitMs ?? 0);
+  const lockClass = options.lockClass ?? "short";
+  const busy = () => {
+    recordLockWait((Date.now() - startedAt) / 1000, lockClass, "busy");
+    return new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
+  };
   for (;;) {
     let reserved: Awaited<ReturnType<typeof reserveDirectUploadLockConnection>>;
     try {
       reserved = await reserveDirectUploadLockConnection({ lockClass: options.lockClass, orgId: options.orgId, deadline });
     } catch (error) {
-      if (error instanceof DirectUploadLockUnavailable) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
+      if (error instanceof DirectUploadLockUnavailable) throw busy();
       throw error;
     }
     const { connection, release } = reserved;
     try {
       const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
       if (lock?.acquired) {
+        recordLockWait((Date.now() - startedAt) / 1000, lockClass, "acquired");
         try { return await run(); }
         finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
       }
     } finally { release(); }
-    if (Date.now() >= deadline) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
+    if (Date.now() >= deadline) throw busy();
     await new Promise(resolve => setTimeout(resolve, Math.min(LOCK_RETRY_INTERVAL_MS, Math.max(1, deadline - Date.now()))));
   }
 }
@@ -621,7 +666,7 @@ export const DECLARED_SIZE_CHANGE_MESSAGE = "Declared upload size cannot change"
  * (`upload_storage_unavailable`), with the provider's own error only in the log. Definite answers stay as they are.
  */
 export function uploadStorageUnavailable(error: unknown, context: string): ProjectIntakeError {
-  console.error(`[direct-upload] status=storage-unavailable ${context}`, error instanceof Error ? error.name : "unknown", isTransientStorageError(error) ? "transient" : "other");
+  console.error(`[direct-upload] status=storage-unavailable ${context} error_class=${errorClass(error)} ${isTransientStorageError(error) ? "transient" : "other"}`);
   return new ProjectIntakeError("Upload storage is temporarily unavailable; retry shortly", 503, undefined, "upload_storage_unavailable");
 }
 
@@ -639,9 +684,10 @@ const LEASE_POLL_MS = 100;
  * without touching storage. A file another finalizer holds is waited for up to `waitMs`, then answers 409
  * `upload_session_busy` (retryable). Callers must have scoped `file` to the caller's session (it is re-checked here).
  */
-export async function finalizeLeasedDirectUploadFile(file: UploadSessionFileRow, options: { finalSize?: number; waitMs?: number; signal?: AbortSignal } = {}): Promise<boolean> {
-  if (file.status === "completed") return true;
+export async function finalizeLeasedDirectUploadFile(file: UploadSessionFileRow, options: { finalSize?: number; waitMs?: number; signal?: AbortSignal; path?: "client" | "webhook" | "fallback" | "recovery" } = {}): Promise<boolean> {
+  if (isFinalizedFileStatus(file.status)) return true;
   const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
+  let contended = false;
   for (;;) {
     const token = randomUUID();
     const [claimed] = await sql<RawFileRow[]>`
@@ -660,10 +706,14 @@ export async function finalizeLeasedDirectUploadFile(file: UploadSessionFileRow,
       }
     }
     const current = await readFileState(file);
-    if (current.status === "completed") return true;
+    if (isFinalizedFileStatus(current.status)) return true;
     if (current.status === "failed") throw storedFinalizeFailure(file, current.finalize_error);
     if (current.status !== "pending") throw new ProjectIntakeError("Upload session is closed", 409, undefined, "upload_session_closed");
     if (current.leased) {
+      if (!contended) {
+        contended = true;
+        uploadEvent("lease_contention", { path: options.path ?? "client" });
+      }
       if (Date.now() >= deadline) throw new ProjectIntakeError(`${file.filename} is being finalized; retry shortly`, 409, undefined, "upload_session_busy");
       await new Promise(resolve => setTimeout(resolve, Math.min(LEASE_POLL_MS, Math.max(1, deadline - Date.now()))));
     }
@@ -679,7 +729,7 @@ async function readFileState(file: Pick<UploadSessionFileRow, "id" | "session_id
 }
 
 /** The rejection the background finalizer recorded, answered again with its own status and message. */
-function storedFinalizeFailure(file: Pick<UploadSessionFileRow, "filename">, stored: StoredFinalizeError | null): ProjectIntakeError {
+export function storedFinalizeFailure(file: Pick<UploadSessionFileRow, "filename">, stored: StoredFinalizeError | null): ProjectIntakeError {
   const status = stored && [400, 409, 413, 415, 422].includes(stored.statusCode) ? stored.statusCode as 400 : 400;
   const error = new ProjectIntakeError(stored?.message ?? `${file.filename} was rejected`, status);
   finalFileFailures.set(error, stored?.code ?? rejectionCode(error));
@@ -700,7 +750,7 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
 }
 
 async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, finalSize: number | undefined, signal: AbortSignal | undefined): Promise<boolean> {
-  if (file.status === "completed") return true;
+  if (isFinalizedFileStatus(file.status)) return true;
   if (file.status !== "pending") return false;
   if (file.unknown_size && finalSize === undefined) return false;
   if (finalSize !== undefined) {
@@ -723,7 +773,7 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
   }
   if (file.upload_mode !== "single") {
     // A completed multipart upload needs no copy: its part URLs are bound to an upload ID that completion closed.
-    const published = await sql<{ id: string }[]>`update upload_session_files set status = 'completed', updated_at = now(), finalized_at = now(),
+    const published = await sql<{ id: string }[]>`update upload_session_files set status = (select case when ps.finalize_protocol = 'waves' then 'finalized' else 'completed' end from upload_sessions ps where ps.id = upload_session_files.session_id), updated_at = now(), finalized_at = now(),
         finalize_lease_until = null, finalize_lease_token = null, finalize_error = null
       where id = ${file.id} and status = 'pending' and source_key = ${file.source_key} returning id`;
     if (published.length === 1) return true;
@@ -754,7 +804,7 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
       from ownership
       on conflict (kind, target) do update set not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)
       returning id
-    ) update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now(), finalized_at = now(),
+    ) update upload_session_files set status = (select case when ps.finalize_protocol = 'waves' then 'finalized' else 'completed' end from upload_sessions ps where ps.id = upload_session_files.session_id), source_key = ${sourceKey}, updated_at = now(), finalized_at = now(),
         finalize_lease_until = null, finalize_lease_token = null, finalize_error = null
       where id = ${file.id} and status = 'pending' and source_key = ${file.source_key} and exists (select 1 from queued)
       returning id, source_key`;
@@ -769,7 +819,7 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
 
 async function completedMeanwhile(file: UploadSessionFileRow): Promise<boolean> {
   const [current] = await sql<Array<{ status: string }>>`select status from upload_session_files where id = ${file.id}`;
-  return current?.status === "completed";
+  return isFinalizedFileStatus(current?.status);
 }
 
 /**
@@ -780,8 +830,8 @@ async function completedMeanwhile(file: UploadSessionFileRow): Promise<boolean> 
 async function alreadyPublishedAs(file: UploadSessionFileRow, attemptedKey: string): Promise<boolean> {
   const [current] = await sql<Array<{ status: string; source_key: string; org_id: string | null }>>`
     select f.status, f.source_key, s.org_id from upload_session_files f join upload_sessions s on s.id = f.session_id where f.id = ${file.id}`;
-  if (current?.status === "completed" && current.source_key === attemptedKey) return true;
-  if (current?.status === "completed" && attemptedKey !== file.source_key && current.source_key !== attemptedKey) {
+  if (isFinalizedFileStatus(current?.status) && current!.source_key === attemptedKey) return true;
+  if (isFinalizedFileStatus(current?.status) && attemptedKey !== file.source_key && current!.source_key !== attemptedKey) {
     await discardLosingSeal(attemptedKey, current.source_key, current.org_id, file.id);
   }
   throw new ProjectIntakeError("Upload ownership changed during finalization", 409);
@@ -954,10 +1004,10 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
   const settled = await settleBounded(entries, env.directUploadFinalizeConcurrency, async entry => {
     const file = byId.get(entry.fileId);
     if (!file) throw new ProjectIntakeError("Upload file not found", 404);
-    if (file.status === "completed") return;
+    if (isFinalizedFileStatus(file.status)) return;
     if (file.status === "failed") throw storedFinalizeFailure(file, file.finalize_error ?? null);
     if (confirmed) throw new ProjectIntakeError("Upload session is closed", 409);
-    if (!await finalizeLeasedDirectUploadFile(file, { finalSize: entry.sizeBytes, waitMs: CLIENT_COMPLETE_LEASE_WAIT_MS, signal: budget.signal })) {
+    if (!await finalizeLeasedDirectUploadFile(file, { finalSize: entry.sizeBytes, waitMs: CLIENT_COMPLETE_LEASE_WAIT_MS, signal: budget.signal, path: "client" })) {
       throw new ProjectIntakeError(PARTS_INCOMPLETE_MESSAGE, 409);
     }
     finalizedHere += 1;
@@ -995,20 +1045,22 @@ export function directUploadWaveThreshold(startedWaves: number): number {
 }
 
 export async function scheduleDirectUploadWaves(sessionId: string): Promise<void> {
-  const [state] = await sql<Array<{ waiting: number; waves: number; open: boolean; extract: boolean; delay_ms: number | null; blocked_ms: number | null }>>`
+  const [state] = await sql<Array<{ waiting: number; waves: number; open: boolean; extract: boolean; protocol: string | null; delay_ms: number | null; blocked_ms: number | null }>>`
     select
-      (select count(*)::int from upload_session_files where session_id = s.id and status = 'completed' and run_id is null) as waiting,
-      (select count(*)::int from upload_session_runs where session_id = s.id) as waves,
+      (select count(*)::int from upload_session_files where session_id = s.id and status in ('completed', 'finalized') and run_id is null) as waiting,
+      (select count(*)::int from upload_session_runs where session_id = s.id and status = 'committed') as waves,
       exists (select 1 from upload_session_files where session_id = s.id and status = 'pending') as open,
       s.extract_id is not null as extract,
+      s.finalize_protocol as protocol,
       (select greatest(0, ceil(extract(epoch from (min(finalized_at) + ${env.directUploadWaveDelayMs}::int * interval '1 millisecond' - now())) * 1000))::int
-        from upload_session_files where session_id = s.id and status = 'completed' and run_id is null) as delay_ms,
+        from upload_session_files where session_id = s.id and status in ('completed', 'finalized') and run_id is null) as delay_ms,
       greatest(0, ceil(extract(epoch from (s.wave_blocked_until - now())) * 1000))::int as blocked_ms
     from upload_sessions s where s.id = ${sessionId} and s.status in ('pending', 'uploading', 'ingesting')`;
   if (!state) return;
   let delayMs: number;
   if (!state.open) delayMs = 0;
-  else if (state.extract || state.waiting === 0) return;
+  // A 'single' session (and an extract) takes its one run once every file is in: nothing is due before that.
+  else if (state.extract || state.protocol !== "waves" || state.waiting === 0) return;
   else if (state.waiting >= directUploadWaveThreshold(Number(state.waves ?? 0))) delayMs = 0;
   else delayMs = Number(state.delay_ms ?? env.directUploadWaveDelayMs);
   delayMs = Math.max(delayMs, Number(state.blocked_ms ?? 0));
@@ -1025,7 +1077,16 @@ export type BackgroundFinalizeOutcome = "completed" | "not-ready" | "failed" | "
  * A definite rejection of the stored bytes (wrong size, refused by intake policy) fails that file only, with a client-safe
  * message; anything else is retried later. Never throws.
  */
-export async function finalizeDirectUploadFileInBackground(ref: { fileId: string; sessionId: string; userId: string }): Promise<BackgroundFinalizeOutcome> {
+export async function finalizeDirectUploadFileInBackground(ref: { fileId: string; sessionId: string; userId: string }, path: "webhook" | "fallback" = "webhook"): Promise<BackgroundFinalizeOutcome> {
+  const outcome = await finalizeInBackground(ref, path);
+  uploadEvent(path === "webhook" ? "webhook_finalize" : "fallback_finalize", { outcome: outcome.outcome.replace("-", "_"), ...(outcome.errorClass ? { error_class: outcome.errorClass } : {}) },
+    outcome.outcome === "failed" || outcome.errorClass
+      ? { severity: outcome.outcome === "failed" ? "warn" : "error", body: `upload file ${ref.fileId} ${path} finalize ${outcome.outcome}`, attributes: { "docslurp.upload.file_id": ref.fileId, "docslurp.upload.session_id": ref.sessionId } }
+      : undefined);
+  return outcome.outcome;
+}
+
+async function finalizeInBackground(ref: { fileId: string; sessionId: string; userId: string }, path: "webhook" | "fallback"): Promise<{ outcome: BackgroundFinalizeOutcome; errorClass?: string }> {
   try {
     const [row] = await sql<RawFileRow[]>`
       select f.id, f.session_id, f.filename, f.mime_type, f.size_bytes, f.source_key, f.upload_mode, f.upload_id, f.part_size, f.status,
@@ -1033,38 +1094,36 @@ export async function finalizeDirectUploadFileInBackground(ref: { fileId: string
       from upload_session_files f join upload_sessions s on s.id = f.session_id
       where f.id = ${ref.fileId} and f.session_id = ${ref.sessionId} and s.user_id = ${ref.userId}
         and s.status in ('pending', 'uploading', 'ingesting') and s.expires_at > now()`;
-    if (!row || row.status !== "pending") return "skipped";
+    if (!row || row.status !== "pending") return { outcome: "skipped" };
     const file = normalizeFileRow(row);
     let completed: boolean;
     try {
-      completed = await finalizeLeasedDirectUploadFile(file);
+      completed = await finalizeLeasedDirectUploadFile(file, { path });
     } catch (error) {
-      if (error instanceof ProjectIntakeError && error.code === "upload_session_busy") return "busy";
-      if (error instanceof ProjectIntakeError && error.code === "upload_session_closed") return "skipped";
+      if (error instanceof ProjectIntakeError && error.code === "upload_session_busy") return { outcome: "busy" };
+      if (error instanceof ProjectIntakeError && error.code === "upload_session_closed") return { outcome: "skipped" };
       if (error instanceof ProjectIntakeError && [400, 413, 415, 422].includes(error.statusCode)) {
         const stored: StoredFinalizeError = { statusCode: error.statusCode, code: error.code ?? rejectionCode(error), message: error.message };
         const failed = await sql`update upload_session_files set status = 'failed', finalize_error = ${sql.json(stored)}, updated_at = now()
           where id = ${file.id} and status = 'pending' and (finalize_lease_until is null or finalize_lease_until < now()) returning id`;
         if (failed.length === 1) {
-          console.error(`[direct-upload] status=file-rejected file=${file.id} code=${stored.code}`);
           await scheduleDirectUploadWaves(file.session_id);
-          return "failed";
+          return { outcome: "failed", errorClass: errorClass(error) };
         }
-        return "busy";
+        return { outcome: "busy" };
       }
       // A replaced object (409), a storage outage (503): the file stays open and is tried again.
       await deferBackgroundCheck(file.id);
-      return "retry";
+      return { outcome: "retry", errorClass: errorClass(error) };
     }
     if (!completed) {
       await deferBackgroundCheck(file.id);
-      return "not-ready";
+      return { outcome: "not-ready" };
     }
     await scheduleDirectUploadWaves(file.session_id);
-    return "completed";
+    return { outcome: "completed" };
   } catch (error) {
-    console.error(`[direct-upload] status=background-finalize-failed file=${ref.fileId}`, error instanceof Error ? error.name : "unknown");
-    return "retry";
+    return { outcome: "retry", errorClass: errorClass(error) };
   }
 }
 
@@ -1134,6 +1193,54 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
   }, undefined, undefined, SIGN_PARTS_LOCK_WAIT_MS);
 }
 
+/**
+ * A pending wave whose holder is gone (a crash, or a lost lock connection while the holder runs on) is fenced: moved to
+ * 'failed' in one statement, which the database orders against its run's publication (trigger on project_runs). If the
+ * run committed first, the wave is already 'committed' and is left alone; otherwise its run can never commit. Then files
+ * of failed waves go back to waiting. Both steps are idempotent, so a crash between them is repaired on the next pass.
+ * Callers hold the session lock; a live holder that lost it only loses its run, never ingests a file twice.
+ */
+export async function fenceInterruptedWaves(sessionId: string): Promise<number> {
+  const fenced = await sql<Array<{ run_id: string }>>`
+    update upload_session_runs set status = 'failed' where session_id = ${sessionId} and status = 'pending' returning run_id`;
+  await freeFailedWaveFiles(sessionId);
+  if (fenced.length > 0) console.warn(`[upload-waves] session=${sessionId} fenced=${fenced.length} reason=interrupted-wave`);
+  return fenced.length;
+}
+
+/** Files held by a failed wave wait for the next one. The database refuses this for any other wave. */
+export async function freeFailedWaveFiles(sessionId: string): Promise<void> {
+  await sql`update upload_session_files set run_id = null, updated_at = now()
+    where session_id = ${sessionId} and run_id in (select run_id from upload_session_runs where session_id = ${sessionId} and status = 'failed')`;
+}
+
+/**
+ * Ends a session that will start no further run (aborted, expired, refused). Files no run took are aborted and cleaned
+ * up. A session with any committed run ends `confirmed`, never `failed` or `aborted`: its runs are ingesting or done,
+ * and `failedFileCount` / `abortedFileCount` say which files were not, so no client asks to upload it again.
+ */
+export async function closeDirectUploadSession(sessionId: string, outcome: "aborted" | "failed", message: string | null): Promise<"confirmed" | "aborted" | "failed"> {
+  await fenceInterruptedWaves(sessionId);
+  await sql`update upload_session_files set status = 'aborted', finalize_lease_until = null, finalize_lease_token = null, updated_at = now()
+    where session_id = ${sessionId} and run_id is null and status in ('pending', 'completed', 'finalized')`;
+  const [first] = await sql<Array<{ result: unknown }>>`
+    select result from upload_session_runs where session_id = ${sessionId} and status = 'committed' order by wave limit 1`;
+  let closed: "confirmed" | "aborted" | "failed";
+  if (first) {
+    closed = "confirmed";
+    await sql`update upload_sessions set status = 'confirmed', result = coalesce(result, ${first.result === null ? null : sql.json(JSON.parse(JSON.stringify(first.result)))}),
+        last_error = ${message}, client_finalizing_until = null, client_finalizing_since = null, updated_at = now()
+      where id = ${sessionId} and status <> 'confirmed'`;
+  } else {
+    closed = outcome;
+    await sql`update upload_sessions set status = ${outcome}, last_error = coalesce(${message}, last_error), updated_at = now()
+      where id = ${sessionId} and status <> 'confirmed'`;
+  }
+  await queueAbandonedDirectUploadCleanup(sessionId);
+  uploadEvent("session_closed", { outcome: closed === "confirmed" ? "partial" : closed }, { body: `upload session ${sessionId} closed (${closed})`, attributes: { "docslurp.upload.session_id": sessionId } });
+  return closed;
+}
+
 async function abortDirectUploadSessionUnlocked(
   sessionId: string,
   userId: string,
@@ -1142,32 +1249,18 @@ async function abortDirectUploadSessionUnlocked(
   if (!session) {
     return false;
   }
-  const loaded = { session };
-
-  if (loaded.session.status === "confirmed" || loaded.session.status === "ingesting") throw new ProjectIntakeError("Ingested uploads cannot be aborted", 409);
-
-  // Runs already started keep their files: only files no run has taken are aborted (and cleaned up). A finalizer still
-  // working on one of them loses its fenced completion write.
-  await sql`
-    update upload_session_files
-    set status = 'aborted',
-        finalize_lease_until = null,
-        finalize_lease_token = null,
-        updated_at = now()
-    where session_id = ${sessionId} and run_id is null
-  `;
-  await sql`
-    update upload_sessions
-    set status = 'aborted',
-        updated_at = now()
-    where id = ${sessionId}
-  `;
-
-  await queueAbandonedDirectUploadCleanup(sessionId);
+  // Every file is in a run: nothing is left to abort. A 'single' session's one run is being started ('ingesting').
+  if (session.status === "confirmed" || (session.status === "ingesting" && sessionProtocol(session) === "single")) {
+    throw new ProjectIntakeError("Ingested uploads cannot be aborted", 409);
+  }
+  // A 'waves' session stops starting runs. Runs already started keep their files; files no run took are aborted and
+  // cleaned up (a finalizer still working on one loses its fenced completion write), and with any run the session ends
+  // confirmed (partly), not aborted.
+  const closed = await closeDirectUploadSession(sessionId, "aborted", null);
   // An aborted extract session has nothing to keep: its prefix is emptied on the next sweep.
-  if (loaded.session.extract_id && (await listDirectUploadRuns(sessionId)).length === 0) {
+  if (session.extract_id && closed !== "confirmed") {
     await sql`update extracts set expires_at = least(expires_at, now()), updated_at = now()
-      where id = ${loaded.session.extract_id} and run_id is null and state = 'active'`;
+      where id = ${session.extract_id} and run_id is null and state = 'active'`;
   }
   return true;
 }
@@ -1314,9 +1407,10 @@ function multipartCompletionError(error: unknown, filename: string): unknown {
 
 /** Wait out outstanding signed PUTs before deleting abandoned raw objects. */
 export async function queueAbandonedDirectUploadCleanup(sessionId: string): Promise<void> {
+  // Only files no run took and that will never join one (aborted or failed); a run's sources are never touched.
   const files = await sql<Array<{ source_key: string; upload_id: string }>>`
     select f.source_key, f.upload_id from upload_session_files f join upload_sessions s on s.id = f.session_id
-    where s.id = ${sessionId} and s.status in ('aborted', 'failed') and f.upload_id is not null and f.run_id is null`;
+    where s.id = ${sessionId} and f.status in ('aborted', 'failed') and f.upload_id is not null and f.run_id is null`;
   for (const file of files) {
     // Abort is idempotent at the service boundary; an assembled or already
     // aborted MPU may legitimately return NoSuchUpload.
@@ -1328,7 +1422,7 @@ export async function queueAbandonedDirectUploadCleanup(sessionId: string): Prom
     select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
       jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'
     from upload_sessions s join upload_session_files f on f.session_id = s.id
-    where s.id = ${sessionId} and s.status in ('aborted', 'failed') and f.run_id is null
+    where s.id = ${sessionId} and f.status in ('aborted', 'failed') and f.run_id is null
     group by s.id
     on conflict (kind, target) do update set artifact_uris = excluded.artifact_uris,
       not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)`;
