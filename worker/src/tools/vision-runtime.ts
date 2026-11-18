@@ -684,10 +684,23 @@ async function sendRouteVisionRequest(
     outputCap,
     ...(args.singleAttempt ? { singleAttempt: true } : {}),
   };
+  // The settings this call ran with, recorded next to the model on its usage row (shared model-provenance.ts).
+  const reasoning = args.reasoning as unknown;
+  const modelConfig = {
+    promptMode: requestProfile?.promptMode ?? "template",
+    temperature: requestProfile?.temperature ?? 0,
+    topP: requestProfile?.topP,
+    maxTokens: outputCap.maxTokens ?? undefined,
+    reasoning: typeof reasoning === "string" ? reasoning
+      : reasoning && typeof reasoning === "object" && typeof (reasoning as { effort?: unknown }).effort === "string" ? (reasoning as { effort: string }).effort
+      : reasoning ? "on" : undefined,
+    transcription: args.transcription ? true : undefined,
+  };
   if (!isPrivate) {
-    return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy,
+    const hosted = await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy,
       maxPrice: cappedMaxPrice(pricing.maxPrice, args.priceCeiling), streaming: args.cfg.visionStreaming,
       ...(args.priceCeiling && pricing.maxPrice ? { providerOnly: args.priceCeiling.hosts } : {}) });
+    return { ...hosted, costMetadata: { ...hosted.costMetadata, modelConfig } };
   }
   const call = await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: route.modelUri, capability: "vision", operation: "worker.vision" });
   onUsageModel(call.usageModel);
@@ -700,7 +713,7 @@ async function sendRouteVisionRequest(
     provider: PRIVATE_MODEL_PROVIDER,
     model: call.usageModel,
     costCents: cost.costCents,
-    costMetadata: { ...cost.metadata, servedModel: call.model },
+    costMetadata: { ...cost.metadata, servedModel: call.model, modelConfig },
   };
 }
 

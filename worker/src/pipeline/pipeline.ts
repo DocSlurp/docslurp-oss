@@ -215,6 +215,7 @@ export class WorkflowState {
     this.documentStages = new Map();
     this.totalStages = 0;
     this.usageLedger.runId = run.id;
+    this.usageLedger.modelClass = runModelClass(run.pipeline);
     // The run's OCR page class decision (pipeline/ocr-page-class.ts), read when a charge is made: it may be pinned after
     // construction (startRun) or arrive with hydrated artifacts.
     this.usageLedger.ocrPageClass = () => runUsesOcrPageClass(this.artifactLedger);
@@ -278,4 +279,20 @@ export class WorkflowState {
   refreshStats(): void {
     refreshRunProgressStats(this);
   }
+}
+
+/** The levels a run was configured with, as recorded next to every model it calls (usage-ledger.ts `modelClass`). */
+export function runModelClass(pipeline: ProjectRun["pipeline"] | null | undefined): Record<string, string> | null {
+  if (!pipeline) return null;
+  const levels: Record<string, string | undefined> = {
+    quality: pipeline.quality,
+    visionProfile: pipeline.vision?.profile,
+    embeddingProfile: pipeline.embedding?.profile,
+    pageRouter: pipeline.pageRouter?.router,
+    inferenceLane: pipeline.inferenceLane,
+    // Speed boost swaps hosted models for their fast hosts: part of what selected the model.
+    speedBoost: pipeline.speedBoost === true ? "on" : undefined,
+  };
+  const known = Object.fromEntries(Object.entries(levels).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""));
+  return Object.keys(known).length ? known : null;
 }

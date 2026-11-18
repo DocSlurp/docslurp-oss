@@ -1538,6 +1538,8 @@ async function chatProjectTurn(
           mode: "whole-corpus",
           wholeCorpusFallbackReason: null,
           ...generated.usage,
+          // What selected the model (the tier or reference the caller asked for) and the settings it ran with.
+          metadata: { ...(generated.usage as { metadata?: Record<string, unknown> }).metadata, modelClass: { tier: policy.requestedModel ?? undefined, answer: "whole-corpus" }, modelConfig: { reasoning: policy.reasoning } },
         });
 
         const answer = requireGeneratedAnswer(generated.text);
@@ -1781,6 +1783,8 @@ async function chatProjectTurn(
       mode: "retrieval",
       wholeCorpusFallbackReason: wholeCorpusDebug.fallbackReason,
       ...generated.usage,
+      // What selected the model (the tier or reference the caller asked for) and the settings it ran with.
+      metadata: { ...(generated.usage as { metadata?: Record<string, unknown> }).metadata, modelClass: { tier: policy.requestedModel ?? undefined, answer: "retrieval" }, modelConfig: { reasoning: policy.reasoning } },
     });
 
     const answer = requireGeneratedAnswer(generated.text);

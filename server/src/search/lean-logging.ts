@@ -111,7 +111,8 @@ export function enqueueSearchUsage(scope: { userId: string; orgId: string | null
       const id = `search-usage-batch:${randomUUID()}`;
       // Only what holds for the whole batch: no per-call trace, span or provider request ids.
       const metadata: Record<string, unknown> = { billable: false, batched: true, providerCostCents: providerCost, firstCallAt: new Date().toISOString() };
-      for (const field of ["costSource", "pricingSource", "privacyMode"]) if (event.metadata?.[field] !== undefined) metadata[field] = event.metadata[field];
+      // The batch key includes provider and model, so what ran (the model URI and the level that chose it) holds for it too.
+      for (const field of ["costSource", "pricingSource", "privacyMode", "modelUri", "modelClass", "modelConfig"]) if (event.metadata?.[field] !== undefined) metadata[field] = event.metadata[field];
       open.set(key, { kind: "usage", id, userId: scope.userId, orgId, projectId: scope.projectId, apiKeyId, event: { ...event, id, calls: 1, metadata } });
     }
   }
