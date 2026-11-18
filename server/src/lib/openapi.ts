@@ -87,6 +87,12 @@ export function buildOpenApiDocument(baseUrl: string) {
               in: "query",
               name: "userId",
               schema: { type: "string" }
+            },
+            {
+              in: "query",
+              name: "activity",
+              description: "`true`: active and just-finished runs, plus `summary` (the organization's queued, in-progress and recently completed work, pages per minute and ETA bucket).",
+              schema: { type: "boolean" }
             }
           ],
           responses: {

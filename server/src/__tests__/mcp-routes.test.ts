@@ -22,6 +22,8 @@ const uploadRequest = vi.fn();
 const loadDirectUploadSession = vi.fn();
 const describeDirectUploadSession = vi.fn();
 vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession, describeDirectUploadSession }));
+const assertSessionProjectStillReadable = vi.fn(async (..._args: unknown[]) => {});
+vi.mock("../services/direct-session-idempotency.js", async (importOriginal) => ({ ...await importOriginal<object>(), assertSessionProjectStillReadable }));
 
 const loadMediaEvidence = vi.fn();
 vi.mock("../services/media-evidence.js", () => ({ loadMediaEvidence }));
@@ -317,14 +319,24 @@ describe("mcpRoutes", () => {
     const sessionId = "11111111-1111-4111-8111-111111111111";
     const loaded = { session: { id: sessionId, user_id: "user-1", org_id: "org-1", project_id: "ws-1", status: "confirmed" }, files: [] };
     loadDirectUploadSession.mockResolvedValue(loaded);
-    describeDirectUploadSession.mockResolvedValue({ sessionId, status: "confirmed", result: { project: { id: "ws-1" }, run: { id: "run-1" } }, files: [] });
+    const progress = { files: { total: 1, completed: 1 }, bytes: { total: 10, completed: 10 }, run: { id: sessionId, status: "processing", eta: { bucket: "1-5m", estimate: false } } };
+    describeDirectUploadSession.mockResolvedValue({ sessionId, status: "confirmed", result: { project: { id: "ws-1" }, run: { id: "run-1" } }, files: [], progress });
     const request = () => app.request("/mcp/tools/getUploadStatus", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ sessionId }) });
     const response = await request();
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ sessionId, result: { run: { id: "run-1" } } });
+    // The progress block (files, bytes, run rate and ETA bucket) reaches MCP clients unchanged.
+    expect(await response.json()).toMatchObject({ sessionId, result: { run: { id: "run-1" } }, progress });
     expect(loadDirectUploadSession).toHaveBeenCalledWith(sessionId, "user-1");
+    describeDirectUploadSession.mockClear();
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, org_id: "foreign" } });
     expect((await request()).status).toBe(404);
+    // A foreign session's progress is never computed, let alone returned.
+    expect(describeDirectUploadSession).not.toHaveBeenCalled();
+    // A user who lost the session's project since reads nothing either.
+    loadDirectUploadSession.mockResolvedValue(loaded);
+    assertSessionProjectStillReadable.mockRejectedValueOnce(new Error("no longer readable"));
+    expect((await request()).status).toBe(404);
+    expect(describeDirectUploadSession).not.toHaveBeenCalled();
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, project_id: "foreign" } });
     expect((await request()).status).toBe(404);
   });

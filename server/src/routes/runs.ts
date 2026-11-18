@@ -41,6 +41,34 @@ import {
   retryRun
 } from "../services/runs.js";
 import { redactOperatorEvent, redactOperatorRun } from "../services/progress-snapshot.js";
+import { activitySummaryScopeFor, getOrgActivitySummary, type ActivitySummaryScope } from "../services/run-activity-summary.js";
+import type { ActivitySummary } from "@docslurp/shared";
+
+/**
+ * The caller's activity summary: an API key's organization, else the session user's default one, over the projects
+ * there the caller may read (project access and the key's allowlist, as the run list applies them). Never fails the
+ * feed: a summary that cannot be read is null and the error goes to telemetry by name only.
+ */
+async function activitySummaryScope(actor: RequestActor): Promise<ActivitySummaryScope | null> {
+  try {
+    return await activitySummaryScopeFor(actor.userId, actor.type === "apiKey" ? actor.apiKey.orgId : null);
+  } catch (error) {
+    console.error("[run-activity] summary scope unavailable", error instanceof Error ? error.name : "unknown");
+    return null;
+  }
+}
+async function activitySummaryIn(scope: ActivitySummaryScope | null): Promise<ActivitySummary | null> {
+  if (!scope) return null;
+  try {
+    return await getOrgActivitySummary(scope);
+  } catch (error) {
+    console.error("[run-activity] summary unavailable", error instanceof Error ? error.name : "unknown");
+    return null;
+  }
+}
+async function activitySummaryFor(actor: RequestActor): Promise<ActivitySummary | null> {
+  return activitySummaryIn(await activitySummaryScope(actor));
+}
 
 /** A run as the caller may read it: platform operators see everything; customers never see backend models or machines. */
 async function customerRun<R extends { stats?: unknown; pipeline?: unknown }>(c: Context, run: R): Promise<R> {
@@ -141,12 +169,21 @@ export const runsRoutes = new Hono()
     // Run stats carry worker CPU, RAM, class and region: operators only, like the progress snapshot.
     const visible = await isPlatformAdminActor(actor) ? <R,>(run: R) => run : redactOperatorRun;
     if (c.req.query("activity") === "true") {
-      const runs = await listRuns(userId, true);
-      return c.json({ runs: (orgId ? runs.filter((run) => run.orgId === orgId) : runs).map(visible), hasMore: false, nextCursor: null });
+      const [runs, summary] = await Promise.all([listRuns(userId, true), activitySummaryFor(actor)]);
+      return c.json({ runs: (orgId ? runs.filter((run) => run.orgId === orgId) : runs).map(visible), hasMore: false, nextCursor: null, summary });
     }
     // History is paged: `limit` (1-100, default 50) and the `cursor` from the previous page's nextCursor.
     const page = await listRunsPage(userId, { orgId, limit: parseListLimit(c.req.query("limit"), 50, 100), cursor: c.req.query("cursor") || undefined });
     return c.json({ ...page, runs: page.runs.map(visible) });
+  })
+  // The organization summary alone: a cheap poll for clients that already hold the run inventory elsewhere.
+  .get("/activity/summary", async (c) => {
+    const actor = getRequestActor(c);
+    if (!apiKeyMayReadRuns(actor)) {
+      return apiStatusError(c, 403, "Forbidden");
+    }
+    c.header("Cache-Control", "no-store");
+    return c.json({ summary: await activitySummaryFor(actor) });
   })
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -176,16 +213,37 @@ export const runsRoutes = new Hono()
         const runs = await listRuns(userId, true);
         return (orgId ? runs.filter(run => run.orgId === orgId) : runs).map(run => operator ? run : redactOperatorRun(run));
       }
+      // The summary is cached per organization (about 5 s), so sending it each heartbeat when it changed costs at most
+      // one read per organization per cache period however many streams are open.
+      let sentSummary: string | null = null;
+      // Re-resolved with each inventory, so a member who loses the organization or a project stops seeing it.
+      let summaryScope: ActivitySummaryScope | null = null;
+      const summaryKey = (summary: ActivitySummary) => JSON.stringify({ ...summary, generatedAt: null });
       try {
         let reconciledAt = Number.NEGATIVE_INFINITY;
         while (!aborted) {
+          // A key revoked, expired or stripped of its scopes while the stream is open stops receiving the feed.
+          if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", ...SEARCH_SCOPES, "artifacts"])) {
+            await stream.writeSSE({ event: "activity-error", data: "{}" });
+            break;
+          }
           // Event snapshots carry live changes; inventory reconciles membership,
           // access revocation and missed notifications at a bounded cadence.
           if (Date.now() - reconciledAt >= STREAM_RECONCILE_MS) {
-            const runs = await inventory();
+            summaryScope = await activitySummaryScope(actor);
+            const [runs, summary] = await Promise.all([inventory(), activitySummaryIn(summaryScope)]);
             if (aborted) break;
-            await stream.writeSSE({ event: "activity", data: JSON.stringify({ runs }) });
+            await stream.writeSSE({ event: "activity", data: JSON.stringify({ runs, summary }) });
+            if (summary) sentSummary = summaryKey(summary);
             reconciledAt = Date.now();
+          } else {
+            const summary = await activitySummaryIn(summaryScope);
+            if (aborted) break;
+            // generatedAt alone changing is not news.
+            if (summary && summaryKey(summary) !== sentSummary) {
+              sentSummary = summaryKey(summary);
+              await stream.writeSSE({ event: "activity-summary", data: JSON.stringify(summary) });
+            }
           }
           await stream.writeSSE({ event: "heartbeat", data: "{}" });
           await Promise.race([stream.sleep(STREAM_HEARTBEAT_MS), abortSignal]);
@@ -503,6 +561,7 @@ acceptApiKeys(runsRoutes, [
   "POST /:runId/reprocess/estimate",
   "GET /",
   "GET /activity/stream",
+  "GET /activity/summary",
   "GET /:runId/progress",
   "GET /:runId/progress/stream",
   "GET /:runId/events",
