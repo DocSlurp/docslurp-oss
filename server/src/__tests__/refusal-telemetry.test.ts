@@ -19,7 +19,7 @@ vi.mock("../lib/posthog-ai-observability.js", () => ({
 import { apiStatusError, middlewareErrorResponse, nativeErrorHandler } from "../lib/api-error.js";
 import { apiPublicErrorMiddleware } from "../lib/public-errors.js";
 import { requestContextMiddleware } from "../lib/request-context.js";
-import { REJECTION_TOKEN_HEADER } from "../lib/error-context.js";
+import { customerPipelineGuard } from "../middleware/customer-pipeline-guard.js";
 import { MAX_REJECTION_REASON_CHARS, sanitizeRejectionReason } from "../lib/rejection-reason.js";
 
 const SECRETS = [
@@ -51,6 +51,12 @@ function app() {
   // An error response built and then discarded, before a different one is sent.
   app.post("/v1/replaced-other-status", c => { apiStatusError(c, 400, "STALEREASON one"); return c.json({ error: "gone" }, 404); });
   app.post("/v1/replaced-same-status", c => { apiStatusError(c, 400, "STALEREASON two"); return c.json({ error: "other" }, 400); });
+  // A recorded error response already assigned to c.res, then replaced by middleware.
+  app.use("/v1/replaced-after-assignment", async (c, next) => { await next(); c.res = c.json({ error: "replacement" }, 400); });
+  app.post("/v1/replaced-after-assignment", c => apiStatusError(c, 400, "STALEREASON four"));
+  // The pipeline guard clones every JSON response (error ones too) on its way out.
+  app.use("/v1/guarded", customerPipelineGuard);
+  app.post("/v1/guarded", c => apiStatusError(c, 400, "guarded reason"));
   app.post("/v1/recorded-twice", c => { apiStatusError(c, 400, "STALEREASON three"); return apiStatusError(c, 400, "delivered reason"); });
   return app;
 }
@@ -78,7 +84,6 @@ async function refuse(path: string) {
   expect(line).toMatch(/^\[api\] requestId=/);
   expect(spans).toHaveLength(1);
   expect(posthog).toHaveLength(1);
-  expect(response.headers.has(REJECTION_TOKEN_HEADER)).toBe(false);
   return { status: response.status, body, line, span: spans.at(-1) ?? {}, posthog: posthog.at(-1) ?? {} };
 }
 
@@ -100,12 +105,18 @@ describe("refusal telemetry never carries credentials", () => {
     expect(JSON.stringify(result.posthog)).not.toMatch(/docslurp\.error\.reason|files\.example\.com/);
   });
 
-  it.each(["/v1/replaced-other-status", "/v1/replaced-same-status"])("%s: a discarded error response's reason is never reported", async (path) => {
+  it.each(["/v1/replaced-other-status", "/v1/replaced-same-status", "/v1/replaced-after-assignment"])("%s: a discarded error response's reason is never reported", async (path) => {
     const result = await refuse(path);
     expect(result.span["docslurp.error.code"]).toBeUndefined();
     expect(result.span["docslurp.error.reason"]).toBeUndefined();
     expect(result.posthog["docslurp.error.code"]).toBeUndefined();
     for (const text of [result.line, JSON.stringify(result.span), JSON.stringify(result.posthog), result.body]) expect(text).not.toContain("STALEREASON");
+  });
+
+  it("keeps the reason through middleware that clones the same response", async () => {
+    const result = await refuse("/v1/guarded");
+    expect(result.span["docslurp.error.reason"]).toBe("guarded reason");
+    expect(result.posthog["docslurp.error.code"]).toBe("invalid_request");
   });
 
   it("reports the reason of the error response actually delivered", async () => {

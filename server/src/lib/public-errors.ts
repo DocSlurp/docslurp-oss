@@ -3,7 +3,7 @@ import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { safeErrorResponse as sharedSafeErrorResponse } from "@docslurp/shared/error-response";
 import { reportException } from "@docslurp/shared/error-reporting";
 import { usesNativeErrorEnvelope } from "./api-error.js";
-import { errorContext } from "./error-context.js";
+import { errorContext, preservingRequestRejection } from "./error-context.js";
 
 export { exceptionDetails } from "@docslurp/shared/error-reporting";
 
@@ -22,7 +22,8 @@ export function safeErrorResponse(response: Response, requestId?: string, native
 
 export const publicErrorMiddleware: MiddlewareHandler = async (c, next) => {
   await next();
-  c.res = await safeErrorResponse(c.res, c.get("requestId"));
+  // The envelope is the same error: its recorded rejection stays with it.
+  await preservingRequestRejection(c, async () => { c.res = await safeErrorResponse(c.res, c.get("requestId")); });
 };
 
 /**
@@ -31,5 +32,5 @@ export const publicErrorMiddleware: MiddlewareHandler = async (c, next) => {
  */
 export const apiPublicErrorMiddleware: MiddlewareHandler = async (c, next) => {
   await next();
-  c.res = await safeErrorResponse(c.res, c.get("requestId"), usesNativeErrorEnvelope(c.req.path));
+  await preservingRequestRejection(c, async () => { c.res = await safeErrorResponse(c.res, c.get("requestId"), usesNativeErrorEnvelope(c.req.path)); });
 };

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { preservingRequestRejection } from "../lib/error-context.js";
 import type { Context, MiddlewareHandler } from "hono";
 import { createClient } from "redis";
 
@@ -474,7 +475,8 @@ function releaseWhenDone(c: Context, release: () => void): void {
       await reader.cancel(reason).catch(() => undefined);
     },
   });
-  c.res = new Response(stream, { status: c.res.status, statusText: c.res.statusText, headers: c.res.headers });
+  // The same response with a slot-releasing body: its recorded rejection (if any) stays with it.
+  preservingRequestRejection(c, () => { c.res = new Response(stream, { status: c.res.status, statusText: c.res.statusText, headers: c.res.headers }); });
 }
 
 export function chatConcurrencyKeys(c: Context): ChatSlotCounter[] {

@@ -3,7 +3,7 @@ import { boundedBodyLimit } from "./bounded-body-limit.js";
 import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
-import { recordRequestRejection, REJECTION_TOKEN_HEADER } from "./error-context.js";
+import { recordRequestRejection } from "./error-context.js";
 
 type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 408 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
 
@@ -95,8 +95,7 @@ export function withApiErrorDetails<T>(error: T, details: ApiErrorDetails): T {
   return error;
 }
 
-// The rejection token belongs to the response it was recorded for, never to a replacement.
-const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-encoding", "transfer-encoding", REJECTION_TOKEN_HEADER]);
+const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-encoding", "transfer-encoding"]);
 
 /**
  * The one place a thrown error becomes an envelope response. Copy comes from the

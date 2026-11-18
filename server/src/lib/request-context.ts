@@ -1,4 +1,4 @@
-import { errorContext, takeDeliveredRejection, type RequestRejection } from "./error-context.js";
+import { deliveredRejection, errorContext, type RequestRejection } from "./error-context.js";
 import { withObservation, addTraceMetadata, withHttpSpan, exportsOtlpLogs, activeTraceparent } from "@docslurp/shared/observability";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -391,8 +391,7 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
             : c.res.status;
       httpResponseStats.record(status);
       // Read (and strip) the rejection token now, before any await: the response is final.
-      const taken = takeDeliveredRejection(reportContext.rejection, c.res);
-      delivered = thrownError ? undefined : taken;
+      delivered = thrownError ? undefined : deliveredRejection(c.res);
       const durationMs = Date.now() - startedAt;
       const cpu = process.cpuUsage(cpuStart);
       const rssDeltaBytes = process.memoryUsage().rss - rssStart;
