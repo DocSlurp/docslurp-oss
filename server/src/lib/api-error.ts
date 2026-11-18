@@ -9,7 +9,7 @@ type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 410 | 413 | 415 | 422 | 4
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
-  recordRequestRejection(code, message);
+  recordRequestRejection(status, code, message);
   return envelopeResponse(c, status, code, message, details);
 }
 
@@ -63,7 +63,7 @@ export function usesNativeErrorEnvelope(path: string): boolean {
  */
 export function middlewareErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
   if (usesNativeErrorEnvelope(c.req.path)) return apiErrorResponse(c, status, code, message, details);
-  recordRequestRejection(code, message);
+  recordRequestRejection(status, code, message);
   return c.json({ error: message, code, ...linkedDetails(c, code, details) }, status);
 }
 
@@ -99,7 +99,7 @@ export function envelopeForError(c: Context, error: unknown, status: number, ori
   const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
   const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);
   // The client gets the code's reviewed copy; telemetry gets what actually went wrong.
-  recordRequestRejection(code, rawErrorReason(error));
+  recordRequestRejection(status, code, rawErrorReason(error));
   const response = envelopeResponse(c, status as ErrorStatus, code, publicApiErrorMessage(code, details), details);
   for (const source of [error instanceof HTTPException ? error.res?.headers : undefined, originalHeaders]) {
     source?.forEach((value, name) => {

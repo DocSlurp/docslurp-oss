@@ -598,8 +598,17 @@ describe("Project Intake from remote URLs", () => {
     const result = await intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
     expect(result?.documents.map((document) => document.filename)).toEqual(["found.txt"]);
     expect(result?.rejected).toEqual([
-      expect.objectContaining({ filename: "https://example.com/missing.txt", statusCode: 400, message: expect.stringContaining("404") }),
+      expect.objectContaining({ filename: "urls[0]", statusCode: 400, message: expect.stringContaining("404") }),
     ]);
+  });
+
+  it("names a refused URL by its index and never echoes its access grant", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("unavailable", { status: 503 })));
+    const fakes = createProjectIntakeFakes();
+    const urls = ["https://example.com/ok.txt", "https://files.example.com/grant/GRANTSECRET0123456789/report.pdf?X-Amz-Signature=SIGSECRET&token=TOKSECRET"];
+    const error = await rejection(intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports));
+    expect(error).toMatchObject({ statusCode: 400, issues: [{ path: "urls[0]" }, { path: "urls[1]" }] });
+    expect(JSON.stringify({ message: (error as Error).message, issues: (error as { issues?: unknown }).issues })).not.toMatch(/GRANTSECRET|SIGSECRET|TOKSECRET|files\.example\.com/);
   });
 
   it("surfaces upstream stream failures as a 400 instead of hanging storage", async () => {

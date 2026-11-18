@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
-import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
+import { assertSafeExternalUrl, safeExternalFetch, UnsafeExternalUrlError } from "../lib/network-security.js";
 import { inferMimeType } from "./documents.js";
 import { ProjectIntakeError, type ProjectIntakeItem } from "./project-intake.js";
 
@@ -14,8 +14,13 @@ function parseKnownContentLength(raw: string | null): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-function rejectedUrl(url: string, message: string): ProjectIntakeItem {
-  return { filename: url, content: { rejected: new ProjectIntakeError(message, 400) } };
+/**
+ * A URL that could not be taken. It is named by its position (`urls[2]`), never
+ * by the URL itself: a download link often carries its access grant in the path
+ * or query, and this name and message reach the response and telemetry.
+ */
+function rejectedUrl(index: number, message: string): ProjectIntakeItem {
+  return { filename: `urls[${index}]`, content: { rejected: new ProjectIntakeError(message, 400) } };
 }
 
 /**
@@ -40,13 +45,14 @@ export async function* remoteUrlIntakeItems(
         signal: options.signal ?? AbortSignal.timeout(15_000),
       });
     } catch (error) {
-      yield rejectedUrl(url, error instanceof Error ? error.message : "Invalid URL");
+      // Our own URL policy messages are fixed text; anything else (DNS, TLS, sockets) may quote the URL.
+      yield rejectedUrl(index, error instanceof UnsafeExternalUrlError ? error.message : "The URL could not be fetched");
       continue;
     }
 
     try {
       if (!response.ok) {
-        yield rejectedUrl(url, `Failed to fetch ${url}: ${response.status}`);
+        yield rejectedUrl(index, `The URL's server answered HTTP ${response.status}`);
         continue;
       }
       const filename = path.basename(new URL(safeUrl).pathname) || `remote-${randomUUID()}`;

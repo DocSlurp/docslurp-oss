@@ -1,5 +1,4 @@
-import { errorContext, type RequestRejection } from "./error-context.js";
-import { redactExceptionText } from "@docslurp/shared/error-reporting";
+import { errorContext, rejectionForStatus, type RequestRejection } from "./error-context.js";
 import { withObservation, addTraceMetadata, withHttpSpan, exportsOtlpLogs, activeTraceparent } from "@docslurp/shared/observability";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -345,9 +344,9 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
 
   // Filled in by auth during the request; read when the span ends.
   let identity: RequestContextState | undefined;
-  // Error responses record their raw reason here (recordRequestRejection).
+  // Error responses record their sanitized reason here (recordRequestRejection).
   const reportContext: { requestId: string; rejection?: RequestRejection } = { requestId };
-  const rejection = () => (c.res.status >= 400 ? reportContext.rejection : undefined);
+  const rejection = () => rejectionForStatus(reportContext.rejection, c.res.status);
   await errorContext.run(reportContext, () => withHttpSpan({ method: c.req.method, route,
     headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "", baggage: c.req.header("baggage") ?? "" },
     status: () => c.res.status,
@@ -446,8 +445,10 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
         // SigNoz already receives the structured record below; the Fly log shipper
         // would ingest a second, uncorrelated copy. Stdout is the fallback only.
         const level = exportsOtlpLogs() ? undefined : status >= 500 ? console.error : status >= 400 ? console.warn : console.log;
-        const refused = status >= 400 ? reportContext.rejection : undefined;
-        const reason = refused ? ` error_code=${refused.code} error_reason=${JSON.stringify(redactExceptionText(refused.reason))}` : "";
+        const refused = rejectionForStatus(reportContext.rejection, status);
+        const reason = refused
+          ? ` error_code=${refused.code} error_reason_id=${refused.reasonId}${refused.reason ? ` error_reason=${JSON.stringify(refused.reason)}` : ""}`
+          : "";
         level?.(`[api] requestId=${requestId} method=${c.req.method} path=${pathname} status=${status} duration_ms=${finalDurationMs} handler_duration_ms=${durationMs} telemetry_flush_ms=${flushDurationMs} telemetry_flush=${flushOutcome}${reason}`);
         emitPostHogApiLog({
           severityText: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
@@ -455,7 +456,8 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
           body: `${c.req.method} ${pathname} ${status} ${finalDurationMs}ms`,
           attributes: {
             // Who made the request and the route's ids, so support can find a user's requests.
-            ...requestSpanAttributes({ requestId, route, pathname, identity: requestContextStorage.getStore(), userAgent: c.req.header("User-Agent"), rejection: refused }),
+            // The refusal reason goes to the request span and stdout line only, never to PostHog.
+            ...requestSpanAttributes({ requestId, route, pathname, identity: requestContextStorage.getStore(), userAgent: c.req.header("User-Agent") }),
             "http.request.method": c.req.method,
             "http.route": route,
             "http.response.status_code": status,
@@ -484,13 +486,14 @@ export function requestSpanAttributes(args: {
   pathname: string;
   identity: Pick<RequestContextState, "userId" | "orgId" | "apiKeyId" | "projectId"> | undefined;
   userAgent?: string | null;
-  /** Why an error response refused the request: never shown to the client, always to telemetry. */
+  /** Why an error response refused the request (already sanitized): never shown to the client. */
   rejection?: RequestRejection;
 }): Record<string, string> {
   const attributes: Record<string, string> = { "docslurp.requestId": args.requestId, "url.path": args.pathname.slice(0, 500) };
   if (args.rejection) {
     attributes["docslurp.error.code"] = args.rejection.code;
-    attributes["docslurp.error.reason"] = redactExceptionText(args.rejection.reason);
+    attributes["docslurp.error.reason_id"] = args.rejection.reasonId;
+    if (args.rejection.reason) attributes["docslurp.error.reason"] = args.rejection.reason;
   }
   if (args.identity?.userId) attributes["enduser.id"] = args.identity.userId;
   if (args.identity?.orgId) attributes["docslurp.orgId"] = args.identity.orgId;
