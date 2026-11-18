@@ -44,6 +44,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  serving.clearIndexConfigCountsCache();
   await sql`delete from document_run_stage_states`;
   await sql`delete from vector_indexes`;
   await sql`delete from documents`;

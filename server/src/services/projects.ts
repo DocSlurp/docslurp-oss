@@ -74,7 +74,7 @@ import {
   emptyProjectBoardSummary,
   listProjectBoardSummaries,
 } from "./project-board-telemetry.js";
-import { attributedUsage, sessionTokenUsage } from "./usage-attribution.js";
+import { projectAttributedUsage, sessionTokenUsage } from "./usage-attribution.js";
 import { cancelProjectRuns, deleteProjectData } from "./data-deletion.js";
 import { insertDefaultProject, ProjectAccessError } from "./default-project.js";
 import { isProtectedStoredQuery } from "../search/session.js";
@@ -1293,8 +1293,7 @@ export async function updateProject(
   await client`
     with current_month_spend as (
       select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
-      from ${attributedUsage("month")} au
-      where au.project_id = ${projectId}
+      from ${projectAttributedUsage(projectId, "month")} au
     )
     update projects
     set
@@ -1781,8 +1780,7 @@ export async function getProjectCockpit(
       coalesce(w.budget_paused, false) as budget_paused,
       coalesce((
         select sum(au.cost_cents)::double precision
-        from ${attributedUsage("month")} au
-        where au.project_id = w.id
+        from ${projectAttributedUsage(sql`w.id`, "month")} au
       ), 0)::double precision as month_spend_cents
     from projects w
     where w.id = ${projectId}

@@ -82,7 +82,7 @@ async function readExtractDeletionSnapshot(): Promise<QueueSnapshot["extractDele
   return { failing: Number(row.failing ?? 0), overdue: Number(row.overdue ?? 0), oldestOverdueSeconds: row.oldest === null ? null : Number(row.oldest) };
 }
 
-async function readQueueSnapshot(): Promise<QueueSnapshot> {
+export async function readQueueSnapshot(): Promise<QueueSnapshot> {
   const stalledSeconds = resolveAlertThresholds().stalledRunSeconds;
   const [row] = await sql<{
     queue_depth: number;
@@ -114,7 +114,9 @@ async function readQueueSnapshot(): Promise<QueueSnapshot> {
       extract(epoch from (now() - min(created_at) filter (
         where status = 'queued' and coalesce(control_state, '') not in ('paused', 'cancelled')
       )))::double precision as oldest_queued_run_age_seconds
+    -- Every count is of queued or processing runs: read those through the active partial index (0195), not history.
     from project_runs
+    where status in ('queued', 'processing')
   `;
   return {
     queueDepth: Number(row?.queue_depth ?? 0),

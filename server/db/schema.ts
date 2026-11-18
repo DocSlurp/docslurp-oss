@@ -1096,10 +1096,6 @@ export const documentChunks = pgTable(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
-    index("document_chunks_ts_content_idx1").using(
-      "gin",
-      table.tsContent.asc().nullsLast().op("tsvector_ops"),
-    ),
     // Chunk ranges of one document (summary-tree guide mode), migration 0165.
     index("document_chunks_document_chunk_index_idx").using(
       "btree",
@@ -1107,11 +1103,6 @@ export const documentChunks = pgTable(
       table.chunkIndex.asc().nullsLast().op("int4_ops"),
     ),
     index("document_chunks_user_id_run_id_idx").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
-    index("document_chunks_user_id_run_id_idx1").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.runId.asc().nullsLast().op("text_ops"),
@@ -1243,16 +1234,7 @@ export const documentPages = pgTable(
       table.documentId.asc().nullsLast().op("int4_ops"),
       table.pageNumber.asc().nullsLast().op("int4_ops"),
     ),
-    index("document_pages_document_id_page_number_idx1").using(
-      "btree",
-      table.documentId.asc().nullsLast().op("int4_ops"),
-      table.pageNumber.asc().nullsLast().op("int4_ops"),
-    ),
     index("document_pages_run_id_idx").using(
-      "btree",
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
-    index("document_pages_run_id_idx1").using(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
     ),
@@ -1390,11 +1372,6 @@ export const documentSummaries = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.runId.asc().nullsLast().op("text_ops"),
     ),
-    index("document_summaries_user_id_run_id_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
     foreignKey({
       columns: [table.documentId],
       foreignColumns: [documents.id],
@@ -1438,11 +1415,6 @@ export const searchSessions = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
-    index("search_sessions_user_id_created_at_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.createdAt.desc().nullsFirst().op("text_ops"),
-    ),
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
@@ -1474,15 +1446,7 @@ export const searchSessionResults = pgTable(
       "btree",
       table.chunkId.asc().nullsLast().op("text_ops"),
     ),
-    index("search_session_results_chunk_id_idx1").using(
-      "btree",
-      table.chunkId.asc().nullsLast().op("text_ops"),
-    ),
     index("search_session_results_session_id_idx").using(
-      "btree",
-      table.sessionId.asc().nullsLast().op("text_ops"),
-    ),
-    index("search_session_results_session_id_idx1").using(
       "btree",
       table.sessionId.asc().nullsLast().op("text_ops"),
     ),
@@ -1604,10 +1568,6 @@ export const searchEvalFixtures = pgTable(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
     ),
-    index("search_eval_fixtures_user_id_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-    ),
     foreignKey({
       columns: [table.runId],
       foreignColumns: [projectRuns.id],
@@ -1646,18 +1606,9 @@ export const searchIndexStaleness = pgTable(
       "btree",
       table.runId.asc().nullsLast().op("text_ops"),
     ),
-    index("search_index_staleness_run_id_idx1").using(
-      "btree",
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
     index("search_index_staleness_user_id_detected_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("timestamptz_ops"),
-      table.detectedAt.desc().nullsFirst().op("text_ops"),
-    ),
-    index("search_index_staleness_user_id_detected_at_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
       table.detectedAt.desc().nullsFirst().op("text_ops"),
     ),
     foreignKey({
@@ -1701,24 +1652,11 @@ export const documentPropositions = pgTable(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),
     ),
-    index("document_propositions_document_id_idx1").using(
-      "btree",
-      table.documentId.asc().nullsLast().op("text_ops"),
-    ),
     index("document_propositions_ts_content_idx").using(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
-    index("document_propositions_ts_content_idx1").using(
-      "gin",
-      table.tsContent.asc().nullsLast().op("tsvector_ops"),
-    ),
     index("document_propositions_user_id_run_id_idx").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.runId.asc().nullsLast().op("text_ops"),
-    ),
-    index("document_propositions_user_id_run_id_idx1").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.runId.asc().nullsLast().op("text_ops"),
@@ -1797,11 +1735,6 @@ export const searchExperiments = pgTable(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
       table.active.asc().nullsLast().op("bool_ops"),
-    ),
-    index("search_experiments_user_id_active_idx1").using(
-      "btree",
-      table.userId.asc().nullsLast().op("text_ops"),
-      table.active.asc().nullsLast().op("text_ops"),
     ),
     foreignKey({
       columns: [table.userId],

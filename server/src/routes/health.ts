@@ -92,11 +92,18 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function buildPrometheusPayload(): Promise<string> {
+/** /metrics reads windows, never run or usage history: each scrape stays bounded by recent volume (migration 0196). */
+const METRICS_WINDOW_HOURS = 24;
+const ACTIVE_RUN_STATUSES = ["queued", "processing"] as const;
+
+export async function buildPrometheusPayload(): Promise<string> {
   const [runsByStatus, queue, stageRows, costRows] = await Promise.all([
+    // Active runs only, through the partial index project_runs_org_active_idx (0195): grouping every run by status
+    // read the whole run history on each scrape.
     sql<RunMetricRow[]>`
       select status, count(*)::int as count
       from project_runs
+      where status in ('queued', 'processing')
       group by status
       order by status
     `,
@@ -109,30 +116,33 @@ async function buildPrometheusPayload(): Promise<string> {
         percentile_cont(0.95) within group (order by value / 1000.0) as p95_seconds
       from performance_log
       where metric = 'stage-duration' and unit = 'ms'
+        and created_at >= now() - make_interval(hours => ${METRICS_WINDOW_HOURS})
       group by stage_name
       order by stage_name
     `,
-    spendByProviderModel() as Promise<CostMetricRow[]>
+    spendByProviderModel(METRICS_WINDOW_HOURS) as Promise<CostMetricRow[]>
   ]);
 
   const lines = [
-    "# HELP docslurp_runs_total Total runs by status.",
+    "# HELP docslurp_runs_total Active runs (queued, processing) by status.",
     "# TYPE docslurp_runs_total gauge",
-    ...(runsByStatus ?? []).map((row) => metricLine("docslurp_runs_total", Number(row.count ?? 0), { status: row.status })),
-    "# HELP docslurp_stage_duration_seconds_p50 P50 stage duration in seconds.",
+    ...ACTIVE_RUN_STATUSES.map((status) =>
+      metricLine("docslurp_runs_total", Number(runsByStatus?.find((row) => row.status === status)?.count ?? 0), { status })
+    ),
+    `# HELP docslurp_stage_duration_seconds_p50 P50 stage duration in seconds over the last ${METRICS_WINDOW_HOURS} hours.`,
     "# TYPE docslurp_stage_duration_seconds_p50 gauge",
     ...(stageRows ?? []).map((row) =>
       metricLine("docslurp_stage_duration_seconds_p50", Number(row.p50_seconds ?? 0), { stage: row.stage_name })
     ),
-    "# HELP docslurp_stage_duration_seconds_p95 P95 stage duration in seconds.",
+    `# HELP docslurp_stage_duration_seconds_p95 P95 stage duration in seconds over the last ${METRICS_WINDOW_HOURS} hours.`,
     "# TYPE docslurp_stage_duration_seconds_p95 gauge",
     ...(stageRows ?? []).map((row) =>
       metricLine("docslurp_stage_duration_seconds_p95", Number(row.p95_seconds ?? 0), { stage: row.stage_name })
     ),
-    "# HELP docslurp_cost_cents_total Total recorded cost cents by provider and model.",
-    "# TYPE docslurp_cost_cents_total counter",
+    `# HELP docslurp_cost_cents_24h Recorded cost cents by provider and model over the last ${METRICS_WINDOW_HOURS} hours.`,
+    "# TYPE docslurp_cost_cents_24h gauge",
     ...(costRows ?? []).map((row) =>
-      metricLine("docslurp_cost_cents_total", Number(row.total_cost_cents ?? 0), {
+      metricLine("docslurp_cost_cents_24h", Number(row.total_cost_cents ?? 0), {
         provider: row.provider,
         model: row.model
       })
