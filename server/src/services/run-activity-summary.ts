@@ -97,7 +97,7 @@ export function getOrgActivitySummary(scope: ActivitySummaryScope, now: () => nu
 export async function computeOrgActivitySummary(scope: ActivitySummaryScope, now = Date.now()): Promise<ActivitySummary> {
   const { orgId } = scope;
   const visible: string[] = [...new Set(scope.projectIds)];
-  // `org_id = $1 and status in (queued, processing)`: the shape of the partial index on active runs by organization.
+  // `org_id = $1 and status in (queued, processing)`: served by project_runs_org_active_idx (migration 0195).
   const active = visible.length === 0 ? [] : await sql<ActiveRunRow[]>`
     select id, project_id, status, total_documents, processed_documents, pages_total, pages_processed, worker_started_at, created_at
     from project_runs
