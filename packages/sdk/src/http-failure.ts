@@ -26,6 +26,8 @@ const RECOVERY_MESSAGES: Record<string, string> = {
   model_not_allowed: "Choose a model allowed by this project.",
   chat_capacity_unavailable: "Chat is temporarily unavailable. Wait a few seconds, then try again.",
   unavailable: "The service is temporarily unavailable. Try again later.",
+  upload_object_missing: "No stored object was found for this file. Upload its bytes again, then complete it.",
+  upload_parts_incomplete: "Some of this file's parts are missing or have the wrong size. Upload them again, then complete it.",
 };
 
 export function safeHttpFailure(status: number, body: unknown): { code?: string; requestId?: string; message: string; retryAfterSeconds?: number } {

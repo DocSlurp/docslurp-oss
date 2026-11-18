@@ -123,6 +123,19 @@ it("requires separate reprocessing consent and handles legacy NULL index hashes 
   expect((await saved(f.id)).chunkOverlap).toBe(!pipeline.chunkOverlap);
 });
 
+it("a locked index change whose only documents are still uploading says to wait, for either consent choice (#500 re-check)", async () => {
+  const f = await fixture(), pipeline = await saved(f.id);
+  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents)
+    values (${f.id},${f.id},${f.userId},${f.id},'upload','processing','extract-markdown',${sql.json(JSON.parse(JSON.stringify(pipeline)))},100)`;
+  await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count,canonical_id)
+    values (${f.id},${f.id},${f.userId},${f.id},${f.id},'source.txt','text/plain','source','processing',3,'source')`;
+  const proposal = await service.proposeProjectSettings({ ...f, changes: { pipeline: { chunkOverlap: !pipeline.chunkOverlap } } });
+  for (const reprocessExisting of [false, true]) {
+    await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting })).rejects.toMatchObject({ status: 409, category: 'uploads_in_progress' });
+  }
+  expect((await saved(f.id)).chunkOverlap).toBe(pipeline.chunkOverlap);
+});
+
 it("rolls settings back when atomic audit persistence fails", async () => {
   const f = await fixture(), proposal = await service.proposeProjectSettings({ ...f, changes });
   const audit = await import('../services/audit-log.js');

@@ -456,6 +456,7 @@ Environment variables are read once, when the client is created, and only on the
 | `getUploadSession(id, options?)` | Session status, accepted `result` and refreshed transfer URLs | `ingest` |
 | `signUploadParts(id, fileId, partNumbers, options?)` | Signed URLs for requested multipart parts | `ingest` |
 | `completeUploadFile(id, input, options?)` | Stored-file verification; required at EOF for custom unknown-size transfers | `ingest` |
+| `completeUploadFiles(id, files, options?)` | Completes many files in batches of 100 with per-file results; falls back to one call per file on older servers | `ingest` |
 | `completeUploadSession(id, options?)` | Explicit fallback for ingestion acceptance; normal uploads finalize automatically | `ingest` |
 | `abortUploadSession(id, options?)` | Cleanup confirmation | `ingest` |
 | `getRun(runId, request?)` | Run record (not the progress envelope) | `ingest`, `artifacts` or any search scope |
@@ -475,8 +476,9 @@ Environment variables are read once, when the client is created, and only on the
 | `chatStream(input, request?)` | Async iterable of `status`, `message` (the full `ChatResponse`) and `done` events; sends `q`, `project`, `sessionId`, `sessionToken`, `model`, `filters` and `speedBoost`, not `retrieval` or `agent` | `chat` |
 | `listDocuments({ project?, runId?, tags? }?, request?)` | Document records, newest first | `artifacts` |
 | `listDocumentVersions(documentId, request?)` | Version chain, newest first | `artifacts` |
-| `updateProject(id, input, request?)` | `{ project, impact?, job? }`; `apply` is `"new-uploads"` or `"reindex"` | `projects:manage` |
-| `updateProjectEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `projects:manage` |
+| `updateProject(id, input, request?)` | `{ project, impact?, job? }`; `apply` is `"new-uploads"` or `"reindex"`. On a project with indexed documents, changing an `INDEX_IDENTITY_SETTINGS` setting without `apply: "reindex"` throws a 409 `reindex_required` `DocSlurpApiError` whose `reindex` has the locked settings, the re-index work and the estimate `signature` | `projects:manage` |
+| `updateProjectEstimate(id, input, request?)` | `{ estimate, billing, impact, lockedSettings, signature }` without changing anything | Server key with `projects:manage` |
+| `reindexProject(id, { pipeline?, confirmEstimate?, speedBoost? }?, request?)` / `reindexProjectEstimate(...)` | `{ project, changedSettings, outcome, impact, estimate, runIds, job }`: applies locked settings (`REINDEX_SETTINGS`: embedding, chunking, vector backends, and the `embed` / `indexVectors` switches) and re-indexes existing documents in one step, or rebuilds the index with no `pipeline`; the estimate returns `signature` for `confirmEstimate` (stale: 409 `estimate_stale`) | Server key with `projects:manage` |
 | `fullIndex({ project?, documentIds? }?, request?)` / `fullIndexDocument(documentId, request?)` | `{ runId, pages, estimatedCredits, billing?, job? }`; indexes unindexed pages in the background | `ingest` |
 | `fullIndexEstimate({ documentId } or { project?, documentIds? }, request?)` / `uploadEstimate({ files, project? }, request?)` | `{ estimate, billing }` | `ingest` |
 | `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `projects:manage` |

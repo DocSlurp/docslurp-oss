@@ -1,4 +1,4 @@
-import { visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
+import { assertIndexIdentityUnchanged, privacyModeAllowsHosted, visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   buildByteHistogram,
   classifyIngestFailure,
@@ -787,7 +787,7 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
       note: `Lowered by ${[...new Set(observed.capsApplied.map((cap) => reasons[cap.reason] ?? cap.reason))].join(" and ")}; the stored project settings are unchanged.`,
     });
   }
-  if (pipeline.privacyMode !== "standard") {
+  if (!privacyModeAllowsHosted(pipeline.privacyMode)) {
     items.push({ key: "privacyMode", label: "Privacy mode", value: pipeline.privacyMode, note: "Hosted vision models are skipped unless a private route is configured." });
   }
   return items;
@@ -883,7 +883,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   const recordedPages = observed.textPages;
 
   // Never suggest a rung the project's constraints rule out (design 5): smartest needs a reader the privacy mode allows.
-  const smartAllowed = pipeline.privacyMode === "standard" || visionReaderIsLocal(pipeline.vision);
+  const smartAllowed = privacyModeAllowsHosted(pipeline.privacyMode) || visionReaderIsLocal(pipeline.vision);
   const patchForAffected = SMARTEST_PATCH;
   if (affected.length > 0 && (smartAllowed || patchHolds(pipeline, patchForAffected))) {
     const patch = patchForAffected;
@@ -1590,13 +1590,27 @@ async function editableRecommendation(args: RecommendationAction): Promise<Inges
 export async function applyIngestRecommendation(args: RecommendationAction): Promise<{ project: ProjectRecord; recommendation: IngestReportRecommendation; pipeline: PipelineFeatures }> {
   const recommendation = await editableRecommendation(args);
   if (!recommendation.patch) throw new IngestReportActionError("This recommendation has no setting to turn on.", 409);
-  const { getProject, updateProject } = await import("./projects.js");
+  const { getProject } = await import("./projects.js");
   // Merge onto the pipeline as stored now, so a settings edit made meanwhile is kept.
   const current = await getProject(args.project.id, args.userId);
   if (!current) throw new IngestReportActionError("Project not found", 404);
   const next = applyRecommendationPatch(current.pipeline, recommendation.patch);
-  const updated = await updateProject(args.project.id, args.userId, { pipeline: next }, { expectedUpdatedAt: args.project.updatedAt });
-  if (!updated) throw new IngestReportActionError("Only project editors can change ingest settings.", 403);
+  // Recommendations never change the index identity.
+  assertIndexIdentityUnchanged(current.pipeline, next, "An ingest recommendation");
+  // The regular settings path, for new uploads only: turning vectors back on over vectors built under another index
+  // config is locked (409 reindex_required: use the reindex command), rechecked under the configuration lock.
+  const { applyProjectChange, ConfigConflictError, planProjectChange } = await import("./config-change.js");
+  const plan = await planProjectChange({ projectId: args.project.id, userId: args.userId, input: { pipeline: next, apply: "new-uploads" } });
+  if (!plan) throw new IngestReportActionError("Project not found", 404);
+  let applied: Awaited<ReturnType<typeof applyProjectChange>>;
+  try {
+    applied = await applyProjectChange({ plan, userId: args.userId, maxAttempts: 1, updateOptions: { expectedUpdatedAt: args.project.updatedAt } });
+  } catch (error) {
+    if (error instanceof ConfigConflictError) throw new IngestReportActionError("The project changed while applying this recommendation; reload the report and try again.", 409);
+    throw error;
+  }
+  if (!applied) throw new IngestReportActionError("Only project editors can change ingest settings.", 403);
+  const updated = applied.project;
   if (!patchHolds(updated.pipeline, recommendation.patch)) {
     throw new IngestReportActionError("The project template locks this setting, so it was not changed.", 409);
   }

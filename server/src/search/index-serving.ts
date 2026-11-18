@@ -1,10 +1,12 @@
 import { HTTPException } from "hono/http-exception";
 import { reportException } from "@docslurp/shared/error-reporting";
 import {
+  applyPrivateModelMode,
   embeddingModelBaseUri,
   embeddingModelCatalogByUri,
   indexConfigHash,
   indexConfigOf,
+  isPrivacyModeViolation,
   normalizeStoredPipelineFeatures,
   resolveEmbeddingRoute,
   type EmbeddingConfig,
@@ -62,6 +64,22 @@ export function parseIndexConfigs(value: unknown): IndexConfigMap {
   return out;
 }
 
+/**
+ * A project's pipeline and index configs as search uses them under the effective model mode. Where the operator's
+ * private model replaces the stored embedding route, documents built before the switch carry the stored config's hash,
+ * which `index_configs` never recorded when the project's config did not change; the stored config is added for them, so
+ * search serves them through it (or skips them, with a diagnostic, when its model is now refused) instead of refusing
+ * the whole search as an unknown index.
+ */
+export function effectiveProjectIndexing(stored: PipelineFeatures, indexConfigs: IndexConfigMap): { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap } {
+  const pipeline = applyPrivateModelMode(stored);
+  if (pipeline === stored) return { pipeline, indexConfigs };
+  const storedConfig = indexConfigOf(stored);
+  const storedHash = indexConfigHash(storedConfig);
+  if (storedHash === indexConfigHash(indexConfigOf(pipeline)) || indexConfigs[storedHash]) return { pipeline, indexConfigs };
+  return { pipeline, indexConfigs: { ...indexConfigs, [storedHash]: storedConfig } };
+}
+
 /** The embedding config that reproduces a stored index config's query vectors. */
 export function embeddingConfigFor(current: EmbeddingConfig, config: IndexConfig): EmbeddingConfig {
   if (config.normalize === undefined) throw new Error("Stored index normalization is unknown; rebuild the index before vector search");
@@ -105,7 +123,8 @@ export async function pruneIndexConfigs(projectId: string, sql: SqlClient = defa
     select pipeline from projects where id = ${projectId} and index_configs is not null
   `;
   if (!ws) return {};
-  const current = indexConfigOf(normalizeStoredPipelineFeatures(ws.pipeline ?? null, `project ${projectId}`));
+  // The effective config (the operator's private model where hosted ones are not allowed), as search and the worker use.
+  const current = indexConfigOf(applyPrivateModelMode(normalizeStoredPipelineFeatures(ws.pipeline ?? null, `project ${projectId}`)));
   const currentHash = indexConfigHash(current);
   const unchanged = ws.pipeline === null
     ? sql`ws.pipeline is null`
@@ -197,7 +216,13 @@ export async function servedVectorSearch<T extends ChunkLike>(args: {
     const config = hash === currentHash ? null : args.indexConfigs[hash]!;
     const embedding = config ? embeddingConfigFor(args.pipeline.embedding, config) : args.pipeline.embedding;
     const key = spaceKey(embedding);
-    if (!vectors.has(key)) vectors.set(key, args.query ? args.deps.embed(args.query, embedding) : Promise.resolve(null));
+    // An older config's model may no longer be callable (its hosted route refused once the deployment runs in private
+    // model mode): those documents are skipped until re-indexed, never served by another model's vectors.
+    if (!vectors.has(key)) vectors.set(key, args.query ? args.deps.embed(args.query, embedding).catch((error: unknown) => {
+      if (!isPrivacyModeViolation(error)) throw error;
+      args.deps.diagnostic?.("indexConfigUnavailable", { hash, reason: "privacy-mode", documents: counts.get(hash) ?? 0 });
+      return null;
+    }) : Promise.resolve(null));
     const vector = await vectors.get(key)!;
     if (!vector) return [] as T[];
     return await args.deps.search(vector, { embedding, hash: { op: "eq", value: hash } });

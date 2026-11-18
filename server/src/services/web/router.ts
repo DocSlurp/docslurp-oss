@@ -221,6 +221,7 @@ export class WebRouter {
    */
   private async attempt<C extends WebCapability>(capability: C, candidate: Candidate<C>, input: WebInput<C>, state: {
     signal: AbortSignal; deadlineAt: number; parent?: TelemetrySpan; attempts: WebAttempt[]; paid: WebPaidAttempt[];
+    beforeAttempt?: () => Promise<void>;
   }): Promise<{ ok: true; result: ProviderResult<WebOutput<C>> } | { ok: false; failure: WebProviderError } | { ok: false; skipped: true }> {
     const { adapter, option } = candidate;
     for (let retry = 0; ; retry++) {
@@ -228,6 +229,11 @@ export class WebRouter {
       const remaining = state.deadlineAt - this.now();
       if (remaining <= 1_000) return { ok: false, skipped: true };
       const timeoutMs = Math.min(remaining, ATTEMPT_TIMEOUT_MS[capability]);
+      // The caller's authorization, rechecked right before each provider request (retries and failovers included):
+      // a refusal throws through, so nothing new is dispatched once a credential is revoked. A request already sent
+      // may still finish (the bounded in-flight window).
+      await state.beforeAttempt?.();
+      state.signal.throwIfAborted();
       const span = startTelemetrySpan("docslurp.web", `web.provider ${capability}`, {
         "docslurp.web.capability": capability, "docslurp.web.provider": adapter.id, "docslurp.web.option": option.id,
         "docslurp.web.tier": option.tier, "docslurp.web.estimate_usd": candidate.usd,
@@ -287,6 +293,8 @@ export class WebRouter {
     /** Absolute wall-clock deadline (epoch ms) for the whole call, failovers included. */
     deadlineAt: number;
     parent?: TelemetrySpan;
+    /** Runs immediately before every provider request; a throw stops the call (no further attempt or failover). */
+    beforeAttempt?: () => Promise<void>;
   }): Promise<WebRouteResult<C>> {
     if (capability === "fetch") return await this.runFetch(input as WebInput<"fetch">, args) as unknown as WebRouteResult<C>;
     const { candidates, priceBlocked } = this.plan(capability, input);
@@ -334,7 +342,7 @@ export class WebRouter {
    * A provider error fails over within the same tier. Pages read so far are
    * always kept, and a thin page is returned if nothing better was found.
    */
-  private async runFetch(input: WebInput<"fetch">, args: { signal: AbortSignal; deadlineAt: number; parent?: TelemetrySpan }): Promise<WebRouteResult<"fetch">> {
+  private async runFetch(input: WebInput<"fetch">, args: { signal: AbortSignal; deadlineAt: number; parent?: TelemetrySpan; beforeAttempt?: () => Promise<void> }): Promise<WebRouteResult<"fetch">> {
     const minTier: WebRenderTier = input.depth === "deep" ? 1 : 0;
     const { candidates, priceBlocked } = this.plan("fetch", input, minTier);
     if (!candidates.length) throw this.unavailable("fetch");

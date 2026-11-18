@@ -19,6 +19,9 @@ import { Transform, type Readable } from "node:stream";
 
 import {
   applyProjectPipelineOverrides,
+  changedIndexIdentitySettings,
+  isIndexIdentitySetting,
+  applyPrivateModelMode,
   VM_PDF_MAX_SOURCE_BYTES,
   sandboxedPdfConfigured,
   defaultPipelineFeatures,
@@ -65,9 +68,11 @@ export type ProjectIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 
  * Machine-readable causes clients act on. `idempotency_in_flight`: the first request with this Idempotency-Key is still being
  * processed, so retry with the same key. `idempotency_key_reused`: the key was used for a different request. `upload_session_closed`:
  * the session remembered for the key can no longer take uploads, so use a new key. `upload_session_busy`: another request (or the
- * reconciler) holds the session's lock, so repeat the same request shortly.
+ * reconciler) holds the session's lock, so repeat the same request shortly. `upload_object_missing`: files/complete found no
+ * stored object for the file, so PUT its bytes (or finish its parts) and complete again. `upload_parts_incomplete`: a
+ * multipart file's stored parts are missing or of the wrong size, so upload the missing parts and complete again.
  */
-export type ProjectIntakeErrorCode = "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "upload_session_busy" | "chart_export_tier_unavailable" | "visuals_unavailable";
+export type ProjectIntakeErrorCode = "reindex_required" | "upload_object_missing" | "upload_parts_incomplete" | "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "upload_session_busy" | "chart_export_tier_unavailable" | "visuals_unavailable";
 
 export class ProjectIntakeError extends Error {
   constructor(
@@ -112,7 +117,26 @@ export type ProjectIntakeAudit = {
   metadata?: Record<string, unknown>;
 };
 
+/** The credential behind an intake no longer permits it, found right before an external dispatch: stop everything. */
+export class IntakeCredentialRefusedError extends Error {
+  constructor() { super("The credential that started this upload no longer permits it"); this.name = "IntakeCredentialRefusedError"; }
+}
+
+/**
+ * What an intake's credential must still cover: its organization and, once resolved, its project (`null`: a project
+ * the intake creates; absent: not resolved yet).
+ */
+export type IntakeAuthTarget = { orgId: string | null; projectId?: string | null };
+
 export interface ProjectIntakeRequest {
+  /**
+   * Runs immediately before every external dispatch (each storage write, and each URL fetch of a remote intake): a
+   * refusal (IntakeCredentialRefusedError) aborts the remaining items, so no fetch or write follows a revocation.
+   * Called once with the resolved target, before any item is read; later calls check against that target.
+   */
+  authorizeExternalWork?: (resolved?: IntakeAuthTarget) => Promise<void>;
+  /** Re-validate the principal inside the run's admission transaction (CreateRunInput.principalAtAdmission). */
+  principalAtAdmission?: { scope: string; keyTypes?: readonly string[] };
   speedBoost?: boolean;
   tags?: string[];
   userId: string;
@@ -243,6 +267,8 @@ export interface ProjectIntakeRecords {
     autoNamed: boolean;
   }): Promise<ProjectRecord>;
   createRun(args: {
+    /** Re-validate the principal inside the admission transaction (CreateRunInput.principalAtAdmission). */
+    principalAtAdmission?: { scope: string; keyTypes?: readonly string[] };
     speedBoost?: boolean;
     userId: string;
     projectId: string;
@@ -262,6 +288,11 @@ export interface ProjectIntakeRecords {
    */
   nameFromUpload?(args: { projectId: string; filenames: string[]; urls?: string[] }): Promise<string | null>;
   appendAudit(entry: Parameters<typeof appendAuditLog>[0]): Promise<void>;
+  /**
+   * Whether an existing project holds documents (or in-flight uploads) whose index identity a request override must not
+   * change (config-change.ts `hasIndexStakes`). The Postgres records always answer; fakes that omit it skip the check.
+   */
+  hasIndexStakes?(projectId: string): Promise<boolean>;
 }
 
 export interface ProjectIntakePorts {
@@ -308,6 +339,11 @@ export function withoutBilledRaises<T extends Record<string, unknown> | null | u
 }
 
 export const postgresIntakeRecords: ProjectIntakeRecords = {
+  async hasIndexStakes(projectId) {
+    const { hasIndexStakes } = await import("./config-change.js");
+    const { sql } = await import("../db.js");
+    return await hasIndexStakes(sql, projectId);
+  },
   async findProject(ref, scope) {
     const found = await findProjectForInput(ref, scope);
     return found ? await getProject(found.id, scope.userId) : null;
@@ -529,6 +565,8 @@ async function storeItem(
   }
 
   const key = rawSourceKey(request.userId, admitted.filename, request.extract);
+  // Never write for a credential that no longer permits it (checked per write, not once per request).
+  await request.authorizeExternalWork?.();
   written.push(key);
   if ("bytes" in content) {
     await storage.put(key, content, admitted.mimeType);
@@ -594,6 +632,38 @@ async function resolveIntakeTarget(
   return existing ? { existing } : create({ name: ref.name, slug: ref.slug });
 }
 
+/**
+ * Whether upload overrides name a setting that can move the index identity: an index-identity setting, or the privacy
+ * mode (in private model mode it decides whether the operator's private embedding model replaces the hosted one).
+ * Pure, so a request without such overrides costs no database read.
+ */
+export function uploadOverridesTouchIndexIdentity(overrides: PipelineFeatureOverrides | null | undefined): boolean {
+  return Boolean(overrides) && Object.keys(overrides as object).some((key) => isIndexIdentitySetting(key) || key === "privacyMode");
+}
+
+/**
+ * An upload's overrides may not move an existing project's index identity (embedding, chunking, vector backends) once it
+ * holds documents or in-flight uploads: the new documents would be embedded in another space. A request-level setting,
+ * so the whole request is refused (409 `reindex_required`); change the project with the reindex command instead. Direct
+ * upload sessions check at creation too, before any bytes are sent.
+ */
+export async function assertUploadKeepsIndexIdentity(
+  project: Pick<ProjectRecord, "id" | "pipeline" | "templateKey">,
+  overrides: PipelineFeatureOverrides | null | undefined,
+  records: Pick<ProjectIntakeRecords, "hasIndexStakes"> = postgresIntakeRecords,
+): Promise<void> {
+  if (!uploadOverridesTouchIndexIdentity(overrides)) return;
+  const base = project.pipeline ?? defaultPipelineFeatures;
+  const changed = changedIndexIdentitySettings(applyPrivateModelMode(base), applyPrivateModelMode(applyProjectPipelineOverrides(base, overrides, project.templateKey)));
+  if (changed.length === 0 || !(await records.hasIndexStakes?.(project.id))) return;
+  throw new ProjectIntakeError(
+    `This project already has indexed documents, so an upload cannot change its index settings (${changed.join(", ")}). Upload without them, or change the project with POST /v1/projects/${project.id}/reindex first.`,
+    409,
+    changed.map((field) => ({ path: `pipeline.${field}`, message: "Locked index setting", code: "reindex_required" })),
+    "reindex_required",
+  );
+}
+
 /** Every file was rejected: fail the request, naming each file. */
 export function allRejectedError(rejected: RejectedIntakeFile[]): ProjectIntakeError {
   const statuses = new Set(rejected.map((file) => file.statusCode));
@@ -628,6 +698,13 @@ export async function intakeIntoProject(
     const target = await resolveIntakeTarget(request, records);
     const existing = "existing" in target ? target.existing : null;
     const toCreate = "create" in target ? target.create : {};
+    // The credential must still cover the resolved organization and project before anything else is said about the
+    // project (a key that lost access gets 403, never a reindex answer that discloses its index state) and before any
+    // item is fetched or stored.
+    await request.authorizeExternalWork?.({ orgId: existing?.orgId ?? request.orgId ?? null, projectId: existing?.id ?? null });
+    // Checked before any bytes are read or stored (see assertUploadKeepsIndexIdentity).
+    if (existing) await assertUploadKeepsIndexIdentity(existing, request.pipeline, records);
+
     // "Untitled project" is the placeholder for "name it for me", not a chosen name.
     const chosenName = toCreate.name && !isUntitledProjectName(toCreate.name) ? toCreate.name : undefined;
 
@@ -692,6 +769,7 @@ export async function intakeIntoProject(
         runId: request.runId,
         files,
         ...(request.extract ? { extract: request.extract } : {}),
+        ...(request.principalAtAdmission ? { principalAtAdmission: request.principalAtAdmission } : {}),
       });
     } catch (error) {
       if (!(error instanceof AllSourcesUnreadableError)) throw error;

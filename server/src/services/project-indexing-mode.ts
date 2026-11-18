@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
 import { groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
-import { EDITOR_REQUIRED_CODE, effectiveLadder, pageReadingQuality, EDITOR_REQUIRED_MESSAGE, explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, effectiveLadder, privacyModeAllowsHosted, pageReadingQuality, EDITOR_REQUIRED_MESSAGE, explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import {
   pageCredits,
@@ -96,7 +96,7 @@ export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privac
       "visual_mode_quality",
     );
   }
-  const hostedForbidden = pipeline.privacyMode !== "standard" && !hasPrivatePageEmbedder();
+  const hostedForbidden = !privacyModeAllowsHosted(pipeline.privacyMode) && !hasPrivatePageEmbedder();
   const piiBlocks = Boolean(pipeline.piiPolicy?.enabled && pipeline.piiPolicy.action === "block_indexing");
   if (hostedForbidden || piiBlocks) {
     throw new IndexingModeError(

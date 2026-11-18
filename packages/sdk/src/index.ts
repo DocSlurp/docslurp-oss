@@ -255,6 +255,10 @@ export type EstimateResponse = {
   profile?: EstimateProfile; pricingVersion?: string;
   /** Upload estimates only: the full quote (ingest, monthly hosting and usage) for the project's settings. */
   quote?: EstimateQuote;
+  /** Project and reindex estimates: the locked index settings the change alters (an update needs `apply: "reindex"`). */
+  lockedSettings?: ReindexSetting[];
+  /** Project and reindex estimates: pass as `confirmEstimate` to refuse stale work. */
+  signature?: string;
 };
 
 /**
@@ -286,13 +290,71 @@ export type FileProfile = {
 
 /** Settings accepted by project PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateProjectInput = JsonObject & {
-  /** "reindex" queues a re-index of existing documents; "new-uploads" only changes future ingestion. */
+  /**
+   * "reindex" applies the change and re-indexes existing documents (equivalent to {@link DocSlurpClient.reindexProject});
+   * "new-uploads" only changes future ingestion. Once a project has indexed documents, changing an
+   * {@link INDEX_IDENTITY_SETTINGS} setting without "reindex" is refused: 409 `reindex_required`, nothing saved
+   * ({@link DocSlurpApiError.reindex} has the work and the estimate signature).
+   */
   apply?: "new-uploads" | "reindex";
+  /** Default `apply` for recommended re-indexes. Never unlocks an index-identity change. */
   autoConfirmReindex?: boolean;
+  /** With `apply: "reindex"`: the estimate `signature`; refused with 409 `estimate_stale` when the work changed since. */
+  confirmEstimate?: string;
   retainDocumentVersions?: number | null;
   /** False keeps China-based model providers out of this project's requests; true cannot widen an organization opt-out. */
   allowChinaProviders?: boolean;
 };
+/**
+ * Pipeline settings that define a project's search index (embedding, chunking, vector backends). Locked once the
+ * project has indexed documents: change them with {@link DocSlurpClient.reindexProject}, or an update with
+ * `apply: "reindex"`.
+ */
+export const INDEX_IDENTITY_SETTINGS = ["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"] as const;
+export type IndexIdentitySetting = (typeof INDEX_IDENTITY_SETTINGS)[number];
+/**
+ * Every setting the reindex command takes and a `reindex_required` refusal may name: the index settings plus the vector
+ * switches (`embed`, `indexVectors`), which are locked while vectors were built under another index config.
+ */
+export const REINDEX_SETTINGS = [...INDEX_IDENTITY_SETTINGS, "embed", "indexVectors"] as const;
+export type ReindexSetting = (typeof REINDEX_SETTINGS)[number];
+
+/**
+ * `POST /v1/projects/:id/reindex` body. `pipeline` takes only {@link REINDEX_SETTINGS}; omitted, the index is rebuilt
+ * as is, which re-embeds every live document (billed).
+ */
+export type ReindexProjectInput = {
+  pipeline?: Partial<Record<ReindexSetting, unknown>>;
+  /** Explicit opt-in to speed-boosted processing for the re-index runs. */
+  speedBoost?: boolean;
+  /** The `signature` from {@link DocSlurpClient.reindexProjectEstimate} (or a `reindex_required` refusal); stale is 409 `estimate_stale`. */
+  confirmEstimate?: string;
+};
+export type ReindexProjectResponse = {
+  project: ProjectRecord;
+  /** Index settings this call changed (empty for a plain rebuild). */
+  changedSettings: ReindexSetting[];
+  /** `queued` / `blocked`: re-index runs exist; `saved`: settings saved, no documents to re-index; `unchanged`: nothing to do. */
+  outcome: "queued" | "blocked" | "saved" | "unchanged";
+  impact: ConfigChangeImpact;
+  estimate: CostEstimate | null;
+  /** The queued re-index runs; empty when the project has no documents to re-index. */
+  runIds: string[];
+  job: JobStatus | null;
+};
+
+/** `error.details.reindex` of a 409 `reindex_required`: what the refused change needs. */
+export type ReindexRequiredDetails = {
+  lockedSettings: ReindexSetting[];
+  documents: number;
+  pages: number;
+  credits: { low: number; high: number } | null;
+  /** Pass as `confirmEstimate` to {@link DocSlurpClient.reindexProject} or a confirming update. */
+  signature: string;
+  /** The reindex command's path. */
+  reindexUrl: string;
+};
+
 export type ProjectUpdateResponse = { project: ProjectRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 /** The stored search and chat settings `PATCH /v1/projects/:id/search-settings` returns. */
 export type ProjectSearchSettingsResponse = { projectId: string; retrievalDefaults: JsonObject; chat: JsonObject } & JsonObject;
@@ -1194,6 +1256,80 @@ function positiveDuration(value: number, name: string): number {
   return value;
 }
 
+/** Repeats of a session call refused as busy or rate limited. */
+const SESSION_BUSY_ATTEMPTS = 8;
+const SESSION_BUSY_MAX_DELAY_MS = 5_000;
+/** A repeat is not worth sending with less time than this left before the call's deadline. */
+const SESSION_RETRY_MIN_REMAINING_MS = 250;
+/** The final complete of a stream upload: the only way its size reaches the server, so it gets its own, longer deadline. */
+const STREAM_FINAL_COMPLETE_TIMEOUT_MS = 120_000;
+/** Uninspected files completed per call (the server's batch limit is 100). */
+const UNINSPECTED_COMPLETE_BATCH = 100;
+/** Extra completion rounds for uninspected files answered retryable, and the first wait between them (doubling). */
+const UNINSPECTED_RETRY_ROUNDS = 3;
+const UNINSPECTED_RETRY_DELAY_MS = 500;
+
+/** The session is held by another request (or the server's reconciler), or the caller is rate limited: wait, repeat. */
+function isSessionBusyError(error: unknown): error is DocSlurpApiError {
+  return error instanceof DocSlurpApiError && (error.status === 429 || (error.status === 409 && error.code === "upload_session_busy"));
+}
+
+/** files/complete's answers that mean the file's bytes (or some parts) are not in storage: upload them, then complete. */
+const RESEND_COMPLETION_CODES = new Set(["upload_object_missing", "upload_parts_incomplete"]);
+function isResendableCompletion(error: unknown): boolean {
+  return error instanceof DocSlurpApiError && RESEND_COMPLETION_CODES.has(error.code ?? "");
+}
+
+/** A server answer that names one remote file twice cannot be matched to local bytes: refuse it before anything moves. */
+function assertUniqueRemoteIds(ids: ReadonlyArray<string | undefined>, what: string): void {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (typeof id !== "string" || !id) throw new Error(`Upload ${what} names a file without an id`);
+    if (seen.has(id)) throw new Error(`Upload ${what} names file ${id} more than once`);
+    seen.add(id);
+  }
+}
+
+/**
+ * The one descriptor for `id` in a refreshed read, checked against the descriptor the local bytes were matched to: the
+ * same file (id, mode, size, and request index and client id where the original had them). Anything else is refused,
+ * so bytes never go to another file's targets.
+ */
+function refreshedDescriptor(files: readonly DirectUploadDescriptor[], original: DirectUploadDescriptor): DirectUploadDescriptor | undefined {
+  const matches = files.filter((file) => file.id === original.id);
+  if (matches.length > 1) throw new Error(`Upload session names file ${original.id} more than once`);
+  const fresh = matches[0];
+  if (!fresh) return undefined;
+  // A file matched without index and client id (an older server: by name and size) must keep its name too.
+  const legacyMatch = original.index == null && original.clientId == null;
+  const same = fresh.mode === original.mode && fresh.sizeBytes === original.sizeBytes
+    && (original.index == null || fresh.index === original.index)
+    && (original.clientId == null || fresh.clientId === original.clientId)
+    && (!legacyMatch || fresh.filename === original.filename);
+  if (!same) throw new Error(`Upload session describes ${original.filename} differently than before; not sending its bytes`);
+  return fresh;
+}
+
+/**
+ * The descriptors of a `fileId`-filtered read for the files asked for. Every id in the read must be unique; files not
+ * asked for are ignored (an older server ignores the filter and describes every file), never used: bytes only go to
+ * the descriptor that `refreshedDescriptor` matches to the requested file.
+ */
+function askedDescriptors(files: readonly DirectUploadDescriptor[], asked: readonly string[]): DirectUploadDescriptor[] {
+  assertUniqueRemoteIds(files.map((file) => file.id), "session read");
+  const wanted = new Set(asked);
+  return files.filter((file) => wanted.has(file.id));
+}
+
+/** Puts the upload session's id on an error thrown out of an upload, so a caller can inspect or clean it up. */
+function withSessionId(error: unknown, sessionPath: string): unknown {
+  const sessionId = decodeURIComponent(sessionPath.slice(sessionPath.lastIndexOf("/") + 1));
+  if (error && typeof error === "object" && !("sessionId" in error)) {
+    try { Object.defineProperty(error, "sessionId", { value: sessionId, enumerable: true }); } catch { /* frozen error */ }
+  }
+  return error;
+}
+
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
@@ -1257,6 +1393,8 @@ export class DocSlurpApiError extends Error {
   readonly requestId?: string;
   /** Buy-credits, auto top-up, billing and docs URLs for credit, budget and rate-limit errors. */
   readonly links?: DocSlurpErrorLinks;
+  /** On 409 `reindex_required`: the locked settings, the re-index work and the estimate signature to confirm. */
+  readonly reindex?: ReindexRequiredDetails;
 
   constructor(message: string, status: number, body: unknown, retryAfterSeconds?: number) {
     const safe = safeHttpFailure(status, body);
@@ -1273,7 +1411,16 @@ export class DocSlurpApiError extends Error {
     if (envelope?.code) this.code = envelope.code;
     if (safe.requestId) this.requestId = safe.requestId;
     if (envelope?.links) this.links = envelope.links;
+    if (envelope?.reindex) this.reindex = envelope.reindex;
   }
+}
+
+function reindexDetails(value: unknown): ReindexRequiredDetails | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const r = value as Record<string, unknown>;
+  if (!Array.isArray(r.lockedSettings) || typeof r.signature !== "string" || typeof r.reindexUrl !== "string") return undefined;
+  if (typeof r.documents !== "number" || typeof r.pages !== "number") return undefined;
+  return r as unknown as ReindexRequiredDetails;
 }
 
 const ERROR_LINK_NAMES = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
@@ -1289,16 +1436,18 @@ function errorLinks(value: unknown): DocSlurpErrorLinks | undefined {
 }
 
 /** Reads `{ error: { code, requestId, details: { links } } }`; legacy bodies, OpenAI errors without a string code and text yield nothing. */
-function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; links?: DocSlurpErrorLinks } | null {
+function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; links?: DocSlurpErrorLinks; reindex?: ReindexRequiredDetails } | null {
   if (!body || typeof body !== "object") return null;
   const error = (body as { error?: unknown }).error;
   if (!error || typeof error !== "object") return null;
-  const { code, requestId, details } = error as { code?: unknown; requestId?: unknown; details?: { links?: unknown } };
+  const { code, requestId, details } = error as { code?: unknown; requestId?: unknown; details?: { links?: unknown; reindex?: unknown } };
   const links = errorLinks(details?.links);
+  const reindex = reindexDetails(details?.reindex);
   return {
     ...(typeof code === "string" && code ? { code } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
     ...(links ? { links } : {}),
+    ...(reindex ? { reindex } : {}),
   };
 }
 
@@ -1312,7 +1461,7 @@ export type UploadContentIdentity = { algorithm: "sha256"; digest: string };
 
 export type DirectUploadDescriptor = {
   identity?: UploadContentIdentity | null;
-  transferState?: "complete" | "missing" | "incomplete" | "unavailable";
+  transferState?: "complete" | "missing" | "incomplete" | "unavailable" | "unknown";
   verifiedBytes?: number | null;
   /** Position of the file in the create request; the server sanitizes filenames, so match by this, never by name. */
   index?: number | null;
@@ -1328,7 +1477,16 @@ export type DirectUploadDescriptor = {
   headers?: Record<string, string>;
   expiresInSeconds?: number;
   partSize?: number;
-  pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  /** A part without `url` (the server signs at most a bounded number per session read; see `partUrlsOmitted`) is signed with parts/sign. */
+  pendingParts?: Array<{ partNumber: number; sizeBytes: number; url?: string }>;
+  partUrlsOmitted?: boolean;
+  /**
+   * False when a large session's read did not check this file's object: complete it first, send bytes only if the
+   * server answers `upload_object_missing` or `upload_parts_incomplete`. An uninspected multipart file has no part list.
+   */
+  inspected?: boolean;
+  /** Stored state of the file (`pending`, `completed`, `failed`, `aborted`) on reads that report it. */
+  status?: string;
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
@@ -1344,6 +1502,47 @@ export type UploadSession = {
   rejected?: RejectedUpload[];
 };
 export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
+/** One file's answer from a batched completion: completed, or failed with the status the single-file call would have answered. */
+/**
+ * Why a file failed to complete, and what to do about it:
+ * - `retryable` / `action: "retry"`: repeat the same request for this file as it is (storage briefly unavailable, the
+ *   session busy, or the call's time budget spent).
+ * - `action: "reupload"`: put the file's bytes again (or finish its parts), then repeat.
+ * - `action: "none"`: a repeat cannot fix it (unknown file, refused type or size).
+ * - `blocksSession`: left as is, this file makes the whole session fail once the client stops completing files.
+ */
+export type UploadFileCompletionError = { statusCode: number; code: string; message: string; retryable: boolean; action: "retry" | "reupload" | "none"; blocksSession: boolean };
+export type UploadFileCompletion =
+  | { fileId: string; status: "completed" }
+  | { fileId: string; status: "failed"; error: UploadFileCompletionError };
+export type CompleteUploadFilesResult = { ok: boolean; files: UploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean };
+/** A session-level failure part-way through `completeUploadFiles`: what the earlier batches already completed. */
+export type CompleteUploadFilesPartial = { partialResults: CompleteUploadFilesResult };
+
+function completionResult(files: UploadFileCompletion[], sessionComplete: boolean): CompleteUploadFilesResult {
+  const completedCount = files.filter(file => file.status === "completed").length;
+  return { ok: completedCount === files.length, files, completedCount, failedCount: files.length - completedCount, sessionComplete };
+}
+
+/** An older server validates only the single-file body: it refuses `{ files }` for a missing top-level `fileId`. */
+function isLegacyCompletionRefusal(error: unknown): boolean {
+  if (!(error instanceof DocSlurpApiError) || error.status !== 400) return false;
+  const issues = (error.body as { error?: { details?: { issues?: Array<{ path?: unknown }> } } } | null)?.error?.details?.issues;
+  return Array.isArray(issues) && issues.some(issue => issue?.path === "fileId");
+}
+
+/** The batch answer's per-file description, rebuilt from a single-file call's error (fallback for older servers). */
+function legacyFileError(error: DocSlurpApiError): UploadFileCompletionError {
+  const retryable = error.status >= 500 || error.status === 429 || error.code === "upload_session_busy";
+  // A coded answer decides; an uncoded one (an older server) falls back to its message, never to its status alone.
+  const missing = isResendableCompletion(error) || (!error.code && /^(No object found|Upload parts are incomplete|Multipart completion for)/.test(error.message));
+  const reupload = !retryable && (missing || /^Uploaded size for|changed while its upload was being completed; upload it again/.test(error.message));
+  const blocksSession = !retryable && error.status < 500 && error.status !== 409 && error.status !== 404
+    && error.code !== "upload_object_missing" && !/^No object found/.test(error.message);
+  return { statusCode: error.status, code: error.code ?? "rejected", message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession };
+}
+/** The most files the server finalizes in one `files/complete` call; `completeUploadFiles` splits larger lists. */
+export const UPLOAD_COMPLETE_BATCH_SIZE = 100;
 
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
@@ -1606,6 +1805,34 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     } finally {
       if (onAbort) bound.signal.removeEventListener("abort", onAbort);
       bound.dispose();
+    }
+  }
+
+  /**
+   * A call that takes an upload session's lock (part signing, file completion, the session read, confirm): a busy
+   * session (409 `upload_session_busy`) or a rate limit (429) is waited out with backoff that honours Retry-After,
+   * within the call's own deadline. These calls are idempotent, so repeating them is safe.
+   */
+  async function requestSessionCall<T>(path: string, init: RequestInit, requestOptions: RequestOptions = {}, retryable = false,
+    /** Busy or rate-limited repeats allowed; the deadline bounds them either way. */
+    busyAttempts = SESSION_BUSY_ATTEMPTS): Promise<T> {
+    // One deadline for the call, all attempts and waits included: each attempt gets only the time that is left.
+    const giveUpAt = Date.now() + positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs");
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request<T>(path, init, { ...requestOptions, timeoutMs: Math.max(1, giveUpAt - Date.now()) }, retryable);
+      } catch (error) {
+        if (!isSessionBusyError(error) || attempt >= busyAttempts) throw error;
+        // The server's Retry-After wins (even past the backoff cap) when it fits before the deadline; otherwise the
+        // caller gets the busy answer, Retry-After included.
+        const backoffMs = Math.min(SESSION_BUSY_MAX_DELAY_MS, 250 * 2 ** attempt);
+        const delayMs = Math.max((error.retryAfterSeconds ?? 0) * 1000, backoffMs);
+        // Too little time would be left for another attempt: answer with this busy reply now.
+        if (Date.now() + delayMs + SESSION_RETRY_MIN_REMAINING_MS >= giveUpAt) throw error;
+        await sleep(delayMs, requestOptions.signal ?? new AbortController().signal);
+        // A sleep can overrun (a suspended timer, a busy event loop): past the deadline, answer with the last busy reply.
+        if (giveUpAt - Date.now() < SESSION_RETRY_MIN_REMAINING_MS) throw error;
+      }
     }
   }
 
@@ -2351,7 +2578,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         signal.throwIfAborted();
         const number = ++partNumber;
         if (number > 10_000) throw new RangeError("Stream exceeds the multipart upload part limit");
-        const signed = await request<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
+        const signed = await requestSessionCall<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
         const url = signed.parts.find((part) => part.partNumber === number)?.url;
         if (!url) throw new Error(`No upload URL for part ${number}`);
         const task = putToStorage(url, new Blob([bytes as Uint8Array<ArrayBuffer>]), undefined, transferOptions).then((etag) => {
@@ -2384,14 +2611,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       await Promise.all(active);
       if (failure) throw failure;
       parts.sort((a, b) => a.partNumber - b.partNumber);
-      await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
+      // The size reaches the server only through this call, so it gets its own, longer deadline (busy replies waited out).
+      await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }),
+        { ...transferOptions, timeoutMs: STREAM_FINAL_COMPLETE_TIMEOUT_MS }, false, Number.POSITIVE_INFINITY);
       transferCompleted = true;
       return await waitUploadSession(sessionPath, transferOptions);
     } catch (error) {
       stopped.abort(error);
       close();
       await Promise.all(active);
-      if (sessionPath && !transferCompleted) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      // A stream declares no size, so the server's reconciler can never finish it: close it (best effort) and name the
+      // session on the error.
+      if (sessionPath && !transferCompleted) {
+        await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+        withSessionId(error, sessionPath);
+      }
       throw error;
     } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
@@ -2406,6 +2640,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           method: "PUT",
           body,
           credentials: "omit",
+          // A presigned target is final: a redirect would re-send the bytes somewhere else.
+          redirect: "error",
           headers: contentType ? { "Content-Type": contentType } : undefined,
           signal: bound.signal,
         }); } catch (error) {
@@ -2472,6 +2708,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    * Sends one file's bytes. When a part or the single PUT fails after its own retries, the session is read again: storage knows which
    * parts arrived, so the transfer resumes from the server's pendingParts (with fresh signed URLs) instead of restarting.
    */
+  /** Every pending part's URL: the ones the session described, and the rest signed through parts/sign (100 per call). */
+  async function partUrls(sessionPath: string, descriptor: DirectUploadDescriptor, options: UploadOptions): Promise<Map<number, string>> {
+    const urls = new Map<number, string>();
+    const unsigned: number[] = [];
+    for (const part of descriptor.pendingParts ?? []) {
+      if (part.url) urls.set(part.partNumber, part.url); else unsigned.push(part.partNumber);
+    }
+    for (let start = 0; start < unsigned.length; start += 100) {
+      const signed = await requestSessionCall<{ parts: Array<{ partNumber: number; url: string }> }>(
+        `${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: unsigned.slice(start, start + 100) }), options);
+      for (const part of signed.parts) urls.set(part.partNumber, part.url);
+    }
+    for (const partNumber of unsigned) if (!urls.has(partNumber)) throw new Error(`No upload URL for part ${partNumber}`);
+    return urls;
+  }
+
   async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions): Promise<void> {
     let descriptor = first;
     for (let round = 0; ; round++) {
@@ -2480,24 +2732,127 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType, options);
           return;
         }
+        const urls = await partUrls(sessionPath, descriptor, options);
         for (const part of descriptor.pendingParts ?? []) {
           const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          await putToStorage(part.url, blob.slice(start, start + part.sizeBytes), undefined, options);
+          await putToStorage(urls.get(part.partNumber)!, blob.slice(start, start + part.sizeBytes), undefined, options);
         }
         return;
       } catch (error) {
         if (round >= 2 || options.signal?.aborted || !isTransientTransferError(error)) throw error;
-        let refreshed: DirectUploadDescriptor | undefined;
+        let session: UploadSession;
         try {
           await sleep(250 * 2 ** round, options.signal ?? new AbortController().signal);
-          const session = await request<UploadSession>(sessionPath, {}, options, true);
-          refreshed = session.files.find((file) => file.id === descriptor.id);
+          // Only this file: a large session's full read inspects far fewer objects.
+          session = await requestSessionCall<UploadSession>(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, {}, options, true);
         } catch { throw error; }
+        // The refreshed targets must belong to the same file the local bytes were matched to.
+        const refreshed = refreshedDescriptor(askedDescriptors(session.files, [descriptor.id]), descriptor);
         if (!refreshed) throw error;
-        if ((refreshed as { status?: string }).status === "completed") return;
+        if (refreshed.status === "completed") return;
+        if (refreshed.status === "failed" || refreshed.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${refreshed.status}`);
         descriptor = refreshed;
       }
     }
+  }
+
+  /**
+   * Files a large session's read did not inspect (`inspected: false`): completed in batches (one call per 100), so
+   * their stored objects decide. Returns the files whose bytes must still be sent, freshly described by ONE `fileId`
+   * read per batch. Only `upload_object_missing` and `upload_parts_incomplete` mean "send the bytes"; any other
+   * failure is thrown (a coded busy reply too: it is never taken for a missing object).
+   */
+  async function settleUninspected(sessionPath: string, uninspected: DirectUploadDescriptor[], options: UploadOptions): Promise<Map<string, DirectUploadDescriptor>> {
+    const resend = new Map<string, DirectUploadDescriptor>();
+    const signal = options.signal ?? new AbortController().signal;
+    for (let start = 0; start < uninspected.length; start += UNINSPECTED_COMPLETE_BATCH) {
+      const chunk = uninspected.slice(start, start + UNINSPECTED_COMPLETE_BATCH);
+      const missing: string[] = [];
+      // Files answered retryable (the server's hold budget ran out: `upload_session_busy`; storage briefly unavailable:
+      // `upload_storage_unavailable`) go into the next batch, a few rounds with short waits.
+      let pending = chunk;
+      for (let round = 0; pending.length > 0; round++) {
+        const retry: DirectUploadDescriptor[] = [];
+        const settled = await completeUninspectedRound(sessionPath, pending, options);
+        for (const file of pending) {
+          const outcome = settled.get(file.id)!;
+          if (outcome === "completed") continue;
+          if (outcome === "missing") missing.push(file.id);
+          else if (outcome === "retry") retry.push(file);
+          else throw new Error(`Upload of ${file.filename} could not be completed (${outcome.code})`);
+        }
+        if (retry.length === 0) break;
+        if (round >= UNINSPECTED_RETRY_ROUNDS) {
+          // Still not finished: the session is busy, not broken. Answered as busy, so the upload keeps (and names) it.
+          throw new DocSlurpApiError("Upload session is busy finalizing these files", 409,
+            { error: { code: "upload_session_busy", message: `${retry.length} files were not finalized in time` } });
+        }
+        await sleep(UNINSPECTED_RETRY_DELAY_MS * 2 ** round, signal);
+        pending = retry;
+      }
+      if (!missing.length) continue;
+      const query = missing.map((id) => `fileId=${encodeURIComponent(id)}`).join("&");
+      const session = await requestSessionCall<UploadSession>(`${sessionPath}?${query}`, {}, options, true);
+      if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
+      const described = askedDescriptors(session.files, missing);
+      for (const id of missing) {
+        const original = chunk.find((file) => file.id === id)!;
+        const name = original.filename;
+        const fresh = refreshedDescriptor(described, original);
+        if (!fresh) throw new Error(`Upload session no longer has ${name}`);
+        if (fresh.status === "completed") continue;
+        if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
+        resend.set(id, fresh);
+      }
+    }
+    return resend;
+  }
+
+  /**
+   * One completion round for uninspected files: one batch call (or, on an older server without batches, one call per
+   * file). Each file is `completed`, `missing` (send its bytes), `retry` (a retryable per-file answer, or a busy or
+   * unavailable single-file call) or a failure with its code.
+   */
+  async function completeUninspectedRound(sessionPath: string, files: DirectUploadDescriptor[], options: UploadOptions): Promise<Map<string, "completed" | "missing" | "retry" | { code: string }>> {
+    const outcomes = new Map<string, "completed" | "missing" | "retry" | { code: string }>();
+    type Answered = Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string; retryable?: boolean } }>;
+    let answered: Answered | null = null;
+    try {
+      const answer = await requestSessionCall<{ files?: Answered }>(`${sessionPath}/files/complete`,
+        jsonRequest("POST", { files: files.map((file) => ({ fileId: file.id })) }), options);
+      if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+      answered = answer.files;
+    } catch (error) {
+      if (!isLegacyCompletionRefusal(error)) throw error;
+    }
+    if (answered !== null) {
+      const results = answered as Answered;
+      assertUniqueRemoteIds(results.map((result) => result.fileId), "completion result");
+      const sent = new Set(files.map((file) => file.id));
+      if (results.some((result) => !sent.has(result.fileId ?? ""))) throw new Error("Upload completion result names a file this call did not send");
+      const byId = new Map(results.map((result) => [result.fileId, result]));
+      for (const file of files) {
+        const result = byId.get(file.id);
+        const code = result?.error?.code;
+        outcomes.set(file.id, result?.status === "completed" ? "completed"
+          : code && RESEND_COMPLETION_CODES.has(code) ? "missing"
+          : result?.error?.retryable ? "retry"
+          : { code: code ?? "missing result" });
+      }
+      return outcomes;
+    }
+    // An older server without batch completion: one call per file, the same rules.
+    for (const file of files) {
+      try {
+        await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: file.id }), options);
+        outcomes.set(file.id, "completed");
+      } catch (error) {
+        if (isResendableCompletion(error)) outcomes.set(file.id, "missing");
+        else if (isSessionBusyError(error) || (error instanceof DocSlurpApiError && error.status >= 500)) outcomes.set(file.id, "retry");
+        else throw error;
+      }
+    }
+    return outcomes;
   }
 
   /** The local file a session descriptor belongs to: by request index, then the client id, and only for older servers by name and size. */
@@ -2550,14 +2905,25 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       filename: typeof rejection.index === "number" ? args.names[rejection.index] ?? rejection.filename : rejection.filename,
     }));
     try {
-      for (const descriptor of session.files) {
+      // Match every descriptor before sending anything, so an unknown or repeated file fails the upload before any bytes move.
+      assertUniqueRemoteIds(session.files.map((descriptor) => descriptor.id), "session");
+      const work = session.files.map((descriptor) => {
         const match = sourceForDescriptor(descriptor, sources, claimed);
         if (!match) throw new Error(`Direct upload session returned a file this upload did not send: ${descriptor.filename}`);
-        await transferFile(sessionPath, descriptor, match.source.blob, options);
+        return { descriptor, blob: match.source.blob };
+      });
+      const resend = await settleUninspected(sessionPath, work.filter((item) => item.descriptor.inspected === false).map((item) => item.descriptor), options);
+      for (const { descriptor, blob } of work) {
+        const target = descriptor.inspected === false ? resend.get(descriptor.id) : descriptor;
+        if (target) await transferFile(sessionPath, target, blob, options);
       }
     } catch (error) {
-      await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
-      throw error;
+      // No final complete is sent here (the reconciler finalizes known sizes). A session that stayed busy (or rate
+      // limited) past our deadline is left open for the server's reconciler, which finishes the files whose bytes
+      // arrived: aborting it would discard them. Any other failure closes the session (best effort). Either way the
+      // error names the session.
+      if (!isSessionBusyError(error)) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      throw withSessionId(error, sessionPath);
     }
     // Once bytes have arrived, a status failure must not cancel accepted ingestion.
     const result = await waitUploadSession(sessionPath, options);
@@ -2593,6 +2959,18 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** Impact and cost of an {@link UpdateProjectInput}, without applying it. */
     updateProjectEstimate(id: string | undefined, input: UpdateProjectInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/estimate`, input, requestOptions);
+    },
+    /**
+     * Applies index-identity setting changes ({@link INDEX_IDENTITY_SETTINGS}) and re-indexes the project's existing
+     * documents in one step; with no `pipeline`, rebuilds the index under the current settings. Spends credits: price it
+     * with {@link reindexProjectEstimate} and pass its `signature` as `confirmEstimate`. Server keys need `projects:manage`.
+     */
+    reindexProject(id: string | undefined, input: ReindexProjectInput = {}, requestOptions?: RequestOptions): Promise<ReindexProjectResponse> {
+      return request<ReindexProjectResponse>(`${wsPath(id)}/reindex`, jsonRequest("POST", input as JsonObject), requestOptions);
+    },
+    /** What {@link reindexProject} would do and cost (`lockedSettings`, `signature`), without changing anything. */
+    reindexProjectEstimate(id: string | undefined, input: ReindexProjectInput = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt(`${wsPath(id)}/reindex/estimate`, input as JsonObject, requestOptions);
     },
     /**
      * Changes a project's retrieval defaults, ranking controls and chat settings (omitted fields keep their
@@ -2902,16 +3280,66 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return postUploadSession<UploadSession>("/v1/uploads/direct/sessions", { ...input, ...intakeTarget(input) }, options ?? {}, options?.idempotencyKey ?? newIdempotencyKey());
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
     },
     completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+    },
+    /**
+     * Completes many files of one session in batches of up to 100, one server call per batch. Good files complete and each
+     * bad one is reported in `files` (never thrown); a session-level failure (not found, closed, busy) throws. Against a
+     * server without batch support, falls back to one `completeUploadFile` call per file.
+     */
+    async completeUploadFiles(sessionId: string, files: CompleteUploadFileInput[], options?: RequestOptions): Promise<CompleteUploadFilesResult> {
+      const path = `/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`;
+      const results: UploadFileCompletion[] = [];
+      let sessionComplete = false;
+      let batched = true;
+      try {
+        for (let start = 0; start < files.length; start += UPLOAD_COMPLETE_BATCH_SIZE) {
+          const chunk = files.slice(start, start + UPLOAD_COMPLETE_BATCH_SIZE);
+          if (batched) {
+            try {
+              // A batch entry carries only what the server uses: storage's own part list is authoritative.
+              const entries = chunk.map(({ fileId, etag, sizeBytes }) => ({ fileId, ...(etag !== undefined ? { etag } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) }));
+              const answer = await requestSessionCall<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
+              if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+              // One result per file sent, each named once: anything else is not this batch's answer.
+              assertUniqueRemoteIds(answer.files.map((file) => file.fileId), "completion result");
+              const sent = new Set(chunk.map((file) => file.fileId));
+              if (answer.files.some((file) => !sent.has(file.fileId))) throw new Error("Upload completion result names a file this call did not send");
+              results.push(...answer.files);
+              sessionComplete = Boolean(answer.sessionComplete);
+              continue;
+            } catch (error) {
+              // Fall back only for an older server's refusal of the batch body, and only before anything was batched.
+              if (start !== 0 || !isLegacyCompletionRefusal(error)) throw error;
+              batched = false;
+            }
+          }
+          for (const file of chunk) {
+            try {
+              await requestSessionCall(path, jsonRequest("POST", file), options);
+              results.push({ fileId: file.fileId, status: "completed" });
+            } catch (error) {
+              // A busy, closed or unavailable session is the caller's to retry or abandon, not a per-file answer.
+              if (!(error instanceof DocSlurpApiError) || ![400, 404, 409, 413, 415].includes(error.status) || error.code === "upload_session_busy") throw error;
+              results.push({ fileId: file.fileId, status: "failed", error: legacyFileError(error) });
+            }
+          }
+        }
+      } catch (error) {
+        // Keep what earlier batches completed: the caller repeats only the rest.
+        if (error && typeof error === "object") (error as CompleteUploadFilesPartial).partialResults = completionResult([...results], sessionComplete);
+        throw error;
+      }
+      return completionResult(results, sessionComplete);
     },
     signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
     },
     completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
     },
     abortUploadSession(sessionId: string, options?: RequestOptions): Promise<{ ok: boolean }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/abort`, { method: "POST" }, options);

@@ -2260,6 +2260,19 @@ export function affectedStages(before: PipelineFeatures, after: PipelineFeatures
   return enabled.filter((stage) => selected.has(stage));
 }
 
+/**
+ * The stages that rebuild what `fields` feed, for an unchanged configuration: their enabled seed stages plus the later
+ * stages that consume their outputs, in pipeline order. A plain index rebuild uses the index-identity settings.
+ */
+export function fieldRebuildStages(features: PipelineFeatures, fields: readonly (keyof PipelineFeatures)[]): PipelineRunStage[] {
+  const enabled = pipelineStagePlan.filter((item) => item.isEnabled(features)).map((item) => item.stage);
+  const seeds = new Set<PipelineRunStage>();
+  for (const field of fields) for (const stage of FIELD_SEED_STAGES[field]) if (enabled.includes(stage)) seeds.add(stage);
+  if (seeds.size === 0) return [];
+  const { selected } = closeStageSelection(seeds, enabled, features, false);
+  return enabled.filter((stage) => selected.has(stage));
+}
+
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, v) =>
     v && typeof v === "object" && !Array.isArray(v)

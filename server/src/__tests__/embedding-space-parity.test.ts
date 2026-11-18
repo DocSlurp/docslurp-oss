@@ -1,4 +1,5 @@
 import {
+  applyPrivateModelMode,
   embeddingProfileCatalog,
   embeddingRouteSpaceUri,
   embeddingSpaceUri,
@@ -59,6 +60,29 @@ describe("embedding space parity, worker write vs server read", () => {
     const later = normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", modelUri: "llm://openai/text-embedding-3-large" } } as never);
     const stored = resolveEmbeddingRoute(embeddingConfigFor(later.embedding, indexConfigOf(pipeline)));
     expect(embeddingRouteSpaceUri(stored, stored.dimensions)).toBe(writtenUri);
+  });
+
+  it("private model mode: the mapped embedding is written and read in one space, and an old hosted index keeps its own", () => {
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    vi.stubEnv("DOCSLURP_PRIVATE_EMBEDDING_MODEL", PRIVATE_TEXT);
+    try {
+      const stored = normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted" } } as never);
+      // The worker's run load and the server's search read both apply the map to the stored pipeline.
+      const effective = applyPrivateModelMode(stored);
+      expect(effective.embedding.modelUri).toBe(PRIVATE_TEXT);
+      const written = resolveEmbeddingModel(config, effective);
+      const writtenUri = embeddingRouteSpaceUri(written, written.dimensions);
+      const read = resolveEmbeddingRoute(effective.embedding);
+      expect(embeddingRouteSpaceUri(read, read.dimensions)).toBe(writtenUri);
+      expect(read.dimensions).toBe(1024);
+      // Documents built before the switch are looked up in the hosted space they were written in, never the private one.
+      const before = resolveEmbeddingModel(config, stored);
+      const old = resolveEmbeddingRoute(embeddingConfigFor(effective.embedding, indexConfigOf(stored)));
+      expect(embeddingRouteSpaceUri(old, old.dimensions)).toBe(embeddingRouteSpaceUri(before, before.dimensions));
+      expect(embeddingRouteSpaceUri(old, old.dimensions)).not.toBe(writtenUri);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("tells pooling and dimensions apart", () => {

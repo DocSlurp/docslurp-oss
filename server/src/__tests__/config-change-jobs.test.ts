@@ -72,7 +72,8 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   }
 }
 
-const embeddingChange = () => ({ pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
+/** Index-identity changes on a project with documents are locked: the confirmation (`apply: "reindex"`) unlocks them. */
+const embeddingChange = () => ({ apply: "reindex" as const, pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
 
 async function patch(input: Record<string, unknown>) {
   const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never });
@@ -216,7 +217,7 @@ describe("config-change jobs", () => {
     const C = pipeline({ embedding: profileEmbedding("cheapest-local") });
     const hashes = { A: indexConfigHash(indexConfigOf(A)), B: indexConfigHash(indexConfigOf(B)), C: indexConfigHash(indexConfigOf(C)) };
 
-    const first = await patch({ pipeline: B });
+    const first = await patch({ apply: "reindex", pipeline: B });
     expect(first.applied!.job).toMatchObject({ status: "queued" });
     // Legacy documents retain unknown provenance until actual reprocessing; the current recipe cannot prove historical normalization.
     expect((await sql<{ h: string | null }[]>`select index_config_hash h from documents where run_id = 'src'`).map((r) => r.h)).toEqual([null, null, null]);
@@ -227,7 +228,7 @@ describe("config-change jobs", () => {
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values ('vk', ${kid!.id}, 'lancedb', 'b', 'p', 'm2', 384)`;
     await sql`update documents set status = 'completed', index_config_hash = ${hashes.B} where id = ${kid!.id}`;
 
-    const second = await patch({ pipeline: C });
+    const second = await patch({ apply: "reindex", pipeline: C });
     expect(second.applied!.cancelledRunIds).toEqual([first.applied!.job!.id]);
     expect(cancelSignal).toHaveBeenCalledWith(first.applied!.job!.id);
     const [oldRun] = await sql<{ status: string; control_state: string }[]>`select status, control_state from project_runs where id = ${first.applied!.job!.id}`;
@@ -265,7 +266,7 @@ describe("config-change jobs", () => {
     await seed({ credits: 0, documents: 2, vectorized: true });
     const first = await patch(embeddingChange());
     expect(first.applied!.job).toMatchObject({ status: "blocked" });
-    const second = await patch({ pipeline: pipeline({ embedding: profileEmbedding("cheapest-local") }) });
+    const second = await patch({ apply: "reindex", pipeline: pipeline({ embedding: profileEmbedding("cheapest-local") }) });
     expect(second.applied!.job).toMatchObject({ status: "blocked" });
     const [cancelled] = await sql<{ status: string; control_state: string }[]>`select status, control_state from project_runs where id = ${first.applied!.job!.id}`;
     expect(cancelled).toEqual({ status: "failed", control_state: "cancelled" });
@@ -309,7 +310,7 @@ describe("config-change jobs", () => {
     (await sql<{ s: string[] | null }[]>`select pipeline -> 'stageSubset' as s from project_runs where job_id = ${jobId} order by created_at`)
       .flatMap((row) => row.s ?? []);
   // An embedding change is a profile change (a category): raw model URIs are managed, never a caller's choice.
-  const embeddingTo = (pl: PipelineFeatures) => ({ pipeline: { ...pl, embedding: profileEmbedding("cheapest-local") } });
+  const embeddingTo = (pl: PipelineFeatures) => ({ apply: "reindex" as const, pipeline: { ...pl, embedding: profileEmbedding("cheapest-local") } });
 
   // Existing work under an already-selected PII policy: exercise cancellation/carry without
   // pretending that tightening a populated project's policy can safely queue an ordinary rebuild.

@@ -294,12 +294,15 @@ const mcpAdapterRoutes = new Hono()
       }).route("/", uploadsRoutes);
       native.onError(spendAwareErrorHandler);
       const sessionPath = `/direct/sessions/${parsed.data.sessionId}`;
-      for (const fileId of parsed.data.fileIds) {
-        const result = await native.request(`http://mcp.internal${sessionPath}/files/complete`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId }), signal: c.req.raw.signal,
-        });
-        if (!result.ok) return result;
-      }
+      // One batched completion for the session's files (at most 10 here), answered per file.
+      const result = await native.request(`http://mcp.internal${sessionPath}/files/complete`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: parsed.data.fileIds.map(fileId => ({ fileId })) }), signal: c.req.raw.signal,
+      });
+      if (!result.ok) return result;
+      const answer = await result.json().catch(() => null) as { files?: Array<{ status: string; error?: { statusCode: number; code: string; message: string } }> } | null;
+      const failed = answer?.files?.find(file => file.status === "failed");
+      if (failed?.error) return adapterError(c, failed.error.statusCode, failed.error.message, failed.error.code as ApiErrorCode);
       return native.request(`http://mcp.internal${sessionPath}/confirm`, { method: "POST", signal: c.req.raw.signal });
     }
 

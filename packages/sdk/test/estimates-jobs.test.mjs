@@ -179,3 +179,28 @@ test("content updates hit their routes and reprocessRun returns one shape for st
     ["POST", "/v1/projects/other/ingest-report/apply", { recommendationId: "preserve-tables", runId: "r1" }],
   ]);
 });
+
+test("reindexProject and its estimate hit the reindex routes; a locked update surfaces the re-index details", async () => {
+  const signature = "b".repeat(64);
+  const { calls, client } = recorder((call) => call.url.endsWith("/reindex")
+    ? json({ project: { id: "ws1" }, changedSettings: ["embedding"], impact: { kind: "reindex-required", stages: ["embed"], reasons: [], documents: 1, pages: 3 }, estimate, runIds: ["r1"], job })
+    : call.method === "PATCH"
+      ? json({ error: { code: "reindex_required", message: "Locked index settings changed: embedding.", details: { reindex: { lockedSettings: ["embedding"], documents: 1, pages: 3, credits: null, signature, reindexUrl: "/v1/projects/ws1/reindex" } }, requestId: "q1" } }, 409)
+      : json({ estimate, billing: "disabled", lockedSettings: ["embedding"], signature }));
+  const priced = await client.reindexProjectEstimate(undefined, { pipeline: { embedding: { profile: "fastest-local" } } });
+  assert.equal(priced.signature, signature);
+  const result = await client.reindexProject(undefined, { pipeline: { embedding: { profile: "fastest-local" } }, confirmEstimate: signature });
+  assert.deepEqual(result.runIds, ["r1"]);
+  await client.reindexProject("other");
+  assert.deepEqual(calls.map((c) => [c.method, c.url]), [
+    ["POST", "/v1/projects/ws1/reindex/estimate"], ["POST", "/v1/projects/ws1/reindex"], ["POST", "/v1/projects/other/reindex"],
+  ]);
+  assert.deepEqual(calls[1].body, { pipeline: { embedding: { profile: "fastest-local" } }, confirmEstimate: signature });
+  assert.deepEqual(calls[2].body, {});
+  await assert.rejects(client.updateProject(undefined, { pipeline: { embedding: { profile: "fastest-local" } } }), (error) => {
+    assert.equal(error.code, "reindex_required");
+    assert.deepEqual(error.reindex?.lockedSettings, ["embedding"]);
+    assert.equal(error.reindex?.signature, signature);
+    return true;
+  });
+});

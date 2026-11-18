@@ -869,3 +869,36 @@ test("search without --stream is unchanged", async () => {
   assert.equal(result.requests[0].method, "GET");
   assert.doesNotMatch(result.stdout, /Final ranking/);
 });
+
+test("reindex --estimate prices the index change and prints the signature; reindex --confirm starts it", async () => {
+  const signature = "c".repeat(64);
+  const estimate = { pages: 10, documents: 2, billing: "disabled", credits: null, seconds: { low: 1, high: 2 }, basis: "test" };
+  const priced = await invoke(["reindex", "--project", "w", "--embedding-profile", "fastest-local", "--chunk-overlap", "on", "--estimate"], () => ({ body: { estimate, lockedSettings: ["embedding", "chunkOverlap"], signature } }));
+  assert.equal(priced.code, 0, priced.stderr);
+  assert.deepEqual(priced.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/reindex/estimate"]]);
+  assert.deepEqual(JSON.parse(priced.requests[0].body), { pipeline: { embedding: { profile: "fastest-local" }, chunkOverlap: true } });
+  assert.match(priced.stdout, /embedding, chunkOverlap/);
+  assert.match(priced.stdout, new RegExp(signature));
+  assert.match(priced.stdout, /nothing was started/);
+
+  const job = { id: "j1", kind: "reindex", status: "queued", runIds: ["r1"], estimate, statusUrl: "/v1/jobs/j1" };
+  const started = await invoke(["reindex", "--project", "w", "--embedding-profile", "fastest-local", "--confirm", signature], () => ({ body: { changedSettings: ["embedding"], runIds: ["r1"], job } }));
+  assert.equal(started.code, 0, started.stderr);
+  assert.deepEqual(started.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/reindex"]]);
+  assert.deepEqual(JSON.parse(started.requests[0].body), { pipeline: { embedding: { profile: "fastest-local" } }, confirmEstimate: signature });
+  assert.match(started.stdout, /Job j1: reindex queued/);
+
+  const all = await invoke(["reindex", "--project", "w", "--embedding-profile", "fastest-local", "--late-chunking", "on", "--late-chunking-window", "3", "--vector-backends", "lancedb,orama", "--contextual-preambles", "off", "--estimate"], () => ({ body: { estimate, lockedSettings: ["embedding"], signature } }));
+  assert.equal(all.code, 0, all.stderr);
+  assert.deepEqual(JSON.parse(all.requests[0].body), { pipeline: { embedding: { profile: "fastest-local", lateChunking: true, lateChunkingWindow: 3 }, contextualChunkPreambles: false, vectorBackends: ["lancedb", "orama"] } });
+
+  const rebuild = await invoke(["reindex", "--project", "w"], () => ({ body: { changedSettings: [], runIds: ["r2"], job: { ...job, id: "j2" } } }));
+  assert.deepEqual(JSON.parse(rebuild.requests[0].body), {});
+
+  const stale = await invoke(["reindex", "--project", "w", "--confirm", signature], () => ({ status: 409, body: { error: { code: "estimate_stale", message: "The re-index work or its price changed since the estimate.", requestId: "q" } } }));
+  assert.notEqual(stale.code, 0);
+
+  const bad = await invoke(["reindex", "--project", "w", "--chunk-overlap", "maybe"], () => ({ body: {} }));
+  assert.notEqual(bad.code, 0);
+  assert.deepEqual(bad.requests, []);
+});
