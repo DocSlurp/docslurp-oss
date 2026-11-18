@@ -138,6 +138,38 @@ test("a conflict that is not the session lock still fails the upload", async () 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("more than 1,000 files go up as several sessions; a failed session does not stop the rest", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 2001);
+    let sessions = 0;
+    const { respond: base } = directSessionServer({ onComplete: () => ({ body: { ok: true } }) });
+    const result = await invoke(["upload", ...files, "--idempotency-key", "batch-key"], (request, count, url) => {
+      if (request.url === "/v1/uploads/direct/sessions" && ++sessions === 2) return { status: 400, body: { error: { code: "bad_request", message: "refused" } } };
+      return base(request, count, url);
+    }, { killAfterMs: 60_000 });
+    assert.equal(result.code, 0, result.stderr);
+    const creates = result.requests.filter((request) => request.url === "/v1/uploads/direct/sessions");
+    assert.deepEqual(creates.map((request) => JSON.parse(request.body.toString()).files.length), [1000, 1000, 1]);
+    assert.deepEqual(creates.map((request) => request.headers["idempotency-key"]), ["batch-key.1", "batch-key.2", "batch-key.3"]);
+    assert.equal(result.requests.filter((request) => request.url.startsWith("/storage/")).length, 1001, "the refused session's files are not sent");
+    assert.match(result.stderr, /1 of 3 upload sessions failed/);
+    assert.equal((result.stdout.match(/Run ID:/g) ?? []).length, 2);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("when every session fails, the command fails", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 1001);
+    const result = await invoke(["upload", ...files], (request) => (
+      request.url === "/v1/uploads/direct/sessions" ? { status: 400, body: { error: { code: "bad_request", message: "refused" } } } : { status: 404, body: {} }
+    ));
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /2 of 2 upload sessions failed/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("a timed-out bulk upload is sent again with the same Idempotency-Key", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
   try {

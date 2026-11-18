@@ -436,6 +436,8 @@ function requestAuth(flags: Record<string, string | boolean>, apiUrl: string): P
 
 /** Same threshold as the SDK's DIRECT_UPLOAD_THRESHOLD_BYTES. */
 const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
+/** Files one direct upload session takes (the server's session schema). Larger uploads go up as several sessions, one run each. */
+const DIRECT_SESSION_MAX_FILES = 1000;
 
 /**
  * The type the file declares. The CLI keeps no format table of its own: the server resolves a missing or generic type from the file's
@@ -783,6 +785,10 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   const totalBytes = blobs.reduce((sum, file) => sum + file.blob.size, 0);
   // The bulk body is timed by its size, not the 30 s a small request gets, and carries an Idempotency-Key so a timed-out
   // attempt can be sent again without uploading (and billing) the files twice.
+  if (totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES && blobs.length > DIRECT_SESSION_MAX_FILES) {
+    await uploadDirectInSessions(blobs, formData, flags, intake);
+    return;
+  }
   const response = totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES
     ? await uploadDirect(blobs, formData, flags, intake)
     : await apiFetchRepeatable(`${intake.base}/bulk`, flags, {
@@ -798,6 +804,38 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   }
 
   await printIntakeResult(response, flags);
+}
+
+/**
+ * More files than one session takes: one session (and run) per 1,000 files, in order. A session that fails is reported and the
+ * rest still go up, so good files are never held back by bad ones; the command fails only when no session was created.
+ * Each session gets its own Idempotency-Key, derived from --idempotency-key when one was given, so a rerun repeats no session.
+ */
+async function uploadDirectInSessions(blobs: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>, intake: IntakeMode): Promise<void> {
+  const count = Math.ceil(blobs.length / DIRECT_SESSION_MAX_FILES);
+  const baseKey = typeof flags.idempotencyKey === "string" && flags.idempotencyKey ? flags.idempotencyKey.slice(0, 240) : randomUUID();
+  const failed: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const slice = blobs.slice(index * DIRECT_SESSION_MAX_FILES, (index + 1) * DIRECT_SESSION_MAX_FILES);
+    const label = `Session ${index + 1}/${count} (${slice.length} files: ${slice[0]!.name} … ${slice.at(-1)!.name})`;
+    console.error(`${label}: uploading`);
+    try {
+      const response = await uploadDirect(slice, fields, { ...flags, idempotencyKey: `${baseKey}.${index + 1}` }, intake);
+      if (!response.ok) {
+        printFailure(await responseFailure(response));
+        failed.push(label);
+        continue;
+      }
+      await printIntakeResult(response, flags);
+    } catch (error) {
+      console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      failed.push(label);
+    }
+  }
+  if (failed.length > 0) {
+    console.error(`Warning: ${failed.length} of ${count} upload sessions failed; their files were not uploaded:\n  ${failed.join("\n  ")}`);
+    if (failed.length === count) process.exitCode = 1;
+  }
 }
 
 type CostEstimate = {

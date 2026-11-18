@@ -186,8 +186,11 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | `--api-url <origin>` | `DOCSLURP_URL` | `https://docslurp.io` (don't add `/v1`) |
 | `--project <id\|slug\|name>` | `DOCSLURP_PROJECT` | `default`, your organization's default project. On `upload`/`ingest-url` a name that matches no project creates it; `--new-project` or `--template` without `--project` creates a self-titled one. |
 | `--timeout <seconds>` | None | 30 seconds per API request; 300 seconds per watch |
+| None | `DOCSLURP_UPLOAD_CONCURRENCY` | 6 storage transfers in flight per upload (1–32) |
 
-Flags override environment variables. With `upload --watch --timeout 600`, the upload request gets up to 600 seconds **and then** the watch gets up to 600 seconds. Watches poll every two seconds, and each progress read is capped at 30 seconds. `--timeout` applies to every API command, including upload, status, runs, search, chat and `jobs watch` (300 seconds by default), but not to `import-search-compat` or the long-lived MCP server. The CLI doesn't retry failed requests.
+Flags override environment variables. With `upload --watch --timeout 600`, the upload request gets up to 600 seconds **and then** the watch gets up to 600 seconds. Watches poll every two seconds, and each progress read is capped at 30 seconds. `--timeout` applies to every API command, including upload, status, runs, search, chat and `jobs watch` (300 seconds by default), but not to `import-search-compat` or the long-lived MCP server. The CLI doesn't retry failed requests, except for requests that are safe to repeat: a lost or rate-limited response to a request that carries an Idempotency-Key, and a busy upload session (`upload_session_busy`).
+
+Uploads larger than 20 MB go straight to storage, several files and parts at a time. An upload of more than 1,000 such files goes up as several sessions of at most 1,000 files, each its own run. A session that fails is reported and the others still upload; the command fails only when every session fails.
 
 Set the key in the environment rather than with `--api-key`, so it doesn't show up in your shell history or process list. For local development, set `DOCSLURP_URL=http://localhost:4321` and run `docslurp login` against it.
 
