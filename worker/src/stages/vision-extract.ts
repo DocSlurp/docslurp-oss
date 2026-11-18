@@ -1,4 +1,5 @@
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { mayHaveHtmlTables, storeEmbedTableCells } from "./embed-table-cells.js";
 import { recordPageExtracts, visionPageRecords } from "../pipeline/page-extracts.js";
 import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { recordPageEscalation } from "../pipeline/run-milestones.js";
@@ -691,6 +692,17 @@ export class VisionExtractStage implements Stage {
               outputs, skips: failedPages, reconciliation, ocrPageClass: runUsesOcrPageClass(state.artifactLedger),
             }));
 
+            // Pages vision rewrote with HTML tables: parse their cells in this activity's warm VM lane and add them to the
+            // document's stored table cells, so embed reuses them (DOCSLURP_TABLE_CELLS_CACHE). Best effort, never fails the stage.
+            const tableCells = reconciliation.changedPages.length > 0 && outputs.some((page) => mayHaveHtmlTables(page.text))
+              ? await storeEmbedTableCells({
+                  run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
+                  markdownUri: state.artifactLedger.readDocument(document.id, "markdown"),
+                  canonicalUri: state.artifactLedger.readDocument(document.id, "canonical-document"),
+                  signal,
+                })
+              : null;
+
             console.log(
               `[extract-debug] document=${document.id} visionCompleted ` +
                 `documentPages=${pages} selectedPages=${needsVision.selectedPages.length} failedPages=${failedPages.length} ` +
@@ -702,6 +714,7 @@ export class VisionExtractStage implements Stage {
             return {
               artifactUri: this.storage.uri(key),
               stats: {
+                ...(tableCells ? { tableCells } : {}),
                 pages: outputs.length,
                 inputTokens,
                 outputTokens,

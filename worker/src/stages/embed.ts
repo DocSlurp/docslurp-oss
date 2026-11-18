@@ -1,6 +1,6 @@
 import { hasVmHtmlTableWork, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
+import { embedHtmlTableSources, readTableCellsArtifact, tableCellsArtifactKey, tableCellsCacheActive, tableCellsGuestVersion, type TableCellsLookup } from "../pipeline/html-table-cells-cache.js";
 import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
-import { htmlTableSources } from "../pipeline/chunking.js";
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
@@ -176,15 +176,43 @@ export class EmbedStage implements Stage {
           // synchronous chunking and hashing run beside the remote call.
           let contextTask: Promise<DocumentContext> | undefined;
           // HTML tables are parsed into cells in a parser VM before chunking (a fresh VM per
-          // embed activity: ~4.8 s p50 in production, 2026-11-11). `auto` overlaps the summary
-          // call with that round trip and keeps the inline order when there is nothing to wait on.
-          const tableSources = [
-            ...(extracted.canonicalDocument?.blocks.flatMap(block => [block.text.trim(), ...htmlTableSources(block.text)]) ?? []),
-            ...htmlTableSources(extracted.text),
-          ];
+          // embed activity: ~4.8 s p50 in production, 2026-11-11). extract-markdown and
+          // vision-extract store those cells from their already-warm VM lanes
+          // (DOCSLURP_TABLE_CELLS_CACHE); only tables missing from that artifact go to a VM here.
+          // `auto` overlaps the summary call with any VM round trip left and keeps the inline
+          // order when there is nothing to wait on.
+          const tableSources = embedHtmlTableSources(extracted);
+          let tableCells: TableCellsLookup | undefined;
+          if (hasVmHtmlTableWork(tableSources) && tableCellsCacheActive()) {
+            const lookupStarted = Date.now();
+            tableCells = await readTableCellsArtifact({
+              storage: this.storage,
+              key: tableCellsArtifactKey(state.run, document),
+              runId: state.run.id,
+              documentId: document.id,
+              guestVersion: await tableCellsGuestVersion(),
+              sources: tableSources,
+            });
+            const reason = "reason" in tableCells ? tableCells.reason : null;
+            (tableCells.status === "invalid" ? console.warn : console.log)(
+              `[table-cells] embed document=${document.id} status=${tableCells.status} hits=${tableCells.hits} ` +
+                `misses=${tableCells.misses}${reason ? ` reason=${reason}` : ""} ms=${Date.now() - lookupStarted}`,
+            );
+            state.pendingPerformance.push({
+              documentId: document.id,
+              scope: "document",
+              stageName: this.name,
+              metric: "table-cells-reuse",
+              value: tableCells.hits,
+              unit: "table",
+              tags: ["document", "tables"],
+              metadata: { status: tableCells.status, hits: tableCells.hits, misses: tableCells.misses, ...(reason ? { reason } : {}), lookupMs: Date.now() - lookupStarted },
+            });
+          }
+          const tableVmWork = hasVmHtmlTableWork(tableSources) && (tableCells === undefined || tableCells.misses > 0);
           const preambleMode = embedPreambleMode();
           const startContextEarly = preambleMode === "concurrent"
-            || (preambleMode === "auto" && hasVmHtmlTableWork(tableSources));
+            || (preambleMode === "auto" && tableVmWork);
           if (preamblesEnabled && startContextEarly) {
             await lookupReusableContext();
             contextTask = resolveDocumentContext({
@@ -245,7 +273,7 @@ export class EmbedStage implements Stage {
                   maxTokens: chunkMaxTokens,
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
-              : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal), signal);
+              : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal), signal, { cached: tableCells?.cached });
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
