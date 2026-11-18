@@ -101,7 +101,8 @@ describe("platform-admin managed model route", () => {
     }
     expect(sqlMock).not.toHaveBeenCalled();
     sqlMock.mockResolvedValueOnce(projectRow()).mockResolvedValueOnce([{ count: 3 }]);
-    const embedding = await put(adminSession, { pipeline: { embedding: { modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b" } } });
+    // Another model than the profile's (the check compares the resolved index identity, so pinning the default is a no-op).
+    const embedding = await put(adminSession, { pipeline: { embedding: { modelUri: "llm://openrouter/perplexity/pplx-embed-v1-4b" } } });
     expect(embedding.status).toBe(400);
     expect((await embedding.json()).error.message).toContain("re-index");
   });

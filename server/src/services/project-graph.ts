@@ -1,4 +1,4 @@
-import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
+import { assertIndexIdentityUnchanged, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -314,6 +314,8 @@ export async function updateProjectGraph(
   if (next.graphRag && !next.embed) {
     throw new ProjectGraphError("The knowledge graph needs embeddings; enable embedding for this project first", 400);
   }
+  // Graph settings never touch the index identity (a reindex-free write path must not).
+  assertIndexIdentityUnchanged(pipeline, next, "A graph settings update");
   const updated = await updateProject(project.id, userId, { pipeline: next }, { expectedUpdatedAt: project.updatedAt });
   if (!updated) throw new ProjectGraphError("Project not found", 404);
   return await buildGraphStatus(updated);

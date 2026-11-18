@@ -181,7 +181,10 @@ describe("estimate twins equal the mutation's job.estimate", () => {
     const body = { pipeline: { ...graphPipeline, embedding: { ...graphPipeline.embedding, profile: "fastest-local" as const, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" } } };
     const twin = await (await post(app, "/v1/projects/w/estimate", body)).json() as { impact: { kind: string }; estimate: unknown };
     expect(twin.impact.kind).toBe("reindex-required");
-    const res = await app.request("/v1/projects/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    // The embedding is locked on a project with indexed documents: the plain PATCH is refused, the confirmed one applies.
+    const refused = await app.request("/v1/projects/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(refused.status).toBe(409);
+    const res = await app.request("/v1/projects/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, apply: "reindex" }) });
     expect(res.status).toBe(200);
     const out = await res.json() as { job: { estimate: unknown; kind: string } };
     expect(out.job.kind).toBe("reindex");
@@ -422,7 +425,8 @@ describe("PATCH project preferences preserve sparse semantics and refuse unsafe 
     ["budget cleared", { monthlyBudgetCents: 0 }],
     ["retention", { artifactRetentionDays: 30, runRetentionDays: null }],
     ["partial nested pipeline", { pipeline: { summarize: true } }],
-    ["nested embedding profile", { pipeline: { embedding: { profile: "fastest-local" } } }],
+    // The project holds documents, so the index setting needs the re-index confirmation.
+    ["nested embedding profile", { pipeline: { embedding: { profile: "fastest-local" } }, apply: "reindex" }],
     ["indexing mode", { pipeline: { indexingMode: "map" } }],
     ["indexing mode with indexAll", { pipeline: { indexingMode: "full" }, indexAll: true }],
     ["apply new-uploads", { apply: "new-uploads", pipeline: { summarize: true } }],

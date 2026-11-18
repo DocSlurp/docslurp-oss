@@ -67,6 +67,10 @@ vi.mock("../services/config-change.js", () => ({
   }),
   estimateProjectChange: vi.fn(),
   billingState: () => "disabled",
+  assertEstimateCurrent: () => undefined,
+  reindexTargetSignature: () => "",
+  ReindexRequiredError: class ReindexRequiredError extends Error {},
+  EstimateStaleError: class EstimateStaleError extends Error {},
 }));
 
 vi.mock("../services/project-chat.js", () => ({
