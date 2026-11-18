@@ -186,3 +186,29 @@ test("direct upload sessions carry Speed boost without a quality override", asyn
   const session = api.calls.find(call => call.url.endsWith("/direct/sessions"));
   assert.equal(JSON.parse(session.body).speedBoost, true);
 });
+
+test("reports every run a direct upload started in waves, while following it and in the result", async () => {
+  const api = fakeApi();
+  const runs = [
+    { runId: "s1", wave: 1, status: "started", fileCount: 5, documentCount: 5, createdAt: "2026-11-17T00:00:00.000Z" },
+    { runId: "run-2", wave: 2, status: "started", fileCount: 2, documentCount: 2, createdAt: "2026-11-17T00:00:05.000Z" },
+  ];
+  let polls = 0;
+  const fetch = async (url, init = {}) => {
+    if (String(url).endsWith("/s1?statusOnly=true")) {
+      polls += 1;
+      // Wave 1 starts while the upload is still in progress; the session is confirmed after wave 2.
+      return polls === 1
+        ? json({ status: "pending", result: null, runs: runs.slice(0, 1) })
+        : json({ status: "confirmed", result: { ...uploadResult, run: { id: "s1" } }, runs });
+    }
+    return api.fetch(url, init);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  const seen = [];
+  const big = new Blob([new Uint8Array(DIRECT_UPLOAD_THRESHOLD_BYTES + 1)], { type: "application/pdf" });
+  const result = await client.upload({ data: big, filename: "big.pdf" }, { onRuns: (list) => seen.push(list.map((run) => run.runId)) });
+  assert.equal(result.run.id, "s1");
+  assert.deepEqual(result.runs.map((run) => run.runId), ["s1", "run-2"]);
+  assert.deepEqual(seen, [["s1"], ["s1", "run-2"]]);
+});

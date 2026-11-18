@@ -576,6 +576,11 @@ export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
 };
 
 export type UploadOptions = RequestOptions & {
+  /**
+   * Direct uploads: called while the upload is followed, each time it has started another run (every run so far, in
+   * order). Large uploads start runs in waves before the last file has arrived.
+   */
+  onRuns?: (runs: UploadRunSummary[]) => void;
   /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
@@ -652,7 +657,23 @@ export type RejectedUpload = {
   message: string;
 };
 
+/**
+ * One run a direct upload started. A direct upload starts runs in waves while it is still uploading (every few files,
+ * or a few seconds after a file arrives), all in the same project; wave 1's run is the response's `run`.
+ */
+export type UploadRunSummary = {
+  runId: string;
+  wave: number;
+  /** `starting` while the run is being created; follow the run itself (getRun, streamRun) for its progress. */
+  status: "starting" | "started";
+  fileCount: number;
+  documentCount: number | null;
+  createdAt: string;
+};
+
 export type UploadResponse = {
+  /** Direct uploads: every run the upload started, in order (`run` is the first). Absent for single-run uploads. */
+  runs?: UploadRunSummary[];
   documents: DocumentRecord[];
   /** Files an upload left out while accepting the rest (one bad file never fails the request). Absent when every file was taken. */
   rejected?: RejectedUpload[];
@@ -1324,7 +1345,13 @@ export type UploadSession = {
   sessionId: string;
   status: string;
   files: DirectUploadDescriptor[];
+  /** The first run's response, set once every file is in a run (status `confirmed`). */
   result?: UploadResponse | null;
+  /** Every run the session has started so far, in order; grows while files are still uploading. */
+  runs?: UploadRunSummary[];
+  /** The project the runs went to, once the first run started. */
+  projectId?: string | null;
+  error?: string | null;
   /** Files the server left out of the session (the others were accepted), keyed by request index. */
   rejected?: RejectedUpload[];
 };
@@ -2279,6 +2306,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const bound = deadline(timeoutMs, options.signal);
     let pollDelayMs = 250;
     let transientFailures = 0;
+    let reportedRuns = 0;
     try {
       while (true) {
         let retryDelayMs = pollDelayMs;
@@ -2286,7 +2314,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           // This loop owns status retries; retrying inside request would multiply polling traffic.
           const session = await request<UploadSession>(`${path}?statusOnly=true`, {}, { ...options, signal: bound.signal });
           transientFailures = 0;
-          if (session.result) return session.result;
+          const runs = session.runs ?? [];
+          if (runs.length > reportedRuns) {
+            reportedRuns = runs.length;
+            try { options.onRuns?.(runs); } catch { /* a caller's callback never fails the upload */ }
+          }
+          // Every run the upload started; `result` (the first run's response) is set once every file is in one.
+          if (session.result) return runs.length > 0 ? { ...session.result, runs } : session.result;
           if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
         } catch (error) {
           if (!(error instanceof DocSlurpApiError)) throw error;
@@ -2939,7 +2973,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
     },
-    completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
+    /**
+     * Confirm (flush): starts a run with every file finalized so far and answers the first run's response plus `runs`
+     * (every run so far), `sessionStatus` and `pendingFileCount`. Files still uploading start later runs on their own.
+     */
+    completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse & { sessionStatus?: string; pendingFileCount?: number }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
     },
     abortUploadSession(sessionId: string, options?: RequestOptions): Promise<{ ok: boolean }> {
