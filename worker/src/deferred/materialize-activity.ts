@@ -1,5 +1,5 @@
 import { ApplicationFailure } from "@temporalio/common";
-import { QUALITY_RANK, runLegacyQualitySql } from "@docslurp/shared";
+import { QUALITY_RANK, retiredGoodQualitySql, runLegacyQualitySql } from "@docslurp/shared";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import type { Sql } from "postgres";
 import { applyDefaultVisionOverride, applyPrivateModelMode, runModelModeStamp, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
@@ -54,7 +54,7 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
   // Quality is capped at the project's while it has a limit (clampRunLadder), so a source run at Good cannot read past it.
   const [row] = await sql<{ ladder: unknown; quality: string | null; retired_good: boolean }[]>`
     select w.pipeline -> 'ladder' as ladder, ${sql.unsafe(runLegacyQualitySql("w"))} as quality,
-      coalesce(w.pipeline ->> 'quality' = 'good', false) as retired_good
+      ${sql.unsafe(retiredGoodQualitySql("w"))} as retired_good
     from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
   `;
   // A project row still on the retired `good` (before migration 0199 moved it) is Smartest: the intelligent rung.

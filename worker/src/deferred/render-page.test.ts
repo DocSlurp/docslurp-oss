@@ -12,7 +12,7 @@ function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: bo
     if (query.includes("select d.id")) return options.deleted ? [] : [{ id: "doc" }];
     if (query.includes("update project_runs")) Object.assign(artifacts, values[0]);
     return [];
-  }), { json: (value: unknown) => value, begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
+  }), { json: (value: unknown) => value, unsafe: (text: string) => ({ unsafe: text }), begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
   return { artifacts, deps: { store: { stageSql: sql, loadDocument: vi.fn(async () => document) }, runner: {}, storage: {} } as never };
 }
 beforeEach(() => { let now = 1000; vi.spyOn(Date, "now").mockImplementation(() => now += 25); vi.clearAllMocks(); mocks.receipts.length = 0; mocks.persist.mockImplementation(async (input: unknown) => { mocks.receipts.push(structuredClone({ ...(input as any), client: undefined })); }); vi.stubEnv("STRIPE_SECRET_KEY", ""); vi.stubEnv("DOCSLURP_BILL_COMPUTE", "false"); vi.stubEnv("DOCSLURP_BILL_STORAGE", "false"); mocks.render.mockImplementation(async ({ pageNumbers }: { pageNumbers: number[] }) => { return [{ artifactUri: `s3://page-${pageNumbers[0]}`, cacheHit: false }]; }); });

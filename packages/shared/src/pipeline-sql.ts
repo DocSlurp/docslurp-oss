@@ -74,3 +74,20 @@ export function runChartTierSql(runAlias: string): string {
   return `coalesce(${r}.pipeline -> 'chartExport' ->> 'tier',
     case ${r}.pipeline ->> 'visuals' when 'charts-ai' then 'models' when 'charts' then 'free' when 'figures' then 'off' when 'none' then 'off' else null end)`;
 }
+
+/**
+ * True when the project row keeps page images: its `pageImages` (a non-boolean stored value reads as the default, on,
+ * never an error), or Smartest, which always keeps them (an `auto` row on the intelligent rung, or a row still on the
+ * retired `good`).
+ */
+export function pageImagesOnSql(projectAlias: string): string {
+  const p = alias(projectAlias);
+  return `((case when jsonb_typeof(${p}.pipeline->'pageImages') = 'boolean' then (${p}.pipeline->'pageImages')::boolean else true end)
+    or (coalesce(${p}.pipeline->>'quality', 'auto') = 'auto' and ${p}.pipeline->'ladder'->>'maxRung' = 'intelligent')
+    or coalesce(${p}.pipeline->>'quality' = 'good', false))`;
+}
+
+/** True when the row is still on the retired `good` quality (before migration 0199 moved it to Smartest). */
+export function retiredGoodQualitySql(alias_: string): string {
+  return `coalesce(${alias(alias_)}.pipeline->>'quality' = 'good', false)`;
+}

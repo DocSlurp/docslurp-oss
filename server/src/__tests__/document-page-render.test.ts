@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const dbMock = vi.hoisted(() => ({ capacity: null as { count: number; own: boolean } | null, decision: null as Record<string, unknown> | null, queued: true, pageImages: null as boolean | null, calls: [] as Array<[TemplateStringsArray, ...unknown[]]> }));
-vi.mock("../db.js", () => { const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { dbMock.calls.push([strings, ...values]); if (strings.join("").includes("insert into document_page_renders")) return [{generation:"2026-10-23 12:00:00+00"}]; if (strings.join("").includes("as page_images")) return dbMock.pageImages === null ? [] : [{ page_images: dbMock.pageImages }]; if (strings.join("").includes("select true as queued")) return dbMock.queued ? [{ queued: true }] : []; if (strings.join("").includes("parse_source_scan_version")) return dbMock.decision ? [dbMock.decision] : []; return strings.join("").includes("count(*)") && dbMock.capacity ? [dbMock.capacity] : []; }), { begin: vi.fn(async (fn: (sql: unknown) => unknown) => fn(sql)) }); return { sql }; });
+vi.mock("../db.js", () => { const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { dbMock.calls.push([strings, ...values]); if (strings.join("").includes("insert into document_page_renders")) return [{generation:"2026-10-23 12:00:00+00"}]; if (strings.join("").includes("as page_images")) return dbMock.pageImages === null ? [] : [{ page_images: dbMock.pageImages }]; if (strings.join("").includes("select true as queued")) return dbMock.queued ? [{ queued: true }] : []; if (strings.join("").includes("parse_source_scan_version")) return dbMock.decision ? [dbMock.decision] : []; return strings.join("").includes("count(*)") && dbMock.capacity ? [dbMock.capacity] : []; }), { begin: vi.fn(async (fn: (sql: unknown) => unknown) => fn(sql)), unsafe: (text: string) => ({ unsafe: text }) }); return { sql }; });
 vi.mock("../lib/temporal.js", () => ({ startPageRenderWorkflow: vi.fn() }));
 vi.mock("../services/documents.js", () => ({ getDocumentViewerPayload: vi.fn() }));
 vi.mock("../services/organizations.js", () => ({ getProjectAccess: vi.fn(), canEditProject: vi.fn() }));
@@ -31,7 +31,8 @@ describe("exact page image requests", () => {
     expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "unavailable", reason: "disabled" });
     expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable", reason: "disabled" });
     // The stored value is read with a type guard: a non-boolean row defaults to on instead of failing the query.
-    expect(dbMock.calls.map(([strings]) => strings.join("")).find((query) => query.includes("as page_images"))).toContain("jsonb_typeof(pipeline->'pageImages') = 'boolean'");
+    const pageImagesCall = dbMock.calls.find(([strings]) => strings.join("").includes("as page_images"));
+    expect(JSON.stringify(pageImagesCall?.slice(1))).toContain("jsonb_typeof(p.pipeline->'pageImages') = 'boolean'");
     dbMock.pageImages = true;
     expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "ready" });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();

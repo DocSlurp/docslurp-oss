@@ -2,7 +2,7 @@ import { ApplicationFailure } from "@temporalio/common";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { createHash } from "node:crypto";
 import type { RenderDocumentPageInput } from "@docslurp/shared";
-import { pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, isBillingEnforced } from "@docslurp/shared";
+import { pageImagesOnSql, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, isBillingEnforced } from "@docslurp/shared";
 import type { Store } from "../db/store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { spendBlockCode } from "../db/spend-check.js";
@@ -32,9 +32,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; page_images: boolean; low: string | null; high: string | null }[]>`
     select d.org_id, d.project_id,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
-      ((case when jsonb_typeof(p.pipeline->'pageImages') = 'boolean' then (p.pipeline->'pageImages')::boolean else true end)
-        or (coalesce(p.pipeline->>'quality', 'auto') = 'auto' and p.pipeline->'ladder'->>'maxRung' = 'intelligent')
-        or p.pipeline->>'quality' = 'good') as page_images,
+      ${sql.unsafe(pageImagesOnSql("p"))} as page_images,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 250)} as high
     from documents d join project_runs r on r.id=d.run_id left join projects p on p.id=d.project_id
