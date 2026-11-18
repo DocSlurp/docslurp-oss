@@ -30,7 +30,7 @@ import { env } from "./config.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
-import { multipartBodyLimit } from "./lib/upload-policy.js";
+import { v1BodyLimit } from "./lib/v1-body-limit.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { createBootWarmGate, warmRecentSearchIndexes } from "./search/boot-warm.js";
 import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
@@ -109,8 +109,6 @@ registerProviderPolicy();
 
 const execFileAsync = promisify(execFile);
 
-/** Largest declared JSON body accepted before validation on non-upload `/v1/*` routes. */
-const JSON_BODY_MAX_BYTES = 8 * 1024 * 1024;
 /**
  * The repository root is the nearest ancestor holding drizzle.config.ts, or a
  * core/ checkout of it (the private app repo pins this repository as a submodule
@@ -178,16 +176,7 @@ export function createApiApp(): Hono {
   app.use("/oauth/mcp/*", nativeBodyLimit(16 * 1024));
   // Bound actual bytes before NUL inspection or any route reader. Select the
   // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
-  app.use("/v1/*", async (c, next) => {
-    if (c.req.path === "/v1/mcp") return next(); // protocol-specific cap above
-    const upload = /^\/v1\/(?:uploads|ingest|extracts)(?:\/|$)/.test(c.req.path);
-    const json = /\bjson\b/i.test(c.req.header("content-type") ?? "");
-    if (upload && !json) {
-      if (/\/bulk\/?$/.test(c.req.path)) return multipartBodyLimit(env.maxMultipartUploadBytes)(c, next);
-      return nativeBodyLimit(env.maxUploadBytes)(c, next);
-    }
-    return nativeBodyLimit(JSON_BODY_MAX_BYTES)(c, next);
-  });
+  app.use("/v1/*", v1BodyLimit(env));
 
   app.use(
     "/webhooks/stripe",

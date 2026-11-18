@@ -1,8 +1,8 @@
 import { bareMimeType, isSupportedFileType, resolveSupportedMimeType, SUPPORTED_UPLOAD_MIME_TYPES } from "@docslurp/shared";
-import { bodyLimit } from "hono/body-limit";
 
 import { env } from "../config.js";
 import { apiErrorResponse } from "./api-error.js";
+import { boundedBodyLimit } from "./bounded-body-limit.js";
 
 /** Intake accepts exactly the formats in the shared table the worker, the quote and the estimator card read. */
 function normalizeMimeType(value: string | null | undefined): string | null {
@@ -56,14 +56,17 @@ export function multipartTooLarge(maxBytes: number) {
   };
 }
 
-/** Body limit for /v1/uploads/bulk that answers 413 with the direct-upload hint. */
+/**
+ * Body limit for /v1/uploads/bulk that answers 413 with the direct-upload hint.
+ * Counts the bytes actually received: Hono's limiter trusts a declared
+ * Content-Length, and an in-process Request can carry a stream longer than it.
+ * The route's parseBody buffers the whole body anyway, so buffering here first
+ * costs no more than the cap.
+ */
 export function multipartBodyLimit(maxBytes: number) {
-  return bodyLimit({
-    maxSize: maxBytes,
-    onError: (c) => {
-      const { message, details } = multipartTooLarge(maxBytes);
-      return apiErrorResponse(c, 413, "payload_too_large", message, details);
-    },
+  return boundedBodyLimit(maxBytes, (c) => {
+    const { message, details } = multipartTooLarge(maxBytes);
+    return apiErrorResponse(c, 413, "payload_too_large", message, details);
   });
 }
 

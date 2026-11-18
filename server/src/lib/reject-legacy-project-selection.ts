@@ -39,22 +39,42 @@ export const rejectLegacyProjectSelection: MiddlewareHandler = async (c, next) =
   await next();
 };
 
+/** How long to wait for the first chunk of a body that declares neither length nor transfer coding. */
+const BODY_PEEK_TIMEOUT_MS = 250;
+
 /**
- * Whether the request body holds at least one byte. Node hosts give every POST a
- * body stream, empty or not, so `request.body !== null` alone does not say the
- * client sent content. Reads a clone only up to its first non-empty chunk.
+ * Whether the request carries content. Node hosts give every POST a body
+ * stream, empty or not, so `request.body !== null` alone does not say so.
+ * - No body, or `Content-Length: 0`: no content.
+ * - A positive Content-Length or any Transfer-Encoding: content, decided from
+ *   the headers alone, so a client that declares a body and sends nothing
+ *   cannot hold the connection here (paths like /v1/uploads/bulk reach this
+ *   check before their bytes are read).
+ * - Neither header (an in-process Request): peek a clone for the first
+ *   non-empty chunk, for at most BODY_PEEK_TIMEOUT_MS; a stream that has not
+ *   answered by then counts as content (fail closed).
  */
 async function carriesBytes(request: Request): Promise<boolean> {
   if (!request.body) return false;
+  if (request.headers.has("transfer-encoding")) return true;
+  const declared = request.headers.get("content-length");
+  if (declared !== null) return declared.trim() !== "0";
   const reader = request.clone().body?.getReader();
   if (!reader) return false;
-  try {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<true>(resolve => { timer = setTimeout(() => resolve(true), BODY_PEEK_TIMEOUT_MS); });
+  const peek = (async () => {
     while (true) {
       const { done, value } = await reader.read();
       if (done) return false;
       if (value.byteLength > 0) return true;
     }
+  })();
+  try {
+    return await Promise.race([peek, timeout]);
   } finally {
+    clearTimeout(timer);
     void reader.cancel().catch(() => {});
+    peek.catch(() => {});
   }
 }
