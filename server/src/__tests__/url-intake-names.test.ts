@@ -77,6 +77,34 @@ describe("replayed URL-intake receipts", () => {
     expect(replayedPayload("extracts.url", legacy()).project.name).toBe("URL import");
   });
 
+  it("names /manual and /manual/ (one legacy key) from each document's own stored sourceUrl, never the other's", () => {
+    const [plain, slash] = ["https://example.com/manual", "https://example.com/manual/"];
+    expect(canonicalIdForUrl(plain)).toBe(canonicalIdForUrl(slash));
+    const receipt = () => ({
+      payload: {
+        project: { id: "p1", name: "x" }, run: { id: "r1" }, warnings: [],
+        documents: [
+          { id: "d-plain", filename: "a.html", mimeType: "text/html", canonicalId: canonicalIdForUrl(plain) },
+          { id: "d-slash", filename: "b.html", mimeType: "text/html", canonicalId: canonicalIdForUrl(slash) },
+        ],
+      },
+      status: 201, temporalDeferred: false,
+    }) as never;
+    // Stored rows settle each one, whatever order the request listed the URLs in.
+    const stored = new Map([["d-plain", plain], ["d-slash", slash]]);
+    for (const urls of [[plain, slash], [slash, plain]]) {
+      const replayed = replayedPayload("uploads.url", receipt(), urls, stored);
+      expect(replayed.documents.map((document) => document.canonicalId)).toEqual([opaqueCanonicalIdForUrl(plain), opaqueCanonicalIdForUrl(slash)]);
+    }
+    // Without stored rows the association is ambiguous: no ID rather than possibly the other URL's.
+    expect(replayedPayload("uploads.url", receipt(), [plain, slash]).documents.map((document) => document.canonicalId)).toEqual([null, null]);
+    // One stored row settles that document only; a stored URL that is not under the document's key is not trusted.
+    const partial = replayedPayload("uploads.url", receipt(), [plain, slash], new Map([["d-plain", plain], ["d-slash", "https://example.com/elsewhere"]]));
+    expect(partial.documents.map((document) => document.canonicalId)).toEqual([opaqueCanonicalIdForUrl(plain), null]);
+    // A single request URL under that key is unambiguous.
+    expect(replayedPayload("uploads.url", receipt(), [plain]).documents[0]!.canonicalId).toBe(opaqueCanonicalIdForUrl(plain));
+  });
+
   it("replays a current-version receipt's response fields only, unchanged", () => {
     const payload = {
       project: { id: "p1", name: "Import from example.com" }, run: { id: "r1" },

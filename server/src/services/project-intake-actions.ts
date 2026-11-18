@@ -237,20 +237,33 @@ export function projectCurrentUrlReceipt(payload: ProjectIntakePayload): Project
  * - project.name and run.projectName: the host-only title from the request's
  *   URLs ("Import from example.com"), else "URL import"; project.slug: the project id.
  * - documents and ingested: `url-<i><ext>` names, source keys renamed to match,
- *   titles dropped. A canonical ID is made opaque only when it is the server's
- *   legacy default for one of the request's URLs; a caller's own ID is kept.
- *   Never throws.
+ *   titles dropped. A canonical ID that is the server's legacy default for one of
+ *   the request's URLs is replayed as the opaque ID of the document's own stored
+ *   sourceUrl (`storedSourceUrls`, by document id), which tells `/manual` from
+ *   `/manual/` although both share one legacy key; without a stored row, as the
+ *   one request URL with that legacy key. When neither settles it (two request
+ *   URLs, no stored row) the ID is null rather than possibly another URL's. A
+ *   caller's own ID is kept. Never throws.
  * - rejected: `urls[i]` with the per-code copy; the not-accepted warning rebuilt.
  */
-export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: readonly string[]): ProjectIntakePayload {
+export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: readonly string[], storedSourceUrls?: ReadonlyMap<string, string>): ProjectIntakePayload {
   const title = urls?.length ? inferProjectTitleFromUrls([...urls]) : "URL import";
   const genericName = (position: number, mimeType: string) => `url-${position}${extensionForMimeType(mimeType ?? "")}`;
-  // Server-derived legacy IDs: the legacy default of each request URL, replayed as that URL's full-URL hash
-  // (the ID adoption gives the row); unparseable URLs have none.
-  const serverDefaults = new Map((urls ?? []).flatMap((url) => {
+  // Server-derived legacy IDs: the legacy default of each request URL, with the full-URL hash of every request URL
+  // that has it (the ID adoption gives such a row). `/manual` and `/manual/` share one legacy key; unparseable URLs
+  // have none.
+  const serverDefaults = new Map<string, Set<string>>();
+  for (const url of urls ?? []) {
     const legacy = tryCanonicalIdForUrl(url);
-    return legacy === null ? [] : [[legacy, opaqueCanonicalIdForUrl(url)] as const];
-  }));
+    if (legacy !== null) serverDefaults.set(legacy, (serverDefaults.get(legacy) ?? new Set()).add(opaqueCanonicalIdForUrl(url)));
+  }
+  /** The opaque ID for a document under a server-default legacy key: from its own stored URL, else unambiguous, else null. */
+  const opaqueFor = (documentId: unknown, legacy: string): string | null => {
+    const stored = typeof documentId === "string" ? storedSourceUrls?.get(documentId) : undefined;
+    if (stored !== undefined && tryCanonicalIdForUrl(stored) === legacy) return opaqueCanonicalIdForUrl(stored);
+    const candidates = serverDefaults.get(legacy)!;
+    return candidates.size === 1 ? [...candidates][0]! : null;
+  };
   const rejected = payload.rejected?.map((file, position) => {
     const index = typeof file.index === "number" ? file.index : position;
     return { index, filename: `urls[${index}]`, statusCode: file.statusCode, code: file.code, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
@@ -263,7 +276,7 @@ export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: r
       filename: name,
       ...(typeof document.sourceKey === "string" ? { sourceKey: sourceKeyWithName(document.sourceKey, name) } : {}),
       ...(typeof document.canonicalId === "string" && serverDefaults.has(document.canonicalId)
-        ? { canonicalId: serverDefaults.get(document.canonicalId)! }
+        ? { canonicalId: opaqueFor(document.id, document.canonicalId) }
         : {}),
     };
   });
@@ -282,9 +295,19 @@ export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: r
 }
 
 /** How a stored receipt is replayed: URL routes by version, every other route as stored. */
-export function replayedPayload(routeKey: string, stable: ProjectIntakeActionResult & { receiptVersion?: unknown }, urls?: readonly string[]): ProjectIntakePayload {
+export function replayedPayload(
+  routeKey: string,
+  stable: ProjectIntakeActionResult & { receiptVersion?: unknown },
+  urls?: readonly string[],
+  storedSourceUrls?: ReadonlyMap<string, string>,
+): ProjectIntakePayload {
   if (!URL_INTAKE_ROUTES.has(routeKey)) return stable.payload;
-  return stable.receiptVersion === INTAKE_RECEIPT_VERSION ? projectCurrentUrlReceipt(stable.payload) : sanitizeLegacyUrlReceipt(stable.payload, urls);
+  return stable.receiptVersion === INTAKE_RECEIPT_VERSION ? projectCurrentUrlReceipt(stable.payload) : sanitizeLegacyUrlReceipt(stable.payload, urls, storedSourceUrls);
+}
+
+/** Whether a stored receipt replays through the legacy sanitizer (an unversioned URL receipt). */
+function isLegacyUrlReceipt(routeKey: string, stable: { receiptVersion?: unknown }): boolean {
+  return URL_INTAKE_ROUTES.has(routeKey) && stable.receiptVersion !== INTAKE_RECEIPT_VERSION;
 }
 
 /**
@@ -373,8 +396,22 @@ async function idempotently(
           !stable.payload.run?.id || !Array.isArray(stable.payload.documents) || !Array.isArray(stable.payload.warnings)) {
         throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
       }
+      // A legacy URL receipt names each document's opaque ID from the document's own stored sourceUrl (scoped to the
+      // receipt's project and organization; a document deleted since has none).
+      let storedSourceUrls: Map<string, string> | undefined;
+      if (isLegacyUrlReceipt(args.routeKey, stable as ProjectIntakeActionResult & { receiptVersion?: unknown })) {
+        const ids = stable.payload.documents.flatMap((document) => (typeof document.id === "string" ? [document.id] : []));
+        const rows: Array<{ id: string; source_url: string | null }> = [];
+        if (ids.length) {
+          rows.push(...await sql<{ id: string; source_url: string | null }[]>`
+            select d.id, d.metadata ->> 'sourceUrl' as source_url from documents d
+            join projects p on p.id = d.project_id and p.org_id = d.org_id
+            where d.id = any(${sql.array(ids)}) and d.project_id = ${projectId}`);
+        }
+        storedSourceUrls = new Map(rows.flatMap((row) => (row.source_url ? [[row.id, row.source_url] as const] : [])));
+      }
       return {
-        payload: replayedPayload(args.routeKey, stable, args.urls),
+        payload: replayedPayload(args.routeKey, stable, args.urls, storedSourceUrls),
         status: stable.status,
         temporalDeferred: stable.temporalDeferred,
         idempotencyReplayed: true,
