@@ -442,7 +442,7 @@ describe("estimator prices the compiled plan the run will execute", () => {
     ["structured extraction", { structuredExtraction: { ...defaultPipelineFeatures.structuredExtraction, supportingPrompt: "Extract totals." } }],
     ["vision", { vision: { ...defaultPipelineFeatures.vision, benchmarkProfile: "ocr-heavy" as const } }],
     ["document extraction", { documentExtraction: { ...defaultPipelineFeatures.documentExtraction, forceOcr: true } }],
-    ["quality", { quality: "good" }],
+    ["quality", { quality: "fast" }],
     ["preserve tables", { preserveTables: !defaultPipelineFeatures.preserveTables }],
     ["propositions", { propositionIndex: true as never }],
   ];

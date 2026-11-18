@@ -559,8 +559,8 @@ test("--visuals (and the deprecated --chart-export / --no-figures) sends visuals
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /disagree/);
 
-    result = await invoke(["reprocess", "run-1", "--visuals", "figures", "--quality", "smart"], respond);
-    assert.deepEqual(JSON.parse(result.requests[0].body), { quality: "smart", visuals: "figures" });
+    result = await invoke(["reprocess", "run-1", "--visuals", "figures", "--quality", "smartest"], respond);
+    assert.deepEqual(JSON.parse(result.requests[0].body), { quality: "smartest", visuals: "figures" });
     result = await invoke(["reprocess", "run-1", "--visuals", "charts-ai", "--estimate"], respond);
     assert.match(result.requests[0].url, /\/reprocess\/estimate$/);
     assert.deepEqual(JSON.parse(result.requests[0].body), { visuals: "charts-ai" });
@@ -595,15 +595,15 @@ test("--quality sends pipeline.quality on upload and ingest-url, and rejects unk
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.requests[0].body, /name="pipeline"\r\n\r\n\{"quality":"fastest"\}/);
 
-    result = await invoke(["ingest-url", "https://example.test/a.pdf", "--quality", "smart"], respond);
+    result = await invoke(["ingest-url", "https://example.test/a.pdf", "--quality", "smartest"], respond);
     assert.equal(result.code, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { quality: "smart" });
+    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { quality: "smartest" });
 
     // Deprecated words still work and send the current word, with a note.
     result = await invoke(["upload", file, "--quality", "good"], respond);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.requests[0].body, /\{"quality":"smart"\}/);
-    assert.match(result.stderr, /--quality good is deprecated; use --quality smart/);
+    assert.match(result.requests[0].body, /\{"quality":"smartest"\}/);
+    assert.match(result.stderr, /--quality good is deprecated; use --quality smartest/);
 
     // Without --quality the project setting applies.
     result = await invoke(["upload", file], respond);
@@ -611,7 +611,7 @@ test("--quality sends pipeline.quality on upload and ingest-url, and rejects unk
 
     result = await invoke(["upload", file, "--quality", "deep"], respond);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /--quality must be fastest, balanced or smart/);
+    assert.match(result.stderr, /--quality must be fastest or smartest/);
     assert.deepEqual(result.requests, []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -625,7 +625,7 @@ test("ingest-url --estimate prices the URLs and never starts an ingest (council 
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(result.requests.map((r) => [r.method, r.url]), [["HEAD", "/files/q3-earnings.pdf"], ["POST", "/v1/uploads/estimate"]]);
   assert.deepEqual(JSON.parse(result.requests[1].body), {
-    files: [{ name: "q3-earnings.pdf", size: 2400000, type: "application/pdf" }], project: "w", visuals: "charts-ai", settings: { quality: "smart" },
+    files: [{ name: "q3-earnings.pdf", size: 2400000, type: "application/pdf" }], project: "w", visuals: "charts-ai", settings: { quality: "smartest" },
   });
   assert.ok(!result.requests.some((r) => r.url === "/v1/uploads/url"));
   assert.match(result.stdout, /nothing was started/);

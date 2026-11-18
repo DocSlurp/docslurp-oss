@@ -17,7 +17,7 @@ describe("visual indexing under the Auto ladder", () => {
       expect(() => assertVisualModeAllowed({ ...base, ladder }), JSON.stringify(ladder)).toThrow(expect.objectContaining({ code: "visual_mode_quality" }));
     }
     // The default (Fastest) refuses it.
-    expect(() => assertVisualModeAllowed({ ...defaultPipelineFeatures, indexingMode: "visual" })).toThrow(expect.objectContaining({ code: "visual_mode_quality" }));
+    expect(() => assertVisualModeAllowed({ ...defaultPipelineFeatures, indexingMode: "visual" } as typeof defaultPipelineFeatures)).toThrow(expect.objectContaining({ code: "visual_mode_quality" }));
   });
 
   it("the ingest report treats Auto capped at the fast rung as reading no page", () => {
