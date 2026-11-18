@@ -43,6 +43,7 @@ import {
   indexingModeSchema,
   parseStoredPipelineFeatures,
   readStoredPipelineSettings,
+  strictestStoredPipelineFeatures,
   type StoredSettingsRepair,
 } from "@docslurp/shared";
 import { reportException } from "@docslurp/shared/error-reporting";
@@ -315,27 +316,35 @@ export async function loadManagedPipelineOverrides(projectId: string, client: Pr
  * trusted: only the explicit admin overrides apply (managed-pipeline-models.ts). Nothing here throws because of one
  * stored field.
  */
-export function readProjectSettings(row: Pick<ProjectRow, "id" | "pipeline" | "managed_models">, surface = "project-read"): { pipeline: PipelineFeatures; repairs: StoredSettingsRepair[] } {
+export function readProjectSettings(row: Pick<ProjectRow, "id" | "pipeline" | "managed_models">, surface = "project-read"): { pipeline: PipelineFeatures; repairs: StoredSettingsRepair[]; unreadable: boolean } {
   const source = `project ${row.id}`;
   const raw: unknown = row.pipeline ?? null;
   const base = raw !== null && typeof raw === "object" && !Array.isArray(raw)
     ? stripLegacyVisionModel(stripManagedPipelineFields(raw as Record<string, unknown>), source)
     : raw;
-  const read = readStoredPipelineSettings(base, source);
+  let read: ReturnType<typeof readStoredPipelineSettings>;
+  try {
+    read = readStoredPipelineSettings(base, source);
+  } catch (error) {
+    // Written by a newer build (a `configVersion` this one does not know), or unreadable for another reason: shown with
+    // every guarded setting at its strictest and marked, so uploads run fail-closed and a save refuses to overwrite it.
+    reportStoredRowOnce(error, surface, "project", row.id, "read-with-defaults");
+    return { pipeline: strictestStoredPipelineFeatures(), repairs: [{ path: "pipeline", reason: "restricted" }], unreadable: true };
+  }
   if (read.repairs.length > 0) reportSettingsRepairsOnce(row.id, surface, read.repairs, read.dropped);
   const overrides = parseManagedPipelineOverrides(row.managed_models?.pipeline, source);
-  if (!overrides) return { pipeline: read.features, repairs: read.repairs };
+  if (!overrides) return { pipeline: read.features, repairs: read.repairs, unreadable: false };
   try {
-    return { pipeline: resolveManagedPipeline(read.features, overrides, source).pipeline, repairs: read.repairs };
+    return { pipeline: resolveManagedPipeline(read.features, overrides, source).pipeline, repairs: read.repairs, unreadable: false };
   } catch (error) {
     // Overrides are dropped one by one when they conflict, so this is not expected; the cleaned settings still apply.
     reportStoredRowOnce(error, surface, "project", row.id, "read-with-defaults");
-    return { pipeline: read.features, repairs: read.repairs };
+    return { pipeline: read.features, repairs: read.repairs, unreadable: false };
   }
 }
 
 function mapProject(row: ProjectRow, surface = "project-read"): ProjectRecord {
-  const { pipeline, repairs } = readProjectSettings(row, surface);
+  const { pipeline, repairs, unreadable } = readProjectSettings(row, surface);
   const indexingMode = effectiveIndexingMode(pipeline.indexingMode);
   return projectSchema.parse({
     id: row.id,
@@ -379,6 +388,7 @@ function mapProject(row: ProjectRow, surface = "project-read"): ProjectRecord {
     isDefault: row.is_default ?? false,
     chatSpeedBoostTiers: speedBoostChatTiers(parseStoredChatTierModels(row.managed_models && typeof row.managed_models === "object" ? (row.managed_models as { chat?: unknown }).chat : null, row.id)),
     ...(repairs.length > 0 ? { settingsRepairs: repairs } : {}),
+    ...(unreadable ? { settingsUnreadable: true } : {}),
     slug: row.slug,
     lastActivityAt: row.last_activity_at,
     createdAt: row.created_at,
@@ -437,10 +447,9 @@ function reportSettingsRepairsOnce(rowId: string, surface: string, repairs: read
   console.error(`[projects] project ${rowId} has stored settings that no longer validate; reset ${summary} (dropped ${dropped.join(", ")}) surface=${surface}`);
 }
 
-/** The last resort for a row whose settings mapping failed for another reason: defaults, guarded settings strictest. */
-const fallbackProjectRow = (row: ProjectRow): ProjectRow => ({ ...row, pipeline: "unreadable" as never, managed_models: null });
+// Settings never fail a row (readProjectSettings); a row that still fails (a missing column value) is left out.
 export const mapProjectsForList = (rows: readonly ProjectRow[], surface = "project-list") => mapRowsForList("project", rows, (row) => mapProject(row, surface),
-  (row) => mapProject(fallbackProjectRow(row), surface), surface);
+  (row) => mapProject(row, surface), surface);
 /** One project read: the same reader as the lists, for every caller (display, uploads, run starts, save drafts). */
 const mapProjectForRead = (row: ProjectRow, surface: string): ProjectRecord => mapProjectsForList([row], surface)[0] ?? mapProject(row, surface);
 const mapProjectRunForRead = (row: ProjectRunRow): ProjectRun => mapProjectRunsForList([row], "run-read")[0] ?? mapProjectRun(row);
@@ -1120,6 +1129,15 @@ export class ProjectSettingsStaleError extends HTTPException {
   constructor() { super(409, { message: "Project settings changed. Reload before saving." }); }
 }
 
+/**
+ * The project's stored settings were written by a newer version of DocSlurp (or cannot be read at all): this version
+ * shows them with every guarded setting at its strictest, and refuses to save over them, which would replace them.
+ */
+export class ProjectSettingsUnreadableError extends HTTPException {
+  readonly code = "project_settings_unreadable" as const;
+  constructor() { super(409, { message: "This project's settings were saved by a newer version and cannot be changed here. Try again shortly." }); }
+}
+
 export type ProjectUpdateOptions = {
   /** Snapshot used to construct a whole-pipeline patch outside this service. */
   expectedUpdatedAt?: string;
@@ -1149,6 +1167,7 @@ export async function resolveUpdatedPipeline(
   parsed: UpdateProjectInput,
   options: Pick<ProjectUpdateOptions, "indexingMode" | "summaryTree"> = {},
 ): Promise<PipelineFeatures> {
+  if (current.settingsUnreadable) throw new ProjectSettingsUnreadableError();
   const template = parsed.templateKey !== undefined
     ? getProjectTemplate(parsed.templateKey)
     : getProjectTemplate(current.templateKey);
@@ -1221,6 +1240,8 @@ export async function updateProject(
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
 
+  // Never overwrite settings this version cannot read (a newer build wrote them) with the strictest values shown here.
+  if (current.settingsUnreadable) throw new ProjectSettingsUnreadableError();
   if (options.expectedUpdatedAt !== undefined && options.expectedUpdatedAt !== current.updatedAt) throw new ProjectSettingsStaleError();
   if (!options.client) {
     // All project preference writers share publication's lock, including graph, history and section summaries.

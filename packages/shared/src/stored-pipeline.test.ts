@@ -4,7 +4,7 @@ import { vi } from "vitest";
 
 import { documentExtractionConfigSchema, sanitizeStoredDocumentExtraction } from "./extraction.js";
 import { hostPdfExtractorsUnderSandbox } from "./extractors.js";
-import { defaultPipelineFeatures, normalizePipelineFeatures, normalizeStoredPipelineFeatures, parseStoredPipelineFeatures, readStoredPipelineSettings, sanitizeStoredPipeline } from "./pipeline.js";
+import { defaultPipelineFeatures, normalizePipelineFeatures, normalizeStoredPipelineFeatures, parseStoredPipelineFeatures, readStoredPipelineSettings, sanitizeStoredPipeline, strictestStoredPipelineFeatures } from "./pipeline.js";
 
 describe("parseStoredPipelineFeatures", () => {
   it("reads historical snapshots with retired keys and nulls (prod /v1/runs 500)", () => {
@@ -102,9 +102,9 @@ describe("readStoredPipelineSettings: drop the invalid field, keep the rest, nev
 
   it("drops one bad enum and keeps every other stored setting", () => {
     quiet();
-    const read = readStoredPipelineSettings({ quality: "no-such-quality", summarize: true, webTools: false }, "project p1");
-    expect(read.features).toMatchObject({ quality: defaultPipelineFeatures.quality, summarize: true, webTools: false });
-    expect(read.repairs).toEqual([{ path: "pipeline.quality", reason: "invalid" }]);
+    const read = readStoredPipelineSettings({ inferenceLane: "warp", summarize: true, webTools: false }, "project p1");
+    expect(read.features).toMatchObject({ inferenceLane: defaultPipelineFeatures.inferenceLane, summarize: true, webTools: false });
+    expect(read.repairs).toEqual([{ path: "pipeline.inferenceLane", reason: "invalid" }]);
   });
 
   it("reports a refused vision model as retired, by setting name only", () => {
@@ -187,5 +187,78 @@ describe("readStoredPipelineSettings: drop the invalid field, keep the rest, nev
     quiet();
     expect(() => normalizeStoredPipelineFeatures({ quality: "no-such-quality" } as never, "p")).toThrow();
     expect(() => normalizePipelineFeatures({ maxCostCents: -5 } as never)).toThrow();
+  });
+});
+
+describe("readStoredPipelineSettings: council follow-ups (#494)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("an unreadable quality, preamble or figures switch is the cheapest value", () => {
+    const read = readStoredPipelineSettings({ quality: "no-such-quality", contextualChunkPreambles: "yes", figures: 1 }, "p");
+    expect(read.features).toMatchObject({ quality: "fast", contextualChunkPreambles: false, figures: false });
+    for (const key of ["quality", "contextualChunkPreambles", "figures"]) expect(read.repairs).toContainEqual({ path: `pipeline.${key}`, reason: "restricted" });
+    // Visual mode refuses Fast, so a visual row falls to Auto.
+    expect(readStoredPipelineSettings({ quality: "nope", indexingMode: "visual" }, "p").features.quality).toBe("auto");
+  });
+
+  it("embed off with graph features on turns the graph features off, never embedding on", () => {
+    const read = readStoredPipelineSettings({ embed: false, indexVectors: false, graphRag: true, entityIndex: true, graphCommunitySummaries: true, quality: "bogus" }, "p");
+    expect(read.features).toMatchObject({ embed: false, indexVectors: false, graphRag: false, entityIndex: false, graphCommunitySummaries: false });
+  });
+
+  it("a stored false named by a refinement is never deleted", () => {
+    const read = readStoredPipelineSettings({ embed: false, graphRag: true, quality: "bogus" }, "p");
+    expect(read.features.embed).toBe(false);
+    expect(read.features.indexVectors).toBe(false);
+  });
+
+  it("an enabled PII policy whose detectors are all unknown, or not names, is the strictest policy", () => {
+    for (const patterns of [["retired-a", "retired-b"], ["ssn", 42]]) {
+      const read = readStoredPipelineSettings({ piiPolicy: { enabled: true, action: "flag_for_review", patterns } }, "p");
+      expect(read.features.piiPolicy).toMatchObject({ enabled: true, action: "block_indexing" });
+      expect(read.features.piiPolicy.patterns.length).toBeGreaterThan(5);
+      expect(read.repairs).toContainEqual({ path: "pipeline.piiPolicy", reason: "restricted" });
+    }
+    // A policy that keeps a known detector keeps its own action.
+    expect(readStoredPipelineSettings({ piiPolicy: { enabled: true, action: "flag_for_review", patterns: ["ssn", "gone"] } }, "p").features.piiPolicy)
+      .toMatchObject({ action: "flag_for_review", patterns: ["ssn"] });
+  });
+
+  it("restricted privacy with a bad vision sub-key drops the key, reads the local profile and keeps the other fields", () => {
+    const read = readStoredPipelineSettings({ privacyMode: "local-only", summarize: true, vision: { profile: "cheapest-local", maxPagesPerDocument: "many" }, embedding: { profile: "cheapest-local" } }, "p");
+    expect(read.features).toMatchObject({ privacyMode: "local-only", summarize: true, vision: { profile: "cheapest-local" } });
+    expect(read.repairs).not.toContainEqual({ path: "pipeline", reason: "invalid" });
+  });
+
+  it("a legacy vision model the migration cannot place goes, the section reads local, the other fields stay", () => {
+    for (const privacyMode of ["local-only", "standard"]) {
+      for (const vision of [{ model: 123, profile: "cheapest-local" }, { model: "no-such", baseUrl: "https://x.example/v1" }]) {
+        const read = readStoredPipelineSettings({ privacyMode, summarize: true, embedding: { profile: "cheapest-local" }, vision }, "p");
+        expect(read.features).toMatchObject({ privacyMode, summarize: true, vision: { profile: "cheapest-local", target: "local" } });
+        expect(read.repairs).toEqual([{ path: "pipeline.vision", reason: "restricted" }]);
+      }
+    }
+  });
+
+  it("a Nitro model without Speed boost loses the model, not the row", () => {
+    const read = readStoredPipelineSettings({ summarize: true, speedBoost: false, textGeneration: { model: "qwen/qwen3.5-flash-02-23:nitro", models: {} } }, "p");
+    expect(read.features.summarize).toBe(true);
+    expect(read.features.speedBoost).toBe(false);
+    expect(read.features.textGeneration.model).toBeNull();
+    expect(read.repairs).toEqual([{ path: "pipeline.textGeneration", reason: "invalid" }]);
+  });
+
+  it("never logs itself; parseStoredPipelineFeatures logs once per row and outcome", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    readStoredPipelineSettings({ inferenceLane: "warp" }, "project log-1");
+    expect(error).not.toHaveBeenCalled();
+    parseStoredPipelineFeatures({ inferenceLane: "warp" }, "project log-1");
+    parseStoredPipelineFeatures({ inferenceLane: "warp" }, "project log-1");
+    expect(error).toHaveBeenCalledOnce();
+  });
+
+  it("a newer configVersion still fails the read; the strictest features are what lists show", () => {
+    expect(() => readStoredPipelineSettings({ configVersion: 99 }, "p")).toThrow(/configVersion 99/);
+    expect(strictestStoredPipelineFeatures()).toMatchObject({ privacyMode: "strict-privacy", quality: "fast", webTools: false, maxCostCents: 1 });
   });
 });

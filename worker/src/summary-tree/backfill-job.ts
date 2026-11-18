@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   detectFileFormat,
-  normalizeStoredPipelineFeatures,
+  parseStoredPipelineFeatures,
   privacyModeAllowsHosted,
   resolveAllowedPipelineTextModel,
   SUMMARY_TREE_BUILD_STALE_MS,
@@ -347,7 +347,7 @@ async function candidateRouteLabels(sql: Client, projectId: string, config: Conf
   try {
     const [project] = await sql<{ pipeline: unknown }[]>`select pipeline from projects where id = ${projectId}`;
     if (project) {
-      const pipeline = normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${projectId}`);
+      const pipeline = parseStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${projectId}`);
       return textUsageLabels(resolveAllowedPipelineTextModel(pipeline, SUMMARY_TREE_TEXT_OPERATION, config.textGenerationModel));
     }
   } catch { /* the default route below */ }
@@ -612,7 +612,7 @@ async function runClaimedJob(
       `;
       if (!project) return "gone";
       if (project.enabled !== true) return "disabled";
-      const pipeline: PipelineFeatures = normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`);
+      const pipeline: PipelineFeatures = parseStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`);
       if (!summaryTreeEnabled(pipeline) || summaryTreeVectorProblem(pipeline)) return "disabled";
       const model = resolveAllowedPipelineTextModel(pipeline, SUMMARY_TREE_TEXT_OPERATION, config.textGenerationModel);
       const profile = resolveEmbeddingModel(config, pipeline);

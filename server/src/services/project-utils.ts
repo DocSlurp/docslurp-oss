@@ -47,13 +47,21 @@ export function readProjectVersionSnapshot(
   // refused, a retired level) is reset as on a project read, so an old version can still be listed and rolled back to.
   // Model values in a snapshot are history, never configuration; chart export keys from before migration 0151 are
   // mapped by the reader. Rolling back writes through the strict save path.
-  const raw: unknown = candidate.pipeline ?? null;
-  const pipeline = readStoredPipelineSettings(
-    raw !== null && typeof raw === "object" && !Array.isArray(raw)
-      ? stripLegacyVisionModel(stripManagedPipelineFields(raw as Record<string, unknown>), "project version snapshot")
-      : raw,
-    "project version snapshot",
-  ).features;
+  // A snapshot without settings is not a rollback target (it would restore plain defaults).
+  const raw: unknown = candidate.pipeline;
+  if (raw === null || raw === undefined) return null;
+  let pipeline: ProjectRecord["pipeline"];
+  try {
+    pipeline = readStoredPipelineSettings(
+      typeof raw === "object" && !Array.isArray(raw)
+        ? stripLegacyVisionModel(stripManagedPipelineFields(raw as Record<string, unknown>), "project version snapshot")
+        : raw,
+      "project version snapshot",
+    ).features;
+  } catch {
+    // Written by a newer version (an unknown configVersion): not readable here, so not offered.
+    return null;
+  }
   const parsed = projectSchema.pick({
     name: true,
     templateKey: true,

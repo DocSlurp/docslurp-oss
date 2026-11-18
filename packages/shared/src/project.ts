@@ -190,6 +190,12 @@ export const projectSchema = z.object({
     /** `retired`: named something no longer offered; `invalid`: no longer valid; `restricted`: set to its strictest value. */
     reason: z.enum(["retired", "invalid", "restricted"]),
   })).optional(),
+  /**
+   * True when the stored settings cannot be read by this version (written by a newer one): `pipeline` shows every
+   * privacy, egress and spend setting at its strictest, uploads run with those, and settings saves are refused with
+   * 409 `project_settings_unreadable` rather than overwrite the stored settings.
+   */
+  settingsUnreadable: z.boolean().optional(),
   lastActivityAt: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),

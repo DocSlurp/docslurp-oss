@@ -77,6 +77,12 @@ describe("project-utils", () => {
     vi.restoreAllMocks();
   });
 
+  it("a snapshot with no settings, or settings from a newer version, is not a rollback target", () => {
+    for (const pipeline of [null, undefined, { configVersion: 99 }]) {
+      expect(readProjectVersionSnapshot({ snapshot: { name: "Old", templateKey: null, systemPrompt: null, pipeline } })).toBeNull();
+    }
+  });
+
   it("returns null for malformed snapshot metadata", () => {
     expect(readProjectVersionSnapshot({ snapshot: { name: "Broken" } })).toBeNull();
   });

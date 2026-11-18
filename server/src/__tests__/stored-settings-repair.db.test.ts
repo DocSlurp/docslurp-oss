@@ -87,6 +87,7 @@ const strictest = {
   ladder: { maxRung: "fast" },
   visionFallback: false,
   mediaVideo: { enabled: false },
+  quality: "fast",
 };
 
 describe("a project whose stored settings no longer validate", () => {
@@ -99,7 +100,7 @@ describe("a project whose stored settings no longer validate", () => {
       expect(project.pipeline.vision.profile).toBe("cheapest-local");
       expect(project.pipeline.summaryTree.enabled).toBe(false);
       expect(project.settingsRepairs).toEqual(expect.arrayContaining([
-        { path: "pipeline.quality", reason: "invalid" },
+        { path: "pipeline.quality", reason: "restricted" },
         { path: "pipeline.privacyMode", reason: "restricted" },
         { path: "pipeline.maxCostCents", reason: "restricted" },
         { path: "pipeline.webhooks", reason: "restricted" },
@@ -157,5 +158,37 @@ describe("a project whose stored settings no longer validate", () => {
     const stored = await storedPipeline();
     expect(stored).toMatchObject(strictest);
     expect(await projects.getProject("w", "u1")).not.toHaveProperty("settingsRepairs");
+  });
+
+  it("written by a newer version: listed and opened with the strictest settings, marked, and never saved over", async () => {
+    const newer = { configVersion: 99, quality: "balanced", privacyMode: "standard", summaryTree: { enabled: true } };
+    await sql`update projects set pipeline = ${sql.json(newer as never)} where id = 'w'`;
+    const [listed] = await projects.listProjects("u1");
+    const opened = (await projects.getProject("w", "u1"))!;
+    for (const project of [listed!, opened]) {
+      expect(project.settingsUnreadable).toBe(true);
+      expect(project.pipeline).toMatchObject(strictest);
+    }
+    for (const input of [{ name: "Renamed" }, { pipeline: { ...opened.pipeline, privacyMode: "standard" as const } }]) {
+      await expect(projects.updateProject("w", "u1", input)).rejects.toBeInstanceOf(projects.ProjectSettingsUnreadableError);
+    }
+    // The newer row (and its summary tree) is untouched.
+    expect(await storedPipeline()).toEqual(newer);
+    expect((await sql<{ name: string }[]>`select name from projects where id = 'w'`)[0]!.name).toBe("W");
+    // An upload still runs, with the strictest settings.
+    const created = await runCreation.create({
+      userId: "u1", projectId: "w", kind: "bulk-upload", pipeline: opened.pipeline,
+      sources: { kind: "files", files: [{ filename: "a.pdf", mimeType: "application/pdf", sourceKey: "u1/raw/a.pdf", fileSize: 1000 }] },
+    } as never);
+    const [run] = await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from project_runs where id = ${created.run.id}`;
+    expect(run!.pipeline).toMatchObject({ privacyMode: "strict-privacy", webTools: false, maxCostCents: 1 });
+  });
+
+  it("embeddings off with graph features on: the graph features go off, embedding stays off after a save", async () => {
+    await sql`update projects set pipeline = ${sql.json({ embed: false, indexVectors: false, graphRag: true, entityIndex: true, quality: "bogus" } as never)} where id = 'w'`;
+    const project = (await projects.getProject("w", "u1"))!;
+    expect(project.pipeline).toMatchObject({ embed: false, indexVectors: false, graphRag: false, entityIndex: false });
+    await projects.updateProject("w", "u1", { name: "Saved" });
+    expect(await storedPipeline()).toMatchObject({ embed: false, graphRag: false, entityIndex: false });
   });
 });

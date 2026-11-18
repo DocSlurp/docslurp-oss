@@ -1,7 +1,7 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, clampRunLadder, readStoredPipelineSettings, stripLegacyVisionModel, stripManagedPipelineFields, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
+import { chartExportModelsAllowed, clampRunLadder, readStoredPipelineSettings, strictestStoredPipelineFeatures, stripLegacyVisionModel, stripManagedPipelineFields, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import { resolveRunExtraction } from "./extraction-settings.js";
 import {
@@ -912,7 +912,13 @@ export function createRunCreation(deps: RunCreationDeps) {
     const record = stored !== null && typeof stored === "object" && !Array.isArray(stored)
       ? stripLegacyVisionModel(stripManagedPipelineFields(stored as Record<string, unknown>), source)
       : stored;
-    const read = readStoredPipelineSettings(record ?? null, source);
+    let read: ReturnType<typeof readStoredPipelineSettings>;
+    try {
+      read = readStoredPipelineSettings(record ?? null, source);
+    } catch {
+      // Written by a newer build: the ceilings are the strictest values, as the project read shows them.
+      return strictestStoredPipelineFeatures();
+    }
     return read.repairs.some((repair) => repair.reason !== "retired") ? read.features : stored;
   }
 
