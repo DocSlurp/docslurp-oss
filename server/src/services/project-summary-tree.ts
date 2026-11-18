@@ -3,6 +3,7 @@ import {
   EDITOR_REQUIRED_MESSAGE,
   effectiveSummaryTreeSearchMode,
   normalizePipelineFeatures,
+  normalizeStoredPipelineFeatures,
   SUMMARY_TREE_BUILD_ENV_FLAG,
   SUMMARY_TREE_BUILD_STALE_MS,
   SUMMARY_TREE_BUILD_UNAVAILABLE_CODE,
@@ -100,7 +101,8 @@ export async function getProjectSummaryTreeState(
     const [project] = await client<{ pipeline: unknown }[]>`
       select pipeline from projects where id = ${args.projectId} and org_id = ${args.orgId}
     `;
-    pipeline = project ? normalizePipelineFeatures(project.pipeline as PipelineFeatures) : null;
+    // A stored row: read it the way the project list does (settings the schema now rejects must not fail the page).
+    pipeline = project ? normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${args.projectId}`) : null;
   }
   const enabled = summaryTreeEnabled(pipeline);
   const total = row?.total ?? 0;

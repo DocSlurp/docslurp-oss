@@ -66,6 +66,8 @@ async function doc(projectId: string, org: string | null, runId: string | null, 
   const id = `d${++docs}`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, index_config_hash, reused_from_document_id, purged_at)
     values (${id}, ${org}, 'u1', ${projectId}, ${runId}, ${id}, 'application/pdf', ${id}, 'completed', 1, ${hash}, ${opts.reusedFrom ?? null}, ${opts.purged ? new Date() : null})`;
+  // A legacy document by date, whatever today is: the candidate query only walks projects with documents from before the cutoff.
+  await sql`update documents set created_at = ${backfill.LEGACY_STAMP_CUTOFF}::timestamptz - interval '1 day' where id = ${id}`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
     values (${`v${id}`}, ${id}, 'lancedb', 'b', 'p', 'm', 1024)`;
   return id;
