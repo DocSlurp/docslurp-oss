@@ -3702,6 +3702,7 @@ export const documentPageExtracts = pgTable("document_page_extracts", {
   projectId: text("project_id").notNull(),
   runId: text("run_id").notNull(),
   pageNumber: integer("page_number").notNull(),
+  // Migration 0193 adds the contributing pass `video-frames` (a video's sampled-frame read), which is never final.
   pass: text().notNull(),
   method: text().notNull(),
   engine: text(),
