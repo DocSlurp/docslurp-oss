@@ -69,12 +69,14 @@ import { hasHealthyTextLayer } from "../routing/routers/decision-model.js";
 import { HeuristicRouter } from "../routing/routers/heuristic.js";
 import {
   PAGE_ROUTE_PLAN_SLOT,
+  assignmentNeedsPixels,
   buildRuntimeCatalog,
   effectivePageRouterMode,
   loadRuntimePolicyPack,
   type RuntimeCatalog,
 } from "../routing/runtime.js";
 import type { CommandRunner } from "../tools/runner.js";
+import { readBudgetOf } from "./classify-route.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 
@@ -361,12 +363,15 @@ export class RoutePagesStage implements Stage {
         pixelNote,
         chainReport ? `decision-chain:${chainReport.trace.map((t, i) => `${i + 1}=${t.outcome}`).join(",")}` : undefined,
       ].filter(Boolean).join(" ") || undefined;
-      const plan: RoutePlan = routePlanSchema.parse({
+      const parsedPlan: RoutePlan = routePlanSchema.parse({
         ...raw,
         documentId: document.id,
         runId: state.run.id,
         mode,
       });
+      // Persist why triage authorized each budgeted page's read with the plan, so routed execution admits it under that
+      // durable budget and never as an ordinary read (stampReadBudgets).
+      const plan = stampReadBudgets(parsedPlan, routing);
 
       if (mode === "active") assertCompleteActivePlan(plan);
       const runTableGate = (this.deps.tableGate ?? readRoutingFlags().tableGate) === "shadow";
@@ -923,4 +928,24 @@ const NO_PIXELS: { render: (pageNumber: number) => Promise<string | null>; clip?
 async function openNativePdfDocument(pdfPath: string, signal?: AbortSignal): Promise<NativePdfDocument | null> {
   const loaded = await loadNativePdfEngine();
   return loaded.ok ? loaded.engine.openPath(pdfPath, { signal }) : null;
+}
+
+/**
+ * The plan with each pixel-needing assignment of a budgeted page (classify-route readBudgetOf over page triage) stamped
+ * with its `readBudget`. A page triage did not budget keeps its assignments as the router wrote them.
+ */
+export function stampReadBudgets(plan: RoutePlan, routing: Pick<AdaptiveRoutingArtifact, "pages"> | null): RoutePlan {
+  const budgets = new Map<number, "encoding-read" | "table-rescue">();
+  for (const page of routing?.pages ?? []) {
+    const budget = readBudgetOf(page);
+    if (budget) budgets.set(page.pageNumber, budget);
+  }
+  if (budgets.size === 0) return plan;
+  return {
+    ...plan,
+    assignments: plan.assignments.map((assignment) => {
+      const budget = budgets.get(assignment.pageNumber);
+      return budget && assignmentNeedsPixels(assignment) ? { ...assignment, readBudget: budget } : assignment;
+    }),
+  };
 }

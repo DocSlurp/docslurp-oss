@@ -439,6 +439,13 @@ export const assignmentSchema = z.object({
   role: assignmentRoleSchema,
   reason: z.string().min(1),
   estimate: assignmentEstimateSchema,
+  /**
+   * The durable read budget this page's read is admitted under, when page triage authorized the read through one capped
+   * signal family alone: `encoding-read` (Doppler's encodings) or `table-rescue` (table-leak signals). Stamped from triage
+   * when the plan is made and enforced for every routed read of the page (groups, shards, fallbacks, executor regions).
+   * Absent: an ordinary read.
+   */
+  readBudget: z.enum(["encoding-read", "table-rescue"]).optional(),
   /** At most one escalation per assignment. */
   cascade: z
     .array(

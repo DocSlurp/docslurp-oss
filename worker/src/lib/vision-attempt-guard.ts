@@ -63,7 +63,17 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * leave the page bound, the breaker and the org count. Throttles are bounded per call by
  * `VISION_THROTTLE_ALLOWANCE` (default 5); past it the wait goes to Temporal with its Retry-After.
  */
-export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique" | "ocr" | "table-rescue";
+export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique" | "ocr" | "table-rescue" | "encoding-read";
+
+/**
+ * Whole-page reads of one page, whatever authorized them: an ordinary read, a table-leak rescue or an encoding read. They
+ * share one per-page attempt ceiling (`pageAttempts`), so a page admitted under one purpose (a resumed task with an older
+ * payload, a re-routed plan) cannot take a second full budget under another.
+ */
+export const WHOLE_PAGE_READ_PURPOSES: readonly VisionAttemptPurpose[] = ["page", "table-rescue", "encoding-read"];
+
+/** Purposes with a durable per-document distinct-page budget (`documentPageLimit`) for reads one signal family authorized. */
+export type BudgetedReadPurpose = "table-rescue" | "encoding-read";
 
 export interface VisionAttemptTarget {
   documentId: string;
@@ -79,6 +89,12 @@ export interface VisionAttemptTarget {
    * (the OCR escalation attempt budget). Counted from the durable ledger like `documentPageLimit`. Absent: no bound.
    */
   documentAttemptLimit?: number;
+  /**
+   * `region`: a routed region request of a budgeted page (purpose `table-rescue` or `encoding-read`). It counts toward the
+   * purpose's distinct-page budget like a whole-page read, but takes the region bound (`regionAttempts`) on its own row and
+   * not the shared whole-page ceiling. Default: `region` for purpose `region`, else `page`.
+   */
+  scope?: "page" | "region";
 }
 
 export interface VisionGuardConfig {
@@ -153,6 +169,11 @@ export interface VisionAttemptSnapshot {
   routeOverruns: number;
   /** The route's weight correction, already capped (1 when none). */
   routeCorrection: number;
+  /**
+   * Requests admitted for this page and the target's own purpose. `pageAttempts` is the bound's count: for a whole-page
+   * read, every WHOLE_PAGE_READ_PURPOSES request of the page; otherwise the same as this. Defaults to `pageAttempts`.
+   */
+  ownPageAttempts?: number;
   /** Other pages of the target's document admitted for the target's purpose in the run (0 when not counted). */
   documentPages?: number;
   /** Requests admitted for the target's document and purpose in the run, every page and retry (0 when not counted). */
@@ -351,8 +372,13 @@ export function resolveVisionGuardConfig(env: Record<string, string | undefined>
   };
 }
 
-export function pageAttemptLimit(config: VisionGuardConfig, purpose: VisionAttemptPurpose): number {
-  return purpose === "region" ? config.regionAttempts : config.pageAttempts;
+export function pageAttemptLimit(config: VisionGuardConfig, purpose: VisionAttemptPurpose, scope?: VisionAttemptTarget["scope"]): number {
+  return purpose === "region" || scope === "region" ? config.regionAttempts : config.pageAttempts;
+}
+
+/** The purposes whose requests of the same page count toward this target's per-page bound (see WHOLE_PAGE_READ_PURPOSES). */
+export function sharedPagePurposes(target: Pick<VisionAttemptTarget, "purpose" | "scope">): readonly VisionAttemptPurpose[] {
+  return target.scope !== "region" && WHOLE_PAGE_READ_PURPOSES.includes(target.purpose) ? WHOLE_PAGE_READ_PURPOSES : [target.purpose];
 }
 
 /** The route weight correction for its highest billed/bound ratio in the window: at least 1, at most the cap. */
@@ -372,7 +398,7 @@ export function decideVisionAdmission(
   config: VisionGuardConfig,
   weightCents: number,
 ): VisionGuardStop | null {
-  const pageLimit = pageAttemptLimit(config, target.purpose);
+  const pageLimit = pageAttemptLimit(config, target.purpose, target.scope);
   const stop = (reason: VisionGuardStopReason, sticky: boolean): VisionGuardStop => ({
     reason, sticky,
     pageAttempts: snapshot.pageAttempts, pageLimit,
@@ -390,7 +416,8 @@ export function decideVisionAdmission(
     return stop("rejection-breaker", true);
   }
   // A new page of a document whose per-document budget is spent; pages it already read keep their page bound.
-  if (target.documentPageLimit !== undefined && snapshot.pageAttempts === 0 && (snapshot.documentPages ?? 0) >= target.documentPageLimit) {
+  // "New" is per purpose: a page read before under another purpose is still new to this budget.
+  if (target.documentPageLimit !== undefined && (snapshot.ownPageAttempts ?? snapshot.pageAttempts) === 0 && (snapshot.documentPages ?? 0) >= target.documentPageLimit) {
     return stop("document-page-limit", false);
   }
   // Every request of the document for this purpose, retries included, counts against its total.
@@ -428,13 +455,16 @@ export class MemoryVisionAttemptBackend implements VisionAttemptBackend {
   async admit(request: VisionAdmitRequest): Promise<VisionBackendAdmission> {
     const runPages = [...this.pages.entries()].filter(([key]) => key.startsWith(`${request.runId}\u0000`)).map(([, row]) => row);
     const page = this.pages.get(pageKey(request.runId, request.target));
+    const shared = sharedPagePurposes(request.target).reduce((sum, purpose) =>
+      sum + (this.pages.get(pageKey(request.runId, { ...request.target, purpose }))?.attempts ?? 0), 0);
     const since = this.now() - VISION_ORG_WINDOW_HOURS * 3_600_000;
     const org = request.orgId ? this.orgRows(request.orgId, since) : [];
     const routeCorrection = request.route ? routeWeightCorrection(this.maxRatio(request.route, since), request.config) : 1;
     const weightCents = request.weightCents * routeCorrection;
     const stop = decideVisionAdmission({
       scoped: request.orgId !== null,
-      pageAttempts: page?.attempts ?? 0,
+      pageAttempts: shared,
+      ownPageAttempts: page?.attempts ?? 0,
       runAttempts: runPages.reduce((sum, row) => sum + row.attempts, 0),
       runFailures: runPages.reduce((sum, row) => sum + row.failures, 0),
       orgCents: org.reduce((sum, row) => sum + row.weight, 0),
@@ -551,7 +581,7 @@ class MissingVisionAttemptBackend implements VisionAttemptBackend {
   async admit(request: VisionAdmitRequest): Promise<VisionBackendAdmission> {
     console.error(`[vision-guard] run=${request.runId} has no shared vision attempt ledger; refusing every vision request`);
     return { admitted: false, stop: {
-      reason: "no-attempt-ledger", sticky: true, pageAttempts: 0, pageLimit: pageAttemptLimit(request.config, request.target.purpose),
+      reason: "no-attempt-ledger", sticky: true, pageAttempts: 0, pageLimit: pageAttemptLimit(request.config, request.target.purpose, request.target.scope),
       runAttempts: 0, runFailures: 0, orgCents: 0, orgSettledCents: 0, orgLimitCents: request.config.orgLimitCents,
       requestCents: roundCents(request.weightCents), routeOverruns: 0, routeCorrection: 1,
     } };

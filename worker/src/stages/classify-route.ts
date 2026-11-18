@@ -563,7 +563,13 @@ function buildEvidencePages(
     const finished = finishEvidencePage(page, withEncoding);
     if (!encodings) return finished;
     const declined = finishEvidencePage(pageWithoutEncodings, baseDecision);
-    if (finished.ocrDecision?.authorized !== true || declined.ocrDecision?.authorized === true) return finished;
+    // A read the page has without the encodings is independent of them only when it is not itself capped: a leak-only
+    // table read (UNCAPPED, capTableLeakPages) is a capped selection, not an authorization. Treating it as independent let
+    // a page whose encodings turned a leak-only read into a table-route read escape both caps (council, d317bea pin).
+    // Such a page is an encoding read; if the encoding cap drops it, it falls back to the leak-only read, which the table
+    // cap then counts.
+    const declinedIndependent = declined.ocrDecision?.authorized === true && (declined as { [UNCAPPED]?: unknown })[UNCAPPED] === undefined;
+    if (finished.ocrDecision?.authorized !== true || declinedIndependent) return finished;
     return {
       ...finished,
       [ENCODING_UNCAPPED]: {
@@ -634,7 +640,12 @@ function capEncodingReadPages(pages: AdaptivePageRoutingEntry[], pageCount: numb
   }
   return (pages as Capped[]).map((page, index) => {
     const { [ENCODING_UNCAPPED]: uncapped, ...kept } = page;
-    return dropped.has(index) && uncapped ? uncapped.page : kept;
+    if (!uncapped) return kept;
+    if (dropped.has(index)) return uncapped.page;
+    // The read exists only because of the encodings: say so on the decision, so execution admits it under the guard's
+    // durable `encoding-read` budget (vision-extract legacyPageHints) and not as an ordinary page read. This cap holds for one
+    // routing decision; the guard's holds across retries, restarts and re-routed facts.
+    return kept.ocrDecision ? { ...kept, ocrDecision: { ...kept.ocrDecision, signals: [...kept.ocrDecision.signals, ENCODING_READ_ONLY_SIGNAL] } } : kept;
   });
 }
 
@@ -645,6 +656,25 @@ export function encodingReadPageCap(pageCount: number): number {
 
 /** Signals of encoding routing (Doppler math and table encoding facts, DOCSLURP_ENCODING_FACTS_ROUTING). */
 export const ENCODING_READ_CAPPED_SIGNAL = "encoding-read-capped";
+/** On a read Doppler's encodings alone authorized (and the per-document cap kept): read under the guard's `encoding-read` budget. */
+export const ENCODING_READ_ONLY_SIGNAL = "encoding-read-only";
+
+/**
+ * The durable budget a triaged page's read is admitted under, from its routing decision: `encoding-read` for a read the
+ * encodings alone authorized (ENCODING_READ_ONLY_SIGNAL), `table-rescue` for one table-leak signals alone authorized
+ * (TABLE_LEAK_ONLY_SIGNAL), else none (an ordinary page read). The one rule for triage hints, route plans and page tasks.
+ */
+export function readBudgetOf(page: { ocrDecision?: { authorized?: boolean; signals: readonly string[] } | null }): "encoding-read" | "table-rescue" | null {
+  const signals = page.ocrDecision?.signals ?? [];
+  if (signals.includes(ENCODING_READ_ONLY_SIGNAL)) return "encoding-read";
+  if (signals.includes(TABLE_LEAK_ONLY_SIGNAL)) return "table-rescue";
+  return null;
+}
+
+/** The stricter of two budgets: an encoding read over a table rescue over none. */
+export function stricterReadBudget(a: "encoding-read" | "table-rescue" | null | undefined, b: "encoding-read" | "table-rescue" | null | undefined): "encoding-read" | "table-rescue" | null {
+  return a === "encoding-read" || b === "encoding-read" ? "encoding-read" : a === "table-rescue" || b === "table-rescue" ? "table-rescue" : null;
+}
 export const ENCODING_MATH_GRID_SIGNAL = "encoding-math-grid";
 export const ENCODING_RASTER_TABLE_SIGNAL = "encoding-table-raster-candidate";
 export const ENCODING_MATH_READ_SIGNAL = "ocr-authorized:encoding-math-unreadable";

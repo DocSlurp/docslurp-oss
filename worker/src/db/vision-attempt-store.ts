@@ -2,8 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import type { Sql, TransactionSql } from "postgres";
 
+import { readEncodingFactsRouting } from "../routing/flags.js";
+
 import {
   decideVisionAdmission,
+  sharedPagePurposes,
   VISION_ORG_WINDOW_HOURS,
   type VisionAdmitRequest,
   type VisionAttemptBackend,
@@ -72,7 +75,18 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
    * records it as applied but lacks `vision_org_attempts.weight_cents` and still has
    * `vision_run_charged_pages`; migrating cannot fix that, and the guard would misbehave on it.
    */
-  async assertSchema(): Promise<void> {
+  async assertSchema(options: { encodingRouting?: boolean } = { encodingRouting: readEncodingFactsRouting() }): Promise<void> {
+    // Encoding routing admits reads under purpose `encoding-read` (migration 0193): without the widened CHECK every such
+    // read would fail at insert time, after the page was routed. Refuse to start instead.
+    if (options.encodingRouting) {
+      const [check] = await this.sql<{ def: string | null }[]>`
+        select pg_get_constraintdef(oid) as def from pg_constraint where conname = 'vision_run_attempts_purpose_check'`;
+      if (!check?.def?.includes("'encoding-read'")) {
+        throw new VisionLedgerSchemaError(
+          "vision attempt ledger does not accept purpose encoding-read (migration 0193_vision_attempts_encoding_read_purpose not applied) " +
+            "while DOCSLURP_ENCODING_FACTS_ROUTING is on; run pnpm db:migrate or turn encoding routing off");
+      }
+    }
     const [row] = await this.sql<{ org_table: boolean; weight: boolean; stale: boolean; overruns: boolean; tickets: boolean }[]>`
       select
         to_regclass('vision_org_attempts') is not null as org_table,
@@ -113,6 +127,11 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         select attempts from vision_run_attempts
         where run_id = ${runId} and document_id = ${target.documentId} and page_number = ${target.pageNumber}
           and purpose = ${target.purpose}`;
+      // The page's bound: whole-page reads share one ceiling across their purposes (WHOLE_PAGE_READ_PURPOSES).
+      const [shared] = await tx<{ attempts: number }[]>`
+        select coalesce(sum(attempts), 0)::int as attempts from vision_run_attempts
+        where run_id = ${runId} and document_id = ${target.documentId} and page_number = ${target.pageNumber}
+          and purpose = any(${[...sharedPagePurposes(target)]})`;
       // The per-document page budget (OCR escalation): other pages of this document admitted for the purpose.
       const [documentPages] = target.documentPageLimit === undefined ? [] : await tx<{ pages: number }[]>`
         select count(*)::int as pages from vision_run_attempts
@@ -152,7 +171,8 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
       const admittedCents = weightCents * routeCorrection;
       const stop = decideVisionAdmission({
         scoped: orgId !== null,
-        pageAttempts: page?.attempts ?? 0,
+        pageAttempts: shared?.attempts ?? 0,
+        ownPageAttempts: page?.attempts ?? 0,
         runAttempts: totals?.attempts ?? 0,
         runFailures: totals?.failures ?? 0,
         orgCents: org.cents,
