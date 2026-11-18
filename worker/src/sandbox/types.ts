@@ -37,6 +37,13 @@ export interface SandboxLimits {
   timeoutMs: number;
   rssBudgetMb?: number;
   cpu?: number;
+  /**
+   * The most output bytes this command may hand back, per file and in total (a command-wide transfer budget). A remote
+   * provider checks every changed file's declared size before reading any of it and stops each transfer at what is
+   * left of the budget, so an oversized result is never buffered on the host (SandboxOutputLimitError). Unset: the
+   * provider's general limits.
+   */
+  maxOutputBytes?: number;
 }
 
 export interface SandboxCommand {
@@ -108,6 +115,14 @@ export class SandboxOutputError extends SandboxRunError {
   constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown }) {
     super(message, usage, options);
     this.name = "SandboxOutputError";
+  }
+}
+
+/** Output refused for its size (a per-file, command-wide or transfer limit): the job produced more than it may. */
+export class SandboxOutputLimitError extends SandboxOutputError {
+  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown }) {
+    super(message, usage, options);
+    this.name = "SandboxOutputLimitError";
   }
 }
 
