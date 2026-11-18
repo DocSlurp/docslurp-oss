@@ -7,7 +7,8 @@
  *   the worker refuses to start without a ready provider (page-reader-mode.ts).
  * - Only plain page transcription goes to the reader: a transcription prompt template with no output schema and no task
  *   prompt (vision-runtime.ts isPageTranscription), on a PDF page the renderer wrote as PNG, in a `standard` privacy
- *   project whose vision route is hosted. Schema and task-prompt reads, figure and chart pages, table-rescue pages,
+ *   project whose vision route is hosted. Schema and task-prompt reads, figure and chart pages, table-rescue and
+ *   encoding-read pages (read under the guard's durable per-document budgets, vision-extract budgetedReadPurpose),
  *   critique passes, routed (page router) pages, page-task (fan-out) pages, raster uploads and documents without page
  *   triage keep the hosted route; so does a `local-only` or `strict-privacy` project, and a run whose configured vision
  *   route is not hosted (a local or operator-private model).

@@ -112,6 +112,52 @@ describe("PostgresVisionAttemptBackend", () => {
     expect(await orgCount("o1")).toBe(10);
   }, 60_000);
 
+  // Council (Doppler d317bea pin, adversarial Medium): classify-route caps encoding-only reads per routing decision; this is
+  // the durable bound. A retried activity whose routing ran again on valid facts that nominate other pages reads no more.
+  it("encoding-read: the per-document page cap holds across a retry whose re-routed facts nominate a different page set", async () => {
+    await insertRuns([["run-encoding-budget", "o-budget", "w-budget"]]);
+    const cap = 3;
+    const admit = async (guard: VisionRunGuard, pageNumber: number, purpose: VisionAttemptPurpose = "encoding-read") => {
+      const gate = guard.call({ documentId: "math-doc", pageNumber, purpose, ...(purpose === "encoding-read" ? { documentPageLimit: cap } : {}) });
+      try { await gate.admit({ weightCents: 0.001 }); return true; } catch { return false; } finally { await gate.finish(); }
+    };
+    // First routing decision: pages 1-3 (the cap) are encoding reads.
+    const first = guardOf("run-encoding-budget", null, { orgLimitCents: 1_000 });
+    expect(await Promise.all([1, 2, 3].map((page) => admit(first, page)))).toEqual([true, true, true]);
+    // The retry routes again and nominates pages 4-6 instead: a fresh guard reads the durable rows and refuses every one.
+    const retry = guardOf("run-encoding-budget", null, { orgLimitCents: 1_000 });
+    const second = [];
+    for (const page of [4, 5, 6]) second.push(await admit(retry, page));
+    expect(second).toEqual([false, false, false]);
+    expect(await count("select count(*)::int as n from vision_run_attempts where run_id = 'run-encoding-budget' and purpose = 'encoding-read' and attempts > 0")).toBe(cap);
+    // An already-read page keeps its own page bound; the other purposes have their own budgets.
+    expect(await admit(retry, 1)).toBe(true);
+    expect(await admit(retry, 7, "page")).toBe(true);
+    const leak = retry.call({ documentId: "math-doc", pageNumber: 8, purpose: "table-rescue", documentPageLimit: cap });
+    await expect(leak.admit({ weightCents: 0.001 })).resolves.toBeUndefined();
+    await leak.finish();
+  });
+
+  it("whole-page reads share one per-page ceiling across page, table-rescue and encoding-read; regions keep their bound", async () => {
+    await insertRuns([["run-shared-ceiling", "o-budget", "w-budget"]]);
+    const admit = async (guard: VisionRunGuard, pageNumber: number, purpose: VisionAttemptPurpose, extra: { scope?: "region"; documentPageLimit?: number } = {}) => {
+      const gate = guard.call({ documentId: "ceiling-doc", pageNumber, purpose, ...extra });
+      try { await gate.admit({ weightCents: 0.001 }); return null; } catch (error) { return (error as { stop?: { reason: string } }).stop?.reason ?? "error"; } finally { await gate.finish(); }
+    };
+    const first = guardOf("run-shared-ceiling", null, { orgLimitCents: 1_000 });
+    expect(await admit(first, 1, "page")).toBeNull();
+    // A resumed task with an older payload reads the page as `page`; the plan's purpose then finds one request left, not two.
+    const resumed = guardOf("run-shared-ceiling", null, { orgLimitCents: 1_000 });
+    expect(await admit(resumed, 1, "encoding-read", { documentPageLimit: 3 })).toBeNull();
+    expect(await admit(resumed, 1, "encoding-read", { documentPageLimit: 3 })).toBe("page-attempt-limit");
+    expect(await admit(resumed, 1, "table-rescue", { documentPageLimit: 3 })).toBe("page-attempt-limit");
+    expect(await admit(resumed, 1, "page")).toBe("page-attempt-limit");
+    // Region requests of a budgeted page take the region bound (4 here) and its distinct-page budget.
+    for (let n = 0; n < 4; n += 1) expect(await admit(resumed, 2, "encoding-read", { scope: "region", documentPageLimit: 2 })).toBeNull();
+    expect(await admit(resumed, 2, "encoding-read", { scope: "region", documentPageLimit: 2 })).toBe("page-attempt-limit");
+    expect(await admit(resumed, 3, "encoding-read", { scope: "region", documentPageLimit: 2 })).toBe("document-page-limit");
+  });
+
   it("holds a per-document page budget across guards (an activity retry or a worker restart) and per document", async () => {
     await insertRuns([["run-doc-budget", "o-budget", "w-budget"]]);
     const admitOne = async (guard: VisionRunGuard, documentId: string, pageNumber: number) => {
@@ -507,6 +553,24 @@ describe("startup schema check", () => {
       await db.exec(`alter table vision_admission_tickets_old rename to vision_admission_tickets;`);
     }
     await expect(store.visionAttempts.assertSchema()).resolves.toBeUndefined();
+  }, 60_000);
+
+  it("with encoding routing on, refuses a ledger whose purpose check predates encoding-read (migration 0193)", async () => {
+    await expect(store.visionAttempts.assertSchema({ encodingRouting: true })).resolves.toBeUndefined();
+    const [row] = (await db.query<{ def: string }>(`select pg_get_constraintdef(oid) as def from pg_constraint where conname = 'vision_run_attempts_purpose_check'`)).rows;
+    expect(row?.def).toContain("'encoding-read'::text");
+    await db.exec(`alter table vision_run_attempts drop constraint vision_run_attempts_purpose_check;
+      alter table vision_run_attempts add constraint vision_run_attempts_purpose_check check (purpose in ('page', 'region', 'map-ocr', 'critique', 'ocr', 'table-rescue')) not valid;`);
+    try {
+      await expect(store.visionAttempts.assertSchema({ encodingRouting: true })).rejects.toThrow(/encoding-read.*0193.*DOCSLURP_ENCODING_FACTS_ROUTING/);
+      // Encoding routing off: no encoding-read request is ever made, so the older check is enough.
+      await expect(store.visionAttempts.assertSchema({ encodingRouting: false })).resolves.toBeUndefined();
+    } finally {
+      await db.exec(`alter table vision_run_attempts drop constraint vision_run_attempts_purpose_check;
+        alter table vision_run_attempts add constraint vision_run_attempts_purpose_check check (purpose in ('page', 'region', 'map-ocr', 'critique', 'ocr', 'table-rescue', 'encoding-read')) not valid;`);
+    }
+    // The widened check refuses an unknown purpose as before.
+    await expect(db.query(`insert into vision_run_attempts (run_id, document_id, page_number, purpose, attempts) values ('x', 'y', 1, 'escalate', 1)`)).rejects.toThrow(/purpose_check/);
   }, 60_000);
 });
 

@@ -348,6 +348,16 @@ export interface VisionPageTask {
   fallbackText?: boolean;
   /** A scan beside native text: read by the VM OCR engine (DOCSLURP_OCR_MODE=vm), never a hosted vision model. */
   vmOcr?: boolean;
+  /**
+   * A read only table-leak signals (`table-rescue`) or Doppler's encodings (`encoding-read`) authorized: admitted under the
+   * guard's durable per-document page budget for that purpose (vision-extract budgetedReadPurpose). Absent: a page read.
+   */
+  readPurpose?: "table-rescue" | "encoding-read";
+  /**
+   * Payload version: 2 carries `readPurpose`. Absent (1): a payload persisted before it (page_work_tasks), whose purpose
+   * runPageTask resolves from the run's plan data alone. A payload's purpose can only make a read stricter.
+   */
+  payloadVersion?: number;
   /** Set by slot-gated workflows only. */
   slotGate?: boolean;
 }

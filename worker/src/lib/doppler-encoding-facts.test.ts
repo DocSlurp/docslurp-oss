@@ -14,7 +14,9 @@ import { pageLayoutFactsFromDopplerPage, routingFactsWithDopplerFacts, withEncod
 import { parsePageLayoutFacts, type PageLayoutFacts } from "./page-layout-facts.js";
 import { buildRoutingPageFacts } from "../pipeline/page-facts.js";
 import { acceptSandboxedPdfResult, sandboxedPdfLayoutFacts, type SandboxedPdfJob } from "../extractors/plugins.js";
-import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, encodingReadDecision, encodingReadPageCap, pageReadReason } from "../stages/classify-route.js";
+import { buildAdaptiveRoutingDecisionSurface, classifyAdaptivePage, ENCODING_READ_ONLY_SIGNAL, encodingReadDecision, encodingReadPageCap, pageReadReason, TABLE_LEAK_ONLY_SIGNAL } from "../stages/classify-route.js";
+import { budgetedReadPurpose, legacyPageHints } from "../stages/vision-extract.js";
+import { tableLeakPageCap } from "@docslurp/shared";
 import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 
 const word = <T extends string>(names: readonly T[], flags: readonly T[]) => flags.reduce((sum, flag) => sum + dopplerFlagBit(names, flag), 0);
@@ -436,6 +438,62 @@ describe("evidence routing by encodings (DOCSLURP_ENCODING_FACTS_ROUTING)", () =
       }
     }
    }, 60_000);
+
+  it("overlapping encoding and table-leak reads stay within both caps (council, d317bea pin: the High)", () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const pageCount = 60;
+    // Leaked rows (table-leak signals on any route) plus a ragged pipe table (unreliable only on a table route). Without the
+    // encodings the page is a leak-only read (capped by tableLeakPageCap); with a whitespace bit it is a table-route read
+    // whose signals are not leak-only, so before the fix neither cap applied and every page was read.
+    const text = ["Bookings by segment", "", "Enterprise 412.5 18.2% 398.1 17.9%", "Mid-market 288.0 12.7% 251.3 11.3%", "Startups 190.4 8.4% 170.2 7.1%",
+      "", "| Office | Seats |", "| --- | --- |", "| London | 40 | new |", "", "The London office opening follows the earnings beat."].join("\n");
+    const layout = new Map<number, PageLayoutFacts>();
+    for (let n = 1; n <= pageCount; n += 1) layout.set(n, walkerPage({ words: 200, encodings: route([], ["whitespace"]) }));
+    const run = (encodingRouting: boolean) => buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "doc.pdf", text: Array.from({ length: pageCount }, () => text).join("\n\f\n"), pageCount,
+      evidence: { source: "canonical-document", artifactUri: "s3://x" }, pageLayout: layout, routingV2: true, encodingRouting,
+    }).pages;
+    const off = run(false);
+    const on = run(true);
+    const read = (pages: typeof on) => pages.filter((page) => page.ocrDecision?.authorized);
+    // Without encodings: the table-leak cap alone.
+    expect(read(off)).toHaveLength(tableLeakPageCap(pageCount));
+    // With them: at most one cap's worth of encoding reads plus one of table-leak reads, each under its own budget.
+    const encodingReads = read(on).filter((page) => page.ocrDecision!.signals.includes(ENCODING_READ_ONLY_SIGNAL));
+    const leakReads = read(on).filter((page) => page.ocrDecision!.signals.includes(TABLE_LEAK_ONLY_SIGNAL));
+    expect(encodingReads).toHaveLength(encodingReadPageCap(pageCount));
+    expect(leakReads.length).toBeLessThanOrEqual(tableLeakPageCap(pageCount));
+    expect(read(on)).toHaveLength(encodingReads.length + leakReads.length);
+    expect(read(on).length).toBeLessThan(pageCount);
+    // Every read has exactly one budgeted purpose, and the execution hints agree.
+    const hints = legacyPageHints(on);
+    for (const page of read(on)) expect(budgetedReadPurpose(hints, page.pageNumber, pageCount)[0]).not.toBe("page");
+    expect([...hints.encodingReadPages!].sort((a, b) => a - b)).toEqual(encodingReads.map((page) => page.pageNumber));
+    expect([...hints.tableRescuePages!].sort((a, b) => a - b)).toEqual(leakReads.map((page) => page.pageNumber));
+  });
+
+  it("every kept encoding read carries the encoding-read mark; a read the text needs on its own does not", () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const pageCount = 10;
+    const layout = new Map<number, PageLayoutFacts>();
+    for (let n = 1; n <= pageCount; n += 1) layout.set(n, walkerPage({ words: n === 9 ? 0 : 60, encodings: route(["math-font-no-unicode"], [], false, n === 4 ? 9 : 6) }));
+    const pages = buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "doc.pdf", text: Array.from({ length: pageCount }, () => prose).join("\f"), pageCount,
+      evidence: { source: "canonical-document", artifactUri: "s3://x" }, pageLayout: layout, routingV2: true, encodingRouting: true,
+    }).pages;
+    const read = pages.filter((page) => page.ocrDecision?.authorized);
+    expect(read).toHaveLength(encodingReadPageCap(pageCount));
+    expect(read.every((page) => page.ocrDecision!.signals.includes(ENCODING_READ_ONLY_SIGNAL))).toBe(true);
+    expect(pages.filter((page) => !page.ocrDecision?.authorized).every((page) => !(page.ocrDecision?.signals ?? []).includes(ENCODING_READ_ONLY_SIGNAL))).toBe(true);
+    // A page with no words is read whatever the encodings say: an ordinary page read.
+    const bare = buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "doc.pdf", text: "", pageCount: 1, evidence: { source: "canonical-document", artifactUri: "s3://x" },
+      pageImageEvidence: new Map([[1, { pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 0.95, largestImageCoverage: 0.95 }]]),
+      pageLayout: new Map([[1, walkerPage({ words: 0, encodings: route(["glyph-outlines"], []) })]]), routingV2: true, encodingRouting: true,
+    }).pages[0]!;
+    expect(bare.ocrDecision?.authorized).toBe(true);
+    expect(bare.ocrDecision?.signals).not.toContain(ENCODING_READ_ONLY_SIGNAL);
+  });
 
   it("an encoding read keeps the page's own route (a code page is not relabelled degraded)", () => {
     const code = "```python\ndef total(rows):\n    return sum(row.amount for row in rows)\n```\n\nfunction add(a, b) { return a + b; }\nconst x = add(1, 2);\nimport os\nclass Ledger:\n    pass";
