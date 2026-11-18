@@ -58,11 +58,11 @@ async function legacyDoc(id: string, args: { project?: string; org?: string; use
       ${args.canonical}, ${sql.json(args.sourceUrl ? { sourceUrl: args.sourceUrl } : {})}, ${args.version ?? 1}, ${args.created})`;
 }
 
-/** A URL ingest of URL_A through run creation, as URL intake hands it over. */
-async function ingest() {
+/** A URL ingest through run creation, as URL intake hands it over (URL_A by default). */
+async function ingest(url = URL_A) {
   return runCreation.create({
     userId: "u", projectId: "w", kind: "url-ingest", pipeline: defaultPipelineFeatures,
-    sources: { kind: "files", files: [{ filename: "files.example.com-0.pdf", mimeType: "application/pdf", sourceKey: `u/raw/${Math.random()}`, fileSize: 1000, canonicalId: OPAQUE, metadata: { sourceUrl: URL_A } }] },
+    sources: { kind: "files", files: [{ filename: "files.example.com-0.pdf", mimeType: "application/pdf", sourceKey: `u/raw/${Math.random()}`, fileSize: 1000, canonicalId: opaqueCanonicalIdForUrl(url), metadata: { sourceUrl: url } }] },
   } as never);
 }
 
@@ -80,8 +80,8 @@ describe("a URL re-ingest supersedes the URL's legacy documents (createRunCreati
     await legacyDoc("legacy", { run: "url-run", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-01" });
     await legacyDoc("other-project", { project: "w2", run: "url-run-w2", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-01" });
     await legacyDoc("other-org", { project: "c", org: "o2", user: "u2", run: "url-run-c", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-01" });
-    // A caller's upload that chose this URL as its own canonical ID (the run kind is the server-only marker).
-    await legacyDoc("caller-upload", { run: "upload-run", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-02" });
+    // A caller's upload that chose this URL as its own canonical ID: no sourceUrl (callers cannot set it).
+    await legacyDoc("caller-upload", { run: "upload-run", canonical: LEGACY, created: "2026-01-02" });
     // A URL-intake row with this canonical ID whose stored source URL is a different one: ambiguous, left alone.
     await legacyDoc("other-url", { run: "url-run", canonical: LEGACY, sourceUrl: "https://files.example.com/d/other.pdf", created: "2026-01-03" });
 
@@ -91,6 +91,40 @@ describe("a URL re-ingest supersedes the URL's legacy documents (createRunCreati
     for (const id of ["other-project", "other-org", "caller-upload", "other-url"]) expect({ id, canonical: byId[id]!.canonical_id }).toEqual({ id, canonical: LEGACY });
     const created = (await rows()).find((row) => !["legacy", "other-project", "other-org", "caller-upload", "other-url"].includes(row.id));
     expect(created).toMatchObject({ canonical_id: OPAQUE, version_number: 2, previous_version_id: "legacy" });
+  });
+
+  it("adopts a mixed url-ingest + bulk-reprocess chain: once the new version completes, it is the only current one", async () => {
+    await legacyRun("url-run", "w", "o", "u", "url-ingest");
+    await legacyRun("reprocess-run", "w", "o", "u", "bulk-reprocess");
+    await legacyDoc("v1", { run: "url-run", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-01" });
+    // A reprocess copies canonical_id and sourceUrl from its source; completing it supersedes v1.
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, metadata, version_number, previous_version_id, created_at)
+      values ('v2', 'o', 'u', 'w', 'reprocess-run', 'report.pdf', 'application/pdf', 'k/v2', 'queued', ${LEGACY}, ${sql.json({ sourceUrl: URL_A })}, 2, 'v1', '2026-01-05')`;
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+    await ingest();
+    const created = (await rows()).find((row) => !["v1", "v2"].includes(row.id))!;
+    expect(created).toMatchObject({ canonical_id: OPAQUE, version_number: 3, previous_version_id: "v2" });
+    await sql`update documents set status = 'completed' where id = ${created.id}`;
+    const states = await sql<{ id: string; canonical_id: string; superseded: boolean }[]>`
+      select id, canonical_id, superseded_at is not null as superseded from documents where project_id = 'w' order by created_at`;
+    expect(states).toEqual([
+      { id: "v1", canonical_id: OPAQUE, superseded: true },
+      { id: "v2", canonical_id: OPAQUE, superseded: true },
+      { id: created.id, canonical_id: OPAQUE, superseded: false },
+    ]);
+  });
+
+  it("keeps two long URLs that share a 2,048-character prefix in separate chains", async () => {
+    const prefix = `https://files.example.com/${"a".repeat(2100)}`;
+    const [one, two] = [`${prefix}?part=1`, `${prefix}?part=2`];
+    expect(canonicalIdForUrl(one)).toBe(canonicalIdForUrl(two));
+    await legacyRun("url-run", "w", "o", "u", "url-ingest");
+    await legacyDoc("long-one", { run: "url-run", canonical: canonicalIdForUrl(one), sourceUrl: one, created: "2026-01-01" });
+    await ingest(two);
+    const created = (await rows()).find((row) => row.id !== "long-one")!;
+    // The other URL's legacy row shares the legacy key but not the provenance: untouched, and not this chain's.
+    expect(created).toMatchObject({ canonical_id: opaqueCanonicalIdForUrl(two), version_number: 1, previous_version_id: null });
+    expect((await rows()).find((row) => row.id === "long-one")!.canonical_id).toBe(canonicalIdForUrl(one));
   });
 
   it("orders an adopted chain by creation and numbers after its highest version", async () => {

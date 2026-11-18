@@ -1,3 +1,4 @@
+import type postgres from "postgres";
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
@@ -24,7 +25,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
-import { normalizeUploadPath, opaqueCanonicalIdForUrl, tryCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { MAX_CANONICAL_ID_LENGTH, normalizeUploadPath, opaqueCanonicalIdForUrl, tryNormalizedUrl } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
@@ -190,59 +191,95 @@ export function isRunCreationBlockedError(
   return error instanceof SpendBlockedError;
 }
 
+/** How long adoption waits for a row lock before retrying, and how many times it tries. */
+const ADOPTION_LOCK_TIMEOUT = "2s";
+const ADOPTION_ATTEMPTS = 3;
+
+/** A URL-provenance document's identities: the full normalized source URL, its opaque ID and its legacy raw form. */
+export function urlSourceIdentity(metadata: unknown): { normalized: string; opaque: string; legacy: string } | null {
+  const sourceUrl = metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>).sourceUrl : undefined;
+  if (typeof sourceUrl !== "string") return null;
+  const normalized = tryNormalizedUrl(sourceUrl);
+  if (!normalized) return null;
+  return { normalized, opaque: opaqueCanonicalIdForUrl(sourceUrl), legacy: normalized.slice(0, MAX_CANONICAL_ID_LENGTH) };
+}
+
 /**
  * URL documents ingested before canonical IDs became opaque store the URL
- * itself (canonicalIdForUrl) as their canonical ID; new ingests of the same URL
- * use `url:<sha256>`. When a URL document is ingested under the server-derived
- * opaque ID, this project's legacy rows of that URL are re-keyed to it first,
- * so the version lookup and the supersession trigger (which match canonical_id
- * exactly) treat them as earlier versions. Lazy, per ingest; no migration.
+ * itself (its legacy raw form, canonicalIdForUrl) as their canonical ID; new
+ * ingests use `url:<sha256>`. Before a URL document is ingested (or
+ * reprocessed) under the server-derived opaque ID, this project's legacy chain
+ * of that URL is re-keyed to it, so the version lookup and the supersession
+ * trigger (which match canonical_id exactly) treat it as earlier versions.
+ * Lazy, per ingest; no migration.
  *
- * Only rows URL intake made are touched, all of these:
- * - same project and organization;
- * - created by a `url-ingest` run (URL intake and crawl; a server-only marker,
- *   callers cannot set run kinds or `sourceUrl` metadata);
- * - stored `sourceUrl` normalizing to the URL being ingested, and canonical_id
- *   equal to that URL's legacy raw form. A caller-chosen ID, or a row whose
- *   source URL differs or doesn't parse, is left as it is.
+ * Provenance is decided per chain: the rows of this project and organization
+ * under the legacy key are adopted when at least one of them was created by a
+ * `url-ingest` run (URL intake and crawl; a server-only marker) and its stored
+ * `sourceUrl` normalizes, in full (no 2,048-character cut), to the URL being
+ * ingested. Then every row under that key whose stored `sourceUrl` normalizes
+ * to it is adopted, whatever its run kind (a `bulk-reprocess` version copies
+ * canonical_id and sourceUrl from its source). A row with another or no
+ * `sourceUrl` (a caller's own URL-shaped ID, a different URL sharing a long
+ * prefix) is never touched; nor is a chain without URL-intake provenance.
  *
- * No advisory lock on the legacy key: the caller holds the opaque key's lock
- * (which serializes URL ingests of this URL), and the UPDATE's row locks cover
- * the rest. Taking the legacy key here would cycle with a worker completing a
- * legacy document, whose supersession trigger takes that key while holding the
- * row (40P01).
+ * Locking. The caller holds the opaque key's advisory lock (which serializes
+ * URL ingests and reprocesses of this URL); there is no lock on the legacy key,
+ * which would cycle with a worker completing a legacy row (its supersession
+ * trigger takes that key while holding the row). Candidate rows are locked
+ * FOR UPDATE newest first (created_at desc, id desc), the order the trigger
+ * visits them in: it holds the completing row and then updates older rows
+ * only, so adoption waits at most on the completing row while holding newer
+ * ones the worker never needs. Each attempt runs in a savepoint with a short
+ * lock_timeout and is retried a bounded number of times on 55P03 (lock
+ * timeout) or 40P01 (deadlock).
  *
  * The UPDATE bumps projection_revision (migration 0109 bumps it on every
  * documents UPDATE, routine status writes included), so a publication in
- * flight for one of these rows fails its compare-and-set. That is intended:
- * the row is a legacy version this ingest is about to supersede.
+ * flight for one of these rows fails its compare-and-set, which is intended for
+ * a legacy version about to be superseded. If the ingest that adopted the chain
+ * then fails, the re-key and its bump stay (C-L2): the rows are still the URL's
+ * history, now under its opaque key, and the next ingest continues the chain.
  */
 export async function adoptLegacyUrlVersions(
   client: SqlClient,
   args: { projectId: string; orgId: string; canonicalId: string; metadata?: Record<string, unknown> | null },
 ): Promise<number> {
-  const sourceUrl = typeof args.metadata?.sourceUrl === "string" ? args.metadata.sourceUrl : null;
-  if (!sourceUrl || args.canonicalId !== opaqueCanonicalIdForUrl(sourceUrl)) return 0;
-  const legacy = tryCanonicalIdForUrl(sourceUrl);
-  if (!legacy || legacy === args.canonicalId) return 0;
-  const candidates = await client<{ id: string; source_url: string | null }[]>`
-    select d.id, d.metadata ->> 'sourceUrl' as source_url
-    from documents d
-    join project_runs r on r.id = d.run_id and r.project_id = d.project_id
-    where d.project_id = ${args.projectId} and d.org_id = ${args.orgId}
-      and d.canonical_id = ${legacy} and r.kind = 'url-ingest'
-  `;
-  const ids = candidates
-    .filter((row) => row.source_url !== null && tryCanonicalIdForUrl(row.source_url) === legacy)
-    .map((row) => row.id);
-  if (!ids.length) return 0;
-  const adopted = await client<{ id: string }[]>`
-    update documents set canonical_id = ${args.canonicalId}, updated_at = now()
-    where id = any(${client.array(ids)}) and project_id = ${args.projectId} and org_id = ${args.orgId}
-      and canonical_id = ${legacy}
-    returning id
-  `;
-  return adopted.length;
+  const identity = urlSourceIdentity(args.metadata);
+  if (!identity || args.canonicalId !== identity.opaque || identity.legacy === args.canonicalId) return 0;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await (client as unknown as postgres.TransactionSql).savepoint(async (sp) => {
+        const [previous] = await sp<{ lock_timeout: string }[]>`select current_setting('lock_timeout') as lock_timeout`;
+        await sp`select set_config('lock_timeout', ${ADOPTION_LOCK_TIMEOUT}, true)`;
+        const rows = await sp<{ id: string; source_url: string | null; run_kind: string | null }[]>`
+          select d.id, d.metadata ->> 'sourceUrl' as source_url, r.kind as run_kind
+          from documents d
+          left join project_runs r on r.id = d.run_id and r.project_id = d.project_id and r.org_id = d.org_id
+          where d.project_id = ${args.projectId} and d.org_id = ${args.orgId} and d.canonical_id = ${identity.legacy}
+          order by d.created_at desc, d.id desc
+          for update of d
+        `;
+        const sameUrl = rows.filter((row) => row.source_url !== null && tryNormalizedUrl(row.source_url) === identity.normalized);
+        let adopted = 0;
+        if (sameUrl.some((row) => row.run_kind === "url-ingest")) {
+          const updated = await sp<{ id: string }[]>`
+            update documents set canonical_id = ${args.canonicalId}, updated_at = now()
+            where id = any(${sp.array(sameUrl.map((row) => row.id))}) and project_id = ${args.projectId}
+              and org_id = ${args.orgId} and canonical_id = ${identity.legacy}
+            returning id
+          `;
+          adopted = updated.length;
+        }
+        await sp`select set_config('lock_timeout', ${previous?.lock_timeout ?? "0"}, true)`;
+        return adopted;
+      });
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if ((code === "55P03" || code === "40P01") && attempt < ADOPTION_ATTEMPTS) continue;
+      throw error;
+    }
+  }
 }
 
 export async function enforceLiveBudgetCaps(
@@ -786,7 +823,8 @@ export function createRunCreation(deps: RunCreationDeps) {
         // A URL re-ingest also takes over the version chain of this URL's legacy rows (raw-URL canonical ID).
         if (!input.extract) await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId, canonicalId, metadata: file.metadata });
         // The latest version by creation (as the supersession trigger orders them), and the next number after the
-        // chain's highest: adopted legacy rows can repeat numbers already used by opaque-keyed ones.
+        // chain's highest: adopted legacy rows can repeat numbers already used by opaque-keyed ones, so in an
+        // adopted chain version_number and created_at can disagree (C-L3); creation order decides the lineage.
         const [existing] = input.extract ? [] : await client<{ id: string; next_version: number }[]>`
           select id, (select max(version_number) from documents
             where project_id = ${input.projectId} and canonical_id = ${canonicalId}) + 1 as next_version
@@ -880,26 +918,43 @@ export function createRunCreation(deps: RunCreationDeps) {
   ) {
     const documents: DocumentRow[] = [];
     for (const source of sources) {
-      let canonicalId = await ensureCanonicalId(sql, source);
-      // A concurrent URL re-ingest can re-key the source's chain (adoptLegacyUrlVersions) between reading its
-      // canonical ID and taking the lock: re-read it under the lock and retry with the current key.
+      // A URL-provenance source (stored sourceUrl, and its chain under that URL's legacy or opaque key) is
+      // reprocessed under the opaque key's lock, as URL ingest is: adoption first, then lineage and insert.
+      const identity = urlSourceIdentity(source.metadata);
+      const urlChain = identity && (source.canonical_id === identity.opaque || source.canonical_id === identity.legacy) ? identity : null;
+      let canonicalId = urlChain ? urlChain.opaque : await ensureCanonicalId(sql, source);
+      // The source's canonical ID is re-read under the lock (a concurrent re-ingest can re-key its chain); a
+      // changed key is retried with the current one.
       let row: (DocumentRow & { tags: string[] }) | null = null;
       for (let attempt = 0; attempt < 3 && row === null; attempt++) row = await sql.begin(async (tx) => {
         const client = tx as unknown as SqlClient;
         await lockRunCreation(runId, client);
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
-        const [current] = await client<{ canonical_id: string | null }[]>`select canonical_id from documents where id = ${source.id}`;
-        if (current?.canonical_id && current.canonical_id !== canonicalId) {
-          canonicalId = current.canonical_id;
-          return null;
+        if (urlChain) {
+          await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId: source.org_id, canonicalId: urlChain.opaque, metadata: source.metadata });
+        }
+        const [current] = await client<{ canonical_id: string | null }[]>`
+          select canonical_id from documents where id = ${source.id} and project_id = ${input.projectId} and org_id = ${source.org_id}`;
+        // Fail closed: the source was deleted (or moved) since it was selected.
+        if (!current) throw new Error(`[run-creation] source document ${source.id} is no longer in this project`);
+        if (current.canonical_id && current.canonical_id !== canonicalId) {
+          // Under URL provenance without URL-intake history the chain keeps its own key: take that key's lock too.
+          if (urlChain && canonicalId === urlChain.opaque) {
+            canonicalId = current.canonical_id;
+            await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
+          } else {
+            canonicalId = current.canonical_id;
+            return null;
+          }
         }
         // The new version follows the latest in the lineage (by creation, as the supersession trigger orders them),
-        // numbered after the chain's highest, whichever version was selected.
+        // numbered after the chain's highest, whichever version was selected. Version numbers can disagree with
+        // creation order in an adopted chain (C-L3: a legacy row and an opaque row both numbered 1); creation wins.
         const [latest] = await client<{ id: string; next_version: number }[]>`
           select id, (select max(version_number) from documents
-            where project_id = ${input.projectId} and canonical_id = ${canonicalId}) + 1 as next_version
+            where project_id = ${input.projectId} and org_id = ${source.org_id} and canonical_id = ${canonicalId}) + 1 as next_version
           from documents
-          where project_id = ${input.projectId} and canonical_id = ${canonicalId}
+          where project_id = ${input.projectId} and org_id = ${source.org_id} and canonical_id = ${canonicalId}
           order by created_at desc, id desc
           limit 1
         `;
