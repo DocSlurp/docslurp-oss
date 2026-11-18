@@ -120,7 +120,9 @@ async function claimAndMaterialize(...args: Parameters<typeof materializePageRan
   return await materializePageRange(...args);
 }
 
-const input = (h: Harness, pages: number[], pipeline = defaultPipelineFeatures) => ({
+// Query-time reads are vision transcription: only Smartest (the ladder's intelligent rung) reads pages here.
+const smartest = { ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" as const } };
+const input = (h: Harness, pages: number[], pipeline: typeof defaultPipelineFeatures = smartest) => ({
   runId: "run-1", documentId: "d1", pages, reason: "query" as const, sessionId: null, maxCredits: 100,
   document, pipeline, run: h.run as never,
 });
@@ -141,7 +143,7 @@ describe("materializePageRange", () => {
     const h = harness({ 1: LONG, 2: "" });
     h.run.id = runId;
     h.usage.runId = runId;
-    const range = { ...input(h, [1, 2], { ...defaultPipelineFeatures, speedBoost }), runId };
+    const range = { ...input(h, [1, 2], { ...smartest, speedBoost }), runId };
     const first = await claimAndMaterialize(h.deps, range);
     expect(first.costCredits).toBeCloseTo((pageCredits("fast", 1) + pageCredits("rich", 1)) * speedBoostMultiplier(speedBoost), 6);
     const firstRows = await sql`select id, cost_cents, metadata from usage_events where run_id = ${runId}`;
@@ -182,7 +184,7 @@ describe("materializePageRange", () => {
   it("never chunks or writes a PII-blocked page", async () => {
     const h = harness({ 1: LONG, 2: `${LONG} SSN 123-45-6789 is on file for this customer.` });
     const pipeline = {
-      ...defaultPipelineFeatures,
+      ...smartest,
       piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "block_indexing" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1, 2], pipeline));
@@ -199,7 +201,7 @@ describe("materializePageRange", () => {
   it("redacts page text when the policy redacts artifacts", async () => {
     const h = harness({ 1: `${LONG} SSN 123-45-6789 on file.` });
     const pipeline = {
-      ...defaultPipelineFeatures,
+      ...smartest,
       piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "redact_artifacts" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1], pipeline));
@@ -482,7 +484,7 @@ describe("materializePageRange", () => {
 
 describe("materializePageRange respects processing quality", () => {
   const fast = { ...defaultPipelineFeatures, quality: "fast" as const };
-  const good = { ...defaultPipelineFeatures, quality: "good" as const };
+  const fastest = defaultPipelineFeatures;
   const reasons = ["query", "full-index"] as const;
 
   it.each(reasons)("fast (%s) indexes only the text layer and keeps textless pages unread", async (reason) => {
@@ -500,12 +502,18 @@ describe("materializePageRange respects processing quality", () => {
     expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "kept-as-image" });
   });
 
-  it.each(reasons)("good (%s) reads every page with vision, text layer or not", async (reason) => {
+  it.each(reasons)("fastest (%s) never transcribes a page with vision at query time", async (reason) => {
     const h = harness({ 1: LONG, 2: "" });
-    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], good), reason });
-    expect(h.ocrCalls.sort()).toEqual([1, 2]);
-    expect(result.indexed).toEqual([1, 2]);
-    // Query: two committed Rich charges. Full index: the run completion fee bills the pages, so the call reports none.
-    expect(result.costCredits).toBeCloseTo(reason === "query" ? 0.5 : 0, 6);
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], fastest), reason });
+    expect(h.ocrCalls).toEqual([]);
+    expect(result.indexed).toEqual([1]);
+    expect(result.failed).toEqual([{ page: 2, reason: "kept-as-image" }]);
+  });
+
+  it.each(reasons)("smartest (%s) reads only the textless page with vision", async (reason) => {
+    const h = harness({ 1: LONG, 2: "" });
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], smartest), reason });
+    expect(h.ocrCalls).toEqual([2]);
+    expect(result.indexed.sort()).toEqual([1, 2]);
   });
 });

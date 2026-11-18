@@ -52,10 +52,15 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
   // Query-time reads follow the project's Auto ladder as it is now, never looser: a materialize run carries an older
   // snapshot of the pipeline (pipeline.ladder), so the project's current limits tighten it.
   // Quality is capped at the project's while it has a limit (clampRunLadder), so a source run at Good cannot read past it.
-  const [project] = await sql<{ ladder: unknown; quality: string | null }[]>`
-    select w.pipeline -> 'ladder' as ladder, ${sql.unsafe(runLegacyQualitySql("w"))} as quality
+  const [row] = await sql<{ ladder: unknown; quality: string | null; retired_good: boolean }[]>`
+    select w.pipeline -> 'ladder' as ladder, ${sql.unsafe(runLegacyQualitySql("w"))} as quality,
+      coalesce(w.pipeline ->> 'quality' = 'good', false) as retired_good
     from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
   `;
+  // A project row still on the retired `good` (before migration 0192 moved it) is Smartest: the intelligent rung.
+  const project = row && row.retired_good
+    ? { ...row, ladder: { ...(row.ladder && typeof row.ladder === "object" ? row.ladder : {}), maxRung: "intelligent" } }
+    : row;
   const projectQuality = qualityModeSchema.safeParse(project?.quality ?? "auto");
   const tighten = <T extends { pipeline: unknown }>(value: T): T => {
     const pipeline = value.pipeline as PipelineFeatures;

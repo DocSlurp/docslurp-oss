@@ -44,6 +44,8 @@ function stateWith(plan: RoutePlan | null, mode: PageRouterMode | undefined, ext
   const state = WorkflowState.create({
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
+      // Smartest: Fastest never runs routed targets (some are vision models).
+      quality: "auto", ladder: { maxRung: "intelligent" },
       preserveImages: true, visionFallback: true, privacyMode: "standard", maxCostCents: null,
       vision: { modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}` },
       // These execution tests deliberately exercise cost-only routing. Defaults are tested below.
@@ -155,7 +157,7 @@ describe("vision-extract with the page router", () => {
     ({ stage, state } = make(null));
     expect(await load(stage, state)).toBeNull();
     ({ stage, state } = make(plan));
-    (state.run.pipeline as { quality: string }).quality = "good";
+    (state.run.pipeline as { ladder: unknown }).ladder = { maxRung: "ocr" };
     expect(await load(stage, state)).toBeNull();
     ({ stage, state } = make(plan));
     (state.run.pipeline as { quality: string }).quality = "fast";
