@@ -634,12 +634,7 @@ function capEncodingReadPages(pages: AdaptivePageRoutingEntry[], pageCount: numb
   }
   return (pages as Capped[]).map((page, index) => {
     const { [ENCODING_UNCAPPED]: uncapped, ...kept } = page;
-    if (!uncapped) return kept;
-    if (dropped.has(index)) return uncapped.page;
-    // The read exists only because of the encodings: say so on the decision, so execution admits it under the guard's
-    // durable `encoding-read` budget (vision-extract legacyPageHints) and not as an ordinary page read. This cap holds for one
-    // routing decision; the guard's holds across retries, restarts and re-routed facts.
-    return kept.ocrDecision ? { ...kept, ocrDecision: { ...kept.ocrDecision, signals: [...kept.ocrDecision.signals, ENCODING_READ_ONLY_SIGNAL] } } : kept;
+    return dropped.has(index) && uncapped ? uncapped.page : kept;
   });
 }
 
@@ -650,8 +645,6 @@ export function encodingReadPageCap(pageCount: number): number {
 
 /** Signals of encoding routing (Doppler math and table encoding facts, DOCSLURP_ENCODING_FACTS_ROUTING). */
 export const ENCODING_READ_CAPPED_SIGNAL = "encoding-read-capped";
-/** On a read Doppler's encodings alone authorized (and the per-document cap kept): read under the guard's `encoding-read` budget. */
-export const ENCODING_READ_ONLY_SIGNAL = "encoding-read-only";
 export const ENCODING_MATH_GRID_SIGNAL = "encoding-math-grid";
 export const ENCODING_RASTER_TABLE_SIGNAL = "encoding-table-raster-candidate";
 export const ENCODING_MATH_READ_SIGNAL = "ocr-authorized:encoding-math-unreadable";

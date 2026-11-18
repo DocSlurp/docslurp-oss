@@ -711,10 +711,21 @@ function layers(value: unknown): DopplerLayerFacts | undefined {
 
 function structure(value: unknown): DopplerStructureFacts | undefined {
   // Required: what released Doppler writes. Optional: the structure-tree counts an earlier build wrote (absent is unknown).
-  return family<DopplerStructureFacts>(value, { actualText: count, actualTextTexLike: count, truncated: bool }, {
+  const facts = family<DopplerStructureFacts>(value, { actualText: count, actualTextTexLike: count, truncated: bool }, {
     formulas: count, tables: count, tableRows: count, tableCells: count, spannedCells: count, mathml: count, mathmlFiles: count,
     altText: count, altTextTexLike: count, markedActualText: count, markedActualTextTexLike: count, unknown: bool,
   });
+  if (!facts) return undefined;
+  // A TeX-like count is a subset of its total: more TeX-like spans than spans is not a fact. The released pair failing
+  // drops the family (unknown); an optional pair that fails is left out, the rest kept.
+  if (facts.actualTextTexLike > facts.actualText) return undefined;
+  for (const [total, texLike] of [["altText", "altTextTexLike"], ["markedActualText", "markedActualTextTexLike"]] as const) {
+    if (facts[texLike] !== undefined && (facts[total] === undefined || facts[texLike]! > facts[total]!)) {
+      delete facts[total];
+      delete facts[texLike];
+    }
+  }
+  return facts;
 }
 
 const PAGE_FAMILIES = { geometry, text, fonts, images, vectors, forms, annots, layers, structure } as const;
