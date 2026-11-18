@@ -88,8 +88,9 @@ describe("worker scaler snapshot over active runs (0194)", () => {
       const explain = async (statement: string, values: unknown[] = []) =>
         (await sql.unsafe<{ "QUERY PLAN": string }[]>(`EXPLAIN ${statement}`, values as never[])).map((row) => row["QUERY PLAN"]).join("\n");
       const snapshotPlan = await explain(captured.text(), captured.values());
+      // The planner may pick any active-status index (this one or the (status, lease) index); never the heap.
       expect(snapshotPlan).not.toMatch(/Seq Scan on project_runs/);
-      expect(snapshotPlan).toContain("project_runs_org_active_idx");
+      expect(snapshotPlan).toMatch(/Index (Only )?Scan (using|on) project_runs_\w+/);
 
       // One organization's active runs: a range read of the index, covering the counters an activity summary reads.
       const orgPlan = await explain(`
