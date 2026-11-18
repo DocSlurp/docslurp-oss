@@ -125,6 +125,7 @@ describe("readStoredPipelineSettings: drop the invalid field, keep the rest, nev
       ladder: { maxRung: "gold" },
       visionFallback: "sometimes",
       mediaVideo: { enabled: true, maxFrames: 999_999 },
+      pageRouter: { mode: "active", router: "decision-model", budgetPerDocumentUsd: 5000 },
       embedding: { profile: "cheapest-local" },
       vision: { profile: "cheapest-local" },
     }, "project p1");
@@ -139,7 +140,9 @@ describe("readStoredPipelineSettings: drop the invalid field, keep the rest, nev
       mediaVideo: { enabled: false },
     });
     expect(read.features.piiPolicy.patterns.length).toBeGreaterThan(5);
-    for (const key of ["privacyMode", "piiPolicy", "webTools", "webhooks", "maxCostCents", "ladder", "visionFallback", "mediaVideo"]) {
+    expect(read.features.pageRouter.mode).toBeUndefined();
+    expect(read.features.pageRouter.router).toBe("baseline");
+    for (const key of ["privacyMode", "piiPolicy", "webTools", "webhooks", "maxCostCents", "ladder", "visionFallback", "mediaVideo", "pageRouter"]) {
       expect(read.repairs).toContainEqual({ path: `pipeline.${key}`, reason: "restricted" });
     }
   });

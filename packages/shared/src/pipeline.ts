@@ -1850,6 +1850,7 @@ const RESTRICTED_LOCAL_PROFILE = "cheapest-local";
  * | ladder                      | { maxRung: "fast" } (Auto never escalates a page to a billed rung)               |
  * | visionFallback              | false (no vision reads unless quality "good" turns them on)                      |
  * | mediaVideo                  | { enabled: false } (no frame reads)                                              |
+ * | pageRouter                  | the default router: no mode, free feature routing (no decision-model spend)      |
  * | embedding, vision (section  | under a restricted privacy mode: profile "cheapest-local" (never a hosted model) |
  * |   or profile)               | under "standard": the product default                                            |
  * | anything else               | the product default (embed, indexVectors, quality, summaryTree off, ...)         |
@@ -1996,6 +1997,7 @@ function strictestGuardedSettings(): Record<string, unknown> {
     ladder: { maxRung: "fast" },
     visionFallback: false,
     mediaVideo: { enabled: false },
+    pageRouter: {},
     embedding: { profile: RESTRICTED_LOCAL_PROFILE },
     vision: { profile: RESTRICTED_LOCAL_PROFILE },
   };
@@ -2041,6 +2043,9 @@ function guardedStoredSettings(stored: Record<string, unknown>): { values: Recor
   guard("visionFallback", (value) => typeof value === "boolean", () => false);
   // Its per-document limits cap frame reads: an unreadable section reads no frames rather than the preset maximum.
   guard("mediaVideo", (value) => isPlainRecord(value) && validAlone("mediaVideo", value), () => strictest.mediaVideo);
+  // Its per-document budget caps decision-model spend: an unreadable section is the default router (no mode, free
+  // feature routing), never a default budget under a stored paid mode.
+  guard("pageRouter", (value) => isPlainRecord(value) && validAlone("pageRouter", value), () => strictest.pageRouter);
   return { values, replaced };
 }
 
