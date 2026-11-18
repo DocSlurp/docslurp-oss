@@ -231,6 +231,11 @@ export interface FirstPassBatchDeps {
   signal?: AbortSignal;
   /** Clock for timings (tests). */
   now?: () => number;
+  /**
+   * The batch provider to run this run's job through (default: the registered one). The same-organization coalescer
+   * (first-pass-coalescer.ts) passes a participant here; everything else about the batch stays this run's own.
+   */
+  provider?: SandboxedPdfBatchProvider;
 }
 
 export interface FirstPassBatchResult {
@@ -282,7 +287,7 @@ async function admitBatchDocument(state: WorkflowState, document: Document): Pro
 export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId: string; documentIds: string[] }): Promise<FirstPassBatchResult> {
   const now = deps.now ?? Date.now;
   const started = now();
-  const provider = sandboxedPdfBatchProvider();
+  const provider = deps.provider ?? sandboxedPdfBatchProvider();
   if (!provider) throw new Error("First pass needs a sandboxed PDF batch provider");
   const state = await loadRunState(deps.store, input.runId, { hydrate: true });
   state.beginShard(input.documentIds);
@@ -407,6 +412,8 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       const event = acceptSandboxedPdfBatchEvent(job, raw);
       const file = files[event.index]!;
       const document = documents.get(file.documentId)!;
+      // A result only ever lands on this run's own document (a shared batch routes by the host's table; checked again here).
+      if (document?.runId !== input.runId) throw new Error("First-pass result names a document outside its run");
       deps.heartbeat({ firstPass: event.phase, index: event.index });
       if (event.phase === "failed") {
         // A file that failed after its text keeps the text; only a file with no text is handed back.
@@ -610,6 +617,8 @@ export async function countFirstPassPages(
 
 /** Keep a batch result in storage so an ordinary extract-markdown that runs again is served from it (no second VM). */
 async function persistBatchResult(storage: ArtifactStore, state: WorkflowState, document: Document, cached: CachedResult): Promise<void> {
+  // Only into this run's own storage prefix, for this run's own document (fail closed).
+  if (document.runId !== state.run.id) throw new Error("First-pass result storage names a document outside its run");
   const resultKey = `${runArtifactRoot(state.run, document.userId)}/first-pass/${document.id}.json`;
   const markdown = await readFile(cached.markdownPath, "utf8");
   await storage.putJson(resultKey, { version: 1, documentId: document.id, markdown, result: cached.result, ...(cached.glyphs ? { glyphs: true } : {}) });

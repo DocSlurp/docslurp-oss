@@ -88,6 +88,13 @@ export interface SandboxedPdfBatchProvider {
    * that sets BATCH_FINAL_PROPERTY is never re-run as a batch.
    */
   run(job: SandboxedPdfBatchJob, onEvent: (event: SandboxedPdfBatchEvent) => Promise<void>, signal?: AbortSignal): Promise<{ usage: UsageEvent[] }>;
+  /**
+   * Optional: convert files of several runs of ONE organization in one job (sandboxed-pdf-org-batch.ts), with the same event
+   * contract as `run`. Only the first-pass coalescer calls it, behind DOCSLURP_FIRST_PASS_CROSS_RUN (default off), after it
+   * checked the job against the database (assertSingleOrgBatch); a provider re-checks every file's owner against
+   * `files[i].runId` and `scope.orgId`. A provider without it never receives a job that spans runs.
+   */
+  runOrgBatch?(job: import("./sandboxed-pdf-org-batch.js").SandboxedPdfOrgBatchJob, onEvent: (event: SandboxedPdfBatchEvent) => Promise<void>, signal?: AbortSignal): Promise<{ usage: UsageEvent[] }>;
 }
 
 export const MAX_BATCH_DOCUMENT_PAGES = 100_000;
@@ -130,6 +137,7 @@ export function sandboxedPdfBatchProvider(): SandboxedPdfBatchProvider | null {
 export function validBatchProvider(batch: Partial<SandboxedPdfBatchProvider> | undefined): boolean {
   if (!batch) return false;
   return typeof batch.run === "function"
+    && (batch.runOrgBatch === undefined || typeof batch.runOrgBatch === "function")
     && [batch.maxFiles, batch.maxBatchBytes, batch.maxBatchPages].every((n) => Number.isSafeInteger(n) && (n as number) >= 1);
 }
 

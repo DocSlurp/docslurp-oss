@@ -1440,6 +1440,15 @@ export class Store {
     `;
   }
 
+  /** The run was cancelled or asked to cancel, or has ended (a shared first-pass batch drops its documents then). */
+  async runCancelRequested(runId: string): Promise<boolean> {
+    const [row] = await this.sql<{ control_state: string | null; status: string }[]>`
+      select control_state, status from project_runs where id = ${runId}
+    `;
+    if (!row) return true;
+    return ["cancel_requested", "cancelled", "dead-letter"].includes(row.control_state ?? "") || ["failed", "cancelled", "completed"].includes(row.status);
+  }
+
   /** The run has a pending pause or cancel request (project_runs.control_state). */
   async hasRunControlRequest(runId: string): Promise<boolean> {
     const [row] = await this.sql<{ control_state: string | null }[]>`
