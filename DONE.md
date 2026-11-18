@@ -6,6 +6,13 @@
 - Upload sessions (and MCP `getUploadStatus`) report `progress`: files and bytes received, then the session's run (same user and organization only) with documents, pages, pages per minute and ETA.
 - Every added read is an index read (`activity-summary-plans.db.test.ts`, 100K finished runs and 50K old sessions: no Seq Scan): active runs through `project_runs_org_active_idx` (0195), recently completed bounded by organization, project and a one-day creation window, history and session progress by primary key. Migration 0197 `upload_sessions_initializing_expiry_idx`: the reconciler's due-session sweep is now two index ranges (due sessions, expired initializing ones) instead of an OR that scanned every session.
 - ETA accuracy: the API logs each run's first estimate (`docslurp.run.eta.predicted`: seconds, bucket, basis) and the worker its actual duration at outcome (`docslurp.run.eta.actual`), joinable on run id in SigNoz.
+## Model URI backfill for rows written before migrations 0191-0192 (2026-11-18)
+
+- `server/scripts/backfill-model-uris.ts` (`services/model-uri-backfill.ts`): a one-off, idempotent, batched backfill. Dry run by default; `--write` applies it; `--target`, `--batch-size` and per-batch statement and lock timeouts are options. Each batch runs in its own transaction and only null fields are filled. Runbook: docs/self-host/operations.md.
+- Vector rows get the space URI search computes for their document, through the same shared code (`effectiveProjectIndexing`, `embeddingConfigFor`, `resolveEmbeddingRoute`, `embeddingRouteSpaceUri`). It is written only when the route's bare id and dimensions equal the row's, so the URI always equals the one readers expect and search serves the same vectors as before. A DB test checks eligibility before and after. Rows it cannot prove stay null and are counted by reason.
+- Usage rows get `withModelProvenance`'s `modelUri` plus `modelUriBackfilled: true`. Runs get `resolved_models` derived from their usage in the worker's shape, with `backfilled: true` on each entry. Vision page reads get `model_uri` and `model_class` when their document and run saw exactly one model.
+- `runModelClass` moved to `@docslurp/shared` (the worker re-exports it), so the backfill labels page extracts the way the worker does.
+
 ## Autoscaler snapshot reads active runs only (2026-11-18)
 
 - Migration 0195: partial index `project_runs_org_active_idx` on `project_runs (org_id)` over `status IN ('queued', 'processing')`, including the run id, project, status, control state, lease, shard demand, document and page totals and processed counts, and created/worker-started/updated times. It serves the scaler snapshot and an organization's active runs (org_id leading) as an index read.
