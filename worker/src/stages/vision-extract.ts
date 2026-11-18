@@ -1738,8 +1738,8 @@ export class VisionExtractStage implements Stage {
 
   /**
    * The pages of `pages` the vision page reader may read for this run and document (vision-page-reader.ts): a PDF with page
-   * triage, pages not routed as figures or charts, not drawn-content (ink-checked) and not table rescue. Empty when the
-   * run's reads stay hosted.
+   * triage, pages not routed as figures or charts, not drawn-content (ink-checked), not table rescue and not an encoding
+   * read (both keep their durable budget on the hosted route). Empty when the run's reads stay hosted.
    */
   private pageReaderCandidates(state: WorkflowState, document: import("../models.js").Document, vision: VisionConfig, pages: readonly number[], hints: LegacyPageHints): number[] {
     if (document.mimeType !== "application/pdf" || !hints.triaged || !visionPageReaderFor(state, vision)) return [];
