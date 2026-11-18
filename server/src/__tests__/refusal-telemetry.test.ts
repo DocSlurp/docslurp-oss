@@ -54,6 +54,9 @@ function app() {
   // A recorded error response already assigned to c.res, then replaced by middleware.
   app.use("/v1/replaced-after-assignment", async (c, next) => { await next(); c.res = c.json({ error: "replacement" }, 400); });
   app.post("/v1/replaced-after-assignment", c => apiStatusError(c, 400, "STALEREASON four"));
+  // A handler's recorded error, then a middleware that throws after next(): onError's response is delivered.
+  app.use("/v1/throws-after-error", async (_c, next) => { await next(); throw new Error("post-next failure"); });
+  app.post("/v1/throws-after-error", c => apiStatusError(c, 400, "STALEREASON five"));
   // The pipeline guard clones every JSON response (error ones too) on its way out.
   app.use("/v1/guarded", customerPipelineGuard);
   app.post("/v1/guarded", c => apiStatusError(c, 400, "guarded reason"));
@@ -110,6 +113,14 @@ describe("refusal telemetry never carries credentials", () => {
     expect(result.span["docslurp.error.code"]).toBeUndefined();
     expect(result.span["docslurp.error.reason"]).toBeUndefined();
     expect(result.posthog["docslurp.error.code"]).toBeUndefined();
+    for (const text of [result.line, JSON.stringify(result.span), JSON.stringify(result.posthog), result.body]) expect(text).not.toContain("STALEREASON");
+  });
+
+  it("reports the thrown error, not the handler's earlier refusal, when a middleware throws after next()", async () => {
+    const result = await refuse("/v1/throws-after-error");
+    expect(result.status).toBe(500);
+    expect(result.span["docslurp.error.code"]).toBe("internal");
+    expect(result.span["docslurp.error.reason"]).toBeUndefined();
     for (const text of [result.line, JSON.stringify(result.span), JSON.stringify(result.posthog), result.body]) expect(text).not.toContain("STALEREASON");
   });
 

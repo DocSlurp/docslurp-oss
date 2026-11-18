@@ -188,7 +188,7 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
       const pending = hono.fetch(new Request("http://localhost/v1/uploads/bulk", {
         method: "POST", headers: { "content-type": "multipart/form-data; boundary=x" }, body: stalling, duplex: "half",
       } as RequestInit));
-      await vi.advanceTimersByTimeAsync(BODY_IDLE_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(BODY_IDLE_TIMEOUT_MS + 1);
       const response = await pending;
       expect(response.status).toBe(408);
       expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });

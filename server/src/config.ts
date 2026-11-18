@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { resolveLanceDbConfig, resolveObjectStorageConfig } from "@docslurp/shared";
 
 import { storageAccessKeyIdProblem } from "./lib/storage-credentials.js";
+import { MAX_IN_MEMORY_BODY_BYTES } from "./lib/bounded-body-limit.js";
 
 const defaultDatabaseUrl = "postgres://docslurp:docslurp@localhost:5432/docslurp";
 
@@ -241,10 +242,12 @@ export const env = {
    * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct
    * upload sessions (/v1/uploads/direct/sessions), which go straight to storage.
+   * Never above MAX_IN_MEMORY_BODY_BYTES (100 MiB), whatever the environment says.
    */
   maxMultipartUploadBytes: Math.min(
     readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),
     readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
+    MAX_IN_MEMORY_BODY_BYTES,
   ),
   /**
    * Request-body bytes the API buffers at once across all requests (the bulk

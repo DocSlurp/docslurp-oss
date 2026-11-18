@@ -1,7 +1,13 @@
 import type { Context, MiddlewareHandler } from "hono";
 
 /** Longest wait for the next body chunk. */
-export const BODY_IDLE_TIMEOUT_MS = 30_000;
+export const BODY_IDLE_TIMEOUT_MS = 45_000;
+
+/**
+ * Hard ceiling on any request body held in memory, whatever a cap or the
+ * environment asks for: larger files go to storage through direct upload sessions.
+ */
+export const MAX_IN_MEMORY_BODY_BYTES = 100 * 1024 * 1024;
 
 /**
  * Process-wide body reading settings (server.ts sets them from config):
@@ -22,7 +28,7 @@ export function bufferedBodyBytes(): number {
   return bodyReads.inUse;
 }
 
-/** The overall deadline for reading a body of up to `maxSize` bytes: 60 s plus `maxSize` at the minimum rate. */
+/** The overall deadline for reading a body of `maxSize` bytes: 60 s plus `maxSize` at the minimum rate. */
 export function bodyReadDeadlineMs(maxSize: number): number {
   return 60_000 + Math.ceil((maxSize / bodyReads.minBytesPerSecond) * 1000);
 }
@@ -58,11 +64,15 @@ export type BoundedBodyLimitOptions = {
  * request has run. One idle timer (refreshed per chunk) and one overall timer
  * cancel the reader; there is no per-chunk promise. Empty chunks are skipped.
  */
-export function boundedBodyLimit(maxSize: number, onError: (c: Context) => Response, options: BoundedBodyLimitOptions): MiddlewareHandler {
+export function boundedBodyLimit(requestedMaxSize: number, onError: (c: Context) => Response, options: BoundedBodyLimitOptions): MiddlewareHandler {
+  const maxSize = Math.min(requestedMaxSize, MAX_IN_MEMORY_BODY_BYTES);
   const idleTimeoutMs = options.idleTimeoutMs ?? BODY_IDLE_TIMEOUT_MS;
   return async (c, next) => {
-    const declared = Number(c.req.header("content-length"));
+    const header = c.req.header("content-length");
+    const declared = header === undefined || header.trim() === "" ? Number.NaN : Number(header);
     if (Number.isFinite(declared) && declared > maxSize) return onError(c);
+    // Sized from the declared length when there is one (capped by maxSize): a small body gets a short deadline.
+    const expectedBytes = Number.isFinite(declared) && declared >= 0 ? declared : maxSize;
     const request = c.req.raw;
     if (!request.body) return next();
     const reader = request.body.getReader();
@@ -73,7 +83,7 @@ export function boundedBodyLimit(maxSize: number, onError: (c: Context) => Respo
       timedOut = true;
       void reader.cancel().catch(() => {});
     };
-    const deadline = setTimeout(expire, options.deadlineMs ?? bodyReadDeadlineMs(maxSize));
+    const deadline = setTimeout(expire, options.deadlineMs ?? bodyReadDeadlineMs(expectedBytes));
     const idle = setTimeout(expire, idleTimeoutMs);
     try {
       try {

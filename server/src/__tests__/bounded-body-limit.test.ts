@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import { nativeBodyLimit } from "../lib/api-error.js";
-import { bodyReadDeadlineMs, bufferedBodyBytes, configureBodyReads } from "../lib/bounded-body-limit.js";
+import { BODY_IDLE_TIMEOUT_MS, MAX_IN_MEMORY_BODY_BYTES, bodyReadDeadlineMs, boundedBodyLimit, bufferedBodyBytes, configureBodyReads } from "../lib/bounded-body-limit.js";
 import { multipartBodyLimit } from "../lib/upload-policy.js";
 import { safeErrorResponse } from "../lib/public-errors.js";
 import { rejectNulBytes } from "../lib/reject-nul.js";
@@ -131,5 +131,72 @@ describe("body read deadline", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  /** A limiter app whose body arrives one byte per `everyMs` (fake timers), `chunks` times. */
+  function paced(cap: number, everyMs: number, chunks: number, headers: Record<string, string> = {}) {
+    const app = new Hono();
+    app.use("*", nativeBodyLimit(cap));
+    app.post("/v1/x", async c => c.text(String((await c.req.raw.arrayBuffer()).byteLength)));
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({ async pull(controller) {
+      if (sent === chunks) { controller.close(); return; }
+      await new Promise(resolve => setTimeout(resolve, everyMs));
+      sent++;
+      controller.enqueue(new Uint8Array(1));
+    } }, { highWaterMark: 0 });
+    return app.request(new Request("http://localhost/v1/x", { method: "POST", headers: { "content-type": "application/json", ...headers }, body, duplex: "half" } as RequestInit));
+  }
+
+  it("lets a steady slow upload through: a chunk every idle - 1 ms for longer than the idle timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // A 4 MiB cap with no declared length: the overall deadline (60 s + 128 s) outlasts three chunks.
+      const pending = paced(4 * 1024 * 1024, BODY_IDLE_TIMEOUT_MS - 1, 3);
+      await vi.advanceTimersByTimeAsync(3 * BODY_IDLE_TIMEOUT_MS);
+      const response = await pending;
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("3");
+      // Both read timers are cleared once the body is complete.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers 408 once a body pauses longer than the idle timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const pending = paced(4 * 1024 * 1024, BODY_IDLE_TIMEOUT_MS + 10_000, 1);
+      await vi.advanceTimersByTimeAsync(BODY_IDLE_TIMEOUT_MS + 1);
+      expect((await pending).status).toBe(408);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sizes the overall deadline from the declared length: a trickle gets 408 at that deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // 1 KB declared on a 4 MiB cap: the deadline is ~60 s, not the cap's ~188 s.
+      const deadline = bodyReadDeadlineMs(1000);
+      expect(deadline).toBeLessThan(bodyReadDeadlineMs(4 * 1024 * 1024));
+      let settled = false;
+      const pending = Promise.resolve(paced(4 * 1024 * 1024, 10_000, 1000, { "content-length": "1000" })).finally(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(deadline - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      expect((await pending).status).toBe(408);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never holds more than the in-memory ceiling, whatever cap it is given", async () => {
+    const huge = new Hono();
+    huge.use("*", boundedBodyLimit(500 * 1024 * 1024, c => c.text("too large", 413), { onTimeout: c => c.text("slow", 408), onBusy: c => c.text("busy", 503) }));
+    huge.post("/x", c => c.text("ok"));
+    const response = await huge.request("/x", { method: "POST", headers: { "content-length": String(MAX_IN_MEMORY_BODY_BYTES + 1) }, body: "x" });
+    expect(response.status).toBe(413);
   });
 });
