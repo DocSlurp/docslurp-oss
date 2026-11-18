@@ -20,6 +20,8 @@ vi.mock("../services/organizations.js", () => ({
 }));
 vi.mock("../services/api-keys.js", () => ({
   getLiveApiKeyById: async () => state.keyLive ? { orgId: "o", scopes: state.keyScopes, projectIds: state.keyProjects } : null,
+  // The intake credential recheck before external work: the same live key.
+  getLiveIntakeKey: async () => state.keyLive ? { orgId: "o", scopes: state.keyScopes, projectIds: state.keyProjects } : null,
 }));
 vi.mock("../services/direct-upload-session.js", () => ({
   loadDirectUploadSession: async () => ({ session: { status: "completed", org_id: "o", api_key_id: "key-a", result: { payload: { project: { id: "p" }, run: { id: "r" }, documents: [] }, status: 201 } }, files: [] }),

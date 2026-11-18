@@ -95,7 +95,7 @@ export interface CreateRunInput {
    * membership removal either commits first and refuses the run (RunAdmissionRefusedError, nothing reserved), or waits
    * for this admission to commit.
    */
-  principalAtAdmission?: { scope: string };
+  principalAtAdmission?: { scope: string; keyTypes?: readonly string[] };
   /** Explicit admission opt-in; never inherit this from project or prior-run settings. */
   speedBoost?: boolean;
   /** Internal durable intake identity; never accepted from HTTP input. */
@@ -632,8 +632,9 @@ export function replayChartExport<T extends PipelineFeatures>(
  */
 export async function assertPrincipalAtAdmission(
   tx: Parameters<Parameters<typeof admitRunSpend>[2]>[0],
-  args: { orgId: string; projectId: string; userId: string; apiKeyId: string | null; scope: string },
+  args: { orgId: string; projectId: string; userId: string; apiKeyId: string | null; scope: string; keyTypes?: readonly string[] },
 ): Promise<void> {
+  const keyTypes = args.keyTypes ?? ["server"];
   const [membership] = await tx<Array<{ one: number }>>`select 1 as one from org_memberships
     where org_id = ${args.orgId} and user_id = ${args.userId} for share`;
   if (args.apiKeyId) {
@@ -644,7 +645,7 @@ export async function assertPrincipalAtAdmission(
       where id = ${args.apiKeyId} and revoked_at is null
       for share`;
     const projectIds = key?.project_ids ?? [];
-    if (!key || key.org_id !== args.orgId || key.user_id !== args.userId || key.key_type !== "server"
+    if (!key || key.org_id !== args.orgId || key.user_id !== args.userId || !keyTypes.includes(key.key_type)
       || !(key.scopes ?? []).includes(args.scope) || (projectIds.length > 0 && !projectIds.includes(args.projectId))) {
       throw new RunAdmissionRefusedError();
     }
@@ -652,12 +653,15 @@ export async function assertPrincipalAtAdmission(
     const grants = await tx<Array<{ revoked: boolean }>>`select revoked_at is not null as revoked from mcp_oauth_grants
       where api_key_id = ${args.apiKeyId} for share`;
     if (grants.some(grant => grant.revoked)) throw new RunAdmissionRefusedError();
-    // Statement time, after the row locks: a key that expired while this admission waited is refused.
+  }
+  await tx`select 1 from project_members where project_id = ${args.projectId} and user_id = ${args.userId} for share`;
+  if (args.apiKeyId) {
+    // Statement time, after every principal row lock (the last may have waited on a concurrent role change): a key
+    // that expired while this admission waited is refused.
     const [live] = await tx<Array<{ live: boolean }>>`select (expires_at is null or expires_at > clock_timestamp()) as live
       from api_keys where id = ${args.apiKeyId}`;
     if (!live?.live) throw new RunAdmissionRefusedError();
   }
-  await tx`select 1 from project_members where project_id = ${args.projectId} and user_id = ${args.userId} for share`;
   const access = await getProjectAccess(args.projectId, args.userId, tx);
   if (!access || access.orgId !== args.orgId || !canContributeToProject(access, args.userId)) throw new RunAdmissionRefusedError();
 }
@@ -736,6 +740,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       leaseRunId: args.id, speedBoost: args.pipeline.speedBoost,
       ...(input.principalAtAdmission ? { authorize: (tx) => assertPrincipalAtAdmission(tx, {
         orgId: args.orgId, projectId: input.projectId, userId: input.userId, apiKeyId: input.apiKeyId ?? null, scope: input.principalAtAdmission!.scope,
+        keyTypes: input.principalAtAdmission!.keyTypes,
       }) } : {}),
     });
     return row!;

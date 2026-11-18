@@ -702,6 +702,18 @@ export async function validateApiKey(
  * under it. Skips the type/domain checks: the token holder is not the key.
  * Null when the key is revoked, gone, or its owner left the organization.
  */
+/**
+ * A live key for intake: getLiveApiKeyById, and refused (null) when the OAuth grant it backs (device login, MCP) was
+ * revoked; a grant can be revoked without its key.
+ */
+export async function getLiveIntakeKey(keyId: string): Promise<Awaited<ReturnType<typeof getLiveApiKeyById>>> {
+  const [key, [revokedGrant]] = await Promise.all([
+    getLiveApiKeyById(keyId),
+    sql<Array<{ one: number }>>`select 1 as one from mcp_oauth_grants where api_key_id = ${keyId} and revoked_at is not null limit 1`,
+  ]);
+  return revokedGrant ? null : key;
+}
+
 export async function getLiveApiKeyById(keyId: string): Promise<{ orgId: string; keyType: ApiKeyType; scopes: string[]; projectIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {
   const [row] = await sql<ApiKeyRow[]>`
     select * from api_keys

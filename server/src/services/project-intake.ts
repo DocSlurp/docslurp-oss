@@ -114,7 +114,7 @@ export type ProjectIntakeAudit = {
 
 export interface ProjectIntakeRequest {
   /** Re-validate the principal inside the run's admission transaction (CreateRunInput.principalAtAdmission). */
-  principalAtAdmission?: { scope: string };
+  principalAtAdmission?: { scope: string; keyTypes?: readonly string[] };
   speedBoost?: boolean;
   tags?: string[];
   userId: string;
@@ -246,7 +246,7 @@ export interface ProjectIntakeRecords {
   }): Promise<ProjectRecord>;
   createRun(args: {
     /** Re-validate the principal inside the admission transaction (CreateRunInput.principalAtAdmission). */
-    principalAtAdmission?: { scope: string };
+    principalAtAdmission?: { scope: string; keyTypes?: readonly string[] };
     speedBoost?: boolean;
     userId: string;
     projectId: string;

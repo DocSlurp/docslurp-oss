@@ -27,7 +27,7 @@ import { sql } from "../db.js";
 import { discardUnstartedRun, RunAdmissionRefusedError } from "./run-creation.js";
 import { type ProjectRunRow } from "./run-records.js";
 import { canContributeToProject, getProjectAccess } from "./organizations.js";
-import { getLiveApiKeyById } from "./api-keys.js";
+import { getLiveApiKeyById, getLiveIntakeKey } from "./api-keys.js";
 
 import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
@@ -85,6 +85,30 @@ type IntakeTargetArgs = Pick<
   ProjectIntakeRequest,
   "speedBoost" | "userId" | "orgId" | "project" | "newProject" | "templateKey" | "allowedProjectIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId" | "origin"
 >;
+
+/**
+ * The credential of an idempotent intake (bulk, URL, website), rechecked right before its external work (storage
+ * writes, fetches, a crawl) starts: a live key with `ingest` whose OAuth grant, if it backs one, is not revoked. Run
+ * admission repeats the check in its transaction (`principalAtAdmission`), so a revocation during the work still
+ * refuses the run.
+ */
+async function assertIntakeCredentialLive(apiKeyId: string | null | undefined): Promise<void> {
+  if (!apiKeyId) return;
+  const key = await getLiveIntakeKey(apiKeyId);
+  if (!key || !key.scopes.includes("ingest")) throw new ProjectIntakeError("API key no longer permits this upload", 403);
+}
+
+/** Key types these intake routes accept (server keys, and client keys with `ingest`); admission rechecks the same. */
+const INTAKE_KEY_TYPES = ["server", "client"] as const;
+
+/** Intake whose run admission re-validates the principal inside its transaction; a refusal there is a 403. */
+async function admittedIntake(request: ProjectIntakeRequest, ports: ProjectIntakePorts): ReturnType<typeof requiredIntake> {
+  return await requiredIntake({ ...request, principalAtAdmission: { scope: "ingest", keyTypes: INTAKE_KEY_TYPES } }, ports)
+    .catch((error: unknown) => {
+      if (error instanceof RunAdmissionRefusedError) throw new ProjectIntakeError("API key no longer permits this upload", 403);
+      throw error;
+    });
+}
 
 /**
  * Intake, plus extract bookkeeping: the run is linked to its extract on
@@ -458,9 +482,10 @@ export async function createBulkProjectIntake(
 
   return await idempotently(
     { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId, apiKeyId: args.apiKeyId, project: args.project },
-    async () =>
-      actionResult(
-        await requiredIntake(
+    async () => {
+      await assertIntakeCredentialLive(args.apiKeyId);
+      return actionResult(
+        await admittedIntake(
           {
             ...target,
             kind: "bulk-upload",
@@ -469,7 +494,8 @@ export async function createBulkProjectIntake(
           },
           ports,
         ),
-      ),
+      );
+    },
   );
 }
 
@@ -496,7 +522,8 @@ export async function createRemoteUrlProjectIntake(
       project: args.project,
     },
     async () => {
-      const intake = await requiredIntake(
+      await assertIntakeCredentialLive(args.apiKeyId);
+      const intake = await admittedIntake(
         {
           ...target,
           kind: "url-ingest",
@@ -555,10 +582,11 @@ export async function createWebsiteProjectIntake(
       const receipt = intakeReceiptContext.getStore();
       if (receipt) await sql`update intake_request_receipts set external_effect_started = true
         where idempotency_key = ${receipt.key} and route_key = ${receipt.route}`;
+      await assertIntakeCredentialLive(args.apiKeyId);
       const crawled = await crawl();
       const pages = crawled.pages.filter((page) => page.markdown?.trim());
       if (!pages.length) throw new ProjectIntakeError("The crawl found no readable pages at this URL.", 422);
-      const intake = await requiredIntake(
+      const intake = await admittedIntake(
         {
           ...target,
           kind: "url-ingest",

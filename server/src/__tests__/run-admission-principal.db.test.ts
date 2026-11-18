@@ -8,6 +8,18 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
  */
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
+/** Stalls external work (a remote fetch, a storage write) until the test releases it. */
+const gates = vi.hoisted(() => ({ fetchStalled: false, releaseFetch: null as null | (() => void), putStalled: false, releasePut: null as null | (() => void), stallPuts: false }));
+vi.mock("../lib/network-security.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../lib/network-security.js")>(),
+  assertSafeExternalUrl: async (url: string) => url,
+  safeExternalFetch: async () => {
+    gates.fetchStalled = true;
+    await new Promise<void>(resolve => { gates.releaseFetch = resolve; });
+    return new Response("Quarterly results beat expectations.", { headers: { "content-type": "text/plain" } });
+  },
+}));
+
 describe.skipIf(!databaseUrl)("run admission revalidates its principal under the spend lock", () => {
   let sql: typeof import("../db.js").sql;
   let admitRunSpend: typeof import("../services/billing/spend-guard.js").admitRunSpend;
@@ -109,6 +121,25 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
     expect(error).toBeInstanceOf(runCreation.RunAdmissionRefusedError);
     expect((error as { code?: string }).code).not.toBe("40P01");
     expect(admitted).toBe(false);
+  }, 20_000);
+
+  it("refuses a key that expired while the admission waited on a concurrent project role change", async () => {
+    await sql`insert into project_members (project_id, user_id, role) values ('adm-p', 'adm-u', 'viewer') on conflict do nothing`;
+    await sql`update api_keys set expires_at = clock_timestamp() + interval '300 milliseconds' where id = 'adm-k'`;
+    // A role update holds the project_members row; it commits only after the key has expired.
+    const editor = await connect();
+    await editor.query("begin");
+    await editor.query("update project_members set role = 'editor' where project_id = 'adm-p' and user_id = 'adm-u'");
+    let admitted = false;
+    const admission = admitRunSpend("adm-o", "adm-p", async () => { admitted = true; return true; }, {
+      authorize: tx => runCreation.assertPrincipalAtAdmission(tx, principal),
+    }).then(() => null, (error: unknown) => error);
+    await untilSomeoneWaitsOnALock();
+    await editor.query("select pg_sleep(0.4)");
+    await editor.query("commit");
+    expect(await admission).toBeInstanceOf(runCreation.RunAdmissionRefusedError);
+    expect(admitted).toBe(false);
+    await sql`delete from project_members where project_id = 'adm-p' and user_id = 'adm-u'`;
   }, 20_000);
 
   it("is not refused for its principal when nothing changed", async () => {
@@ -228,6 +259,74 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
         values ('adm-grant', 'adm-client', 'adm-u', 'adm-o', 'https://api.example.test', '["ingest"]', 'adm-ok')`;
       const id = await seedReadySession("adm-u", "adm-ok");
       refusedCleanly(await confirmAcrossChange(id, "adm-u", "update mcp_oauth_grants set revoked_at = now() where id = 'adm-grant'"));
+    }, 30_000);
+  });
+
+  describe("through the real bulk, URL and website intake paths", () => {
+    const P2 = "b0000000-0000-4000-8000-000000000001";
+    let actions: typeof import("../services/project-intake-actions.js");
+    let ports: import("../services/project-intake.js").ProjectIntakePorts;
+    beforeAll(async () => {
+      actions = await import("../services/project-intake-actions.js");
+      const intake = await import("../services/project-intake.js");
+      const { createProjectIntakeFakes } = await import("./helpers/project-intake-fakes.js");
+      const storage = createProjectIntakeFakes().ports.storage;
+      // Real records and run creation; storage is in memory, and its writes can be stalled.
+      ports = { ...intake.projectIntakePorts, storage: { ...storage, async put(...args: Parameters<typeof storage.put>) {
+        if (gates.stallPuts) { gates.putStalled = true; await new Promise<void>(resolve => { gates.releasePut = resolve; }); }
+        return storage.put(...args);
+      } } as typeof storage };
+      await sql`insert into mcp_oauth_clients (id, name, redirect_uris) values ('adm-client', 'Device login', '[]') on conflict do nothing`;
+      await sql`insert into projects (id, org_id, user_id, name) values (${P2}, 'adm-o', 'adm-u', 'Confirm path') on conflict do nothing`;
+    });
+    beforeEach(async () => {
+      // An OAuth device-login credential: a server key backed by a live grant.
+      await sql`delete from mcp_oauth_grants where id = 'adm-grant-i'`;
+      await sql`delete from api_keys where id = 'adm-oi'`;
+      await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes, allowed_domains, project_ids)
+        values ('adm-oi', 'adm-u', 'adm-o', 'hash-adm-oi', 'OAuth: Device login', 'server', ${sql.array(["ingest"])}, '{}', ${sql.array([P2])})`;
+      await sql`insert into mcp_oauth_grants (id, client_id, user_id, org_id, resource, scopes, api_key_id)
+        values ('adm-grant-i', 'adm-client', 'adm-u', 'adm-o', 'https://api.example.test', '["ingest"]', 'adm-oi')`;
+      Object.assign(gates, { fetchStalled: false, releaseFetch: null, putStalled: false, releasePut: null, stallPuts: false });
+    });
+    const target = { userId: "adm-u", orgId: "adm-o", project: P2, apiKeyId: "adm-oi", allowedProjectIds: [P2] } as const;
+    const runCount = async () => (await sql<Array<{ n: number }>>`select count(*)::int as n from project_runs where project_id = ${P2}`)[0]!.n;
+
+    /** Starts an intake, revokes its grant once its external work is stalled, then lets the work finish. */
+    async function revokeDuringExternalWork(start: () => Promise<unknown>, stalled: () => boolean, release: () => void) {
+      const before = await runCount();
+      const outcome = start().then(() => null, (error: unknown) => error);
+      await vi.waitFor(() => expect(stalled()).toBe(true), { timeout: 10_000 });
+      await sql`update mcp_oauth_grants set revoked_at = now() where id = 'adm-grant-i'`;
+      release();
+      const error = await outcome;
+      expect(error).toMatchObject({ statusCode: 403 });
+      expect(await runCount()).toBe(before);
+    }
+
+    it("refuses the run of a website crawl whose grant is revoked while the crawl runs", async () => {
+      let crawling = false;
+      let finish!: () => void;
+      await revokeDuringExternalWork(() => actions.createWebsiteProjectIntake({
+        ...target, startUrl: "https://docs.example.com/", crawlOptions: {},
+        crawl: async () => {
+          crawling = true;
+          await new Promise<void>(resolve => { finish = resolve; });
+          return { pages: [{ url: "https://docs.example.com/results", title: "Results", markdown: "Quarterly results beat expectations." }], credits: 0 };
+        },
+      }, ports), () => crawling, () => finish());
+    }, 30_000);
+
+    it("refuses the run of a URL intake whose grant is revoked while the URL is fetched", async () => {
+      await revokeDuringExternalWork(() => actions.createRemoteUrlProjectIntake({ ...target, urls: ["https://docs.example.com/results.txt"] }, ports),
+        () => gates.fetchStalled, () => gates.releaseFetch?.());
+    }, 30_000);
+
+    it("refuses the run of a bulk upload whose grant is revoked while its files are stored", async () => {
+      gates.stallPuts = true;
+      await revokeDuringExternalWork(() => actions.createBulkProjectIntake({
+        ...target, files: [new File(["Quarterly results beat expectations."], "results.txt", { type: "text/plain" })],
+      }, ports), () => gates.putStalled, () => { gates.stallPuts = false; gates.releasePut?.(); });
     }, 30_000);
   });
 });
