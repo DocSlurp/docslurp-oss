@@ -83,7 +83,8 @@ export function dopplerMathDefault(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 /**
- * The batch options a project's pipeline asks for: math by default (DOCSLURP_DOPPLER_MATH_DEFAULT) unless the project opts
+ * The batch options a project's pipeline asks for: math (requested by default, DOCSLURP_DOPPLER_MATH_DEFAULT, and read only
+ * where the deploy gate DOCSLURP_FIRST_PASS_MATH is on; default off) unless the project opts
  * out (`math: false`), figures when the deploy has them and the project did not opt out (`figures: false`), and the page
  * facts routing reads (`mathtables`) unless page facts are off.
  */
