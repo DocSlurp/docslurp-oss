@@ -4,6 +4,7 @@ import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import { createUploadsRoutes } from "../routes/uploads.js";
 import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { publicApiErrorMessage } from "@docslurp/shared";
 import { RunCreationBlockedError } from "../services/runs.js";
 import { withTestSession } from "./helpers/session-app.js";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
@@ -214,6 +215,20 @@ describe("uploadsRoutes over Project Intake", () => {
     expect(fakes.runs[0].files.map((file) => file.filename)).toEqual(["files.example.com-0.txt"]);
     expect(JSON.stringify(fakes.runs[0].files.map((file) => file.sourceKey))).not.toContain("GRANTPART");
     expect(JSON.stringify([...fakes.objects.keys()])).not.toContain("GRANTPART");
+  });
+
+  it("refuses a caller canonical ID in the server's url: namespace, with reviewed copy", async () => {
+    const { app } = setup();
+    const url = await app.request("/uploads/url", json({ project: "ws-1", urls: [{ url: "https://example.com/a.txt", canonicalId: "url:0123" }] }));
+    expect(url.status).toBe(400);
+    expect(await url.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
+    const form = new FormData();
+    form.append("files", new File(["hello"], "notes.txt", { type: "text/plain" }));
+    form.append("canonicalId", "URL:mine");
+    const bulk = await app.request("/uploads/bulk", { method: "POST", body: form });
+    expect(bulk.status).toBe(400);
+    expect(await bulk.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
+    expect(publicApiErrorMessage("invalid_request", { policy: "canonical_id_reserved" })).toContain("reserved for DocSlurp");
   });
 
   it("reports what URL ingest fetched", async () => {

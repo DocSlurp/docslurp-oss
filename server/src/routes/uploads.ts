@@ -28,7 +28,9 @@ import {
   normalizeUploadPath,
   sourcePathsForFiles,
   InvalidCanonicalIdError,
-  isReservedCanonicalId,
+  isCallerReservedCanonicalId,
+  RESERVED_CANONICAL_ID_MESSAGE,
+  ReservedCanonicalIdError,
   MAX_CANONICAL_ID_LENGTH,
 } from "../lib/canonical-id.js";
 import { actorHasAnyApiKeyScope, apiKeyCanUseProject, getRequestActor, lookupActorProject, requireActorProject, type RequestActor } from "../lib/request-actor.js";
@@ -75,7 +77,7 @@ import { billingState } from "../services/config-change.js";
 type Uploadable = File | string | Array<File | string> | undefined;
 
 export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_LENGTH)
-  .refine((value) => !isReservedCanonicalId(value), "canonicalId must not start with docslurp: (reserved)");
+  .refine((value) => !isCallerReservedCanonicalId(value), RESERVED_CANONICAL_ID_MESSAGE);
 
 /** The public `project` field: a project UUID, slug, former slug or name; created when no project matches. */
 export const projectInputSchema = z.string().max(PROJECT_INPUT_MAX_LENGTH);
@@ -162,6 +164,11 @@ export const uploadValidationHook = (
   if (result.success) {
     return;
   }
+  // A reserved canonical ID gets its reviewed copy (details.policy), not the generic validation message.
+  if (result.error && "issues" in result.error && Array.isArray(result.error.issues)
+    && result.error.issues.some((issue: { message?: string }) => issue.message === RESERVED_CANONICAL_ID_MESSAGE)) {
+    return reservedCanonicalIdResponse(c);
+  }
 
   return validationErrorResponse(
     c,
@@ -180,6 +187,7 @@ export function parseCanonicalIds(
       canonicalIds: body.canonicalIds,
     });
   } catch (error) {
+    if (error instanceof ReservedCanonicalIdError) throw error;
     if (error instanceof InvalidCanonicalIdError) throw new ProjectIntakeError(error.message, 400);
     throw error;
   }
@@ -212,10 +220,16 @@ export function runCreationErrorResponse(c: Context, error: unknown): Response |
   return apiStatusError(c, error.statusCode, error.message, { code: error.code });
 }
 
+/** 400 for a caller canonical ID in a server namespace (`docslurp:`, `url:`), with reviewed public copy. */
+export function reservedCanonicalIdResponse(c: Context): Response {
+  return apiErrorResponse(c, 400, "invalid_request", RESERVED_CANONICAL_ID_MESSAGE, { policy: "canonical_id_reserved" });
+}
+
 export function projectIntakeErrorResponse(
   c: Context,
   error: unknown,
 ): Response | null {
+  if (error instanceof ReservedCanonicalIdError) return reservedCanonicalIdResponse(c);
   // Fast (or a refused privacy policy) with visual indexing, from the request's overrides (run-creation.ts).
   if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
   if (error instanceof ProjectAccessError) {

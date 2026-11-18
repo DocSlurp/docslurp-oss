@@ -5,6 +5,11 @@ export const MAX_CANONICAL_ID_LENGTH = 2048;
 
 export class InvalidCanonicalIdError extends Error {}
 
+/** A caller's canonical ID in a namespace the server reserves (`docslurp:`, `url:`). */
+export class ReservedCanonicalIdError extends InvalidCanonicalIdError {}
+
+export const RESERVED_CANONICAL_ID_MESSAGE = "canonicalId must not start with docslurp: or url: (reserved for the server)";
+
 /**
  * `docslurp:` canonical IDs are minted by the server (`docslurp:document:<id>`,
  * `docslurp:extract:<extract>:<doc>`). A caller-chosen one could join another
@@ -13,6 +18,15 @@ export class InvalidCanonicalIdError extends Error {}
  */
 export function isReservedCanonicalId(value: string): boolean {
   return /^docslurp:/i.test(value.trim());
+}
+
+/**
+ * Namespaces a caller may never write a canonical ID in: `docslurp:` (above)
+ * and `url:`, the server's opaque ID for a fetched URL (opaqueCanonicalIdForUrl).
+ * A caller-chosen `url:` value could join, or be joined by, a URL's version chain.
+ */
+export function isCallerReservedCanonicalId(value: string): boolean {
+  return /^(?:docslurp|url):/i.test(value.trim());
 }
 
 /**
@@ -25,7 +39,7 @@ export function normalizeCanonicalId(value: unknown): string | null {
   if (typeof value !== "string") throw new InvalidCanonicalIdError("canonicalId must be a string");
   const trimmed = value.trim();
   if (!trimmed) return null;
-  if (isReservedCanonicalId(trimmed)) throw new InvalidCanonicalIdError("canonicalId must not start with docslurp: (reserved)");
+  if (isCallerReservedCanonicalId(trimmed)) throw new ReservedCanonicalIdError(RESERVED_CANONICAL_ID_MESSAGE);
   if (trimmed.length > MAX_CANONICAL_ID_LENGTH) {
     throw new InvalidCanonicalIdError(`canonicalId must be at most ${MAX_CANONICAL_ID_LENGTH} characters`);
   }
@@ -34,15 +48,29 @@ export function normalizeCanonicalId(value: unknown): string | null {
 
 /**
  * Default identity for a URL-intake document: `url:` plus the sha256 hex of
- * the URL (without fragment or trailing slash, as canonicalIdForUrl). Opaque,
+ * the full normalized URL (normalizedUrl: no fragment or trailing slash, never
+ * truncated, so two long URLs that share a prefix stay distinct). Opaque,
  * because canonical IDs are returned in document responses and a signed URL's
  * query is a credential; re-ingesting the same URL still matches.
  */
 export function opaqueCanonicalIdForUrl(rawUrl: string): string {
   // Never throws: a malformed legacy or caller value hashes as-is.
-  let basis = rawUrl;
-  try { basis = canonicalIdForUrl(rawUrl); } catch { /* not a parseable URL */ }
-  return `url:${createHash("sha256").update(basis).digest("hex")}`;
+  return `url:${createHash("sha256").update(tryNormalizedUrl(rawUrl) ?? rawUrl).digest("hex")}`;
+}
+
+/** The URL without its fragment or a trailing slash, in full (the identity URL provenance is compared by). */
+export function normalizedUrl(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  url.hash = "";
+  if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
+    url.pathname = url.pathname.replace(/\/+$/, "");
+  }
+  return url.toString();
+}
+
+/** normalizedUrl, or null for a value `new URL` rejects (never throws). */
+export function tryNormalizedUrl(rawUrl: string): string | null {
+  try { return normalizedUrl(rawUrl); } catch { return null; }
 }
 
 /** Whether a value is scheme-prefixed like a URL (`https://…`, `s3://…`). */
@@ -55,14 +83,13 @@ export function tryCanonicalIdForUrl(rawUrl: string): string | null {
   try { return canonicalIdForUrl(rawUrl); } catch { return null; }
 }
 
-/** The URL without its fragment or a trailing slash. */
+/**
+ * The legacy canonical ID of a fetched URL (stored before IDs became opaque):
+ * normalizedUrl cut to MAX_CANONICAL_ID_LENGTH. Long URLs that share a prefix
+ * share it, so adoption compares full provenance too.
+ */
 export function canonicalIdForUrl(rawUrl: string): string {
-  const url = new URL(rawUrl);
-  url.hash = "";
-  if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
-    url.pathname = url.pathname.replace(/\/+$/, "");
-  }
-  return url.toString().slice(0, MAX_CANONICAL_ID_LENGTH);
+  return normalizedUrl(rawUrl).slice(0, MAX_CANONICAL_ID_LENGTH);
 }
 
 /**

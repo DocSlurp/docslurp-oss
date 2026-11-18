@@ -22,6 +22,13 @@ describe("URL-derived names", () => {
     expect(urlDerivedFilename(new URL(url), 3, "application/pdf")).toBe(`${new URL(url).hostname}-3.pdf`);
   });
 
+  it("hashes the full normalized URL: two long URLs sharing a 2,048-character prefix stay distinct", () => {
+    const prefix = `https://example.com/${"a".repeat(2100)}`;
+    const [one, two] = [`${prefix}?part=1`, `${prefix}?part=2`];
+    expect(canonicalIdForUrl(one)).toBe(canonicalIdForUrl(two));
+    expect(opaqueCanonicalIdForUrl(one)).not.toBe(opaqueCanonicalIdForUrl(two));
+  });
+
   it("gives a URL an opaque canonical ID that still matches on re-ingest", () => {
     const id = opaqueCanonicalIdForUrl("https://example.com/products/#pricing");
     expect(id).toMatch(/^url:[0-9a-f]{64}$/);
