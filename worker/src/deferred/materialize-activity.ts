@@ -57,7 +57,7 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
       coalesce(w.pipeline ->> 'quality' = 'good', false) as retired_good
     from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
   `;
-  // A project row still on the retired `good` (before migration 0192 moved it) is Smartest: the intelligent rung.
+  // A project row still on the retired `good` (before migration 0197 moved it) is Smartest: the intelligent rung.
   const project = row && row.retired_good
     ? { ...row, ladder: { ...(row.ladder && typeof row.ladder === "object" ? row.ladder : {}), maxRung: "intelligent" } }
     : row;

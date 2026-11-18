@@ -898,7 +898,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       : !qualityAllowsVision(pipeline)
         ? "Fastest with Read scans off never reads pages with OCR or vision."
         : ladderForbidsVision(pipeline)
-          ? "Fastest reads scans with OCR only and never sends a page to vision."
+          ? "Fastest reads scans with OCR only and never sends a page to vision, and no OCR engine read these pages (a self-hosted deployment needs DOCSLURP_OCR_MODE set to vm or local). Enable OCR, or switch to Smartest."
           : "Page triage did not send them to vision.";
     recs.push({
       id: settingInPlace ? "reprocess-with-vision" : pipeline.visionFallback ? "vision-all-pages" : "turn-on-vision",

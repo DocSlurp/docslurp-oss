@@ -42,7 +42,7 @@ Switches only ever lower what runs; a project keeps its stored settings.
 | Token | Turns off |
 |---|---|
 | `ai` | Every model read in extraction: rescue reads (also at query time), OCR escalation, the page image reader, the page router (deterministic extraction only), the document-map siphon, self-critique re-reads, AI chart reads, vision reads of video frames, `hosted` OCR and the `local-cli` reader. `smartest` runs as `fastest` (OCR, no vision). Audio and video transcription keep running (the baseline read of media, like OCR for scans). |
-| `ai-rescue` | Vision rescue reads of pages the text layer or OCR could not read (`visionFallback`, at ingest and at query time) and self-critique re-reads. A `smartest` run keeps its vision reads, its primary reads (use `ai` to stop them). |
+| `ai-rescue` | Vision rescue reads of pages the text layer or OCR could not read (`visionFallback`, at ingest and at query time) and self-critique re-reads. A `smartest` run keeps its ingest vision reads, its primary reads (use `ai` to stop them); its query-time reads of pages with no text layer are rescue reads and stop. On `fastest` the switch also stops query-time OCR-engine reads of such pages (they are off-plan reads), while ingest OCR keeps running (use `ocr` to stop it). |
 | `ai-escalation` | Hosted OCR escalation (as `DOCSLURP_OCR_ESCALATION=off`). |
 | `page-reader` | The page image reader, in its OCR and vision-transcription modes. |
 | `ocr` | OCR (as `DOCSLURP_OCR_MODE=off`); the OCR page reader has nothing to read. As with `DOCSLURP_OCR_MODE=off` today, a document that only OCR could read (an image, a scan without a text layer) fails rather than being kept as an image. |
