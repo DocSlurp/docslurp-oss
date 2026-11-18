@@ -21,6 +21,15 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);
   const capabilities = pageRenderCapabilities();
+  // Page images off (pipeline.pageImages: false): no page image is served or rendered, stored ones included. Smartest
+  // always keeps page images, whatever a stored row says. A non-boolean stored value reads as the default (on), never
+  // an error for the whole project.
+  const [project] = await sql<{ page_images: boolean }[]>`
+    select (case when jsonb_typeof(pipeline->'pageImages') = 'boolean' then (pipeline->'pageImages')::boolean else true end)
+      or (coalesce(pipeline->>'quality', 'auto') = 'auto' and pipeline->'ladder'->>'maxRung' = 'intelligent')
+      or pipeline->>'quality' = 'good' as page_images
+    from projects where id = ${doc.projectId}`;
+  if (project && !project.page_images) return { status: "unavailable" as const, reason: "disabled" as const, document: doc };
   const artifact = viewer.artifacts.find(item => item.slot === pageRenderSlot(documentId, pageNumber, quality, dpi));
   if (!artifact && quality === "reader") {
     const legacy = viewer.artifacts.find(item => item.slot === `${documentId}:page-${pageNumber}` || item.slot === `${documentId}:raster-v2-reader-page-${pageNumber}`);
@@ -33,14 +42,6 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   const unavailable = pageRenderUnavailableReason(doc, Boolean(viewer.source?.url));
   if (unavailable || !doc.runId) return { status: "unavailable" as const, reason: unavailable ?? "processing", document: doc };
   const runId = doc.runId;
-  // Page images off (pipeline.pageImages: false): images already stored are served above; no new one is rendered.
-  // Smartest always keeps page images, whatever a stored row says.
-  const [project] = await sql<{ page_images: boolean }[]>`
-    select coalesce((pipeline->>'pageImages')::boolean, true)
-      or (coalesce(pipeline->>'quality', 'auto') = 'auto' and pipeline->'ladder'->>'maxRung' = 'intelligent')
-      or pipeline->>'quality' = 'good' as page_images
-    from projects where id = ${doc.projectId}`;
-  if (project && !project.page_images) return { status: "unavailable" as const, reason: "disabled" as const, document: doc };
   // Scan what we parse (PR #339): the worker refuses to render a document without a parse decision from the current scan
   // (one quarantined before it). Say so, stably, instead of queueing a render that can only fail and polling "pending".
   const [decision] = await sql<ParseSourceDecisionColumns[]>`
