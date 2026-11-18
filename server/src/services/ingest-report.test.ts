@@ -99,7 +99,7 @@ describe("ingest report: observed content", () => {
     expect(report.searchability.byReason).toEqual([{ reason: "scanned-no-vision", pages: 3 }]);
     const rec = report.recommendations[0]!;
     expect(rec).toMatchObject({ id: "turn-on-vision", severity: "high", affectedPages: 3, affectedDocuments: 1, reprocessDocumentIds: ["scan"] });
-    expect(rec.patch).toEqual({ visionFallback: true, quality: "good" });
+    expect(rec.patch).toEqual({ visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } });
     // Default vision model's catalog price per page.
     const perPage = visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].estimatedCostPerPageCents;
     expect(rec.cost.centsPer100Pages).toBeCloseTo(perPage * 100, 2);
@@ -133,9 +133,10 @@ describe("ingest report: observed content", () => {
     expect(ids).toContain("reindex-pages-with-text");
     const vision = report.recommendations.find((rec) => rec.id === "vision-all-pages")!;
     expect(vision.reason).toMatch(/2 pages of 6 measured have images and almost no text layer/);
-    expect(vision.reason).toMatch(/Page triage did not send them to vision\./);
+    // The default (Fastest) reads scans with OCR only.
+    expect(vision.reason).toMatch(/Fastest reads scans with OCR only and never sends a page to vision, and no OCR engine read these pages/);
     expect(vision.reason).not.toMatch(/at most \d+ vision pages/);
-    expect(vision.patch).toEqual({ visionFallback: true, quality: "good" });
+    expect(vision.patch).toEqual({ visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } });
     expect(report.focus).toEqual([expect.objectContaining({ pageNumber: 4, searchable: false, reason: "scanned-no-vision", imageCount: 1 })]);
     expect(summarizeIngestReport(report)).toMatch(/Page 4 of mixed\.pdf: not searchable \(looks scanned and was not read with vision\)/);
   });
@@ -147,7 +148,7 @@ describe("ingest report: observed content", () => {
     expect(report.searchability.byReason).toEqual([{ reason: "vision-page-limit", pages: 36 }]);
     const rec = report.recommendations[0]!;
     expect(rec.id).toBe("vision-all-pages");
-    expect(rec.patch).toEqual({ visionFallback: true, quality: "good" });
+    expect(rec.patch).toEqual({ visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } });
     // These pages also look scanned, so the evidence names them as scans; nothing mentions a page limit.
     expect(rec.reason).not.toMatch(/at most \d+ vision pages|Vision stops after/);
     expect(rec.effect).not.toMatch(/first \d+ pages only/);
@@ -169,7 +170,7 @@ describe("ingest report: observed content", () => {
       documents: [doc("scan", { pageCount: 2 })],
       pages: pages("scan", [{ text: 0, images: 1 }, { text: 0, images: 1 }]),
     });
-    expect(higher.recommendations[0]!.patch).toEqual({ visionFallback: true, quality: "good" });
+    expect(higher.recommendations[0]!.patch).toEqual({ visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } });
   });
 
   it("never proposes reprocessing a superseded version", () => {
@@ -548,10 +549,13 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
   it("accepts the quality setting, maps the retired vision.forceAllPages and rejects malformed ones", async () => {
     const { projectSettingsProposalInputSchema } = await import("./project-settings-proposal-input.js");
     const parse = (pipeline: unknown) => projectSettingsProposalInputSchema.safeParse({ changes: { pipeline } });
-    for (const quality of ["fast", "auto", "good"]) expect(parse({ quality }).success).toBe(true);
+    for (const quality of ["fast", "auto", "good", "fastest", "smartest", "balanced", "smart"]) expect(parse({ quality }).success).toBe(true);
     expect(parse({ quality: "deep" }).success).toBe(false);
-    // Older recommendations proposed vision.forceAllPages; it arrives as quality good.
-    expect(parse({ vision: { forceAllPages: true } }).data?.changes.pipeline).toEqual({ quality: "good" });
+    expect(parse({ quality: "smartest" }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true });
+    expect(parse({ quality: "fastest", readScans: false }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "fast" } });
+    expect(parse({ pageImages: false }).data?.changes.pipeline).toEqual({ pageImages: false });
+    // Older recommendations proposed vision.forceAllPages; it arrives as Smartest.
+    expect(parse({ vision: { forceAllPages: true } }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" } });
     expect(parse({ vision: { forceAllPages: false } }).data?.changes.pipeline).toEqual({});
     // The per-file vision page limit no longer exists, and other vision settings are not proposable.
     expect(parse({ vision: { forceAllPages: true, maxPagesPerDocument: 32 } }).success).toBe(false);
@@ -576,12 +580,12 @@ describe("ingest report: helpers", () => {
 
   it("merges a patch onto the stored pipeline without resetting other settings", () => {
     const base = pipeline({ summarize: true, vision: { benchmarkProfile: "ocr-heavy" } });
-    const next = applyRecommendationPatch(base, { visionFallback: true, quality: "good" });
+    const next = applyRecommendationPatch(base, { visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } });
     expect(next.summarize).toBe(true);
-    expect(next.quality).toBe("good");
+    expect(next.ladder.maxRung).toBe("intelligent");
     expect(next.vision).toMatchObject({ benchmarkProfile: "ocr-heavy", profile: base.vision.profile });
-    expect(patchHolds(next, { quality: "good" })).toBe(true);
-    expect(patchHolds(base, { quality: "good" })).toBe(false);
+    expect(patchHolds(next, { ladder: { maxRung: "intelligent" } })).toBe(true);
+    expect(patchHolds(base, { ladder: { maxRung: "intelligent" } })).toBe(false);
   });
 });
 
@@ -605,13 +609,13 @@ describe("ingest report: pages kept as images in Fast mode", () => {
     expect(ids).not.toContain("turn-on-vision");
   });
 
-  it("recommends Auto or Good to make them searchable", () => {
+  it("recommends Read scans or Smartest to make them searchable", () => {
     const rec = fastReport().recommendations.find((entry) => entry.id === "fast-kept-as-image")!;
     expect(rec).toMatchObject({ affectedPages: 2, affectedDocuments: 1, reprocessDocumentIds: ["fast-scan"] });
-    expect(rec.reason).toMatch(/2 pages in 1 file had no text layer and were kept as page images in Fast mode/);
-    expect(rec.effect).toMatch(/Auto .*Good/);
+    expect(rec.reason).toMatch(/2 pages in 1 file had no text layer and were kept as page images with Read scans off/);
+    expect(rec.effect).toMatch(/Read scans on .*Smartest/);
     expect(rec.effect).toMatch(/\$0\.05 to \$2\.50 per 1,000 pages/);
-    expect(rec.patch).toEqual({ visionFallback: true, quality: "auto" });
+    expect(rec.patch).toEqual({ quality: "auto", ladder: { maxRung: "ocr" } });
   });
 
   it("offers only a reprocess once the project has left Fast", () => {
@@ -625,8 +629,8 @@ describe("ingest report: pages kept as images in Fast mode", () => {
   it("shows processing quality in the config list instead of the playbook", () => {
     const report = fastReport();
     const quality = report.config.find((item) => item.key === "quality")!;
-    expect(quality).toMatchObject({ label: "Processing quality", value: "Fast" });
-    expect(quality.note).toMatch(/Scanned pages are kept as images, not read\. \$0\.05 per 1,000 pages\./);
+    expect(quality).toMatchObject({ label: "Processing quality", value: "Fastest, scans not read" });
+    expect(quality.note).toMatch(/kept as page images, not read\. \$0\.05 per 1,000 pages\./);
     expect(report.config.map((item) => item.key)).not.toContain("parserPlaybook");
     expect(report.config.map((item) => item.key)).not.toContain("vision.forceAllPages");
   });
@@ -851,7 +855,7 @@ describe("ingest report: OCR escalation cap", () => {
       ],
     });
     const rec = report.recommendations.find((entry) => entry.id === "ocr-escalation-cap");
-    expect(rec).toMatchObject({ severity: "medium", affectedPages: 13, affectedDocuments: 2, patch: { quality: "good" } });
+    expect(rec).toMatchObject({ severity: "medium", affectedPages: 13, affectedDocuments: 2, patch: { visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } } });
     expect(rec!.reprocessDocumentIds.sort()).toEqual(["a", "b"]);
     expect(rec!.reason).toContain("13 pages in 2 files");
     expect(rec!.reason).toContain("per-document second-read cap");

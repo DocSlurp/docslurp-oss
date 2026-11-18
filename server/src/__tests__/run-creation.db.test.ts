@@ -493,7 +493,7 @@ describe("quality and visuals at run creation (extraction config R0, council #44
   beforeEach(async () => {
     await sql`update projects set pipeline = ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))} where id = 'w'`;
   });
-  const smart = { ...defaultPipelineFeatures, quality: "good" as const };
+  const smart = { ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" as const } };
   const code = async (promise: Promise<unknown>) => promise.then(() => "ok", (error: { code?: string; message?: string }) => error.code ?? error.message ?? "error");
   const stamped = async () => (await sql<{ pipeline: { quality: string; effective?: { quality: string; capsApplied: unknown[] } } }[]>`select pipeline from project_runs order by created_at desc limit 1`)[0]!.pipeline;
 
@@ -502,7 +502,7 @@ describe("quality and visuals at run creation (extraction config R0, council #44
     expect(await code(runCreation.create({ ...input, pipeline: smart, apiKeyId: "k-revoked" }))).toBe("quality_smart_forbidden");
     expect(await sql`select id from project_runs`).toHaveLength(0);
     expect(await code(runCreation.create({ ...input, pipeline: smart, apiKeyId: "k-billed" }))).toBe("ok");
-    expect(await stamped()).toMatchObject({ quality: "good", effective: { quality: "smart", capsApplied: [] } });
+    expect(await stamped()).toMatchObject({ quality: "auto", ladder: { maxRung: "intelligent" }, effective: { quality: "smartest", capsApplied: [] } });
     expect(await code(runCreation.create({ ...input, pipeline: smart }))).toBe("ok");
   });
 
@@ -538,10 +538,10 @@ describe("quality and visuals at run creation (extraction config R0, council #44
   });
 
   it("a stored smart under local-only is lowered and recorded, never refused", async () => {
-    const saved = normalizePipelineFeatures({ quality: "good", privacyMode: "local-only" });
+    const saved = normalizePipelineFeatures({ quality: "good", privacyMode: "local-only" } as never);
     await sql`update projects set pipeline = ${sql.json(JSON.parse(JSON.stringify(saved)))} where id = 'w'`;
     expect(await code(runCreation.create({ ...input, pipeline: saved, apiKeyId: "k-ingest" }))).toBe("ok");
-    expect(await stamped()).toMatchObject({ quality: "auto", effective: { quality: "balanced", capsApplied: [{ field: "quality", reason: "privacy" }] } });
+    expect(await stamped()).toMatchObject({ quality: "auto", ladder: { maxRung: "ocr" }, effective: { quality: "fastest", capsApplied: [{ field: "quality", reason: "privacy" }] } });
   });
 
   it("an old project row with only the retired parserPlaybook key is not mistaken for a raise", async () => {

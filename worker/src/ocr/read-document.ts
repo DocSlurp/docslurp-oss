@@ -18,6 +18,7 @@ import { imageTooManyFramesError } from "./image-frames.js";
 import { recordOcrReads } from "./ledger.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import { OcrRefusedError, resolveOcrMode } from "./mode.js";
+import { ladderForbidsVision } from "@docslurp/shared";
 import { ocrPageReaderKeepFrames, ocrPageReaderMode, readOcrPagesWithConfiguredReader, type PageReaderSummary } from "./page-reader.js";
 
 export interface OcrDocumentInput {
@@ -85,14 +86,24 @@ export interface OcrDocumentResult {
   pageReader?: PageReaderSummary | null;
 }
 
+/** True when the run's quality forbids a Vision read of a page (Fastest: the ladder never reaches the intelligent rung). */
+export function runForbidsModelReads(run: { pipeline?: unknown } | null | undefined): boolean {
+  if (!run?.pipeline) return false;
+  return ladderForbidsVision(run.pipeline as Parameters<typeof ladderForbidsVision>[0]);
+}
+
 export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentResult> {
   const env = input.env ?? process.env;
   const mode = resolveOcrMode(env);
   if (mode === "off") throw new OcrRefusedError("OCR is off (DOCSLURP_OCR_MODE=off)", "off");
+  // Hosted mode is the operator's OCR engine (one flat Scan page per read), so Fastest keeps it.
   if (mode === "hosted") return await hostedDocument(input);
   let outcome: OcrReadOutcome | null = null;
-  const pageReaderMode = ocrPageReaderMode(env);
-  const hostedEscalation = Boolean(input.hostedReader) && ocrEscalationEnabled(env);
+  // Fastest (a ladder capped below the intelligent rung) never upgrades an OCR read to a model read: no hosted escalation
+  // and no page reader (both bill Vision), whatever the deployment's OCR env says. The recogniser's read stands.
+  const modelReadsForbidden = runForbidsModelReads(input.state.run);
+  const pageReaderMode = modelReadsForbidden ? "off" : ocrPageReaderMode(env);
+  const hostedEscalation = !modelReadsForbidden && Boolean(input.hostedReader) && ocrEscalationEnabled(env);
   const keepFrames = ocrPageReaderKeepFrames(pageReaderMode);
   const budget = input.kind === "image" && input.frameBudget ? Math.max(1, Math.min(OCR_DEFAULT_MAX_FRAMES, await input.frameBudget(OCR_DEFAULT_MAX_FRAMES))) : null;
   const run = input.state.run;

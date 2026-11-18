@@ -1,7 +1,7 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { stampRunModelMode, chartExportModelsAllowed, clampRunLadder, readStoredPipelineSettings, strictestStoredPipelineFeatures, stripLegacyVisionModel, stripManagedPipelineFields, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
+import { stampRunModelMode, chartExportModelsAllowed, clampRunLadder, qualityLevelOfPipeline, readStoredPipelineSettings, strictestStoredPipelineFeatures, stripLegacyVisionModel, stripManagedPipelineFields, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import { resolveRunExtraction } from "./extraction-settings.js";
 import {
@@ -1055,10 +1055,14 @@ export function createRunCreation(deps: RunCreationDeps) {
         const scopes = await activeApiKeyScopes(apiKeyId).catch(() => null);
         mayLoosen = !!scopes && (scopes.includes(BILLED_FEATURES_SCOPE) || scopes.includes("projects:manage"));
       }
-      let clamped = clampRunLadder(input.pipeline, projectPipeline, mayLoosen);
+      // A Smartest request above a Fastest project is a billed raise: left for resolveRunExtraction to refuse (403) for a
+      // caller who may not raise, instead of being silently clamped back to the project's rung.
+      const raisesLevel = !reprocessing && !request.chartExportReplay && !mayLoosen
+        && qualityLevelOfPipeline(input.pipeline).quality === "smartest" && qualityLevelOfPipeline(projectPipeline).quality !== "smartest";
+      let clamped = raisesLevel ? input.pipeline : clampRunLadder(input.pipeline, projectPipeline, mayLoosen);
       // A replay (reprocess, bulk reprocess, retry as new) carries an older run's snapshot: the project's limits as they are
       // now tighten it whoever asks, as the chart tier caps a replay at what the project resolves to now.
-      // Quality is capped too while the project has a limit, so a snapshot at Good cannot read past it.
+      // Quality is capped too while the project has a limit, so a snapshot cannot read past it.
       if (reprocessing || request.chartExportReplay) clamped = clampRunLadder(clamped, projectPipeline, false);
       if (clamped !== input.pipeline && (JSON.stringify(clamped.ladder) !== JSON.stringify(input.pipeline.ladder) || clamped.quality !== input.pipeline.quality)) {
         console.log(`[run-creation] ladder override clamped to the project's limits project=${input.projectId} quality=${input.pipeline.quality}->${clamped.quality}`);

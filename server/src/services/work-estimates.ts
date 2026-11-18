@@ -19,7 +19,7 @@ import {
   type ReprocessRunInput,
 } from "@docslurp/shared";
 
-import { estimateChartExportCredits, legacyQualityModeFor, projectExtractionView, QUALITY_LEVEL_RANK, qualityLevelFromLegacy, reprocessRequestedTier, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type RunOrigin, type VisualsLevel } from "@docslurp/shared";
+import { estimateChartExportCredits, pipelineFieldsForQuality, projectExtractionView, QUALITY_LEVEL_RANK, qualityLevelOfPipeline, reprocessRequestedTier, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type RunOrigin, type VisualsLevel } from "@docslurp/shared";
 import { replayChartExport } from "./run-creation.js";
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
@@ -63,15 +63,16 @@ export async function replayedRunPipeline(
 }
 
 function withQuality<T extends PipelineFeatures>(pipeline: T, quality: QualityLevel): T {
-  const current = qualityLevelFromLegacy(pipeline.quality);
+  const current = qualityLevelOfPipeline(pipeline).quality;
   if (current === quality) return pipeline;
-  return { ...pipeline, quality: legacyQualityModeFor(quality), ...(quality === "balanced" ? { visionFallback: true } : {}) };
+  const fields = pipelineFieldsForQuality(quality, { ladder: pipeline.ladder });
+  return { ...pipeline, quality: fields.quality, ladder: fields.ladder as T["ladder"], ...(fields.visionFallback ? { visionFallback: true } : {}) };
 }
 
 /** A replayed run's quality capped at its project's now (extraction-settings.ts does the same at run creation). */
 function capReplayQuality<T extends PipelineFeatures>(pipeline: T, projectQuality: QualityLevel | null): T {
   if (!projectQuality) return pipeline;
-  const current = qualityLevelFromLegacy(pipeline.quality);
+  const current = qualityLevelOfPipeline(pipeline).quality;
   return QUALITY_LEVEL_RANK[projectQuality] < QUALITY_LEVEL_RANK[current] ? withQuality(pipeline, projectQuality) : pipeline;
 }
 

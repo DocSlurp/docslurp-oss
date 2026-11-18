@@ -93,7 +93,7 @@ export async function markPages(
   documentId: string,
   pages: number[],
   state: PageLedgerState,
-  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string; embeddingModelUri?: string | null; claimedBy?: string } = {},
+  extra: { costCredits?: number; failureReason?: string; embeddingModel?: string; embeddingModelUri?: string | null; claimedBy?: string; exhausted?: boolean } = {},
 ): Promise<number[]> {
   if (pages.length === 0) return [];
   const releases = state === "indexed" || state === "failed" || state === "blocked-pii" || state === "unseen";
@@ -110,6 +110,8 @@ export async function markPages(
         claim_expires_at = case when ${releases} then null else claim_expires_at end,
         -- A kept read (read_text) is spent once the page indexes, and a PII-blocked page keeps no text.
         read_text = case when ${state === "indexed" || state === "blocked-pii"} then null else read_text end,
+        -- A final failure (a page OCR read and found empty) is never claimed again: its attempts are spent.
+        attempts = case when ${extra.exhausted === true && state === "failed"} then greatest(attempts, ${MAX_PAGE_ATTEMPTS}) else attempts end,
         updated_at = now()
     where document_id = ${documentId} and page_number = any(${pages}::int[])
       ${extra.claimedBy === undefined ? sql`` : sql`and claimed_by_run = ${extra.claimedBy}`}

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
- * 0199: the activity feeds read active runs plus recently finished ones through indexes, never a project's or an
+ * 0200: the activity feeds read active runs plus recently finished ones through indexes, never a project's or an
  * organization's whole run history: listRuns(activity), getRun, the realtime activity projection and the org
  * activity summary. One large project holds the history (100K finished runs here, more on a real Postgres); every
  * SELECT the real functions send is captured and EXPLAINed with its parameters. Also checks the finished_at trigger.
@@ -74,7 +74,7 @@ function expectNoBigSeqScan(plans: Array<{ text: string; plan: string }>): void 
   }
 }
 
-describe("activity feed plans (0199)", () => {
+describe("activity feed plans (0200)", () => {
   it("listRuns(activity) reads active, just-finished and blocked runs by index and returns only those", async () => {
     const { listRuns } = await import("../services/runs.js");
     let runs: Array<{ id: string }> = [];

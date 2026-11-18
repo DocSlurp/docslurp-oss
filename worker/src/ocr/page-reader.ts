@@ -16,7 +16,7 @@
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { poolMemberForBackend, priceAiUsageEvent } from "@docslurp/shared";
+import { ladderForbidsVision, poolMemberForBackend, priceAiUsageEvent } from "@docslurp/shared";
 
 import {
   PAGE_IMAGE_READ_FAILURES,
@@ -606,6 +606,8 @@ export async function readOcrPagesWithConfiguredReader(
   ctx: Omit<PageReaderContext, "mode" | "maxPages">,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<PageReaderSummary | null> {
+  // Fastest never reads a page with a model, the page image reader included.
+  if (ctx.state.run?.pipeline && ladderForbidsVision(ctx.state.run.pipeline)) return null;
   const mode = ocrPageReaderMode(env);
   if (mode === "off") return null;
   const provider = pageImageReaderProvider();

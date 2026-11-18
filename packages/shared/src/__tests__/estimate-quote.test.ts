@@ -101,7 +101,7 @@ describe("quoteEstimate", () => {
     quoteEstimate(request, { env: BILLED });
     const runs = 20;
     const started = performance.now();
-    for (let i = 0; i < runs; i += 1) quoteEstimate({ ...request, settings: { quality: i % 2 ? "good" : "fast" } }, { env: BILLED });
+    for (let i = 0; i < runs; i += 1) quoteEstimate({ ...request, settings: { quality: i % 2 ? "smartest" : "fast" } }, { env: BILLED });
     const perQuote = (performance.now() - started) / runs;
     console.log(`[estimate-quote] 1,000 profiled files: ${perQuote.toFixed(2)} ms per quote`);
     expect(perQuote).toBeLessThan(150);

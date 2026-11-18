@@ -112,7 +112,7 @@ export async function computeOrgActivitySummary(scope: ActivitySummaryScope, now
       select cs.project_id, cs.completed_run_pages_processed as pages, cs.completed_run_runtime_ms as runtime_ms
       from project_corpus_stats cs join projects p on p.id = cs.project_id
       where cs.project_id = any(${sql.array(projectIds)}) and p.org_id = ${orgId}`,
-    // project_runs_org_finished_idx (0199): runs that finished in the window, an exact and bounded index range.
+    // project_runs_org_finished_idx (0200): runs that finished in the window, an exact and bounded index range.
     visible.length === 0 ? Promise.resolve([{ runs: 0, documents: 0, pages: 0 }] as RecentRow[]) : sql<RecentRow[]>`
       select count(*)::int as runs, coalesce(sum(processed_documents), 0)::bigint as documents, coalesce(sum(pages_processed), 0)::bigint as pages
       from (

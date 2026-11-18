@@ -106,7 +106,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
         [VISION_ROUTING_VERSION_SLOT]: "v3",
       }),
       pendingPerformance: [],
-      run: { pipeline: { quality: "auto", vision: {} } },
+      run: { pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, vision: {} } },
     } as unknown as WorkflowState;
     const decision = await (stage as unknown as {
       checkNeedsVision(document: Document, pageCount: number, state: WorkflowState): Promise<{ needed: boolean; selectedPages: number[]; reason: string }>;

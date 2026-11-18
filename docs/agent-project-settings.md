@@ -72,19 +72,20 @@ offer it instead: an optional free reindex. A rung the deployment or the project
 mode does not offer is refused, and chat never proposes one: no `charts-ai` under
 `local-only` or `strict-privacy`.
 
-`quality` is `fastest` (reads the text layer only and keeps scanned pages as page images,
-billed as Text pages), `balanced` (the default: reads each page the cheapest faithful way,
-Text, Scan or Vision per page) or `smart` (reads every page with AI, Vision); prices come only from the
+`quality` is `fastest` (the default: native readers, OCR for scanned pages and images, never a
+vision model; Text and Scan pages; with `readScans: false` scans are kept as page images, Text only) or
+`smartest` (native readers, a vision model for scans, images and hard math, layouts or fonts; Text and
+Vision pages); `pageImages: false` keeps no viewer page images; prices come only from the
 estimate tools and [docslurp.io/pricing](https://docslurp.io/pricing). Quality is what the
 [ingest report](api-sdk.md#ingest-report) recommends for scanned pages that page triage
 skipped or that `fastest` kept as images, so its `patch` can be proposed as
-`{"changes":{"pipeline":<patch>}}`. Chat never proposes `smart` under `local-only` or
+`{"changes":{"pipeline":<patch>}}`. Chat never proposes `smartest` under `local-only` or
 `strict-privacy` unless the project's vision profile is local.
 
-The deprecated names are still accepted in proposals and mapped: `quality` `fast`/`auto`/`good`,
+The deprecated names are still accepted in proposals and mapped: `quality` `fast`/`auto`/`good` and `balanced`/`smart`,
 `visionFallback`, `figures` and `chartExport.tier` (`off`/`free`/`models` = `figures`/`charts`/
-`charts-ai`). A retired `vision.forceAllPages: true` patch is proposed as `smart`;
-`vision.forceAllPages: false` as `balanced` on a `smart` project, and nothing on any other.
+`charts-ai`). A retired `vision.forceAllPages: true` patch is proposed as `smartest`;
+`vision.forceAllPages: false` as `fastest` on a `smartest` project, and nothing on any other.
 Raising quality is `reindex-recommended`: it adds per-page cost and applies to
 new uploads, existing files keep their text until you reprocess them (optional,
 with the usual cost estimate and a separate consent), and reprocessing is never

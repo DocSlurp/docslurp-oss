@@ -14,7 +14,7 @@
  */
 import type { CostEstimate } from "./jobs.js";
 import { OPEN_PRICING } from "./pricing-open.js";
-import type { QualityMode } from "./quality.js";
+import type { PipelineProfileId } from "./billing.js";
 import type { SearchMode } from "./project.js";
 import { serviceProfileActive } from "./deployment-profile.js";
 
@@ -57,7 +57,7 @@ export type IngestEstimateInput = {
   pages: number;
   /** Fractions of pages per class; normalized, so any positive weights work. */
   mix: Partial<PageMix>;
-  profile?: QualityMode;
+  profile?: PipelineProfileId;
   /** Org concurrent worker ceiling (default: the provider's funded worker slots). */
   workerSlots?: number;
   /** Number of files in the batch. */
@@ -72,7 +72,7 @@ export type IngestEstimateInput = {
 
 export type IngestEstimate = {
   pages: number;
-  profile: QualityMode;
+  profile: PipelineProfileId;
   workers: number;
   effectiveParallelism: number;
   workerSeconds: number;
@@ -237,7 +237,8 @@ export interface PricingProvider {
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */
   pageChargeShare(plan: { stageOrder: readonly string[]; reusedStages: readonly string[] }): number;
-  qualityModePricing(mode: QualityMode): QualityModePricing;
+  /** Price of one pricing profile (`fast`, `fastest`, `smartest`, `visual`; billing.ts PIPELINE_PROFILE_IDS). */
+  qualityModePricing(mode: PipelineProfileId): QualityModePricing;
   /** Body of the public price list (`GET /v1/billing/prices`), beyond `pricingVersion` and plans. */
   publicPrices(): Record<string, unknown>;
   /** Planning estimate of ingesting pages and media. */

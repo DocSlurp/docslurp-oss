@@ -107,10 +107,12 @@ describe("reprocess after a mode-switch backfill adopted the source", () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     try {
       // The source was uploaded in map mode; a backfill later adopted it into visual mode (its run is unchanged).
+      // Visual indexing reads every page image with a model: Smartest only.
+      await sql`update projects set pipeline = jsonb_set(pipeline, '{ladder}', '{"maxRung": "intelligent"}') where id = 'w'`;
       await sql`
         insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
         values ('run-old', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed',
-          ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
+          ${sql.json({ ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" }, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
       `;
       await sql`
         insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, indexing_mode)

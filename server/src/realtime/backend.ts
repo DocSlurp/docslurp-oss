@@ -136,7 +136,7 @@ export const realtimeBackend: RealtimeBackend = {
       }
       case "activity": {
         // Active runs first (project_runs_org_active_idx, 0195), then blocked ones (not admitted yet), then the most recently finished
-        // (project_runs_org_finished_idx, 0199), each read in index order and stopped at the limit: never a sort of the
+        // (project_runs_org_finished_idx, 0200), each read in index order and stopped at the limit: never a sort of the
         // organization's whole history.
         const runs = await sql<ProjectRunRow[]>`
           select r.*, w.name as project_name from (

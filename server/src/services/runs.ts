@@ -1,5 +1,5 @@
 import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode, resolveManagedPipeline } from "@docslurp/shared";
-import { legacyQualityModeFor, reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE, type QualityLevel, type VisualsLevel } from "@docslurp/shared";
+import { pipelineFieldsForQuality, reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE, type QualityLevel, type VisualsLevel } from "@docslurp/shared";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { chartExportOverrideError } from "./chart-export-availability.js";
 import {
@@ -164,7 +164,7 @@ export async function listRuns(userId: string, activityOnly = false): Promise<Pr
   if (activityOnly) {
     // Include every active upload, even when it is older than the history window.
     // Three index ranges, never a project's whole run history: active runs (project_runs_project_active_idx), runs
-    // that finished in the last five minutes (project_runs_project_finished_idx, 0199; finished_at changes once per
+    // that finished in the last five minutes (project_runs_project_finished_idx, 0200; finished_at changes once per
     // run, unlike updated_at), and blocked runs touched recently. The parts are disjoint by status.
     const ids = sql.array(projectIds);
     const rows = await sql<ProjectRunRow[]>`
@@ -424,7 +424,7 @@ export async function reprocessRun(
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
     // An explicit quality or visuals replaces the snapshot's; run creation checks the raise and caps (extraction-settings.ts).
-    ...(options?.quality ? { quality: legacyQualityModeFor(options.quality), ...(options.quality === "balanced" ? { visionFallback: true } : {}) } : {}),
+    ...(options?.quality ? pipelineFieldsForQuality(options.quality, { ladder: managed.pipeline.ladder }) : {}),
     ...(options?.visuals ? { figures: options.visuals !== "none" } : {}),
   };
   const plan = compilePipelinePlan(pipelineConfig);

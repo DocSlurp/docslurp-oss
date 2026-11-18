@@ -4,9 +4,9 @@ import {
   stampRunModelMode,
   chartTierForVisuals,
   extractionPolicyFromEnv,
-  legacyQualityModeFor,
+  pipelineFieldsForQuality,
   migrateLegacyQualitySettings,
-  qualityLevelFromLegacy,
+  qualityLevelOfPipeline,
   resolveExtractionSettings,
   runEffectiveExtraction,
   upgradeStoredChartExport,
@@ -54,7 +54,7 @@ export class ExtractionSettingsError extends HTTPException {
   }
 }
 
-type LegacyHolder = { quality?: unknown; figures?: unknown; chartExport?: unknown; privacyMode?: unknown; vision?: unknown } | null | undefined;
+type LegacyHolder = { quality?: unknown; ladder?: unknown; figures?: unknown; chartExport?: unknown; privacyMode?: unknown; vision?: unknown } | null | undefined;
 
 function tierOf(chartExport: unknown): ChartExportTier | undefined {
   const upgraded = upgradeStoredChartExport(chartExport) as { tier?: unknown } | null | undefined;
@@ -64,8 +64,8 @@ function tierOf(chartExport: unknown): ChartExportTier | undefined {
 
 function storedQuality(pipeline: LegacyHolder): QualityLevel {
   // Legacy keys first (parserPlaybook, vision.forceAllPages), as every other reader does (design 3.2).
-  const raw = (migrateLegacyQualitySettings(pipeline ?? null) as LegacyHolder)?.quality;
-  return qualityLevelFromLegacy(raw === "fast" || raw === "auto" || raw === "good" ? raw : null);
+  // The level of an `auto` pipeline lives in its ladder's highest rung (qualityLevelOfPipeline).
+  return qualityLevelOfPipeline(migrateLegacyQualitySettings(pipeline ?? null) as LegacyHolder).quality;
 }
 
 export type RunExtractionArgs<T extends PipelineFeatures> = {
@@ -132,9 +132,9 @@ export async function resolveRunExtraction<T extends PipelineFeatures>(args: Run
   }
   let next: T = pipeline;
   if (result.quality !== runQuality) {
-    next = { ...next, quality: legacyQualityModeFor(result.quality) };
-    // Lowered from smart: the run keeps today's balanced rules (rescue reads on).
-    if (result.quality === "balanced") next = { ...next, visionFallback: true };
+    // Lowered from smartest: the run reads as Fastest (the ladder's ocr rung, its share caps kept).
+    const fields = pipelineFieldsForQuality(result.quality, { ladder: next.ladder });
+    next = { ...next, quality: fields.quality, ladder: fields.ladder as T["ladder"], ...(fields.visionFallback ? { visionFallback: true } : {}) };
   }
   if (result.visuals !== runVisuals) next = lowerVisuals(next, result.visuals);
   return { ...next, effective: runEffectiveExtraction(next, result.capsApplied) };
@@ -157,7 +157,7 @@ export function withRunEffective<T extends PipelineFeatures>(pipeline: T, env: R
   // No caller choice here, so nothing is refused or rewritten: the stored fields stay as the run's source had them (the
   // worker applies switches and privacy at run time, as before), and the stamp records what privacy, locality and the
   // switches cap them to.
-  const quality = qualityLevelFromLegacy(pipeline.quality);
+  const quality = qualityLevelOfPipeline(pipeline).quality;
   const visuals = visualsLevelForRun(pipeline.figures !== false, tierOf(pipeline.chartExport) ?? "off");
   const result = resolveExtractionSettings({
     project: { quality, visuals },

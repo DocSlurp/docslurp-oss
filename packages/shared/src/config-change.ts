@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { QUALITY_RANK } from "./quality.js";
 import { applyLadderLimits, ladderAllowsMore, ladderChartExportTier, ladderEstimateMix, pageReadingQuality } from "./auto-ladder.js";
-import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, workerSlotsFor, type PipelineProfileId } from "./billing.js";
+import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, pipelineProfileIdFor, workerSlotsFor, type PipelineProfileId } from "./billing.js";
 import type { VisualCandidateStats } from "./chart-export.js";
 import { chartExportDefaults, chartExportModelsAvailable, CONSERVATIVE_CHART_EXPORT_DEFAULTS, effectiveTierFromDefaults, type ChartExportDefaults, type ChartExportTier, type RunOrigin } from "./chart-export.js";
 import { chartExportConfigOf, expectedBillableVisuals, type VisualExportModes } from "./chart-export-estimate.js";
@@ -177,6 +177,8 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   quality: (before, after) => (QUALITY_RANK[after.quality] > QUALITY_RANK[before.quality] ? "reindex-recommended" : "new-uploads"),
   // Raising a limit (a higher rung, a larger share) reads more pages of old documents; lowering one only saves on new uploads.
   ladder: (before, after) => (ladderAllowsMore(before, after) ? "reindex-recommended" : "new-uploads"),
+  // Turning page images off keeps the images already stored; turning them on renders them only for documents processed again.
+  pageImages: (before, after) => (after.pageImages !== false && before.pageImages === false ? "reindex-recommended" : "new-uploads"),
   documentExtraction: "reindex-recommended",
   vision: "reindex-recommended",
   visionFallback: toggled("visionFallback"),
@@ -463,8 +465,8 @@ export function freeChartTierSeconds(documents: number, workerSlots: number): { 
   return { low: pass / slots, high: (pass + vm) / slots };
 }
 
-/** The quality the run reads pages with: Auto capped at the fast rung (pipeline.ladder) is estimated as Fast. */
-const profileFor = (features: PipelineFeatures): PipelineProfileId => pageReadingQuality(features);
+/** The pricing profile the run reads pages with (pipelineProfileIdFor): Read scans off is estimated as Fast. */
+const profileFor = (features: PipelineFeatures): PipelineProfileId => pipelineProfileIdFor(features);
 
 /** Stages whose run re-exports charts and diagrams: the generator runs at the end of vision-extract (worker chart-export/stage.ts). */
 export const CHART_EXPORT_CHARGING_STAGES: readonly string[] = ["vision-extract"];

@@ -223,16 +223,23 @@ export function postureFingerprint(posture: DeploymentPosture): string {
 /** A run pipeline's switch-relevant fields (legacy shape, as the worker reads runs in R0). */
 export type KillSwitchPipeline = {
   quality?: string | null;
+  /** The Auto ladder: `maxRung: "intelligent"` is Smartest. */
+  ladder?: { maxRung?: string | null } | null;
   visionFallback?: boolean | null;
   chartExport?: { tier?: string | null; enabled?: boolean | null } | null;
   /** Legacy shapes may still carry `vision.forceAllPages` (smart); normalized pipelines do not. */
   vision?: object | null;
 };
 
+/** Smartest in any stored shape: the retired `good`, or `auto` with the ladder's intelligent rung. */
+function killSwitchSmartest(pipeline: KillSwitchPipeline): boolean {
+  return pipeline.quality === "good" || ((pipeline.quality ?? "auto") === "auto" && pipeline.ladder?.maxRung === "intelligent");
+}
+
 /**
- * `pipeline` as a run executes it under the deployment's switches. Only lowers: `ai` runs `smart` (`good`) as `balanced`
- * (`auto`) and drops rescue reads and the chart model tier; `ai-rescue` drops rescue reads (`visionFallback`) on
- * `fastest`/`balanced` runs (a `smart` run's every-page reads are not rescue reads);
+ * `pipeline` as a run executes it under the deployment's switches. Only lowers: `ai` runs `smartest` as `fastest` (the
+ * ladder's highest rung becomes `ocr`) and drops the chart model tier; `ai-rescue` drops rescue reads
+ * (`visionFallback`) on `fastest` runs (a `smartest` run's vision reads are its primary reads, not rescue reads);
  * `charts-ai` keeps chart export on its free tier. Returns the same object when nothing changes.
  */
 export function applyKillSwitchesToPipeline<T extends KillSwitchPipeline>(pipeline: T, env: Env): T {
@@ -243,12 +250,11 @@ export function applyKillSwitchesToPipeline<T extends KillSwitchPipeline>(pipeli
     next = { ...next, ...patch };
   };
   if (off.has("ai")) {
-    if (next.quality === "good") set({ quality: "auto" });
+    if (killSwitchSmartest(next)) set({ quality: "auto", ladder: { ...(next.ladder ?? {}), maxRung: "ocr" } });
     const vision = next.vision as { forceAllPages?: unknown } | null | undefined;
     if (vision?.forceAllPages) set({ vision: { ...vision, forceAllPages: false } });
   }
-  // `ai-rescue` alone leaves `smart` its every-page reads (those are not rescue reads); `ai` lowered smart above.
-  if (off.has("ai-rescue") && next.visionFallback !== false && next.quality !== "good") set({ visionFallback: false });
+  if (off.has("ai-rescue") && next.visionFallback !== false && !killSwitchSmartest(next)) set({ visionFallback: false });
   if (off.has("charts-ai") && next.chartExport?.tier === "models") set({ chartExport: { ...next.chartExport, tier: "free" } });
   if (off.has("charts") && next.chartExport && next.chartExport.tier && next.chartExport.tier !== "off") {
     set({ chartExport: { ...next.chartExport, tier: "off" } });

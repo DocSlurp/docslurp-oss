@@ -73,9 +73,10 @@ export const markSessionToolsSurface: MiddlewareHandler = async (c, next) => {
 };
 
 /** The pipeline override an MCP upload or extract sends: quality and visuals (or the deprecated chart tier), nothing else. */
-function mcpPipelineOverride(input: { quality?: string; visuals?: string; chartExport?: { tier: string } }): Record<string, unknown> {
+function mcpPipelineOverride(input: { quality?: string; readScans?: boolean; visuals?: string; chartExport?: { tier: string } }): Record<string, unknown> {
   return {
     ...(input.quality ? { quality: input.quality } : {}),
+    ...(typeof input.readScans === "boolean" ? { readScans: input.readScans } : {}),
     ...(input.visuals ? { visuals: input.visuals } : {}),
     ...(input.chartExport ? { chartExport: { tier: input.chartExport.tier } } : {}),
   };
@@ -259,7 +260,7 @@ const mcpAdapterRoutes = new Hono()
         }
         const form = new FormData();
         if (input.project) form.set("project", input.project);
-        if (input.quality || input.visuals || input.chartExport) form.set("pipeline", JSON.stringify(mcpPipelineOverride(input)));
+        if (input.quality || typeof input.readScans === "boolean" || input.visuals || input.chartExport) form.set("pipeline", JSON.stringify(mcpPipelineOverride(input)));
         for (const [name, value] of Object.entries(extractFields)) form.set(name, String(value));
         for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
         return native.request("http://mcp.internal/bulk", { method: "POST", headers, body: form, signal: c.req.raw.signal });
@@ -268,7 +269,7 @@ const mcpAdapterRoutes = new Hono()
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ project: input.project,
           ...(input.urls ? { urls: input.urls } : { files: input.files }),
-          ...(input.quality || input.visuals || input.chartExport ? { pipeline: mcpPipelineOverride(input) } : {}),
+          ...(input.quality || typeof input.readScans === "boolean" || input.visuals || input.chartExport ? { pipeline: mcpPipelineOverride(input) } : {}),
           ...extractFields,
         }), signal: c.req.raw.signal,
       });

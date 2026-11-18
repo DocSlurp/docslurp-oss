@@ -1,4 +1,4 @@
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures as fastestPipelineDefaults } from "@docslurp/shared";
 import { Hono } from "hono";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { withTestSession } from "./helpers/session-app.js";
 import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
+
+// Visual indexing embeds every page image with a model: it needs Smartest (the ladder's intelligent rung).
+const defaultPipelineFeatures = { ...fastestPipelineDefaults, ladder: { maxRung: "intelligent" as const } };
+
 
 /** HTTP-level behaviour of the indexing-mode routes against a migrated database. */
 let stop: () => Promise<void>;
@@ -103,7 +107,8 @@ describe("PATCH /v1/projects/:id indexing mode", () => {
   it("parses pipeline.indexingMode from the raw body and returns indexingJob", async () => {
     await seedProject("t-vis", "gold", "map");
     await seedDoc("t-vis-a", "t-vis", "gold", 4, 4);
-    const res = await app.request("/v1/projects/t-vis", json("PATCH", { pipeline: { indexingMode: "visual" } }));
+    // A pipeline PATCH replaces the stored pipeline: visual indexing needs Smartest.
+    const res = await app.request("/v1/projects/t-vis", json("PATCH", { pipeline: { indexingMode: "visual", quality: "smartest" } }));
     expect(res.status).toBe(200);
     const body = await res.json() as { indexingMode: string; indexingJob?: { runIds: string[] } };
     expect(body.indexingMode).toBe("visual");

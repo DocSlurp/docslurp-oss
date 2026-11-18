@@ -1,4 +1,4 @@
-import { PII_BLOCKED_DOCUMENT_STATUS, type DataUnavailableReason, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
+import { pageImagesOnSql, PII_BLOCKED_DOCUMENT_STATUS, type DataUnavailableReason, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { sql } from "../db.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
@@ -21,6 +21,13 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);
   const capabilities = pageRenderCapabilities();
+  // Page images off (pipeline.pageImages: false): no page image is served or rendered, stored ones included. Smartest
+  // always keeps page images, whatever a stored row says. A non-boolean stored value reads as the default (on), never
+  // an error for the whole project.
+  const [project] = await sql<{ page_images: boolean }[]>`
+    select ${sql.unsafe(pageImagesOnSql("p"))} as page_images
+    from projects p where p.id = ${doc.projectId}`;
+  if (project && !project.page_images) return { status: "unavailable" as const, reason: "disabled" as const, document: doc };
   const artifact = viewer.artifacts.find(item => item.slot === pageRenderSlot(documentId, pageNumber, quality, dpi));
   if (!artifact && quality === "reader") {
     const legacy = viewer.artifacts.find(item => item.slot === `${documentId}:page-${pageNumber}` || item.slot === `${documentId}:raster-v2-reader-page-${pageNumber}`);

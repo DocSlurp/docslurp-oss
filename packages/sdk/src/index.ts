@@ -31,12 +31,13 @@ export type JsonObject = Record<string, unknown>;
 export type IndexingMode = "full" | "map" | "visual";
 
 /**
- * Processing quality (`pipeline.quality`): `fastest` reads the text layer only and keeps pages without one as page
- * images, never read (lowest price); `balanced` (default) reads each page the cheapest faithful way (its price depends
- * on the mix of pages); `smart` reads every page with AI (highest price). `smart` above the project's quality needs
- * project editor rights or an API key with the `pipeline:billed-features` scope. Prices: https://docslurp.io/pricing
+ * Processing quality (`pipeline.quality`): `fastest` (default) reads each file with its native reader and sends only
+ * scanned pages and images to OCR, never to a vision model (with `readScans: false` they are kept as page images and
+ * not read, the lowest price); `smartest` reads each file with its native reader and sends scans, images and hard math,
+ * layouts or fonts to a vision model. `smartest` above the project's quality needs project editor rights or an API key
+ * with the `pipeline:billed-features` scope. Prices: https://docslurp.io/pricing
  */
-export type Quality = "fastest" | "balanced" | "smart";
+export type Quality = "fastest" | "smartest";
 
 /**
  * Figures and charts (`pipeline.visuals`), an ordered ladder: `none`; `figures` (PDF figures as files); `charts` (also
@@ -47,10 +48,11 @@ export type Quality = "fastest" | "balanced" | "smart";
 export type Visuals = "none" | "figures" | "charts" | "charts-ai";
 
 /**
- * @deprecated The former quality words; use {@link Quality} (`fast` = `fastest`, `auto` = `balanced`, `good` = `smart`).
- * Still accepted; the server answers with a `Deprecation` header and `warnings`.
+ * @deprecated The former quality words; use {@link Quality}: `balanced` and `auto` are `fastest`, `fast` is `fastest`
+ * with `readScans: false`, `smart` and `good` are `smartest`. Still accepted; the server answers with a `Deprecation`
+ * header and `warnings`.
  */
-export type LegacyQualityMode = "fast" | "auto" | "good";
+export type LegacyQualityMode = "fast" | "auto" | "good" | "balanced" | "smart";
 
 /** A quality value the API accepts: {@link Quality}, or a deprecated {@link LegacyQualityMode} word. */
 export type QualityMode = Quality | LegacyQualityMode;
@@ -59,7 +61,7 @@ export type QualityMode = Quality | LegacyQualityMode;
 export type DeprecatedFieldWarning = { code: "deprecated_field"; field: string; replacement: string; message: string };
 
 /** A project's extraction settings in the current names (`ProjectRecord.extraction`). */
-export type ExtractionSettings = { quality: Quality; visuals: Visuals | null };
+export type ExtractionSettings = { quality: Quality; /** Fastest only: false keeps scans as page images. */ readScans?: boolean; visuals: Visuals | null };
 
 /** What unset visuals run as on this deployment per origin, and the rungs a caller may choose (`ProjectRecord.visualsDefaults`). */
 export type VisualsDefaults = { app: Visuals; machine: Visuals; available: Visuals[] };
@@ -78,8 +80,9 @@ export type RunExtraction = { quality: Quality; visuals: Visuals; readsPages: bo
 export type LadderRung = "fast" | "ocr" | "intelligent";
 
 /**
- * Auto ladder limits (`pipeline.ladder`), applied in `auto` quality only. `maxRung` (default `intelligent`) is the highest
- * rung any page may be read on. `maxEscalationShare.aboveFast` / `.aboveOcr` (0..1, unset by default) cap the share of
+ * Auto ladder limits (`pipeline.ladder`), applied in `auto` quality only. `maxRung` is the highest rung any page may be
+ * read on and holds the quality level: `ocr` (the default) is `fastest`, `fast` is `fastest` with `readScans: false`,
+ * `intelligent` is `smartest`; prefer `quality` and `readScans`. `maxEscalationShare.aboveFast` / `.aboveOcr` (0..1, unset by default) cap the share of
  * each document's pages read above `fast` / above `ocr` (floor of share x pages, at least 1 while above 0). Set either to
  * null to remove it. A non-editor's per-upload override can only tighten the project's limits.
  */
@@ -380,8 +383,13 @@ export type ChartExportOverride = { tier: ChartExportTier };
 
 /** The knobs of a quote, in customer terms; omitted ones take a new project's defaults. */
 export type QuoteSettings = {
-  /** `fastest`, `balanced` or `smart` (deprecated `fast`, `auto`, `good` accepted; quotes still answer with those). */
-  quality: QualityMode;
+  /**
+   * `fastest` or `smartest` (deprecated words accepted). Quotes answer with the pricing profile: `fast` (Fastest with
+   * `readScans: false`), `fastest`, `smartest`, or `visual` (visual indexing).
+   */
+  quality: QualityMode | "visual";
+  /** Fastest only: `false` quotes scans kept as page images, not read. */
+  readScans?: boolean;
   /** Visuals to quote with (`charts-ai` adds a `charts` line); replaces `chartExport`. */
   visuals?: Visuals;
   /**
@@ -424,7 +432,7 @@ export type EstimateQuote = {
 /** What upload pricing reads from a project; returned by `uploadEstimate`. */
 export type EstimateProfile = {
   pricingVersion: string;
-  quality: "fast" | "auto" | "good";
+  quality: "fast" | "fastest" | "smartest" | "visual";
   documentFeatures: { documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean };
   videoFrames: boolean;
   workerSlots?: number;
@@ -647,8 +655,10 @@ export type UploadOptions = RequestOptions & {
   /** Folder path for a single-file or streamed upload. Use UploadFileInput.path for several files. */
   path?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (balanced by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (fastest by default). */
   quality?: QualityMode;
+  /** Fastest only: `false` keeps scanned pages and images as page images, not read. Omitted uses the project's. */
+  readScans?: boolean;
   /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
   visuals?: Visuals;
   /**
@@ -692,8 +702,10 @@ export type UploadInput = {
   idempotencyKey?: string;
   /** Stamp these documents with an indexing mode instead of the project's. */
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (balanced by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (fastest by default). */
   quality?: QualityMode;
+  /** Fastest only: `false` keeps scanned pages and images as page images, not read. Omitted uses the project's. */
+  readScans?: boolean;
   /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
   visuals?: Visuals;
   /**
@@ -772,8 +784,10 @@ export type UploadUrlsInput = {
   tags?: string[];
   idempotencyKey?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (balanced by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (fastest by default). */
   quality?: QualityMode;
+  /** Fastest only: `false` keeps scanned pages and images as page images, not read. Omitted uses the project's. */
+  readScans?: boolean;
   /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
   visuals?: Visuals;
   /**
@@ -2248,9 +2262,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   /** Quality is a pipeline override; Speed boost is an explicit request-level opt-in. */
-  function pipelineFields(metadata: { quality?: QualityMode; visuals?: Visuals; speedBoost?: boolean; chartExport?: ChartExportOverride }): { pipeline?: { quality?: QualityMode; visuals?: Visuals; chartExport?: ChartExportOverride }; speedBoost?: boolean } {
+  function pipelineFields(metadata: { quality?: QualityMode; readScans?: boolean; visuals?: Visuals; speedBoost?: boolean; chartExport?: ChartExportOverride }): { pipeline?: { quality?: QualityMode; readScans?: boolean; visuals?: Visuals; chartExport?: ChartExportOverride }; speedBoost?: boolean } {
     const pipeline = {
       ...(metadata.quality ? { quality: metadata.quality } : {}),
+      ...(metadata.readScans !== undefined ? { readScans: metadata.readScans } : {}),
       ...(metadata.visuals ? { visuals: metadata.visuals } : {}),
       ...(metadata.chartExport ? { chartExport: { tier: metadata.chartExport.tier } } : {}),
     };
@@ -2476,7 +2491,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (options.path) fields.path = options.path;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
-    if (metadata.quality || metadata.chartExport) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
+    if (metadata.quality || metadata.readScans !== undefined || metadata.chartExport) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
     if (metadata.speedBoost !== undefined) fields.speedBoost = String(metadata.speedBoost);
     for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();

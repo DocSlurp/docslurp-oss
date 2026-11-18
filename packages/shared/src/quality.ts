@@ -3,14 +3,20 @@ import type { ParserPlaybookKey } from "./embedding.js";
 import type { DocumentExtractionConfig } from "./extraction.js";
 
 /**
- * Processing quality: the one public extraction knob. `fast` reads the text layer only and keeps pages without one
- * as page images (no OCR, no vision model). `auto` routes each page the cheapest faithful way (text layer, or a
- * vision model for scans and complex layouts). `good` reads every page with a vision model.
+ * Stored processing quality, under the public levels (extraction-config.ts `fastest` / `smartest`). Every new pipeline
+ * stores `auto`; the level lives in the Auto ladder's highest rung (auto-ladder.ts): `ocr` is Fastest (text layer, OCR
+ * for scans and image pages, never a vision model), `intelligent` is Smartest (text layer, a vision model for every
+ * page the text layer cannot carry), and `fast` is Fastest with "Read scans" off. `fast` remains the quality a run
+ * reads pages with when nothing may be read (pageReadingQuality) and the stored word of older rows.
+ *
+ * The retired `good` (a vision model on every page) is read as `auto`; migrateLegacyQualitySettings also raises its
+ * ladder to `intelligent`, so a stored `good` row reads as Smartest.
  *
  * The parser playbook catalog stays internal: the worker derives the playbook from `quality`, and classify-route may
  * still suggest a playbook per document inside `auto`.
  */
-export const qualityModeSchema = z.enum(["fast", "auto", "good"]);
+export const QUALITY_MODES_STORED = ["fast", "auto"] as const;
+export const qualityModeSchema = z.preprocess((value) => (value === "good" ? "auto" : value), z.enum(QUALITY_MODES_STORED));
 export type QualityMode = z.infer<typeof qualityModeSchema>;
 export const DEFAULT_QUALITY_MODE: QualityMode = "auto";
 
@@ -22,17 +28,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const QUALITY_PLAYBOOK: Record<QualityMode, ParserPlaybookKey> = {
   fast: "fast",
   auto: "balanced",
-  good: "review-grade",
 };
 
 /** Internal parser playbook a quality mode runs. */
 export function parserPlaybookForQuality(quality: QualityMode | null | undefined): ParserPlaybookKey {
   return QUALITY_PLAYBOOK[quality ?? DEFAULT_QUALITY_MODE];
-}
-
-/** True when the mode reads every page with a vision model (the former `vision.forceAllPages`). */
-export function qualityReadsEveryPage(quality: QualityMode | null | undefined): boolean {
-  return quality === "good";
 }
 
 /** True when the mode may send any page to OCR or a vision model. */
@@ -89,15 +89,17 @@ export function documentExtractionForQuality(
   };
 }
 
-export const QUALITY_RANK: Record<QualityMode, number> = { fast: 0, auto: 1, good: 2 };
+export const QUALITY_RANK: Record<QualityMode, number> = { fast: 0, auto: 1 };
+
+/** A retired stored quality word: `good` (vision on every page), read as Smartest. */
+export type RetiredQualityMode = "good";
 
 /**
  * Quality implied by the retired `parserPlaybook` and `vision.forceAllPages` keys, or null when neither says
- * anything. Only `forceAllPages: true` (vision on every page) means good; `fast` means fast; every other playbook,
- * including `review-grade` and `agentic`, means auto. Those playbooks never read every page, so mapping them to
- * good would multiply a project's spend. `forceAllPages: false` alone implies nothing (it was the default).
+ * anything. Only `forceAllPages: true` (vision on every page) means `good` (now Smartest); `fast` means fast; every
+ * other playbook, including `review-grade` and `agentic`, means auto. `forceAllPages: false` alone implies nothing.
  */
-export function legacyQualityMode(source: unknown): QualityMode | null {
+export function legacyQualityMode(source: unknown): QualityMode | RetiredQualityMode | null {
   if (!isRecord(source)) return null;
   const vision = source.vision;
   if (isRecord(vision) && vision.forceAllPages === true) return "good";
@@ -108,14 +110,15 @@ export function legacyQualityMode(source: unknown): QualityMode | null {
 
 /**
  * Rewrites a stored pipeline or a request override that may carry the retired keys: an explicit `quality` wins,
- * otherwise the legacy keys are mapped, and both legacy keys are removed. Returns the input unchanged when it has
- * neither key, so callers can apply it to every source cheaply.
+ * otherwise the legacy keys are mapped, and both legacy keys are removed. A retired `quality: "good"` becomes `auto`
+ * with the ladder's highest rung raised to `intelligent` (Smartest). Returns the input unchanged when it has none of
+ * these, so callers can apply it to every source cheaply.
  */
 export function migrateLegacyQualitySettings<T>(source: T): T {
   if (!isRecord(source)) return source;
   const vision = source.vision;
   const hasVisionKey = isRecord(vision) && "forceAllPages" in vision;
-  if (!("parserPlaybook" in source) && !hasVisionKey) return source;
+  if (!("parserPlaybook" in source) && !hasVisionKey && source.quality !== "good") return source;
   const legacy = legacyQualityMode(source);
   const { parserPlaybook: _playbook, ...rest } = source as Record<string, unknown>;
   const next: Record<string, unknown> = rest;
@@ -124,6 +127,10 @@ export function migrateLegacyQualitySettings<T>(source: T): T {
     next.vision = visionRest;
   }
   if (next.quality === undefined && legacy) next.quality = legacy;
+  if (next.quality === "good") {
+    next.quality = "auto";
+    next.ladder = { ...(isRecord(next.ladder) ? next.ladder : {}), maxRung: "intelligent" };
+  }
   return next as T;
 }
 

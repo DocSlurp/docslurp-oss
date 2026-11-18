@@ -3,7 +3,7 @@ import { SEARCH_SCOPES, type SearchScope } from "../lib/search-tiers.js";
 import { z } from "zod";
 
 import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
-import { CHART_EXPORT_OVERRIDE_DESCRIPTION, chartExportOverrideSchema, deferredProfilesEnabled, figureResumeChatEnabled, figureResumeProposalInputSchema, QUALITY_OVERRIDE_DESCRIPTION, qualityLevelSchema, qualityModeSchema, VISUALS_OVERRIDE_DESCRIPTION, visualsLevelSchema } from "@docslurp/shared";
+import { CHART_EXPORT_OVERRIDE_DESCRIPTION, chartExportOverrideSchema, deferredProfilesEnabled, figureResumeChatEnabled, figureResumeProposalInputSchema, QUALITY_OVERRIDE_DESCRIPTION, VISUALS_OVERRIDE_DESCRIPTION, visualsLevelSchema } from "@docslurp/shared";
 
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } from "../lib/search-input.js";
@@ -43,7 +43,8 @@ const uploadInputShape = {
   }).strict().refine(file => Boolean(file.contentBase64) !== Boolean(file.text), "Supply either contentBase64 or text for each inline file")).min(1).max(10).optional()
     .describe(`Small files sent in this call (at most ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total) when you cannot make HTTP requests to storage upload URLs.`),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL and inline uploads: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
-  quality: z.union([qualityLevelSchema, qualityModeSchema]).optional().describe(QUALITY_OVERRIDE_DESCRIPTION),
+  quality: z.enum(["fastest", "smartest", "balanced", "smart", "fast", "auto", "good"]).optional().describe(QUALITY_OVERRIDE_DESCRIPTION),
+  readScans: z.boolean().optional().describe("Fastest only: false keeps scanned pages and images as page images without reading them (cheapest)."),
   visuals: visualsLevelSchema.optional().describe(VISUALS_OVERRIDE_DESCRIPTION),
   chartExport: chartExportOverrideSchema.optional().describe(`Deprecated: use visuals. ${CHART_EXPORT_OVERRIDE_DESCRIPTION}`),
 };

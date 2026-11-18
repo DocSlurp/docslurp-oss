@@ -2385,7 +2385,7 @@ export const projectRuns = pgTable(
     firstPageExtractedAt: timestamp("first_page_extracted_at", { withTimezone: true, mode: "string" }),
     firstPageCompletedAt: timestamp("first_page_completed_at", { withTimezone: true, mode: "string" }),
     outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true, mode: "string" }),
-    /** When the run last reached a terminal status (completed or failed); null while active (migration 0199 trigger). */
+    /** When the run last reached a terminal status (completed or failed); null while active (migration 0200 trigger). */
     finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
     workflowStartAttempts: integer("workflow_start_attempts").default(0).notNull(),
     workflowStartNextAt: timestamp("workflow_start_next_at", {
