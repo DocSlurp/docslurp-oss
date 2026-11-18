@@ -173,6 +173,8 @@ export async function generateOpenRouterText(args: {
       const served = servedTextModel(args.model, accounting.sentModel());
       const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: served.model, providerName: accounting.providerName(), generationId: result.response.id, receiptRetryDelaysMs: [0, 1_500], usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
       const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, routedModel: served.model,
+        // The settings this call ran with, recorded next to the model on its usage row (shared model-provenance.ts).
+        modelConfig: { operation: args.operation, profile: settings.profile, reasoningEffort: settings.reasoningEffort ?? "none", maxOutputTokens: settings.maxOutputTokens },
         ...regionFallbackUsageMetadata(args.model, served),
         reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
       return { text: result.text, finishReason: result.finishReason, usage: recordedUsage };

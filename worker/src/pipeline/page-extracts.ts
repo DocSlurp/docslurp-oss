@@ -13,12 +13,15 @@
  * document completes in its current run (finalizePageExtracts), never by a stale run.
  */
 import {
+  modelClassLabel,
+  modelRecordUri,
   normalizePageExtractTags,
   PAGE_EXTRACT_PASSES,
   PAGE_EXTRACT_ENGINE_PATTERN,
   PAGE_EXTRACT_FINISH_REASONS,
   PAGE_EXTRACT_MEMBER_PATTERN,
   PAGE_EXTRACT_REGION_PATTERN,
+  type ModelCallClass,
   type PageExtractBilledClass,
   type PageExtractFinishReason,
   type PageExtractMethod,
@@ -47,6 +50,8 @@ export interface PageExtractInput {
   durationMs?: number | null;
   /** This pass's text was taken for the page in this run (default true); false records a pass that gave nothing usable. */
   adopted?: boolean;
+  /** The model that served this pass, as an `llm://` URI (shared model-provenance.ts); unset when no model did. */
+  modelUri?: string | null;
 }
 
 export interface PageExtractRow {
@@ -68,6 +73,9 @@ export interface PageExtractRow {
   finish_reason: PageExtractFinishReason | null;
   duration_ms: number | null;
   adopted: boolean;
+  model_uri: string | null;
+  /** The run's levels (quality, profiles) at the time, when a model served the pass. */
+  model_class: string | null;
 }
 
 export interface PageExtractTagMerge {
@@ -81,8 +89,25 @@ export interface PageExtractTagMerge {
 /** The part of the workflow state these helpers use. */
 export interface PageExtractState {
   run: { id: string; orgId: string | null; projectId?: string };
+  /** The run's levels as the usage ledger records them (pipeline.ts runModelClass); optional for callers without a ledger. */
+  usageLedger?: { modelClass: ModelCallClass | null };
   pendingPageExtracts: PageExtractRow[];
   pendingPageExtractTags: PageExtractTagMerge[];
+}
+
+/** A stored model URI, or null: the column's own check, so one odd value never fails a checkpoint. */
+function modelUri(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.length <= 400 && /^llm:\/\/[a-z0-9][a-z0-9.-]*\//.test(value) ? value : null;
+}
+
+/** The provider a vision-stage read went to: a known hosted API by its host, otherwise the runtime's own name. An address is never recorded. */
+function servingProvider(runtime: string, baseUrl: string | null | undefined): string {
+  let host = "";
+  try { host = baseUrl ? new URL(baseUrl).hostname.toLowerCase() : ""; } catch { /* not a URL: fall through to the runtime */ }
+  if (host === "openrouter.ai" || host.endsWith(".openrouter.ai")) return "openrouter";
+  if (host === "api.deepinfra.com") return "deepinfra";
+  if (host === "api.openai.com") return "openai";
+  return runtime;
 }
 
 const MAX_PAGE = 1_000_000;
@@ -131,6 +156,7 @@ export function recordPageExtracts(
   const owner = scope(state, document);
   if (!owner || inputs.length === 0) return;
   const pending = state.pendingPageExtracts;
+  const modelClass = modelClassLabel(state.usageLedger?.modelClass);
   const counts = new Map<string, { labels: Record<string, string>; n: number }>();
   const count = (name: string, labels: Record<string, string>) => {
     const key = `${name}\u0000${Object.values(labels).join("\u0000")}`;
@@ -159,6 +185,8 @@ export function recordPageExtracts(
       finish_reason: pageExtractFinishReason(input.finishReason),
       duration_ms: bounded(input.durationMs, MAX_DURATION_MS),
       adopted: input.adopted ?? true,
+      model_uri: modelUri(input.modelUri),
+      model_class: modelUri(input.modelUri) ? modelClass : null,
     };
     pending.push(row);
     count("pages.extracts", { method: row.method, pass: row.pass, adopted: row.adopted ? "true" : "false",
@@ -224,14 +252,15 @@ export function pageExtractStatements(
     const batch = rows.slice(start, start + ROWS_PER_STATEMENT);
     statements.push(client`
       insert into document_page_extracts as t (document_id, org_id, project_id, run_id, page_number, pass, method, engine,
-        member_id, region, billed_class, tags, confidence, plausibility, text_bytes, finish_reason, duration_ms, adopted)
+        member_id, region, billed_class, tags, confidence, plausibility, text_bytes, finish_reason, duration_ms, adopted,
+        model_uri, model_class)
       select document_id, org_id, project_id, run_id, page_number, pass, method, engine, member_id, region, billed_class,
         array(select distinct x from unnest(coalesce(tags, '{}')) as x order by x), confidence, plausibility, text_bytes,
-        finish_reason, duration_ms, adopted
+        finish_reason, duration_ms, adopted, model_uri, model_class
       from jsonb_to_recordset(${client.json(batch as never)}::jsonb) as r(
         document_id text, org_id text, project_id text, run_id text, page_number integer, pass text, method text,
         engine text, member_id text, region text, billed_class text, tags text[], confidence real, plausibility real,
-        text_bytes integer, finish_reason text, duration_ms integer, adopted boolean)
+        text_bytes integer, finish_reason text, duration_ms integer, adopted boolean, model_uri text, model_class text)
       -- Lock order: the documents' rows first (an init plan, in id order), then extract rows, as finalization does.
       where (select count(*) from (select 1 from documents where id = any(${client.array(documentIdsOf(batch))}::text[])
         order by id for no key update) locked) >= 0
@@ -242,6 +271,7 @@ export function pageExtractStatements(
         tags = array(select distinct x from unnest(t.tags || excluded.tags) as x order by x),
         confidence = excluded.confidence, plausibility = excluded.plausibility, text_bytes = excluded.text_bytes,
         finish_reason = excluded.finish_reason, duration_ms = excluded.duration_ms, adopted = excluded.adopted,
+        model_uri = excluded.model_uri, model_class = excluded.model_class,
         -- A withdrawn pass (a retry that rejected it) can no longer be final; finalization picks the next adopted one.
         is_final = t.is_final and excluded.adopted, updated_at = now()
       where t.org_id = excluded.org_id
@@ -361,12 +391,17 @@ export function logFinalizeOutcome(rows: ReadonlyArray<{ run_found: number; chan
   }
 }
 
-/** OCR reader labels (ocr/read-document.ts `reader`) as a method and route. Model ids after the prefix are never kept. */
-export function ocrReaderProvenance(reader: string): { method: PageExtractMethod; engine: string } {
-  if (reader.startsWith("page-reader:")) return { method: "ocr-second-read", engine: "gpu-page-reader" };
-  if (reader.startsWith("escalated:")) return { method: "ocr-second-read", engine: "ocr-escalation" };
-  if (reader.startsWith("hosted:")) return { method: "ocr", engine: "hosted-ocr" };
-  return { method: "ocr", engine: "page-ocr" };
+/**
+ * OCR reader labels (ocr/read-document.ts `reader`) as a method and route. The engine stays a route word; the model
+ * id after a prefix is kept only as the read's `modelUri` (the operator-facing column), never in `engine`.
+ */
+export function ocrReaderProvenance(reader: string): { method: PageExtractMethod; engine: string; modelUri: string | null } {
+  const named = (engine: string, prefix: string) => modelRecordUri({ provider: engine, model: reader.slice(prefix.length) });
+  if (reader.startsWith("page-reader:")) return { method: "ocr-second-read", engine: "gpu-page-reader", modelUri: named("gpu-page-reader", "page-reader:") };
+  if (reader.startsWith("escalated:")) return { method: "ocr-second-read", engine: "ocr-escalation", modelUri: named("ocr-escalation", "escalated:") };
+  if (reader.startsWith("hosted:")) return { method: "ocr", engine: "hosted-ocr", modelUri: named("hosted-ocr", "hosted:") };
+  // The local recogniser set (`latin`, `multi`, …) of the OCR engine.
+  return { method: "ocr", engine: "page-ocr", modelUri: modelRecordUri({ provider: "page-ocr", model: reader }) };
 }
 
 /** Plain UTF-8 bytes of a page's text (a size label, never the text). */
@@ -461,7 +496,7 @@ export function extractionPageRecords(args: {
         pageNumber, pass: "scan-ocr", method: route.method, engine: route.engine,
         billedClass: route.method === "ocr" ? ocrClass(args.ocrPageClass) : "rich",
         tags: ocrTags(scan), confidence: scan.confidence, durationMs: scan.durationMs, adopted: true,
-        textBytes: scanFinal ? textBytes : null,
+        textBytes: scanFinal ? textBytes : null, modelUri: route.modelUri,
       });
     }
     if (corrected) {
@@ -490,7 +525,8 @@ const VISION_SKIP_TAGS: Partial<Record<string, PageExtractTag>> = {
  * non-final with why (`failed`, `rejected`, `ladder-capped`, ...), so the earlier pass stays the page's source.
  */
 export function visionPageRecords(args: {
-  outputs: ReadonlyArray<{ pageNumber: number; runtime: string; text: string; latencyMs: number; finishReason?: string | null }>;
+  outputs: ReadonlyArray<{ pageNumber: number; runtime: string; text: string; latencyMs: number; finishReason?: string | null;
+    model?: string; servedModel?: string; baseUrl?: string | null }>;
   skips: ReadonlyArray<{ pageNumber: number; outcome: string }>;
   reconciliation: { changedPages: readonly number[]; decisions: ReadonlyArray<{ pageNumber: number; outcome: string }> };
   ocrPageClass: boolean;
@@ -514,6 +550,7 @@ export function visionPageRecords(args: {
       billedClass: ocr ? ocrClass(args.ocrPageClass) : "rich", tags,
       finishReason: output.finishReason ?? (output.text.trim() ? null : "empty"),
       durationMs: output.latencyMs, textBytes: final ? pageTextBytes(output.text) : null, adopted: final,
+      modelUri: modelRecordUri({ provider: servingProvider(output.runtime, output.baseUrl), model: output.servedModel || output.model }),
     });
   }
   for (const skip of args.skips) {
