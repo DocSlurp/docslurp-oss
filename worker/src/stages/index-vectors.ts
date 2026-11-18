@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { indexConfigHash, indexConfigOf, LANCEDB_CHUNKS_TABLE } from "@docslurp/shared";
+import { embeddingRouteSpaceUri, indexConfigHash, indexConfigOf, LANCEDB_CHUNKS_TABLE, modelClassLabel } from "@docslurp/shared";
 import { encodeLanceChunkHydration, lancePageNumberValue } from "@docslurp/shared/lancedb-hydration";
 import postgres from "postgres";
 
@@ -325,6 +325,8 @@ export class IndexStage implements Stage {
                 path: key,
                 embeddingModel: artifact.embedding.model,
                 dimension: artifact.embedding.dimensions,
+                embeddingModelUri: embeddingRouteSpaceUri(artifact.embedding, artifact.embedding.dimensions),
+                embeddingModelClass: modelClassLabel({ embeddingProfile: artifact.embedding.profile }),
                 indexConfigHash: indexConfigHash(indexConfigOf(state.run.pipeline))
               } satisfies PipelineVectorIndex);
 

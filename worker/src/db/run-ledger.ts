@@ -1822,6 +1822,8 @@ export class PostgresRunLedger implements CheckpointStore {
       path: vector.path,
       embedding_model: vector.embeddingModel,
       dimension: vector.dimension,
+      embedding_model_uri: vector.embeddingModelUri ?? null,
+      embedding_model_class: vector.embeddingModelClass ?? null,
     }));
 
     const statements: PendingQuery<any>[] = batchedRows(rows).map((batch) => client`
@@ -1834,9 +1836,12 @@ export class PostgresRunLedger implements CheckpointStore {
         "path",
         "embedding_model",
         "dimension",
+        "embedding_model_uri",
+        "embedding_model_class",
       )}
       on conflict (document_id, backend, embedding_model, dimension)
-      do update set bucket = excluded.bucket, path = excluded.path
+      do update set bucket = excluded.bucket, path = excluded.path,
+        embedding_model_uri = excluded.embedding_model_uri, embedding_model_class = excluded.embedding_model_class
     `);
     // Search serves each document from the index config it was built with (projects.index_configs).
     const hashes = new Map(vectors.filter((vector) => vector.indexConfigHash).map((vector) => [vector.documentId, vector.indexConfigHash!]));

@@ -126,4 +126,23 @@ describe("page ledger", () => {
     expect(counts.get("d1")).toEqual({ total: 4, indexed: 2, mapped: 3, embedded: 1 });
     expect(counts.get("missing")).toEqual({ total: 0, indexed: 0, mapped: 0, embedded: 0 });
   });
+
+  it("records the exact embedding space beside the bare id, and drops a stale one when only a bare id is given", async () => {
+    await ensurePageRows(sql, "d1", 3);
+    await markPages(sql, "d1", [1, 2], "indexed", { embeddingModel: "m", embeddingModelUri: "llm://host-a/m?dimensions=8" });
+    await markPagesEmbedded(sql, "d1", [3], "img", "llm://host-b/img?dimensions=4");
+    const read = async () => (await db.query<{ page_number: number; embedding_model: string | null; embedding_model_uri: string | null }>(
+      `select page_number, embedding_model, embedding_model_uri from document_page_states order by page_number`)).rows;
+    expect(await read()).toEqual([
+      { page_number: 1, embedding_model: "m", embedding_model_uri: "llm://host-a/m?dimensions=8" },
+      { page_number: 2, embedding_model: "m", embedding_model_uri: "llm://host-a/m?dimensions=8" },
+      { page_number: 3, embedding_model: "img", embedding_model_uri: "llm://host-b/img?dimensions=4" },
+    ]);
+    // Re-indexing without a model keeps both; with a bare id and no URI, the old URI no longer describes the row.
+    await markPages(sql, "d1", [1], "indexed");
+    await markPages(sql, "d1", [2], "indexed", { embeddingModel: "m2" });
+    const rows = await read();
+    expect(rows[0]).toMatchObject({ embedding_model: "m", embedding_model_uri: "llm://host-a/m?dimensions=8" });
+    expect(rows[1]).toMatchObject({ embedding_model: "m2", embedding_model_uri: null });
+  });
 });

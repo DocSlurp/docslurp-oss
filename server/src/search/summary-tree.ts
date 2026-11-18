@@ -6,6 +6,7 @@ import {
   SUMMARY_TREE_SEARCH_HITS,
   effectiveSummaryTreeSearchMode,
   resolveEmbeddingRoute,
+  embeddingRouteSpaceUri,
   summaryTreeDeadlineMs,
   summaryTreeGuideSlots,
   summaryTreeSearchModeSchema,
@@ -381,7 +382,7 @@ export async function summaryTreeLeg(args: {
   deps: SummaryTreeLegDeps;
 }): Promise<SummaryTreeLegResult> {
   const embedding = resolveEmbeddingRoute(args.pipeline.embedding);
-  const space = { projectId: args.projectId, embeddingModel: embedding.model, dimension: args.queryVector.length };
+  const space = { projectId: args.projectId, embeddingModel: embedding.model, dimension: args.queryVector.length, embeddingModelUri: embeddingRouteSpaceUri(embedding, args.queryVector.length) };
   const candidates = treeCandidates(scopeEligibleDocuments(await loadEligibleDocuments(space), args.options.filters, args.options.runId));
   const stats = { ...EMPTY_STATS, candidateDocuments: candidates.size };
   if (candidates.size === 0) return skippedResult("not-ready", 0, stats);

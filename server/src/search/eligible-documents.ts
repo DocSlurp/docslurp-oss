@@ -69,6 +69,8 @@ export interface EligibleDocumentSet {
   projectId: string;
   embeddingModel: string;
   dimension: number;
+  /** The exact space (`embeddingRouteSpaceUri`); null matches on the bare id and dimension alone. */
+  embeddingModelUri?: string | null;
   documents: EligibleDocument[];
   /** Completed documents with stored pages but no chunks: only completed-page search serves them. */
   pageOnlyCompletedDocuments: number;
@@ -289,7 +291,7 @@ function treeReadyColumn(embeddingModel: string, dimension: number): SqlFragment
   ))`;
 }
 
-async function queryEligibleDocuments(projectId: string, embeddingModel: string, dimension: number): Promise<EligibleDocumentSet> {
+async function queryEligibleDocuments(projectId: string, embeddingModel: string, dimension: number, embeddingModelUri: string | null): Promise<EligibleDocumentSet> {
   const lexical: SqlFragment = lexicalSearchableDocument("d");
   // The vector part is the per-search `current_docs` CTE of vectorSearch,
   // including the walk from dedup copies to the document that owns the rows.
@@ -300,6 +302,8 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
           select 1 from vector_indexes v
           where v.document_id = d.id and v.backend = 'lancedb'
             and v.embedding_model = ${embeddingModel} and v.dimension = ${dimension}
+            -- The exact space when both sides know it; rows from before migration 0192 match on the bare id.
+            and coalesce(v.embedding_model_uri = ${embeddingModelUri}::text, true)
         )) as vector_ready,
         ${lexical} as lexical,
         (d.status = 'completed' and d.superseded_at is null
@@ -353,6 +357,7 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
     projectId,
     embeddingModel,
     dimension,
+    embeddingModelUri,
     documents,
     pageOnlyCompletedDocuments: rows.filter((row) => row.page_only_completed).length,
     loadedAt: Date.now(),
@@ -360,13 +365,14 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
 }
 
 /** The cached eligible set for one project and embedding space; one query on a miss, none on a hit. */
-export function loadEligibleDocuments(args: { projectId: string; embeddingModel: string; dimension: number }): Promise<EligibleDocumentSet> {
+export function loadEligibleDocuments(args: { projectId: string; embeddingModel: string; dimension: number; embeddingModelUri?: string | null }): Promise<EligibleDocumentSet> {
   ensureInvalidationListener();
   const { eligibleCache } = caches();
-  const key = JSON.stringify(["eligible", args.projectId, args.embeddingModel, args.dimension]);
+  const uri = args.embeddingModelUri ?? null;
+  const key = JSON.stringify(["eligible", args.projectId, args.embeddingModel, args.dimension, uri]);
   const cached = eligibleCache.get(key);
   if (cached) return cached;
-  const loading = queryEligibleDocuments(args.projectId, args.embeddingModel, args.dimension).then((set) => {
+  const loading = queryEligibleDocuments(args.projectId, args.embeddingModel, args.dimension, uri).then((set) => {
     for (const document of set.documents) if (runProjects.size < 100_000) runProjects.set(document.runId, set.projectId);
     return set;
   });

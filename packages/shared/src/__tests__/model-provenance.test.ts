@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { modelClassLabel, modelRecordUri, withModelProvenance } from "../model-provenance.js";
+import { embeddingSpaceMatches, embeddingSpaceUri, modelClassLabel, modelRecordUri, withModelProvenance } from "../model-provenance.js";
+import { embeddingRequestConfig, embeddingRouteSpaceUri } from "../embedding.js";
 
 describe("modelRecordUri", () => {
   it("names a call as one llm:// URI with its settings sorted", () => {
@@ -91,5 +92,42 @@ describe("withModelProvenance", () => {
     const stamped = withModelProvenance(hostile);
     expect(stamped.metadata).toEqual({});
     expect(() => JSON.stringify(stamped)).not.toThrow();
+  });
+});
+
+describe("embedding spaces", () => {
+  it("names provider, model and the settings that change the space; mean pooling is the default", () => {
+    expect(embeddingSpaceUri({ provider: "openrouter", model: "vendor/embed-1", dimensions: 1024 })).toBe("llm://openrouter/vendor/embed-1?dimensions=1024");
+    expect(embeddingSpaceUri({ provider: "openrouter", model: "vendor/embed-1", dimensions: 1024, pooling: "mean" })).toBe("llm://openrouter/vendor/embed-1?dimensions=1024");
+    expect(embeddingSpaceUri({ provider: "local", model: "bge-small", dimensions: 384, pooling: "cls" })).toBe("llm://local/bge-small?dimensions=384&pooling=cls");
+    expect(embeddingSpaceUri({ provider: "private", model: "llm://private/page-embed", dimensions: 768 })).toBe("llm://private/page-embed?dimensions=768");
+    expect(embeddingSpaceUri({ provider: "", model: "x" })).toBeNull();
+    expect(embeddingSpaceUri({ provider: "a", model: "https://host/x" })).toBeNull();
+  });
+
+  it("tells same-id spaces apart and lets a missing URI fall back to the bare id", () => {
+    const a = embeddingSpaceUri({ provider: "host-a", model: "m", dimensions: 8 });
+    const b = embeddingSpaceUri({ provider: "host-b", model: "m", dimensions: 8 });
+    expect(a).not.toBe(b);
+    expect(embeddingSpaceMatches(a, a)).toBe(true);
+    expect(embeddingSpaceMatches(a, b)).toBe(false);
+    expect(embeddingSpaceMatches(null, b)).toBe(true);
+    expect(embeddingSpaceMatches(a, null)).toBe(true);
+  });
+
+  it("derives a route's space from its own pooling and the vectors' real dimensions", () => {
+    const route = { provider: "transformersjs", model: "Xenova/bge", dimensions: 384, modelUri: "llm://transformersjs/Xenova/bge?pooling=cls" };
+    expect(embeddingRouteSpaceUri(route)).toBe("llm://transformersjs/Xenova/bge?dimensions=384&pooling=cls");
+    expect(embeddingRouteSpaceUri(route, 256)).toBe("llm://transformersjs/Xenova/bge?dimensions=256&pooling=cls");
+  });
+
+  it("records an embedding call's request settings, without addresses", () => {
+    const config = embeddingRequestConfig({ task: "document", normalize: true, dimensions: 1024, requestedDimensions: 512, batchSize: 64,
+      lateChunking: false, modelUri: "llm://ollama/nomic?baseUrl=http://127.0.0.1:11434/v1&pooling=cls", runtime: "local" }, { inputTokenLimit: 8192 });
+    expect(config).toEqual({ task: "document", inputType: undefined, normalize: true, pooling: "cls", dimensions: 1024, requestedDimensions: 512,
+      batchSize: 64, lateChunking: false, truncateAtTokens: 8192 });
+    const stamped = withModelProvenance({ provider: "ollama", model: "nomic", metadata: { modelConfig: config } });
+    expect(stamped.metadata?.modelUri).toBe("llm://ollama/nomic?batchSize=64&dimensions=1024&lateChunking=false&normalize=true&pooling=cls&requestedDimensions=512&task=document&truncateAtTokens=8192");
+    expect(JSON.stringify(stamped)).not.toContain("127.0.0.1");
   });
 });

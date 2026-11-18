@@ -3,6 +3,7 @@ import { estimateTextTokens } from "../token-estimate.js";
 import {
   attestedRegion,
   authorizePrivateModelCall,
+  embeddingSpaceUri,
   isPrivateModelUri,
   l2Normalize,
   privacyModeAllowsHosted,
@@ -18,6 +19,15 @@ const EMBED_TIMEOUT_MS = 4000;
 export interface PageQueryEmbedderDeps {
   fetchImpl?: typeof fetch;
   geminiApiKey?: string | undefined;
+}
+
+/**
+ * The space a query vector from `embedPageQuery` is in, as the worker's page embedders record it on
+ * `document_page_vectors.model_uri`: a private route by its own URI, the hosted Gemini model under `google`.
+ */
+export function pageQuerySpaceUri(model: string, dimensions: number): string | null {
+  if (isPrivateModelUri(model)) return embeddingSpaceUri({ provider: "private", model, dimensions });
+  return String(model).includes("gemini-embedding-2") ? embeddingSpaceUri({ provider: "google", model, dimensions }) : null;
 }
 
 /**

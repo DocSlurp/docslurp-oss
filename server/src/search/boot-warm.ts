@@ -1,4 +1,4 @@
-import { normalizeStoredPipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
+import { embeddingRouteSpaceUri, normalizeStoredPipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { warmLanceDbSearch } from "./lancedb.js";
 
@@ -72,7 +72,7 @@ export async function recentSearchTargets(limit: number): Promise<BootWarmTarget
       if (targets.length >= limit) break;
       const orgId = row.org_id ?? "";
       if (!orgId || (perOrg.get(orgId) ?? 0) >= MAX_PROJECTS_PER_ORG) continue;
-      let embedding: { model: string; dimensions: number };
+      let embedding: { provider: string; model: string; dimensions: number; modelUri?: string | null };
       try {
         embedding = resolveEmbeddingRoute(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`).embedding);
       } catch {
@@ -85,6 +85,7 @@ export async function recentSearchTargets(limit: number): Promise<BootWarmTarget
           join vector_indexes vi on vi.document_id = d.id
           where d.project_id = ${row.project_id} and d.status = 'completed'
             and vi.backend = 'lancedb' and vi.embedding_model = ${embedding.model} and vi.dimension = ${embedding.dimensions}
+            and coalesce(vi.embedding_model_uri = ${embeddingRouteSpaceUri(embedding, embedding.dimensions)}::text, true)
         ) as found
       `;
       if (!indexed?.found) continue;

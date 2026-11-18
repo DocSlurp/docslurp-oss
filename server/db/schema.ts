@@ -273,6 +273,9 @@ export const vectorIndexes = pgTable(
     path: text().notNull(),
     embeddingModel: text("embedding_model").notNull(),
     dimension: integer().notNull(),
+    /** The exact embedding space as an `llm://` URI and the profile that chose it (migration 0192). Operator-facing. */
+    embeddingModelUri: text("embedding_model_uri"),
+    embeddingModelClass: text("embedding_model_class"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -3587,6 +3590,8 @@ export const documentPageStates = pgTable(
     mapped: boolean().default(false).notNull(),
     embeddedAt: timestamp("embedded_at", { withTimezone: true, mode: "string" }),
     embeddingModel: text("embedding_model"),
+    /** The exact embedding space as an `llm://` URI (migration 0192). Operator-facing. */
+    embeddingModelUri: text("embedding_model_uri"),
     state: text().default("unseen").notNull(),
     claimedByRun: text("claimed_by_run"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true, mode: "string" }),
@@ -4014,6 +4019,8 @@ export const documentPageVectors = pgTable(
     documentId: text("document_id").notNull(),
     pageNumber: integer("page_number").notNull(),
     model: text().notNull(),
+    /** The exact embedding space as an `llm://` URI (migration 0192). Operator-facing. */
+    modelUri: text("model_uri"),
     dims: integer().notNull(),
     bits: bytea().notNull(),
     int8: bytea().notNull(),

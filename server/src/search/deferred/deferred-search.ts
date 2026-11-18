@@ -11,7 +11,7 @@ import type { MaterializeEvent } from "./deferred-context.js";
 import { locateMapCandidates, type MapRouterCall } from "./map-locator.js";
 import { createMapRouterCall } from "./map-router.js";
 import { materializeForQuery } from "./materialize-client.js";
-import { embedPageQuery } from "./page-query-embedder.js";
+import { embedPageQuery, pageQuerySpaceUri } from "./page-query-embedder.js";
 import { clearPageVectorCache, listPageVectorModels, locatePageImageCandidates } from "./page-vector-locator.js";
 
 type Locator = "map-node" | "page-image";
@@ -208,7 +208,7 @@ export async function runDeferredPageSearch(
       args.signal?.throwIfAborted();
       const vector = await deps.embed({ model, query: args.query, journal: journal as UsageRecorder, privacyMode: args.privacyMode, signal: args.signal });
       if (!vector) return { list: [], degraded: true };
-      const hits = await deps.locateImages({ projectId, documentIds, model, queryVector: vector, k: cap });
+      const hits = await deps.locateImages({ projectId, documentIds, model, modelUri: pageQuerySpaceUri(model, vector.length), queryVector: vector, k: cap });
       return { list: hits.map((h) => ({ documentId: h.documentId, page: h.page, locator: "page-image" as const })), degraded: false };
     };
 

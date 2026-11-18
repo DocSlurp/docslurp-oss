@@ -114,6 +114,9 @@ export interface VectorIndex {
   path: string;
   embeddingModel: string;
   dimension: number;
+  /** The exact embedding space (`embeddingSpaceUri`) and the profile that chose it; null when unknown. */
+  embeddingModelUri?: string | null;
+  embeddingModelClass?: string | null;
   /** Identity of the index config the vectors were built with (`documents.index_config_hash`). */
   indexConfigHash?: string;
 }
