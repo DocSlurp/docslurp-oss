@@ -94,10 +94,14 @@ export async function computeSpendCents(sql: postgres.Sql<Record<string, unknown
   if (!SPEND_LABEL.test(query.provider) || !SPEND_LABEL.test(query.model) || !Number.isSafeInteger(query.sinceSeconds) || query.sinceSeconds < 1 || query.sinceSeconds > 86_400) {
     throw new Error("Invalid compute spend query");
   }
-  const [row] = await sql<{ cents: string | number | null }[]>`
-    select coalesce(sum(cost_cents), 0) as cents from usage_attribution
-    where metric = 'sandbox_compute' and provider = ${query.provider} and model = ${query.model}
-      and created_at > now() - (${query.sinceSeconds} * interval '1 second')`;
+  // A cap read must never hold a pool connection on a slow database (2 s); a correction row never lowers the total.
+  const [row] = await sql.begin(async (tx) => {
+    await tx`set local statement_timeout = '2s'`;
+    return await tx<{ cents: string | number | null }[]>`
+      select coalesce(sum(greatest(cost_cents, 0)), 0) as cents from usage_attribution
+      where metric = 'sandbox_compute' and provider = ${query.provider} and model = ${query.model}
+        and created_at > now() - (${query.sinceSeconds} * interval '1 second')`;
+  });
   const cents = Number(row?.cents ?? 0);
   if (!Number.isFinite(cents) || cents < 0) throw new Error("Invalid compute spend total");
   return cents;

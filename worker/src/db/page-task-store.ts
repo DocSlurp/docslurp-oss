@@ -172,12 +172,16 @@ export async function queuedRunPageTasks(sql: Sql<Record<string, unknown>>, scop
   for (const value of [scope.orgId, scope.runId]) {
     if (!value || value.length > 200) throw new Error("Invalid run backlog scope");
   }
-  const [row] = await sql<{ queued: number }[]>`
+  // A hint must never hold a pool connection on a slow database: the read gives up after 2 s.
+  const [row] = await sql.begin(async (tx) => {
+    await tx`set local statement_timeout = '2s'`;
+    return await tx<{ queued: number }[]>`
     select count(*)::int as queued from (
       select 1 from page_work_tasks t
       where t.run_id = ${scope.runId} and t.status = 'queued'
         and exists (select 1 from project_runs r where r.id = ${scope.runId} and r.org_id = ${scope.orgId})
       limit ${RUN_BACKLOG_COUNT_LIMIT}
     ) q`;
+  });
   return Number(row?.queued ?? 0);
 }

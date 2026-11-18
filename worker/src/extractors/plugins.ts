@@ -359,7 +359,8 @@ export function runBacklogHint(scope: { orgId: string; runId: string }, now: () 
     },
     (error: unknown) => {
       console.warn(`[run-backlog] run=${scope.runId} status=lookup-failed error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}; no hint`);
-      runBacklogCache.delete(key);
+      // Only this read's entry: a newer read for the run may already have replaced it.
+      if (runBacklogCache.get(key)?.value === value) runBacklogCache.delete(key);
       return undefined;
     },
   );

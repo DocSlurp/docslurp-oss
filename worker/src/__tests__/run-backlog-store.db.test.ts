@@ -43,7 +43,7 @@ describe("run backlog store", () => {
     await sql.begin(async (tx) => {
       await tx`set local enable_seqscan = off`;
       const plan = await tx.unsafe(`explain select 1 from page_work_tasks t where t.run_id = 'run-org-a' and t.status = 'queued'`);
-      expect(JSON.stringify(plan)).toMatch(/page_work_tasks_(pending|status_run)_idx|page_work_tasks_pkey/);
+      expect(JSON.stringify(plan)).toMatch(/page_work_tasks_(pending|status_run)_idx/);
     });
   });
 });
@@ -60,6 +60,7 @@ describe("compute spend", () => {
     await event("org-a", "host-x", "reader-2", "sandbox_compute", 40, 60);
     await event("org-a", "host-y", "reader-1", "sandbox_compute", 40, 60);
     await event("org-a", "host-x", "reader-1", "pages", 40, 60);
+    await event("org-b", "host-x", "reader-1", "sandbox_compute", -50, 60);
   });
 
   it("sums one provider and model's sandbox compute across organizations within the window", async () => {
