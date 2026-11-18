@@ -45,7 +45,7 @@ import {
   type ExtractionArtifactRef, switchDisabled } from "@docslurp/shared";
 import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
 import { mayHaveHtmlTables, storeEmbedTableCells, tableCellsInactiveStatus, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
-import { visionMayReadDocumentPages, visionRunReadsPages } from "../lib/vision-reads-pages.js";
+import { visionMayReadDocumentPages } from "../lib/vision-reads-pages.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
@@ -354,7 +354,9 @@ export class ExtractMarkdownStage implements Stage {
         // Smartest has no OCR step: the text-layer extractors run (as in Fast), and scans and image pages are left for
         // the vision model. Only while vision can actually read this run's pages; otherwise OCR reads them, so a scan is
         // never left unread because vision is off or refused by the privacy mode.
-        const skipOcr = pageQuality === "auto" && ladderSkipsOcr(state.run.pipeline) && visionRunReadsPages(state.run.pipeline);
+        // Per document: a document vision-extract will not read (its playbook disallows vision, a text-native source) is
+        // read by OCR here, as on Fastest.
+        const skipOcr = pageQuality === "auto" && ladderSkipsOcr(state.run.pipeline) && visionMayReadDocumentPages(state, document, true);
         const playbook =
           (state.artifactLedger.readDocument(document.id, "parser-playbook") as
             | keyof typeof parserPlaybookCatalog

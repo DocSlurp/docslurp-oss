@@ -997,6 +997,21 @@ describe("Smartest has no OCR step: scans and images are left for the vision mod
     } finally { await h.cleanup(); }
   });
 
+  it("still OCRs a document vision will not read (its playbook disallows vision), so its scans are not left unread", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 2, pipeline: SMARTEST,
+      extract: async () => ({ text: "Native text layer page\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scanned words ${frame}` })),
+    });
+    try {
+      h.state.artifactLedger.recordDocument("doc-1", "parser-playbook", "fast");
+      await h.stage.run(h.state);
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2] });
+    } finally { await h.cleanup(); }
+  });
+
   it("Fastest (the default) reads the same scan with OCR", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const h = await harness({
