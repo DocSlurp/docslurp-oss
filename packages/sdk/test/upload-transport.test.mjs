@@ -274,7 +274,7 @@ test("uninspected files are completed in one batch and only the coded-missing on
     if (href.endsWith("/files/complete")) {
       const { files } = JSON.parse(String(init.body));
       return json({ sessionComplete: false, files: files.map(({ fileId }) => fileId === "missing"
-        ? { fileId, status: "failed", error: { statusCode: 400, code: "upload_object_missing", message: "missing", retryable: false, action: "reupload", blocksSession: false } }
+        ? { fileId, status: "failed", error: { statusCode: 409, code: "upload_object_missing", message: "missing", retryable: false, action: "reupload", blocksSession: false } }
         : fileId === "parts"
           ? { fileId, status: "failed", error: { statusCode: 409, code: "upload_parts_incomplete", message: "parts", retryable: false, action: "reupload", blocksSession: false } }
           : { fileId, status: "completed" }) });
@@ -434,5 +434,119 @@ test("completeUploadFiles refuses a batch answer that names a file twice or one 
     const fetch = async () => new Response(JSON.stringify({ files, sessionComplete: true }), { headers: { "content-type": "application/json" } });
     const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
     await assert.rejects(client.completeUploadFiles("s1", [{ fileId: "a" }, { fileId: "b" }]), /more than once|did not send/);
+  }
+});
+
+test("an uninspected file answered retryable (per-file busy or storage unavailable) is completed again in the next batch, not aborted", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const { mock } = await import("node:test");
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const single = (index, id) => ({ index, clientId: String(index), id, filename: `f${index}.txt`, mimeType: "text/plain", sizeBytes: 3, mode: "single", inspected: false, putUrl: `https://storage.invalid/${index}` });
+  const busy = { statusCode: 409, code: "upload_session_busy", message: "busy", retryable: true, action: "retry", blocksSession: false };
+  const unavailable = { statusCode: 503, code: "upload_storage_unavailable", message: "down", retryable: true, action: "retry", blocksSession: false };
+  for (const [label, stillFailing] of [["recovers", 2], ["stays busy", Infinity]]) {
+    const calls = [];
+    let completes = 0;
+    const fetch = async (url, init = {}) => {
+      const href = String(url);
+      calls.push(`${init.method ?? "GET"} ${href}`);
+      if (href.endsWith("/direct/sessions") && init.method === "POST") return json({ sessionId: "s1", files: [single(0, "a"), single(1, "b"), single(2, "c")] });
+      if (href.endsWith("/files/complete")) {
+        completes += 1;
+        const { files } = JSON.parse(String(init.body));
+        // a completes at once; b is past the hold budget and c's storage is briefly down, for `stillFailing` rounds.
+        return json({ files: files.map(({ fileId }) => fileId === "a" || completes > stillFailing ? { fileId, status: "completed" }
+          : { fileId, status: "failed", error: fileId === "b" ? busy : unavailable }) });
+      }
+      if (href.endsWith("/abort")) return json({ ok: true });
+      if (href.endsWith("?statusOnly=true")) return json({ status: "completed", result: { run: { id: "r1" }, project: { id: "p1" }, documents: [] } });
+      return json({ error: "unexpected" }, 500);
+    };
+    mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+    try {
+      const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+      let settled = null;
+      const uploading = client.upload([new Blob(["abc"]), new Blob(["abc"]), new Blob(["abc"])], { directUpload: true, filenames: ["f0.txt", "f1.txt", "f2.txt"] })
+        .then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+      for (let i = 0; i < 400 && !settled; i++) { await new Promise((resolve) => setImmediate(resolve)); mock.timers.tick(250); }
+      await uploading;
+      const batches = calls.filter((call) => call.endsWith("/files/complete"));
+      assert.equal(calls.filter((call) => call.endsWith("/abort")).length, 0, `${label}: never aborted`);
+      assert.equal(calls.filter((call) => call.startsWith("PUT ")).length, 0, `${label}: no bytes resent`);
+      if (stillFailing === 2) {
+        assert.ok(settled.value, `${label}: ${settled.error}`);
+        assert.equal(batches.length, 3);
+      } else {
+        // Out of rounds: a busy-class error, the session kept and named.
+        assert.equal(settled.error?.status, 409);
+        assert.equal(settled.error.code, "upload_session_busy");
+        assert.equal(settled.error.sessionId, "s1");
+        assert.equal(batches.length, 4);
+      }
+    } finally { mock.timers.reset(); }
+  }
+});
+
+test("an older server's per-file completes answered busy or unavailable are repeated in the next round", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const { mock } = await import("node:test");
+  const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+  let unavailable = 1;
+  const calls = [];
+  const fetch = async (url, init = {}) => {
+    const href = String(url);
+    calls.push(`${init.method ?? "GET"} ${href}`);
+    if (href.endsWith("/direct/sessions") && init.method === "POST") {
+      return json({ sessionId: "s1", files: [{ index: 0, clientId: "0", id: "a", filename: "f0.txt", mimeType: "text/plain", sizeBytes: 3, mode: "single", inspected: false, putUrl: "https://storage.invalid/0" }] });
+    }
+    if (href.endsWith("/files/complete")) {
+      const body = JSON.parse(String(init.body));
+      if (body.files) return json({ error: { code: "invalid_request", message: "Invalid request", details: { issues: [{ path: "fileId", code: "invalid_type", message: "Required" }] } } }, 400);
+      if (unavailable-- > 0) return json({ error: { code: "upload_storage_unavailable", message: "down" } }, 503, { "retry-after": "0" });
+      return json({ ok: true });
+    }
+    if (href.endsWith("/abort")) return json({ ok: true });
+    if (href.endsWith("?statusOnly=true")) return json({ status: "completed", result: { run: { id: "r1" }, project: { id: "p1" }, documents: [] } });
+    return json({ error: "unexpected" }, 500);
+  };
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  try {
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+    let settled = null;
+    const uploading = client.upload([new Blob(["abc"])], { directUpload: true, filenames: ["f0.txt"] }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+    for (let i = 0; i < 400 && !settled; i++) { await new Promise((resolve) => setImmediate(resolve)); mock.timers.tick(250); }
+    await uploading;
+    assert.ok(settled.value, String(settled.error));
+    assert.equal(calls.filter((call) => call.endsWith("/abort")).length, 0);
+  } finally { mock.timers.reset(); }
+});
+
+test("a resume refuses foreign ids: extra completion results, extra descriptors in a filtered read, a renamed legacy match", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const missing = (fileId) => ({ fileId, status: "failed", error: { statusCode: 409, code: "upload_object_missing", message: "missing", retryable: false } });
+  const single = (extra) => ({ id: "a", filename: "f0.txt", mimeType: "text/plain", sizeBytes: 3, mode: "single", putUrl: "https://storage.invalid/0", ...extra });
+  const cases = [
+    ["an extra completion result", single({ index: 0, clientId: "0", inspected: false }), () => json({ files: [missing("a"), { fileId: "other", status: "completed" }] }), null],
+    ["an extra descriptor in the filtered read", single({ index: 0, clientId: "0", inspected: false }), () => json({ files: [missing("a")] }),
+      () => json({ sessionId: "s1", status: "pending", files: [single({ index: 0, clientId: "0", putUrl: "https://storage.invalid/a" }), single({ id: "other", index: 1, clientId: "1", putUrl: "https://storage.invalid/other" })] })],
+    // An older server's file, matched by name and size: a refresh that renames it is another file.
+    ["a renamed legacy match", single({ inspected: false }), () => json({ files: [missing("a")] }),
+      () => json({ sessionId: "s1", status: "pending", files: [single({ filename: "other.txt", putUrl: "https://storage.invalid/renamed" })] })],
+  ];
+  for (const [label, descriptor, complete, refresh] of cases) {
+    const puts = [];
+    const fetch = async (url, init = {}) => {
+      const href = String(url);
+      if (href.endsWith("/direct/sessions") && init.method === "POST") return json({ sessionId: "s1", files: [descriptor] });
+      if (href.endsWith("/files/complete")) return complete();
+      if (href.includes("?fileId=") && refresh) return refresh();
+      if (href.endsWith("/abort")) return json({ ok: true });
+      if (init.method === "PUT") { puts.push(href); return new Response(null, { status: 200 }); }
+      return json({ error: "unexpected" }, 500);
+    };
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+    await assert.rejects(client.upload([new Blob(["abc"])], { directUpload: true, filenames: ["f0.txt"] }), /did not send|not asked for|differently/, label);
+    assert.deepEqual(puts, [], `${label}: no bytes sent`);
   }
 });

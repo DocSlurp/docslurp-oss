@@ -90,7 +90,10 @@ function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete, 
       return { status: 201, body: { sessionId: "s1", files } };
     }
     if (request.method === "GET" && request.url.startsWith("/v1/uploads/direct/sessions/s1")) {
-      return { body: { sessionId: "s1", status: sessionStatus, files: files.map((file) => ({ ...file, status: done.has(file.id) ? "completed" : "pending" })) } };
+      // Like the server: a `fileId` filter describes only the files it names.
+      const asked = new URL(request.url, "http://local").searchParams.getAll("fileId");
+      const described = asked.length ? files.filter((file) => asked.includes(file.id)) : files;
+      return { body: { sessionId: "s1", status: sessionStatus, files: described.map((file) => ({ ...file, status: done.has(file.id) ? "completed" : "pending" })) } };
     }
     if (request.url.startsWith("/storage/")) {
       live.put++; live.maxPut = Math.max(live.maxPut, live.put); settle("put", putDelayMs);
@@ -496,7 +499,7 @@ test("uninspected files are completed in one batch: a coded-missing file costs o
         const ids = body.files ? body.files.map((file) => file.fileId) : [body.fileId];
         // f0 is already assembled in storage; f1 has no object until it is sent.
         return { body: { files: ids.map((fileId) => fileId === "f1" && !sent
-          ? { fileId, status: "failed", error: { statusCode: 400, code: "upload_object_missing", message: "No object found", retryable: false, action: "reupload", blocksSession: false } }
+          ? { fileId, status: "failed", error: { statusCode: 409, code: "upload_object_missing", message: "No object found", retryable: false, action: "reupload", blocksSession: false } }
           : { fileId, status: "completed" }), sessionComplete: sent } };
       }
       if (request.url === "/v1/uploads/direct/sessions/s1?fileId=f1") {
@@ -590,6 +593,74 @@ test("duplicate remote file ids or a changed refreshed descriptor stop the uploa
       });
       assert.notEqual(result.code, 0, label);
       assert.match(result.stderr, /more than once|differently/, label);
+      assert.equal(result.requests.filter((request) => request.url.startsWith("/storage/")).length, 0, `${label}: no bytes sent`);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("uninspected files answered retryable (per-file busy or storage unavailable) go into the next batch; out of rounds the session is kept", async () => {
+  const busy = { statusCode: 409, code: "upload_session_busy", message: "busy", retryable: true, action: "retry", blocksSession: false };
+  const unavailable = { statusCode: 503, code: "upload_storage_unavailable", message: "down", retryable: true, action: "retry", blocksSession: false };
+  for (const [label, stillFailing] of [["recovers", 2], ["stays busy", Infinity]]) {
+    const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+    try {
+      const files = await directFiles(dir, 2);
+      let completes = 0;
+      const result = await invoke(["upload", ...files], (request, _count, base) => {
+        if (request.url === "/v1/uploads/direct/sessions") {
+          return { status: 201, body: { sessionId: "s1", files: [
+            { index: 0, clientId: "0", id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "multipart", partSize: 8 * 1024 * 1024, inspected: false, transferState: "unknown" },
+            { index: 1, clientId: "1", id: "f1", filename: "f1.pdf", mimeType: "application/pdf", sizeBytes: 7, mode: "single", inspected: false, putUrl: `${base}/storage/1` },
+          ] } };
+        }
+        if (request.url.endsWith("/files/complete")) {
+          completes += 1;
+          const ids = JSON.parse(request.body.toString()).files.map((file) => file.fileId);
+          return { body: { files: ids.map((fileId) => completes > stillFailing ? { fileId, status: "completed" } : { fileId, status: "failed", error: fileId === "f0" ? busy : unavailable }) } };
+        }
+        if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
+        if (request.url.endsWith("/abort")) return { body: { ok: true } };
+        return { status: 404, body: {} };
+      });
+      const urls = result.requests.map((request) => request.url);
+      assert.equal(urls.filter((url) => url.endsWith("/abort")).length, 0, `${label}: never aborted`);
+      assert.equal(urls.filter((url) => url.startsWith("/storage/")).length, 0, `${label}: no bytes resent`);
+      if (stillFailing === 2) {
+        assert.equal(result.code, 0, result.stderr);
+        assert.equal(urls.filter((url) => url.endsWith("/files/complete")).length, 3);
+      } else {
+        assert.notEqual(result.code, 0);
+        assert.equal(urls.filter((url) => url.endsWith("/files/complete")).length, 4);
+        assert.match(result.stderr, /s1/);
+      }
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("a resume refuses foreign ids: extra completion results, extra descriptors in a filtered read, a renamed legacy match", async () => {
+  const missing = (fileId) => ({ fileId, status: "failed", error: { statusCode: 409, code: "upload_object_missing", message: "missing", retryable: false } });
+  const big = (extra) => ({ id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "single", putUrl: "/storage/0", ...extra });
+  const cases = [
+    ["an extra completion result", big({ index: 0, clientId: "0", inspected: false }), () => ({ body: { files: [missing("f0"), { fileId: "other", status: "completed" }] } }), null],
+    ["an extra descriptor in the filtered read", big({ index: 0, clientId: "0", inspected: false }), () => ({ body: { files: [missing("f0")] } }),
+      () => [big({ index: 0, clientId: "0", putUrl: "/storage/a" }), big({ id: "other", index: 1, clientId: "1", putUrl: "/storage/other" })]],
+    ["a renamed legacy match", big({ inspected: false }), () => ({ body: { files: [missing("f0")] } }),
+      () => [big({ filename: "other.pdf", putUrl: "/storage/renamed" })]],
+  ];
+  for (const [label, descriptor, complete, refresh] of cases) {
+    const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+    try {
+      const files = await directFiles(dir, 1);
+      const result = await invoke(["upload", ...files], (request, _count, base) => {
+        if (request.url === "/v1/uploads/direct/sessions") return { status: 201, body: { sessionId: "s1", files: [{ ...descriptor, putUrl: `${base}${descriptor.putUrl}` }] } };
+        if (request.url.endsWith("/files/complete")) return complete();
+        if (request.url.includes("?fileId=") && refresh) return { body: { sessionId: "s1", status: "pending", files: refresh().map((file) => ({ ...file, putUrl: `${base}${file.putUrl}` })) } };
+        if (request.url.endsWith("/abort")) return { body: { ok: true } };
+        if (request.url.startsWith("/storage/")) return { headers: { etag: '"e"' }, body: {} };
+        return { status: 404, body: {} };
+      });
+      assert.notEqual(result.code, 0, label);
+      assert.match(result.stderr, /did not send|not asked for|differently/, label);
       assert.equal(result.requests.filter((request) => request.url.startsWith("/storage/")).length, 0, `${label}: no bytes sent`);
     } finally { await rm(dir, { recursive: true, force: true }); }
   }

@@ -722,9 +722,12 @@ function refreshedDescriptor(files: readonly DirectUploadDescriptor[], original:
   if (matches.length > 1) throw new Error(`Upload session names file ${original.id} more than once`);
   const fresh = matches[0];
   if (!fresh) return undefined;
+  // A file matched without index and client id (an older server: by name and size) must keep its name too.
+  const legacyMatch = original.index == null && original.clientId == null;
   const same = fresh.mode === original.mode && fresh.sizeBytes === original.sizeBytes
     && (original.index == null || fresh.index === original.index)
-    && (original.clientId == null || fresh.clientId === original.clientId);
+    && (original.clientId == null || fresh.clientId === original.clientId)
+    && (!legacyMatch || fresh.filename === original.filename);
   if (!same) throw new Error(`Upload session describes ${original.filename} differently than before; not sending its bytes`);
   return fresh;
 }
@@ -741,18 +744,35 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
   const answerOnly: SessionProbe = async () => "fail";
   for (let start = 0; start < uninspected.length; start += COMPLETE_BATCH_MAX) {
     const chunk = uninspected.slice(start, start + COMPLETE_BATCH_MAX);
-    const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, post({ files: chunk.map((file) => ({ fileId: file.id })) })), flags, answerOnly);
-    if (!done.ok) throw await responseFailure(done);
-    const answer = await done.json() as { files?: Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string } }> };
-    if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
-    assertUniqueRemoteIds(answer.files.map((result) => result.fileId), "completion result");
-    const byId = new Map(answer.files.map((result) => [result.fileId, result]));
     const missing: string[] = [];
-    for (const file of chunk) {
-      const result = byId.get(file.id);
-      if (result?.status === "completed") continue;
-      if (result?.error?.code && RESEND_COMPLETION_CODES.has(result.error.code)) { missing.push(file.id); continue; }
-      throw new Error(`${file.filename}: ${result?.error?.message ?? "not completed"} (${result?.error?.code ?? "missing result"})`);
+    // Files answered retryable (the server's hold budget ran out: `upload_session_busy`; storage briefly unavailable:
+    // `upload_storage_unavailable`) go into the next batch, a few rounds with short waits.
+    let pending = chunk;
+    for (let round = 0; pending.length > 0; round++) {
+      const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, post({ files: pending.map((file) => ({ fileId: file.id })) })), flags, answerOnly);
+      if (!done.ok) throw await responseFailure(done);
+      const answer = await done.json() as { files?: Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string; retryable?: boolean } }> };
+      if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+      // Every result names a file this call sent, each once.
+      assertUniqueRemoteIds(answer.files.map((result) => result.fileId), "completion result");
+      const sent = new Set(pending.map((file) => file.id));
+      if (answer.files.some((result) => !sent.has(String(result.fileId)))) throw new Error("Upload completion result names a file this call did not send");
+      const byId = new Map(answer.files.map((result) => [result.fileId, result]));
+      const retry: DirectUploadDescriptor[] = [];
+      for (const file of pending) {
+        const result = byId.get(file.id);
+        if (result?.status === "completed") continue;
+        if (result?.error?.code && RESEND_COMPLETION_CODES.has(result.error.code)) { missing.push(file.id); continue; }
+        if (result?.error?.retryable) { retry.push(file); continue; }
+        throw new Error(`${file.filename}: ${result?.error?.message ?? "not completed"} (${result?.error?.code ?? "missing result"})`);
+      }
+      if (retry.length === 0) break;
+      if (round >= UNINSPECTED_RETRY_ROUNDS) {
+        // Still not finished: the session is busy, not broken. Answered as busy, so the upload keeps (and names) it.
+        throw new CliApiError(409, safeHttpFailure(409, { error: { code: "upload_session_busy" } }));
+      }
+      await sleepMs(UNINSPECTED_RETRY_DELAY_MS * 2 ** round);
+      pending = retry;
     }
     if (missing.length === 0) continue;
     const query = missing.map((id) => `fileId=${encodeURIComponent(id)}`).join("&");
@@ -760,6 +780,7 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
     if (!refreshed.ok) throw await responseFailure(refreshed);
     const state = await refreshed.json() as DirectSession;
     if (["failed", "aborted", "expired"].includes(String(state.status ?? ""))) throw new Error(`Upload session ${String(state.status)}`);
+    assertFilteredRead(state.files, missing);
     for (const id of missing) {
       const original = chunk.find((file) => file.id === id)!;
       const name = original.filename;
@@ -772,6 +793,17 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
   }
   return resend;
 }
+
+/** A `fileId`-filtered read describes only the files asked for, each once: an extra descriptor is refused. */
+function assertFilteredRead(files: readonly DirectUploadDescriptor[], asked: readonly string[]): void {
+  assertUniqueRemoteIds(files.map((file) => file.id), "session read");
+  const wanted = new Set(asked);
+  if (files.some((file) => !wanted.has(file.id))) throw new Error("Upload session read describes a file it was not asked for");
+}
+
+/** Extra completion rounds for uninspected files answered retryable, and the first wait between them (doubling). */
+const UNINSPECTED_RETRY_ROUNDS = 3;
+const UNINSPECTED_RETRY_DELAY_MS = 500;
 
 /** files/complete's answers that mean the file's bytes (or some parts) are not in storage: upload them, then complete. */
 const RESEND_COMPLETION_CODES = new Set(["upload_object_missing", "upload_parts_incomplete"]);
@@ -955,7 +987,9 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, flags, {}), flags, async () => "retry");
           if (!refreshed.ok) throw error;
           // The refreshed targets must belong to the same file the local bytes were matched to.
-          const next = refreshedDescriptor(((await refreshed.json()) as DirectSession).files, descriptor);
+          const refreshedFiles = ((await refreshed.json()) as DirectSession).files;
+          assertFilteredRead(refreshedFiles, [descriptor.id]);
+          const next = refreshedDescriptor(refreshedFiles, descriptor);
           if (!next) throw error;
           if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
           if (next.status === "failed" || next.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${next.status}`);

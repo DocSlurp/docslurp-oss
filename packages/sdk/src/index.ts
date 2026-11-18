@@ -1251,6 +1251,9 @@ const SESSION_RETRY_MIN_REMAINING_MS = 250;
 const STREAM_FINAL_COMPLETE_TIMEOUT_MS = 120_000;
 /** Uninspected files completed per call (the server's batch limit is 100). */
 const UNINSPECTED_COMPLETE_BATCH = 100;
+/** Extra completion rounds for uninspected files answered retryable, and the first wait between them (doubling). */
+const UNINSPECTED_RETRY_ROUNDS = 3;
+const UNINSPECTED_RETRY_DELAY_MS = 500;
 
 /** The session is held by another request (or the server's reconciler), or the caller is rate limited: wait, repeat. */
 function isSessionBusyError(error: unknown): error is DocSlurpApiError {
@@ -1283,11 +1286,21 @@ function refreshedDescriptor(files: readonly DirectUploadDescriptor[], original:
   if (matches.length > 1) throw new Error(`Upload session names file ${original.id} more than once`);
   const fresh = matches[0];
   if (!fresh) return undefined;
+  // A file matched without index and client id (an older server: by name and size) must keep its name too.
+  const legacyMatch = original.index == null && original.clientId == null;
   const same = fresh.mode === original.mode && fresh.sizeBytes === original.sizeBytes
     && (original.index == null || fresh.index === original.index)
-    && (original.clientId == null || fresh.clientId === original.clientId);
+    && (original.clientId == null || fresh.clientId === original.clientId)
+    && (!legacyMatch || fresh.filename === original.filename);
   if (!same) throw new Error(`Upload session describes ${original.filename} differently than before; not sending its bytes`);
   return fresh;
+}
+
+/** A `fileId`-filtered read describes only the files asked for, each once: an extra descriptor is refused. */
+function assertFilteredRead(files: readonly DirectUploadDescriptor[], asked: readonly string[]): void {
+  assertUniqueRemoteIds(files.map((file) => file.id), "session read");
+  const wanted = new Set(asked);
+  if (files.some((file) => !wanted.has(file.id))) throw new Error("Upload session read describes a file it was not asked for");
 }
 
 /** Puts the upload session's id on an error thrown out of an upload, so a caller can inspect or clean it up. */
@@ -1505,7 +1518,7 @@ function legacyFileError(error: DocSlurpApiError): UploadFileCompletionError {
   const retryable = error.status >= 500 || error.status === 429 || error.code === "upload_session_busy";
   // A coded answer decides; an uncoded one (an older server) falls back to its message, never to its status alone.
   const missing = isResendableCompletion(error) || (!error.code && /^(No object found|Upload parts are incomplete|Multipart completion for)/.test(error.message));
-  const reupload = !retryable && (missing || /^Uploaded size for/.test(error.message));
+  const reupload = !retryable && (missing || /^Uploaded size for|changed while its upload was being completed; upload it again/.test(error.message));
   const blocksSession = !retryable && error.status < 500 && error.status !== 409 && error.status !== 404
     && error.code !== "upload_object_missing" && !/^No object found/.test(error.message);
   return { statusCode: error.status, code: error.code ?? "rejected", message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession };
@@ -2713,6 +2726,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           session = await requestSessionCall<UploadSession>(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, {}, options, true);
         } catch { throw error; }
         // The refreshed targets must belong to the same file the local bytes were matched to.
+        assertFilteredRead(session.files, [descriptor.id]);
         const refreshed = refreshedDescriptor(session.files, descriptor);
         if (!refreshed) throw error;
         if (refreshed.status === "completed") return;
@@ -2730,39 +2744,37 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    */
   async function settleUninspected(sessionPath: string, uninspected: DirectUploadDescriptor[], options: UploadOptions): Promise<Map<string, DirectUploadDescriptor>> {
     const resend = new Map<string, DirectUploadDescriptor>();
+    const signal = options.signal ?? new AbortController().signal;
     for (let start = 0; start < uninspected.length; start += UNINSPECTED_COMPLETE_BATCH) {
       const chunk = uninspected.slice(start, start + UNINSPECTED_COMPLETE_BATCH);
       const missing: string[] = [];
-      type Answered = Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string; retryable?: boolean } }>;
-      let answered: Answered | null = null;
-      try {
-        const answer = await requestSessionCall<{ files?: Answered }>(`${sessionPath}/files/complete`,
-          jsonRequest("POST", { files: chunk.map((file) => ({ fileId: file.id })) }), options);
-        if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
-        answered = answer.files;
-      } catch (error) {
-        if (!isLegacyCompletionRefusal(error)) throw error;
-      }
-      if (answered !== null) {
-        assertUniqueRemoteIds((answered as Answered).map((result) => result.fileId), "completion result");
-        const byId = new Map((answered as Answered).map((result) => [result.fileId, result]));
-        for (const file of chunk) {
-          const result = byId.get(file.id);
-          if (result?.status === "completed") continue;
-          if (result?.error?.code && RESEND_COMPLETION_CODES.has(result.error.code)) { missing.push(file.id); continue; }
-          throw new Error(`Upload of ${file.filename} could not be completed (${result?.error?.code ?? "missing result"})`);
+      // Files answered retryable (the server's hold budget ran out: `upload_session_busy`; storage briefly unavailable:
+      // `upload_storage_unavailable`) go into the next batch, a few rounds with short waits.
+      let pending = chunk;
+      for (let round = 0; pending.length > 0; round++) {
+        const retry: DirectUploadDescriptor[] = [];
+        const settled = await completeUninspectedRound(sessionPath, pending, options);
+        for (const file of pending) {
+          const outcome = settled.get(file.id)!;
+          if (outcome === "completed") continue;
+          if (outcome === "missing") missing.push(file.id);
+          else if (outcome === "retry") retry.push(file);
+          else throw new Error(`Upload of ${file.filename} could not be completed (${outcome.code})`);
         }
-      } else {
-        // An older server without batch completion: one call per file, the same rule.
-        for (const file of chunk) {
-          try { await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: file.id }), options); }
-          catch (error) { if (!isResendableCompletion(error)) throw error; missing.push(file.id); }
+        if (retry.length === 0) break;
+        if (round >= UNINSPECTED_RETRY_ROUNDS) {
+          // Still not finished: the session is busy, not broken. Answered as busy, so the upload keeps (and names) it.
+          throw new DocSlurpApiError("Upload session is busy finalizing these files", 409,
+            { error: { code: "upload_session_busy", message: `${retry.length} files were not finalized in time` } });
         }
+        await sleep(UNINSPECTED_RETRY_DELAY_MS * 2 ** round, signal);
+        pending = retry;
       }
       if (!missing.length) continue;
       const query = missing.map((id) => `fileId=${encodeURIComponent(id)}`).join("&");
       const session = await requestSessionCall<UploadSession>(`${sessionPath}?${query}`, {}, options, true);
       if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
+      assertFilteredRead(session.files, missing);
       for (const id of missing) {
         const original = chunk.find((file) => file.id === id)!;
         const name = original.filename;
@@ -2774,6 +2786,53 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       }
     }
     return resend;
+  }
+
+  /**
+   * One completion round for uninspected files: one batch call (or, on an older server without batches, one call per
+   * file). Each file is `completed`, `missing` (send its bytes), `retry` (a retryable per-file answer, or a busy or
+   * unavailable single-file call) or a failure with its code.
+   */
+  async function completeUninspectedRound(sessionPath: string, files: DirectUploadDescriptor[], options: UploadOptions): Promise<Map<string, "completed" | "missing" | "retry" | { code: string }>> {
+    const outcomes = new Map<string, "completed" | "missing" | "retry" | { code: string }>();
+    type Answered = Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string; retryable?: boolean } }>;
+    let answered: Answered | null = null;
+    try {
+      const answer = await requestSessionCall<{ files?: Answered }>(`${sessionPath}/files/complete`,
+        jsonRequest("POST", { files: files.map((file) => ({ fileId: file.id })) }), options);
+      if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+      answered = answer.files;
+    } catch (error) {
+      if (!isLegacyCompletionRefusal(error)) throw error;
+    }
+    if (answered !== null) {
+      const results = answered as Answered;
+      assertUniqueRemoteIds(results.map((result) => result.fileId), "completion result");
+      const sent = new Set(files.map((file) => file.id));
+      if (results.some((result) => !sent.has(result.fileId ?? ""))) throw new Error("Upload completion result names a file this call did not send");
+      const byId = new Map(results.map((result) => [result.fileId, result]));
+      for (const file of files) {
+        const result = byId.get(file.id);
+        const code = result?.error?.code;
+        outcomes.set(file.id, result?.status === "completed" ? "completed"
+          : code && RESEND_COMPLETION_CODES.has(code) ? "missing"
+          : result?.error?.retryable ? "retry"
+          : { code: code ?? "missing result" });
+      }
+      return outcomes;
+    }
+    // An older server without batch completion: one call per file, the same rules.
+    for (const file of files) {
+      try {
+        await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: file.id }), options);
+        outcomes.set(file.id, "completed");
+      } catch (error) {
+        if (isResendableCompletion(error)) outcomes.set(file.id, "missing");
+        else if (isSessionBusyError(error) || (error instanceof DocSlurpApiError && error.status >= 500)) outcomes.set(file.id, "retry");
+        else throw error;
+      }
+    }
+    return outcomes;
   }
 
   /** The local file a session descriptor belongs to: by request index, then the client id, and only for older servers by name and size. */

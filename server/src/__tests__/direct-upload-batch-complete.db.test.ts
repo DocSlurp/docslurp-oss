@@ -36,6 +36,8 @@ const mocks = vi.hoisted(() => ({
   onCreateMultipart: null as null | (() => Promise<void>),
   multipartCreates: 0,
   multipartCompletes: 0,
+  /** A provider error name the next multipart completion fails with. */
+  completeFailure: null as string | null,
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -82,7 +84,9 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   signMultipartUploadPart: async () => { mocks.partSignatures += 1; return "https://storage.example/part"; },
   listMultipartUploadParts: async () => { mocks.listParts += 1; if (mocks.onListParts) await mocks.onListParts(); return mocks.parts; },
   createMultipartUpload: async () => { mocks.multipartCreates += 1; if (mocks.onCreateMultipart) await mocks.onCreateMultipart(); return `up-${mocks.multipartCreates}`; },
-  completeMultipartUpload: async ({ key }: { key: string }) => { mocks.multipartCompletes += 1; mocks.objects.set(key, { size: 20 * 1024 * 1024, etag: "\"mp\"" }); return {}; },
+  completeMultipartUpload: async ({ key }: { key: string }) => {
+    if (mocks.completeFailure) throw Object.assign(new Error(mocks.completeFailure), { name: mocks.completeFailure, $metadata: { httpStatusCode: 400 } });
+    mocks.multipartCompletes += 1; mocks.objects.set(key, { size: 20 * 1024 * 1024, etag: "\"mp\"" }); return {}; },
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
 
@@ -138,6 +142,7 @@ beforeEach(async () => {
   mocks.onCreateMultipart = null;
   mocks.multipartCreates = 0;
   mocks.multipartCompletes = 0;
+  mocks.completeFailure = null;
   // A held lock is answered at once here (production waits DOCSLURP_UPLOAD_LOCK_WAIT_MS first).
   (await import("../config.js")).env.directUploadLockWaitMs = 0;
   mocks.heads.length = 0;
@@ -227,6 +232,53 @@ describe("missing bytes have explicit codes", () => {
     const byId = Object.fromEntries(result.files.map(file => [file.fileId, file]));
     expect(byId.gone).toMatchObject({ status: "failed", error: { statusCode: 409, code: "upload_object_missing", retryable: false, action: "reupload", blocksSession: false } });
     expect(byId.mp).toMatchObject({ status: "failed", error: { statusCode: 409, code: "upload_parts_incomplete", retryable: false, action: "reupload" } });
+  });
+});
+
+describe("non-resend failures", () => {
+  async function seedMultipart(id: string, extra = "") {
+    await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status${extra ? ", unknown_size" : ""})
+      values ($1, $2, 'big.pdf', 'application/pdf', $3, $4, 'multipart', 'up-1', $5, 'pending'${extra ? ", true" : ""})`, [id, SESSION, 20 * 1024 * 1024, `u/${SESSION}/raw/${id}.pdf`, 8 * 1024 * 1024]);
+  }
+
+  it("answers a part below the provider's minimum (EntityTooSmall) without a resend code or a reupload action", async () => {
+    await seedMultipart("small");
+    mocks.parts = [{ partNumber: 1, sizeBytes: 8 * 1024 * 1024, etag: "\"1\"" }, { partNumber: 2, sizeBytes: 8 * 1024 * 1024, etag: "\"2\"" }, { partNumber: 3, sizeBytes: 4 * 1024 * 1024, etag: "\"3\"" }];
+    mocks.completeFailure = "EntityTooSmall";
+    const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "small" }] });
+    expect(result.files[0]).toMatchObject({ status: "failed", error: { statusCode: 400, action: "none", retryable: false } });
+    expect(["upload_parts_incomplete", "upload_object_missing"]).not.toContain((result.files[0] as { error: { code: string } }).error.code);
+  });
+
+  it("answers a stream file completed without its final sizeBytes with a non-blocking 409", async () => {
+    await seedMultipart("stream", "unknown");
+    const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "stream" }] });
+    expect(result.files[0]).toMatchObject({ status: "failed", error: { statusCode: 409, blocksSession: false } });
+    expect(["upload_parts_incomplete", "upload_object_missing"]).not.toContain((result.files[0] as { error: { code: string } }).error.code);
+  });
+});
+
+describe("the session read authorizes its seals once per wave (M1)", () => {
+  it("checks the key once per wave of concurrent seals, not once per file, and still refuses a revoked key", async () => {
+    await db.query("delete from api_keys where id = 'k-u'");
+    await db.query(`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes, allowed_domains, project_ids)
+      values ('k-u', 'u', 'o', 'hash-k-u', 'Ingest', 'server', '{ingest}', '{}', '{}')`);
+    await db.query("update upload_sessions set api_key_id = 'k-u' where id = $1", [SESSION]);
+    for (let i = 0; i < 16; i++) await seedFile(SESSION, `w${i}`, { size: 10, etag: `"w${i}"` });
+    const { env } = await import("../config.js");
+    const lanes = env.directUploadFinalizeConcurrency;
+    let keyChecks = 0;
+    const query = mocks.query.getMockImplementation()!;
+    mocks.query.mockImplementation((text: string, values: unknown[]) => {
+      if (text.includes("from api_keys k")) keyChecks += 1;
+      return query(text, values);
+    });
+    try {
+      await getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u");
+      // One check per wave of `lanes` seals, plus the one right before signing.
+      expect(mocks.copies).toHaveLength(16);
+      expect(keyChecks).toBe(Math.ceil(16 / lanes) + 1);
+    } finally { mocks.query.mockImplementation(query); }
   });
 });
 

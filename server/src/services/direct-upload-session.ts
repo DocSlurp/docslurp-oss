@@ -545,6 +545,20 @@ function assertMaySignNow(signal: AbortSignal, requestSignal?: AbortSignal): voi
   }
 }
 
+/**
+ * One authorization check shared by up to `size` dispatches (a wave of concurrent seals): the first dispatch of each
+ * wave runs a fresh check, the rest of that wave reuse its answer (a refusal refuses them all).
+ */
+function perWave(check: () => Promise<void>, size: number): () => Promise<void> {
+  let current: Promise<void> | null = null;
+  let uses = 0;
+  return () => {
+    if (!current || uses >= Math.max(1, size)) { current = check(); uses = 0; }
+    uses += 1;
+    return current;
+  };
+}
+
 /** The most files one full session read may name with `fileId`. */
 export const MAX_DESCRIBE_FILE_IDS = 1_000;
 
@@ -583,13 +597,15 @@ export async function getDirectUploadSessionDescription(
       const open = loaded.files.filter(file => file.status === "pending" && !file.unknown_size);
       const budget = lockHoldBudget(signal);
       const sessionRow = loaded.session;
+      const sealAuthorization = perWave(() => assertMayMintTargets(sessionRow, userId, credentialKeyId), env.directUploadFinalizeConcurrency);
       const inspected = await settleBounded(open, env.directUploadFinalizeConcurrency, async file => {
         let exists = false;
         try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, budget.signal), undefined, budget.signal); exists = true; }
         catch (error) { if (!isStorageNotFound(error)) throw error; }
         if (!exists) return;
-        // Sealing an uploaded object is an external dispatch: authorized immediately before each write it sends.
-        await finalizeDirectUploadFile(file, undefined, { signal: budget.signal, authorize: () => assertMayMintTargets(sessionRow, userId, credentialKeyId) });
+        // Sealing an uploaded object is an external dispatch, authorized right before its writes: once per wave of
+        // concurrent seals (per-file checks would spend the hold budget on queries and leave more files uninspected).
+        await finalizeDirectUploadFile(file, undefined, { signal: budget.signal, authorize: sealAuthorization });
       }, { shouldStart: budget.shouldStart });
       for (const [i, result] of inspected.entries()) {
         if (result.status === "rejected" && result.reason === NOT_STARTED) uninspected.add(open[i]!.id);
@@ -930,7 +946,8 @@ export const PARTS_INCOMPLETE_MESSAGE = "Upload parts are incomplete or have inc
  */
 function notFinalizedError(file: UploadSessionFileRow, entry: CompleteDirectUploadFileEntry): ProjectIntakeError {
   if (file.status !== "pending") return new ProjectIntakeError(`${file.filename} is ${file.status}`, 409);
-  if (file.unknown_size && entry.sizeBytes === undefined) return new ProjectIntakeError(`Complete ${file.filename} with its final sizeBytes`, 400);
+  // Not a session-blocking failure: the client completes it again with its final size.
+  if (file.unknown_size && entry.sizeBytes === undefined) return new ProjectIntakeError(`Complete ${file.filename} with its final sizeBytes`, 409);
   if (file.upload_mode === "single") {
     return new ProjectIntakeError(`No object found in storage for ${file.filename}: PUT its bytes to the file's putUrl, then complete it again`, 409, undefined, "upload_object_missing");
   }
@@ -959,7 +976,8 @@ const REUPLOAD_MESSAGES = ["Upload parts are incomplete", "No object found", "Up
 export function describeFileFailure(error: ProjectIntakeError): DirectUploadFileError {
   const code = error.code ?? rejectionCode(error);
   const retryable = error.statusCode >= 500 || code === "upload_session_busy";
-  const reupload = !retryable && (code === "upload_object_missing" || code === "upload_parts_incomplete"
+  // A part below the provider's minimum size comes from the server's own layout: no client resend can fix it.
+  const reupload = !retryable && !error.message.includes("(EntityTooSmall)") && (code === "upload_object_missing" || code === "upload_parts_incomplete"
     || error.message.includes("changed while its upload was being completed")
     || REUPLOAD_MESSAGES.some(prefix => error.message.startsWith(prefix)));
   // Mirrors the reconciler's terminal rule (a 4xx other than 409) for what it meets on its own: an absent object is
@@ -1292,7 +1310,8 @@ function multipartCompletionError(error: unknown, filename: string): unknown {
     case "InvalidPartOrder":
       return new ProjectIntakeError(`Multipart completion for ${filename} failed: parts must be in ascending partNumber order (InvalidPartOrder)`, 400);
     case "EntityTooSmall":
-      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a non-final part is smaller than the storage provider's minimum part size (EntityTooSmall)`, 400, undefined, "upload_parts_incomplete");
+      // Resending the same layout cannot fix it: not a "send the bytes again" code.
+      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a non-final part is smaller than the storage provider's minimum part size (EntityTooSmall)`, 400);
     case "NoSuchUpload":
       return new ProjectIntakeError(`Multipart upload for ${filename} is no longer open (expired, aborted or already completed); create a new upload session`, 400);
     default:

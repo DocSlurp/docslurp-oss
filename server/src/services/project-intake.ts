@@ -692,10 +692,12 @@ export async function intakeIntoProject(
     const target = await resolveIntakeTarget(request, records);
     const existing = "existing" in target ? target.existing : null;
     const toCreate = "create" in target ? target.create : {};
+    // The credential must still cover the resolved organization and project before anything else is said about the
+    // project (a key that lost access gets 403, never a reindex answer that discloses its index state) and before any
+    // item is fetched or stored.
+    await request.authorizeExternalWork?.({ orgId: existing?.orgId ?? request.orgId ?? null, projectId: existing?.id ?? null });
     // Checked before any bytes are read or stored (see assertUploadKeepsIndexIdentity).
     if (existing) await assertUploadKeepsIndexIdentity(existing, request.pipeline, records);
-    // The credential must still cover the resolved organization and project before any item is fetched or stored.
-    await request.authorizeExternalWork?.({ orgId: existing?.orgId ?? request.orgId ?? null, projectId: existing?.id ?? null });
 
     // "Untitled project" is the placeholder for "name it for me", not a chosen name.
     const chosenName = toCreate.name && !isUntitledProjectName(toCreate.name) ? toCreate.name : undefined;
