@@ -8,6 +8,7 @@ import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { env } from "../config.js";
 import { reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
 import { settleBounded } from "../lib/bounded-settle.js";
+import { isTransientStorageError, withStorageRetry } from "../lib/storage-retry.js";
 import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
 import {
@@ -201,7 +202,8 @@ function fileRef(file: UploadSessionFileRow) {
 async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: number, partCount: number): Promise<Array<{ partNumber: number; etag: string }>> {
   if (file.status !== "pending" || !file.upload_id) return [];
   let parts: Awaited<ReturnType<typeof listMultipartUploadParts>>;
-  try { parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id }); }
+  const uploadId = file.upload_id;
+  try { parts = await withStorageRetry(() => listMultipartUploadParts({ key: file.source_key, uploadId })); }
   catch (error) {
     if (storageErrorName(error) === "NoSuchUpload") throw new ProjectIntakeError("Upload transfer no longer exists; reconciliation is required", 409, undefined, "intake_reconciliation_required");
     throw error;
@@ -461,7 +463,7 @@ export async function getDirectUploadSessionDescription(
       const open = loaded.files.filter(file => file.status === "pending" && !file.unknown_size);
       const inspected = await settleBounded(open, env.directUploadFinalizeConcurrency, async file => {
         let exists = false;
-        try { await getUploadedObjectMetadata(file.source_key); exists = true; }
+        try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key)); exists = true; }
         catch (error) { if (!isStorageNotFound(error)) throw error; }
         if (exists) await finalizeDirectUploadFile(file);
       });
@@ -485,15 +487,28 @@ export function assertUploadSessionActive(session: UploadSessionRow): number {
   return Math.min(SIGNED_UPLOAD_TTL_SECONDS, remaining);
 }
 
-/** Cross-process serialization: the dedicated connection owns the lock until release. */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy"): Promise<T> {
-  const { connection, release } = await reserveDirectUploadLockConnection();
-  try {
-    const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
-    if (!lock?.acquired) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
-    try { return await run(); }
-    finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
-  } finally { release(); }
+/** How often a caller that may wait for a held session lock tries it again. */
+const LOCK_RETRY_INTERVAL_MS = 250;
+
+/**
+ * Cross-process serialization: the dedicated connection owns the lock until release. A held lock answers 409
+ * `upload_session_busy` at once, or after `waitMs` of retries. A waiting caller releases its lock connection between
+ * tries: the per-process lock pool is tiny and must stay free for the holder and other sessions.
+ */
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy", waitMs = 0): Promise<T> {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  for (;;) {
+    const { connection, release } = await reserveDirectUploadLockConnection();
+    try {
+      const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
+      if (lock?.acquired) {
+        try { return await run(); }
+        finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
+      }
+    } finally { release(); }
+    if (Date.now() >= deadline) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
+    await new Promise(resolve => setTimeout(resolve, Math.min(LOCK_RETRY_INTERVAL_MS, Math.max(1, deadline - Date.now()))));
+  }
 }
 
 export function validMultipartLayout(parts: Array<{ partNumber: number; sizeBytes: number }>, size: number, partSize: number): boolean {
@@ -501,8 +516,26 @@ export function validMultipartLayout(parts: Array<{ partNumber: number; sizeByte
   return parts.every((part, i) => part.partNumber === i + 1 && part.sizeBytes === Math.min(partSize, size - i * partSize));
 }
 
+/**
+ * A failure of storage or the database while finalizing is the server's, never the client's: it is a retryable 503
+ * (`upload_storage_unavailable`), with the provider's own error only in the log. Definite answers stay as they are.
+ */
+export function uploadStorageUnavailable(error: unknown, context: string): ProjectIntakeError {
+  console.error(`[direct-upload] status=storage-unavailable ${context}`, error instanceof Error ? error.name : "unknown", isTransientStorageError(error) ? "transient" : "other");
+  return new ProjectIntakeError("Upload storage is temporarily unavailable; retry shortly", 503, undefined, "upload_storage_unavailable");
+}
+
 /** Storage is authoritative: never assemble a caller's unverified part manifest. */
 export async function finalizeDirectUploadFile(file: UploadSessionFileRow, finalSize?: number): Promise<boolean> {
+  try {
+    return await finalizeDirectUploadFileUnclassified(file, finalSize);
+  } catch (error) {
+    if (error instanceof ProjectIntakeError) throw error;
+    throw uploadStorageUnavailable(error, `file=${file.id}`);
+  }
+}
+
+async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, finalSize?: number): Promise<boolean> {
   if (file.status === "completed") return true;
   if (file.status !== "pending") return false;
   if (file.unknown_size && finalSize === undefined) return false;
@@ -519,11 +552,19 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
   } catch (error) {
     if (!isStorageNotFound(error) && !(error instanceof ProjectIntakeError && error.message.startsWith("No object found"))) throw error;
     if (file.upload_mode !== "multipart" || !file.upload_id) return false;
-    const parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id });
+    const uploadId = file.upload_id;
+    const parts = await withStorageRetry(() => listMultipartUploadParts({ key: file.source_key, uploadId }));
     if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return false;
-    try { await completeMultipartUpload({ key: file.source_key, uploadId: file.upload_id, parts }); }
-    catch (error) { throw multipartCompletionError(error, file.filename); }
-    verified = await verifyCompletedDirectUpload(file);
+    let assembled: { etag: string | null } | null = null;
+    try { await withStorageRetry(() => completeMultipartUpload({ key: file.source_key, uploadId, parts })); }
+    catch (error) {
+      // A retried completion whose earlier answer was lost finds the upload already closed: storage decides. Only the
+      // server completes uploads (clients hold part URLs only), so an object of the verified size is this one.
+      if (storageErrorName(error) !== "NoSuchUpload") throw multipartCompletionError(error, file.filename);
+      assembled = await verifyCompletedDirectUpload(file).catch(() => null);
+      if (!assembled) throw multipartCompletionError(error, file.filename);
+    }
+    verified = assembled ?? await verifyCompletedDirectUpload(file);
     await sql`update upload_session_files set completed_parts = ${sql.json(parts)} where id = ${file.id}`;
   }
   // A single-part file's presigned PUT stays valid for its whole TTL, so the client could replace
@@ -574,7 +615,8 @@ async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null)
   if (!etag) throw new ProjectIntakeError(`Unable to verify the uploaded version of ${file.filename}`, 400);
   const sealed = sealedSourceKey(file);
   try {
-    await copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag });
+    // Idempotent: the same If-Match copy repeated after a lost answer writes the same bytes again.
+    await withStorageRetry(() => copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag }));
   } catch (error) {
     if (storageErrorName(error) === "PreconditionFailed" || (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 412) {
       throw new ProjectIntakeError(`${file.filename} changed while its upload was being completed; upload it again`, 409);
@@ -595,7 +637,7 @@ export const CLIENT_FINALIZING_HOLD_SECONDS = 30;
 
 export type DirectUploadFileCompletion =
   | { fileId: string; status: "completed" }
-  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string } };
+  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string; retryable: boolean } };
 
 type FinalizeOutcome = { fileId: string; completed: true } | { fileId: string; completed: false; error: unknown };
 
@@ -647,9 +689,10 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
 }
 
 /** The single-file `files/complete` body: throws the file's own error, exactly as before batching existed. */
-export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput) {
-  const { outcomes: [outcome] } = await finalizeSessionFiles(input.sessionId, input.userId, [input]);
+export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput): Promise<{ sessionComplete: boolean }> {
+  const { outcomes: [outcome], sessionComplete } = await finalizeSessionFiles(input.sessionId, input.userId, [input]);
   if (outcome && !outcome.completed) throw outcome.error;
+  return { sessionComplete };
 }
 
 /**
@@ -661,11 +704,12 @@ export async function completeDirectUploadFiles(input: { sessionId: string; user
   const files = outcomes.map((outcome): DirectUploadFileCompletion => {
     if (outcome.completed) return { fileId: outcome.fileId, status: "completed" };
     if (outcome.error instanceof ProjectIntakeError) {
-      return { fileId: outcome.fileId, status: "failed", error: { statusCode: outcome.error.statusCode, code: outcome.error.code ?? rejectionCode(outcome.error), message: outcome.error.message } };
+      const code = outcome.error.code ?? rejectionCode(outcome.error);
+      return { fileId: outcome.fileId, status: "failed", error: { statusCode: outcome.error.statusCode, code, message: outcome.error.message, retryable: outcome.error.statusCode >= 500 || code === "upload_session_busy" } };
     }
     // Provider and database errors can carry credentials or internals: log the name only, answer a generic retryable error.
-    console.error(`[direct-upload] status=complete-failed session=${input.sessionId} file=${outcome.fileId}`, outcome.error instanceof Error ? outcome.error.name : "unknown");
-    return { fileId: outcome.fileId, status: "failed", error: { statusCode: 503, code: "upload_storage_unavailable", message: "Upload storage evidence is unavailable; retry this file" } };
+    const unavailable = uploadStorageUnavailable(outcome.error, `session=${input.sessionId} file=${outcome.fileId}`);
+    return { fileId: outcome.fileId, status: "failed", error: { statusCode: unavailable.statusCode, code: unavailable.code!, message: unavailable.message, retryable: true } };
   });
   const completedCount = files.filter(file => file.status === "completed").length;
   return { files, completedCount, failedCount: files.length - completedCount, sessionComplete };
@@ -704,10 +748,11 @@ async function abortDirectUploadSessionUnlocked(
   sessionId: string,
   userId: string,
 ): Promise<boolean> {
-  const loaded = await loadDirectUploadSession(sessionId, userId);
-  if (!loaded) {
+  const session = await loadDirectUploadSessionRow(sessionId, userId);
+  if (!session) {
     return false;
   }
+  const loaded = { session };
 
   if (loaded.session.status === "confirmed" || loaded.session.status === "ingesting") throw new ProjectIntakeError("Ingested uploads cannot be aborted", 409);
 
@@ -733,8 +778,9 @@ async function abortDirectUploadSessionUnlocked(
   return true;
 }
 
-export async function abortDirectUploadSession(sessionId: string, userId: string): Promise<boolean> {
-  return withDirectUploadLock(sessionId, () => abortDirectUploadSessionUnlocked(sessionId, userId));
+/** `lockWaitMs`: how long to wait out a reconciler pass or another request holding the session (0: answer busy at once). */
+export async function abortDirectUploadSession(sessionId: string, userId: string, lockWaitMs = 0): Promise<boolean> {
+  return withDirectUploadLock(sessionId, () => abortDirectUploadSessionUnlocked(sessionId, userId), undefined, undefined, lockWaitMs);
 }
 
 export function assertDirectUploadSessionReadyForIntake(
@@ -814,7 +860,7 @@ async function verifyCompletedDirectUpload(
 ): Promise<{ etag: string | null }> {
   let metadata: Awaited<ReturnType<typeof getUploadedObjectMetadata>>;
   try {
-    metadata = await getUploadedObjectMetadata(file.source_key);
+    metadata = await withStorageRetry(() => getUploadedObjectMetadata(file.source_key));
   } catch (error) {
     if (isStorageNotFound(error)) {
       throw new ProjectIntakeError(

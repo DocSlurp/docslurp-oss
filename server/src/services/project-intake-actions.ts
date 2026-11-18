@@ -274,7 +274,8 @@ export function parseFormProjectIntakePipeline(raw: unknown): PipelineFeatureOve
 }
 
 export async function confirmDirectUploadProjectIntake(
-  args: { sessionId: string; userId: string; audit?: ProjectIntakeAudit },
+  /** `lockWaitMs`: how long to wait out a reconciler pass or another request holding the session (0: answer busy at once). */
+  args: { sessionId: string; userId: string; audit?: ProjectIntakeAudit; lockWaitMs?: number },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
   return withDirectUploadLock(args.sessionId, async () => {
@@ -341,7 +342,7 @@ export async function confirmDirectUploadProjectIntake(
     const result = actionResult(intake);
     await persistDirectUploadResult(args.sessionId, result);
     return result;
-  });
+  }, undefined, undefined, args.lockWaitMs ?? 0);
 }
 
 async function persistDirectUploadResult(sessionId: string, result: ProjectIntakeActionResult) {

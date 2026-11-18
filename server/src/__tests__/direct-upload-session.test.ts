@@ -188,7 +188,7 @@ describe("Direct Upload Session Module", () => {
       getUploadedObjectMetadata.mockResolvedValue({ contentLength: actualSize, etag: "etag" });
       const completing = completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1" });
       if (actualSize === 42) {
-        await expect(completing).resolves.toBeUndefined();
+        await expect(completing).resolves.toEqual({ sessionComplete: false });
         expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
       } else {
         await expect(completing).rejects.toThrow();
@@ -389,8 +389,11 @@ describe("authoritative recovery evidence", () => {
   });
   it.each(["AccessDenied", "TimeoutError", "NoSuchUpload"])("never signs retry URLs when inventory fails: %s", async name => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u", part_size: 8 };
-    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("private provider detail"), { name }));
+    // Every attempt fails: a transient name is retried, then still refused.
+    const failure = Object.assign(new Error("private provider detail"), { name });
+    listMultipartUploadParts.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
     await expect(buildDirectUploadFileDescriptor(file)).rejects.toThrow();
+    listMultipartUploadParts.mockReset();
   });
   it("retries a wrong-sized part despite a stale completed receipt", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u", part_size: 42, completed_parts: [{ partNumber: 1, etag: "stale" }] };
@@ -433,7 +436,8 @@ describe("full recovery inspection", () => {
     const fixture = installSession();
     Object.assign(fixture.files[0], { upload_mode: "multipart", upload_id: "open", part_size: 42 });
     getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("missing"), { name: "NotFound" }));
-    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("secret provider detail"), { name }));
+    const providerFailure = Object.assign(new Error("secret provider detail"), { name });
+    listMultipartUploadParts.mockReset().mockRejectedValue(providerFailure);
     const failure = await getDirectUploadSessionDescription("session-1", "user-1").catch(error => error);
     expect(failure).toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
     expect(failure.message).not.toContain("secret provider detail");

@@ -66,6 +66,8 @@ import {
 } from "../services/project-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
+import { isTransientStorageError } from "../lib/storage-retry.js";
+import { kickDirectUploadReconcile } from "../services/direct-upload-reconciler.js";
 import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 import { findDefaultProject, getProject } from "../services/projects.js";
 import { IndexingModeError } from "../services/project-indexing-mode.js";
@@ -252,7 +254,29 @@ export function projectIntakeErrorResponse(
     return null;
   }
 
+  // Retryable session states tell the client when to repeat the same request.
+  if (error.code === "upload_storage_unavailable") c.header("Retry-After", String(UPLOAD_STORAGE_RETRY_AFTER_SECONDS));
+  if (error.code === "upload_session_busy") c.header("Retry-After", "1");
   return apiStatusError(c, error.statusCode, error.message, { ...(error.code ? { code: error.code } : {}), ...(error.issues ? { details: { issues: error.issues } } : {}) });
+}
+
+const UPLOAD_STORAGE_RETRY_AFTER_SECONDS = 5;
+/** How long confirm and abort wait out another holder of the session lock before answering 409 upload_session_busy. */
+const CONFIRM_LOCK_WAIT_MS = 10_000;
+const ABORT_LOCK_WAIT_MS = 5_000;
+
+/**
+ * The answer for an unexpected failure on an upload-session route. A storage provider or network failure is a
+ * retryable 503 (`upload_storage_unavailable`, Retry-After), never a client error; anything else is a 500. Either way
+ * the raw error goes to the log only.
+ */
+export function uploadServerErrorResponse(c: Context, error: unknown): Response {
+  if (isTransientStorageError(error)) {
+    reportPublicError(error);
+    c.header("Retry-After", String(UPLOAD_STORAGE_RETRY_AFTER_SECONDS));
+    return apiStatusError(c, 503, "Upload storage is temporarily unavailable; retry shortly", { code: "upload_storage_unavailable" });
+  }
+  return apiStatusError(c, 500, reportPublicError(error));
 }
 
 /**
@@ -405,13 +429,15 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
         try {
           const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files });
+          // The last file is in: start ingestion now rather than at the next sweep (after this request's lock is released).
+          if (result.sessionComplete) kickDirectUploadReconcile(sessionId);
           return c.json({ ok: result.failedCount === 0, ...result });
         } catch (error) {
-          return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 503, reportPublicError(error));
+          return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
         }
       }
       try {
-        await completeDirectUploadFile({
+        const completed = await completeDirectUploadFile({
           sessionId,
           userId,
           fileId: body.fileId,
@@ -419,11 +445,10 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           sizeBytes: body.sizeBytes,
           parts: body.parts,
         });
+        if (completed?.sessionComplete) kickDirectUploadReconcile(sessionId);
       } catch (error) {
-        return (
-          projectIntakeErrorResponse(c, error) ??
-          apiStatusError(c, 400, reportPublicError(error))
-        );
+        // Never a 400 for a server-side failure: a client would treat it as permanent and abandon the upload.
+        return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
       }
 
       return c.json({ ok: true });
@@ -432,7 +457,13 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
   .post("/direct/sessions/:sessionId/abort", async (c) => {
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
-    const aborted = await abortDirectUploadSession(sessionId, userId);
+    let aborted: boolean;
+    try {
+      aborted = await abortDirectUploadSession(sessionId, userId, ABORT_LOCK_WAIT_MS);
+    } catch (error) {
+      // A held lock (the reconciler or another request) is a retryable 409 upload_session_busy; an ingested session 409.
+      return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
+    }
     if (!aborted) {
       return apiStatusError(c, 404, "Upload session not found");
     }
@@ -447,6 +478,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       result = await confirmDirectUploadProjectIntake({
         sessionId,
         userId,
+        // A reconciler pass (or the kick after the last complete) may hold the session briefly: wait it out.
+        lockWaitMs: CONFIRM_LOCK_WAIT_MS,
         audit: {
           ipAddress: requestIp(c),
           userAgent: requestUserAgent(c),
@@ -457,7 +490,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       return (
         projectIntakeErrorResponse(c, error) ??
         runCreationErrorResponse(c, error) ??
-        apiStatusError(c, 500, reportPublicError(error))
+        uploadServerErrorResponse(c, error)
       );
     }
 
