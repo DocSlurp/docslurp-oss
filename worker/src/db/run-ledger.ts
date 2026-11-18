@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
 import { flushAssetLedger, postgresDocumentAssets, writeDocumentAssetLedger, type DocumentAssets } from "./document-asset-ledger.js";
-import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyPrivateModelMode, runModelModeStamp, applyKillSwitchesToPipeline, applyLadderLimits, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { completingDocumentStamp, runReusesExtraction, runStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
@@ -2100,11 +2100,12 @@ function mapRun(row: ProjectRunRow): ProjectRun {
     pagesTotal: row.pages_total,
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
-    // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
+    // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings, and so
+    // does the operator's private model map (DOCSLURP_MODEL_MODE, DOCSLURP_PRIVATE_*_MODEL) where hosted models are not allowed.
     // The Auto ladder's limits (pipeline.ladder) are applied once here: Auto capped at the fast rung reads as Fast, and
     // chart export below the intelligent rung keeps its free tier. Every stage reads this pipeline. DOCSLURP_DISABLE
     // lowers it last (`ai`: smart runs as balanced without rescue reads; `ai-rescue`; `charts`/`charts-ai`).
-    pipeline: applyKillSwitchesToPipeline(applyLadderLimits(applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`))), process.env),
+    pipeline: applyKillSwitchesToPipeline(applyLadderLimits(applyPrivateModelMode({ ...applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`)), ...runModelModeStamp(row.pipeline) })), process.env),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},

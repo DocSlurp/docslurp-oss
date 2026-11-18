@@ -14,6 +14,7 @@ import {
   deferredProfilesEnabled,
   effectiveIndexingMode,
   estimatePipelineWork,
+  applyPrivateModelMode,
   indexConfigHash,
   indexConfigOf,
   isBillingEnforced,
@@ -293,8 +294,10 @@ export async function planProjectChange(args: {
   const reindex: ReindexMode | null =
     base.kind === "reindex-required" ? "required" : base.kind === "reindex-recommended" ? "recommended" : null;
 
-  const beforeConfig = indexConfigOf(project.pipeline);
-  const afterConfig = indexConfigOf(nextPipeline);
+  // Index identity is the effective one (the operator's private model where hosted ones are not allowed), as the worker
+  // stamps it on documents and search serves it.
+  const beforeConfig = indexConfigOf(applyPrivateModelMode(project.pipeline));
+  const afterConfig = indexConfigOf(applyPrivateModelMode(nextPipeline));
   const hashChanged = indexConfigHash(beforeConfig) !== indexConfigHash(afterConfig);
   let targets: ReindexTarget[] = [];
   if (reindex) {

@@ -227,6 +227,13 @@ describe("which pages the reader reads", () => {
     expect(h.hosted.map((call) => call.page).sort()).toEqual([1, 2]);
   });
 
+  it("never sends a standard project's pages to the reader in private model mode", () => {
+    register(reader(echo).provider);
+    const standard = runState(pdf());
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    expect(visionPageReaderDecision(standard, standard.run.pipeline.vision, { DOCSLURP_VISION_PAGE_READER: "all" })).toEqual({ refused: "privacy-mode" });
+  });
+
   it("keeps a run pinned to a local or operator-private vision model on that model", () => {
     register(reader(echo).provider);
     const document = pdf();

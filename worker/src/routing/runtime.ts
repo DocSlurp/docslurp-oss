@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  privacyModeAllowsHosted,
   automaticCallMarginDecision,
   buildDecisionModelCatalog,
   logAutomaticCallDecision,
@@ -198,7 +199,8 @@ export function buildRuntimeCatalog(
     ...(checkedAt ? { checkedAt } : {}),
   }).targets);
   const decisionAll = buildDecisionModelCatalog({ env, disableNonFree }).models;
-  const hostedAllowed = options.privacyMode === undefined || options.privacyMode === null || options.privacyMode === "standard";
+  // Private model mode (DOCSLURP_MODEL_MODE=private) admits no hosted target or decision model for any project.
+  const hostedAllowed = privacyModeAllowsHosted(options.privacyMode);
   return {
     allTargets: all,
     targets: hostedAllowed ? all : all.filter((t) => t.availability.privacyClass !== "hosted"),
