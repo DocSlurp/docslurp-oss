@@ -308,14 +308,14 @@ export function createStageExecution(deps: {
     }
 
     // First pickup only (the stamp is conditional): start latency, split by whether this worker was already running.
-    await noteRunMilestone(store, run.id, "worker_started", { start: workerStartKind() });
-    // Which models serve the run, per service (first pickup only). A record, never a reason to fail the run.
-    const recordResolved = (store as { recordResolvedModels?(runId: string, models: Record<string, unknown>): Promise<void> }).recordResolvedModels;
-    if (recordResolved) {
-      await recordResolved.call(store, run.id, resolvedRunModels(config, run.pipeline)).catch((error: unknown) => {
-        console.warn(`[run-models] run=${run.id} resolved models not recorded: ${error instanceof Error ? error.name : "error"}`);
-      });
+    // The same stamp records which models serve the run, per service: a record, never a reason to fail the run.
+    let resolvedModels: Record<string, unknown> | undefined;
+    try {
+      resolvedModels = resolvedRunModels(config, run.pipeline);
+    } catch (error) {
+      console.warn(`[run-models] run=${run.id} resolved models not recorded: ${error instanceof Error ? error.name : "error"}`);
     }
+    await noteRunMilestone(store, run.id, "worker_started", { start: workerStartKind() }, { resolvedModels });
 
     // Log start event
     await store.appendEvent(

@@ -70,7 +70,7 @@ export interface CheckpointStore {
   creditLeaseWouldExhaust(state: WorkflowState): boolean;
   setPagesStageComplete(runId: string, documentId: string, stageName: string, pageNumbers: number[]): Promise<void>;
   /** Stamps a run milestone once; null when already stamped (pipeline/run-milestones.ts). */
-  markRunMilestone(runId: string, milestone: import("./run-milestones.js").RunMilestone): Promise<import("./run-milestones.js").RunMilestoneHit | null>;
+  markRunMilestone(runId: string, milestone: import("./run-milestones.js").RunMilestone, extra?: import("./run-milestones.js").RunMilestoneExtra): Promise<import("./run-milestones.js").RunMilestoneHit | null>;
   setPageStageComplete(runId: string, documentId: string, stageName: string, pageNumber: number): Promise<void>;
   getCompletedPages(runId: string, documentId: string, stageName: string): Promise<Set<number>>;
   /** Audit rows for provider calls the run's privacy mode blocked (lib/privacy-guard.ts). */

@@ -50,10 +50,12 @@ describe("project_runs.resolved_models", () => {
   }, 120_000);
   afterAll(async () => { await server?.stop(); await db?.close(); });
 
-  it("is written at the first pickup and kept on a resume", async () => {
-    await store.recordResolvedModels("run-1", { text: { uri: "llm://openrouter/vendor/text-1" } });
-    await store.recordResolvedModels("run-1", { text: { uri: "llm://openrouter/vendor/text-2" } });
-    await store.recordResolvedModels("run-1", {});
+  it("is written by the first-pickup stamp and kept on a resume", async () => {
+    expect(await store.markRunMilestone("run-1", "worker_started", { resolvedModels: { text: { uri: "llm://openrouter/vendor/text-1" } } })).not.toBeNull();
+    // A resume: the stamp is already set, so neither the milestone nor the models change.
+    expect(await store.markRunMilestone("run-1", "worker_started", { resolvedModels: { text: { uri: "llm://openrouter/vendor/text-2" } } })).toBeNull();
+    // Another milestone without models leaves them alone.
+    await store.markRunMilestone("run-1", "first_page_extracted");
     await store.close();
     const rows = await db.query<{ resolved_models: unknown }>(`select resolved_models from project_runs where id = 'run-1'`);
     expect(rows.rows).toEqual([{ resolved_models: { text: { uri: "llm://openrouter/vendor/text-1" } } }]);

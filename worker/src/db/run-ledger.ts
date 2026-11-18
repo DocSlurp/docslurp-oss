@@ -1,4 +1,4 @@
-import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneHit } from "../pipeline/run-milestones.js";
+import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneExtra, type RunMilestoneHit } from "../pipeline/run-milestones.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { type GeoFinalSource } from "./geo-final-source.js";
@@ -1856,19 +1856,13 @@ export class PostgresRunLedger implements CheckpointStore {
   }
 
   /** Stamps a run milestone the first time it happens; null when it was already stamped (pipeline/run-milestones.ts). */
-  /** Records the models that serve the run (`project_runs.resolved_models`, migration 0192), once: a resume keeps the first map. */
-  async recordResolvedModels(runId: string, models: Record<string, unknown>): Promise<void> {
-    if (Object.keys(models).length === 0) return;
-    await this.sql`
-      update project_runs set resolved_models = ${this.sql.json(models as never)}
-      where id = ${runId} and resolved_models is null
-    `;
-  }
-
-  async markRunMilestone(runId: string, milestone: RunMilestone): Promise<RunMilestoneHit | null> {
+  async markRunMilestone(runId: string, milestone: RunMilestone, extra?: RunMilestoneExtra): Promise<RunMilestoneHit | null> {
     const column = this.sql(RUN_MILESTONE_COLUMNS[milestone]);
+    // The first-pickup stamp also records the run's resolved models (same row, same once-only condition), so
+    // recording them costs no extra statement.
+    const models = extra?.resolvedModels && Object.keys(extra.resolvedModels).length > 0 ? extra.resolvedModels : null;
     const [row] = await this.sql<{ seconds: number; pages: number }[]>`
-      update project_runs set ${column} = now()
+      update project_runs set ${column} = now()${models ? this.sql`, resolved_models = coalesce(resolved_models, ${this.sql.json(models as never)})` : this.sql``}
       where id = ${runId} and ${column} is null
       returning extract(epoch from (now() - created_at))::float8 as seconds, coalesce(pages_total, 0)::int as pages
     `;
