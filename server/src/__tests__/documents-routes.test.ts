@@ -224,7 +224,10 @@ describe("documentsRoutes API key content updates", () => {
     const single = deleteDocumentMock.mock.calls.at(-1)?.[2] as (row: unknown) => Record<string, unknown>;
     expect(single({ documentId: "doc-1", projectId: "ws-1", filename: "a.md", runId: "run-1", sourceKey: "k" })).toMatchObject({ action: "document.deleted", apiKeyId: "key-1" });
     expect((await app.request("/documents/doc-1/tags", json("PUT", { tags: ["docs"] }))).status).toBe(200);
-    expect(setDocumentTagsMock).toHaveBeenCalledWith("doc-1", "user-1", ["docs"]);
+    expect(setDocumentTagsMock).toHaveBeenCalledWith("doc-1", "user-1", ["docs"], expect.any(Function));
+    // The record the service writes in the replacement's transaction (it adds the org and project).
+    const tagRecord = (setDocumentTagsMock.mock.calls.at(-1)?.[3] as (tags: string[]) => Record<string, unknown>)(["docs"]);
+    expect(tagRecord).toMatchObject({ action: "document.tags.updated", apiKeyId: "key-1", resourceId: "doc-1", metadata: { tags: ["docs"] } });
     const bulk = await app.request("/documents/bulk", json("POST", { action: "delete", documentIds: ["doc-1", "doc-2"] }));
     expect(bulk.status).toBe(200);
     expect(deleteDocumentsMock).toHaveBeenCalledWith(["doc-1", "doc-2"], "user-1", expect.any(Function));

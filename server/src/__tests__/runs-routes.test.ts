@@ -199,7 +199,7 @@ describe("runsRoutes validation", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({ error: { code: "missing_stage_artifacts" } });
-    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed", origin: "machine", apiKeyId: null });
+    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed", origin: "machine", apiKeyId: null, audit: expect.any(Function) });
   });
 
   it("rejects unknown reprocess stages before creating a run", async () => {
@@ -318,7 +318,10 @@ describe("API-key run reads", () => {
     expect(reprocessRunMock).not.toHaveBeenCalled();
     expect((await post(keyApp())).status).toBe(201);
     // The run records the key that asked for it: the chart export ceiling checks that key's scopes.
-    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "extract-markdown", origin: "machine", apiKeyId: "key-1" });
+    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "extract-markdown", origin: "machine", apiKeyId: "key-1", audit: expect.any(Function) });
+    // The run's audit record is written by the service in the publish transaction (it adds the org, project and run).
+    const runRecord = (reprocessRunMock.mock.calls.at(-1)?.[2] as { audit: (runId: string) => Record<string, unknown> }).audit("run-2");
+    expect(runRecord).toMatchObject({ action: "run.reprocessed", resourceType: "run", resourceId: "run-2", apiKeyId: "key-1" });
     expect((await post(keyApp(["search"]), "/runs/run-1/reprocess/estimate")).status).toBe(403);
     const { listRouteAuthModes } = await import("../lib/route-auth.js");
     const modes = Object.fromEntries(listRouteAuthModes(runsRoutes).map((route) => [`${route.method} ${route.path}`, route.mode]));
