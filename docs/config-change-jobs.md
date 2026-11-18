@@ -58,6 +58,10 @@ A plain rebuild (no `pipeline`) re-runs the embedding and indexing stages, and t
 
 The SDK has `reindexProject(project, input)` and `reindexProjectEstimate(project, input)`, and `DocSlurpApiError.reindex` carries the refusal's details. The CLI has `docslurp reindex [--embedding-profile <profile>] [--late-chunking on|off] [--late-chunking-window <1-6>] [--chunk-overlap on|off] [--contextual-preambles on|off] [--vector-backends <a,b>] [--estimate] [--confirm <signature>]`. Access is the same as `PATCH`: an editor of the project, or a server key with `projects:manage` for that project.
 
+The MCP server has the same pair: `reindexEstimate` (read-only) and `reindex`. Both take `project` (omit for the organization default), `embeddingProfile`, `lateChunking`, `lateChunkingWindow`, `chunkOverlap`, `contextualChunkPreambles`, `vectorBackends`, `embed`, `indexVectors` and `speedBoost`; with no setting they price or run a plain rebuild. `reindexEstimate` returns `{ lockedSettings, documents, pages, credits, signature, estimate, impact, billing }`. `reindex` **requires** `confirmEstimate` (the estimate's `signature`), so an agent cannot spend credits without first fetching an estimate, and returns `{ outcome, changedSettings, project: { id, slug, name }, runIds, job, estimate, impact }`; poll the job with `getJob`. Both have the route's access rules (an editor, or a server API key with `projects:manage`; delegated OAuth tokens are refused), and project chat never offers them.
+
+Estimate signatures are HMACed with `DOCSLURP_ESTIMATE_SIGNING_SECRET` (preferred) or, unset, `SECRETS_ENCRYPTION_KEY`, `BETTER_AUTH_SECRET` or `FILE_TOKEN_SECRET`. A signature also covers the `speedBoost` choice and whether billing is enforced. Every API and chat-executor process must resolve the same key, or each refuses the others' signatures as `estimate_stale`: set the dedicated variable to one value on every such process before rolling it out, and check that the `fingerprint=` in each startup line (and `GET /ops/estimate-signing`, operator bearer) matches. See [estimate signing key rollout](self-host/security.md#estimate-signing-key-rollout).
+
 Nothing is locked on a project with no indexed documents: changes there apply at once and only shape future uploads. `autoConfirmReindex` never unlocks a locked setting; it still re-indexes recommended changes when `apply` is omitted. A stricter PII or privacy policy is not locked: it still saves and queues its re-index automatically, because delaying enforcement would be worse than the spend.
 
 ## Re-indexing without downtime
@@ -77,7 +81,7 @@ Every route that can create work has a `POST …/estimate` twin with the same bo
 | Operation | Estimate route | SDK | CLI | MCP tool |
 | --- | --- | --- | --- | --- |
 | Update project | `POST /v1/projects/:id/estimate` | `updateProjectEstimate` | Use SDK/HTTP | `updateEstimate` |
-| Re-index project | `POST /v1/projects/:id/reindex/estimate` | `reindexProjectEstimate` | `reindex --estimate` | Use `updateEstimate` |
+| Re-index project | `POST /v1/projects/:id/reindex/estimate` | `reindexProjectEstimate` | `reindex --estimate` | `reindexEstimate` |
 | Update search settings | `POST /v1/projects/:id/search-settings/estimate` | `updateSearchSettingsEstimate` | Use SDK/HTTP | `searchSettingsEstimate` |
 | Reprocess a run | `POST /v1/runs/:id/reprocess/estimate` | `reprocessEstimate` | `reprocess <runId> --estimate` | `reprocessEstimate` |
 | Full index (document) | `POST /v1/documents/:id/full-index/estimate` | `fullIndexEstimate({ documentId })` | `full-index --document <id> --estimate` | `fullIndexEstimate` |

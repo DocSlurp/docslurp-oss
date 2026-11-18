@@ -2,7 +2,8 @@ import { lockProjectConfigurationWrite } from "./project-write-lock.js";
 import { isPolicyTightening } from "./policy-transition.js";
 import { withRunEffective } from "./extraction-settings.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { estimateSigningKey } from "../lib/estimate-signing-key.js";
 
 import {
   assertPipelineSpeedBoost,
@@ -198,24 +199,24 @@ export function assertReindexConfirmed(plan: ProjectChangePlan): void {
 
 /** Refuses a confirmation that priced different work (`confirmEstimate` vs the plan's signature). */
 export function assertEstimateCurrent(plan: ProjectChangePlan, confirmEstimate: string | undefined): void {
-  if (confirmEstimate !== undefined && confirmEstimate !== plan.signature) throw new EstimateStaleError();
+  if (confirmEstimate === undefined) return;
+  const given = Buffer.from(confirmEstimate, "utf8");
+  const expected = Buffer.from(plan.signature, "utf8");
+  // Constant-time: a caller learns nothing about the expected signature from how fast a guess is refused.
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new EstimateStaleError();
 }
 
-let signatureKey: Buffer | null = null;
 /**
- * The key estimate signatures are MACed with: the deployment's secret, so a signature (which covers the resolved pipeline,
- * managed model ids included) cannot be tested offline against guessed values. Without one (local development), a
- * per-process random key: signatures then hold for this process only.
+ * Estimate signatures are MACed with the deployment's shared estimate-signing key (lib/estimate-signing-key.ts), so a
+ * signature (which covers the resolved pipeline, managed model ids included) cannot be tested offline against guessed
+ * values and holds on every API and chat-executor process. Production never signs with a per-process random key.
  */
 function planSignatureKey(): Buffer {
-  if (signatureKey) return signatureKey;
-  const secret = process.env.SECRETS_ENCRYPTION_KEY?.trim() || process.env.BETTER_AUTH_SECRET?.trim() || process.env.FILE_TOKEN_SECRET?.trim();
-  signatureKey = secret ? createHash("sha256").update(`docslurp:reindex-estimate-signature:${secret}`).digest() : randomBytes(32);
-  return signatureKey;
+  return estimateSigningKey();
 }
 
 /** Stable signature of a plan's work: the resulting pipeline, stages, target documents and the price. */
-function planSignature(args: { projectId: string; nextPipeline: PipelineFeatures; stages: readonly string[]; lockedSettings: readonly string[]; targets: readonly ReindexTarget[]; estimate: CostEstimate | null; willReindex: boolean }): string {
+function planSignature(args: { projectId: string; nextPipeline: PipelineFeatures; stages: readonly string[]; lockedSettings: readonly string[]; targets: readonly ReindexTarget[]; estimate: CostEstimate | null; willReindex: boolean; speedBoost: boolean; billing: "enforced" | "disabled" }): string {
   return createHmac("sha256", planSignatureKey()).update(JSON.stringify({
     project: args.projectId,
     pipeline: indexConfigHash(indexConfigOf(args.nextPipeline)),
@@ -226,6 +227,9 @@ function planSignature(args: { projectId: string; nextPipeline: PipelineFeatures
     reindex: args.willReindex,
     credits: args.estimate?.credits ?? null,
     pages: args.estimate?.pages ?? 0,
+    // Bound explicitly: speed boost changes what the runs cost, and the billing state whether they are charged at all.
+    speedBoost: args.speedBoost,
+    billing: args.billing,
   })).digest("hex");
 }
 
@@ -549,7 +553,7 @@ export async function planProjectChange(args: {
     willReindex: queues,
     hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion, origin,
     identityChanges, reenabledVectors, lockedSettings, rebuildIndex,
-    signature: planSignature({ projectId: project.id, nextPipeline, stages: impact.stages, lockedSettings, targets, estimate, willReindex: queues }),
+    signature: planSignature({ projectId: project.id, nextPipeline, stages: impact.stages, lockedSettings, targets, estimate, willReindex: queues, speedBoost: input.speedBoost === true, billing: billingState(args.env) }),
   };
 }
 

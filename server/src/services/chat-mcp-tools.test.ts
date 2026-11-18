@@ -66,6 +66,17 @@ describe("chat MCP tools", () => {
 
   it("never lets the model start a paid full index", () => {
     expect(Object.keys(setup(["search", "fullIndex"]).tools)).toEqual(["search"]);
+    expect(Object.keys(setup(["search", "reindex", "reindexEstimate"]).tools)).toEqual(["search"]);
+  });
+
+  it("never offers a tool the catalog marks as writing or spending, even one missing from the denylist", () => {
+    const base = { title: "t", category: "tool", description: "d", inputSchema: { type: "object" } };
+    const context = createChatMcpTools({ manifest: { capabilities: [
+      { ...base, id: "search", annotations: { readOnly: true, destructive: false, idempotent: true, openWorld: false, consequential: false } },
+      { ...base, id: "futurePaidTool", annotations: { readOnly: true, destructive: false, idempotent: false, openWorld: false, consequential: true } },
+      { ...base, id: "futureWriteTool", annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false } },
+    ] }, dispatch: vi.fn<McpDispatch>(), projectId: "selected", signal: new AbortController().signal, onActivity: vi.fn(), settingsTools: true });
+    expect(Object.keys(context.tools)).toEqual(["search"]);
   });
 
   it("leaves rarely used tools out of the per-step tool catalog", () => {
