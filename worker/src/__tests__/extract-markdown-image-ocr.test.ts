@@ -953,3 +953,60 @@ describe("quality fast extraction is text-layer only", () => {
     }
   });
 });
+
+describe("Smartest has no OCR step: scans and images are left for the vision model", () => {
+  const SMARTEST = { ladder: { maxRung: "intelligent" }, visionFallback: true };
+
+  it("leaves a scanned PDF's empty pages for vision: no OCR job, nothing billed as an OCR page", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 4, pipeline: SMARTEST,
+      extract: async () => ({ text: "Native text layer page\f\fThird page native\f\f" }),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs).toEqual([]);
+      expect(h.richEvents()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("sends an image to vision instead of the OCR extractor", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({ format: "image", pipeline: SMARTEST });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.attempted).not.toContain("ocr");
+      expect(h.jobs).toEqual([]);
+      expect(h.richEvents()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("still OCRs scans when vision cannot read the run (vision off), so no scan is left unread", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 2, pipeline: { ...SMARTEST, visionFallback: false },
+      extract: async () => ({ text: "Native text layer page\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scanned words ${frame}` })),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2] });
+    } finally { await h.cleanup(); }
+  });
+
+  it("Fastest (the default) reads the same scan with OCR", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 2,
+      extract: async () => ({ text: "Native text layer page\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scanned words ${frame}` })),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2] });
+    } finally { await h.cleanup(); }
+  });
+});

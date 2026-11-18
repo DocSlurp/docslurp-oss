@@ -44,7 +44,8 @@ function runState(document: Document, pipeline: Record<string, unknown> = {}): W
   // As the worker loads a run (db/run-ledger.ts): the ladder limits applied.
   const state = WorkflowState.create({
     id: "run-1", orgId: "org-1", projectId: "proj-1", userId: "user-1", spentCents: 0, storagePrefix: "user-1/run-1",
-    pipeline: applyLadderLimits({ ...defaultPipelineFeatures, privacyMode: "standard", ...pipeline } as typeof defaultPipelineFeatures),
+    // Smartest unless a test sets the ladder: the intelligent rung with no share cap is "no limit".
+    pipeline: applyLadderLimits({ ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" }, privacyMode: "standard", ...pipeline } as typeof defaultPipelineFeatures),
   } as never, [document]);
   state.usageLedger.runId = "run-1";
   return state;
@@ -75,14 +76,14 @@ const MIXED: AdaptivePageRoutingEntry[] = [
 ];
 
 describe("Auto ladder in vision-extract", () => {
-  it("changes nothing without limits", async () => {
+  it("Smartest without a share cap selects the same pages, all for the vision model (no OCR-engine hint)", async () => {
     const document = pdf(10);
     const { internals } = stageFor(MIXED);
     const state = runState(document);
     const result = await internals.checkNeedsVision(document, 10, state);
     const legacy = selectLegacyVisionPages(MIXED, {});
     expect(result.selectedPages).toEqual(legacy);
-    expect(result.hints).toEqual(legacyPageHints(MIXED));
+    expect(result.hints).toEqual({ ...legacyPageHints(MIXED), vmOcrPages: new Set() });
     // Without a limit nothing new is recorded: the stats and manifest keep their shape.
     expect(result.ladder).toBeUndefined();
     expect(Object.keys(result).sort()).toEqual(["hints", "needed", "reason", "routing", "score", "selectedPages"]);
@@ -94,28 +95,26 @@ describe("Auto ladder in vision-extract", () => {
     expect(explicit.hints).toEqual(result.hints);
   });
 
-  it("maxRung ocr transcribes chart pages with the OCR engine in its VM", async () => {
+  it("Fastest (maxRung ocr) reads every selected page with the OCR engine in its VM, chart pages included", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const document = pdf(10);
     const { internals } = stageFor(MIXED);
     const result = await internals.checkNeedsVision(document, 10, runState(document, { ladder: { maxRung: "ocr" } }));
     expect(result.selectedPages).toEqual(selectLegacyVisionPages(MIXED, {}));
-    expect([...result.hints.vmOcrPages ?? []].sort((a, b) => a - b)).toEqual([3, 7]);
+    expect([...result.hints.vmOcrPages ?? []].sort((a, b) => a - b)).toEqual([...selectLegacyVisionPages(MIXED, {})].sort((a, b) => a - b));
     expect([...result.hints.figurePages ?? []]).toEqual([]);
     expect(result.ladder?.decisions.filter((decision) => decision.rung === "intelligent")).toEqual([]);
     expect(result.ladder?.summary).toMatchObject({ loweredReader: "ocr-vm" });
   });
 
-  it("maxRung ocr without an OCR reader and with a task prompt leaves chart pages on their text layer", async () => {
+  it("Fastest without an OCR reader reads no page here: it never falls back to a vision model", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "off");
     const document = pdf(10);
     const { internals } = stageFor(MIXED);
     const result = await internals.checkNeedsVision(document, 10, runState(document, {
       ladder: { maxRung: "ocr" }, outputSchema: { type: "object", properties: { total: { type: "number" } } },
     }));
-    expect(result.selectedPages).not.toContain(3);
-    expect(result.selectedPages).not.toContain(7);
-    expect(result.selectedPages.sort((a, b) => a - b)).toEqual([2, 4, 6, 8, 9]);
+    expect(result.selectedPages).toEqual([]);
   });
 
   it("an image the ladder keeps unread (multi-frame, under a share) is not read by vision either", async () => {

@@ -43,7 +43,8 @@ beforeEach(async () => {
 
 const DIMS = 768;
 const document = { id: "d1", userId: "u1", runId: "run-1", filename: "a.pdf", mimeType: "application/pdf", pageCount: 6 } as Document;
-const run = { id: "run-1", orgId: "o1", projectId: "w" };
+// Page-image embeddings read every page with a model: Smartest without a share cap only.
+const run = { id: "run-1", orgId: "o1", projectId: "w", pipeline: { quality: "auto", ladder: { maxRung: "intelligent" } } };
 
 function fixture() {
   const objects = new Map<string, Buffer>();

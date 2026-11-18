@@ -40,7 +40,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   `;
   if (!row || row.withheld) throw new Error("Document page is unavailable");
   // Page images off for the project (pipeline.pageImages: false): no viewer page image is rendered (fail closed).
-  if (!row.page_images) throw ApplicationFailure.nonRetryable("Page images are turned off for this project", "PageImagesDisabled");
+  if (row.page_images === false) throw ApplicationFailure.nonRetryable("Page images are turned off for this project", "PageImagesDisabled");
   const dpi = input.dpi ?? pageRenderDpi(quality);
   if ((dpi !== 120 && dpi !== 250) || (dpi === 250 && quality !== "export")) throw ApplicationFailure.nonRetryable("Page render policy changed; request again", "PageRenderPolicyChanged");
   const slot = pageRenderSlot(input.documentId, input.pageNumber, quality, dpi);

@@ -531,7 +531,6 @@ describe("stored HTML table cells: stage wiring", () => {
     ["vision fallback off, extraction asked for vision", { quality: "auto", visionFallback: false }, true, "written"],
     ["auto quality, extraction asked for vision", { quality: "auto", visionFallback: true }, true, "vision-pending"],
     ["auto quality, no vision needed", { quality: "auto", visionFallback: true }, false, "written"],
-    ["good quality reads every page (vision's override) though extraction did not ask", { quality: "good", visionFallback: true }, false, "vision-pending"],
   ] as const)("extract-markdown: %s → %s", async (_, pipeline, needsVision, expected) => {
     const { stats, storage } = await wired(runState("wired", "", pipeline), needsVision);
     expect(stats.status).toBe(expected);

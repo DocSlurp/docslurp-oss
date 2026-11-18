@@ -2428,7 +2428,8 @@ export class VisionExtractStage implements Stage {
     const reconciled = reconcileCanonicalArtifacts({
       canonicalDocument,
       extractionContract: contract,
-      minimumConfidence: undefined,
+      // Smartest has no OCR read to fall back on: a page it sent to vision takes the vision read.
+      minimumConfidence: ladderSkipsOcr(state.run.pipeline) ? 0 : undefined,
       replacements: outputs.map((output) => {
         const pageEvidence = routingByPage.get(output.pageNumber);
         return {
