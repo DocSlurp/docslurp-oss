@@ -122,7 +122,7 @@ export function stripManagedPipelineFields<T>(pipeline: T): T {
  */
 const LEGACY_VISION_MODEL_KEYS = ["model", "runtime", "baseUrl", "remoteFallbackModel"] as const;
 
-function stripLegacyVisionModel(pipeline: PipelineLike, source: string): PipelineLike {
+export function stripLegacyVisionModel(pipeline: PipelineLike, source: string): PipelineLike {
   const vision = record(pipeline.vision);
   if (!vision || !LEGACY_VISION_MODEL_KEYS.some((key) => Object.hasOwn(vision, key))) return pipeline;
   // An endpoint of its own was a deliberate choice: say that it no longer applies.
