@@ -18,7 +18,8 @@ export const rejectLegacyProjectSelection: MiddlewareHandler = async (c, next) =
   if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method)) {
     const contentType = c.req.header("content-type") ?? "";
     const form = /multipart\/form-data|application\/x-www-form-urlencoded/i.test(contentType);
-    if (c.req.raw.body && !form && !/\bjson\b/i.test(contentType)) {
+    // A body-less POST (`fetch` with no body sends no Content-Type) is not content.
+    if (!form && !/\bjson\b/i.test(contentType) && await carriesBytes(c.req.raw)) {
       return middlewareErrorResponse(c, 400, "invalid_request", "JSON API requests require application/json; legacy selection must not bypass validation through Content-Type.");
     }
     if (/\bjson\b/i.test(contentType)) {
@@ -37,3 +38,23 @@ export const rejectLegacyProjectSelection: MiddlewareHandler = async (c, next) =
   }
   await next();
 };
+
+/**
+ * Whether the request body holds at least one byte. Node hosts give every POST a
+ * body stream, empty or not, so `request.body !== null` alone does not say the
+ * client sent content. Reads a clone only up to its first non-empty chunk.
+ */
+async function carriesBytes(request: Request): Promise<boolean> {
+  if (!request.body) return false;
+  const reader = request.clone().body?.getReader();
+  if (!reader) return false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return false;
+      if (value.byteLength > 0) return true;
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+}

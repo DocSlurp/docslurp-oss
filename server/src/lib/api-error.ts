@@ -3,11 +3,17 @@ import { boundedBodyLimit } from "./bounded-body-limit.js";
 import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
+import { recordRequestRejection } from "./error-context.js";
 
 type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
+  recordRequestRejection(code, message);
+  return envelopeResponse(c, status, code, message, details);
+}
+
+function envelopeResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
   const linked = linkedDetails(c, code, details);
   return c.json(apiError(code, message, linked), status);
 }
@@ -57,6 +63,7 @@ export function usesNativeErrorEnvelope(path: string): boolean {
  */
 export function middlewareErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
   if (usesNativeErrorEnvelope(c.req.path)) return apiErrorResponse(c, status, code, message, details);
+  recordRequestRejection(code, message);
   return c.json({ error: message, code, ...linkedDetails(c, code, details) }, status);
 }
 
@@ -91,13 +98,20 @@ export function envelopeForError(c: Context, error: unknown, status: number, ori
   // A blocked spend knows whether the org's auto top-up is on (no "turn on auto top-up" link then).
   const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
   const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);
-  const response = apiErrorResponse(c, status as ErrorStatus, code, publicApiErrorMessage(code, details), details);
+  // The client gets the code's reviewed copy; telemetry gets what actually went wrong.
+  recordRequestRejection(code, rawErrorReason(error));
+  const response = envelopeResponse(c, status as ErrorStatus, code, publicApiErrorMessage(code, details), details);
   for (const source of [error instanceof HTTPException ? error.res?.headers : undefined, originalHeaders]) {
     source?.forEach((value, name) => {
       if (!DROPPED_HEADERS.has(name.toLowerCase())) response.headers.set(name, value);
     });
   }
   return response;
+}
+
+function rawErrorReason(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return typeof error === "string" ? error : "non-Error thrown";
 }
 
 /**

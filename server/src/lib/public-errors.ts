@@ -8,7 +8,10 @@ import { errorContext } from "./error-context.js";
 export { exceptionDetails } from "@docslurp/shared/error-reporting";
 
 export function reportPublicError(error: unknown, context: Record<string, string | number | boolean> = {}, signal?: AbortSignal): string {
-  reportException(error, { ...errorContext.getStore(), ...context }, signal);
+  // Correlation ids only: the recorded rejection is a request-span attribute, not an exception one.
+  const store = errorContext.getStore();
+  const correlation = store ? { requestId: store.requestId, ...(store.userId ? { userId: store.userId } : {}) } : {};
+  reportException(error, { ...correlation, ...context }, signal);
   return PUBLIC_ERROR_MESSAGES.unexpected;
 }
 
