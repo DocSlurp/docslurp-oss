@@ -1,3 +1,9 @@
+## Autoscaler snapshot reads active runs only (2026-11-18)
+
+- Migration 0195: partial index `project_runs_org_active_idx` on `project_runs (org_id)` over `status IN ('queued', 'processing')`, including the run id, project, status, control state, lease, shard demand, document and page totals and processed counts, and created/worker-started/updated times. It serves the scaler snapshot and an organization's active runs (org_id leading) as an index read.
+- `queryWorkerScalerSnapshot` restricts every `project_runs` read to active runs, so the 10 s poll from the app and the worker leader no longer aggregates finished history. Its lifetime `pages_processed_total` sum is gone, along with the `docslurp_pages_processed_total` gauge on `/metrics` (nothing read it). `/metrics` now reuses the shared snapshot instead of a drifted copy of the query, so it reports the same queue view and worker target as `/fly-scaler-metrics`.
+- DB test: with a million finished runs on real Postgres (100K on the PGlite fallback), the snapshot plan uses the partial index with no sequential scan on `project_runs`, and its counts cover only live work.
+
 ## Locked index settings and the reindex command (2026-11-18)
 
 Owner: changing a project's embedding after documents are ingested silently re-billed or broke search; lock it once projects have ingests and wrap the change in a reindex command with the similar options.
