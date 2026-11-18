@@ -32,7 +32,9 @@ describe("URL-derived names", () => {
   it("gives a URL an opaque canonical ID that still matches on re-ingest", () => {
     const id = opaqueCanonicalIdForUrl("https://example.com/products/#pricing");
     expect(id).toMatch(/^url:[0-9a-f]{64}$/);
-    expect(id).toBe(opaqueCanonicalIdForUrl("https://example.com/products"));
+    // The fragment is never sent, so it is not identity; the path is kept exactly: /manual and /manual/ differ.
+    expect(id).toBe(opaqueCanonicalIdForUrl("https://example.com/products/"));
+    expect(opaqueCanonicalIdForUrl("https://example.com/manual")).not.toBe(opaqueCanonicalIdForUrl("https://example.com/manual/"));
     expect(opaqueCanonicalIdForUrl("https://example.com/a.pdf?X-Amz-Signature=SIG")).not.toContain("SIG");
   });
 });

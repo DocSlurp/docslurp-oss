@@ -102,4 +102,24 @@ describe.skipIf(!url)("legacy URL adoption under concurrency (real PostgreSQL)",
     expect(new Set(chain.map((row) => row.canonical_id))).toEqual(new Set([s.opaque]));
     expect(new Set(chain.map((row) => row.version_number)).size).toBe(chain.length);
   });
+
+  it("fails closed when the reprocess source is deleted concurrently, and inserts nothing", async () => {
+    const s = await scenario();
+    await s.legacyDoc(s.ids.l1, "completed", "2026-01-01", 1);
+    // Session 1 deletes the source as deleteDocumentRows does (children re-pointed, then the row), uncommitted.
+    const connection = await worker.reserve();
+    await connection`begin`;
+    await connection`update documents set previous_version_id = null where previous_version_id = ${s.ids.l1}`;
+    await connection`delete from documents where id = ${s.ids.l1}`;
+    // Session 2 reprocesses it: it cannot take the source's lock (NOWAIT, retried with backoff) ...
+    const reprocess = s.reprocess(s.ids.l1).then(() => "created", (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // ... and once the deletion commits, it finds the source gone and fails closed, with a typed 404.
+    await connection`commit`;
+    connection.release();
+    const outcome = await reprocess;
+    expect(outcome).toMatchObject({ name: "RunSourceGoneError", status: 404 });
+    expect(await s.chain()).toEqual([]);
+  });
 });
+

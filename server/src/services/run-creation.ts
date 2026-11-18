@@ -1,4 +1,4 @@
-import type postgres from "postgres";
+import { HTTPException } from "hono/http-exception";
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
@@ -25,7 +25,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
-import { MAX_CANONICAL_ID_LENGTH, normalizeUploadPath, opaqueCanonicalIdForUrl, tryNormalizedUrl } from "../lib/canonical-id.js";
+import { MAX_CANONICAL_ID_LENGTH, normalizeUploadPath, opaqueCanonicalIdForUrl, tryIdentityUrl, tryNormalizedUrl } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
@@ -191,17 +191,73 @@ export function isRunCreationBlockedError(
   return error instanceof SpendBlockedError;
 }
 
-/** How long adoption waits for a row lock before retrying, and how many times it tries. */
-const ADOPTION_LOCK_TIMEOUT = "2s";
-const ADOPTION_ATTEMPTS = 3;
+/**
+ * Lock waits in a version transaction (the advisory key included) are bounded
+ * by LOCK_TIMEOUT; row locks are taken NOWAIT, so the transaction never waits
+ * on a row while holding others. On a lock conflict (55P03) or deadlock (40P01)
+ * the whole transaction rolls back, releasing every lock, and is retried after
+ * a short backoff, LOCK_ATTEMPTS times in all; then RunCreationBusyError (503).
+ */
+const LOCK_TIMEOUT = "2s";
+const LOCK_ATTEMPTS = 6;
 
-/** A URL-provenance document's identities: the full normalized source URL, its opaque ID and its legacy raw form. */
-export function urlSourceIdentity(metadata: unknown): { normalized: string; opaque: string; legacy: string } | null {
+/**
+ * Run creation could not take its locks in time (a concurrent writer held them):
+ * retryable, 503 with Retry-After (an HTTPException, so any route answers it so).
+ */
+export class RunCreationBusyError extends HTTPException {
+  readonly code = "unavailable";
+  constructor(message = "These documents are being updated by another request; retry shortly.") {
+    super(503, { message, res: new Response(null, { status: 503, headers: { "Retry-After": "2" } }) });
+    this.name = "RunCreationBusyError";
+  }
+}
+
+/** A reprocess source deleted (or moved out of the project) after it was selected: fail closed, 404. */
+export class RunSourceGoneError extends HTTPException {
+  readonly code = "not_found";
+  constructor(documentId: string) {
+    super(404, { message: `Document ${documentId} no longer exists in this project` });
+    this.name = "RunSourceGoneError";
+  }
+}
+
+function isLockConflict(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "55P03" || code === "40P01";
+}
+
+/** Runs one version transaction, retrying the whole of it on lock conflicts (see LOCK_TIMEOUT). */
+async function withLockRetry<T>(transaction: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await transaction();
+    } catch (error) {
+      if (!isLockConflict(error)) throw error;
+      if (attempt >= LOCK_ATTEMPTS) throw new RunCreationBusyError();
+      // 50 ms doubling to 800 ms (about 1.5 s in all): long enough to outlast a worker finishing a row.
+      await new Promise((resolve) => setTimeout(resolve, Math.min(800, 25 * 2 ** attempt) + Math.random() * 25));
+    }
+  }
+}
+
+/** Bounds every lock wait in this transaction, the advisory key's included. */
+async function boundLockWaits(client: SqlClient): Promise<void> {
+  await client`select set_config('lock_timeout', ${LOCK_TIMEOUT}, true)`;
+}
+
+/**
+ * A URL-provenance document's identities: its source URL as fetched
+ * (identityUrl, exact path), its opaque ID, and the legacy raw form legacy rows
+ * were stored under (the old normalization, used only to find candidates).
+ */
+export function urlSourceIdentity(metadata: unknown): { identity: string; opaque: string; legacy: string } | null {
   const sourceUrl = metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>).sourceUrl : undefined;
   if (typeof sourceUrl !== "string") return null;
+  const identity = tryIdentityUrl(sourceUrl);
   const normalized = tryNormalizedUrl(sourceUrl);
-  if (!normalized) return null;
-  return { normalized, opaque: opaqueCanonicalIdForUrl(sourceUrl), legacy: normalized.slice(0, MAX_CANONICAL_ID_LENGTH) };
+  if (!identity || !normalized) return null;
+  return { identity, opaque: opaqueCanonicalIdForUrl(sourceUrl), legacy: normalized.slice(0, MAX_CANONICAL_ID_LENGTH) };
 }
 
 /**
@@ -214,25 +270,28 @@ export function urlSourceIdentity(metadata: unknown): { normalized: string; opaq
  * Lazy, per ingest; no migration.
  *
  * Provenance is decided per chain: the rows of this project and organization
- * under the legacy key are adopted when at least one of them was created by a
- * `url-ingest` run (URL intake and crawl; a server-only marker) and its stored
- * `sourceUrl` normalizes, in full (no 2,048-character cut), to the URL being
- * ingested. Then every row under that key whose stored `sourceUrl` normalizes
- * to it is adopted, whatever its run kind (a `bulk-reprocess` version copies
+ * under the legacy key (found by the old normalization) are adopted when at
+ * least one of them was created by a `url-ingest` run (URL intake and crawl; a
+ * server-only marker) and its stored `sourceUrl` is the URL being ingested,
+ * exactly as fetched (identityUrl: same path, trailing slash included; no
+ * 2,048-character cut). Then every row under that key whose stored `sourceUrl`
+ * is that URL is adopted, whatever its run kind (a `bulk-reprocess` version copies
  * canonical_id and sourceUrl from its source). A row with another or no
- * `sourceUrl` (a caller's own URL-shaped ID, a different URL sharing a long
- * prefix) is never touched; nor is a chain without URL-intake provenance.
+ * `sourceUrl` (a caller's own URL-shaped ID, `/manual/` for `/manual`, a
+ * different URL sharing a long prefix) is never touched; nor is a chain without URL-intake provenance.
+ * Rows a pre-release build of this change keyed by a hash of the truncated (2,048-character) URL are not
+ * adopted either (none were deployed): adoption only finds the raw legacy form.
  *
  * Locking. The caller holds the opaque key's advisory lock (which serializes
- * URL ingests and reprocesses of this URL); there is no lock on the legacy key,
- * which would cycle with a worker completing a legacy row (its supersession
- * trigger takes that key while holding the row). Candidate rows are locked
- * FOR UPDATE newest first (created_at desc, id desc), the order the trigger
- * visits them in: it holds the completing row and then updates older rows
- * only, so adoption waits at most on the completing row while holding newer
- * ones the worker never needs. Each attempt runs in a savepoint with a short
- * lock_timeout and is retried a bounded number of times on 55P03 (lock
- * timeout) or 40P01 (deadlock).
+ * URL ingests and reprocesses of this URL), taken under a bounded lock_timeout;
+ * there is no lock on the legacy key, which would cycle with a worker
+ * completing a legacy row (its supersession trigger takes that key while
+ * holding the row). Candidate rows are locked FOR UPDATE NOWAIT, newest first
+ * (created_at desc, id desc): run creation never waits on a row while holding
+ * others, so it cannot cycle with the trigger (completing row, then older rows)
+ * or with deletion (children, then the row). A conflict aborts the caller's
+ * transaction, which withLockRetry retries whole, releasing every lock, and on
+ * exhaustion answers RunCreationBusyError (503, retryable).
  *
  * The UPDATE bumps projection_revision (migration 0109 bumps it on every
  * documents UPDATE, routine status writes included), so a publication in
@@ -247,39 +306,33 @@ export async function adoptLegacyUrlVersions(
 ): Promise<number> {
   const identity = urlSourceIdentity(args.metadata);
   if (!identity || args.canonicalId !== identity.opaque || identity.legacy === args.canonicalId) return 0;
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await (client as unknown as postgres.TransactionSql).savepoint(async (sp) => {
-        const [previous] = await sp<{ lock_timeout: string }[]>`select current_setting('lock_timeout') as lock_timeout`;
-        await sp`select set_config('lock_timeout', ${ADOPTION_LOCK_TIMEOUT}, true)`;
-        const rows = await sp<{ id: string; source_url: string | null; run_kind: string | null }[]>`
-          select d.id, d.metadata ->> 'sourceUrl' as source_url, r.kind as run_kind
-          from documents d
-          left join project_runs r on r.id = d.run_id and r.project_id = d.project_id and r.org_id = d.org_id
-          where d.project_id = ${args.projectId} and d.org_id = ${args.orgId} and d.canonical_id = ${identity.legacy}
-          order by d.created_at desc, d.id desc
-          for update of d
-        `;
-        const sameUrl = rows.filter((row) => row.source_url !== null && tryNormalizedUrl(row.source_url) === identity.normalized);
-        let adopted = 0;
-        if (sameUrl.some((row) => row.run_kind === "url-ingest")) {
-          const updated = await sp<{ id: string }[]>`
-            update documents set canonical_id = ${args.canonicalId}, updated_at = now()
-            where id = any(${sp.array(sameUrl.map((row) => row.id))}) and project_id = ${args.projectId}
-              and org_id = ${args.orgId} and canonical_id = ${identity.legacy}
-            returning id
-          `;
-          adopted = updated.length;
-        }
-        await sp`select set_config('lock_timeout', ${previous?.lock_timeout ?? "0"}, true)`;
-        return adopted;
-      });
-    } catch (error) {
-      const code = (error as { code?: unknown }).code;
-      if ((code === "55P03" || code === "40P01") && attempt < ADOPTION_ATTEMPTS) continue;
-      throw error;
-    }
-  }
+  type Candidate = { id: string; source_url: string | null; run_kind: string | null };
+  // The legacy key only finds candidates; provenance is the stored sourceUrl, exactly (no slash folding).
+  const provenance = (rows: Candidate[]) => {
+    const sameUrl = rows.filter((row) => row.source_url !== null && tryIdentityUrl(row.source_url) === identity.identity);
+    return sameUrl.some((row) => row.run_kind === "url-ingest") ? sameUrl : [];
+  };
+  const candidates = (lock: boolean) => client<Candidate[]>`
+    select d.id, d.metadata ->> 'sourceUrl' as source_url, r.kind as run_kind
+    from documents d
+    left join project_runs r on r.id = d.run_id and r.project_id = d.project_id and r.org_id = d.org_id
+    where d.project_id = ${args.projectId} and d.org_id = ${args.orgId} and d.canonical_id = ${identity.legacy}
+    order by d.created_at desc, d.id desc
+    ${lock ? client`for update of d nowait` : client``}
+  `;
+  // Most URL ingests have no legacy chain: one unlocked read, and no lock sequence at all.
+  if (!provenance(await candidates(false)).length) return 0;
+  // NOWAIT: never wait on a row while holding others; a conflict aborts the caller's transaction, which
+  // withLockRetry retries whole (releasing every lock first). Provenance is re-checked on the locked rows.
+  const sameUrl = provenance(await candidates(true));
+  if (!sameUrl.length) return 0;
+  const updated = await client<{ id: string }[]>`
+    update documents set canonical_id = ${args.canonicalId}, updated_at = now()
+    where id = any(${client.array(sameUrl.map((row) => row.id))}) and project_id = ${args.projectId}
+      and org_id = ${args.orgId} and canonical_id = ${identity.legacy}
+    returning id
+  `;
+  return updated.length;
 }
 
 export async function enforceLiveBudgetCaps(
@@ -803,9 +856,11 @@ export function createRunCreation(deps: RunCreationDeps) {
         throw error;
       }
 
-      const row = await sql.begin(async (tx) => {
+      // Lock waits are bounded and the whole transaction is retried on a conflict (withLockRetry).
+      const row = await withLockRetry(() => sql.begin(async (tx) => {
         const client = tx as unknown as SqlClient;
 
+        await boundLockWaits(client);
         await lockRunCreation(runId, client);
         // Every upload has a version key: the caller's canonicalId, else project + folder path + filename.
         // Versions chain per (project_id, canonical_id) (documents_project_canonical_idx).
@@ -899,7 +954,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         }
 
         return { ...inserted!, tags: file.tags ?? [] };
-      });
+      }));
       documents.push(row);
     }
 
@@ -926,17 +981,21 @@ export function createRunCreation(deps: RunCreationDeps) {
       // The source's canonical ID is re-read under the lock (a concurrent re-ingest can re-key its chain); a
       // changed key is retried with the current one.
       let row: (DocumentRow & { tags: string[] }) | null = null;
-      for (let attempt = 0; attempt < 3 && row === null; attempt++) row = await sql.begin(async (tx) => {
+      for (let attempt = 0; attempt < 3 && row === null; attempt++) row = await withLockRetry(() => sql.begin(async (tx) => {
         const client = tx as unknown as SqlClient;
+        await boundLockWaits(client);
         await lockRunCreation(runId, client);
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
         if (urlChain) {
           await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId: source.org_id, canonicalId: urlChain.opaque, metadata: source.metadata });
         }
+        // The source row stays locked FOR SHARE through the insert, so a concurrent deletion (which locks the
+        // source's children, then deletes it) waits for this version or has already removed it. NOWAIT: a
+        // conflict retries the whole transaction; a source gone by then fails closed.
         const [current] = await client<{ canonical_id: string | null }[]>`
-          select canonical_id from documents where id = ${source.id} and project_id = ${input.projectId} and org_id = ${source.org_id}`;
-        // Fail closed: the source was deleted (or moved) since it was selected.
-        if (!current) throw new Error(`[run-creation] source document ${source.id} is no longer in this project`);
+          select canonical_id from documents where id = ${source.id} and project_id = ${input.projectId} and org_id = ${source.org_id}
+          for share nowait`;
+        if (!current) throw new RunSourceGoneError(source.id);
         if (current.canonical_id && current.canonical_id !== canonicalId) {
           // Under URL provenance without URL-intake history the chain keeps its own key: take that key's lock too.
           if (urlChain && canonicalId === urlChain.opaque) {
@@ -1000,7 +1059,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           on conflict do nothing`;
         const tags = await client<{ tag: string }[]>`select tag from document_tags where document_id = ${inserted!.id} order by tag`;
         return { ...inserted!, tags: tags.map((row) => row.tag) };
-      });
+      }));
       if (!row) throw new Error(`[run-creation] source ${source.id} kept changing its canonical ID; retry the reprocess`);
       documents.push(row);
     }

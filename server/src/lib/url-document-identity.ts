@@ -25,7 +25,8 @@ export function publicUrlCanonicalId(canonicalId: string | null | undefined, sou
   if (!canonicalId) return null;
   if (!isUrlShapedCanonicalId(canonicalId)) return canonicalId;
   const serverDefault = tryCanonicalIdForUrl(sourceUrl.href);
-  return serverDefault !== null && canonicalId === serverDefault ? opaqueCanonicalIdForUrl(canonicalId) : canonicalId;
+  // The same full-URL hash adoption gives the row (of its source URL, not of the possibly truncated legacy form).
+  return serverDefault !== null && canonicalId === serverDefault ? opaqueCanonicalIdForUrl(sourceUrl.href) : canonicalId;
 }
 
 /**

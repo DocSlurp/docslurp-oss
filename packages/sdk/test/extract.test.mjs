@@ -72,3 +72,14 @@ test("refuses reserved docslurp: canonical IDs before any request", async () => 
   await assert.rejects(client.upload(new Blob(["x"]), { canonicalId: "docslurp:document:y" }), RangeError);
   assert.equal(api.calls.length, 0);
 });
+
+test("refuses the server's url:<sha256> identity before any request, and leaves other url: values alone", async () => {
+  const api = fakeApi();
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: api.fetch });
+  await assert.rejects(client.upload(new Blob(["x"]), { canonicalId: `url:${"a".repeat(64)}` }), RangeError);
+  await assert.rejects(client.extract({ urls: [{ url: "https://example.com/a.pdf", canonicalId: `URL:${"F".repeat(64)}` }] }), RangeError);
+  assert.equal(api.calls.length, 0);
+  // A url: value that is not a 64-character hex hash is the caller's own (the request goes out).
+  await client.upload(new Blob(["x"]), { canonicalId: "url:my-key" }).catch(() => undefined);
+  assert.ok(api.calls.length > 0);
+});

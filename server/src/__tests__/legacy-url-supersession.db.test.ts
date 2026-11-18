@@ -127,6 +127,22 @@ describe("a URL re-ingest supersedes the URL's legacy documents (createRunCreati
     expect((await rows()).find((row) => row.id === "long-one")!.canonical_id).toBe(canonicalIdForUrl(one));
   });
 
+  it("keeps /manual and /manual/ in separate chains (the fetched path, exactly)", async () => {
+    const [plain, slash] = ["https://files.example.com/manual", "https://files.example.com/manual/"];
+    // Both stored the same legacy key (the old normalization folded the slash).
+    expect(canonicalIdForUrl(plain)).toBe(canonicalIdForUrl(slash));
+    await legacyRun("url-run", "w", "o", "u", "url-ingest");
+    await legacyDoc("plain-legacy", { run: "url-run", canonical: canonicalIdForUrl(plain), sourceUrl: plain, created: "2026-01-01" });
+    await ingest(slash);
+    const created = (await rows()).find((row) => row.id !== "plain-legacy")!;
+    expect(created).toMatchObject({ canonical_id: opaqueCanonicalIdForUrl(slash), version_number: 1, previous_version_id: null });
+    expect((await rows()).find((row) => row.id === "plain-legacy")!.canonical_id).toBe(canonicalIdForUrl(plain));
+    await ingest(plain);
+    const adopted = (await rows()).find((row) => row.id === "plain-legacy")!;
+    expect(adopted.canonical_id).toBe(opaqueCanonicalIdForUrl(plain));
+    expect(opaqueCanonicalIdForUrl(plain)).not.toBe(opaqueCanonicalIdForUrl(slash));
+  });
+
   it("orders an adopted chain by creation and numbers after its highest version", async () => {
     await legacyRun("url-run", "w", "o", "u", "url-ingest");
     await legacyDoc("legacy", { run: "url-run", canonical: LEGACY, sourceUrl: URL_A, created: "2026-01-01" });

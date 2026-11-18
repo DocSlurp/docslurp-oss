@@ -47,6 +47,7 @@ import {
 import { assertSessionReplayable, assertSessionProjectStillReadable, assertSessionProjectStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
 import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
+import { RunCreationBusyError, RunSourceGoneError } from "../services/run-creation.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
 import { ProjectAccessError } from "../services/default-project.js";
 import {
@@ -213,6 +214,12 @@ export function normalizeFiles(entry: Uploadable): File[] {
 }
 
 export function runCreationErrorResponse(c: Context, error: unknown): Response | null {
+  // Locks held by a concurrent writer past the bound: retryable.
+  if (error instanceof RunCreationBusyError) {
+    c.header("Retry-After", "2");
+    return apiErrorResponse(c, 503, "unavailable", error.message);
+  }
+  if (error instanceof RunSourceGoneError) return apiErrorResponse(c, 404, "not_found", error.message);
   if (!isRunCreationBlockedError(error)) {
     return null;
   }

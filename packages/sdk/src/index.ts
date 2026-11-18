@@ -542,10 +542,17 @@ export type UploadFileInput = {
 };
 
 /** Structural Node ReadStream/async iterable support, without Node runtime imports. */
-/** `docslurp:` canonical IDs are minted by the server; the API refuses them from callers (400). */
+/**
+ * Canonical IDs the server mints, which the API refuses from callers (400): the
+ * `docslurp:` prefix and the server's URL identity shape, `url:` plus a 64-character hex hash.
+ */
 function assertClientCanonicalIds(ids: Array<string | null | undefined>): void {
   for (const id of ids) {
-    if (typeof id === "string" && /^docslurp:/i.test(id.trim())) throw new RangeError("canonicalId must not start with docslurp: (reserved for DocSlurp)");
+    if (typeof id !== "string") continue;
+    const trimmed = id.trim();
+    if (/^docslurp:/i.test(trimmed) || /^url:[0-9a-f]{64}$/i.test(trimmed)) {
+      throw new RangeError("canonicalId must not start with docslurp: or be a url:<sha256> URL identity (reserved for DocSlurp)");
+    }
   }
 }
 

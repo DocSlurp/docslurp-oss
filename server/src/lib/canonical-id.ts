@@ -8,7 +8,7 @@ export class InvalidCanonicalIdError extends Error {}
 /** A caller's canonical ID in a namespace the server reserves (`docslurp:`, `url:`). */
 export class ReservedCanonicalIdError extends InvalidCanonicalIdError {}
 
-export const RESERVED_CANONICAL_ID_MESSAGE = "canonicalId must not start with docslurp: or url: (reserved for the server)";
+export const RESERVED_CANONICAL_ID_MESSAGE = "canonicalId must not start with docslurp: or be a url:<sha256> URL identity (reserved for the server)";
 
 /**
  * `docslurp:` canonical IDs are minted by the server (`docslurp:document:<id>`,
@@ -21,12 +21,15 @@ export function isReservedCanonicalId(value: string): boolean {
 }
 
 /**
- * Namespaces a caller may never write a canonical ID in: `docslurp:` (above)
- * and `url:`, the server's opaque ID for a fetched URL (opaqueCanonicalIdForUrl).
- * A caller-chosen `url:` value could join, or be joined by, a URL's version chain.
+ * Canonical IDs a caller may never write: the `docslurp:` prefix (above) and
+ * the exact shape of the server's opaque ID for a fetched URL,
+ * `url:<64 hex>` (opaqueCanonicalIdForUrl), which could join, or be joined by,
+ * a URL's version chain. Other `url:` values stay the caller's. Mirrored in the
+ * SDK (assertClientCanonicalIds).
  */
 export function isCallerReservedCanonicalId(value: string): boolean {
-  return /^(?:docslurp|url):/i.test(value.trim());
+  const trimmed = value.trim();
+  return /^docslurp:/i.test(trimmed) || /^url:[0-9a-f]{64}$/i.test(trimmed);
 }
 
 /**
@@ -48,17 +51,33 @@ export function normalizeCanonicalId(value: unknown): string | null {
 
 /**
  * Default identity for a URL-intake document: `url:` plus the sha256 hex of
- * the full normalized URL (normalizedUrl: no fragment or trailing slash, never
- * truncated, so two long URLs that share a prefix stay distinct). Opaque,
- * because canonical IDs are returned in document responses and a signed URL's
- * query is a credential; re-ingesting the same URL still matches.
+ * the URL as fetched (identityUrl: the fragment, which is never sent, dropped;
+ * the path exactly as given, trailing slash included; never truncated). So
+ * `/manual` and `/manual/`, or two long URLs that share a prefix, stay distinct.
+ * Opaque, because canonical IDs are returned in document responses and a
+ * signed URL's query is a credential; re-ingesting the same URL still matches.
  */
 export function opaqueCanonicalIdForUrl(rawUrl: string): string {
   // Never throws: a malformed legacy or caller value hashes as-is.
-  return `url:${createHash("sha256").update(tryNormalizedUrl(rawUrl) ?? rawUrl).digest("hex")}`;
+  return `url:${createHash("sha256").update(tryIdentityUrl(rawUrl) ?? rawUrl).digest("hex")}`;
 }
 
-/** The URL without its fragment or a trailing slash, in full (the identity URL provenance is compared by). */
+/** The URL as fetched, for identity and provenance: no fragment (never sent), the path exactly as given. */
+export function identityUrl(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  url.hash = "";
+  return url.toString();
+}
+
+/** identityUrl, or null for a value `new URL` rejects (never throws). */
+export function tryIdentityUrl(rawUrl: string): string | null {
+  try { return identityUrl(rawUrl); } catch { return null; }
+}
+
+/**
+ * The URL without its fragment or a trailing slash, in full: the legacy
+ * normalization (canonicalIdForUrl), used only to find legacy candidates.
+ */
 export function normalizedUrl(rawUrl: string): string {
   const url = new URL(rawUrl);
   url.hash = "";

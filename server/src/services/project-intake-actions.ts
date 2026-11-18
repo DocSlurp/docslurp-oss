@@ -181,8 +181,12 @@ export function projectCurrentUrlReceipt(payload: ProjectIntakePayload): Project
 export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: readonly string[]): ProjectIntakePayload {
   const title = urls?.length ? inferProjectTitleFromUrls([...urls]) : "URL import";
   const genericName = (position: number, mimeType: string) => `url-${position}${extensionForMimeType(mimeType ?? "")}`;
-  // Server-derived legacy IDs: the default for each request URL (unparseable URLs have none).
-  const serverDefaults = new Set((urls ?? []).map(tryCanonicalIdForUrl).filter((id): id is string => id !== null));
+  // Server-derived legacy IDs: the legacy default of each request URL, replayed as that URL's full-URL hash
+  // (the ID adoption gives the row); unparseable URLs have none.
+  const serverDefaults = new Map((urls ?? []).flatMap((url) => {
+    const legacy = tryCanonicalIdForUrl(url);
+    return legacy === null ? [] : [[legacy, opaqueCanonicalIdForUrl(url)] as const];
+  }));
   const rejected = payload.rejected?.map((file, position) => {
     const index = typeof file.index === "number" ? file.index : position;
     return { index, filename: `urls[${index}]`, statusCode: file.statusCode, code: file.code, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
@@ -195,7 +199,7 @@ export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: r
       filename: name,
       ...(typeof document.sourceKey === "string" ? { sourceKey: sourceKeyWithName(document.sourceKey, name) } : {}),
       ...(typeof document.canonicalId === "string" && serverDefaults.has(document.canonicalId)
-        ? { canonicalId: opaqueCanonicalIdForUrl(document.canonicalId) }
+        ? { canonicalId: serverDefaults.get(document.canonicalId)! }
         : {}),
     };
   });

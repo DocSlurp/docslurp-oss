@@ -217,18 +217,33 @@ describe("uploadsRoutes over Project Intake", () => {
     expect(JSON.stringify([...fakes.objects.keys()])).not.toContain("GRANTPART");
   });
 
-  it("refuses a caller canonical ID in the server's url: namespace, with reviewed copy", async () => {
+  it("refuses a caller canonical ID shaped like the server's URL identity, with reviewed copy", async () => {
     const { app } = setup();
-    const url = await app.request("/uploads/url", json({ project: "ws-1", urls: [{ url: "https://example.com/a.txt", canonicalId: "url:0123" }] }));
+    const url = await app.request("/uploads/url", json({ project: "ws-1", urls: [{ url: "https://example.com/a.txt", canonicalId: `url:${"0".repeat(64)}` }] }));
     expect(url.status).toBe(400);
     expect(await url.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
     const form = new FormData();
     form.append("files", new File(["hello"], "notes.txt", { type: "text/plain" }));
-    form.append("canonicalId", "URL:mine");
+    form.append("canonicalId", `URL:${"A".repeat(64)}`);
     const bulk = await app.request("/uploads/bulk", { method: "POST", body: form });
     expect(bulk.status).toBe(400);
     expect(await bulk.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
     expect(publicApiErrorMessage("invalid_request", { policy: "canonical_id_reserved" })).toContain("reserved for DocSlurp");
+    // Any other url: value stays the caller's.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })));
+    const mine = await app.request("/uploads/url", json({ project: "ws-1", urls: [{ url: "https://example.com/a.txt", canonicalId: "url:my-own-key" }] }));
+    expect(mine.status).toBe(201);
+  });
+
+  it("refuses a reserved canonical ID on a direct upload session", async () => {
+    const { app } = setup();
+    for (const canonicalId of ["docslurp:document:x", `url:${"f".repeat(64)}`]) {
+      const response = await app.request("/uploads/direct/sessions", json({
+        project: "ws-1", files: [{ filename: "a.pdf", sizeBytes: 1000, mimeType: "application/pdf", canonicalId }],
+      }));
+      expect({ canonicalId, status: response.status }).toEqual({ canonicalId, status: 400 });
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
+    }
   });
 
   it("reports what URL ingest fetched", async () => {
@@ -248,7 +263,8 @@ describe("uploadsRoutes over Project Intake", () => {
     ] }));
     expect(response.status).toBe(201);
     // Opaque and server-derived (a signed URL's query is a credential); the same URL always maps to the same ID.
-    expect(fakes.runs[0].files.map((file) => file.canonicalId)).toEqual([opaqueCanonicalIdForUrl("https://example.com/products"), "/products"]);
+    // The URL as fetched: the fragment (never sent) dropped, the path exactly as given.
+    expect(fakes.runs[0].files.map((file) => file.canonicalId)).toEqual([opaqueCanonicalIdForUrl("https://example.com/products/"), "/products"]);
     expect(fakes.runs[0].files[0].canonicalId).toMatch(/^url:[0-9a-f]{64}$/);
     expect(fakes.runs[0].files[0].metadata).toMatchObject({ sourceUrl: "https://example.com/products/#pricing" });
   });
