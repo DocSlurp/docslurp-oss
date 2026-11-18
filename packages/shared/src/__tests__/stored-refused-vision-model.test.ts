@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { defaultVisionConfig, readVisionModelUriOverride, visionModelCatalog } from "../embedding.js";
 import { resolveManagedPipeline } from "../managed-pipeline-models.js";
-import { normalizePipelineFeatures, normalizeStoredPipelineFeatures, sanitizeStoredPipeline } from "../pipeline.js";
+import { normalizePipelineFeatures, normalizeStoredPipelineFeatures, parseStoredPipelineFeatures, sanitizeStoredPipeline } from "../pipeline.js";
 
 const REFUSED = "llm://openai/gpt-4.1-mini";
 
@@ -83,6 +83,55 @@ describe("a stored vision model that is no longer admitted", () => {
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/project p8 names its own vision endpoint/));
   });
 
+  it("an older row's embedding model the catalog no longer has falls back to the profile; a known one is kept", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const gone = normalizeStoredPipelineFeatures({ embedding: { profile: "cheapest-local", model: "retired/embedder", runtime: "local", provider: "transformers.js", batchSize: 32, dimensions: 768, target: "hosted" } } as never, "project p10");
+    expect(normalizeStoredPipelineFeatures({ embedding: { profile: "cheapest-hosted", model: null, dimensions: 384 } } as never, "project p10b").embedding.profile).toBe("cheapest-hosted");
+    expect(gone.embedding.profile).toBe("cheapest-local");
+    expect(gone.embedding.modelUri).toBe(normalizePipelineFeatures({ embedding: { profile: "cheapest-local" } } as never).embedding.modelUri);
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/project p10.*embedding\.model/));
+    // The shape production rows hold: a cataloged model stays the row's model (its vectors were built with it).
+    const kept = normalizeStoredPipelineFeatures({ embedding: { task: "document", model: "Xenova/bge-small-en-v1.5", profile: "balanced", runtime: "local", provider: "transformers.js", batchSize: 32, normalize: true, dimensions: 384 } } as never, "project p11");
+    expect(kept.embedding.modelUri).toBe("llm://transformers.js/Xenova/bge-small-en-v1.5");
+  });
+
+  it("a tolerant read never weakens the settings that restrict what happens to content", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // A plain Error from the legacy migration (a stored vision id with its own endpoint), not a schema issue.
+    const row = { privacyMode: "local-only", piiPolicy: { enabled: true, action: "block_indexing" }, webTools: false, quality: "retired-level", vision: { model: "gpt-4.1-mini", baseUrl: "https://eu.example.com/v1" } };
+    expect(parseStoredPipelineFeatures(row, "project p12")).toMatchObject({ privacyMode: "local-only", webTools: false, piiPolicy: { enabled: true, action: "block_indexing" } });
+    // Unreadable values become the strictest, on the per-field path too.
+    for (const [stored, expected] of [
+      [{ privacyMode: "strict" }, { privacyMode: "strict-privacy" }],
+      [{ privacyMode: "Local-Only" }, { privacyMode: "strict-privacy" }],
+      [{ piiPolicy: { enabled: true, action: "block" } }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
+      [{ piiPolicy: { enabled: "true" } }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
+      [{ piiPolicy: "on" }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
+      [{ piiPolicy: { enabled: true, patterns: ["email"], allowlistPatterns: 7 } }, { piiPolicy: { enabled: true, action: "block_indexing", patterns: expect.arrayContaining(["email", "ssn"]) } }],
+      [{ webTools: "off" }, { webTools: false }],
+    ] as const) {
+      expect(parseStoredPipelineFeatures({ ...stored, quality: "retired-level" }, "project p13"), JSON.stringify(stored)).toMatchObject(expected);
+    }
+    // A restricted mode never reads with a hosted model.
+    const strict = parseStoredPipelineFeatures({ privacyMode: "strict", quality: "retired-level" }, "project p14");
+    expect(strict.embedding.modelUri.startsWith("llm://openrouter/")).toBe(false);
+    // Valid stored values are untouched, and a row with none of these settings still reads as defaults.
+    expect(parseStoredPipelineFeatures({ webTools: true, privacyMode: "standard", quality: "retired-level" }, "project p15")).toMatchObject({ webTools: true, privacyMode: "standard" });
+    expect(parseStoredPipelineFeatures({ quality: "retired-level" }, "project p16").privacyMode).toBe("standard");
+  });
+
+  it("a URI that names its own endpoint is never swapped for the default hosted model", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const remote = "llm://vllm/Qwen/Qwen2-VL-2B-Instruct?baseUrl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1";
+    expect(sanitizeStoredPipeline({ vision: { modelUri: remote } }, "run r10")).toEqual({ vision: { modelUri: remote } });
+    expect(() => normalizeStoredPipelineFeatures({ vision: { modelUri: remote } } as never, "run r10")).toThrow();
+    for (const encoded of ["llm://vllm/Qwen/Qwen2-VL-2B-Instruct?base%55rl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1", "llm://openrouter/openai/gpt-4.1-mini?%62aseUrl=https%3A%2F%2Feu.example.com", "llm://private%2Falias/model"]) {
+      expect(sanitizeStoredPipeline({ vision: { remoteFallbackModelUri: encoded } }, "run r12"), encoded).toEqual({ vision: { remoteFallbackModelUri: encoded } });
+    }
+    const privateRoute = "llm://private/not-registered/model";
+    expect(sanitizeStoredPipeline({ vision: { modelUri: privateRoute } }, "run r11")).toEqual({ vision: { modelUri: privateRoute } });
+  });
+
   it("is never the deployment default either", () => {
     const messages: string[] = [];
     expect(readVisionModelUriOverride({ DOCSLURP_VISION_MODEL_URI: "llm://openrouter/google/gemini-2.5-flash-lite" }, (message) => messages.push(message))).toBeNull();
@@ -108,7 +157,12 @@ describe("a stored vision model that is no longer admitted", () => {
     const admitted = { vision: { modelUri: defaultVisionConfig.modelUri } };
     expect(sanitizeStoredPipeline(admitted, "project p2")).toEqual(admitted);
     expect(error).not.toHaveBeenCalled();
-    // Not a refusal: an unknown hosted model still fails the read, as before.
-    expect(() => normalizeStoredPipelineFeatures({ vision: { modelUri: "llm://openai/not-a-catalog-model" } } as never, "project p3")).toThrow();
+    // A model the catalog no longer has (removed, not refused) reads the same way; a request naming it is still rejected.
+    expect(normalizeStoredPipelineFeatures({ vision: { modelUri: "llm://openai/not-a-catalog-model" } } as never, "project p3").vision.modelUri).toBe(defaultVisionConfig.modelUri);
+    expect(normalizeStoredPipelineFeatures({ vision: { model: "retired-model-id" } } as never, "project p3").vision.modelUri).toBe(defaultVisionConfig.modelUri);
+    expect(() => normalizePipelineFeatures({ vision: { modelUri: "llm://openai/not-a-catalog-model" } } as never)).toThrow();
+    // A local model with its loopback endpoint is a usable stored choice and is kept.
+    const local = "llm://vllm/Qwen/Qwen2-VL-2B-Instruct?baseUrl=http%3A%2F%2F127.0.0.1%3A8000%2Fv1";
+    expect(sanitizeStoredPipeline({ vision: { modelUri: local } }, "run r9")).toEqual({ vision: { modelUri: local } });
   });
 });
