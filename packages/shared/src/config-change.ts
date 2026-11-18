@@ -13,6 +13,8 @@ import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   affectedStages,
   compilePipelinePlan,
+  fieldRebuildStages,
+  pipelineFeatureOverridesSchema,
   pipelineStageOrder,
   pipelineValuesEqual,
   type PipelineFeatures,
@@ -280,6 +282,64 @@ export function analyzePipelineChange(
   const stages: PipelineRunStage[] = reindexFields > 0 ? affectedStages(before, after) : [];
   return { kind, stages, reasons, documents: ctx.documents, pages: ctx.pages };
 }
+
+// ---------------------------------------------------------------------------
+// Index identity: settings locked once a project has ingested documents
+// ---------------------------------------------------------------------------
+
+/**
+ * The pipeline settings that define a project's search index: the embedding (profile, model, dimensions,
+ * normalization, task, late chunking), chunking (overlap, contextual preambles) and the vector backends. They are
+ * exactly the inputs of `indexConfigOf`. Vectors built under one value are not comparable with queries or chunks built
+ * under another, so once a project has ingested documents a plain settings update that changes any of them is refused
+ * with 409 `reindex_required`; `POST /v1/projects/:id/reindex` (or a PATCH with `apply: "reindex"`) applies the change
+ * and re-indexes the existing documents in one step.
+ */
+export const INDEX_IDENTITY_SETTINGS = ["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"] as const satisfies readonly (keyof PipelineFeatures)[];
+export type IndexIdentitySetting = (typeof INDEX_IDENTITY_SETTINGS)[number];
+
+export function isIndexIdentitySetting(value: unknown): value is IndexIdentitySetting {
+  return typeof value === "string" && (INDEX_IDENTITY_SETTINGS as readonly string[]).includes(value);
+}
+
+/**
+ * The index-identity settings `after` changes that existing documents would have to be re-indexed for: changed, and
+ * used by an enabled stage (an embedding change while embedding is off re-indexes nothing, as `analyzePipelineChange`
+ * says). Pure; in `INDEX_IDENTITY_SETTINGS` order.
+ */
+export function changedIndexIdentitySettings(before: PipelineFeatures, after: PipelineFeatures): IndexIdentitySetting[] {
+  return INDEX_IDENTITY_SETTINGS.filter((field) =>
+    !pipelineValuesEqual(before[field], after[field]) && affectedStages({ ...after, [field]: before[field] }, after).length > 0);
+}
+
+/** The stages a plain index rebuild (no settings change) re-runs: those the index-identity settings feed, closed over data flow. */
+export function indexRebuildStages(features: PipelineFeatures): PipelineRunStage[] {
+  return fieldRebuildStages(features, INDEX_IDENTITY_SETTINGS);
+}
+
+/** An estimate signature: what `POST /v1/projects/:id/reindex` and a confirming PATCH accept as `confirmEstimate`. */
+export const reindexEstimateSignatureSchema = z.string().regex(/^[a-f0-9]{64}$/, "confirmEstimate must be the signature an estimate returned");
+
+/**
+ * `POST /v1/projects/:id/reindex` (and its `/estimate` twin): applies index-identity setting changes and re-indexes the
+ * project's existing documents in one step. `pipeline` takes only the index-identity settings (other settings change
+ * through PATCH); omitted or empty, the command rebuilds the index under the current settings. `confirmEstimate` is the
+ * `signature` an estimate (or a `reindex_required` refusal) returned: the command is refused with 409 `estimate_stale`
+ * when the work or its price changed since.
+ */
+export const reindexProjectSchema = z.object({
+  pipeline: pipelineFeatureOverridesSchema.optional().superRefine((value, ctx) => {
+    for (const key of Object.keys(value ?? {})) {
+      if (!isIndexIdentitySetting(key)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `Only index settings (${INDEX_IDENTITY_SETTINGS.join(", ")}) change through reindex; change '${key}' with PATCH /v1/projects/:id` });
+      }
+    }
+  }),
+  /** Explicit opt-in to speed-boosted processing for the re-index runs, as on PATCH. */
+  speedBoost: z.boolean().optional(),
+  confirmEstimate: reindexEstimateSignatureSchema.optional(),
+}).strict();
+export type ReindexProjectInput = z.infer<typeof reindexProjectSchema>;
 
 /** Search and chat settings apply immediately; there is never a job. */
 export function analyzeSearchSettingsChange(

@@ -73,9 +73,12 @@ import {
 import { listProjectTags } from "../services/project-tags.js";
 import { getProjectState } from "../services/project-state.js";
 import { ChartExportUnavailableError } from "../services/chart-export-availability.js";
-import { applyProjectChange, billingState, ConfigConflictError, estimateProjectChange, planProjectChange } from "../services/config-change.js";
+import {
+  applyProjectChange, assertEstimateCurrent, billingState, ConfigConflictError, EstimateStaleError, estimateProjectChange, planProjectChange,
+  ReindexRequiredError, reindexTargetSignature,
+} from "../services/config-change.js";
 import { mergeProjectSearchSettings } from "../services/search-controls.js";
-import { analyzeSearchSettingsChange } from "@docslurp/shared";
+import { analyzeSearchSettingsChange, reindexProjectSchema, type UpdateProjectInput } from "@docslurp/shared";
 import { sql } from "../db.js";
 import {
   applyIngestRecommendation,
@@ -622,6 +625,47 @@ function findProhibitedModelId(value: unknown): string | null {
  * caller; platform admins use /v1/admin/projects), with the paths and the categories to use instead. The refused
  * values are logged, never echoed.
  */
+/**
+ * 409 for a locked index-identity change without a re-index confirmation (`reindex_required`, with the locked settings,
+ * the re-index work and the estimate signature in `details.reindex`) and for a stale confirmed estimate.
+ */
+function configChangeRefusal(c: Context, error: unknown): Response | null {
+  if (error instanceof ReindexRequiredError) return apiErrorResponse(c, 409, "reindex_required", error.message, error.details);
+  if (error instanceof EstimateStaleError) return apiErrorResponse(c, 409, "estimate_stale", error.message);
+  return null;
+}
+
+/** The reindex command's body as the PATCH it is equivalent to: the explicit confirmation, plus the speed-boost opt-in. */
+function reindexInput(body: { speedBoost?: boolean }): UpdateProjectInput {
+  return { apply: "reindex", ...(body.speedBoost !== undefined ? { speedBoost: body.speedBoost } : {}) };
+}
+
+/**
+ * The reindex command's gates, the same as PATCH /:projectId (it spends credits and changes settings): a server key
+ * with projects:manage, bound to its organization; a project the caller can see; edit access to it. Managed model
+ * fields and prohibited models are refused before anything is planned.
+ */
+async function reindexGate(c: Context): Promise<Response | { project: NonNullable<Awaited<ReturnType<typeof getProject>>>; userId: string }> {
+  const raw = await c.req.json().catch(() => null) as { pipeline?: unknown } | null;
+  markDeprecatedFields(c, deprecatedPipelineFields(raw?.pipeline));
+  const managed = refuseManagedPipelineFields(c, raw?.pipeline);
+  if (managed) return managed;
+  if (findProhibitedModelId(raw?.pipeline)) return apiErrorResponse(c, 400, "invalid_request", "A model in this pipeline configuration is not permitted");
+  const userId = c.get("sessionUser").id;
+  const project = await getProject(String(c.req.param("projectId")), userId);
+  if (!project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+  const actor = getRequestActor(c);
+  if (actor.type === "apiKey") {
+    if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["projects:manage"])) {
+      return apiErrorResponse(c, 403, "forbidden", "This endpoint requires a server API key with the projects:manage scope");
+    }
+    if (!apiKeyCanUseProject(actor.apiKey, project)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+  }
+  const denied = await denyEditOfVisibleProject(c, project);
+  if (denied) return denied;
+  return { project, userId };
+}
+
 function refuseManagedPipelineFields(c: Context, rawPipeline: unknown): Response | null {
   const paths = managedPipelineModelPaths(rawPipeline);
   if (!paths.length) return null;
@@ -696,6 +740,8 @@ export const projectsRoutes = new Hono()
       return c.json({ ...result, snapshot: { ...result.snapshot, project: publicProjectView((await withCanEdit(c, [result.snapshot.project]))[0], getRequestActor(c)), settings: customerSearchSettingsView(result.snapshot.settings) } });
     } catch (error) {
       if (error instanceof SettingsPublicationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      const refused = configChangeRefusal(c, error);
+      if (refused) return refused;
       if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
       if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
       if (error instanceof ProjectSettingsUnreadableError) return apiStatusError(c, 409, error.message, { code: error.code });
@@ -1544,10 +1590,17 @@ export const projectsRoutes = new Hono()
         const plan = await planProjectChange({
           projectId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined, origin: runOriginOf(c),
         });
+        // A confirmed estimate pins the work: a stale one is refused, and the transaction rechecks the documents.
+        if (plan) assertEstimateCurrent(plan, input.confirmEstimate);
         applied = plan
-          ? await applyProjectChange({ plan, userId, updateOptions: requestedMode.success ? { indexingMode: requestedMode.data } : undefined })
+          ? await applyProjectChange({
+            plan, userId, updateOptions: requestedMode.success ? { indexingMode: requestedMode.data } : undefined,
+            ...(input.confirmEstimate !== undefined ? { maxAttempts: 1, expectedTargetSignature: reindexTargetSignature(plan.targets) } : {}),
+          })
           : null;
       } catch (error) {
+        const refused = configChangeRefusal(c, error);
+        if (refused) return refused;
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
         // Settings written by a newer version: never overwritten from the strictest values this version shows.
         if (error instanceof ProjectSettingsUnreadableError) return apiStatusError(c, 409, error.message, { code: error.code });
@@ -1632,6 +1685,91 @@ export const projectsRoutes = new Hono()
       const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json"), origin: runOriginOf(c) });
       if (!result) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       return c.json(result);
+    },
+  )
+  .post(
+    "/:projectId/reindex/estimate",
+    zValidator("json", reindexProjectSchema, validationHook),
+    async (c) => {
+      const gate = await reindexGate(c);
+      if (gate instanceof Response) return gate;
+      const body = c.req.valid("json");
+      const result = await estimateProjectChange({
+        projectId: gate.project.id, userId: gate.userId, input: reindexInput(body), pipelineOverrides: body.pipeline, rebuildIndex: true, origin: runOriginOf(c),
+      });
+      if (!result) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      return c.json(result);
+    },
+  )
+  .post(
+    "/:projectId/reindex",
+    zValidator("json", reindexProjectSchema, validationHook),
+    async (c) => {
+      const gate = await reindexGate(c);
+      if (gate instanceof Response) return gate;
+      const { project: current, userId } = gate;
+      const body = c.req.valid("json");
+      let applied: Awaited<ReturnType<typeof applyProjectChange>>;
+      try {
+        const plan = await planProjectChange({
+          projectId: current.id, userId, input: reindexInput(body), pipelineOverrides: body.pipeline, rebuildIndex: true, origin: runOriginOf(c),
+        });
+        if (!plan) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+        assertEstimateCurrent(plan, body.confirmEstimate);
+        if (plan.targets.length > 0 && plan.impact.stages.length === 0) {
+          return apiErrorResponse(c, 400, "no_stages_to_run", "No enabled stage builds the search index (embedding or indexing is off), so there is nothing to re-index.");
+        }
+        applied = await applyProjectChange({
+          plan, userId,
+          // The overrides were merged onto the project as planned: never re-merge them onto a newer row.
+          maxAttempts: 1,
+          ...(body.confirmEstimate !== undefined ? { expectedTargetSignature: reindexTargetSignature(plan.targets) } : {}),
+        });
+      } catch (error) {
+        const refused = configChangeRefusal(c, error);
+        if (refused) return refused;
+        if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        if (error instanceof ProjectSettingsUnreadableError) return apiStatusError(c, 409, error.message, { code: error.code });
+        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
+        if (error instanceof SummaryTreeConfigError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "summaryTree" } });
+        throw error;
+      }
+      if (!applied) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      for (const runId of applied.queuedRunIds) {
+        try {
+          const run = await getRun(runId, userId);
+          if (run) await runLifecycle.start(run);
+        } catch (error) {
+          // The run-start recovery sweeper starts runs whose workflow start was never confirmed.
+          console.warn(`[config-change] run=${runId} start deferred: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      const project = applied.project;
+      const actor = getRequestActor(c);
+      await appendAuditLog({
+        orgId: project.orgId,
+        userId,
+        projectId: project.id,
+        action: "project.reindexed",
+        resourceType: "project",
+        resourceId: project.id,
+        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
+        ipAddress: requestIp(c),
+        metadata: {
+          snapshot: createProjectVersionSnapshot(project),
+          changedSettings: applied.plan.identityChanges,
+          runIds: applied.job?.runIds ?? [],
+          userAgent: requestUserAgent(c),
+        },
+      });
+      return c.json({
+        project: publicProjectView((await withCanEdit(c, [project]))[0], actor),
+        changedSettings: applied.plan.identityChanges,
+        impact: applied.plan.impact,
+        estimate: applied.plan.estimate,
+        runIds: applied.job?.runIds ?? [],
+        job: applied.job,
+      });
     },
   )
   .post(

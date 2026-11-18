@@ -39,7 +39,36 @@ export const configChangePaths = {
     post: {
       tags: ["projects"],
       summary: "Estimate a project update",
-      description: "Same body as PATCH /v1/projects/{projectId}. Returns `{ impact, estimate, billing }`: whether the change needs a re-index (none, search-only, new-uploads, reindex-recommended, reindex-required) and what it would cost.",
+      description: "Same body as PATCH /v1/projects/{projectId}. Returns `{ impact, estimate, lockedSettings, signature, billing }`: whether the change needs a re-index (none, search-only, new-uploads, reindex-recommended, reindex-required), what it would cost, which locked index settings it changes (a PATCH changing them needs `apply: \"reindex\"`) and the signature a confirming PATCH or reindex command passes as `confirmEstimate`.",
+      security,
+      parameters: [projectRefParameter],
+      requestBody: body,
+      responses: estimateResponses,
+    },
+  },
+  "/v1/projects/{projectId}/reindex": {
+    post: {
+      tags: ["projects"],
+      summary: "Re-index a project (apply locked index settings)",
+      description: "Applies index-identity setting changes (`pipeline` takes only embedding, chunkOverlap, contextualChunkPreambles and vectorBackends) and re-indexes the project's existing documents in one step; with no `pipeline`, rebuilds the index under the current settings. These settings are locked once the project has indexed documents: PATCH /v1/projects/{projectId} refuses a change to them with 409 `reindex_required` (nothing saved) unless it sends `apply: \"reindex\"`. `confirmEstimate` is the `signature` from POST /v1/projects/{projectId}/reindex/estimate (or the refusal's `details.reindex.signature`); when the work or its price changed since, the command is refused with 409 `estimate_stale` and nothing is saved. Same access as PATCH: a session editor, or a server key with projects:manage. Returns `{ project, changedSettings, impact, estimate, runIds, job }`; a project without documents just saves the settings (`job` null). Spends credits; runs that cannot be admitted wait as `blocked`.",
+      security,
+      parameters: [projectRefParameter],
+      requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { pipeline: { type: "object" }, speedBoost: { type: "boolean" }, confirmEstimate: { type: "string", pattern: "^[a-f0-9]{64}$" } }, additionalProperties: false } } } },
+      responses: {
+        "200": { description: "`{ project, changedSettings, impact, estimate, runIds, job }`" },
+        "400": { description: "A non-index setting in `pipeline`, or nothing builds the index (`no_stages_to_run`)" },
+        "401": { description: "Authentication required" },
+        "403": { description: "Not an editor of the project, or a key without projects:manage" },
+        "404": { description: "Not found" },
+        "409": { description: "`estimate_stale`, or `config_conflict` when the project changed while saving" },
+      },
+    },
+  },
+  "/v1/projects/{projectId}/reindex/estimate": {
+    post: {
+      tags: ["projects"],
+      summary: "Estimate a project re-index",
+      description: "Same body and access as POST /v1/projects/{projectId}/reindex; changes nothing. Returns `{ impact, estimate, lockedSettings, signature, quote, billing }`. Pass `signature` as the command's `confirmEstimate`.",
       security,
       parameters: [projectRefParameter],
       requestBody: body,

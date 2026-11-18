@@ -10,7 +10,7 @@ import { openSettingsProposal, sealSettingsProposal } from "../lib/settings-prop
 import { mergeProjectSearchSettings, getProjectSearchSettings, upsertProjectSearchSettings } from "./search-controls.js";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { ChartExportUnavailableError } from "./chart-export-availability.js";
-import { applyProjectChange, ConfigConflictError, planProjectChange, reindexTargetSignature, type ProjectChangePlan } from "./config-change.js";
+import { applyProjectChange, ConfigConflictError, planProjectChange, ReindexRequiredError, reindexTargetSignature, type ProjectChangePlan } from "./config-change.js";
 import { appendAuditLog } from "./audit-log.js";
 import { getRun } from "./runs.js";
 import { runLifecycle } from "./run-lifecycle.js";
@@ -168,6 +168,8 @@ export async function applySettingsProposal(args: { actor: RequestActor; project
       ...(args.reprocessExisting ? { expectedTargetSignature: reindexTargetSignature(planned.targets) } : {}) });
   } catch (error) {
     if (error instanceof ConfigConflictError) return fail(409, "settings_proposal_stale", "Settings or affected work changed; request a fresh proposal");
+    // A locked index change applied without reprocessing: the proposal needs explicit reprocessing consent.
+    if (error instanceof ReindexRequiredError) return fail(409, "reprocess_consent_required", "This change requires explicit consent to reprocess existing documents");
     throw error;
   }
   if (!applied) return fail(403, "settings_proposal_forbidden", "Project editing permission is required");
