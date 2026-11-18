@@ -207,5 +207,30 @@ describe.skipIf(!url)("legacy URL adoption under concurrency (real PostgreSQL)",
     expect(await reprocess).toBe("created");
     expect((await s.chain()).map((row) => row.canonical_id)).toEqual([canonicalIdForUrl(s.sourceUrl), canonicalIdForUrl(s.sourceUrl)]);
   }, 30_000);
+
+  it("a new version and a reprocess are not refused while a summary build holds the document (FOR NO KEY UPDATE)", async () => {
+    const s = await scenario();
+    const upload = () => runCreation.create({
+      userId: s.user, projectId: s.project, kind: "bulk-upload", pipeline: defaultPipelineFeatures,
+      sources: { kind: "files", files: [{ filename: "notes.pdf", mimeType: "application/pdf", sourceKey: `u/raw/${randomUUID()}`, fileSize: 1000, canonicalId: "notes-key" }] },
+    } as never);
+    await upload();
+    const [first] = await pool<{ id: string }[]>`select id from documents where project_id = ${s.project} and canonical_id = 'notes-key'`;
+    // Session B holds the document as the worker's summary-tree build does, for the whole build.
+    const build = await worker.reserve();
+    await build`begin`;
+    await build`select id from documents where id = ${first!.id} for no key update`;
+    try {
+      // A new version chains to it (FOR KEY SHARE NOWAIT on the predecessor) and a reprocess holds it as its source.
+      await expect(upload()).resolves.toBeTruthy();
+      await expect(s.reprocess(first!.id)).resolves.toBeTruthy();
+    } finally {
+      await build`commit`;
+      build.release();
+    }
+    const chain = await pool<{ version_number: number; previous_version_id: string | null }[]>`
+      select version_number, previous_version_id from documents where project_id = ${s.project} and canonical_id = 'notes-key' order by created_at, id`;
+    expect(chain.map((row) => row.version_number)).toEqual([1, 2, 3]);
+  }, 30_000);
 });
 

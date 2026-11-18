@@ -222,3 +222,22 @@ describe("a caller canonicalId that is a legacy URL-intake chain's raw-URL key",
     await expect(upload("https://example.com/elsewhere")).resolves.toBeTruthy();
   });
 });
+
+describe("a caller's own repeat URL ingest under its URL's key", () => {
+  /** A URL ingest of `url` with the caller's own canonicalId, as URL intake hands it over. */
+  const urlIngest = (url: string, canonicalId: string) => runCreation.create({
+    userId: "u", projectId: "w", kind: "url-ingest", pipeline: defaultPipelineFeatures,
+    sources: { kind: "files", files: [{ filename: "files.example.com-0.pdf", mimeType: "application/pdf", sourceKey: `u/raw/${Math.random()}`, fileSize: 1000, canonicalId, metadata: { sourceUrl: url } }] },
+  } as never);
+
+  it("succeeds both times and chains, while another URL naming that key is still refused", async () => {
+    await expect(urlIngest(URL_A, LEGACY)).resolves.toBeTruthy();
+    await expect(urlIngest(URL_A, LEGACY)).resolves.toBeTruthy();
+    const chain = await rows();
+    expect(chain.map((row) => [row.canonical_id, row.version_number])).toEqual([[LEGACY, 1], [LEGACY, 2]]);
+    expect(chain[1]!.previous_version_id).toBe(chain[0]!.id);
+    // Another URL cannot use this URL's key to join its history.
+    await expect(urlIngest("https://files.example.com/d/other.pdf", LEGACY)).rejects.toBeInstanceOf((await import("../lib/canonical-id.js")).ReservedCanonicalIdError);
+    expect(await rows()).toHaveLength(2);
+  });
+});

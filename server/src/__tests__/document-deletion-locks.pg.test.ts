@@ -81,7 +81,7 @@ describe.skipIf(!url)("document deletion under concurrency (real PostgreSQL)", (
     expect(await pool`select previous_version_id from documents where id = ${c!}`).toEqual([{ previous_version_id: null }]);
   }, 60_000);
 
-  it("a delete racing a worker completing a newer version ends without a deadlock, both in their final state", async () => {
+  it("delete X while the worker completes its successor Y, worker first: no 40P01, both in their final state", async () => {
     const { ids: [a, b] } = await chain(["completed", "processing"]);
     // The worker holds the newer version's row, as its completing UPDATE does before the supersession trigger runs.
     const session = await worker.reserve();
@@ -105,6 +105,31 @@ describe.skipIf(!url)("document deletion under concurrency (real PostgreSQL)", (
     expect(await deletion).toBe(1);
     expect(await pool`select id from documents where id = ${a!}`).toEqual([]);
     expect(await pool`select status, previous_version_id from documents where id = ${b!}`).toEqual([{ status: "completed", previous_version_id: null }]);
+  }, 30_000);
+
+  it("delete X while the worker completes its successor Y, deletion first: the worker waits, no 40P01, both final", async () => {
+    const { ids: [x, y] } = await chain(["completed", "processing"]);
+    // Session B pauses the deletion after it holds the chain key, X and Y (its project update waits).
+    const blocker = await worker.reserve();
+    await blocker`begin`;
+    await blocker`select id from projects where id = ${project} for update`;
+    const deletion = deleteDocuments([x!], user).then((n) => n, (error: unknown) => error);
+    for (let i = 0; i < 100; i++) {
+      const [row] = await pool<{ n: number }[]>`select count(*)::int as n from pg_stat_activity
+        where wait_event_type = 'Lock' and query ilike '%update projects set retention_changed_at%'`;
+      if (row!.n > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    // The worker completes Y now: its UPDATE waits on the deletion's row lock (then its trigger on the chain key).
+    const completion = worker`update documents set status = 'completed' where id = ${y!}`.then(() => "completed", (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await blocker`commit`;
+    blocker.release();
+    expect(await deletion).toBe(1);
+    expect(await completion).toBe("completed");
+    expect(await pool`select id from documents where id = ${x!}`).toEqual([]);
+    expect(await pool`select status, previous_version_id, superseded_at from documents where id = ${y!}`)
+      .toEqual([{ status: "completed", previous_version_id: null, superseded_at: null }]);
   }, 30_000);
 
   it("a delete of an old version racing a worker whose newest version supersedes several rows ends without a deadlock", async () => {

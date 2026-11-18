@@ -1082,13 +1082,14 @@ export function createRunCreation(deps: RunCreationDeps) {
         if (urlChain) {
           await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId: source.org_id, canonicalId: urlChain.opaque, metadata: source.metadata });
         }
-        // The source row stays locked FOR SHARE through the insert, so a concurrent deletion (which locks the
+        // The source row stays locked FOR KEY SHARE through the insert, so a concurrent deletion (which locks the
         // source FOR UPDATE before it enumerates and rewires its children) either waits for this version, which it
-        // then rewires, or has already removed the source. NOWAIT: a conflict retries the whole transaction; a
-        // source gone by then fails closed.
+        // then rewires, or has already removed the source. KEY SHARE blocks only deletion: ordinary updates of the
+        // source (its status, a summary build's FOR NO KEY UPDATE) go on. NOWAIT: a conflict retries the whole
+        // transaction; a source gone by then fails closed.
         const [current] = await client<{ canonical_id: string | null }[]>`
           select canonical_id from documents where id = ${source.id} and project_id = ${input.projectId} and org_id = ${source.org_id}
-          for share nowait`;
+          for key share nowait`;
         if (!current) throw new RunSourceGoneError(source.id);
         if (current.canonical_id && current.canonical_id !== canonicalId) {
           // Under URL provenance without URL-intake history the chain keeps its own key: take that key's lock too.
@@ -1336,8 +1337,16 @@ export function createRunCreation(deps: RunCreationDeps) {
     }
 
     // A caller key that is a legacy URL-intake chain's raw-URL key is refused before anything is created.
+    // A URL ingest whose own URL maps to its caller key is that URL's chain continuing (a repeat ingest), not a join.
     if (sources.kind === "files" && !input.extract) {
-      await assertCallerKeysAvoidLegacyUrlChains(sql, { projectId: input.projectId, orgId: access.orgId, canonicalIds: sources.files.map((file) => file.canonicalId) });
+      const ownUrlChain = (file: RunSourceFile) => {
+        const sourceUrl = (file.metadata as Record<string, unknown> | null | undefined)?.sourceUrl;
+        return input.kind === "url-ingest" && typeof sourceUrl === "string" && tryCanonicalIdForUrl(sourceUrl) === file.canonicalId;
+      };
+      await assertCallerKeysAvoidLegacyUrlChains(sql, {
+        projectId: input.projectId, orgId: access.orgId,
+        canonicalIds: sources.files.filter((file) => !ownUrlChain(file)).map((file) => file.canonicalId),
+      });
     }
 
     // One admission path for every caller: credit floor, live budget caps, then
