@@ -106,6 +106,7 @@ import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore } from "../tools/storage.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
+import { readPageFactsRasterSizes, storePageFactsRasterSizes } from "../pipeline/pdf-page-sizes.js";
 import { repairDocumentTables } from "../pipeline/table-routing-vm.js";
 import { buildRoutingPageFacts, pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
 import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
@@ -1055,6 +1056,12 @@ export class ExtractMarkdownStage implements Stage {
                   if (isPdf && winningCandidate.pageFacts) {
                     const pageFactsUri = await this.storeDopplerPageFactsFile(document, state.run.id, winningCandidate.pageFacts);
                     if (pageFactsUri) state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_SLOT, pageFactsUri);
+                    // Page sizes for later raster stages in place of a sandboxed pdfinfo (DOCSLURP_PAGE_FACTS_RASTER_SIZES=on, off
+                    // by default), bound to the staged source the facts measured (pipeline/pdf-page-sizes.ts).
+                    if (readPageFactsRasterSizes()) {
+                      const stored = await storePageFactsRasterSizes({ storage: this.storage, document, runId: state.run.id, sourceSha256: contentHash, facts: winningCandidate.pageFacts });
+                      if (stored) console.log(`[raster-page-sizes] document=${document.id} source=page-facts stored=${stored.stored} skipped=${JSON.stringify(stored.skipped)}`);
+                    }
                   }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.

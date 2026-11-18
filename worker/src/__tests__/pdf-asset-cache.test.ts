@@ -17,6 +17,7 @@ import {
   parsePdfPageSizes,
   runLanes,
 } from "../pipeline/pdf-asset-cache.js";
+import { pdfPageSizeMemo } from "../pipeline/pdf-page-sizes.js";
 import { probePidNamespace, spawnContained } from "../sandbox/teardown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
@@ -46,6 +47,7 @@ function makeDocument(): Document {
 }
 
 afterEach(async () => {
+  pdfPageSizeMemo().clear();
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -231,13 +233,15 @@ describe("PdfRasterCache", () => {
     expect(first.map((page) => page.pageNumber)).toEqual([2, 3, 5]);
     expect(first.every((page) => !page.cacheHit)).toBe(true);
     expect(second.every((page) => page.cacheHit)).toBe(true);
-    expect(artifacts.size).toBe(3);
+    // Three pages, plus the run's stored page sizes.
+    expect([...artifacts.keys()].filter((key) => key.endsWith(".png"))).toHaveLength(3);
+    expect([...artifacts.keys()].filter((key) => key.includes("/page-sizes/doc-1/pdfinfo-"))).toHaveLength(1);
     expect(first.map((page) => page.sizeBytes)).toEqual([6, 6, 6]);
     expect(second.map((page) => page.sizeBytes)).toEqual([6, 6, 6]);
     await sourceCache.clear();
   });
 
-  it("sizes each contiguous run with one pdfinfo call and renders pages in bounded parallel lanes", async () => {
+  it("sizes the pages with one pdfinfo call per page block and renders pages in bounded parallel lanes", async () => {
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -277,7 +281,8 @@ describe("PdfRasterCache", () => {
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 3 });
     const pages = await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 20 }, runId: "run-1", pageNumbers: [9, 2, 4, 7, 5, 11] });
 
-    expect(calls.filter((call) => call.startsWith("pdfinfo")).sort()).toEqual(["pdfinfo:11", "pdfinfo:2", "pdfinfo:5", "pdfinfo:7", "pdfinfo:9"]);
+    // One block covers the whole 20-page document (pdf-page-sizes.ts PAGE_SIZE_BLOCK_PAGES).
+    expect(calls.filter((call) => call.startsWith("pdfinfo"))).toEqual(["pdfinfo:20"]);
     // Same per-page command (page, DPI, bounded edge) as the sequential path.
     expect(calls.filter((call) => call.startsWith("pdftoppm")).sort()).toEqual(
       [2, 4, 5, 7, 9, 11].map((page) => `pdftoppm:${page},${page},150,1650`).sort(),
@@ -398,7 +403,7 @@ describe("PdfRasterCache", () => {
       },
     };
     const uploads: string[] = [];
-    const storage = { async objectSize() { return null; }, async putBytes(key: string) { uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
+    const storage = { async objectSize() { return null; }, async putBytes(key: string) { if (!key.includes("/page-sizes/")) uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
     const pidRoot = await mkdtemp(path.join(tmpdir(), "raster-abort-test-"));
     tempRoots.push(pidRoot);
     const pidFile = path.join(pidRoot, "pids");
@@ -494,7 +499,7 @@ describe("PdfRasterCache", () => {
       },
     };
     const uploads: string[] = [];
-    const storage = { async objectSize() { return null; }, async putBytes(key: string) { uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
+    const storage = { async objectSize() { return null; }, async putBytes(key: string) { if (!key.includes("/page-sizes/")) uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
     let releaseSibling!: () => void;
     const siblingMayFail = new Promise<void>((resolve) => { releaseSibling = resolve; });
     let finishedAfterAbort = false;
@@ -540,7 +545,7 @@ describe("PdfRasterCache", () => {
       },
     };
     const uploads: string[] = [];
-    const storage = { async objectSize() { return null; }, async putBytes(key: string) { uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
+    const storage = { async objectSize() { return null; }, async putBytes(key: string) { if (!key.includes("/page-sizes/")) uploads.push(key); }, uri(key: string) { return `s3://test/${key}`; } };
     const runner = {
       async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
       async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
@@ -600,7 +605,7 @@ describe("PdfRasterCache", () => {
     await sourceCache.clear();
   });
 
-  it("sizes distant selected pages with one pdfinfo call each, not one call over their span", async () => {
+  it("sizes distant selected pages with one pdfinfo call per aligned block, not one call over their span", async () => {
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -624,7 +629,7 @@ describe("PdfRasterCache", () => {
     const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { rasterSlots: new Semaphore(4) });
     await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 40_000 }, runId: "run-1", pageNumbers: [1, 2, 3, 40_000] });
-    expect(sized.sort((a, b) => a[0] - b[0])).toEqual([[1, 3], [40_000, 40_000]]);
+    expect(sized.sort((a, b) => a[0] - b[0])).toEqual([[1, 4_096], [36_865, 40_000]]);
     await sourceCache.clear();
   });
 
