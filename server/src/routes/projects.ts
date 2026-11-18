@@ -67,6 +67,7 @@ import {
   listProjects,
   rollbackProjectVersion,
   updateProject,
+  ProjectSettingsUnreadableError,
   ProjectSlugError,
 } from "../services/projects.js";
 import { listProjectTags } from "../services/project-tags.js";
@@ -697,6 +698,7 @@ export const projectsRoutes = new Hono()
       if (error instanceof SettingsPublicationError) return apiStatusError(c, error.status, error.message, { code: error.code });
       if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
       if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
+      if (error instanceof ProjectSettingsUnreadableError) return apiStatusError(c, 409, error.message, { code: error.code });
       if (error instanceof z.ZodError) return apiStatusError(c, 400, "Invalid project settings", { details: { issues: error.issues } });
       if (error instanceof ChartExportUnavailableError || error instanceof SummaryTreeConfigError) return apiStatusError(c, 400, error.message, { code: error.code });
       throw error;
@@ -1547,6 +1549,8 @@ export const projectsRoutes = new Hono()
           : null;
       } catch (error) {
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
+        // Settings written by a newer version: never overwritten from the strictest values this version shows.
+        if (error instanceof ProjectSettingsUnreadableError) return apiStatusError(c, 409, error.message, { code: error.code });
         if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
         if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
         // The project's summary tree is on and this save would leave it without vectors, or under a template that keeps summaries off.

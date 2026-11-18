@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PrivacyModeViolationError } from "@docslurp/shared";
+import { PrivacyModeViolationError, readStoredPipelineSettings } from "@docslurp/shared";
 
 const mocks = vi.hoisted(() => ({
   sql: vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[])),
@@ -38,6 +38,14 @@ describe("privacy mode resolution", () => {
     expect(privacyModeOf({ privacyMode: "typo" })).toBe("strict-privacy");
     expect(strictestPrivacyMode(["standard", "strict-privacy", "local-only"])).toBe("strict-privacy");
     expect(strictestPrivacyMode([])).toBe("standard");
+  });
+
+  it("a stored pipeline that is not an object fails closed, as the stored-row reader reads it", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const pipeline of ["garbage", 42, ["a"], true, null, {}, { privacyMode: "local-only" }, { privacyMode: "typo" }, { privacyMode: null }]) {
+      expect(privacyModeOf(pipeline)).toBe(readStoredPipelineSettings(pipeline, "test").features.privacyMode);
+    }
+    expect(privacyModeOf("garbage")).toBe("strict-privacy");
   });
 
   it("treats a failed project lookup as local-only", async () => {

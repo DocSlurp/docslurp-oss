@@ -116,7 +116,7 @@ describe("listProjects", () => {
     error.mockRestore();
   });
 
-  it("shows one project whose stored settings no longer validate, and refuses to start work or draft a save from it", async () => {
+  it("reads one project whose stored settings no longer validate with each invalid field reset, on every path", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { getProject } = await import("../services/projects.js");
     const { getProjectAccess } = await import("../services/organizations.js");
@@ -140,9 +140,31 @@ describe("listProjects", () => {
     expect(strictest?.pipeline.piiPolicy).toMatchObject({ enabled: true, action: "block_indexing" });
     expect(strictest?.pipeline.webTools).toBe(false);
 
-    // The same row read to start work or to draft a save still fails: nothing is guessed there.
+    expect(strictest?.settingsRepairs).toEqual(expect.arrayContaining([
+      { path: "pipeline.privacyMode", reason: "restricted" },
+      { path: "pipeline.piiPolicy", reason: "restricted" },
+      { path: "pipeline.webTools", reason: "restricted" },
+      { path: "pipeline.quality", reason: "restricted" },
+    ]));
+
+    // The read that starts work or drafts a save is the same read: the invalid field is reset, the guarded ones kept.
     sqlMock.mockResolvedValueOnce(row(stale));
-    await expect(getProject("ws-old", "user-1")).rejects.toThrow();
+    const forWork = await getProject("ws-old", "user-1");
+    expect(forWork?.pipeline).toMatchObject({ privacyMode: "local-only", webTools: false, piiPolicy: { enabled: true, action: "block_indexing" }, embedding: { profile: "cheapest-local" } });
+    expect(forWork?.settingsRepairs).toEqual([{ path: "pipeline.quality", reason: "restricted" }]);
+    expect(forWork?.pipeline.quality).toBe("fast");
+    expect(JSON.stringify(forWork?.settingsRepairs)).not.toContain("no-such-quality");
+
+    // A pipeline that is not an object: defaults, with every guarded setting at its strictest.
+    sqlMock.mockResolvedValueOnce(row("garbage"));
+    const unreadable = await getProject("ws-old", "user-1");
+    expect(unreadable?.pipeline).toMatchObject({ privacyMode: "strict-privacy", webTools: false, maxCostCents: 1, webhooks: { enabled: false }, visionFallback: false, mediaVideo: { enabled: false } });
+    expect(unreadable?.settingsRepairs).toEqual([{ path: "pipeline", reason: "restricted" }]);
+
+    // A valid row carries no repairs field at all (response shape unchanged).
+    sqlMock.mockResolvedValueOnce(row({ summarize: true }));
+    const valid = await getProject("ws-old", "user-1");
+    expect(valid).not.toHaveProperty("settingsRepairs");
     error.mockRestore();
   });
 
@@ -254,5 +276,29 @@ describe("listProjectBoardRecords", () => {
       totalEmbeddingTokens: 600,
       totalLlmCostCents: 5,
     });
+  });
+});
+
+describe("readProjectSettings on a valid row", () => {
+  it("reads exactly what the strict managed-pipeline path read before (no repairs)", async () => {
+    const { readProjectSettings } = await import("../services/projects.js");
+    const { defaultPipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline } = await import("@docslurp/shared");
+    const rows: Array<{ pipeline: unknown; managed?: unknown }> = [
+      { pipeline: null },
+      { pipeline: {} },
+      { pipeline: { summarize: true, quality: "good", maxCostCents: 300 } },
+      { pipeline: structuredClone(defaultPipelineFeatures) },
+      { pipeline: { privacyMode: "local-only", embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" }, piiPolicy: { enabled: true, action: "redact_artifacts", patterns: ["ssn"] } } },
+      { pipeline: { webhooks: { enabled: true, events: ["run.completed"] }, ladder: { maxRung: "ocr" }, mediaVideo: { enabled: false } } },
+      { pipeline: { summarize: true }, managed: { textGeneration: { model: "llm://private/gpu1/acme/text" } } },
+    ];
+    for (const [index, { pipeline, managed }] of rows.entries()) {
+      const row = { id: `valid-${index}`, pipeline: pipeline as never, managed_models: managed ? { pipeline: managed } : null };
+      const read = readProjectSettings(row);
+      const before = resolveManagedPipeline(pipeline ?? defaultPipelineFeatures, parseManagedPipelineOverrides(managed ?? null, "test"), "test").pipeline;
+      expect(read.repairs).toEqual([]);
+      expect(read.unreadable).toBe(false);
+      expect(read.pipeline).toEqual(before);
+    }
   });
 });

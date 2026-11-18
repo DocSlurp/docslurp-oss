@@ -1,7 +1,7 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
+import { chartExportModelsAllowed, clampRunLadder, readStoredPipelineSettings, strictestStoredPipelineFeatures, stripLegacyVisionModel, stripManagedPipelineFields, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import { resolveRunExtraction } from "./extraction-settings.js";
 import {
@@ -971,6 +971,22 @@ export function createRunCreation(deps: RunCreationDeps) {
     }
   }
 
+  function projectPipelineForCeilings(stored: unknown, projectId: string): unknown {
+    const source = `project ${projectId}`;
+    // Model fields are not ceilings (and are never configuration): stripped first, as on a project read.
+    const record = stored !== null && typeof stored === "object" && !Array.isArray(stored)
+      ? stripLegacyVisionModel(stripManagedPipelineFields(stored as Record<string, unknown>), source)
+      : stored;
+    let read: ReturnType<typeof readStoredPipelineSettings>;
+    try {
+      read = readStoredPipelineSettings(record ?? null, source);
+    } catch {
+      // Written by a newer build: the ceilings are the strictest values, as the project read shows them.
+      return strictestStoredPipelineFeatures();
+    }
+    return read.repairs.some((repair) => repair.reason !== "retired") ? read.features : stored;
+  }
+
   async function create(request: CreateRunInput): Promise<CreatedRun> {
     // Callers often pass a stored project or run pipeline (reprocess, bulk reprocess, full index, connectors).
     // Extractor settings the strict schemas now reject are dropped here, before anything is written, so the
@@ -1001,7 +1017,11 @@ export function createRunCreation(deps: RunCreationDeps) {
       if (reprocessing && canContributeToProject(access, request.userId)) throw new EditorRequiredError();
       throw new Error("Forbidden");
     }
-    const projectChartExport = upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: ChartExportTier } | null;
+    // The project's stored settings are ceilings below (chart tier, ladder, quality and visuals). A row whose stored
+    // settings no longer validate is read with its reset values (readStoredPipelineSettings: the strictest value for
+    // spend and privacy settings), never with the unreadable ones; a valid row is used exactly as stored.
+    const projectStored = projectPipelineForCeilings(access.pipeline, request.projectId);
+    const projectChartExport = upgradeStoredChartExport((projectStored as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: ChartExportTier } | null;
     // The chart export tier is resolved here, once per run, and stored on the run: a retry or resume reads it back, and
     // the worker never re-resolves it. A new run: request override, project tier, origin default. A replay (reprocess,
     // bulk reprocess): the request's explicit override, else the source run's stamp capped at what the project resolves
@@ -1014,7 +1034,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       pipeline: withProjectSummaryTree(request.chartExportReplay
         ? replayChartExport(sanitized, request.chartExportReplay.requested ?? null, projectChartExport, request.origin ?? "machine")
         : stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),
-      storedSummaryTree(access.pipeline)),
+      storedSummaryTree(projectStored)),
     };
     assertPipelineSpeedBoost(input.pipeline);
     // The project's Auto ladder limits (pipeline.ladder) are a ceiling for callers who cannot change the project's spend
@@ -1022,7 +1042,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     // their run override may tighten the limits (a lower rung, a smaller share), never loosen them, and while the project
     // has a limit it may not raise quality above the project's (auto -> good would read every page). Clamped, not refused.
     {
-      const projectPipeline = (access.pipeline ?? null) as { quality?: QualityMode | null; ladder?: Partial<PipelineLadder> | null } | null;
+      const projectPipeline = (projectStored ?? null) as { quality?: QualityMode | null; ladder?: Partial<PipelineLadder> | null } | null;
       const apiKeyId = input.apiKeyId ?? currentRequestApiKeyId();
       let mayLoosen = canEditProject(access, input.userId);
       if (mayLoosen && apiKeyId) {
@@ -1056,7 +1076,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     // The resolved values are stamped on the run as `pipeline.effective` (additive: older releases ignore it).
     const { effective, ...resolvedPipeline } = await resolveRunExtraction({
       pipeline: input.pipeline,
-      project: access.pipeline as never,
+      project: projectStored as never,
       origin: input.origin ?? "machine",
       replay: request.chartExportReplay ? { requestedQuality: request.chartExportReplay.quality ?? null } : null,
       canEdit: canEditProject(access, input.userId),
@@ -1071,7 +1091,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     // Visual mode embeds every page, which no ladder limit allows: a limit the project does not have (a run override)
     // is dropped for a visual run rather than refusing the upload; a project limit is refused below as before.
     if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual" && effectiveLadder(input.pipeline).active) {
-      const projectLadder = (access.pipeline as { ladder?: PipelineFeatures["ladder"] } | null | undefined)?.ladder;
+      const projectLadder = (projectStored as { ladder?: PipelineFeatures["ladder"] } | null | undefined)?.ladder;
       if (!effectiveLadder({ quality: input.pipeline.quality, ladder: projectLadder ?? null }).active) {
         console.warn(`[run-creation] ladder override ignored on a visual-mode run project=${input.projectId}`);
         input.pipeline = { ...input.pipeline, ladder: projectLadder ?? defaultPipelineLadder };
