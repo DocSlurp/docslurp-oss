@@ -665,6 +665,11 @@ export type UploadOptions = RequestOptions & {
    * create that timed out is retried safely and never makes a second session.
    */
   directUpload?: "auto" | boolean;
+  /**
+   * Storage PUTs in flight at once for a direct upload, shared by every file and part (1–32, default 6). Files and the
+   * parts of a large file go up in parallel up to this limit.
+   */
+  transferConcurrency?: number;
   filename?: string;
   idempotencyKey?: string;
   /** Without `project`: create a fresh self-titled project instead of using the client project. */
@@ -675,6 +680,8 @@ export type UploadOptions = RequestOptions & {
   /** Project ID, slug or name. A name that matches no project creates one with that name. */
   project?: string;
 };
+
+type TransferSlot = <T>(task: () => Promise<T>) => Promise<T>;
 
 export type UploadInput = {
   /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
@@ -2586,7 +2593,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
       const descriptor = session.files[0];
       if (!descriptor || descriptor.mode !== "multipart") throw new Error("Stream upload requires a multipart session");
-      const partSize = descriptor.partSize ?? 8 * 1024 * 1024;
+      const partSize = descriptor.partSize ?? 16 * 1024 * 1024;
       if (!Number.isSafeInteger(partSize) || partSize < 1) throw new Error("Invalid upload part size");
       const parts: Array<{ partNumber: number; etag: string }> = [];
       let buffer = new Uint8Array(partSize);
@@ -2650,9 +2657,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
 
-  /** PUT to a presigned storage URL: no API credentials, its own long deadline. */
+  /**
+   * PUT to a presigned storage URL: no API credentials, its own long deadline. The deadline grows with the body (16 KB/s
+   * floor) so a large part sharing a slow uplink with the other transfers still finishes.
+   */
   async function putToStorage(url: string, body: Blob, contentType: string | undefined, options: UploadOptions): Promise<string | null> {
-    const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs"), options.signal);
+    const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs") + Math.ceil(body.size / 16), options.signal);
     try {
       for (let attempt = 0; ; attempt++) {
         let response: Response;
@@ -2724,8 +2734,31 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
+  /** Storage PUTs in flight at once for one upload. */
+  function transferConcurrencyFor(options: UploadOptions): number {
+    const value = options.transferConcurrency ?? 6;
+    if (!Number.isInteger(value) || value < 1 || value > 32) throw new RangeError("transferConcurrency must be an integer from 1 to 32.");
+    return value;
+  }
+
+  /** At most `limit` tasks run at once; the rest start in the order they were queued. */
+  function transferSlots(limit: number): TransferSlot {
+    let active = 0;
+    const waiting: Array<() => void> = [];
+    return async (task) => {
+      if (active >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+      else active++;
+      try { return await task(); }
+      finally {
+        const next = waiting.shift();
+        if (next) next(); else active--;
+      }
+    };
+  }
+
   /**
-   * Sends one file's bytes. When a part or the single PUT fails after its own retries, the session is read again: storage knows which
+   * Sends one file's bytes through the shared transfer slots: the single PUT, or every missing part in parallel. When a PUT fails
+   * after its own retries, no new part starts, the parts in flight finish, and the session is read again: storage knows which
    * parts arrived, so the transfer resumes from the server's pendingParts (with fresh signed URLs) instead of restarting.
    */
   /** Every pending part's URL: the ones the session described, and the rest signed through parts/sign (100 per call). */
@@ -2744,19 +2777,25 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return urls;
   }
 
-  async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions): Promise<void> {
+  async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions, slot: TransferSlot): Promise<void> {
     let descriptor = first;
     for (let round = 0; ; round++) {
       try {
         if (descriptor.mode === "single") {
-          await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType, options);
+          const single = descriptor;
+          await slot(() => putToStorage(single.putUrl ?? "", blob, single.mimeType, options));
           return;
         }
         const urls = await partUrls(sessionPath, descriptor, options);
-        for (const part of descriptor.pendingParts ?? []) {
-          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          await putToStorage(urls.get(part.partNumber)!, blob.slice(start, start + part.sizeBytes), undefined, options);
-        }
+        const partSize = descriptor.partSize;
+        let failed: { error: unknown } | undefined;
+        await Promise.all((descriptor.pendingParts ?? []).map((part) => slot(async () => {
+          if (failed) return;
+          const start = (part.partNumber - 1) * (partSize ?? part.sizeBytes);
+          try { await putToStorage(urls.get(part.partNumber)!, blob.slice(start, start + part.sizeBytes), undefined, options); }
+          catch (error) { failed ??= { error }; }
+        })));
+        if (failed) throw failed.error;
         return;
       } catch (error) {
         if (round >= 2 || options.signal?.aborted || !isTransientTransferError(error)) throw error;
@@ -2896,6 +2935,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newProject: boolean; project?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
+    const concurrency = transferConcurrencyFor(options);
     const idempotencyKey = metadata.idempotencyKey ?? newIdempotencyKey();
     const session = await postUploadSession<UploadSession>(`${intakeBase(options)}/direct/sessions`, {
       ...extractFields(options),
@@ -2933,10 +2973,21 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         return { descriptor, blob: match.source.blob };
       });
       const resend = await settleUninspected(sessionPath, work.filter((item) => item.descriptor.inspected === false).map((item) => item.descriptor), options);
-      for (const { descriptor, blob } of work) {
+      // Every file and part shares one set of slots. The first file that fails for good stops the others.
+      const stop = new AbortController();
+      const transferOptions = { ...options, signal: options.signal ? AbortSignal.any([options.signal, stop.signal]) : stop.signal };
+      const slot = transferSlots(concurrency);
+      let failure: { error: unknown } | undefined;
+      await Promise.all(work.map(({ descriptor, blob }) => {
         const target = descriptor.inspected === false ? resend.get(descriptor.id) : descriptor;
-        if (target) await transferFile(sessionPath, target, blob, options);
-      }
+        if (!target) return undefined;
+        return transferFile(sessionPath, target, blob, transferOptions, slot).catch((error) => {
+          if (!failure) { failure = { error }; stop.abort(error); }
+        });
+      }));
+      // The caller's cancel wins over the error it caused.
+      options.signal?.throwIfAborted();
+      if (failure) throw failure.error;
     } catch (error) {
       // No final complete is sent here (the reconciler finalizes known sizes). A session that stayed busy (or rate
       // limited) past our deadline is left open for the server's reconciler, which finishes the files whose bytes

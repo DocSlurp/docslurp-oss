@@ -319,12 +319,12 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
 
   it("a 1,000-file multipart session create does not block files/complete", async () => {
     const other = await seedSession(1);
-    store.multipartCreateDelayMs = 10; // 1,000 provider calls, 8 at a time: the create takes a while
+    store.multipartCreateDelayMs = 10; // 1,000 provider calls (each file is over one 64 MiB part), 8 at a time: the create takes a while
     const createdBefore = store.multipartCreated;
     const creating = tracked(Promise.resolve(app.request("/uploads/direct/sessions", {
       method: "POST",
       headers: { "content-type": "application/json", "x-test-user": "upl-u", "idempotency-key": "thousand-multipart" },
-      body: JSON.stringify({ orgId: "upl-o", files: Array.from({ length: 1_000 }, (_, i) => ({ filename: `big-${i}.pdf`, mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 })) }),
+      body: JSON.stringify({ orgId: "upl-o", files: Array.from({ length: 1_000 }, (_, i) => ({ filename: `big-${i}.pdf`, mimeType: "application/pdf", sizeBytes: 100 * 1024 * 1024 })) }),
     })));
     // Ordering: the create is opening provider uploads before the complete is sent.
     await vi.waitFor(() => expect(store.multipartCreated).toBeGreaterThan(createdBefore));

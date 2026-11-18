@@ -55,6 +55,13 @@
 - Realtime row triggers still on per-page tables (council, 2026-11-13): 0153 moved `document_chunks`, `document_pages` and `page_stage_states` to statement triggers (`realtime_statement_changed()`; a 20,000-row chunk insert went from about 1.5 s to about 10 ms in the trigger). `document_page_states` (`realtime_materialization_changed()`) and `document_run_stage_states` still pay the lookup and two counter inserts per row; measure a deferred-materialization run and a many-document run, then move them the same way if the trigger shows up.
 - Retire the search-session project backfill (2026-11-13, migration 0152): once every deployment has run `sweepSearchSessionProjectBackfill` to completion (it logs `nothing left`), drop the sweep and, one release after no writer omits the column, the `search_sessions_set_project_id` trigger. Until the sweep finishes on a deployment, project reads undercount sessions older than the migration.
 
+## Direct upload follow-ups (2026-11-18 council on #505)
+
+- Streamed (unknown-size) part URLs carry no signed length: one stream file can stage up to `ceil(MAX_UPLOAD_BYTES / part)` parts of up to 5 GiB each until its session expires (24 h), unbilled because estimates count unknown sizes as 0. Fix: let `parts/sign` take `{ partNumber, sizeBytes }` (≤ part size) and sign that length, have the SDK send it, then refuse unsized part signing; cap stream files per session or org.
+- When a client declares `sha256`, sign `ChecksumSHA256` into the single-PUT URL (and per part) so a leaked 3 h URL cannot swap same-size bytes before finalize.
+- `queueAbandonedDirectUploadCleanup` targets `user/session/` but `rawSourceKey` writes `user/<random>/raw/…`; it relies on `artifact_uris`. Confirm the bucket lifecycle rule aborts incomplete multipart uploads (also covers MPUs left by a failed session create whose abort failed).
+- `buildDirectUploadFileDescriptor` signs every missing part on each full session read (up to 10,000 per file). Return a window of pending parts if `MAX_UPLOAD_BYTES` grows large.
+
 ## Stored settings that stop validating (2026-11-17, project list 500)
 
 - [ ] Projects hold a level (profile, quality), never a model. Old project rows still carry `vision.model`, `vision.remoteFallbackModel`, `vision.runtime`, `vision.baseUrl` and `embedding.model`; reads ignore the vision ones now. Remove the keys from the rows with a migration, and decide what a legacy `embedding.model` means (it still selects the embedding model, which matters for existing vectors).
