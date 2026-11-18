@@ -217,11 +217,23 @@ export async function assertSafeExternalUrl(rawUrl: string): Promise<string> {
   return parsed.toString();
 }
 
-export async function safeExternalFetch(rawUrl: string, init: RequestInit = {}): Promise<Response> {
+export async function safeExternalFetch(
+  rawUrl: string,
+  init: RequestInit = {},
+  options: {
+    /**
+     * The caller's authorization, run after the URL's DNS validation as the last step before the request is sent: no
+     * other await sits between it and the dispatch. A throw sends nothing. (The dispatcher's pinned connect resolves
+     * and checks the host again as part of the dispatch itself.)
+     */
+    beforeDispatch?: () => Promise<void>;
+  } = {},
+): Promise<Response> {
   const parsed = await resolveSafeExternalUrl(rawUrl);
   const dispatcher = createDnsPinnedDispatcher(parsed.hostname.replace(/^\[|\]$/g, ""));
 
   try {
+    await options.beforeDispatch?.();
     const response = await undiciFetch(parsed.toString(), {
       ...init,
       redirect: "error",

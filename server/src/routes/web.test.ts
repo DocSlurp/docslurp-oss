@@ -58,6 +58,24 @@ describe("POST /v1/web/ingest preflight", () => {
     expect(intake).toHaveBeenCalledWith(expect.objectContaining({ project: "ws-allowed", allowedProjectIds: ["ws-allowed"] }));
   });
 
+  it.each([
+    ["a server key", undefined, ["ingest"]],
+    ["a CLI OAuth token", { audience: "api", grantId: "g", clientId: "c", clientName: "CLI" }, ["ingest", "web"]],
+  ])("carries the scopes it required of %s into the crawl's credential checks", async (_label, oauth, required) => {
+    crawlSpy();
+    lookup.mockResolvedValueOnce({ ref: { kind: "default" } });
+    scoped.mockResolvedValueOnce({ id: "ws-allowed", orgId: "org-1" });
+    const intake = vi.spyOn(await import("../services/project-intake-actions.js"), "createWebsiteProjectIntake")
+      .mockResolvedValueOnce({ payload: {} as never, status: 201, temporalDeferred: false });
+    const actor = { type: "apiKey", userId: "user-1", apiKey: { id: "key-1", userId: "user-1", orgId: "org-1", keyType: "server",
+      scopes: oauth ? ["ingest", "search:deep", "web"] : ["ingest", "search:deep"], projectIds: ["ws-allowed"], ...(oauth ? { oauth } : {}) } } as never;
+    const response = await webRoutesFor(actor, "mcp").request("http://mcp.internal/ingest", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: "https://a.test/" }),
+    });
+    expect(response.status).toBe(201);
+    expect(intake).toHaveBeenCalledWith(expect.objectContaining({ requiredScopes: required }));
+  });
+
   it("refuses an unknown project ID before crawling", async () => {
     const run = crawlSpy();
     lookup.mockResolvedValueOnce({ ref: { kind: "id", id: "00000000-0000-4000-8000-000000000000" }, project: null });

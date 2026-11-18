@@ -285,7 +285,11 @@ export async function runWebCapability<C extends WebCapability>(
   capability: C,
   rawInput: WebInput<C>,
   ctx: WebCallContext,
-  options: { deadlineMs?: number } = {},
+  options: {
+    deadlineMs?: number;
+    /** The caller's authorization, run immediately before every provider request (see WebRouter.run). */
+    beforeProviderAttempt?: () => Promise<void>;
+  } = {},
 ): Promise<WebCallResult<C>> {
   const d = deps();
   const started = d.now();
@@ -339,7 +343,8 @@ export async function runWebCapability<C extends WebCapability>(
     if (!output) {
       const deadlineMs = options.deadlineMs ?? (capability === "crawl" ? 120_000 : CALL_DEADLINE_MS[capability as Exclude<C, "crawl">]);
       try {
-        const routed = await d.router.run(capability, input, { signal: ctx.signal ?? new AbortController().signal, deadlineAt: started + deadlineMs, parent: span });
+        const routed = await d.router.run(capability, input, { signal: ctx.signal ?? new AbortController().signal, deadlineAt: started + deadlineMs, parent: span,
+          ...(options.beforeProviderAttempt ? { beforeAttempt: options.beforeProviderAttempt } : {}) });
         output = routed.result.data;
         provider = routed.provider;
         attempts = routed.attempts;

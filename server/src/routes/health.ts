@@ -92,7 +92,7 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** /metrics reads windows, never run or usage history: each scrape stays bounded by recent volume (migration 0196). */
+/** /metrics reads windows, never run or usage history: each scrape stays bounded by recent volume (migration 0197). */
 const METRICS_WINDOW_HOURS = 24;
 const ACTIVE_RUN_STATUSES = ["queued", "processing"] as const;
 

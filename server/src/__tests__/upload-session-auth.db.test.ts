@@ -98,7 +98,7 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
     expect((await request()).status).toBe(200);
     expect(mocks.query.mock.calls.some(([sql]) => /from api_keys/i.test(sql))).toBe(true);
     expect(mocks.query).toHaveBeenCalled();
-    expect(mocks.describe).toHaveBeenCalledWith(id, "u", statusOnly);
+    expect(mocks.describe).toHaveBeenCalledWith(id, "u", statusOnly, expect.anything(), undefined, "key");
   });
   it.each([
     ["browser", { keyType: "client", scopes: ["search:deep"] }, 403],

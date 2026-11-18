@@ -90,6 +90,9 @@ vi.mock("./../routes/uploads.js", async (importOriginal) => {
 vi.mock("../services/api-keys.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/api-keys.js")>(),
   validateApiKey: mocks.validateApiKey,
+  // The intake credential recheck (live key, OAuth grant not revoked) is covered against a database
+  // (run-admission-principal.db.test.ts); here the key stays live.
+  getLiveIntakeKey: async () => ({ orgId: "org-1", keyType: "server", scopes: ["ingest"], projectIds: [], materializationPolicy: {} }),
 }));
 
 const { createExtractsRoutes } = await import("../routes/extracts.js");

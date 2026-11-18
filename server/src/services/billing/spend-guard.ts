@@ -359,7 +359,15 @@ export async function admitRunSpend<T>(
   orgId: string,
   projectId: string,
   admit: (client: TransactionSql) => Promise<T>,
-  options: { leaseRunId?: string; speedBoost?: boolean; readmission?: boolean } = {},
+  options: {
+    leaseRunId?: string; speedBoost?: boolean; readmission?: boolean;
+    /**
+     * Runs first in the admission transaction, right after the organization's admission lock is held and before any
+     * spend is read or reserved: re-validates the principal against rows it locks, so an authorization change that
+     * committed while this admission waited for the lock refuses it. Throwing rolls everything back.
+     */
+    authorize?: (client: TransactionSql) => Promise<void>;
+  } = {},
 ): Promise<T> {
   const multiplier = speedBoostMultiplier(options.speedBoost);
   const guarded = !spendGuardsSkipped();
@@ -376,6 +384,7 @@ export async function admitRunSpend<T>(
     if (guarded || options.readmission) {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
     }
+    if (options.authorize) await options.authorize(tx);
     // Verify the persisted tenant scope before allowing the transactional
     // lifecycle callback to touch an existing run.
     let admitted: T;
