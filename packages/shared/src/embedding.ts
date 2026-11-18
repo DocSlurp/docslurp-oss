@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
+import { embeddingSpaceUri, type ModelCallConfig } from "./model-provenance.js";
 
 export const supportedEmbeddingModels = [
   "text-embedding-3-small",
@@ -369,6 +370,47 @@ export function localEmbeddingPooling(modelUri: string): EmbeddingPooling {
   const query = modelUri.indexOf("?");
   const value = query === -1 ? null : new URLSearchParams(modelUri.slice(query + 1)).get("pooling");
   return value === "cls" ? "cls" : "mean";
+}
+
+/**
+ * The space a resolved route (or a worker embedding profile) writes vectors into, as an `llm://` URI
+ * (`embeddingSpaceUri`): provider, model, the dimensions the vectors have, and a non-default `?pooling=`.
+ * `dimensions` overrides the route's when the caller knows the vectors' real length.
+ */
+export function embeddingRouteSpaceUri(
+  route: { provider: string; model: string; dimensions?: number | null; modelUri?: string | null },
+  dimensions?: number | null,
+): string | null {
+  const pooling = route.modelUri ? localEmbeddingPooling(route.modelUri) : "mean";
+  return embeddingSpaceUri({ provider: route.provider, model: route.model, dimensions: dimensions ?? route.dimensions ?? null, pooling });
+}
+
+/**
+ * The request settings an embedding call ran with, for `metadata.modelConfig`: task (input type), normalisation,
+ * pooling, dimensions (the vectors' and, when sent, the requested ones), batch size, late chunking and the input
+ * token limit past which the model truncates. No address, key or text.
+ */
+export function embeddingRequestConfig(profile: {
+  task?: string | null;
+  normalize?: boolean | null;
+  dimensions?: number | null;
+  requestedDimensions?: number | null;
+  batchSize?: number | null;
+  lateChunking?: boolean | null;
+  modelUri?: string | null;
+  runtime?: string | null;
+}, extra: { inputTokenLimit?: number | null; inputType?: string | null } = {}): ModelCallConfig {
+  return {
+    task: profile.task ?? undefined,
+    inputType: extra.inputType ?? undefined,
+    normalize: profile.normalize ?? undefined,
+    pooling: profile.modelUri && profile.runtime === "local" ? localEmbeddingPooling(profile.modelUri) : undefined,
+    dimensions: profile.dimensions ?? undefined,
+    requestedDimensions: profile.requestedDimensions ?? undefined,
+    batchSize: profile.batchSize ?? undefined,
+    lateChunking: profile.lateChunking ?? undefined,
+    truncateAtTokens: extra.inputTokenLimit ?? undefined,
+  };
 }
 
 /** Why a route's `?pooling=` cannot be honoured, or null. */

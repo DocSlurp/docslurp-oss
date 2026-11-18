@@ -19,7 +19,9 @@ export const RUN_MILESTONE_COLUMNS: Readonly<Record<RunMilestone, string>> = {
 };
 
 export type RunMilestoneHit = { seconds: number; pages: number };
-export type RunMilestoneStore = { markRunMilestone(runId: string, milestone: RunMilestone): Promise<RunMilestoneHit | null> };
+/** Extra columns a milestone stamp may write in the same statement (`worker_started` records the run's resolved models). */
+export type RunMilestoneExtra = { resolvedModels?: Record<string, unknown> };
+export type RunMilestoneStore = { markRunMilestone(runId: string, milestone: RunMilestone, extra?: RunMilestoneExtra): Promise<RunMilestoneHit | null> };
 
 /** Stages whose page checkpoint means the page has extracted content, by any method. */
 const EXTRACTION_STAGES: ReadonlySet<string> = new Set(["extract-markdown", "extract-html", "vision-extract"]);
@@ -50,14 +52,14 @@ export function workerStartKind(uptimeSeconds = process.uptime()): "cold" | "war
 
 /** Telemetry only: never fails or delays the stage beyond one conditional update per run, milestone and process. */
 export async function noteRunMilestone(store: RunMilestoneStore | undefined, runId: string, milestone: RunMilestone,
-  labels: Record<string, string> = {}): Promise<void> {
+  labels: Record<string, string> = {}, extra?: RunMilestoneExtra): Promise<void> {
   if (!store) return;
   const key = `${runId}:${milestone}`;
   if (attempted.has(key)) return;
   if (attempted.size >= MAX_TRACKED) attempted.clear();
   attempted.add(key);
   try {
-    const hit = await store.markRunMilestone(runId, milestone);
+    const hit = await store.markRunMilestone(runId, milestone, extra);
     // The page count is rarely measured when a worker first picks a run up, so start latency carries no page bucket.
     const pages: Record<string, string> = milestone === "worker_started" ? {} : { pages: pageCountBucket(hit?.pages ?? 0) };
     if (hit) recordPipelineTelemetry("run.milestone.duration", hit.seconds, { milestone, ...pages, ...labels }, "duration");

@@ -244,8 +244,11 @@ describe("page extract records", () => {
     const m = state("run-m", "org-a", "proj-a");
     recordPageExtracts(m, DOC_A, materializedPageRecords({
       published: [2], modelRead: () => true, blocked: [], failed: [[3, "kept-as-image"]], keptAsImageReason: "kept-as-image",
+      readModelUri: (page) => page === 2 ? "llm://openrouter/vendor/vision-1" : null,
     }));
     await flush(m);
+    // The query-time read names the model that read the page, like a run's vision read.
+    expect((await rows("doc-a")).find((row) => row.run_id === "run-m" && row.page_number === 2)).toMatchObject({ model_uri: "llm://openrouter/vendor/vision-1" });
     await finalize("run-m", "doc-a", [2, 3]);
     const now = await finals("doc-a");
     expect(now.filter(([page]) => page <= 3)).toEqual([

@@ -169,3 +169,39 @@ describe("embedPageQuery", () => {
     expect(await embedPageQuery({ model: "unknown-model", query: "q", journal, privacyMode: "standard" })).toBeNull();
   });
 });
+
+describe("embedPageQuery with a private page embedder", () => {
+  const MODEL_ID = "jinaai/jina-embeddings-v5-omni-nano";
+  const registry = [{
+    alias: "gpu1",
+    baseUrl: "https://gpu1.example.com/v1",
+    auth: { tokenEnv: "TEST_PAGE_QUERY_TOKEN" },
+    attestation: { tenancy: "single-tenant", hostProvider: "example", region: "us-east-1" },
+    models: [{ id: MODEL_ID, capability: "embedding", dimensions: 16 }],
+  }];
+
+  it("resolves the bare model id the worker stores to the registered endpoint and prefixes the query", async () => {
+    const shared = await import("@docslurp/shared");
+    const { embedPageQuery, privatePageQueryModel } = await import("../search/deferred/page-query-embedder.js");
+    shared.setPrivateModelEndpointRegistryForTests(registry);
+    vi.stubEnv("TEST_PAGE_QUERY_TOKEN", "t");
+    try {
+      expect(privatePageQueryModel(MODEL_ID)).toBe(`llm://private/gpu1/${MODEL_ID}`);
+      expect(privatePageQueryModel("someone/else")).toBeNull();
+      const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => new Response(JSON.stringify({
+        data: [{ embedding: [3, 0, 4, 0] }], usage: { prompt_tokens: 5 },
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+      const journal = { record: vi.fn() };
+      const vector = await embedPageQuery({ model: MODEL_ID, query: "find the chart", journal: journal as never, privacyMode: "standard" }, { fetchImpl: fetchImpl as never });
+      expect(vector && Array.from(vector, (v) => Math.round(v * 1000) / 1000)).toEqual([0.6, 0, 0.8, 0]);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchImpl.mock.calls[0]!;
+      expect(String(url)).toBe("https://gpu1.example.com/v1/embeddings");
+      expect(JSON.parse(String(init?.body))).toEqual({ model: MODEL_ID, input: "Query: find the chart" });
+      expect(journal.record).toHaveBeenCalledWith(expect.objectContaining({ metric: "page-query-embedding", inputTokens: 5 }));
+    } finally {
+      shared.setPrivateModelEndpointRegistryForTests(undefined);
+      vi.unstubAllEnvs();
+    }
+  });
+});
