@@ -477,11 +477,12 @@ test("parts the session describes without a URL are signed through parts/sign be
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("an uninspected file is completed first and its bytes are sent only when its object is missing", async () => {
+test("uninspected files are completed in one batch: a coded-missing file costs one complete and no wait, then one read and its bytes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
   try {
     const files = await directFiles(dir, 2); // a 21 MiB multipart file (index 0) and a small single file (index 1)
-    const completedOnce = new Set();
+    let sent = false;
+    const started = Date.now();
     const result = await invoke(["upload", ...files], (request, _count, base) => {
       if (request.url === "/v1/uploads/direct/sessions") {
         // A large session's replayed read: neither file was inspected.
@@ -494,18 +495,65 @@ test("an uninspected file is completed first and its bytes are sent only when it
         const body = JSON.parse(request.body.toString());
         const ids = body.files ? body.files.map((file) => file.fileId) : [body.fileId];
         // f0 is already assembled in storage; f1 has no object until it is sent.
-        if (ids.includes("f1") && !completedOnce.has("f1-sent")) return { status: 409, body: { error: { code: "conflict", message: "Upload parts are incomplete or have incorrect sizes" } } };
-        return body.files ? { body: { ok: true, files: ids.map((fileId) => ({ fileId, status: "completed" })), sessionComplete: true } } : { body: { ok: true } };
+        return { body: { files: ids.map((fileId) => fileId === "f1" && !sent
+          ? { fileId, status: "failed", error: { statusCode: 400, code: "upload_object_missing", message: "No object found", retryable: false, action: "reupload", blocksSession: false } }
+          : { fileId, status: "completed" }), sessionComplete: sent } };
       }
       if (request.url === "/v1/uploads/direct/sessions/s1?fileId=f1") {
         return { body: { sessionId: "s1", status: "pending", files: [{ index: 1, clientId: "1", id: "f1", filename: "f1.pdf", mimeType: "application/pdf", sizeBytes: 7, mode: "single", status: "pending", putUrl: `${base}/storage/fresh` }] } };
       }
-      if (request.url.startsWith("/storage/")) { completedOnce.add("f1-sent"); return { headers: { etag: '"e"' }, body: {} }; }
+      if (request.url.startsWith("/storage/")) { sent = true; return { headers: { etag: '"e"' }, body: {} }; }
       if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
       return { status: 404, body: {} };
-    }, { killAfterMs: 60_000 });
+    });
     assert.equal(result.code, 0, result.stderr);
-    // The assembled multipart file sent nothing; the missing file was read alone, then sent to its fresh URL.
+    // The assembled multipart file sent nothing; the missing file was read once, then sent to its fresh URL.
     assert.deepEqual(result.requests.filter((request) => request.url.startsWith("/storage/")).map((request) => request.url), ["/storage/fresh"]);
+    const completes = result.requests.filter((request) => request.url.endsWith("/files/complete")).map((request) => JSON.parse(request.body.toString()));
+    // One batch settles both uninspected files; the resent file is completed once more after its bytes.
+    assert.deepEqual(completes[0], { files: [{ fileId: "f0" }, { fileId: "f1" }] });
+    assert.equal(completes.length, 2);
+    assert.equal(result.requests.filter((request) => request.url.includes("?fileId=")).length, 1);
+    assert.ok(Date.now() - started < 10_000, "no busy wait for a missing file");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an uninspected file's uncoded 409 is a failure, never a wait or a resend", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 1);
+    const started = Date.now();
+    const result = await invoke(["upload", ...files], (request) => {
+      if (request.url === "/v1/uploads/direct/sessions") {
+        return { status: 201, body: { sessionId: "s1", files: [{ index: 0, clientId: "0", id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "multipart", partSize: 8 * 1024 * 1024, inspected: false, transferState: "unknown" }] } };
+      }
+      if (request.url.endsWith("/files/complete")) return { status: 409, body: { error: { code: "conflict", message: "Check your request and try again." } } };
+      if (request.url.endsWith("/abort")) return { body: { ok: true } };
+      return { status: 404, body: {} };
+    });
+    assert.notEqual(result.code, 0);
+    assert.equal(result.requests.filter((request) => request.url.endsWith("/files/complete")).length, 1);
+    assert.equal(result.requests.filter((request) => request.url.startsWith("/storage/") || request.url.includes("?fileId=")).length, 0);
+    assert.equal(result.requests.filter((request) => request.url.endsWith("/abort")).length, 1);
+    assert.ok(Date.now() - started < 10_000);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an upload whose session stays busy past --timeout is kept for the server, not aborted", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 1);
+    const result = await invoke(["upload", ...files, "--timeout", "2"], (request) => {
+      if (request.url === "/v1/uploads/direct/sessions") {
+        return { status: 201, body: { sessionId: "s1", files: [{ index: 0, clientId: "0", id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "multipart", partSize: 8 * 1024 * 1024, inspected: false, transferState: "unknown" }] } };
+      }
+      if (request.url.endsWith("/files/complete")) return { status: 409, headers: { "retry-after": "0" }, body: { error: { code: "upload_session_busy", message: "busy" } } };
+      if (request.url.endsWith("/abort")) return { body: { ok: true } };
+      return { status: 404, body: {} };
+    });
+    assert.notEqual(result.code, 0);
+    assert.ok(result.requests.filter((request) => request.url.endsWith("/files/complete")).length > 1, "the busy complete was waited out");
+    assert.equal(result.requests.filter((request) => request.url.endsWith("/abort")).length, 0);
+    assert.match(result.stderr, /s1/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

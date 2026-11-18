@@ -696,16 +696,55 @@ async function pollConfirmedSession(sessionPath: string, flags: Record<string, s
   return null;
 }
 
-/** A failure of a final files/complete: when it is only a busy session, the server can still finish these known-size files. */
-const COMPLETION_FAILURE = Symbol("completion failure");
-function completionFailure(error: CliApiError): CliApiError {
-  Object.defineProperty(error, COMPLETION_FAILURE, { value: true });
-  return error;
+/** A coded busy session or a rate limit that outlasted our waits: nothing failed, the server just did not answer in time. */
+function isBusyFailure(error: unknown): boolean {
+  return error instanceof CliApiError && (error.status === 429 || (error.status === 409 && error.failure.code === "upload_session_busy"));
 }
-function isBusyCompletionFailure(error: unknown): boolean {
-  return error instanceof CliApiError && error.status === 409 && error.failure.code === "upload_session_busy"
-    && (error as unknown as Record<symbol, unknown>)[COMPLETION_FAILURE] === true;
+
+/**
+ * Files a large session's read did not inspect (`inspected: false`): completed in batches of up to 100, so storage
+ * decides which still need bytes, then ONE `fileId` read per batch describes those. Only the explicit codes
+ * `upload_object_missing` and `upload_parts_incomplete` mean "send the bytes"; anything else is a failure. Only a coded
+ * busy session or a rate limit is waited out (an uncoded 409 is an answer: the probe says "fail").
+ */
+async function settleUninspected(sessionPath: string, uninspected: DirectUploadDescriptor[], flags: Record<string, string | boolean>): Promise<Map<string, DirectUploadDescriptor>> {
+  const resend = new Map<string, DirectUploadDescriptor>();
+  const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const answerOnly: SessionProbe = async () => "fail";
+  for (let start = 0; start < uninspected.length; start += COMPLETE_BATCH_MAX) {
+    const chunk = uninspected.slice(start, start + COMPLETE_BATCH_MAX);
+    const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, post({ files: chunk.map((file) => ({ fileId: file.id })) })), flags, answerOnly);
+    if (!done.ok) throw await responseFailure(done);
+    const answer = await done.json() as { files?: Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string } }> };
+    if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+    const byId = new Map(answer.files.map((result) => [result.fileId, result]));
+    const missing: string[] = [];
+    for (const file of chunk) {
+      const result = byId.get(file.id);
+      if (result?.status === "completed") continue;
+      if (result?.error?.code && RESEND_COMPLETION_CODES.has(result.error.code)) { missing.push(file.id); continue; }
+      throw new Error(`${file.filename}: ${result?.error?.message ?? "not completed"} (${result?.error?.code ?? "missing result"})`);
+    }
+    if (missing.length === 0) continue;
+    const query = missing.map((id) => `fileId=${encodeURIComponent(id)}`).join("&");
+    const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}?${query}`, flags, {}), flags, answerOnly);
+    if (!refreshed.ok) throw await responseFailure(refreshed);
+    const state = await refreshed.json() as DirectSession;
+    if (["failed", "aborted", "expired"].includes(String(state.status ?? ""))) throw new Error(`Upload session ${String(state.status)}`);
+    for (const id of missing) {
+      const fresh = state.files.find((file) => file.id === id);
+      const name = chunk.find((file) => file.id === id)?.filename ?? id;
+      if (!fresh) throw new Error(`Upload session no longer has ${name}`);
+      if (fresh.status === "completed") continue;
+      if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
+      resend.set(id, fresh);
+    }
+  }
+  return resend;
 }
+
+/** files/complete's answers that mean the file's bytes (or some parts) are not in storage: upload them, then complete. */
+const RESEND_COMPLETION_CODES = new Set(["upload_object_missing", "upload_parts_incomplete"]);
 
 /** Files one `files/complete` call finalizes on a server with batch completion. */
 const COMPLETE_BATCH_MAX = 100;
@@ -751,7 +790,7 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
   async function completeOne(item: Pending): Promise<void> {
     const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(item.body)), flags, probeFor([fileOf(item.body)]), 3);
     if (done.ok || await handOverIfOpen(done, [fileOf(item.body)])) return;
-    throw completionFailure(await responseFailure(done));
+    throw await responseFailure(done);
   }
 
   async function completeBatch(items: Pending[]): Promise<void> {
@@ -768,7 +807,7 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
     }
     if (!response.ok) {
       if (await handOverIfOpen(response, items.map((item) => fileOf(item.body)))) { for (const item of items) item.resolve(); return; }
-      const failure = completionFailure(await responseFailure(response));
+      const failure = await responseFailure(response);
       for (const item of items) item.reject(failure);
       return;
     }
@@ -853,25 +892,16 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
       if (!match) throw new Error(`Upload session returned a file this upload did not send: ${first.filename}`);
       return { first, match };
     });
+    // Uninspected files (a large session's replayed read) are settled first, in batches: only those storage reports
+    // missing are read again and sent.
+    const resend = await settleUninspected(sessionPath, work.filter(({ first }) => first.inspected === false).map(({ first }) => first), flags);
     // Files go up a few at a time; each one is completed as soon as its bytes are in storage.
     await forEachLimited(work, uploadConcurrency(), async ({ first, match }) => {
-      let descriptor = first;
+      const target = first.inspected === false ? resend.get(first.id) : first;
+      // An uninspected file whose stored object completed it needs nothing more.
+      if (!target) return;
+      let descriptor: DirectUploadDescriptor = target;
       let complete: Record<string, unknown> | null = null;
-      if (descriptor.inspected === false) {
-        // A large session's read did not check this file's object: complete it first, and send bytes only when its
-        // object is reported missing (an assembled multipart upload or a finished PUT is not sent again).
-        const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags,
-          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileId: descriptor.id }) }), flags, async () => "retry");
-        if (done.ok) { await done.body?.cancel(); return; }
-        if (![400, 409].includes(done.status)) throw await responseFailure(done);
-        await done.body?.cancel();
-        const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, flags, {}), flags, async () => "retry");
-        if (!refreshed.ok) throw await responseFailure(refreshed);
-        const fresh = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
-        if (!fresh) throw new Error(`Upload session no longer has ${descriptor.filename}`);
-        if (fresh.status === "completed") return;
-        descriptor = fresh;
-      }
       for (let round = 0; complete === null; round++) {
         try {
           const fileId = descriptor.id;
@@ -892,6 +922,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           const next = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
           if (!next) throw error;
           if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
+          if (next.status === "failed" || next.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${next.status}`);
           descriptor = next;
         }
       }
@@ -926,9 +957,9 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
       warnings: [...((result.warnings as string[] | undefined) ?? []), warning],
     }), { status: confirmed.status, headers: { "content-type": "application/json" } });
   } catch (error) {
-    // Like the SDK: a final complete that stayed busy leaves known-size files the server finishes itself, so that
-    // session is kept (and named); any other failure closes it, best effort.
-    if (isBusyCompletionFailure(error)) {
+    // Like the SDK: a session that stayed busy (or rate limited) past our waits is kept (and named), since the server
+    // finishes the known-size files whose bytes arrived; any other failure closes it, best effort.
+    if (isBusyFailure(error)) {
       console.error(`Upload session ${session.sessionId} stayed busy; the server finishes its uploaded files.`);
     } else {
       await apiFetch(`${sessionPath}/abort`, flags, { method: "POST" }).catch(() => undefined);
