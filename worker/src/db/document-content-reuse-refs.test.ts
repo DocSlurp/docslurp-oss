@@ -2,7 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { Store } from "../db/store.js";
+import { Store } from "./store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -34,29 +34,29 @@ afterAll(async () => {
 
 describe("embedding reuse refs", () => {
   it("upserts to the newest artifact, isolates organizations and forgets stale pointers", async () => {
-    await store.recordEmbeddingReuseRefs("o1", [
+    await store.content.recordEmbeddingReuseRefs("o1", [
       { key: "k1", artifactUri: "s3://b/old.json", chunkIndex: 0 },
       { key: "k2", artifactUri: "s3://b/old.json", chunkIndex: 1 },
       // A repeated key in one batch keeps the last ref instead of failing the upsert.
       { key: "k2", artifactUri: "s3://b/old.json", chunkIndex: 3 },
       { key: "ctx:doc", artifactUri: "s3://b/old.json", chunkIndex: -1 },
     ]);
-    await store.recordEmbeddingReuseRefs("o1", [{ key: "k1", artifactUri: "s3://b/new.json", chunkIndex: 5 }]);
+    await store.content.recordEmbeddingReuseRefs("o1", [{ key: "k1", artifactUri: "s3://b/new.json", chunkIndex: 5 }]);
 
-    const refs = await store.findEmbeddingReuseRefs("o1", ["k1", "k2", "ctx:doc", "missing"]);
+    const refs = await store.content.findEmbeddingReuseRefs("o1", ["k1", "k2", "ctx:doc", "missing"]);
     expect(refs.sort((a, b) => a.key.localeCompare(b.key))).toEqual([
       { key: "ctx:doc", artifactUri: "s3://b/old.json", chunkIndex: -1 },
       { key: "k1", artifactUri: "s3://b/new.json", chunkIndex: 5 },
       { key: "k2", artifactUri: "s3://b/old.json", chunkIndex: 3 },
     ]);
-    expect(await store.findEmbeddingReuseRefs("o2", ["k1", "k2"])).toEqual([]);
+    expect(await store.content.findEmbeddingReuseRefs("o2", ["k1", "k2"])).toEqual([]);
 
     // Only the pointer to the stale artifact is removed.
-    await store.forgetEmbeddingReuseRefs("o1", "s3://b/old.json", ["k1", "k2"]);
-    expect((await store.findEmbeddingReuseRefs("o1", ["k1", "k2"])).map((ref) => ref.key)).toEqual(["k1"]);
+    await store.content.forgetEmbeddingReuseRefs("o1", "s3://b/old.json", ["k1", "k2"]);
+    expect((await store.content.findEmbeddingReuseRefs("o1", ["k1", "k2"])).map((ref) => ref.key)).toEqual(["k1"]);
 
     // Deleting an organization deletes its refs.
     await db.exec(`delete from organizations where id = 'o1'`);
-    expect(await store.findEmbeddingReuseRefs("o1", ["k1", "ctx:doc"])).toEqual([]);
+    expect(await store.content.findEmbeddingReuseRefs("o1", ["k1", "ctx:doc"])).toEqual([]);
   }, 60_000);
 });

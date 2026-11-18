@@ -505,7 +505,7 @@ describe("tenant isolation", () => {
     for await (const row of readLedgerSpill(set.ledger.spill)) if (row.status === "extracted") extracted.push(row);
     await expect(markAssetsPending(sql, { scope: forged, rows: extracted })).rejects.toMatchObject({ rule: "scope-mismatch" });
     await expect(adoptPendingAssets(sql, storage, { scope: forged })).resolves.toEqual({ adopted: 0, lost: 0, kept: 0 });
-    await expect(store.markAssetsStored({ scope: forged, files: [{ id: "p1.1", key: `${ROOT_A}/page-0001/image-001.webp` }] })).rejects.toMatchObject({ rule: "scope-mismatch" });
+    await expect(store.assets.markAssetsStored({ scope: forged, files: [{ id: "p1.1", key: `${ROOT_A}/page-0001/image-001.webp` }] })).rejects.toMatchObject({ rule: "scope-mismatch" });
     // A key outside the scope's own folder is refused (a path-traversal or foreign key never becomes a row).
     await expect(markAssetsPending(sql, { scope: A, rows: extracted.map((row) => ({ ...row, storageKey: `ub/run-b/doppler/doc-b/images/${row.linkPath!.slice("images/".length)}` })) }))
       .rejects.toMatchObject({ rule: "key-mismatch" });

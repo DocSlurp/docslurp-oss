@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import { applyLadderLimits, defaultPipelineFeatures, documentLadderPolicy, type AdaptivePageRoutingEntry } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
@@ -40,7 +41,7 @@ function pdf(pageCount: number, id = "doc-1"): Document {
 }
 
 function runState(document: Document, pipeline: Record<string, unknown> = {}): WorkflowState {
-  // As the worker loads a run (store.ts): the ladder limits applied.
+  // As the worker loads a run (db/run-ledger.ts): the ladder limits applied.
   const state = WorkflowState.create({
     id: "run-1", orgId: "org-1", projectId: "proj-1", userId: "user-1", spentCents: 0, storagePrefix: "user-1/run-1",
     pipeline: applyLadderLimits({ ...defaultPipelineFeatures, privacyMode: "standard", ...pipeline } as typeof defaultPipelineFeatures),
@@ -270,7 +271,9 @@ describe("render-images under the ladder", () => {
   it("keeps capped scans as page images under Fast's caps, renders no capped text page, and fails closed without a budget", async () => {
     const { document, state, select } = setup();
     const reserve = vi.fn(async ({ wanted }: { wanted: number }) => wanted);
-    (state as unknown as { store: unknown }).store = { reserveFastPageImageRenders: reserve, listHostPageImagePages: async () => [] };
+    const store = memoryCheckpointStore();
+    store.budgets.reserveFastPageImageRenders = reserve;
+    state.store = store;
     const selected = await select(state, document);
     expect(selected.keptAsImage).toEqual([2, 9]);
     expect(selected.unreadPages).toEqual([]);
@@ -280,13 +283,13 @@ describe("render-images under the ladder", () => {
     reserve.mockResolvedValueOnce(1);
     expect(await select(state, document)).toMatchObject({ keptAsImage: [2], unreadPages: [9] });
     // No store to reserve from: nothing is kept (fail closed).
-    (state as unknown as { store: unknown }).store = undefined;
+    state.store = undefined;
     expect(await select(state, document)).toMatchObject({ keptAsImage: [], unreadPages: [2, 9], pageNumbers: [6] });
   });
 
   it("applies the per-document cap, and page-range shards choose no kept pages", async () => {
     const { document, state, select, getJson } = setup({ WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT: "1" });
-    (state as unknown as { store: unknown }).store = { reserveFastPageImageRenders: async ({ wanted }: { wanted: number }) => wanted, listHostPageImagePages: async () => [] };
+    state.store = memoryCheckpointStore();
     expect(await select(state, document)).toMatchObject({ keptAsImage: [2], unreadPages: [9] });
     getJson.mockClear();
     const shard = await select(state, document, { shard: true });

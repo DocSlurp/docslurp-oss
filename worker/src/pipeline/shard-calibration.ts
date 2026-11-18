@@ -121,12 +121,12 @@ export interface ShardCalibration {
   record(state: WorkflowState, row: ShardTimingRow): void;
 }
 
-/** Store-backed calibration; without a store that can load observations every profile is its prior. */
+/** Store-backed calibration; without a store (unit tests) every profile is its prior. */
 export function createShardCalibration(
-  store: { loadShardObservations?: LoadShardObservations } | undefined,
+  store: { loadShardObservations: LoadShardObservations } | undefined,
   now?: () => number,
 ): ShardCalibration {
-  const load = store?.loadShardObservations?.bind(store);
+  const load = store?.loadShardObservations.bind(store);
   return {
     profile: (key) => load
       ? calibratedShardProfile(key, { loadObservations: load, ...(now ? { now } : {}) })

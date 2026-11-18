@@ -26,6 +26,14 @@ import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security
 
 import { fromEnv } from "../config.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
+import { authorizeComputeCohort, computeAllocationAdmission, loadComputeObservations } from "../db/compute-fleet-store.js";
+import { computeJobAdmission } from "../db/compute-job-store.js";
+import { flushPendingCreditDebits } from "../db/usage-event-store.js";
+import { tryMaintenanceLease } from "../db/worker-slot-store.js";
+import { runGraphJobs as claimGraphJobs } from "../graph/rebuild-job.js";
+import { runSummaryTreeJobs as claimSummaryTreeJobs } from "../summary-tree/backfill-job.js";
+import { queryWorkerScalerSnapshot, type ScalerSql } from "@docslurp/shared";
 import { assertVisionLedgerSchemaWithRetry, VisionLedgerSchemaError } from "../db/vision-attempt-store.js";
 import { createShardCalibration } from "../pipeline/shard-calibration.js";
 import { workerInstanceId } from "../db/worker-capabilities.js";
@@ -128,10 +136,13 @@ async function main(): Promise<void> {
   // Shared infrastructure — reused across all activity invocations
   const store = new Store(cfg.databaseUrl, cfg.workerLeaseTtlMs, {
     plausibilityWarningThreshold: cfg.plausibilityWarningThreshold,
-    apiKeyUsageRetentionDays: cfg.apiKeyUsageRetentionDays,
-    perfLogRetentionDays: cfg.perfLogRetentionDays,
     poisonRunFailureThreshold: cfg.poisonRunFailureThreshold,
     poolMax: cfg.workerDbPoolMax,
+  });
+  // Periodic sweeps and alerts (db/maintenance.ts): the maintenance loop below, never pipeline stages.
+  const maintenance = new Maintenance(store.stageSql, {
+    apiKeyUsageRetentionDays: cfg.apiKeyUsageRetentionDays,
+    perfLogRetentionDays: cfg.perfLogRetentionDays,
   });
   // Invalid private endpoint config fails startup; the /models probe never blocks it.
   try {
@@ -161,11 +172,11 @@ async function main(): Promise<void> {
   // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a
   // configuration that selects the VM PDF extractor without a provider, refuses to start.
   // Providers check batch ownership against the database themselves (ExtractorPluginHost.documentOwners).
-  setExtractorDocumentOwners((documentIds) => store.documentScopes(documentIds));
-  setExtractorComputeObservations((profileIds) => store.computeObservations(profileIds));
-  setExtractorComputeCohortAuthorizer((scope) => store.authorizeComputeCohort(scope));
-  setExtractorComputeAllocationAdmission(store.computeAllocationAdmission());
-  setExtractorComputeJobAdmission(store.computeJobAdmission());
+  setExtractorDocumentOwners((documentIds) => store.records.documentScopes(documentIds));
+  setExtractorComputeObservations((profileIds) => loadComputeObservations(store.stageSql, profileIds));
+  setExtractorComputeCohortAuthorizer((scope) => authorizeComputeCohort(store.stageSql, scope));
+  setExtractorComputeAllocationAdmission(computeAllocationAdmission(store.stageSql));
+  setExtractorComputeJobAdmission(computeJobAdmission(store.stageSql));
   await loadExtractorPlugins(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
@@ -382,7 +393,7 @@ async function main(): Promise<void> {
   const scalerParams = resolveWorkerScalerQueryParams();
   const scaler = new ScalerPublisher({
     isLeader: () => maintenanceLeader,
-    read: () => store.readWorkerScalerSnapshot(scalerParams),
+    read: () => queryWorkerScalerSnapshot(store.stageSql as unknown as ScalerSql, scalerParams),
     config: resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency),
     params: scalerParams,
     keepAliveUrl: readOptionalEnv("WORKER_APP_KEEPALIVE_URL"),
@@ -451,7 +462,7 @@ async function main(): Promise<void> {
   const refreshMaintenanceLeadership = async () => {
     if (cfg.workerRunMaintenance !== "auto") return;
     const leader = await withBackgroundSpan("worker.maintenance-lease", () =>
-      store.tryMaintenanceLease("worker-maintenance", workerIdentity, maintenanceLeaseMs))
+      tryMaintenanceLease(store.stageSql, { name: "worker-maintenance", holder: workerIdentity, ttlMs: maintenanceLeaseMs }))
       .catch((err) => {
         console.warn(`[temporal-worker] maintenance lease check failed: ${err instanceof Error ? err.message : String(err)}`);
         return false;
@@ -494,13 +505,13 @@ async function main(): Promise<void> {
 
   // Background maintenance tasks (same as legacy worker)
   const budgetTimer = setInterval(onLeader(() => {
-    withBackgroundSpan("worker.budget-alerts", () => store.processBudgetAlerts()).catch((err) => {
+    withBackgroundSpan("worker.budget-alerts", () => maintenance.processBudgetAlerts()).catch((err) => {
       console.error(
         "budget alert sweep failed:",
         err instanceof Error ? err.message : String(err)
       );
     });
-    withBackgroundSpan("worker.secret-expiry-alerts", () => store.processSecretExpiryAlerts()).catch((err) => {
+    withBackgroundSpan("worker.secret-expiry-alerts", () => maintenance.processSecretExpiryAlerts()).catch((err) => {
       console.error(
         "secret expiry sweep failed:",
         err instanceof Error ? err.message : String(err)
@@ -516,7 +527,7 @@ async function main(): Promise<void> {
   const flushCreditDebits = () => {
     if (creditFlushRunning) return;
     creditFlushRunning = true;
-    withBackgroundSpan("worker.credit-debit-flush", () => store.flushPendingCreditDebits())
+    withBackgroundSpan("worker.credit-debit-flush", () => flushPendingCreditDebits(store.stageSql))
       .then((result) => {
         if (result.debits > 0) {
           console.log(`[billing] credit-debit-flush orgs=${result.orgs} debits=${result.debits} credits=${result.credits.toFixed(6)}`);
@@ -537,7 +548,7 @@ async function main(): Promise<void> {
   // Replaced canonical versions: delete derived data once the grace period passes.
   const purgeOptions = purgeConfig();
   const purgeSuperseded = () =>
-    withBackgroundSpan("worker.superseded-purge", () => store.purgeSupersededDocuments(storage, purgeOptions)).catch((err) => {
+    withBackgroundSpan("worker.superseded-purge", () => maintenance.purgeSupersededDocuments(storage, purgeOptions)).catch((err) => {
       console.error(
         "superseded purge sweep failed:",
         err instanceof Error ? err.message : String(err)
@@ -554,7 +565,7 @@ async function main(): Promise<void> {
   const runGraphJobs = () => {
     if (graphJobRunning) return;
     graphJobRunning = true;
-    withBackgroundSpan("worker.graph-jobs", () => store.runGraphJobs({
+    withBackgroundSpan("worker.graph-jobs", () => claimGraphJobs(store.stageSql, {
       workerId: workerIdentity,
       config: cfg,
       concurrency: cfg.graphJobConcurrency,
@@ -582,7 +593,7 @@ async function main(): Promise<void> {
   const runSummaryTreeJobs = () => {
     if (summaryTreeJobRunning) return;
     summaryTreeJobRunning = true;
-    withBackgroundSpan("worker.summary-tree-jobs", () => store.runSummaryTreeJobs({
+    withBackgroundSpan("worker.summary-tree-jobs", () => claimSummaryTreeJobs(store.stageSql, {
       workerId: workerIdentity,
       config: cfg,
       storage,
@@ -618,14 +629,14 @@ async function main(): Promise<void> {
   const runFigureResumes = () => {
     if (figureResumeRunning) return;
     figureResumeRunning = true;
-    withBackgroundSpan("figure-resume", () => store.runFigureResumes({ storage, provider: figureProvider(), workerId: workerIdentity }))
+    withBackgroundSpan("figure-resume", async () => (await import("../figures/resume-runner.js")).runFigureResumes({ storage, provider: figureProvider(), workerId: workerIdentity, sql: store.stageSql }))
       .catch((err) => console.error(`[doppler-figures] resume sweep failed: ${err instanceof Error ? err.name : typeof err}`))
       .finally(() => { figureResumeRunning = false; });
   };
   const figureResumeTimer = setInterval(runFigureResumes, 30_000);
   figureResumeTimer.unref();
   const figureBacklogTimer = setInterval(onLeader(() => {
-    void withBackgroundSpan("figure-resume-backlog", () => store.figureResumeBacklog())
+    void withBackgroundSpan("figure-resume-backlog", async () => (await import("../figures/resume-runner.js")).figureResumeBacklog(store.stageSql))
       .catch((err) => console.error(`[doppler-figures] backlog gauge failed: ${err instanceof Error ? err.name : typeof err}`));
   }), 60_000);
   figureBacklogTimer.unref();
@@ -633,7 +644,7 @@ async function main(): Promise<void> {
   const figureAuditTimer = setInterval(onLeader(() => {
     if (figureAuditRunning) return;
     figureAuditRunning = true;
-    withBackgroundSpan("figure-audit", () => store.auditFigureStorage({ storage, limit: 50 }))
+    withBackgroundSpan("figure-audit", async () => (await import("../figures/resume-runner.js")).auditFigureStorage({ storage, limit: 50, sql: store.stageSql }))
       .catch((err) => console.error(`[figure-audit] sweep failed: ${err instanceof Error ? err.name : typeof err}`))
       .finally(() => { figureAuditRunning = false; });
   }), 30 * 60_000);
@@ -662,13 +673,13 @@ async function main(): Promise<void> {
   lanceSweepTimer?.unref();
 
   const retentionTimer = setInterval(onLeader(() => {
-    withBackgroundSpan("worker.retention-sweep", () => store.runRetentionSweep(storage, cfg.retentionSweepBatchSize)).catch((err) => {
+    withBackgroundSpan("worker.retention-sweep", () => maintenance.runRetentionSweep(storage, cfg.retentionSweepBatchSize)).catch((err) => {
       console.error(
         "retention sweep failed:",
         err instanceof Error ? err.message : String(err)
       );
     });
-    withBackgroundSpan("worker.storage-integrity-sweep", () => store.runStorageIntegritySweep(storage, {
+    withBackgroundSpan("worker.storage-integrity-sweep", () => maintenance.runStorageIntegritySweep(storage, {
       maxKeys: cfg.storageIntegritySweepMaxKeys,
       prefix: cfg.storageIntegritySweepPrefix,
     }))
@@ -715,12 +726,12 @@ async function main(): Promise<void> {
   try {
     // Run initial maintenance sweep (leader only)
     if (maintenanceLeader) {
-      await store.processBudgetAlerts().catch(() => {});
-      await store.processSecretExpiryAlerts().catch(() => {});
-      await store
+      await maintenance.processBudgetAlerts().catch(() => {});
+      await maintenance.processSecretExpiryAlerts().catch(() => {});
+      await maintenance
         .runRetentionSweep(storage, cfg.retentionSweepBatchSize)
         .catch(() => {});
-      await withBackgroundSpan("worker.storage-integrity-sweep", () => store
+      await withBackgroundSpan("worker.storage-integrity-sweep", () => maintenance
         .runStorageIntegritySweep(storage, {
           maxKeys: cfg.storageIntegritySweepMaxKeys,
           prefix: cfg.storageIntegritySweepPrefix,

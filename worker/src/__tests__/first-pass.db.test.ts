@@ -147,10 +147,10 @@ function stages(): Stage[] {
       seen.push({ stage: "pii-detect", documentId: document.id });
       if (piiFails.has(document.id)) throw Object.assign(new Error("pii blocked"), {});
     }),
-    perDocument("embed", async (_state, document) => {
+    perDocument("embed", async (state, document) => {
       if (embedHold?.ids.has(document.id)) await embedHold.until;
       seen.push({ stage: "embed", documentId: document.id });
-      await store.markDocumentLexicalSearchable(document.id);
+      await store.content.markDocumentLexicalSearchable({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id });
     }),
     perDocument("index", async (_state, document) => {
       seen.push({ stage: "index", documentId: document.id });

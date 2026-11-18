@@ -3,6 +3,7 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { createHash } from "node:crypto";
 import { BILLABLE_UNIT_METRICS, decodeTextBytes, defaultPipelineFeatures, pageCredits, textPageCount } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
@@ -59,7 +60,7 @@ afterEach(() => { setSpendCheckConfig(null); });
 afterAll(async () => { await store?.close(); await server?.stop(); await db?.close(); });
 
 async function stateFor(runId: string, documentId: string) {
-  const document = (await store.loadDocument(documentId))!;
+  const document = (await loadFixtureDocument(store, documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
   state.bindStore(store);
   state.usageLedger.runId = runId;
@@ -89,7 +90,7 @@ describe("text pages are measured in full by the worker, and only that count bil
     expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource })).toEqual({ pages: fullCount, estimate: apiEstimate });
     expect(await pageRow("big")).toEqual({ page_count: fullCount, page_count_source: "counted" });
     const sql = (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
-    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("run1"), [(await store.loadDocument("big"))!, (await store.loadDocument("small"))!]));
+    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("run1"), [(await loadFixtureDocument(store, "big"))!, (await loadFixtureDocument(store, "small"))!]));
     expect(charges.fastPages).toBe(fullCount + 2);
     const { rows } = await db.query<{ amount: string; cost_cents: string }>(`select amount::text, cost_cents::text from usage_events where run_id = 'run1' and metric = $1`, [BILLABLE_UNIT_METRICS.fastPage]);
     expect(Number(rows[0]!.amount)).toBe(fullCount + 2);

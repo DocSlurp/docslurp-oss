@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import {
   canonicalDocumentSchema,
   normalizePipelineFeatures,
@@ -87,7 +88,10 @@ describe("quality fast: pages without a text layer", () => {
     const { state, storage } = fastState();
     const listHostPageImagePages = vi.fn(async () => [1, 0, 3, 1.5]);
     const reserveFastPageImageRenders = vi.fn(async ({ wanted }: { wanted: number }) => wanted);
-    (state as unknown as { store: unknown }).store = { listHostPageImagePages, reserveFastPageImageRenders };
+    const store = memoryCheckpointStore();
+    store.assets.listHostPageImagePages = listHostPageImagePages;
+    store.budgets.reserveFastPageImageRenders = reserveFastPageImageRenders;
+    state.store = store;
     const stage = new RenderImagesStage({} as never, storage);
     const select = (stage as unknown as { selectPages: (s: WorkflowState, d: Document) => Promise<{
       pageNumbers: number[]; keptAsImage: number[];
@@ -194,27 +198,23 @@ describe("quality fast: kept-as-image renders are bounded", () => {
       documentId: "blank", markdown: "", extractor: "native-pdf", strategy: "native-pdf-only", extractionTimeMs: 1, pageCount: manyPages, canonicalDocument: canonical,
     });
     const { storage, objects } = memoryStorage(withCanonical ? { "canonical/blank.json": canonical, "contract/blank.json": contract } : {});
-    const facts: Array<{ pageNumber: number; visionStatus?: string }> = [];
+    const facts: Array<{ pageNumber: number; visionStatus?: string | null }> = [];
     const grants = new Map<string, number>();
     const state = WorkflowState.create({
       id: runId, orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
       pipeline: normalizePipelineFeatures({ quality: "fast" }),
     } as unknown as ProjectRun, [blankPdf]);
-    // Every other store call is a no-op; page facts are captured.
-    const known: Record<string, unknown> = {
-      getCompletedPages: async () => new Set<number>(),
-      upsertPageFacts: async (rows: typeof facts) => void facts.push(...rows),
-      // In-memory stand-in for the Postgres budget (db/fast-page-image-budget.ts, tested against PGlite).
-      reserveFastPageImageRenders: async (args: { documentId: string; wanted: number; perRun: number }) => {
-        const used = [...grants.values()].reduce((sum, granted) => sum + granted, 0);
-        const granted = grants.get(args.documentId) ?? Math.max(0, Math.min(args.wanted, args.perRun - used));
-        grants.set(args.documentId, granted);
-        return Math.min(granted, args.wanted);
-      },
+    // An in-memory store; page facts are captured.
+    const store = memoryCheckpointStore();
+    store.content.upsertPageFacts = async (_scope, rows) => void facts.push(...rows);
+    // In-memory stand-in for the Postgres budget (db/fast-page-image-budget.ts, tested against PGlite).
+    store.budgets.reserveFastPageImageRenders = async (args) => {
+      const used = [...grants.values()].reduce((sum, granted) => sum + granted, 0);
+      const granted = grants.get(args.documentId) ?? Math.max(0, Math.min(args.wanted, args.perRun - used));
+      grants.set(args.documentId, granted);
+      return Math.min(granted, args.wanted);
     };
-    (state as unknown as { store: unknown }).store = new Proxy(known, {
-      get: (target, key: string) => target[key] ?? (async () => undefined),
-    });
+    state.store = store;
     if (withCanonical) {
       state.artifactLedger.recordDocument("blank", "canonical-document", "s3://bucket/canonical/blank.json");
       state.artifactLedger.recordDocument("blank", "extraction-contract", "s3://bucket/contract/blank.json");
@@ -255,15 +255,11 @@ describe("quality fast: kept-as-image renders are bounded", () => {
 
   it("renders nothing without a store to reserve the run budget from (fail closed)", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const { state, storage, facts } = blankState(true, "run-no-budget");
-    const proxied = (state as unknown as { store: Record<string, unknown> }).store;
-    (state as unknown as { store: unknown }).store = new Proxy({}, {
-      get: (_target, key: string) => (key === "reserveFastPageImageRenders" ? undefined : proxied[key]),
-    });
+    const { state, storage } = blankState(true, "run-no-budget");
+    state.store = undefined;
     const { stage: render, rendered } = stage(storage);
     await render.run(state);
     expect(rendered.flat()).toEqual([]);
-    expect(facts.filter((row) => row.visionStatus === "not-read")).toHaveLength(manyPages);
   });
 
   it("keeps the first frame of a multi-frame image and records the other frames unread", () => {

@@ -6,6 +6,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures, pageCredits } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
@@ -68,7 +69,7 @@ afterEach(() => { resetExtractorPluginsForTest(); setSpendCheckConfig(null); });
 afterAll(async () => { await store?.close(); await server?.stop(); await db?.close(); });
 
 async function stateFor(runId: string, documentId: string) {
-  const document = (await store.loadDocument(documentId))!;
+  const document = (await loadFixtureDocument(store, documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
   state.bindStore(store);
   state.usageLedger.runId = runId;
@@ -394,7 +395,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
 
   it("billing reads only measured counts: the measured PDFs bill their pages, the one still estimated bills nothing", async () => {
     const { state } = await stateFor("run1", "local");
-    state.documents.push((await store.loadDocument("vm"))!, (await store.loadDocument("never"))!);
+    state.documents.push((await loadFixtureDocument(store, "vm"))!, (await loadFixtureDocument(store, "never"))!);
     const sql = (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
     const charges = await recordPageBaseFee(sql, state);
     expect(charges.fastPages).toBe(7 + 12);
@@ -484,13 +485,13 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
       }),
       getBytes: vi.fn(),
     } as unknown as ArtifactStore;
-    const state = WorkflowState.create(await store.loadRun("run-e2e"), [(await store.loadDocument("e2e-pdf"))!, (await store.loadDocument("e2e-txt"))!]);
+    const state = WorkflowState.create(await store.loadRun("run-e2e"), [(await loadFixtureDocument(store, "e2e-pdf"))!, (await loadFixtureDocument(store, "e2e-txt"))!]);
     state.bindStore(store);
     await new FormatDetectStage(storage, runner(9)).run(state);
     expect(await pageRow("e2e-pdf")).toEqual({ page_count: 9, page_count_source: "counted" });
     expect(await pageRow("e2e-txt")).toEqual({ page_count: 2, page_count_source: "counted" });
     const sql = (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
-    const billing = WorkflowState.create(await store.loadRun("run-e2e"), [(await store.loadDocument("e2e-pdf"))!, (await store.loadDocument("e2e-txt"))!]);
+    const billing = WorkflowState.create(await store.loadRun("run-e2e"), [(await loadFixtureDocument(store, "e2e-pdf"))!, (await loadFixtureDocument(store, "e2e-txt"))!]);
     expect((await recordPageBaseFee(sql, billing)).fastPages).toBe(9 + 2);
   }, 60_000);
 
@@ -504,7 +505,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
         values ('off-pdf', 'o1', 'u1', 'w1', 'run-off', 'h.pdf', 'application/pdf', 'raw/h', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     const storage = { putJson: vi.fn(async () => undefined), uri: (key: string) => `s3://b/${key}`, downloadSourceToTempFile: vi.fn(), downloadToTempFile: vi.fn(), getBytes: vi.fn() } as unknown as ArtifactStore;
     const host = runner(2);
-    const state = WorkflowState.create(await store.loadRun("run-off"), [(await store.loadDocument("off-pdf"))!]);
+    const state = WorkflowState.create(await store.loadRun("run-off"), [(await loadFixtureDocument(store, "off-pdf"))!]);
     state.bindStore(store);
     await new FormatDetectStage(storage, host).run(state);
     expect(state.documentStage("off-pdf", "format-detect")?.status).toBe("failed");
@@ -539,7 +540,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     expect(less.document.pageCount).toBe(1);
     expect(less.state.artifactLedger.readDocument("x-less", PDF_WALKED_PAGES_SLOT)).toBe("10");
     // A retried stage (the row already lowered) reports the same 1 of 10 and changes nothing.
-    const retry = WorkflowState.create(await store.loadRun("run-x"), [(await store.loadDocument("x-less"))!]);
+    const retry = WorkflowState.create(await store.loadRun("run-x"), [(await loadFixtureDocument(store, "x-less"))!]);
     retry.bindStore(store);
     retry.artifactLedger.recordDocument("x-less", PDF_WALKED_PAGES_SLOT, "10");
     expect(await reconcileProcessedPdfPages(retry, retry.documents[0]!, 1)).toEqual({ measured: 10, processed: 1, mismatch: "processed-below-measured" });

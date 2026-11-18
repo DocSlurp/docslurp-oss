@@ -89,7 +89,7 @@ describe("partial Document failure in the store", () => {
       const state = await loadRunState(store, "success-rollback");
       state.usageLedger.enqueue({ id: "rollback-usage", provider: "local", model: "compute", metric: "compute", amount: 1, unit: "second", costCents: 2 });
       const pending = state.usageLedger.pendingBillableCents;
-      const spy = vi.spyOn(store, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
+      const spy = vi.spyOn(store.notifications, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
       await expect(store.completeRun(state)).rejects.toThrow("outbox unavailable");
       expect(state.usageLedger.pendingBillableCents).toBe(pending);
       spy.mockRestore();
@@ -125,7 +125,7 @@ describe("partial Document failure in the store", () => {
     await seedRun("receipt-rollback");
     const owner = { runId: "receipt-rollback", orgId: "o1", projectId: "w" };
     await withStore(async (store) => {
-      const webhook = vi.spyOn(store, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
+      const webhook = vi.spyOn(store.notifications, "triggerWebhooks").mockRejectedValueOnce(new Error("outbox unavailable"));
       await expect(store.failRun(owner.runId, "embed", "failure", owner)).rejects.toThrow("outbox unavailable");
       webhook.mockRestore();
     });

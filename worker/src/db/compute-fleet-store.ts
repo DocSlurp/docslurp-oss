@@ -1,4 +1,5 @@
 import type postgres from "postgres";
+import { computeCalibrationColumns, computePriceColumns, decodeComputeObservation, type ComputeCalibrationObservation, type ComputeCohortGrant, type ComputeExecutionScope, type ComputeObservations, type ComputePriceObservation } from "@docslurp/shared";
 import type { ComputeAllocationAdmission, ComputeAllocationPending, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "@docslurp/shared";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -48,5 +49,37 @@ export function computeAllocationAdmission(sql: postgres.Sql): ComputeAllocation
         order by created_at limit 200`;
       return rows.map((row) => ({ reservationId: row.id, providerId: row.provider_id, reservedAt: new Date(row.created_at).toISOString() }));
     },
+  };
+}
+
+/** The cohort grant for one execution scope; null unless the run belongs to scope.orgId (authorize_compute_cohort). */
+export async function authorizeComputeCohort(sql: postgres.Sql<Record<string, unknown>>, scope: ComputeExecutionScope): Promise<ComputeCohortGrant | null> {
+  for (const value of [scope.orgId, scope.projectId, scope.runId, scope.documentId]) {
+    if (!value || value.length > 200) throw new Error("Invalid compute execution scope");
+  }
+  const [row] = await sql<{ cohort_id: string | null; valid_until: Date }[]>`
+    select * from public.authorize_compute_cohort(${scope.orgId}, ${scope.projectId}, ${scope.runId}, ${scope.documentId}, ${scope.executionGeneration})`;
+  // A row exists only when the run belongs to scope.orgId (authorize_compute_cohort's `r.org_id = p_org`).
+  return row ? { cohortId: row.cohort_id, validUntil: new Date(row.valid_until).toISOString(), orgId: scope.orgId } : null;
+}
+
+/** The newest valid calibration of each profile, with the price observation of its offer. */
+export async function loadComputeObservations(sql: postgres.Sql<Record<string, unknown>>, profileIds: readonly string[]): Promise<ComputeObservations> {
+  if (profileIds.length > 100 || profileIds.some((id) => !id || id.length > 200)) throw new Error("Invalid compute profile selection");
+  if (!profileIds.length) return { prices: [], calibrations: [] };
+  const calibrations = await sql`
+    select distinct on (profile_id) * from compute_calibration_observations
+    where profile_id = any(${[...profileIds]}) and observed_at <= now() and valid_until > now()
+      and observed_at > now() - interval '7 days'
+    order by profile_id, observed_at desc, id desc`;
+  const offers = calibrations.map((row) => String(row.offer_id));
+  const prices = offers.length ? await sql`
+    select distinct on (offer_id) * from compute_price_observations
+    where offer_id = any(${offers}) and observed_at <= now() and valid_until > now()
+    order by offer_id, observed_at desc, id desc` : [];
+  const valid = new Set(prices.map((row) => row.offer_id));
+  return {
+    prices: prices.map((row) => decodeComputeObservation<ComputePriceObservation>(row, computePriceColumns)),
+    calibrations: calibrations.filter((row) => valid.has(row.offer_id)).map((row) => decodeComputeObservation<ComputeCalibrationObservation>(row, computeCalibrationColumns)),
   };
 }
