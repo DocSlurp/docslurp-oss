@@ -955,10 +955,16 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
  * `directUploadWaveDelayMs` after the first waiting file was finalized. An extract session takes one run, once every
  * file is in. Durable first (`next_reconcile_at`, read by the sweep), then the in-process timer.
  */
+/** How many finalized files start the next wave, after `startedWaves` waves (see `directUploadWaveGrowth`). */
+export function directUploadWaveThreshold(startedWaves: number): number {
+  return Math.min(10_000, Math.ceil(env.directUploadWaveFiles * env.directUploadWaveGrowth ** Math.max(0, startedWaves)));
+}
+
 export async function scheduleDirectUploadWaves(sessionId: string): Promise<void> {
-  const [state] = await sql<Array<{ waiting: number; open: boolean; extract: boolean; delay_ms: number | null; blocked_ms: number | null }>>`
+  const [state] = await sql<Array<{ waiting: number; waves: number; open: boolean; extract: boolean; delay_ms: number | null; blocked_ms: number | null }>>`
     select
       (select count(*)::int from upload_session_files where session_id = s.id and status = 'completed' and run_id is null) as waiting,
+      (select count(*)::int from upload_session_runs where session_id = s.id) as waves,
       exists (select 1 from upload_session_files where session_id = s.id and status = 'pending') as open,
       s.extract_id is not null as extract,
       (select greatest(0, ceil(extract(epoch from (min(finalized_at) + ${env.directUploadWaveDelayMs}::int * interval '1 millisecond' - now())) * 1000))::int
@@ -969,7 +975,7 @@ export async function scheduleDirectUploadWaves(sessionId: string): Promise<void
   let delayMs: number;
   if (!state.open) delayMs = 0;
   else if (state.extract || state.waiting === 0) return;
-  else if (state.waiting >= env.directUploadWaveFiles) delayMs = 0;
+  else if (state.waiting >= directUploadWaveThreshold(Number(state.waves ?? 0))) delayMs = 0;
   else delayMs = Number(state.delay_ms ?? env.directUploadWaveDelayMs);
   delayMs = Math.max(delayMs, Number(state.blocked_ms ?? 0));
   await sql`update upload_sessions set next_reconcile_at = least(next_reconcile_at, now() + ${delayMs}::int * interval '1 millisecond')

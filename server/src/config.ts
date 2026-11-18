@@ -262,6 +262,12 @@ export const env = {
   directUploadWaveFiles: Math.min(10_000, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WAVE_FILES, 5)))),
   directUploadWaveDelayMs: Math.min(600_000, Math.max(0, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WAVE_DELAY_MS, 10_000)))),
   /**
+   * How the wave size grows: wave n starts at `directUploadWaveFiles * growth^(n-1)` waiting files (the delay and the last
+   * file still start a smaller one). 1 keeps every wave at `directUploadWaveFiles`; 2 doubles it, so a large upload becomes
+   * a handful of runs while the first still starts after a few files.
+   */
+  directUploadWaveGrowth: Math.min(10, Math.max(1, readNumber(process.env.DOCSLURP_UPLOAD_WAVE_GROWTH, 1))),
+  /**
    * How long after a file is declared the fallback reconciler first checks storage for it itself. The storage upload
    * webhook and client `files/complete` calls normally finalize a file well before this; the fallback covers lost events.
    */

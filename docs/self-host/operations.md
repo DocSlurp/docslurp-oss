@@ -21,7 +21,9 @@ batches, with per-file backoff up to five minutes, so self-hosted S3/MinIO
 installations do not require notifications. Waves start when
 `DOCSLURP_UPLOAD_WAVE_FILES` finalized files (default 5) are waiting, after
 `DOCSLURP_UPLOAD_WAVE_DELAY_MS` (default 10000) from the first of them, or when
-the last file is finalized. Unfinished transfers expire after 24 hours: files no
+the last file is finalized. `DOCSLURP_UPLOAD_WAVE_GROWTH` (default 1) multiplies
+the file count each later wave waits for: 2 makes waves of 5, 10, 20, ... files,
+so a 1,000-file upload becomes a handful of runs instead of one per 5 files. Unfinished transfers expire after 24 hours: files no
 run took become `aborted`, and runs already started continue. Keep the API
 process running; a process that sleeps between requests cannot execute
 background sweeps or wave timers.

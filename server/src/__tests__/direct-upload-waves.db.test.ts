@@ -61,7 +61,7 @@ const { createProjectIntakeFakes } = await import("./helpers/project-intake-fake
 const SECRET = "test-webhook-secret";
 let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
 let fakes: ReturnType<typeof createProjectIntakeFakes>;
-const saved = { files: env.directUploadWaveFiles, delay: env.directUploadWaveDelayMs, grace: env.directUploadFinalizeGraceSeconds };
+const saved = { files: env.directUploadWaveFiles, delay: env.directUploadWaveDelayMs, grace: env.directUploadFinalizeGraceSeconds, growth: env.directUploadWaveGrowth };
 
 /** Intake fakes whose runs carry the run id waves choose, and whose new projects exist in the database (access checks). */
 function installFakes() {
@@ -137,12 +137,12 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => {
   setDirectUploadWavePortsForTesting(null);
-  Object.assign(env, { directUploadWaveFiles: saved.files, directUploadWaveDelayMs: saved.delay, directUploadFinalizeGraceSeconds: saved.grace });
+  Object.assign(env, { directUploadWaveFiles: saved.files, directUploadWaveDelayMs: saved.delay, directUploadFinalizeGraceSeconds: saved.grace, directUploadWaveGrowth: saved.growth });
   await db?.close();
 });
 beforeEach(async () => {
   process.env.DOCSLURP_TIGRIS_UPLOAD_WEBHOOK_SECRET = SECRET;
-  Object.assign(env, { directUploadWaveFiles: 5, directUploadWaveDelayMs: 10_000, directUploadFinalizeGraceSeconds: 60 });
+  Object.assign(env, { directUploadWaveFiles: 5, directUploadWaveDelayMs: 10_000, directUploadFinalizeGraceSeconds: 60, directUploadWaveGrowth: 1 });
   mocks.lockHeld = false;
   mocks.objects.clear();
   mocks.replacedBeforeCopy.clear();
@@ -195,6 +195,22 @@ describe("webhook-driven finalization", () => {
     const described = await getDirectUploadSessionDescription(sessionId, "u", true);
     expect(described?.runs.map(run => [run.wave, run.fileCount, run.status])).toEqual([[1, 5, "started"], [2, 2, "started"]]);
     expect(described?.files.every(file => "runId" in file && file.runId)).toBe(true);
+  });
+
+  it("grows later waves when asked: 5, then 10 waiting files", async () => {
+    Object.assign(env, { directUploadWaveGrowth: 2 });
+    try {
+      const { sessionId, files: seeded } = await seedSession(20);
+      for (const file of seeded) put(file.key);
+      await webhook(seeded.slice(0, 5).map(file => file.key));
+      await advance(sessionId);
+      await webhook(seeded.slice(5, 14).map(file => file.key));
+      expect((await advance(sessionId)).nextCheckMs).toBeGreaterThan(0);
+      expect((await runs(sessionId)).map(run => run.file_count)).toEqual([5]);
+      await webhook([seeded[14]!.key]);
+      await advance(sessionId);
+      expect((await runs(sessionId)).map(run => run.file_count)).toEqual([5, 10]);
+    } finally { Object.assign(env, { directUploadWaveGrowth: 1 }); }
   });
 
   it("starts a wave below the wave size once the first waiting file has waited the wave delay", async () => {

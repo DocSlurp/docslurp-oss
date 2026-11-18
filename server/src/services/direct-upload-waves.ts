@@ -1,7 +1,8 @@
 /**
  * Early ingestion for direct uploads: a session starts runs ("waves") while its upload is still in progress.
  *
- * A wave takes every finalized file not yet in a run. It is due when `directUploadWaveFiles` such files are waiting,
+ * A wave takes every finalized file not yet in a run. It is due when `directUploadWaveFiles` such files are waiting (more
+ * for later waves when `directUploadWaveGrowth` > 1),
  * `directUploadWaveDelayMs` after the first of them was finalized, when no file is still open, or when the client
  * confirms (a flush). Every wave is an ordinary billable run in the session's one project: the same reservation,
  * budget and admission checks, refused per wave. The first wave resolves the project (creating and self-titling it
@@ -21,6 +22,7 @@ import { env } from "../config.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import {
   assertUploadSessionActive,
+  directUploadWaveThreshold,
   listDirectUploadRuns,
   loadDirectUploadSessionRow,
   queueAbandonedDirectUploadCleanup,
@@ -95,8 +97,9 @@ async function advanceLocked(sessionId: string, userId: string, options: Advance
       select id, filename, mime_type, size_bytes, source_key, canonical_id, source_path from upload_session_files
       where session_id = ${session.id} and status = 'completed' and run_id is null
       order by request_index asc nulls last, created_at asc`;
-    const [state] = await sql<Array<{ open: boolean; delay_ms: number | null; blocked_ms: number | null }>>`
+    const [state] = await sql<Array<{ open: boolean; waves: number; delay_ms: number | null; blocked_ms: number | null }>>`
       select exists (select 1 from upload_session_files where session_id = ${session.id} and status = 'pending') as open,
+        (select count(*)::int from upload_session_runs where session_id = ${session.id}) as waves,
         (select greatest(0, ceil(extract(epoch from (min(finalized_at) + ${env.directUploadWaveDelayMs}::int * interval '1 millisecond' - now())) * 1000))::int
           from upload_session_files where session_id = ${session.id} and status = 'completed' and run_id is null) as delay_ms,
         greatest(0, ceil(extract(epoch from (wave_blocked_until - now())) * 1000))::int as blocked_ms
@@ -113,7 +116,7 @@ async function advanceLocked(sessionId: string, userId: string, options: Advance
       return { nextCheckMs: null };
     }
     const delayMs = Number(state?.delay_ms ?? 0);
-    const due = !open || flush || waiting.length >= env.directUploadWaveFiles || delayMs <= 0;
+    const due = !open || flush || waiting.length >= directUploadWaveThreshold(Number(state?.waves ?? 0)) || delayMs <= 0;
     if (!due) return { nextCheckMs: delayMs };
     const blockedMs = Number(state?.blocked_ms ?? 0);
     if (blockedMs > 0 && !flush) return { nextCheckMs: blockedMs };
