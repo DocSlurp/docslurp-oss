@@ -15,7 +15,7 @@ engine during extraction, before triage; they count as `ocr`.
 
 ## Limits
 
-Two project settings cap the ladder. Both apply in `auto` only: Fast reads no page and Good reads every page, whatever
+Two project settings cap the ladder. The highest rung is also the quality level: `ocr` (the default) is Fastest, `fast` is Fastest with Read scans off, `intelligent` is Smartest, under which a page that needs a read goes straight to the vision model (no OCR step; a share cap lowers it to OCR). Both apply in `auto` only: Fast reads no page, whatever
 the ladder says.
 
 ```json
@@ -97,10 +97,10 @@ A limit is a project setting. A per-upload `pipeline.ladder` override from a cal
 settings (not an editor, or an API key without the `pipeline:billed-features` or `projects:manage` scope, as for chart
 export's `models` tier) can only tighten the project's limits: the run gets the lower rung and the smaller share of
 each. While the project has a limit, such a caller cannot raise quality above the project's either (an upload asking
-Good on an Auto project with a limit runs Auto). The override is clamped, not refused; on a visual-mode project a limit the project does not have is dropped from the
+Smartest on a Fastest project is refused, 403, for a caller who may not raise). The override is clamped, not refused; on a visual-mode project a limit the project does not have is dropped from the
 run. A replay (reprocess, bulk reprocess, retry as new) and query-time materialization carry an older run's pipeline:
 the project's limits as they are now tighten it, whoever asks, and while the project has a limit its quality is capped
-at the project's (a source run at Good replays at the project's Auto). A stored share or rung that is not a valid value
+at the project's (a Smartest source run replays at the project's Fastest). A stored share or rung that is not a valid value
 reads as the tightest limit. Adding a limit to a visual-mode project is refused
 (`visual_mode_quality`).
 
