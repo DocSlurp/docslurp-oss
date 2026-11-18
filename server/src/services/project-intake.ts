@@ -64,9 +64,10 @@ export type ProjectIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 
 /**
  * Machine-readable causes clients act on. `idempotency_in_flight`: the first request with this Idempotency-Key is still being
  * processed, so retry with the same key. `idempotency_key_reused`: the key was used for a different request. `upload_session_closed`:
- * the session remembered for the key can no longer take uploads, so use a new key.
+ * the session remembered for the key can no longer take uploads, so use a new key. `upload_session_busy`: another request (or the
+ * reconciler) holds the session's lock, so repeat the same request shortly.
  */
-export type ProjectIntakeErrorCode = "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "chart_export_tier_unavailable" | "visuals_unavailable";
+export type ProjectIntakeErrorCode = "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "upload_session_busy" | "chart_export_tier_unavailable" | "visuals_unavailable";
 
 export class ProjectIntakeError extends Error {
   constructor(

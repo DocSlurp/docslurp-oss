@@ -459,6 +459,71 @@ function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Storage PUTs in flight at once, across every file and part of one upload. One stream is usually limited by round trips and the
+ * TCP window rather than the uplink, so a few parallel transfers fill the link; on a saturated uplink they share it. Bodies are
+ * file-backed blob slices, so memory does not grow with the limit.
+ */
+function uploadConcurrency(): number {
+  const raw = Number(process.env.DOCSLURP_UPLOAD_CONCURRENCY ?? 6);
+  return Number.isInteger(raw) && raw >= 1 && raw <= 32 ? raw : 6;
+}
+
+function limiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async (task) => {
+    if (active >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+    else active++;
+    try { return await task(); }
+    finally { const next = waiting.shift(); if (next) next(); else active--; }
+  };
+}
+
+/** Runs `task` over `items` at most `limit` at a time. After the first failure no new item starts; it waits for those in flight, then throws that failure. */
+async function forEachLimited<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | null = null;
+  const lane = async () => {
+    while (!failure && next < items.length) {
+      const item = items[next++]!;
+      try { await task(item); } catch (error) { failure ??= { error }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  if (failure) throw (failure as { error: unknown }).error;
+}
+
+const storageSlot = limiter(uploadConcurrency());
+/** `files/complete` and `confirm` take the session's lock, so this upload sends them one at a time. */
+const sessionSlot = limiter(1);
+
+/**
+ * 409 for a session lock someone else holds (the server's reconciler finalizing the session, or another request of this upload).
+ * Older servers send the generic `conflict` code with the message "Upload session is being finalized; retry shortly".
+ */
+async function isSessionBusy(response: Response): Promise<boolean> {
+  if (response.status !== 409) return false;
+  try {
+    const body = await response.clone().json() as { code?: unknown; message?: unknown; error?: { code?: unknown; message?: unknown } | unknown };
+    const error = body.error && typeof body.error === "object" ? body.error as { code?: unknown; message?: unknown } : body;
+    return error.code === "upload_session_busy" || (error.code === "conflict" && /being finalized; retry shortly/.test(String(error.message ?? "")));
+  } catch {
+    return false;
+  }
+}
+
+/** Sends a session-locked request, waiting out a busy lock with backoff. `complete` and `confirm` are idempotent, so a repeat is safe. */
+async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<string, string | boolean>): Promise<Response> {
+  const giveUpAt = Date.now() + Math.max(120_000, Number(flags.timeout ?? 30) * 1000);
+  for (let attempt = 0; ; attempt++) {
+    const response = await sessionSlot(send);
+    if (!(await isSessionBusy(response)) || Date.now() >= giveUpAt) return response;
+    await response.body?.cancel();
+    await sleepMs(Math.min(2_000, 200 * 2 ** attempt) * (0.5 + Math.random() / 2));
+  }
+}
+
 /** A timeout or a dropped connection: the request may or may not have reached the server. */
 function isLostResponse(error: unknown): boolean {
   return error instanceof TypeError || (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"));
@@ -520,10 +585,10 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
   // Presigned URL: never send the API key to storage. A part is retried with backoff before the caller resumes from the server's view.
   for (let attempt = 0; ; attempt++) {
     try {
-      const response = await fetch(url, {
+      const response = await storageSlot(() => fetch(url, {
         method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined,
         signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 100_000) * 1000))),
-      });
+      }));
       if (response.ok) return response.headers.get("etag");
       if (attempt >= 2 || !RETRYABLE_STATUSES.has(response.status)) throw await responseFailure(response);
       await response.body?.cancel();
@@ -541,13 +606,17 @@ async function sendFile(descriptor: DirectUploadDescriptor, blob: Blob): Promise
     return { fileId: descriptor.id, ...(etag ? { etag } : {}) };
   }
   const parts: Array<{ partNumber: number; etag: string }> = [...(descriptor.completedParts ?? [])];
-  for (const part of descriptor.pendingParts ?? []) {
+  const pending = descriptor.pendingParts ?? [];
+  let sent = 0;
+  // Parts share the upload's storage slots. A failed part stops new ones and waits for those in flight, so a resume never
+  // races a PUT of the same part.
+  await forEachLimited(pending, uploadConcurrency(), async (part) => {
     const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
     const etag = await putToStorage(part.url, blob.slice(start, start + part.sizeBytes));
     if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
     parts.push({ partNumber: part.partNumber, etag });
-    console.error(`Uploaded ${descriptor.filename} part ${part.partNumber}/${(descriptor.pendingParts ?? []).length}`);
-  }
+    console.error(`Uploaded ${descriptor.filename} part ${part.partNumber} (${++sent}/${pending.length})`);
+  });
   return { fileId: descriptor.id, parts: parts.sort((a, b) => a.partNumber - b.partNumber) };
 }
 
@@ -611,9 +680,14 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
   }));
   try {
     const claimed = new Set<number>();
-    for (const first of session.files) {
+    // Match every descriptor before sending anything, so an unknown file fails the upload before any bytes move.
+    const work = session.files.map((first) => {
       const match = localFileFor(first, files, claimed);
       if (!match) throw new Error(`Upload session returned a file this upload did not send: ${first.filename}`);
+      return { first, match };
+    });
+    // Files go up a few at a time; each one is completed as soon as its bytes are in storage.
+    await forEachLimited(work, uploadConcurrency(), async ({ first, match }) => {
       let descriptor = first;
       let complete: Record<string, unknown> | null = null;
       for (let round = 0; complete === null; round++) {
@@ -631,12 +705,13 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           descriptor = next;
         }
       }
-      const done = await apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(complete));
+      const body = json(complete);
+      const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, body), flags);
       if (!done.ok) throw await responseFailure(done);
-    }
+    });
     let confirmed: Response | null;
     try {
-      confirmed = await apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" });
+      confirmed = await sendWhenSessionFree(() => apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" }), flags);
     } catch (error) {
       if (!isLostResponse(error)) throw error;
       confirmed = await pollConfirmedSession(sessionPath, flags);

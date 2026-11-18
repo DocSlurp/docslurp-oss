@@ -295,7 +295,8 @@ describe("Direct Upload Session Module", () => {
   it("fences a concurrent finalizer without executing it", async () => {
     lockMock.mockResolvedValueOnce([{acquired:false}]);
     const work = vi.fn();
-    await expect(withDirectUploadLock("session-1",work)).rejects.toMatchObject({statusCode:409});
+    // Coded, so clients can tell a held lock (repeat shortly) from a real conflict.
+    await expect(withDirectUploadLock("session-1",work)).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
     expect(work).not.toHaveBeenCalled();
     expect(lockMock.release).toHaveBeenCalled();
   });

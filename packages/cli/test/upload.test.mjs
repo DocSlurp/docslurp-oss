@@ -63,10 +63,78 @@ test("direct uploads match session files by index: names the server sanitizes st
     const create = result.requests.find((request) => request.url === "/v1/uploads/direct/sessions");
     assert.ok(create.headers["idempotency-key"], "session create carries an Idempotency-Key");
     assert.deepEqual(JSON.parse(create.body.toString()).files.map((file) => file.clientId), ["0", "1"]);
-    const puts = result.requests.filter((request) => request.url.startsWith("/storage/"));
-    assert.equal(puts[0].body.length, 21 * 1024 * 1024);
-    assert.equal(puts[1].body.toString(), "scan-bytes");
+    // Files upload in parallel, so match each PUT by its signed URL rather than by arrival order.
+    const put = (index) => result.requests.find((request) => request.url === `/storage/${index}`);
+    assert.equal(put(0).body.length, 21 * 1024 * 1024);
+    assert.equal(put(1).body.toString(), "scan-bytes");
     assert.match(result.stdout, /Run ID:\s+run/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+/** A direct session that answers every file as a single PUT; `onComplete` decides each files/complete reply. */
+function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete }) {
+  const live = { put: 0, maxPut: 0, complete: 0, maxComplete: 0 };
+  const settle = (key, ms) => setTimeout(() => { live[key]--; }, ms);
+  const respond = (request, count, base) => {
+    if (request.url === "/v1/uploads/direct/sessions") {
+      const body = JSON.parse(request.body.toString());
+      return { status: 201, body: { sessionId: "s1", files: body.files.map((file, index) => ({
+        index, clientId: file.clientId, id: `f${index}`, filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes, mode: "single", putUrl: `${base}/storage/${index}`,
+      })) } };
+    }
+    if (request.url.startsWith("/storage/")) {
+      live.put++; live.maxPut = Math.max(live.maxPut, live.put); settle("put", putDelayMs);
+      return { delayMs: putDelayMs, headers: { etag: '"e"' }, body: {} };
+    }
+    if (request.url.endsWith("/files/complete")) {
+      live.complete++; live.maxComplete = Math.max(live.maxComplete, live.complete); settle("complete", completeDelayMs);
+      return { delayMs: completeDelayMs, ...onComplete(JSON.parse(request.body.toString())) };
+    }
+    if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
+    return { status: 404, body: {} };
+  };
+  return { live, respond };
+}
+
+async function directFiles(dir, count) {
+  const files = [join(dir, "big.pdf")];
+  await writeFile(files[0], Buffer.alloc(21 * 1024 * 1024, 0x41));
+  for (let i = 1; i < count; i++) { files.push(join(dir, `f${i}.pdf`)); await writeFile(files[i], `bytes-${i}`); }
+  return files;
+}
+
+test("direct uploads send files in parallel but complete them one at a time, waiting out a busy session lock", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 6);
+    let busy = 2;
+    const completed = new Set();
+    const { live, respond } = directSessionServer({ putDelayMs: 150, completeDelayMs: 30, onComplete: ({ fileId }) => {
+      // The reconciler holds the lock: an older server's uncoded reply, then the coded one.
+      if (busy-- > 0) return { status: 409, body: { error: { code: busy === 1 ? "conflict" : "upload_session_busy", message: "Upload session is being finalized; retry shortly" } } };
+      completed.add(fileId);
+      return { body: { ok: true } };
+    } });
+    const result = await invoke(["upload", ...files], respond);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(live.maxPut > 1, `storage PUTs overlapped (max ${live.maxPut})`);
+    assert.ok(live.maxPut <= 6, `at most the default limit in flight (max ${live.maxPut})`);
+    assert.equal(live.maxComplete, 1, "files/complete never overlaps within one upload");
+    assert.equal(completed.size, files.length);
+    assert.equal(result.requests.filter((request) => request.url.endsWith("/abort")).length, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a conflict that is not the session lock still fails the upload", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 2);
+    const { respond } = directSessionServer({ onComplete: () => ({ status: 409, body: { error: { code: "conflict", message: "Upload session is closed" } } }) });
+    const result = await invoke(["upload", ...files], respond);
+    assert.notEqual(result.code, 0);
+    const completes = result.requests.filter((request) => request.url.endsWith("/files/complete")).map((request) => JSON.parse(request.body.toString()).fileId);
+    assert.ok(completes.length >= 1);
+    assert.equal(new Set(completes).size, completes.length, "no file's complete is retried");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
