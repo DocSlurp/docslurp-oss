@@ -72,7 +72,11 @@ test("direct uploads match session files by index: names the server sanitizes st
 });
 
 /** A direct session that answers every file as a single PUT; `onComplete` decides each files/complete reply. */
-function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete, sessionStatus = "uploading" }) {
+/**
+ * A direct session that answers every file as a single PUT; `onComplete` decides each file's complete. `batch: false` is a
+ * server without batch completion (it refuses `{ files }` with 400); `batch: true` answers per file.
+ */
+function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete, sessionStatus = "uploading", batch = false }) {
   const live = { put: 0, maxPut: 0, complete: 0, maxComplete: 0 };
   const files = [];
   const done = new Set();
@@ -94,6 +98,18 @@ function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete, 
     }
     if (request.url.endsWith("/files/complete")) {
       live.complete++; live.maxComplete = Math.max(live.maxComplete, live.complete); settle("complete", completeDelayMs);
+      const sent = JSON.parse(request.body.toString());
+      if (sent.files && !batch) return { delayMs: completeDelayMs, status: 400, body: { error: { code: "invalid_request", message: "Check your request and try again." } } };
+      if (sent.files) {
+        const files = sent.files.map((file) => {
+          const reply = onComplete(file);
+          if ((reply.status ?? 200) < 300) { done.add(file.fileId); return { fileId: file.fileId, status: "completed" }; }
+          if (reply.status === 409 && reply.body?.error?.code === "upload_session_busy") return { busy: true };
+          return { fileId: file.fileId, status: "failed", error: { statusCode: reply.status, code: reply.body?.error?.code, message: "failed", retryable: reply.status === 503 } };
+        });
+        if (files.some((file) => file.busy)) return { delayMs: completeDelayMs, status: 409, body: { error: { code: "upload_session_busy", message: "Check your request and try again." } } };
+        return { delayMs: completeDelayMs, body: { ok: files.every((file) => file.status === "completed"), files, sessionComplete: done.size === files.length } };
+      }
       const reply = onComplete(JSON.parse(request.body.toString()));
       if ((reply.status ?? 200) < 300) done.add(JSON.parse(request.body.toString()).fileId);
       return { delayMs: completeDelayMs, ...reply };
@@ -176,6 +192,55 @@ test("an uncoded 409 for a file the reconciler already finalized counts as done;
     const f2 = result.requests.filter((request) => request.url.endsWith("/files/complete") && JSON.parse(request.body.toString()).fileId === "f2");
     assert.equal(f2.length, 2, "the rate-limited complete is sent again");
     assert.equal(result.requests.filter((request) => request.url.endsWith("/abort")).length, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("against a server with batch completion, finished files are completed together and a retryable file is sent again", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 40);
+    let outage = 1;
+    const { respond } = directSessionServer({ batch: true, putDelayMs: 20, completeDelayMs: 150, onComplete: ({ fileId }) => (
+      fileId === "f7" && outage-- > 0 ? { status: 503, body: { error: { code: "upload_storage_unavailable", message: "x" } } } : { body: { ok: true } }
+    ) });
+    const result = await invoke(["upload", ...files], respond);
+    assert.equal(result.code, 0, result.stderr);
+    const completes = result.requests.filter((request) => request.url.endsWith("/files/complete")).map((request) => JSON.parse(request.body.toString()));
+    assert.ok(completes.every((body) => Array.isArray(body.files)), "every call is a batch");
+    assert.ok(completes.length < 20, `files finished during a call share the next one (${completes.length} calls for 40 files)`);
+    const sent = completes.flatMap((body) => body.files.map((file) => file.fileId));
+    assert.equal(sent.filter((id) => id === "f7").length, 2, "the retryable file is sent again");
+    assert.equal(new Set(sent).size, 40);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a file the batch reports as failed for good fails the upload", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 3);
+    const { respond } = directSessionServer({ batch: true, onComplete: ({ fileId }) => (
+      fileId === "f2" ? { status: 409, body: { error: { code: "conflict", message: "x" } } } : { body: { ok: true } }
+    ) });
+    const result = await invoke(["upload", ...files], respond);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /f2/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a rate-limited session read while checking an uncoded 409 is retried, not taken as failure", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 2);
+    let conflicts = 1, limited = 1;
+    const server = directSessionServer({ onComplete: () => (
+      conflicts-- > 0 ? { status: 409, body: { error: { code: "conflict", message: "Check your request and try again." } } } : { body: { ok: true } }
+    ) });
+    const result = await invoke(["upload", ...files], (request, count, base) => (
+      request.method === "GET" && request.url.startsWith("/v1/uploads/direct/sessions/s1") && limited-- > 0
+        ? { status: 429, headers: { "retry-after": "0" }, body: { error: { code: "rate_limited", message: "slow down" } } }
+        : server.respond(request, count, base)
+    ));
+    assert.equal(result.code, 0, result.stderr);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

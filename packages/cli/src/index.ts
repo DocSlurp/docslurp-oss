@@ -678,6 +678,97 @@ async function pollConfirmedSession(sessionPath: string, flags: Record<string, s
   return null;
 }
 
+/** Files one `files/complete` call finalizes on a server with batch completion. */
+const COMPLETE_BATCH_MAX = 100;
+
+/**
+ * Completes the files of one upload session. Files that finish while a complete call is in flight go together in the next
+ * call as one batch (`{ files: [...] }`, up to 100), so a 1,000-file upload needs about ten calls instead of a thousand. A file
+ * the server reports as retryable (a storage outage) is sent again; a session-level 409 or 429 is waited out. An older server
+ * refuses the batch body with 400; from then on each file is completed on its own, as before.
+ */
+function sessionCompleter(sessionPath: string, flags: Record<string, string | boolean>) {
+  type Pending = { body: Record<string, unknown>; tries: number; resolve: () => void; reject: (error: unknown) => void };
+  const queue: Pending[] = [];
+  let batched: boolean | null = null; // unknown until the first batch call answers
+  let draining: Promise<void> | null = null;
+  const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const fileOf = (body: Record<string, unknown>) => String(body.fileId);
+
+  /** An older server's uncoded 409: ask the session whether the file is done, worth retrying, or a real failure. */
+  const probeFor = (fileIds: string[]): SessionProbe => async () => {
+    const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
+    // A rate-limited or unavailable read says nothing about the session: ask again later.
+    if (refreshed.status === 429 || refreshed.status >= 500) { await refreshed.body?.cancel(); return "retry"; }
+    if (!refreshed.ok) return "fail";
+    const state = await refreshed.json() as DirectSession;
+    if (fileIds.every((id) => state.files.find((file) => file.id === id)?.status === "completed")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return ["pending", "uploading"].includes(String(state.status ?? "pending")) ? "retry" : "fail";
+  };
+
+  async function completeOne(item: Pending): Promise<void> {
+    const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(item.body)), flags, probeFor([fileOf(item.body)]));
+    if (!done.ok) throw await responseFailure(done);
+  }
+
+  async function completeBatch(items: Pending[]): Promise<void> {
+    const response = await sendWhenSessionFree(
+      () => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json({ files: items.map((item) => item.body) })),
+      flags, probeFor(items.map((item) => fileOf(item.body))));
+    if (batched === null && response.status === 400) {
+      // No batch support: settle these one by one, and every later file too.
+      await response.body?.cancel();
+      batched = false;
+      for (const item of items) await completeOne(item).then(item.resolve, item.reject);
+      return;
+    }
+    if (!response.ok) {
+      const failure = await responseFailure(response);
+      for (const item of items) item.reject(failure);
+      return;
+    }
+    const answer = await response.json() as { files?: Array<{ fileId?: string; status?: string; error?: { statusCode?: number; code?: string; message?: string; retryable?: boolean } }> };
+    batched = true;
+    if (!Array.isArray(answer.files)) {
+      // A probe that found every file completed answers `{ ok: true }` without per-file results.
+      for (const item of items) item.resolve();
+      return;
+    }
+    const byId = new Map(answer.files.map((result) => [result.fileId, result]));
+    for (const item of items) {
+      const result = byId.get(fileOf(item.body));
+      if (result?.status === "completed") item.resolve();
+      else if (result?.error?.retryable && item.tries < 4) { item.tries++; queue.push(item); }
+      else item.reject(new Error(`${String(item.body.fileId)}: ${result?.error?.message ?? "not completed"} (${result?.error?.code ?? "missing result"})`));
+    }
+    if (queue.some((item) => item.tries > 0)) await sleepMs(1_000);
+  }
+
+  async function drain(): Promise<void> {
+    while (queue.length > 0) {
+      if (batched === false) {
+        const item = queue.shift()!;
+        await completeOne(item).then(item.resolve, item.reject);
+        continue;
+      }
+      const items = queue.splice(0, COMPLETE_BATCH_MAX);
+      // An unexpected failure (a lost response after retries) fails what this call carried; settled items ignore it.
+      await completeBatch(items).catch((error) => { for (const item of items) item.reject(error); });
+    }
+  }
+
+  /** One drain at a time; a file queued while the last drain was finishing starts the next. */
+  function kick(): void {
+    draining ??= drain().finally(() => { draining = null; if (queue.length > 0) kick(); });
+  }
+
+  return {
+    complete(body: Record<string, unknown>): Promise<void> {
+      return new Promise<void>((resolve, reject) => { queue.push({ body, tries: 0, resolve, reject }); kick(); });
+    },
+  };
+}
+
 /** Create a direct upload session, PUT each file (or its parts), complete, then confirm. Returns the confirm response. */
 async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<Response> {
   const field = (name: string) => (typeof fields.get(name) === "string" ? String(fields.get(name)) : undefined);
@@ -708,6 +799,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
   }));
   try {
     const claimed = new Set<number>();
+    const completer = sessionCompleter(sessionPath, flags);
     // Match every descriptor before sending anything, so an unknown file fails the upload before any bytes move.
     const work = session.files.map((first) => {
       const match = localFileFor(first, files, claimed);
@@ -733,24 +825,14 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           descriptor = next;
         }
       }
-      const body = json(complete);
-      const fileId = descriptor.id;
-      const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, body), flags, async () => {
-        // An older server's uncoded 409: the reconciler may hold the lock (and may already have finalized this file), or the
-        // session may be closed. Only an open session with this file still pending is worth another try.
-        const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
-        if (!refreshed.ok) return "fail";
-        const state = await refreshed.json() as DirectSession;
-        if (state.files.find((file) => file.id === fileId)?.status === "completed") return new Response(JSON.stringify({ ok: true }), { status: 200 });
-        return ["pending", "uploading"].includes(String(state.status ?? "pending")) ? "retry" : "fail";
-      });
-      if (!done.ok) throw await responseFailure(done);
+      await completer.complete(complete);
     });
     let confirmed: Response | null;
     try {
       confirmed = await sendWhenSessionFree(() => apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" }), flags, async () => {
         // The reconciler may be confirming this session itself: its result is the answer. A closed session is a real failure.
         const status = await apiFetchRepeatable(`${sessionPath}?statusOnly=true`, flags, {});
+        if (status.status === 429 || status.status >= 500) { await status.body?.cancel(); return "retry"; }
         if (!status.ok) return "fail";
         const state = await status.json() as { status?: string; result?: unknown };
         if (state.result) return new Response(JSON.stringify(state.result), { status: 201, headers: { "content-type": "application/json" } });
