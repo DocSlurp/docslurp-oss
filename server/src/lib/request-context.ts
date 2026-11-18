@@ -1,4 +1,5 @@
-import { errorContext } from "./error-context.js";
+import { errorContext, type RequestRejection } from "./error-context.js";
+import { redactExceptionText } from "@docslurp/shared/error-reporting";
 import { withObservation, addTraceMetadata, withHttpSpan, exportsOtlpLogs, activeTraceparent } from "@docslurp/shared/observability";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -344,10 +345,13 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
 
   // Filled in by auth during the request; read when the span ends.
   let identity: RequestContextState | undefined;
-  await errorContext.run({ requestId }, () => withHttpSpan({ method: c.req.method, route,
+  // Error responses record their raw reason here (recordRequestRejection).
+  const reportContext: { requestId: string; rejection?: RequestRejection } = { requestId };
+  const rejection = () => (c.res.status >= 400 ? reportContext.rejection : undefined);
+  await errorContext.run(reportContext, () => withHttpSpan({ method: c.req.method, route,
     headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "", baggage: c.req.header("baggage") ?? "" },
     status: () => c.res.status,
-    attributes: () => requestSpanAttributes({ requestId, route, pathname, identity, userAgent: c.req.header("User-Agent") }),
+    attributes: () => requestSpanAttributes({ requestId, route, pathname, identity, userAgent: c.req.header("User-Agent"), rejection: rejection() }),
     error: () => identity?.error,
     // A browser or API client's traceparent must not pick our trace id or force sampling.
     trustInboundParent: TRUST_INBOUND_TRACEPARENT,
@@ -442,14 +446,16 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
         // SigNoz already receives the structured record below; the Fly log shipper
         // would ingest a second, uncorrelated copy. Stdout is the fallback only.
         const level = exportsOtlpLogs() ? undefined : status >= 500 ? console.error : status >= 400 ? console.warn : console.log;
-        level?.(`[api] requestId=${requestId} method=${c.req.method} path=${pathname} status=${status} duration_ms=${finalDurationMs} handler_duration_ms=${durationMs} telemetry_flush_ms=${flushDurationMs} telemetry_flush=${flushOutcome}`);
+        const refused = status >= 400 ? reportContext.rejection : undefined;
+        const reason = refused ? ` error_code=${refused.code} error_reason=${JSON.stringify(redactExceptionText(refused.reason))}` : "";
+        level?.(`[api] requestId=${requestId} method=${c.req.method} path=${pathname} status=${status} duration_ms=${finalDurationMs} handler_duration_ms=${durationMs} telemetry_flush_ms=${flushDurationMs} telemetry_flush=${flushOutcome}${reason}`);
         emitPostHogApiLog({
           severityText: status >= 500 ? "error" : status >= 400 ? "warn" : "info",
           eventName: "docslurp.api.request_completed",
           body: `${c.req.method} ${pathname} ${status} ${finalDurationMs}ms`,
           attributes: {
             // Who made the request and the route's ids, so support can find a user's requests.
-            ...requestSpanAttributes({ requestId, route, pathname, identity: requestContextStorage.getStore(), userAgent: c.req.header("User-Agent") }),
+            ...requestSpanAttributes({ requestId, route, pathname, identity: requestContextStorage.getStore(), userAgent: c.req.header("User-Agent"), rejection: refused }),
             "http.request.method": c.req.method,
             "http.route": route,
             "http.response.status_code": status,
@@ -478,8 +484,14 @@ export function requestSpanAttributes(args: {
   pathname: string;
   identity: Pick<RequestContextState, "userId" | "orgId" | "apiKeyId" | "projectId"> | undefined;
   userAgent?: string | null;
+  /** Why an error response refused the request: never shown to the client, always to telemetry. */
+  rejection?: RequestRejection;
 }): Record<string, string> {
   const attributes: Record<string, string> = { "docslurp.requestId": args.requestId, "url.path": args.pathname.slice(0, 500) };
+  if (args.rejection) {
+    attributes["docslurp.error.code"] = args.rejection.code;
+    attributes["docslurp.error.reason"] = redactExceptionText(args.rejection.reason);
+  }
   if (args.identity?.userId) attributes["enduser.id"] = args.identity.userId;
   if (args.identity?.orgId) attributes["docslurp.orgId"] = args.identity.orgId;
   if (args.identity?.apiKeyId) attributes["docslurp.apiKeyId"] = args.identity.apiKeyId;
