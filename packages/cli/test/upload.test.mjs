@@ -211,6 +211,7 @@ test("against a server with batch completion, finished files are completed toget
     const sent = completes.flatMap((body) => body.files.map((file) => file.fileId));
     assert.equal(sent.filter((id) => id === "f7").length, 2, "the retryable file is sent again");
     assert.equal(new Set(sent).size, 40);
+    assert.ok(completes.every((body) => body.files.every((file) => !("parts" in file))), "batch entries carry no part lists");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

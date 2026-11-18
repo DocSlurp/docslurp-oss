@@ -713,7 +713,8 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
 
   async function completeBatch(items: Pending[]): Promise<void> {
     const response = await sendWhenSessionFree(
-      () => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json({ files: items.map((item) => item.body) })),
+      // A batch entry carries the file id and its single-PUT etag only: the server reads a multipart file's parts from storage.
+      () => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json({ files: items.map(({ body }) => ({ fileId: body.fileId, ...(body.etag ? { etag: body.etag } : {}) })) })),
       flags, probeFor(items.map((item) => fileOf(item.body))));
     if (batched === null && response.status === 400) {
       // No batch support: settle these one by one, and every later file too.
