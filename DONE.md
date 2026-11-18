@@ -4,6 +4,11 @@
 - `queryWorkerScalerSnapshot` restricts every `project_runs` read to active runs, so the 10 s poll from the app and the worker leader no longer aggregates finished history. Its lifetime `pages_processed_total` sum is gone, along with the `docslurp_pages_processed_total` gauge on `/metrics` (nothing read it). `/metrics` now reuses the shared snapshot instead of a drifted copy of the query, so it reports the same queue view and worker target as `/fly-scaler-metrics`.
 - DB test: with a million finished runs on real Postgres (100K on the PGlite fallback), the snapshot plan uses the partial index with no sequential scan on `project_runs`, and its counts cover only live work.
 
+## Shared estimate-signing secret and the MCP reindex tools (2026-11-18)
+
+- Estimate signatures (`signature` / `confirmEstimate`) are keyed by `DOCSLURP_ESTIMATE_SIGNING_SECRET` (at least 32 characters), falling back to `SECRETS_ENCRYPTION_KEY`, `BETTER_AUTH_SECRET`, `FILE_TOKEN_SECRET`. Every process that signs or verifies them (the API and standalone server via `config.ts` and `ensureApiStartup`, the chat executor entrypoint) refuses to start in production without a stable key, and everywhere on a too-short dedicated secret; development and tests keep a per-process random key with a one-time warning. The startup log names the source variable, never the value. The worker does not sign estimates.
+- MCP `reindexEstimate` (read-only: locked settings, documents, pages, credits, signature) and `reindex` (requires that signature as `confirmEstimate`), forwarding to `POST /v1/projects/:id/reindex[/estimate]` with the route's gates (editor; server key with `projects:manage`, bound to the organization and project). Project chat never offers them.
+
 ## Locked index settings and the reindex command (2026-11-18)
 
 Owner: changing a project's embedding after documents are ingested silently re-billed or broke search; lock it once projects have ingests and wrap the change in a reindex command with the similar options.

@@ -10,6 +10,7 @@ import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } fro
 import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
 import { webMcpTools } from "./web/mcp-web-tools.js";
 import { apiKeyMayUseEstimateTool, estimateToolDefinitions, jobsGetInputSchema, jobsGetToolDefinition, type EstimateToolName } from "./mcp-estimate-catalog.js";
+import { REINDEX_TOOL_DESCRIPTION, reindexToolInput } from "./mcp-reindex-tool.js";
 
 export { jobsGetInputSchema };
 
@@ -150,7 +151,7 @@ const TOOL_ORDER = [
   "listProjects", "upload", "getUploadStatus", "search", "chat", "openUploader", "extract", "getMediaEvidence", "suggestQueries",
   "getProjectSettings", "proposeProjectSettings", "proposeFigureResume", "fullIndex",
   "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite",
-  "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
+  "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "reindexEstimate", "reindex",
   "getJob", "completeUpload",
 ];
 const toolRank = (id: string) => { const rank = TOOL_ORDER.indexOf(id); return rank < 0 ? TOOL_ORDER.length : rank; };
@@ -217,6 +218,12 @@ export function mcpTools(baseUrl: string): McpTool[] {
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "Parse and index every remaining page of a deferred (map/visual) project, or of the listed documents, in the background. Spends credits and is refused unless the key or capability policy allows full-index requests.",
       inputSchema: toolInputJsonSchema(fullIndexInput) }] : []),
+    { id: "reindex", title: "Reindex project", scopes: ["ingest"],
+      // Exactly the reindex route's (and reindexEstimate's) callers: a server key or grant with projects:manage.
+      keyAccess: (key) => apiKeyMayUseEstimateTool("reindexEstimate", key),
+      annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
+      description: REINDEX_TOOL_DESCRIPTION,
+      inputSchema: toolInputJsonSchema(reindexToolInput) },
     ...estimates,
     { id: jobsGetToolDefinition.id, title: jobsGetToolDefinition.title, description: jobsGetToolDefinition.description,
       inputSchema: jobsGetToolDefinition.inputSchema, scopes: [...SEARCH_SCOPES, "ingest"], annotations: READ_ONLY },

@@ -21,12 +21,19 @@ describe("MCP estimate tools", () => {
     expect(plan("fullIndexEstimate", { documentIds: ["a"] })).toEqual(["/v1/projects/w1/full-index/estimate", { documentIds: ["a"] }]);
     expect(plan("indexingModeEstimate", { mode: "map" })).toEqual(["/v1/projects/w1/indexing-mode/estimate", { mode: "map" }]);
     expect(plan("graphRebuildEstimate", {})).toEqual(["/v1/projects/w1/graph/jobs/estimate", {}]);
+    expect(plan("reindexEstimate", {})).toEqual(["/v1/projects/w1/reindex/estimate", {}]);
+    expect(plan("reindexEstimate", { embeddingProfile: "fastest-local", lateChunking: true, lateChunkingWindow: 3, chunkOverlap: false, contextualChunkPreambles: true, vectorBackends: ["lancedb"], speedBoost: true }))
+      .toEqual(["/v1/projects/w1/reindex/estimate", { pipeline: { embedding: { profile: "fastest-local", lateChunking: true, lateChunkingWindow: 3 }, chunkOverlap: false, contextualChunkPreambles: true, vectorBackends: ["lancedb"] }, speedBoost: true }]);
     expect(plan("uploadEstimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }] })).toEqual(["/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }], project: "w1" }]);
   });
 
   it("rejects invalid input and skips project resolution for run and document targets", () => {
     expect(planEstimateTool("indexingModeEstimate", { mode: "bogus" }, "w1").ok).toBe(false);
     expect(planEstimateTool("uploadEstimate", { files: [] }, "w1").ok).toBe(false);
+    // The estimate never carries a confirmation, and only index settings are accepted.
+    expect(planEstimateTool("reindexEstimate", { confirmEstimate: "a".repeat(64) }, "w1").ok).toBe(false);
+    expect(planEstimateTool("reindexEstimate", { summarize: true }, "w1").ok).toBe(false);
+    expect(planEstimateTool("reindexEstimate", { lateChunkingWindow: 7 }, "w1").ok).toBe(false);
     expect(estimateToolUsesProject("reprocessEstimate", { runId: "r" })).toBe(false);
     expect(estimateToolUsesProject("fullIndexEstimate", { documentId: "d" })).toBe(false);
     expect(estimateToolUsesProject("fullIndexEstimate", {})).toBe(true);
@@ -52,5 +59,21 @@ describe("MCP estimate tools", () => {
     expect(ids(["projects:manage"])).toContain("searchSettingsEstimate");
     expect(ids(["search:deep", "ingest"])).not.toContain("searchSettingsEstimate");
     expect(ids(["projects:manage"], "client")).not.toContain("searchSettingsEstimate");
+    // reindex and its estimate: the reindex route's gate, a server key (or grant) with projects:manage.
+    expect(all).toEqual(expect.arrayContaining(["reindexEstimate", "reindex"]));
+    expect(ids(["projects:manage"])).toEqual(expect.arrayContaining(["reindexEstimate", "reindex"]));
+    for (const [scopes, keyType] of [[["search:deep", "ingest", "chat"], "server"], [["projects:manage"], "client"]] as const) {
+      expect(ids([...scopes], keyType)).not.toContain("reindex");
+      expect(ids([...scopes], keyType)).not.toContain("reindexEstimate");
+    }
+  });
+
+  it("reindex requires the estimate signature and is consequential; no input pre-approves spend", () => {
+    const tools = mcpManifest("https://x.test").capabilities as Array<{ id: string; inputSchema: { required?: string[] }; annotations: { readOnly: boolean; consequential?: boolean } }>;
+    const reindex = tools.find((tool) => tool.id === "reindex")!;
+    expect(reindex.inputSchema.required).toEqual(["confirmEstimate"]);
+    expect(reindex.annotations).toMatchObject({ readOnly: false, consequential: true });
+    expect(tools.find((tool) => tool.id === "reindexEstimate")!.annotations.readOnly).toBe(true);
+    expect(JSON.stringify(tools.find((tool) => tool.id === "reindexEstimate")!.inputSchema)).not.toMatch(/confirmEstimate/);
   });
 });

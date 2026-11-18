@@ -407,3 +407,86 @@ describe("re-check fixes", () => {
     expect(response.status).toBe(409);
   });
 });
+
+/**
+ * The MCP pair against the real routes: reindexEstimate prices and signs, reindex needs that signature, and the
+ * route's gates hold through the in-process forward (another organization, a key without projects:manage, a browser
+ * key, a viewer, a stale or missing signature: nothing saved or queued).
+ */
+describe("MCP reindexEstimate and reindex", () => {
+  type Actor = import("../lib/request-actor.js").RequestActor;
+  const sessionActor = (user: string): Actor => ({ type: "session", userId: user, sessionId: `session-${user}`, user: { id: user, email: `${user}@example.com`, name: user } } as never);
+  const keyActor = async (raw: string, origin: string | null = null): Promise<Actor> => {
+    const key = await keys.validateApiKey(raw, { origin });
+    if (!key) throw new Error("invalid key");
+    return { type: "apiKey", userId: key.userId, apiKey: key };
+  };
+  const call = async (actor: Actor, tool: string, input: unknown) => {
+    const { createMcpDispatcher } = await import("../services/mcp-tools.js");
+    const context = await import("../lib/request-context.js");
+    // Inside a request context, as the MCP server runs the dispatcher.
+    const outer = new Hono().use("*", context.requestContextMiddleware).all("*", () =>
+      createMcpDispatcher(actor)(`/tools/${tool}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }));
+    const response = await outer.request("/");
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  };
+  const input = { project: "proj-a", embeddingProfile: "fastest-local" };
+
+  it("estimates with a signature, then re-indexes only with it", async () => {
+    const actor = sessionActor("ua");
+    const estimate = await call(actor, "reindexEstimate", input);
+    expect(estimate.status).toBe(200);
+    expect(estimate.body).toMatchObject({ tool: "reindexEstimate", lockedSettings: ["embedding"], documents: 2, pages: 10 });
+    expect(estimate.body.signature).toMatch(/^[a-f0-9]{64}$/);
+    expect(await reindexRuns("proj-a")).toBe(0);
+
+    // Without (or with a malformed) signature: refused before anything is planned.
+    expect((await call(actor, "reindex", input)).status).toBe(400);
+    expect((await call(actor, "reindex", { ...input, confirmEstimate: "0".repeat(63) })).status).toBe(400);
+    expect(await reindexRuns("proj-a")).toBe(0);
+
+    // A signature for other inputs is stale.
+    const stale = await call(actor, "reindex", { ...input, embeddingProfile: "cheapest-local", confirmEstimate: estimate.body.signature });
+    expect(stale.status).toBe(409);
+    expect(await reindexRuns("proj-a")).toBe(0);
+    expect((await stored("proj-a")).pipeline.embedding.profile).toBe(defaultPipelineFeatures.embedding.profile);
+
+    const applied = await call(actor, "reindex", { ...input, confirmEstimate: estimate.body.signature });
+    expect(applied.status).toBe(200);
+    expect(applied.body).toMatchObject({ tool: "reindex", outcome: "queued", changedSettings: ["embedding"], project: { id: "proj-a" } });
+    expect((applied.body.project as Record<string, unknown>).pipeline).toBeUndefined();
+    expect(await reindexRuns("proj-a")).toBeGreaterThan(0);
+    expect((await stored("proj-a")).pipeline.embedding.profile).toBe("fastest-local");
+  }, 60_000);
+
+  it("a server key with projects:manage can re-index; other organizations, scopes, browser keys and viewers cannot", async () => {
+    const signature = (await call(sessionActor("ua"), "reindexEstimate", input)).body.signature as string;
+    const { rawKey: foreign } = await keys.createApiKey("ub", `mcp-foreign-${randomUUID()}`, { orgId: "org-b", scopes: ["projects:manage", "ingest"] });
+    const { rawKey: noManage } = await keys.createApiKey("ua", `mcp-no-manage-${randomUUID()}`, { orgId: "org-a", scopes: ["ingest", "search:keyword"] });
+    const { rawKey: browserKey } = await keys.createApiKey("ua", `mcp-browser-${randomUUID()}`, { orgId: "org-a", keyType: "client", scopes: ["search:keyword"], allowedDomains: ["example.com"], projectIds: ["proj-a"] });
+    const refused: Array<[Actor, number]> = [
+      [sessionActor("ub"), 404],
+      [await keyActor(foreign), 404],
+      [await keyActor(noManage), 403],
+      [await keyActor(browserKey, "https://example.com"), 403],
+      [sessionActor("uv"), 403],
+    ];
+    for (const [actor, status] of refused) {
+      expect((await call(actor, "reindexEstimate", input)).status).toBe(status);
+      expect((await call(actor, "reindex", { ...input, confirmEstimate: signature })).status).toBe(status);
+    }
+    // Org A's editor cannot reach org B's project either.
+    expect((await call(sessionActor("ua"), "reindex", { project: "proj-b", confirmEstimate: signature })).status).toBe(404);
+    expect(await reindexRuns("proj-a")).toBe(0);
+    expect(await reindexRuns("proj-b")).toBe(0);
+
+    const { rawKey: manage } = await keys.createApiKey("ua", `mcp-manage-${randomUUID()}`, { orgId: "org-a", scopes: ["projects:manage"] });
+    const keyed = await keyActor(manage);
+    const priced = await call(keyed, "reindexEstimate", input);
+    expect(priced.status).toBe(200);
+    // The same work priced by another caller signs the same (one deployment key).
+    expect(priced.body.signature).toBe(signature);
+    expect((await call(keyed, "reindex", { ...input, confirmEstimate: priced.body.signature })).status).toBe(200);
+    expect(await reindexRuns("proj-a")).toBeGreaterThan(0);
+  }, 60_000);
+});

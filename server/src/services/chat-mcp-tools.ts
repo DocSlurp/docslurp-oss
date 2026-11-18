@@ -199,7 +199,7 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
 /**
  * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
  * paid ingestion, and the model's arguments can be steered by document text (G-04).
- * fullIndex is excluded for the same reason: it spends credits on the model's say-so.
+ * fullIndex and reindex are excluded for the same reason: they spend credits on the model's say-so.
  * The cost estimates, getJob and suggestQueries are left out because every tool
  * definition is resent on every step: in production (30 days to 2026-10-25) they
  * made 24 of ~9,000 chat tool calls. proposeProjectSettings already reports a
@@ -207,7 +207,7 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  */
 // The agent generates the answer itself. A nested chat starts another paid answer
 // generator under a short tool deadline and can block otherwise usable retrieval.
-const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract", "completeUpload", "listProjects", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract", "completeUpload", "listProjects", "webMap", "webCrawl", "ingestWebsite", "fullIndex", "reindex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /**
  * Project settings tools: offered to the chat agent only for the first-party

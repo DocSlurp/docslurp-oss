@@ -40,6 +40,7 @@ import {
   apiKeyMayUseEstimateTool, estimateToolUsesProject, forwardInProcess, isEstimateToolName, jobsGetInputSchema, planEstimateTool,
 } from "./mcp-estimate-tools.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
+import { reindexRouteBody, reindexToolInput, shapeReindexEstimate, shapeReindexResult } from "./mcp-reindex-tool.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 import { dispatchWebTool, isWebToolId } from "./web/mcp-web-tools.js";
 import { customerPipelineGuard } from "../middleware/customer-pipeline-guard.js";
@@ -408,6 +409,20 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ tool: toolId, job: await response.json() });
     }
 
+    if (toolId === "reindex") {
+      // Paid: refused without the signature reindexEstimate returned (schema), before any project lookup or forward.
+      // The route re-checks every gate (editor; a server key or grant with projects:manage bound to the org and
+      // project) and refuses a stale signature before anything is saved or queued.
+      if (apiKey && !apiKeyMayUseEstimateTool("reindexEstimate", apiKey)) return adapterError(c, 403, "Forbidden");
+      const parsed = reindexToolInput.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, parsed.data.project), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
+      const response = await forwardInProcess(actor, "POST", `/v1/projects/${encodeURIComponent(project.id)}/reindex`, reindexRouteBody(parsed.data), c.req.raw.signal);
+      if (!response.ok) return response;
+      return c.json({ tool: toolId, ...shapeReindexResult(await response.json() as Record<string, unknown>) });
+    }
+
     if (isEstimateToolName(toolId)) {
       // Estimates are read-only, but a key may only price work it could start (same scope and key type as the mutation).
       if (apiKey && !apiKeyMayUseEstimateTool(toolId, apiKey)) return adapterError(c, 403, "Forbidden");
@@ -422,7 +437,8 @@ const mcpAdapterRoutes = new Hono()
       if (!planned.ok) return invalidInput(c, { issues: planned.issues });
       const response = await forwardInProcess(actor, "POST", planned.plan.path, planned.plan.body, c.req.raw.signal);
       if (!response.ok) return response;
-      return c.json({ tool: toolId, ...(await response.json() as Record<string, unknown>) });
+      const estimated = await response.json() as Record<string, unknown>;
+      return c.json({ tool: toolId, ...(toolId === "reindexEstimate" ? shapeReindexEstimate(estimated) : estimated) });
     }
 
     if (toolId === "suggestQueries") {
