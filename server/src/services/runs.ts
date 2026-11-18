@@ -1,5 +1,5 @@
 import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode, resolveManagedPipeline } from "@docslurp/shared";
-import { legacyQualityModeFor, reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE, type QualityLevel, type VisualsLevel } from "@docslurp/shared";
+import { pipelineFieldsForQuality, reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE, type QualityLevel, type VisualsLevel } from "@docslurp/shared";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { chartExportOverrideError } from "./chart-export-availability.js";
 import {
@@ -420,7 +420,7 @@ export async function reprocessRun(
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
     // An explicit quality or visuals replaces the snapshot's; run creation checks the raise and caps (extraction-settings.ts).
-    ...(options?.quality ? { quality: legacyQualityModeFor(options.quality), ...(options.quality === "balanced" ? { visionFallback: true } : {}) } : {}),
+    ...(options?.quality ? pipelineFieldsForQuality(options.quality, { ladder: managed.pipeline.ladder }) : {}),
     ...(options?.visuals ? { figures: options.visuals !== "none" } : {}),
   };
   const plan = compilePipelinePlan(pipelineConfig);

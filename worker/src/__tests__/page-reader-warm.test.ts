@@ -106,7 +106,8 @@ function runState(documents: Document[], run: Record<string, unknown> = {}): Wor
   const id = String(run.id ?? "run-1");
   const state = WorkflowState.create({
     id, orgId: "org-1", projectId: "proj-1", userId: "user-1", spentCents: 0, storagePrefix: `user-1/${id}`, artifacts: {}, stats: {}, stage: "vision-extract",
-    pipeline: { ...defaultPipelineFeatures, privacyMode: "standard" },
+    // Smartest: the page reader is refused on Fastest (no vision below the intelligent rung).
+    pipeline: { ...defaultPipelineFeatures, privacyMode: "standard", ladder: { maxRung: "intelligent" } },
     ...run,
   } as unknown as ProjectRun, documents);
   state.usageLedger.runId = id;

@@ -8,7 +8,7 @@
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
  * missing VM: escalation only follows a VM (or self-hosted) read, and hosted mode is its own operator setting.
  */
-import { admitAutomaticCall, DEFAULT_OCR_ESCALATION_MODEL, isAutomaticSelectionDenied, ocrEscalationAutomaticRoute, ocrEscalationRoutes, prepareAutomaticCallPrices, reportAutomaticCallOutcome, switchDisabled, type OcrEscalationRoute } from "@docslurp/shared";
+import { admitAutomaticCall, ladderForbidsVision, DEFAULT_OCR_ESCALATION_MODEL, isAutomaticSelectionDenied, ocrEscalationAutomaticRoute, ocrEscalationRoutes, prepareAutomaticCallPrices, reportAutomaticCallOutcome, switchDisabled, type OcrEscalationRoute } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
@@ -142,6 +142,9 @@ export function createHostedOcrReader(args: {
       recordOcrEscalationPages(state.artifactLedger, documentId, pages);
     },
     async read(page, purpose, signal) {
+      // Fastest never upgrades a page to a Vision read: escalation is refused for such a run (the recogniser's text stands).
+      // DOCSLURP_OCR_MODE=hosted stays allowed: it is the operator's OCR engine and bills one Scan page.
+      if (purpose === "ocr-escalation" && state.run?.pipeline && ladderForbidsVision(state.run.pipeline)) throw new HostedOcrSkipped("disabled", "Fastest never escalates an OCR read to a vision model");
       if (purpose === "ocr-escalation" && !ocrEscalationEnabled(env)) throw new HostedOcrSkipped("disabled", "OCR escalation is off");
       if (!HOSTED_OCR_MIME_TYPES.has(page.mimeType)) throw new Error(`hosted OCR refuses ${page.mimeType}: it would need host decoding`);
       // The readers to try, in order. Each must be a hosted route the project's privacy mode allows and, for an escalation,

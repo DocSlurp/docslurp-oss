@@ -192,7 +192,7 @@ describe("quality fast: kept-as-image renders are bounded", () => {
     return { stage: new RenderImagesStage(rasters as never, storage), rendered };
   }
 
-  function blankState(withCanonical: boolean, runId: string) {
+  function blankState(withCanonical: boolean, runId: string, extra: Record<string, unknown> = {}) {
     const canonical = buildCanonicalDocumentFromMarkdown({ documentId: "blank", text: "\f".repeat(manyPages - 1), pageCount: manyPages, extractor: "native-pdf" });
     const contract = buildExtractionContract({
       documentId: "blank", markdown: "", extractor: "native-pdf", strategy: "native-pdf-only", extractionTimeMs: 1, pageCount: manyPages, canonicalDocument: canonical,
@@ -202,7 +202,7 @@ describe("quality fast: kept-as-image renders are bounded", () => {
     const grants = new Map<string, number>();
     const state = WorkflowState.create({
       id: runId, orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
-      pipeline: normalizePipelineFeatures({ quality: "fast" }),
+      pipeline: normalizePipelineFeatures({ quality: "fast", ...extra }),
     } as unknown as ProjectRun, [blankPdf]);
     // An in-memory store; page facts are captured.
     const store = memoryCheckpointStore();
@@ -233,6 +233,20 @@ describe("quality fast: kept-as-image renders are bounded", () => {
       expect(rendered.flat()).toEqual(Array.from({ length: 10 }, (_, index) => index + 1));
       expect(facts.filter((row) => row.visionStatus === "kept-as-image")).toHaveLength(10);
       expect(facts.filter((row) => row.visionStatus === "not-read")).toHaveLength(manyPages - 10);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("stores no page image with page images off: kept pages stay unread", async () => {
+    vi.stubEnv("WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT", "10");
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const { state, storage, facts } = blankState(true, "run-images-off", { pageImages: false });
+      const { stage: render, rendered } = stage(storage);
+      await render.run(state);
+      expect(rendered.flat()).toEqual([]);
+      expect(facts.filter((row) => row.visionStatus === "kept-as-image")).toHaveLength(0);
     } finally {
       vi.unstubAllEnvs();
     }

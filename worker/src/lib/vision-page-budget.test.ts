@@ -2,14 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { visionAllowedForDocument } from "./vision-page-budget.js";
 
-const pipeline = (quality: "fast" | "auto" | "good" | undefined) =>
+const pipeline = (quality: "fast" | "auto" | undefined) =>
   ({ quality }) as Parameters<typeof visionAllowedForDocument>[0];
 
 describe("visionAllowedForDocument", () => {
-  it("allows vision in auto (the default) and good, never in fast", () => {
+  it("allows vision in auto (the default), never in fast", () => {
     expect(visionAllowedForDocument(pipeline(undefined))).toBe(true);
     expect(visionAllowedForDocument(pipeline("auto"))).toBe(true);
-    expect(visionAllowedForDocument(pipeline("good"))).toBe(true);
     expect(visionAllowedForDocument(pipeline("fast"))).toBe(false);
   });
 
@@ -20,7 +19,4 @@ describe("visionAllowedForDocument", () => {
     expect(visionAllowedForDocument(pipeline("auto"), "not-a-playbook")).toBe(true);
   });
 
-  it("good reads every page whatever the suggestion", () => {
-    expect(visionAllowedForDocument(pipeline("good"), "fast")).toBe(true);
-  });
 });

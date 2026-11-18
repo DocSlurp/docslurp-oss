@@ -10,7 +10,8 @@ import { defaultPipelineFeatures, pageCredits, speedBoostMultiplier } from "@doc
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
-import { claimPages, ensurePageRows } from "../deferred/page-ledger.js";
+import { claimPages, ensurePageRows, MAX_PAGE_ATTEMPTS } from "../deferred/page-ledger.js";
+import { OcrInfrastructureError } from "../ocr/mode.js";
 import { materializePageRange, type PageMaterializerDeps, type PageMaterializerOps } from "../deferred/materialize-pages.js";
 import { Store } from "../db/store.js";
 import type { Document } from "../models.js";
@@ -64,6 +65,7 @@ interface Harness {
   deps: PageMaterializerDeps;
   usage: PipelineUsageEventLedger;
   ocrCalls: number[];
+  ocrEngineCalls: number[][];
   embedCalls: string[][];
   lanceWrites: Array<{ id: string; text: string }[]>;
   lanceDeletes: string[];
@@ -76,6 +78,7 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
   usage.runId = "run-1";
   const h = {
     ocrCalls: [] as number[],
+    ocrEngineCalls: [] as number[][],
     embedCalls: [] as string[][],
     lanceWrites: [] as Array<{ id: string; text: string }[]>,
     lanceDeletes: [] as string[],
@@ -90,6 +93,11 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
       await ctx.gate.admit();
       h.ocrCalls.push(page);
       return { text: `${LONG} scanned page ${page}`, model: "vision-x", provider: "test", inputTokens: 1000, outputTokens: 200, costCents: 2 };
+    },
+    async readPagesWithOcrEngine(document, pages, ctx) {
+      h.ocrEngineCalls.push(pages);
+      for (const page of pages) ctx.usage.chargeOcrPage({ documentId: document.id, pageNumber: page, readBy: "page-ocr", model: "ppocr:test" });
+      return { pages: pages.map((page) => ({ pageNumber: page, text: `${LONG} ocr page ${page}` })), charged: pages };
     },
     async embed(args) {
       h.embedCalls.push(args.chunks);
@@ -120,7 +128,9 @@ async function claimAndMaterialize(...args: Parameters<typeof materializePageRan
   return await materializePageRange(...args);
 }
 
-const input = (h: Harness, pages: number[], pipeline = defaultPipelineFeatures) => ({
+// Query-time reads of textless pages: Smartest by vision transcription, Fastest by the OCR engine.
+const smartest = { ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" as const } };
+const input = (h: Harness, pages: number[], pipeline: typeof defaultPipelineFeatures = smartest) => ({
   runId: "run-1", documentId: "d1", pages, reason: "query" as const, sessionId: null, maxCredits: 100,
   document, pipeline, run: h.run as never,
 });
@@ -141,7 +151,7 @@ describe("materializePageRange", () => {
     const h = harness({ 1: LONG, 2: "" });
     h.run.id = runId;
     h.usage.runId = runId;
-    const range = { ...input(h, [1, 2], { ...defaultPipelineFeatures, speedBoost }), runId };
+    const range = { ...input(h, [1, 2], { ...smartest, speedBoost }), runId };
     const first = await claimAndMaterialize(h.deps, range);
     expect(first.costCredits).toBeCloseTo((pageCredits("fast", 1) + pageCredits("rich", 1)) * speedBoostMultiplier(speedBoost), 6);
     const firstRows = await sql`select id, cost_cents, metadata from usage_events where run_id = ${runId}`;
@@ -182,7 +192,7 @@ describe("materializePageRange", () => {
   it("never chunks or writes a PII-blocked page", async () => {
     const h = harness({ 1: LONG, 2: `${LONG} SSN 123-45-6789 is on file for this customer.` });
     const pipeline = {
-      ...defaultPipelineFeatures,
+      ...smartest,
       piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "block_indexing" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1, 2], pipeline));
@@ -199,7 +209,7 @@ describe("materializePageRange", () => {
   it("redacts page text when the policy redacts artifacts", async () => {
     const h = harness({ 1: `${LONG} SSN 123-45-6789 on file.` });
     const pipeline = {
-      ...defaultPipelineFeatures,
+      ...smartest,
       piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "redact_artifacts" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1], pipeline));
@@ -482,7 +492,7 @@ describe("materializePageRange", () => {
 
 describe("materializePageRange respects processing quality", () => {
   const fast = { ...defaultPipelineFeatures, quality: "fast" as const };
-  const good = { ...defaultPipelineFeatures, quality: "good" as const };
+  const fastest = defaultPipelineFeatures;
   const reasons = ["query", "full-index"] as const;
 
   it.each(reasons)("fast (%s) indexes only the text layer and keeps textless pages unread", async (reason) => {
@@ -500,12 +510,69 @@ describe("materializePageRange respects processing quality", () => {
     expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "kept-as-image" });
   });
 
-  it.each(reasons)("good (%s) reads every page with vision, text layer or not", async (reason) => {
+  it.each(reasons)("fastest (%s) reads textless pages with the OCR engine, never with vision", async (reason) => {
     const h = harness({ 1: LONG, 2: "" });
-    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], good), reason });
-    expect(h.ocrCalls.sort()).toEqual([1, 2]);
-    expect(result.indexed).toEqual([1, 2]);
-    // Query: two committed Rich charges. Full index: the run completion fee bills the pages, so the call reports none.
-    expect(result.costCredits).toBeCloseTo(reason === "query" ? 0.5 : 0, 6);
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], fastest), reason });
+    expect(h.ocrCalls).toEqual([]);
+    expect(h.ocrEngineCalls).toEqual([[2]]);
+    expect(result.indexed.sort()).toEqual([1, 2]);
+    expect(result.failed).toEqual([]);
+    const ledger = (h.usage as unknown as { pending: Array<{ metric: string }> }).pending;
+    expect(ledger.filter((e) => e.metric === "page-analysis")).toEqual([]);
+  });
+
+  it("fastest with Read scans off keeps textless pages unread", async () => {
+    const h = harness({ 1: LONG, 2: "" });
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2], { ...defaultPipelineFeatures, ladder: { maxRung: "fast" as const } }));
+    expect(h.ocrCalls).toEqual([]);
+    expect(h.ocrEngineCalls).toEqual([]);
+    expect(result.failed).toEqual([{ page: 2, reason: "kept-as-image" }]);
+  });
+
+  it("fastest stops OCR reads at the credit limit and releases the rest", async () => {
+    const h = harness({ 1: "", 2: "", 3: "" });
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2, 3], fastest), maxCredits: 0.0005 });
+    expect(h.ocrEngineCalls).toEqual([]);
+    expect(result.indexed).toEqual([]);
+    expect(result.failed.map((f) => f.reason)).toEqual(["credit-limit", "credit-limit", "credit-limit"]);
+  });
+
+  it("fastest: an OCR read that found an empty page is final, never claimed again", async () => {
+    const h = harness({ 1: "" }, {
+      async readPagesWithOcrEngine(_document, pages) {
+        h.ocrEngineCalls.push(pages);
+        return { pages: pages.map((page) => ({ pageNumber: page, text: "   " })), charged: [] };
+      },
+    });
+    const result = await claimAndMaterialize(h.deps, input(h, [1], fastest));
+    expect(result.failed).toEqual([{ page: 1, reason: "empty-page" }]);
+    const state = await db.query<{ state: string; attempts: number }>(
+      `select state, attempts from document_page_states where document_id = 'd1' and page_number = 1`);
+    expect(state.rows[0]!.state).toBe("failed");
+    expect(state.rows[0]!.attempts).toBeGreaterThanOrEqual(MAX_PAGE_ATTEMPTS);
+  });
+
+  it("fastest: an OCR boundary that cannot run is retried, never a permanent kept page", async () => {
+    const h = harness({ 1: "" }, {
+      async readPagesWithOcrEngine() { throw new OcrInfrastructureError("VM capacity"); },
+    });
+    await expect(claimAndMaterialize(h.deps, input(h, [1], fastest))).rejects.toBeInstanceOf(OcrInfrastructureError);
+    const state = await db.query<{ state: string; failure_reason: string | null }>(
+      `select state, failure_reason from document_page_states where document_id = 'd1' and page_number = 1`);
+    expect(state.rows[0]!.failure_reason).not.toBe("kept-as-image");
+  });
+
+  it("smartest never uses the OCR engine at query time", async () => {
+    const h = harness({ 1: "" });
+    await claimAndMaterialize(h.deps, input(h, [1], smartest));
+    expect(h.ocrEngineCalls).toEqual([]);
+    expect(h.ocrCalls).toEqual([1]);
+  });
+
+  it.each(reasons)("smartest (%s) reads only the textless page with vision", async (reason) => {
+    const h = harness({ 1: LONG, 2: "" });
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], smartest), reason });
+    expect(h.ocrCalls).toEqual([2]);
+    expect(result.indexed.sort()).toEqual([1, 2]);
   });
 });

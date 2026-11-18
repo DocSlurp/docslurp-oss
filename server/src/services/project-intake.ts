@@ -398,13 +398,19 @@ export const objectStorage: RawSourceStorage = {
 };
 
 /**
- * Upload overrides without the billed rungs a new project must not be seeded with: `quality` `good` (smart) and chart
- * tier `models` (charts-ai). Other overrides are kept. Input is already converted to the stored (legacy) shape.
+ * Upload overrides without the billed rungs a new project must not be seeded with: Smartest (`ladder.maxRung`
+ * `intelligent`, or the retired `quality: "good"`) and chart tier `models` (charts-ai). Other overrides are kept. Input
+ * is already converted to the stored (legacy) shape.
  */
 export function withoutBilledRaises<T extends Record<string, unknown> | null | undefined>(overrides: T): T {
   if (!overrides) return overrides;
   const next: Record<string, unknown> = { ...overrides };
   if (next.quality === "good") delete next.quality;
+  const ladder = next.ladder;
+  if (ladder && typeof ladder === "object" && (ladder as { maxRung?: unknown }).maxRung === "intelligent") {
+    const { maxRung: _maxRung, ...rest } = ladder as Record<string, unknown>;
+    next.ladder = rest;
+  }
   const chartExport = next.chartExport;
   if (chartExport && typeof chartExport === "object" && (chartExport as { tier?: unknown }).tier === "models") {
     const { tier: _tier, ...rest } = chartExport as Record<string, unknown>;

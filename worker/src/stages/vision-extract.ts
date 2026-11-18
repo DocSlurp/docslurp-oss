@@ -21,8 +21,9 @@ import {
   ladderPlanSummary,
   parserPlaybookCatalog,
   parserPlaybookForQuality,
+  ladderForbidsVision,
+  ladderSkipsOcr,
   qualityAllowsPageReading,
-  qualityReadsEveryPage,
   resolveVisionRoute,
   visionListPriceCents,
   visionModelTokenPricing,
@@ -818,18 +819,13 @@ export class VisionExtractStage implements Stage {
       }
     }
 
-    if (qualityReadsEveryPage(state.run.pipeline.quality)) {
-      needed = true;
-      selectedPages = Array.from({ length: pageCount }, (_, index) => index + 1);
-      reason = "quality-good-all-pages";
-    } else if (needed && !this.visionAllowed_(state, document.id)) {
+    if (needed && !this.visionAllowed_(state, document.id)) {
       needed = false;
       reason = "playbook-disallows-vision";
     }
 
-    // Pages whose OCR read failed in its boundary stay failed: vision never reads them in OCR's place. (Good reads every
-    // page with vision by the project's own choice, so it keeps them.)
-    const ocrFailed = qualityReadsEveryPage(state.run.pipeline.quality) ? new Set<number>() : ocrFailedPages(state.artifactLedger, document.id);
+    // Pages whose OCR read failed in its boundary stay failed: vision never reads them in OCR's place.
+    const ocrFailed = ocrFailedPages(state.artifactLedger, document.id);
     if (ocrFailed.size > 0) {
       selectedPages = selectedPages.filter((page) => !ocrFailed.has(page));
       needed = needed && selectedPages.length > 0;
@@ -839,6 +835,9 @@ export class VisionExtractStage implements Stage {
     // The Auto ladder: every selected page gets a rung from page triage; the project's limits (pipeline.ladder) cap it.
     // Without limits the plan keeps every selected page on the rung it asked for, so the reads are unchanged.
     let hints: LegacyPageHints = routing ? legacyPageHints(routing.pages) : NO_HINTS;
+    // Smartest has no OCR step: a mixed scan triage would send to the OCR engine is read by the vision model. A page an
+    // above-ocr share cap lowers gets the OCR hint back from the ladder plan below.
+    if (ladderSkipsOcr(state.run.pipeline) && hints.vmOcrPages?.size) hints = { ...hints, vmOcrPages: new Set<number>() };
     let ladder: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] } | undefined;
     // An image the ladder kept unread in extraction (a format that can hold several frames, under an above-fast share) is
     // not read here either: it stays its page image, as quoted.
@@ -933,11 +932,17 @@ export class VisionExtractStage implements Stage {
       }
       return decision;
     });
-    const lowered = decisions.filter((decision) => decision.need === "intelligent" && decision.rung === "ocr").map((decision) => decision.pageNumber);
-    const vmOcr = resolveOcrMode() === "vm" && document.mimeType === "application/pdf";
+    // Fastest (a highest rung below intelligent) never calls a vision model: every page it reads here is read by the OCR
+    // engine in its VM, or not at all (its scans were already read by OCR during extraction). Under Smartest only pages
+    // a share cap lowered from intelligent are read on the OCR rung, by the OCR engine, the page reader or transcription.
+    const forbidsVision = ladderForbidsVision(state.run.pipeline);
+    const lowered = decisions.filter((decision) => decision.rung === "ocr" && (forbidsVision || decision.need === "intelligent")).map((decision) => decision.pageNumber);
+    // Fastest has no other reader, so its pages also go to the local OCR sandbox when no VM provider is configured.
+    const ocrMode = resolveOcrMode();
+    const vmOcr = (ocrMode === "vm" || (forbidsVision && ocrMode === "local")) && document.mimeType === "application/pdf";
     const vision = state.run.pipeline.vision;
-    const reader = !vmOcr && document.mimeType === "application/pdf" && hints.triaged ? visionPageReaderFor(state, vision) : null;
-    const transcription = isPageTranscription({ vision, outputSchema: state.run.pipeline.outputSchema ?? null });
+    const reader = !forbidsVision && !vmOcr && document.mimeType === "application/pdf" && hints.triaged ? visionPageReaderFor(state, vision) : null;
+    const transcription = !forbidsVision && isPageTranscription({ vision, outputSchema: state.run.pipeline.outputSchema ?? null });
     const unread = new Set<number>();
     if (!vmOcr && !reader && !transcription) for (const page of lowered) unread.add(page);
     const finalDecisions = decisions.map((decision) => unread.has(decision.pageNumber)
@@ -1049,8 +1054,8 @@ export class VisionExtractStage implements Stage {
     state: WorkflowState,
     document: import("../models.js").Document,
   ): Promise<{ plan: RoutePlan; execution: RoutedExecution; catalog: ReturnType<typeof buildRuntimeCatalog>["allTargets"] } | null> {
-    // Good (vision on every page) bypasses the router; fast reads no page at all.
-    if (qualityReadsEveryPage(state.run.pipeline.quality) || !qualityAllowsPageReading(state.run.pipeline.quality)) return null;
+    // Fast reads no page at all; Fastest never runs routed targets (some are vision models): its pages take the ladder path.
+    if (ladderForbidsVision(state.run.pipeline) || !qualityAllowsPageReading(state.run.pipeline.quality)) return null;
     const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg);
     if (!plan) return null;
     const catalog = buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).allTargets;
@@ -1445,7 +1450,9 @@ export class VisionExtractStage implements Stage {
     }
     // Scans beside native text go to the OCR engine in its VM (as scanned pages do in extract-markdown), not to the host
     // raster and a hosted vision model. Escalation follows the OCR boundary's own rules.
-    const vmOcr = resolveOcrMode() === "vm" && document.mimeType === "application/pdf" ? missing.filter((page) => hints.vmOcrPages?.has(page)) : [];
+    const engineMode = resolveOcrMode();
+    const engineReads = engineMode === "vm" || (engineMode === "local" && ladderForbidsVision(state.run.pipeline));
+    const vmOcr = engineReads && document.mimeType === "application/pdf" ? missing.filter((page) => hints.vmOcrPages?.has(page)) : [];
     if (vmOcr.length > 0) {
       completed.push(...await this.readPagesWithVmOcr(state, document, vmOcr, skip, signal));
       const rest = missing.filter((page) => !vmOcr.includes(page));
@@ -2426,7 +2433,8 @@ export class VisionExtractStage implements Stage {
     const reconciled = reconcileCanonicalArtifacts({
       canonicalDocument,
       extractionContract: contract,
-      minimumConfidence: qualityReadsEveryPage(state.run.pipeline.quality) ? 0 : undefined,
+      // Smartest has no OCR read to fall back on: a page it sent to vision takes the vision read.
+      minimumConfidence: ladderSkipsOcr(state.run.pipeline) ? 0 : undefined,
       replacements: outputs.map((output) => {
         const pageEvidence = routingByPage.get(output.pageNumber);
         return {

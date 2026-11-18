@@ -2,6 +2,7 @@ import {
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
   documentLadderPolicy,
+  ladderForbidsVision,
   qualityAllowsPageReading,
   VISUAL_CANDIDATE_STATS_KEY,
   type AdaptiveRoutingDecisionSurface,
@@ -180,6 +181,11 @@ export class RenderImagesStage implements Stage {
       const selection = pagesKeptAsImage({ ...selectionArgs,
         requiredImagePages: isPdf ? await this.hostPageImagePages(state, document) : [],
       });
+      // Page images off (pipeline.pageImages: false): a kept page has no stored image either; it stays unread.
+      if (state.run.pipeline.pageImages === false) {
+        console.log(`[render-images] page images off document=${document.id} run=${state.run.id} unread=${selection.kept.length + selection.unread.length}`);
+        return { pageNumbers: [], request, routed: null, keptAsImage: [], unreadPages: [...selection.unread, ...selection.kept].sort((a, b) => a - b) };
+      }
       // The per-run cap is a Postgres reservation shared by every worker (db/fast-page-image-budget.ts). Without a
       // store to reserve from, nothing renders (fail closed).
       const reserve = state.store?.budgets.reserveFastPageImageRenders.bind(state.store.budgets);
@@ -199,6 +205,11 @@ export class RenderImagesStage implements Stage {
         );
       }
       return { pageNumbers, request, routed: null, keptAsImage, unreadPages };
+    }
+    // Page images off on a run no vision model reads (Fastest; Smartest always keeps page images): the rasters this
+    // stage stores would only be viewer images, so none is rendered. OCR renders its own frames inside its boundary.
+    if (state.run.pipeline.pageImages === false && ladderForbidsVision(state.run.pipeline)) {
+      return { pageNumbers: [], request, routed: null, keptAsImage: [], unreadPages: [] };
     }
     // Native text-only runs leave previews on demand. Classification can
     // suggest images, but must not override the project feature choices.

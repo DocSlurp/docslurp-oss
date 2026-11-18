@@ -55,7 +55,7 @@ type RequestContextState = {
   /** Aborts when the client disconnects before the response finished (search cancels its SQL). */
   signal?: AbortSignal;
   /** Deprecated request fields the request used (lib/deprecation.ts): a `Deprecation` header and `warnings[]` on the response. */
-  deprecatedFields?: Array<{ code: "deprecated_field"; field: string; replacement: string; message: string }>;
+  deprecatedFields?: Array<RequestFieldWarning>;
   performanceEvents: Array<{
     scope: string;
     stageName: string;
@@ -147,7 +147,10 @@ export function currentRequestSignal(): AbortSignal | undefined {
 }
 
 /** Records deprecated request fields for this request's response; outside a request it does nothing. */
-export function recordDeprecatedRequestFields(fields: ReadonlyArray<{ code: "deprecated_field"; field: string; replacement: string; message: string }>): void {
+/** A request field the response warns about: a deprecated name, or a value the server kept (`page_images_forced`). */
+export type RequestFieldWarning = { code: "deprecated_field" | "page_images_forced"; field: string; replacement?: string; message: string };
+
+export function recordDeprecatedRequestFields(fields: ReadonlyArray<RequestFieldWarning>): void {
   const store = requestContextStorage.getStore();
   if (!store || fields.length === 0) return;
   const list = (store.deprecatedFields ??= []);
@@ -155,7 +158,7 @@ export function recordDeprecatedRequestFields(fields: ReadonlyArray<{ code: "dep
 }
 
 /** The deprecated fields recorded for this request, removed from it. */
-export function takeDeprecatedRequestFields(): Array<{ code: "deprecated_field"; field: string; replacement: string; message: string }> {
+export function takeDeprecatedRequestFields(): Array<RequestFieldWarning> {
   const store = requestContextStorage.getStore();
   const list = store?.deprecatedFields ?? [];
   if (store) store.deprecatedFields = [];

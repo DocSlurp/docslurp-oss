@@ -47,7 +47,7 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
   webPageCredits: (pages) => Math.max(0, pages) * 0.5,
   webMapCredits: (urls) => Math.max(1, Math.ceil(Math.max(0, urls) / 40)),
   qualityModePricing: (mode) => ({
-    creditsPer1kPages: mode === "fast" ? { min: 5, max: 5 } : mode === "good" ? { min: 250, max: 250 } : { min: 5, max: 250 },
+    creditsPer1kPages: mode === "fast" ? { min: 5, max: 5 } : mode === "visual" ? { min: 250, max: 250 } : { min: 5, max: 250 },
     priceNote: "Test price note.",
   }),
   pageEquivalentAllowance: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE,
@@ -79,7 +79,7 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
       documents: paged.length + (media ? media.audioFiles + media.videoFiles : 0),
       billing: args.profile.billing,
       credits: args.profile.billing === "disabled" ? null : {
-        low: (test.pageCredits!(args.profile.quality === "good" ? "rich" : "fast", low)) * boost + (media?.credits.low ?? 0),
+        low: (test.pageCredits!(args.profile.quality === "visual" ? "rich" : "fast", low)) * boost + (media?.credits.low ?? 0),
         high: (test.pageCredits!(fast ? "fast" : "rich", high)) * boost + (media?.credits.high ?? 0),
       },
       seconds: { low: seconds(low), high: seconds(high) },

@@ -175,13 +175,13 @@ describe("ingest report on a migrated database", () => {
     await expect(report.applyIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "made-up" }))
       .rejects.toMatchObject({ status: 409 });
     const applied = await report.applyIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "vision-all-pages" });
-    expect(applied.pipeline.quality).toBe("good");
+    expect(applied.pipeline.ladder.maxRung).toBe("intelligent");
     expect(applied.pipeline.vision).not.toHaveProperty("maxPagesPerDocument");
     expect(applied.pipeline.vision).not.toHaveProperty("forceAllPages");
     expect(applied.pipeline.summarize).toBe(true);
     // The rule no longer fires the same way once vision covers every page; the scans still need reprocessing.
     const after = await report.loadIngestReport({ project: await project("w1", "owner"), canEdit: true });
-    expect(after.config.find((item) => item.key === "quality")?.value).toBe("Good");
+    expect(after.config.find((item) => item.key === "quality")?.value).toBe("Smartest");
   });
 
   it("reprocesses the affected files with the project's current settings", async () => {
@@ -194,7 +194,7 @@ describe("ingest report on a migrated database", () => {
     expect(result.runs).toHaveLength(1);
     const [run] = await sql<{ pipeline: { quality: string }; project_id: string }[]>`
       select pipeline, project_id from project_runs where id = ${result.runs[0]!.id}`;
-    expect(run).toMatchObject({ project_id: "w1", pipeline: { quality: "good" } });
+    expect(run).toMatchObject({ project_id: "w1", pipeline: { quality: "auto", ladder: { maxRung: "intelligent" } } });
     const versions = await sql<{ filename: string; file_size: number; page_count: number }[]>`
       select filename, file_size::int as file_size, page_count from documents where run_id = ${result.runs[0]!.id} order by filename`;
     expect(versions).toEqual([{ filename: "mixed.pdf", file_size: 900000, page_count: 4 }, { filename: "scan.pdf", file_size: 2000000, page_count: 2 }]);

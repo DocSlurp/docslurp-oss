@@ -27,10 +27,11 @@ const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
 const CFG = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
 const ROUTE = { runtime: "openai-compatible", baseUrl: "https://api.deepinfra.com/v1/openai", provider: "deepinfra", model: MODEL, billing: "deepinfra" } as const;
 
+// Smartest by default: escalation (a Vision read) runs only where the ladder reaches the intelligent rung.
 function runState(pipeline: Record<string, unknown> = {}, run: Record<string, unknown> = {}): WorkflowState {
   const state = WorkflowState.create({
     id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
-    pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, ...pipeline },
+    pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" }, ...pipeline },
     ...run,
   } as unknown as ProjectRun, []);
   state.visionAttempts = new MemoryVisionAttemptBackend();
@@ -351,6 +352,25 @@ describe("OCR escalation reads", () => {
       expect((await escalateOcrPages(outcome, reader, "doc-1")).skipped).toEqual({ disabled: 1 });
       expect(execute).not.toHaveBeenCalled();
     }
+  });
+
+  it("Fastest never escalates: zero hosted calls and no Vision page with DOCSLURP_OCR_ESCALATION=on; Smartest still escalates", async () => {
+    for (const maxRung of ["ocr", "fast"] as const) {
+      const state = runState({ quality: "auto", ladder: { maxRung } });
+      const execute = stubExecute();
+      const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+      const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+      expect((await escalateOcrPages(outcome, reader, "doc-1")).skipped).toEqual({ disabled: 1 });
+      expect(execute).not.toHaveBeenCalled();
+      expect(outcome.pages[0]!.text).toBe("b1urry");
+      expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
+    }
+    const smart = runState({ quality: "auto", ladder: { maxRung: "intelligent" } });
+    const execute = stubExecute();
+    const reader = createHostedOcrReader({ state: smart, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }]);
+    expect((await escalateOcrPages(outcome, reader, "doc-1")).replaced).toBe(1);
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the OCR text when the hosted read fails", async () => {

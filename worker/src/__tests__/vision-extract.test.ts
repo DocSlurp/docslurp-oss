@@ -126,7 +126,7 @@ describe("shouldFailOpenVisionError", () => {
         "doc-1:classification": "s3://bucket/classification.json",
       }),
       pendingPerformance: [],
-      run: { pipeline: { quality: "auto", vision: {} } },
+      run: { pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, vision: {} } },
     } as unknown as WorkflowState;
     const document = {
       id: "doc-1",
@@ -148,49 +148,6 @@ describe("shouldFailOpenVisionError", () => {
       needed: false,
       selectedPages: [],
       reason: "calibrated-routing-skip",
-    });
-  });
-
-  it("good quality sends every page through vision despite calibrated routing", async () => {
-    const routing = buildAdaptiveRoutingDecisionSurface({
-      documentId: "doc-1",
-      filename: "form.jpg",
-      text: "Readable parser text",
-      pageCount: 2,
-      evidence: { source: "canonical-document", artifactUri: "s3://bucket/canonical.json" },
-    });
-    const storage = {
-      bucket: "bucket",
-      getJson: async () => routing,
-    } as unknown as ArtifactStore;
-    const stage = new VisionExtractStage(
-      {} as CommandRunner,
-      storage,
-      { visionDensityThreshold: 0.25 } as Config,
-      {} as never,
-    );
-    const state = {
-      artifactLedger: DocumentArtifactLedger.create({
-        "doc-1:classification": "s3://bucket/classification.json",
-      }),
-      pendingPerformance: [],
-      run: { pipeline: { quality: "good", vision: {} } },
-    } as unknown as WorkflowState;
-
-    const result = await (
-      stage as unknown as {
-        checkNeedsVision(
-          document: Document,
-          pageCount: number,
-          state: WorkflowState,
-        ): Promise<{ needed: boolean; selectedPages: number[]; reason: string }>;
-      }
-    ).checkNeedsVision({ id: "doc-1", filename: "form.jpg" } as Document, 2, state);
-
-    expect(result).toMatchObject({
-      needed: true,
-      selectedPages: [1, 2],
-      reason: "quality-good-all-pages",
     });
   });
 

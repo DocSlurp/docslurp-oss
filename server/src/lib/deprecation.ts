@@ -1,6 +1,6 @@
 import type { Context, MiddlewareHandler } from "hono";
-import { deprecatedExtractionFields, type DeprecatedFieldWarning } from "@docslurp/shared";
-import { recordDeprecatedRequestFields, takeDeprecatedRequestFields } from "./request-context.js";
+import { deprecatedExtractionFields, PAGE_IMAGES_FORCED_WARNING, smartestLocksPageImages, type DeprecatedFieldWarning } from "@docslurp/shared";
+import { recordDeprecatedRequestFields, takeDeprecatedRequestFields, type RequestFieldWarning } from "./request-context.js";
 import { preservingRequestRejection } from "./error-context.js";
 
 /**
@@ -9,7 +9,7 @@ import { preservingRequestRejection } from "./error-context.js";
  * field, replacement, message }`) merged into a JSON object body. Routes and services call `markDeprecatedFields` (recorded on the request context); the
  * `deprecationWarnings` middleware writes them onto whatever response the route returns, success or error.
  */
-export function markDeprecatedFields(_c: Context | null, warnings: readonly DeprecatedFieldWarning[]): void {
+export function markDeprecatedFields(_c: Context | null, warnings: readonly RequestFieldWarning[]): void {
   recordDeprecatedRequestFields(warnings);
 }
 
@@ -19,8 +19,19 @@ export function deprecatedReprocessFields(body: { chartExport?: unknown } | null
 }
 
 /** Deprecated fields of a request pipeline (`pipeline.quality: "auto"`, `pipeline.visionFallback`, `pipeline.figures`, `pipeline.chartExport.tier`). */
-export function deprecatedPipelineFields(pipeline: unknown, prefix = "pipeline."): DeprecatedFieldWarning[] {
-  return deprecatedExtractionFields(pipeline, prefix);
+export function deprecatedPipelineFields(pipeline: unknown, prefix = "pipeline."): RequestFieldWarning[] {
+  const warnings: RequestFieldWarning[] = deprecatedExtractionFields(pipeline, prefix);
+  // Smartest always stores page images: a request asking for both keeps them on (normalizePipelineFeatures) and says so.
+  if (pipeline && typeof pipeline === "object" && smartestLocksPageImages(requestLevelFields(pipeline as Record<string, unknown>))) {
+    warnings.push({ ...PAGE_IMAGES_FORCED_WARNING, field: `${prefix}pageImages` });
+  }
+  return warnings;
+}
+
+/** A request's quality as stored fields, so a level word (`smartest`) reads like the stored ladder it becomes. */
+function requestLevelFields(pipeline: Record<string, unknown>): { quality?: unknown; ladder?: unknown; pageImages?: unknown } {
+  const level = pipeline.quality === "smartest" || pipeline.quality === "smart" || pipeline.quality === "good";
+  return level ? { quality: "auto", ladder: { maxRung: "intelligent" }, pageImages: pipeline.pageImages } : pipeline;
 }
 
 export const deprecationWarnings: MiddlewareHandler = async (c, next) => {
@@ -32,7 +43,7 @@ export const deprecationWarnings: MiddlewareHandler = async (c, next) => {
 };
 
 async function addDeprecationWarnings(c: Context, warnings: ReturnType<typeof takeDeprecatedRequestFields>): Promise<void> {
-  c.res.headers.set("Deprecation", "true");
+  if (warnings.some((warning) => warning.code === "deprecated_field")) c.res.headers.set("Deprecation", "true");
   const type = c.res.headers.get("content-type") ?? "";
   if (!type.includes("application/json")) return;
   try {

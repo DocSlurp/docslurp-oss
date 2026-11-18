@@ -12,7 +12,8 @@ import {
   type PageMode,
 } from "./pricing-provider.js";
 import type { SearchPriceOptions } from "./pricing-provider.js";
-import { qualityModeSchema, type QualityMode } from "./quality.js";
+import { effectiveLadder, pageReadingQuality } from "./auto-ladder.js";
+import type { QualityMode } from "./quality.js";
 import type { ChartExportFormat, VisualSource } from "./chart-export.js";
 import { chartExportModelCallsPerVisual, isBillableVisualSource, type VisualExportModes } from "./chart-export-estimate.js";
 
@@ -545,12 +546,33 @@ export function priceAiUsageEvent<T extends PriceableAiEvent>(event: T): T {
 
 export const pageClassSchema = z.enum(["text", "complex", "scanned"]);
 
-/** Estimator profiles are the processing quality modes (`pipeline.quality`). */
-export const pipelineProfileIdSchema = qualityModeSchema;
-export type PipelineProfileId = QualityMode;
+/**
+ * Estimator (pricing) profiles: how a run reads its pages, which is what a page costs.
+ *
+ * - `fast`: the text layer only (Fastest with Read scans off): every page bills Text.
+ * - `fastest`: the text layer, OCR for scans and image pages (never a vision model): Text to Scan.
+ * - `smartest`: the text layer, the vision model for every page it cannot carry: Text to Vision.
+ * - `visual`: every page read by a model (visual indexing embeds every page image): Vision.
+ *
+ * The retired words are read as their profile: `auto` and `balanced` as `fastest`, `good` and `smart` as `smartest`.
+ */
+export const PIPELINE_PROFILE_IDS = ["fast", "fastest", "smartest", "visual"] as const;
+export type PipelineProfileId = (typeof PIPELINE_PROFILE_IDS)[number];
+const RETIRED_PROFILE_WORDS: Readonly<Record<string, PipelineProfileId>> = { auto: "fastest", balanced: "fastest", good: "smartest", smart: "smartest" };
+export const pipelineProfileIdSchema = z.preprocess(
+  (value) => (typeof value === "string" && value in RETIRED_PROFILE_WORDS ? RETIRED_PROFILE_WORDS[value] : value),
+  z.enum(PIPELINE_PROFILE_IDS),
+);
+
+/** The pricing profile a pipeline reads with (its stored quality and ladder). */
+export function pipelineProfileIdFor(pipeline: { quality?: QualityMode | null; ladder?: unknown }): PipelineProfileId {
+  const ladderPipeline = pipeline as Parameters<typeof pageReadingQuality>[0];
+  if (pageReadingQuality(ladderPipeline) === "fast") return "fast";
+  return effectiveLadder(ladderPipeline).maxRung === "intelligent" ? "smartest" : "fastest";
+}
 
 export type QualityModeInfo = {
-  id: QualityMode;
+  id: PipelineProfileId;
   label: string;
   /** One line for the picker. */
   description: string;
@@ -560,24 +582,30 @@ export type QualityModeInfo = {
   creditsPer1kPages: { min: number; max: number };
 };
 
-/** The public processing quality choice: what each mode does. Prices come from the pricing provider (`qualityModeInfo`). */
-export const QUALITY_MODES: Record<QualityMode, Pick<QualityModeInfo, "id" | "label" | "description">> = {
-  fast: { id: "fast", label: "Fast", description: "Text layer only. Scanned pages are kept as images, not read." },
-  auto: { id: "auto", label: "Auto", description: "Reads each page the cheapest faithful way: text layer, OCR for scans and images, or a vision model for complex layouts." },
-  good: { id: "good", label: "Good", description: "A vision model reads every page for the most faithful tables, figures and layout." },
+/**
+ * What each pricing profile does, in customer words. The public choice is QUALITY_MODE_ORDER (Fastest, Smartest);
+ * `fast` is Fastest with Read scans off and `visual` is visual indexing. Prices come from the pricing provider
+ * (`qualityModeInfo`).
+ */
+export const QUALITY_MODES: Record<PipelineProfileId, Pick<QualityModeInfo, "id" | "label" | "description">> = {
+  fast: { id: "fast", label: "Fastest, scans not read", description: "Native readers only. Scanned pages and images are kept as page images, not read." },
+  fastest: { id: "fastest", label: "Fastest", description: "Native readers first; only scanned pages and images are read, by OCR. No vision model." },
+  smartest: { id: "smartest", label: "Smartest", description: "Native readers first; a vision model reads scans, images and hard math, layouts or fonts." },
+  visual: { id: "visual", label: "Visual indexing", description: "A model reads every page image for visual search." },
 };
 
-export const QUALITY_MODE_ORDER: readonly QualityMode[] = qualityModeSchema.options;
+/** The public processing quality choice, in picker order. */
+export const QUALITY_MODE_ORDER: readonly PipelineProfileId[] = ["fastest", "smartest"];
 
-/** A quality mode with the active provider's price. */
-export function qualityModeInfo(mode: QualityMode): QualityModeInfo {
+/** A pricing profile with the active provider's price. */
+export function qualityModeInfo(mode: PipelineProfileId): QualityModeInfo {
   return { ...QUALITY_MODES[mode], ...pricing().qualityModePricing(mode) };
 }
 
 const formatUsdPer1k = (credits: number): string => `$${creditsToDollars(credits).toFixed(2)}`;
 
 /** "$0.10", "$0.10 to $1.50" or "$1.50" per 1,000 pages for a quality mode (whatever the pricing provider sets). */
-export function qualityModePriceRange(mode: QualityMode): string {
+export function qualityModePriceRange(mode: PipelineProfileId): string {
   const { min, max } = qualityModeInfo(mode).creditsPer1kPages;
   return min === max ? formatUsdPer1k(min) : `${formatUsdPer1k(min)} to ${formatUsdPer1k(max)}`;
 }

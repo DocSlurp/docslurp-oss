@@ -267,7 +267,8 @@ describe("DocumentMapStage coarse visual layer", () => {
     const storage = { getBytes: async () => new Uint8Array(png), deleteKeys: async () => undefined };
     const texts = Array.from({ length: 30 }, () => "");
     const { stage, state } = await setup({ pages: texts }, texts, {
-      pipeline: { visualPages: { route: "auto", coarseFallback: true } },
+      // Smartest: Fastest never embeds page images with a model (its ladder caps page reads at the OCR rung).
+      pipeline: { visualPages: { route: "auto", coarseFallback: true }, ladder: { maxRung: "intelligent" } },
       materialization: { allowAgentDiscovery: true },
       ops: { ocrPages: (async ({ first, last }: { first: number; last: number }) => ({ pageTexts: Array.from({ length: last - first + 1 }, () => "ocr"), costCents: 0 })) as never,
         decide: (async () => ({ decision: { action: "stop", reason: "done" }, extracted: { nodes: [{ id: "x", title: "Chapter", level: 1, parentId: null, printedStart: null, printedEnd: null, physicalStart: 25, physicalEnd: null, source: "agent", confidence: 0.6 }], terms: [] } })) as never },
@@ -292,7 +293,8 @@ describe("DocumentMapStage coarse visual layer opt-in", () => {
     const renderSelectedPages = vi.fn(async () => []);
     const storage = { getBytes: async () => new Uint8Array(), deleteKeys: async () => undefined };
     const texts = Array.from({ length: 30 }, () => "");
-    for (const pipeline of [{}, { visualPages: { route: "auto", coarseFallback: false } }]) {
+    // Off by default, off when declined, and off on Fastest even when chosen (no model reads a page there).
+    for (const pipeline of [{}, { visualPages: { route: "auto", coarseFallback: false } }, { visualPages: { route: "auto", coarseFallback: true } }]) {
       const { stage, state } = await setup({ pages: texts }, texts, {
         pipeline, materialization: { allowAgentDiscovery: false },
         deps: { pageEmbedder: embedder, pageEmbedIo: { rasters: { renderSelectedPages }, storage } },

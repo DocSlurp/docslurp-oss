@@ -802,7 +802,7 @@ export const uploadEstimateRoutes = new Hono().post(
     }
     markDeprecatedFields(c, [
       ...deprecatedReprocessFields(body),
-      ...(typeof body.settings?.quality === "string" && ["fast", "auto", "good"].includes(body.settings.quality) ? deprecatedPipelineFields({ quality: body.settings.quality }, "settings.") : []),
+      ...(typeof body.settings?.quality === "string" && ["fast", "auto", "good", "balanced", "smart"].includes(body.settings.quality) ? deprecatedPipelineFields({ quality: body.settings.quality }, "settings.") : []),
       ...(body.settings?.chartExport ? [{ code: "deprecated_field" as const, field: "settings.chartExport", replacement: "settings.visuals", message: "'settings.chartExport' is deprecated; use 'settings.visuals'." }] : []),
     ]);
     const requestedTier = body.visuals ? chartTierForVisuals(body.visuals) : body.chartExport?.tier ?? null;

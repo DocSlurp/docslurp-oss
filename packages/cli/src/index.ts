@@ -49,22 +49,30 @@ function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTar
   return { newProject: false, project: resolveProject(flags) };
 }
 
-const QUALITY_LEVELS = ["fastest", "balanced", "smart"] as const;
+const QUALITY_LEVELS = ["fastest", "smartest"] as const;
 type Quality = (typeof QUALITY_LEVELS)[number];
 /** Deprecated `--quality` words and their replacements (still accepted during the window, with a note on stderr). */
-const LEGACY_QUALITY: Readonly<Record<string, Quality>> = { fast: "fastest", auto: "balanced", good: "smart" };
+const LEGACY_QUALITY: Readonly<Record<string, { quality: Quality; readScans?: false }>> = {
+  balanced: { quality: "fastest" }, smart: { quality: "smartest" },
+  fast: { quality: "fastest", readScans: false }, auto: { quality: "fastest" }, good: { quality: "smartest" },
+};
 
-/** `--quality fastest|balanced|smart` (or a deprecated fast|auto|good) as a pipeline override, or {} when the project setting applies. */
-export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality: Quality } } {
-  if (flags.quality === undefined) return {};
+/**
+ * `--quality fastest|smartest` (or a deprecated word) and `--no-read-scans` as a pipeline override, or {} when the
+ * project setting applies.
+ */
+export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: Quality; readScans?: false } } {
+  const readScans = flags.noReadScans === true ? { readScans: false as const } : {};
+  if (flags.quality === undefined) return flags.noReadScans === true ? { pipeline: readScans } : {};
   const raw = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
   const legacy = LEGACY_QUALITY[raw];
   if (legacy) {
-    console.error(`Note: --quality ${raw} is deprecated; use --quality ${legacy}.`);
-    return { pipeline: { quality: legacy } };
+    console.error(`Note: --quality ${raw} is deprecated; use --quality ${legacy.quality}${legacy.readScans === false ? " --no-read-scans" : ""}.`);
+    return { pipeline: { ...legacy, ...readScans } };
   }
-  if (!(QUALITY_LEVELS as readonly string[]).includes(raw)) throw new Error("--quality must be fastest, balanced or smart.");
-  return { pipeline: { quality: raw as Quality } };
+  if (!(QUALITY_LEVELS as readonly string[]).includes(raw)) throw new Error("--quality must be fastest or smartest.");
+  if (raw === "smartest" && flags.noReadScans === true) throw new Error("--no-read-scans works with --quality fastest only (Smartest always reads scans).");
+  return { pipeline: { quality: raw as Quality, ...readScans } };
 }
 
 const VISUALS_LEVELS = ["none", "figures", "charts", "charts-ai"] as const;
@@ -107,10 +115,10 @@ export function resolveVisualsFlag(flags: Record<string, string | boolean>): Vis
 }
 
 /** `--quality` and `--visuals` (or their deprecated aliases) as one pipeline override, or {} when neither is given. */
-export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: Quality; visuals?: Visuals } } {
-  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: Quality; readScans?: false; visuals?: Visuals } } {
+  const qualityPipeline = resolveQualityPipeline(flags).pipeline ?? {};
   const visuals = resolveVisualsFlag(flags);
-  const pipeline = { ...(quality ? { quality } : {}), ...(visuals ? { visuals } : {}) };
+  const pipeline = { ...qualityPipeline, ...(visuals ? { visuals } : {}) };
   return Object.keys(pipeline).length ? { pipeline } : {};
 }
 
@@ -127,15 +135,15 @@ export function printDeprecationWarnings(body: unknown): void {
 
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fastest|balanced|smart>] [--indexing <full|on-demand|visual>] [--visuals <none|figures|charts|charts-ai>] [--months <n>] [--json]
-  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch] [--api-url <url>]
+  docslurp estimate <files...> [--quality <fastest|smartest>] [--no-read-scans] [--indexing <full|on-demand|visual>] [--visuals <none|figures|charts|charts-ai>] [--months <n>] [--json]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reindex [--project <id|slug|name>] [--embedding-profile <profile>] [--late-chunking <on|off>] [--late-chunking-window <1-6>] [--chunk-overlap <on|off>] [--contextual-preambles <on|off>] [--vector-backends <a,b>] [--confirm <signature>] [--estimate] [--json]
-  docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
+  docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|smartest>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
   docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
   docslurp summary-tree status [--project <id|slug|name>] [--json]
   docslurp summary-tree cancel <jobId> [--project <id|slug|name>] [--json]
@@ -170,17 +178,18 @@ commands use the "default" project: your organization's default project.
 the same project. Uploads and URL ingests into a name that matches no project create
 it with that name (and --template, if given); other commands answer project not found.
 --new-project (or --template alone) uploads into a fresh self-titled project.
---quality sets processing quality for the upload (default: the project's, balanced unless changed):
-fastest reads the text layer only and keeps pages without one as images, not read (lowest price);
-balanced reads each page the cheapest faithful way (its price depends on the mix of pages);
-smart reads every page with AI (highest price). Prices: https://docslurp.io/pricing
-(fast, auto and good are deprecated aliases.)
+--quality sets processing quality for the upload (default: the project's, fastest unless changed):
+fastest reads each file with its native reader and sends only scanned pages and images to OCR, never
+to a vision model; add --no-read-scans to keep them as page images, not read (lowest price);
+smartest reads each file with its native reader and sends scans, images and hard math, layouts or
+fonts to a vision model. Prices: https://docslurp.io/pricing
+(balanced, smart, fast, auto and good are deprecated aliases.)
 --visuals sets figures and charts for this request (default: the project's setting, else the
 deployment's default, figures): none; figures keeps PDF figures as files; charts also exports
 charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no
 charge; charts-ai also reads other charts with AI, billed per chart read. upload --estimate and
 estimate price it. --chart-export off|free|models and --no-figures are deprecated aliases.
-smart and charts-ai above the project's setting need project editor rights (or a key with
+smartest and charts-ai above the project's setting need project editor rights (or a key with
 the pipeline:billed-features scope).
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
@@ -347,7 +356,7 @@ function normalizeCompatImportPayload(args: {
 /** Flags that take no value, by their command-line name, and the key commands read them as. */
 const BOOLEAN_FLAGS: Readonly<Record<string, string>> = {
   watch: "watch", json: "json", context: "context", estimate: "estimate", device: "device", force: "force", stream: "stream", stats: "stats",
-  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject", "no-figures": "noFigures",
+  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject", "no-figures": "noFigures", "no-read-scans": "noReadScans",
 };
 
 /** Flags that take a value (`--flag value` or `--flag=value`); the key is the camelCase name. */
@@ -1057,8 +1066,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
     const target = resolveIntakeTarget(flags);
     const estimateFiles = await profiledEstimateFiles(files);
     const visuals = resolveVisualsFlag(flags);
-    const quality = resolveQualityPipeline(flags).pipeline?.quality;
-    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
+    const qualitySettings = resolveQualityPipeline(flags).pipeline;
+    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(qualitySettings ? { settings: qualitySettings } : {}) }, flags);
     return;
   }
 
@@ -1200,7 +1209,9 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
     return;
   }
   const settings: Record<string, unknown> = {};
-  if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
+  const qualitySettings = resolveQualityPipeline(flags).pipeline;
+  if (qualitySettings?.quality) settings.quality = qualitySettings.quality;
+  if (qualitySettings?.readScans === false) settings.readScans = false;
   if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
   if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
   const visuals = resolveVisualsFlag(flags);
@@ -1565,8 +1576,8 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     const files = await urlEstimateFiles(urls);
     const target = resolveIntakeTarget(flags);
     const visuals = resolveVisualsFlag(flags);
-    const quality = resolveQualityPipeline(flags).pipeline?.quality;
-    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
+    const qualitySettings = resolveQualityPipeline(flags).pipeline;
+    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(qualitySettings ? { settings: qualitySettings } : {}) }, flags);
     return;
   }
   const response = await apiFetch(`${intake.base}/url`, flags, {

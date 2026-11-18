@@ -35,7 +35,7 @@ import {
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 import { chartExportConfigSchema, defaultChartExportConfig, upgradeStoredPipelineChartExport } from "./chart-export.js";
-import { convertExtractionConfigInput, ExtractionConfigConflictError, isVisualsLevel, UnsupportedConfigVersionError } from "./extraction-config.js";
+import { convertExtractionConfigInput, ExtractionConfigConflictError, isVisualsLevel, normalizeQualityLevel, qualityLevelOfPipeline, UnsupportedConfigVersionError } from "./extraction-config.js";
 import {
   defaultSummaryTreePipelineConfig,
   summaryTreeEnabled,
@@ -521,13 +521,16 @@ const pipelineFeaturesObjectSchema = z
       .default({ route: "auto", coarseFallback: false }),
     inferenceLane: inferenceLaneSchema.default("standard"),
     textGeneration: textGenerationConfigSchema.default(defaultTextGenerationConfig),
-    // Processing quality (fast / auto / good): the one public extraction knob. The worker derives its internal
-    // parser playbook and vision page selection from it. Retired `parserPlaybook` and `vision.forceAllPages`
-    // inputs are mapped onto it by migrateLegacyQualitySettings.
+    // Stored processing quality (`auto`; `fast` on older rows). The public level (`fastest` / `smartest`,
+    // extraction-config.ts) lives in the ladder's highest rung below. Retired `good`, `parserPlaybook` and
+    // `vision.forceAllPages` inputs are mapped by migrateLegacyQualitySettings.
     quality: qualityModeSchema.default(DEFAULT_QUALITY_MODE),
-    // Auto ladder limits (auto-ladder.ts): the highest rung a page may be read on and per-document escalation share caps.
-    // Defaults change nothing; ignored outside `auto`.
+    // Auto ladder (auto-ladder.ts): the highest rung a page may be read on (`ocr` Fastest, the default; `fast` Fastest
+    // without Read scans; `intelligent` Smartest) and per-document escalation share caps. Ignored outside `auto`.
     ladder: pipelineLadderSchema.default(defaultPipelineLadder),
+    // Page images (thumbnails, the reader and cited-page previews): `false` keeps no viewer page image. OCR and vision
+    // still render the pages they read, in scratch only.
+    pageImages: z.boolean().default(true),
     documentExtraction: documentExtractionConfigSchema.default(
       defaultDocumentExtractionConfig,
     ),
@@ -777,6 +780,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   textGeneration: defaultTextGenerationConfig,
   quality: DEFAULT_QUALITY_MODE,
   ladder: defaultPipelineLadder,
+  pageImages: true,
   documentExtraction: defaultDocumentExtractionConfig,
   visionFallback: true,
   vision: defaultVisionConfig,
@@ -1164,11 +1168,28 @@ export function normalizePipelineFeatures(
     },
     // The tree's root is the document summary, so the tree turns summaries on; `summarize` never implies the tree.
     ...(summaryTreeEnabled(source) ? { summarize: true } : {}),
-    // Good means a vision model reads every page, so it turns vision on: `{ quality: "good", visionFallback: false }`
-    // would otherwise bill as Good while skipping vision. A run cost cap (maxCostCents) can still stop vision early.
-    ...(source?.quality === "good" ? { visionFallback: true } : {}),
+    // Smartest reads every page the text layer cannot carry with the vision model and skips OCR, so it turns vision on:
+    // with vision off its scans would be read by nothing. A run cost cap (maxCostCents) can still stop vision early.
+    ...(source && qualityLevelOfPipeline(source).quality === "smartest" ? { visionFallback: true } : {}),
+    // Smartest always keeps page images: the reader and cited-page previews show what the vision model read.
+    ...(source && smartestLocksPageImages(source) ? { pageImages: true } : {}),
   });
 }
+
+/**
+ * True when Smartest overrides `pageImages: false` (Smartest always stores page images). Callers that accept a request
+ * report it as a warning (`pageImagesForcedWarning`); normalizePipelineFeatures applies it.
+ */
+export function smartestLocksPageImages(source: { quality?: unknown; ladder?: unknown; pageImages?: unknown } | null | undefined): boolean {
+  return !!source && source.pageImages === false && qualityLevelOfPipeline(source).quality === "smartest";
+}
+
+/** The response warning for a request whose `pageImages: false` Smartest kept on. */
+export const PAGE_IMAGES_FORCED_WARNING = {
+  code: "page_images_forced",
+  field: "pageImages",
+  message: "Smartest always stores page images; pageImages stays true.",
+} as const;
 
 /** `value` with its `documentExtraction` extractor ids aliased to their canonical ids (extractor-aliases.ts). */
 function withCanonicalExtractorIds<T>(value: T): T {
@@ -1359,7 +1380,14 @@ export function mergePipelineFeatures(
 ): PipelineFeatures {
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
   // New names (`quality` words, `visuals`) become legacy fields; `visuals: null` unsets the base's chart tier.
-  const converted = convertExtractionConfigInput(migrateLegacyQualitySettings(overrides));
+  const migratedOverrides = migrateLegacyQualitySettings(overrides);
+  // `readScans` alone toggles the base's level: it reads the base's highest rung, so Read scans on a Smartest project
+  // keeps Smartest and Read scans off lowers it to Fastest without scans.
+  const rungContext = isPlainRecord(migratedOverrides) && "readScans" in migratedOverrides && normalizeQualityLevel(migratedOverrides.quality) === null
+    && !(isPlainRecord(migratedOverrides.ladder) && migratedOverrides.ladder.maxRung !== undefined)
+    ? { ...migratedOverrides, ladder: { ...(isPlainRecord(migratedOverrides.ladder) ? migratedOverrides.ladder : {}), maxRung: normalizedBase.ladder.maxRung } }
+    : migratedOverrides;
+  const converted = convertExtractionConfigInput(rungContext);
   overrides = converted.value;
   // The summary tree is never an override: the base's stored value always wins (summary-tree.ts). An upload, a chat
   // proposal or a report recommendation that names it changes nothing.
@@ -1392,7 +1420,8 @@ export function mergePipelineFeatures(
   );
 }
 
-const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(["outputSchema", "restartFromStage"]));
+// `readScans` is input-only: mergePipelineFeatures converts it against the project (it is never stored).
+const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(["outputSchema", "restartFromStage", "readScans"]));
 
 /**
  * Validates partial pipeline overrides (as sent with an upload) without
@@ -1408,7 +1437,15 @@ export const pipelineFeatureOverridesSchema = z
       const { visuals: _visuals, ...rest } = migrated;
       return rest;
     }
+    // `readScans: true` alone keeps the project's level (Smartest stays Smartest), which only the merge onto the
+    // project can tell: it stays in the override for mergePipelineFeatures to convert against the base.
+    const deferReadScans = isPlainRecord(migrated) && migrated.readScans === true && normalizeQualityLevel(migrated.quality) === null
+      && !(isPlainRecord(migrated.ladder) && migrated.ladder.maxRung !== undefined);
     try {
+      if (deferReadScans) {
+        const { readScans: _readScans, ...rest } = migrated as Record<string, unknown>;
+        return { ...(convertExtractionConfigInput(rest).value as Record<string, unknown>), readScans: true };
+      }
       return convertExtractionConfigInput(migrated).value;
     } catch (error) {
       if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
@@ -2189,6 +2226,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   textGeneration: [],
   quality: ["extract-markdown", "vision-extract"],
   ladder: ["extract-markdown", "vision-extract"],
+  pageImages: ["render-images"],
   documentExtraction: ["extract-markdown"],
   visionFallback: ["vision-extract"],
   vision: ["vision-extract"],

@@ -58,7 +58,7 @@ const {
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
-const { defaultPipelineFeatures, estimateProfileFor, quoteUpload } = await import("@docslurp/shared");
+const { defaultPipelineFeatures, estimateProfileFor, pipelineFieldsForQuality, quoteUpload } = await import("@docslurp/shared");
 const { createRunCreation } = await import("../services/run-creation.js");
 
 // Spend admission is exercised through Run creation with no files: it fails or
@@ -228,8 +228,8 @@ describe("run preview", () => {
 
     expect(preview.documentCount).toBe(2);
     expect(preview.estimatedPages).toBeGreaterThan(1);
-    expect(preview.recommended.quality).toBe("auto");
-    expect(preview.options.map((option) => option.quality)).toEqual(["fast", "auto", "good"]);
+    expect(preview.recommended.quality).toBe("smartest");
+    expect(preview.options.map((option) => option.quality)).toEqual(["fastest", "smartest"]);
     expect(preview.options.some((option) => option.recommended)).toBe(true);
     expect(preview.topSignals).toContain("table-heavy inputs favor layout-aware extraction");
   });
@@ -245,8 +245,9 @@ describe("run preview", () => {
     const byQuality = Object.fromEntries(preview().options.map((option) => [option.quality, option.estimatedCost]));
     expect(preview().estimatedPages).toBe(20);
     // Each quality's price is the pricing provider's quote for the same files, billing enforced.
-    for (const quality of ["fast", "auto", "good"] as const) {
-      const profile = { ...estimateProfileFor({ ...defaultPipelineFeatures, quality }, { env: {} }), billing: "enforced" as const };
+    for (const quality of ["fastest", "smartest"] as const) {
+      const fields = pipelineFieldsForQuality(quality);
+      const profile = { ...estimateProfileFor({ ...defaultPipelineFeatures, quality: fields.quality, ladder: fields.ladder as never }, { env: {} }), billing: "enforced" as const };
       const credits = quoteUpload({ files: [{ name: "scan.pdf", type: "application/pdf", size: 3_000_000, pages: 20 }], profile }).estimate.credits!;
       expect(byQuality[quality]).toEqual({ minCents: credits.low, maxCents: Math.max(credits.low, credits.high) });
     }
