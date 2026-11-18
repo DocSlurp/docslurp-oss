@@ -72,7 +72,8 @@ type WaitingFile = {
   source_path: string | null;
 };
 
-type AdvanceOptions = { flush: boolean; audit?: ProjectIntakeAudit; ports: ProjectIntakePorts };
+/** `background`: started by the reconciler (a refusal then closes the session), not by a client's confirm. */
+type AdvanceOptions = { flush: boolean; background: boolean; audit?: ProjectIntakeAudit; ports: ProjectIntakePorts };
 /** When the session should be looked at again (ms from now), or null when nothing is waiting on a timer. */
 type AdvanceOutcome = { nextCheckMs: number | null; refusal?: unknown };
 
@@ -82,7 +83,7 @@ type AdvanceOutcome = { nextCheckMs: number | null; refusal?: unknown };
  */
 export async function advanceDirectUploadWaves(sessionId: string, userId: string, lockWaitMs = 0): Promise<AdvanceOutcome> {
   // The reconciler's own lock class: one background holder per process, so waves never take every lock connection.
-  return withDirectUploadLock(sessionId, () => advanceLocked(sessionId, userId, { flush: false, ports: wavePorts }), undefined, undefined, { waitMs: lockWaitMs, lockClass: "reconcile" });
+  return withDirectUploadLock(sessionId, () => advanceLocked(sessionId, userId, { flush: false, background: true, ports: wavePorts }), undefined, undefined, { waitMs: lockWaitMs, lockClass: "reconcile" });
 }
 
 async function advanceLocked(sessionId: string, userId: string, options: AdvanceOptions): Promise<AdvanceOutcome> {
@@ -170,7 +171,8 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
     admission = await liveDirectUploadAdmission(session, session.user_id);
   } catch (error) {
     // Fail closed: a revoked share, membership or key stops every further wave (runs already started are left alone).
-    if (error instanceof ProjectIntakeError && [403, 404].includes(error.statusCode)) {
+    // A client's confirm is only refused (403); the reconciler's next pass closes the session.
+    if (options.background && error instanceof ProjectIntakeError && [403, 404].includes(error.statusCode)) {
       await failSession(session.id, "Upload rejected: the uploader or API key may no longer add to this project");
     }
     throw error;
@@ -344,7 +346,7 @@ export async function confirmDirectUploadProjectIntake(
       assertUploadSessionActive(session);
       const [files] = await sql<Array<{ count: number }>>`select count(*)::int as count from upload_session_files where session_id = ${session.id}`;
       if (!files || Number(files.count) === 0) throw new ProjectIntakeError("Upload session has no files", 400);
-      refusal = (await advanceLocked(session.id, args.userId, { flush: true, audit: args.audit, ports })).refusal;
+      refusal = (await advanceLocked(session.id, args.userId, { flush: true, background: false, audit: args.audit, ports })).refusal;
     }
     const [first] = await sql<Array<{ result: ProjectIntakeActionResult | null }>>`
       select result from upload_session_runs where session_id = ${session.id} and status = 'started' order by wave limit 1`;

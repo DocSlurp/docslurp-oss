@@ -1357,11 +1357,41 @@ export type UploadSession = {
 };
 export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 /** One file's answer from a batched completion: completed, or failed with the status the single-file call would have answered. */
+/**
+ * Why a file failed to complete, and what to do about it:
+ * - `retryable` / `action: "retry"`: repeat the same request for this file as it is (storage briefly unavailable, the
+ *   session busy, or the call's time budget spent).
+ * - `action: "reupload"`: put the file's bytes again (or finish its parts), then repeat.
+ * - `action: "none"`: a repeat cannot fix it (unknown file, refused type or size).
+ * - `blocksSession`: left as is, this file makes the whole session fail once the client stops completing files.
+ */
+export type UploadFileCompletionError = { statusCode: number; code: string; message: string; retryable: boolean; action: "retry" | "reupload" | "none"; blocksSession: boolean };
 export type UploadFileCompletion =
   | { fileId: string; status: "completed" }
-  /** `retryable`: repeat this file later (storage briefly unavailable); otherwise the file needs a fresh upload. */
-  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string; retryable: boolean } };
+  | { fileId: string; status: "failed"; error: UploadFileCompletionError };
 export type CompleteUploadFilesResult = { ok: boolean; files: UploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean };
+/** A session-level failure part-way through `completeUploadFiles`: what the earlier batches already completed. */
+export type CompleteUploadFilesPartial = { partialResults: CompleteUploadFilesResult };
+
+function completionResult(files: UploadFileCompletion[], sessionComplete: boolean): CompleteUploadFilesResult {
+  const completedCount = files.filter(file => file.status === "completed").length;
+  return { ok: completedCount === files.length, files, completedCount, failedCount: files.length - completedCount, sessionComplete };
+}
+
+/** An older server validates only the single-file body: it refuses `{ files }` for a missing top-level `fileId`. */
+function isLegacyCompletionRefusal(error: unknown): boolean {
+  if (!(error instanceof DocSlurpApiError) || error.status !== 400) return false;
+  const issues = (error.body as { error?: { details?: { issues?: Array<{ path?: unknown }> } } } | null)?.error?.details?.issues;
+  return Array.isArray(issues) && issues.some(issue => issue?.path === "fileId");
+}
+
+/** The batch answer's per-file description, rebuilt from a single-file call's error (fallback for older servers). */
+function legacyFileError(error: DocSlurpApiError): UploadFileCompletionError {
+  const retryable = error.status >= 500 || error.status === 429 || error.code === "upload_session_busy";
+  const reupload = !retryable && (error.status === 409 || /^(No object found|Uploaded size for|Multipart completion for)/.test(error.message));
+  const blocksSession = !retryable && error.status < 500 && error.status !== 409 && error.status !== 404 && !/^No object found/.test(error.message);
+  return { statusCode: error.status, code: error.code ?? "rejected", message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession };
+}
 /** The most files the server finalizes in one `files/complete` call; `completeUploadFiles` splits larger lists. */
 export const UPLOAD_COMPLETE_BATCH_SIZE = 100;
 
@@ -2940,37 +2970,41 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const results: UploadFileCompletion[] = [];
       let sessionComplete = false;
       let batched = true;
-      for (let start = 0; start < files.length; start += UPLOAD_COMPLETE_BATCH_SIZE) {
-        const chunk = files.slice(start, start + UPLOAD_COMPLETE_BATCH_SIZE);
-        if (batched) {
-          try {
-            // A batch entry carries only what the server uses: storage's own part list is authoritative.
-            const entries = chunk.map(({ fileId, etag, sizeBytes }) => ({ fileId, ...(etag !== undefined ? { etag } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) }));
-            const answer = await request<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
-            if (Array.isArray(answer.files)) {
+      try {
+        for (let start = 0; start < files.length; start += UPLOAD_COMPLETE_BATCH_SIZE) {
+          const chunk = files.slice(start, start + UPLOAD_COMPLETE_BATCH_SIZE);
+          if (batched) {
+            try {
+              // A batch entry carries only what the server uses: storage's own part list is authoritative.
+              const entries = chunk.map(({ fileId, etag, sizeBytes }) => ({ fileId, ...(etag !== undefined ? { etag } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) }));
+              const answer = await request<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
+              if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
               results.push(...answer.files);
               sessionComplete = Boolean(answer.sessionComplete);
               continue;
+            } catch (error) {
+              // Fall back only for an older server's refusal of the batch body, and only before anything was batched.
+              if (start !== 0 || !isLegacyCompletionRefusal(error)) throw error;
+              batched = false;
             }
-          } catch (error) {
-            // An older server validates only the single-file body and refuses `{ files }` with 400.
-            if (!(error instanceof DocSlurpApiError && error.status === 400 && start === 0)) throw error;
           }
-          batched = false;
-        }
-        for (const file of chunk) {
-          try {
-            await request(path, jsonRequest("POST", file), options);
-            results.push({ fileId: file.fileId, status: "completed" });
-          } catch (error) {
-            // A busy or closed session is the caller's to retry or abandon, not a per-file answer.
-            if (!(error instanceof DocSlurpApiError) || ![400, 404, 409, 413, 415].includes(error.status) || error.code === "upload_session_busy") throw error;
-            results.push({ fileId: file.fileId, status: "failed", error: { statusCode: error.status, code: error.code ?? "rejected", message: error.message, retryable: false } });
+          for (const file of chunk) {
+            try {
+              await request(path, jsonRequest("POST", file), options);
+              results.push({ fileId: file.fileId, status: "completed" });
+            } catch (error) {
+              // A busy, closed or unavailable session is the caller's to retry or abandon, not a per-file answer.
+              if (!(error instanceof DocSlurpApiError) || ![400, 404, 409, 413, 415].includes(error.status) || error.code === "upload_session_busy") throw error;
+              results.push({ fileId: file.fileId, status: "failed", error: legacyFileError(error) });
+            }
           }
         }
+      } catch (error) {
+        // Keep what earlier batches completed: the caller repeats only the rest.
+        if (error && typeof error === "object") (error as CompleteUploadFilesPartial).partialResults = completionResult([...results], sessionComplete);
+        throw error;
       }
-      const completedCount = results.filter(result => result.status === "completed").length;
-      return { ok: completedCount === results.length, files: results, completedCount, failedCount: results.length - completedCount, sessionComplete };
+      return completionResult(results, sessionComplete);
     },
     signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
