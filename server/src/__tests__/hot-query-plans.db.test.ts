@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
- * 0197: queries that run on every scrape, alert tick, run creation, document delete or budgeted spend check read the
+ * 0198: queries that run on every scrape, alert tick, run creation, document delete or budgeted spend check read the
  * large tables (project_runs, usage_events, performance_log, page_work_tasks, project_run_events) through indexes,
  * never a sequential scan of their history. The real functions run against a seeded database; each statement they
  * send is captured (postgres.js `debug`) and EXPLAINed with its parameters.
@@ -105,7 +105,7 @@ function expectNoBigSeqScan(plans: Array<{ text: string; plan: string }>): void 
   }
 }
 
-describe("hot query plans (0197)", () => {
+describe("hot query plans (0198)", () => {
   it("/metrics reads active runs, recent stage timings and recent cost through indexes", async () => {
     const { buildPrometheusPayload } = await import("../routes/health.js");
     const plans = await plansOf(() => buildPrometheusPayload());

@@ -493,7 +493,7 @@ export async function documentUsageTotals(documentId: string, client: SqlClient 
 
 /**
  * Spend per provider and model across all orgs over the trailing `hours` (health metrics). A window, not lifetime: the
- * lifetime sum read every usage event on each scrape. The window is served by `usage_events_created_brin` (0197).
+ * lifetime sum read every usage event on each scrape. The window is served by `usage_events_created_brin` (0198).
  */
 export async function spendByProviderModel(
   hours = 24,
