@@ -109,12 +109,37 @@ function mixedPdf(s: PageExtractState): void {
 function vision(s: PageExtractState, accepted: boolean): void {
   recordPageExtracts(s, DOC_A, visionPageRecords({
     outputs: [{ pageNumber: 2, runtime: "openai-compatible", text: "| Q1 | Q2 |", latencyMs: 900, finishReason: "stop",
-      model: "z-ai/glm-5.3-flash", baseUrl: "https://openrouter.ai/api/v1" }],
+      model: "z-ai/glm-5.3-flash", provider: "openrouter" }],
     skips: [{ pageNumber: 5, outcome: "ladder-capped" }],
     reconciliation: { changedPages: accepted ? [2] : [], decisions: [{ pageNumber: 2, outcome: accepted ? "accepted" : "rejected" }] },
     ocrPageClass: true,
   }));
 }
+
+describe("page extract records: what read the page", () => {
+  it("names the same provider and model as the read's usage row, an OCR read by its reader, and nothing it does not know", () => {
+    const records = visionPageRecords({
+      outputs: [
+        { pageNumber: 1, runtime: "openai-compatible", provider: "private", model: "gpu1/acme-vision", text: "a", latencyMs: 1 },
+        { pageNumber: 2, runtime: "openai-compatible", provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", text: "b", latencyMs: 1 },
+        { pageNumber: 3, runtime: "page-reader", provider: "page-reader:gpu-a", model: "reader-v2", text: "c", latencyMs: 1 },
+        { pageNumber: 4, runtime: "ocr-vm", model: "page-ocr", reader: "escalated:qwen/qwen3-vl-30b", text: "d", latencyMs: 1 },
+        { pageNumber: 5, runtime: "ocr-vm", model: "page-ocr", reader: "latin", text: "e", latencyMs: 1 },
+        // No reader label and no provider: unknown stays unset instead of a made-up model.
+        { pageNumber: 6, runtime: "ocr-vm", model: "page-ocr", text: "f", latencyMs: 1 },
+        { pageNumber: 7, runtime: "chart-export", model: "chart-export", text: "", latencyMs: 1 },
+        { pageNumber: 8, runtime: "ocr-vm", model: "page-ocr", reader: "none", text: "", latencyMs: 1 },
+        // An endpoint that reports an address as its model names nothing.
+        { pageNumber: 9, runtime: "openai-compatible", provider: "openrouter", model: "http://10.0.0.5:8000/v1", text: "g", latencyMs: 1 },
+      ],
+      skips: [], reconciliation: { changedPages: [], decisions: [] }, ocrPageClass: true,
+    });
+    expect(records.map((record) => record.modelUri)).toEqual([
+      "llm://private/gpu1/acme-vision", "llm://openrouter/z-ai/glm-5.3-flash:nitro", "llm://page-reader-gpu-a/reader-v2",
+      "llm://ocr-escalation/qwen/qwen3-vl-30b", "llm://page-ocr/latin", null, null, null, null,
+    ]);
+  });
+});
 
 describe("page extract records", () => {
   it("a mixed PDF yields exactly one final record per page once the document completes", async () => {

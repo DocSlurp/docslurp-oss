@@ -1,4 +1,5 @@
 import { applySpeedBoostUnitCharge } from "@docslurp/shared";
+import { withModelProvenance } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import type { JSONValue, PendingQuery, Sql } from "postgres";
@@ -32,7 +33,10 @@ function batchedRows<T>(rows: T[], batchSize = BULK_WRITE_BATCH_SIZE): T[][] {
  * its cost as `providerCostCents` (our cost, for internal reports) and is
  * marked `billable: false`, because it is written at 0 credits.
  */
-function persistedMetadata(usage: UsageEvent): Record<string, unknown> {
+function persistedMetadata(raw: UsageEvent): Record<string, unknown> {
+  // Every persisted model call names what ran, including the writers that do not go through the pipeline ledger
+  // (graph rebuild, summary-tree backfill). Idempotent for events the ledger already stamped.
+  const usage = withModelProvenance(raw);
   if (billableCents(usage) > 0 || usage.metadata?.unitCharge === true) return { ...usage.metadata };
   const stored = usage.metadata?.providerCostCents;
   return {

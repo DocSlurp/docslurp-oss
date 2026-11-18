@@ -317,6 +317,8 @@ export function runModelClass(pipeline: ProjectRun["pipeline"] | null | undefine
     embeddingProfile: pipeline.embedding?.profile,
     pageRouter: pipeline.pageRouter?.router,
     inferenceLane: pipeline.inferenceLane,
+    // Speed boost swaps hosted models for their fast hosts: part of what selected the model.
+    speedBoost: pipeline.speedBoost === true ? "on" : undefined,
   };
   const known = Object.fromEntries(Object.entries(levels).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""));
   return Object.keys(known).length ? known : null;

@@ -10,45 +10,76 @@ export type ModelCallClass = Record<string, string | number | boolean | null | u
 
 const MAX_URI_LENGTH = 400;
 const MAX_VALUE_LENGTH = 80;
-/** Keys that would put an address or a credential into a record. A private route is named by its alias only. */
-const WITHHELD_CONFIG_KEYS = /^(?:base_?url|url|endpoint|host|api_?key|token|authorization|secret|password)$/i;
+/**
+ * Setting names that could carry an address or a credential, wherever the word sits in the name. A private route is
+ * named by its alias only; nothing about where it lives is recorded.
+ */
+const WITHHELD_KEYS = /url|uri|endpoint|host|addr|base|key|secret|auth|passw|bearer|header|cookie|credential|token(?!s)/i;
+/** Values are plain labels: letters, digits and a little punctuation. Anything else (an address, userinfo, free text) is dropped. */
+const SAFE_VALUE = /^[A-Za-z0-9][A-Za-z0-9 _.:+/-]*$/;
+/** Rows that record compute, a fee or a reuse, not a call to a model: nothing ran, so nothing is named. */
+const NON_MODEL_PROVIDERS = new Set(["docslurp", "local-compute", "modal", "heuristic", "reused"]);
+const NON_MODEL_MODELS = new Set(["price-card", "gpu-capacity", "none"]);
 
-function providerSegment(provider: string): string {
+function looksLikeAddress(value: string): boolean {
+  return value.includes("://") || value.includes("@") || /\s/.test(value) || value.includes("\\");
+}
+
+function providerSegment(provider: string): string | null {
   // Provider labels in records are not all URI hosts (`page-reader:<id>`, `ocr-vm:<engine>`): keep them readable.
-  const cleaned = provider.trim().toLowerCase().replace(/[^a-z0-9.-]+/g, "-").replace(/^-+|-+$/g, "");
-  return cleaned || "unknown";
+  if (looksLikeAddress(provider) || provider.includes("/")) return null;
+  const cleaned = provider.trim().toLowerCase().replace(/[^a-z0-9.-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  return cleaned || null;
 }
 
-function modelSegment(model: string): string {
-  // The model id keeps its slashes and variant suffix (`vendor/model:nitro`); anything that would start a query does not.
-  return model.trim().replace(/^llm:\/\/[^/]+\//i, "").split("/").map((part) => encodeURIComponent(part).replace(/%3A/gi, ":").replace(/%40/g, "@")).join("/");
+function modelSegment(model: string): string | null {
+  // The model id keeps its slashes and variant suffix (`vendor/model:nitro`); an address, a path with userinfo or
+  // anything outside plain id characters is not a model id.
+  if (looksLikeAddress(model) || !/^[A-Za-z0-9][A-Za-z0-9._:+/-]*$/.test(model)) return null;
+  return model;
 }
 
-function flat(record: Record<string, unknown> | null | undefined): Array<[string, string]> {
-  const out: Array<[string, string]> = [];
+/** The recordable settings of a record: plain names, small plain values, sorted by name; values keep their type. */
+function clean(record: Record<string, unknown> | null | undefined): Array<[string, string | number | boolean]> {
+  const out: Array<[string, string | number | boolean]> = [];
   for (const [key, value] of Object.entries(record ?? {})) {
-    if (value === undefined || value === null || value === "" || WITHHELD_CONFIG_KEYS.test(key)) continue;
+    if (value === undefined || value === null || value === "" || WITHHELD_KEYS.test(key) || !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key)) continue;
     if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") continue;
     if (typeof value === "number" && !Number.isFinite(value)) continue;
-    out.push([key, String(value).slice(0, MAX_VALUE_LENGTH)]);
+    // ASCII only after this check, so truncating cannot split a character.
+    if (typeof value === "string" && (!SAFE_VALUE.test(value) || value.includes("://"))) continue;
+    out.push([key, typeof value === "string" ? value.slice(0, MAX_VALUE_LENGTH) : value]);
   }
   return out.sort(([a], [b]) => a.localeCompare(b));
 }
 
+const flat = (record: Record<string, unknown> | null | undefined): Array<[string, string]> => clean(record).map(([key, value]) => [key, String(value)]);
+
 /**
  * The canonical record form of a model call: `llm://<provider>/<model>?<setting>=<value>&…`, settings sorted by name.
- * Null when there is no model to name. A `model` that is already an `llm://` URI keeps its provider.
+ * Null when there is no model to name, or when the provider or model is not a plain id (an address, userinfo, free
+ * text). A `model` that is already an `llm://` URI keeps its provider and loses any query. Never throws.
  */
 export function modelRecordUri(input: { provider?: string | null; model?: string | null; config?: ModelCallConfig | null }): string | null {
-  const model = input.model?.trim();
-  if (!model) return null;
-  const own = /^llm:\/\/([^/?#\s]+)\/([^?#\s]+)/i.exec(model);
-  const provider = own ? own[1]! : input.provider?.trim();
-  if (!provider) return null;
-  const base = `llm://${providerSegment(provider)}/${modelSegment(own ? own[2]! : model)}`;
-  const query = flat(input.config).map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
-  const uri = query ? `${base}?${query}` : base;
-  return uri.length <= MAX_URI_LENGTH ? uri : base.slice(0, MAX_URI_LENGTH);
+  try {
+    const raw = typeof input.model === "string" ? input.model.trim() : "";
+    if (!raw) return null;
+    const own = /^llm:\/\/([^/?#\s]+)\/([^?#\s]+)/i.exec(raw);
+    const provider = providerSegment(own ? own[1]! : typeof input.provider === "string" ? input.provider : "");
+    const model = modelSegment(own ? own[2]! : raw);
+    if (!provider || !model) return null;
+    const base = `llm://${provider}/${model}`;
+    if (base.length > MAX_URI_LENGTH) return null;
+    let uri = base;
+    for (const [key, value] of flat(input.config)) {
+      const next = `${uri}${uri === base ? "?" : "&"}${key}=${encodeURIComponent(value)}`;
+      if (next.length > MAX_URI_LENGTH) break;
+      uri = next;
+    }
+    return uri;
+  } catch {
+    return null;
+  }
 }
 
 /** A level as one sorted `name=value;…` string, for a text column. Null when nothing is known. */
@@ -57,33 +88,39 @@ export function modelClassLabel(modelClass: ModelCallClass | null | undefined): 
   return parts.length ? parts.join(";").slice(0, 200) : null;
 }
 
-/** Usage rows that are a charge or a fee, not a model call: nothing ran, so nothing is named. */
-function isModelCall(event: { provider?: string | null; model?: string | null }): boolean {
-  const model = event.model?.trim().toLowerCase();
-  return Boolean(model) && model !== "price-card" && Boolean(event.provider?.trim());
+function isModelCall(event: { provider?: string | null; model?: string | null; metadata?: Record<string, unknown> | null }): boolean {
+  const provider = typeof event.provider === "string" ? event.provider.trim().toLowerCase() : "";
+  const model = typeof event.model === "string" ? event.model.trim().toLowerCase() : "";
+  if (!provider || !model || event.metadata?.unitCharge === true) return false;
+  return !NON_MODEL_PROVIDERS.has(provider.split(/[:/]/)[0]!) && !NON_MODEL_MODELS.has(model);
 }
 
 /**
- * Stamps a usage event's metadata with what ran: `modelUri` (the model the provider served when the event says so,
- * with `modelConfig` as its settings) and `modelClass` (the caller's, over the given defaults). Idempotent; an event
- * that is not a model call is returned unchanged. Applied where events are buffered or inserted, so every recorder
- * gets it without a change at each call site.
+ * Stamps a usage event's metadata with what ran: `modelUri` (the model on the row, with `modelConfig` as its settings),
+ * `modelConfig` reduced to its recordable settings, and `modelClass` (the caller's, over the given defaults).
+ * Idempotent; an event that is not a model call is returned unchanged. Never throws: a label must not fail a ledger
+ * write. Applied where events are buffered or inserted, so every recorder gets it without a change at each call site.
  */
 export function withModelProvenance<Event extends { provider?: string | null; model?: string | null; metadata?: Record<string, unknown> | null }>(
   event: Event,
   defaults: { modelClass?: ModelCallClass | null } = {},
 ): Event {
-  if (!isModelCall(event)) return event;
-  const metadata = { ...(event.metadata ?? {}) };
-  const record = (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-  const config = record(metadata.modelConfig) as ModelCallConfig | null;
-  if (typeof metadata.modelUri !== "string" || !metadata.modelUri.startsWith("llm://")) {
+  try {
+    if (!isModelCall(event)) return event;
+    const metadata = { ...(event.metadata ?? {}) };
+    const record = (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+    const config = Object.fromEntries(clean(record(metadata.modelConfig)));
+    if (Object.keys(config).length > 0) metadata.modelConfig = config;
+    else delete metadata.modelConfig;
+    // Always derived from the row: a URI handed in by a caller is not trusted to be canonical or free of an address.
     const uri = modelRecordUri({ provider: event.provider, model: event.model, config });
     if (uri) metadata.modelUri = uri;
+    else delete metadata.modelUri;
+    const known = Object.fromEntries(clean({ ...(defaults.modelClass ?? {}), ...(record(metadata.modelClass) ?? {}) }));
+    if (Object.keys(known).length > 0) metadata.modelClass = known;
+    else delete metadata.modelClass;
+    return { ...event, metadata };
+  } catch {
+    return event;
   }
-  const modelClass = { ...(defaults.modelClass ?? {}), ...(record(metadata.modelClass) ?? {}) };
-  const known = Object.fromEntries(flat(modelClass));
-  if (Object.keys(known).length > 0) metadata.modelClass = known;
-  else delete metadata.modelClass;
-  return { ...event, metadata };
 }

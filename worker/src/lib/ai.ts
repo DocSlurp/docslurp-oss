@@ -106,7 +106,9 @@ async function generatePrivateText(args: {
           inputTokens,
           outputTokens,
           costCents: cost.costCents,
-          metadata: { ...cost.metadata, provider: "private", servedModel: call.model, tokenUsageReported: result.usage.inputTokens !== undefined },
+          metadata: { ...cost.metadata, provider: "private", servedModel: call.model, tokenUsageReported: result.usage.inputTokens !== undefined,
+            // The settings this call ran with, recorded next to the model on its usage row (shared model-provenance.ts).
+            modelConfig: { operation: args.operation, maxOutputTokens: args.maxOutputTokens } },
         },
       };
     },

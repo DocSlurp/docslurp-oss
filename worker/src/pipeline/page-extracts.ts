@@ -100,16 +100,6 @@ function modelUri(value: string | null | undefined): string | null {
   return typeof value === "string" && value.length <= 400 && /^llm:\/\/[a-z0-9][a-z0-9.-]*\//.test(value) ? value : null;
 }
 
-/** The provider a vision-stage read went to: a known hosted API by its host, otherwise the runtime's own name. An address is never recorded. */
-function servingProvider(runtime: string, baseUrl: string | null | undefined): string {
-  let host = "";
-  try { host = baseUrl ? new URL(baseUrl).hostname.toLowerCase() : ""; } catch { /* not a URL: fall through to the runtime */ }
-  if (host === "openrouter.ai" || host.endsWith(".openrouter.ai")) return "openrouter";
-  if (host === "api.deepinfra.com") return "deepinfra";
-  if (host === "api.openai.com") return "openai";
-  return runtime;
-}
-
 const MAX_PAGE = 1_000_000;
 const MAX_DURATION_MS = 86_400_000;
 const MAX_TEXT_BYTES = 268_435_456;
@@ -400,8 +390,8 @@ export function ocrReaderProvenance(reader: string): { method: PageExtractMethod
   if (reader.startsWith("page-reader:")) return { method: "ocr-second-read", engine: "gpu-page-reader", modelUri: named("gpu-page-reader", "page-reader:") };
   if (reader.startsWith("escalated:")) return { method: "ocr-second-read", engine: "ocr-escalation", modelUri: named("ocr-escalation", "escalated:") };
   if (reader.startsWith("hosted:")) return { method: "ocr", engine: "hosted-ocr", modelUri: named("hosted-ocr", "hosted:") };
-  // The local recogniser set (`latin`, `multi`, …) of the OCR engine.
-  return { method: "ocr", engine: "page-ocr", modelUri: modelRecordUri({ provider: "page-ocr", model: reader }) };
+  // The local recogniser set (`latin`, `multi`, …) of the OCR engine; `none` is an empty frame nothing read.
+  return { method: "ocr", engine: "page-ocr", modelUri: reader === "none" ? null : modelRecordUri({ provider: "page-ocr", model: reader }) };
 }
 
 /** Plain UTF-8 bytes of a page's text (a size label, never the text). */
@@ -526,7 +516,7 @@ const VISION_SKIP_TAGS: Partial<Record<string, PageExtractTag>> = {
  */
 export function visionPageRecords(args: {
   outputs: ReadonlyArray<{ pageNumber: number; runtime: string; text: string; latencyMs: number; finishReason?: string | null;
-    model?: string; servedModel?: string; baseUrl?: string | null }>;
+    model?: string; provider?: string; reader?: string }>;
   skips: ReadonlyArray<{ pageNumber: number; outcome: string }>;
   reconciliation: { changedPages: readonly number[]; decisions: ReadonlyArray<{ pageNumber: number; outcome: string }> };
   ocrPageClass: boolean;
@@ -550,7 +540,9 @@ export function visionPageRecords(args: {
       billedClass: ocr ? ocrClass(args.ocrPageClass) : "rich", tags,
       finishReason: output.finishReason ?? (output.text.trim() ? null : "empty"),
       durationMs: output.latencyMs, textBytes: final ? pageTextBytes(output.text) : null, adopted: final,
-      modelUri: modelRecordUri({ provider: servingProvider(output.runtime, output.baseUrl), model: output.servedModel || output.model }),
+      // The same provider and model as the read's usage row; an OCR read is named by its reader. Unknown stays unset.
+      modelUri: output.reader ? ocrReaderProvenance(output.reader).modelUri
+        : output.provider && !ocr ? modelRecordUri({ provider: output.provider, model: output.model }) : null,
     });
   }
   for (const skip of args.skips) {
