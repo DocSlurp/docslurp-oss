@@ -1218,7 +1218,11 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   // such row fails every read. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
   if (isPlainRecord(next.vision)) {
     const vision = { ...next.vision } as Record<string, unknown>;
-    const unusableUri = (value: unknown) => typeof value === "string" && (!llmModelUriSchema.safeParse(value).success || visionModelUriProblem(value) !== null);
+    // A URI that names its own endpoint (a `baseUrl`, or an operator's private route) was a deliberate destination: it
+    // is never swapped for the default hosted model. Such a row keeps failing, as before.
+    const pinsEndpoint = (value: string) => /[?&]baseUrl=/i.test(value) || /^llm:\/\/private\//i.test(value.trim());
+    const unusableUri = (value: unknown) => typeof value === "string" && !pinsEndpoint(value)
+      && (!llmModelUriSchema.safeParse(value).success || visionModelUriProblem(value) !== null);
     const unusableId = (value: unknown) => typeof value === "string" && (visionModelRefusal(value) !== null || !visionModelCatalog.some((spec) => spec.id === value));
     const refused = [
       ...(["modelUri", "remoteFallbackModelUri"] as const).filter((key) => unusableUri(vision[key])),
@@ -1236,11 +1240,9 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
           // The legacy shape is converted only while `model` is present (stored-model-settings.ts): finish it here.
           delete vision.runtime;
           delete vision.baseUrl;
-          if (vision.remoteFallbackModel !== undefined && vision.remoteFallbackModel !== null) {
-            const fallback = visionModelCatalog.find((spec) => spec.id === vision.remoteFallbackModel);
-            if (fallback) vision.remoteFallbackModelUri ??= fallback.uri;
-            else refused.push("remoteFallbackModel");
-          }
+          // A fallback id still here is in the catalog and admitted (an unusable one was dropped above).
+          const fallback = visionModelCatalog.find((spec) => spec.id === vision.remoteFallbackModel);
+          if (fallback) vision.remoteFallbackModelUri ??= fallback.uri;
           delete vision.remoteFallbackModel;
         }
         next = { ...next, vision };
@@ -1249,12 +1251,14 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
       }
     }
   }
-  // The same for an older row's embedding model named by an id the catalog no longer has: the profile decides.
-  if (isPlainRecord(next.embedding) && typeof next.embedding.model === "string"
+  // The same for an older row's embedding model named by an id the catalog no longer has (or not by a string at all):
+  // the profile decides. The stored dimensions and target described that model, so they go with it.
+  if (isPlainRecord(next.embedding) && "model" in next.embedding
     && !Object.values(embeddingModelCatalogByUri).some((spec) => spec.model === (next.embedding as Record<string, unknown>).model)) {
-    const { model: _model, runtime: _runtime, provider: _provider, batchSize: _batchSize, ...rest } = next.embedding as Record<string, unknown>;
+    const { model: _model, runtime: _runtime, provider: _provider, batchSize: _batchSize, dimensions: _dimensions, target: _target, ...rest } = next.embedding as Record<string, unknown>;
     next = { ...next, embedding: rest };
     dropped.push("embedding.model");
+    reasons.add("embedding-model-unknown");
   }
   if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
     const patterns = stored.piiPolicy.patterns;
@@ -1790,7 +1794,11 @@ export function compilePipelinePlan(
  * so defaults fill them; a list of historical runs never fails on one row.
  */
 export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a stored pipeline"): PipelineFeatures {
-  let source = structuredClone(sanitizeStoredPipeline((stored ?? null) as Record<string, unknown> | null, sourceName));
+  const sanitized = structuredClone(sanitizeStoredPipeline((stored ?? null) as Record<string, unknown> | null, sourceName));
+  // Settings that restrict what may happen to a customer's content are never replaced by a weaker default: an
+  // unreadable value becomes the strictest one.
+  const guarded = guardedStoredSettings(sanitized);
+  let source = isPlainRecord(sanitized) ? { ...sanitized, ...guarded } : sanitized;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       return normalizePipelineFeatures(source as PipelineFeatureOverrides | null);
@@ -1798,6 +1806,8 @@ export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a sto
       const issues = (error as { issues?: Array<{ code: string; path: PropertyKey[]; keys?: string[] }> }).issues;
       if (!issues?.length || !source) break;
       for (const issue of issues) {
+        // Guarded settings were made valid above; an issue on one is a conflict with another field, which goes instead.
+        if (issue.path.length === 1 && Object.hasOwn(guarded, String(issue.path[0]))) continue;
         let node: unknown = source;
         for (const segment of issue.path.slice(0, -1)) node = (node as Record<PropertyKey, unknown> | undefined)?.[segment];
         if (!node || typeof node !== "object") continue;
@@ -1812,15 +1822,35 @@ export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a sto
       }
     }
   }
-  // Nothing readable is left. The privacy mode is the one setting never replaced by a weaker default: keep it when it
-  // is valid on its own, with the local profiles a restricted mode requires.
-  const privacyMode = isPlainRecord(stored) ? stored.privacyMode : undefined;
-  for (const candidate of [{ privacyMode }, { privacyMode, embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } }]) {
-    try {
-      if (privacyMode !== undefined) return normalizePipelineFeatures(candidate as PipelineFeatureOverrides);
-    } catch { /* try the next, stricter shape */ }
+  // Nothing else is readable. Keep the guarded settings, with the local profiles a restricted privacy mode requires;
+  // if even that does not validate the row is unreadable, and a row with guarded settings never reads as plain defaults.
+  if (Object.keys(guarded).length === 0) return normalizePipelineFeatures(null);
+  try {
+    return normalizePipelineFeatures(guarded as PipelineFeatureOverrides);
+  } catch {
+    return normalizePipelineFeatures({ ...guarded, embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } } as PipelineFeatureOverrides);
   }
-  return normalizePipelineFeatures(null);
+}
+
+/**
+ * The stored settings a tolerant read must not weaken (privacy mode, PII policy, web tools), each made valid: kept when
+ * it validates, otherwise the strictest value. Only settings the row actually holds are returned.
+ */
+function guardedStoredSettings(stored: unknown): Record<string, unknown> {
+  if (!isPlainRecord(stored)) return {};
+  const guarded: Record<string, unknown> = {};
+  if (stored.privacyMode !== undefined) {
+    // Same reading as the request-time gates: a mode that is not recognized is the strictest one.
+    guarded.privacyMode = privacyModeSchema.safeParse(stored.privacyMode).success ? stored.privacyMode : "strict-privacy";
+  }
+  if (stored.piiPolicy !== undefined) {
+    let valid = isPlainRecord(stored.piiPolicy);
+    if (valid) try { normalizePipelineFeatures({ piiPolicy: stored.piiPolicy } as PipelineFeatureOverrides); } catch { valid = false; }
+    // Unreadable: detection on, and pages with a match kept out of the index.
+    guarded.piiPolicy = valid ? stored.piiPolicy : { enabled: true, action: "block_indexing" };
+  }
+  if (stored.webTools !== undefined) guarded.webTools = typeof stored.webTools === "boolean" ? stored.webTools : false;
+  return guarded;
 }
 
 /**

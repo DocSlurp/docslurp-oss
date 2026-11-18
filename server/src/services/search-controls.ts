@@ -49,7 +49,7 @@ export function parseProjectSearchSettingsRow(row: SettingsRow | undefined, proj
   }
 
   const compatMetadata = row.compat_metadata ?? {};
-  const projectUi = readProjectUiSettings(compatMetadata);
+  const projectUi = readProjectUiSettings(compatMetadata, `project ${projectId}`);
 
   return projectSearchSettingsSchema.parse({
     projectId,
@@ -273,7 +273,7 @@ export function applySearchControls(args: {
   return out;
 }
 
-export function readProjectUiSettings(metadata: Record<string, unknown>) {
+export function readProjectUiSettings(metadata: Record<string, unknown>, source = "a project") {
   const defaults = defaultProjectSearchSettings;
   const projectUi = metadata.projectUi;
 
@@ -286,27 +286,52 @@ export function readProjectUiSettings(metadata: Record<string, unknown>) {
 
   const uiRecord = projectUi as Record<string, unknown>;
   return {
-    retrievalDefaults: readStoredSection("retrievalDefaults", projectSearchSettingsSchema.shape.retrievalDefaults, uiRecord.retrievalDefaults),
-    chat: readStoredSection("chat", projectSearchSettingsSchema.shape.chat, uiRecord.chat)
+    retrievalDefaults: readStoredSection("retrievalDefaults", projectSearchSettingsSchema.shape.retrievalDefaults, uiRecord.retrievalDefaults, source),
+    // `enabled` is the owner's off switch: a stored value that is not readable never turns chat on.
+    chat: readStoredSection("chat", projectSearchSettingsSchema.shape.chat, uiRecord.chat, source, { enabled: false })
   };
 }
 
+const reportedStoredSections = new Set<string>();
+
 /**
  * Stored settings are read, not validated as a request: a value the schema no longer accepts (a retired mode, a
- * renamed model id) falls back to that field's default and is logged, so the project's chat and search keep working
- * and its owner can save new settings. Fields that still validate are kept.
+ * renamed model id) falls back to that field's default and is logged once per project, so the project's chat and
+ * search keep working and its owner can save new settings. Fields that still validate are kept. `failClosed` names the
+ * fields whose default would permit more than an unreadable stored value may: they take the given value instead.
  */
-function readStoredSection<Output>(name: string, schema: { safeParse(value: unknown): { success: true; data: Output } | { success: false; error: { issues: Array<{ path: PropertyKey[] }> } } }, stored: unknown): Output {
-  let value: Record<string, unknown> = stored && typeof stored === "object" && !Array.isArray(stored) ? { ...(stored as Record<string, unknown>) } : {};
+function readStoredSection<Output>(
+  name: string,
+  schema: { safeParse(value: unknown): { success: true; data: Output } | { success: false; error: { issues: Array<{ path: PropertyKey[] }> } } },
+  stored: unknown,
+  source: string,
+  failClosed: Record<string, unknown> = {},
+): Output {
+  const report = (detail: string) => {
+    const key = `${source}:${name}:${detail}`;
+    if (reportedStoredSections.has(key)) return;
+    if (reportedStoredSections.size > 5_000) reportedStoredSections.clear();
+    reportedStoredSections.add(key);
+    console.error(`[search-settings] stored ${name} of ${source} ${detail}`);
+  };
+  const isRecord = stored !== null && typeof stored === "object" && !Array.isArray(stored);
+  if (stored !== undefined && stored !== null && !isRecord) report("is not an object; using defaults");
+  let value: Record<string, unknown> = isRecord ? { ...(stored as Record<string, unknown>) } : (stored === undefined || stored === null ? {} : { ...failClosed });
+  const replaced = new Set<string>();
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const parsed = schema.safeParse(value);
     if (parsed.success) return parsed.data;
     const rejected = [...new Set(parsed.error.issues.map((issue) => String(issue.path[0] ?? "")))].filter((key) => key in value);
-    console.error(`[search-settings] stored ${name} has fields that no longer validate; using defaults for ${rejected.join(", ") || "all of it"}`);
+    report(`has fields that no longer validate; using defaults for ${rejected.join(", ") || "all of it"}`);
     if (rejected.length === 0) break;
-    value = Object.fromEntries(Object.entries(value).filter(([key]) => !rejected.includes(key)));
+    const next: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (!rejected.includes(key)) next[key] = entry;
+      else if (key in failClosed && !replaced.has(key)) { next[key] = failClosed[key]; replaced.add(key); }
+    }
+    value = next;
   }
-  const fallback = schema.safeParse({});
+  const fallback = schema.safeParse(stored === undefined || stored === null ? {} : { ...failClosed });
   if (fallback.success) return fallback.data;
   throw new Error(`default ${name} settings do not validate`);
 }

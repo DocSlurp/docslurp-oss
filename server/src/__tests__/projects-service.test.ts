@@ -112,28 +112,37 @@ describe("listProjects", () => {
     expect(JSON.stringify(projects)).not.toContain("gpt-4.1-mini");
     expect(projects[2]!.pipeline.vision.profile).toBe("cheapest-hosted");
     expect(error).toHaveBeenCalledWith(expect.stringContaining("project bad-field has stored settings that no longer validate"));
-    expect(error).toHaveBeenCalledWith(expect.stringContaining("project unreadable could not be read even with defaults; left out of the list"));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("project unreadable could not be read even with defaults; left out"));
     error.mockRestore();
   });
 
-  it("opens one project whose stored settings no longer validate, with defaults for the invalid fields and its privacy mode kept", async () => {
+  it("shows one project whose stored settings no longer validate, and refuses to start work or draft a save from it", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { getProject } = await import("../services/projects.js");
     const { getProjectAccess } = await import("../services/organizations.js");
     vi.mocked(getProjectAccess).mockResolvedValue({ orgId: "org-1" } as never);
-    sqlMock.mockResolvedValueOnce([{
-      id: "ws-old", org_id: "org-1", user_id: "user-1", name: "Old", template_key: null, system_prompt: null, monthly_budget_cents: null,
-      pipeline: { privacyMode: "local-only", quality: "no-such-quality", embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } },
+    const row = (pipeline: unknown) => [{
+      id: "ws-old", org_id: "org-1", user_id: "user-1", name: "Old", template_key: null, system_prompt: null, monthly_budget_cents: null, pipeline,
       document_count: 0, total_page_count: 0, run_count: 0, latest_run_id: null, latest_run_status: null, archived_at: null,
       slug: "old", last_activity_at: "2026-04-08T18:00:00.000Z", created_at: "2026-04-08T17:00:00.000Z", updated_at: "2026-04-08T18:00:00.000Z",
-    }]);
+    }];
+    const stale = { privacyMode: "local-only", quality: "no-such-quality", piiPolicy: { enabled: true, action: "block_indexing" }, webTools: false, embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } };
 
-    const project = await getProject("ws-old", "user-1");
-
-    expect(project?.id).toBe("ws-old");
-    expect(project?.pipeline.privacyMode).toBe("local-only");
-    expect(project?.pipeline.embedding.profile).toBe("cheapest-local");
+    sqlMock.mockResolvedValueOnce(row(stale));
+    const shown = await getProject("ws-old", "user-1", undefined, { forDisplay: true });
+    expect(shown?.pipeline).toMatchObject({ privacyMode: "local-only", webTools: false, piiPolicy: { enabled: true, action: "block_indexing" }, embedding: { profile: "cheapest-local" } });
     expect(error).toHaveBeenCalledWith(expect.stringContaining("project ws-old has stored settings that no longer validate"));
+
+    // Settings that restrict what happens to content are never shown weaker than stored: unreadable means strictest.
+    sqlMock.mockResolvedValueOnce(row({ privacyMode: "Local-Only", piiPolicy: { enabled: "true", action: "block" }, webTools: "off", quality: "no-such-quality" }));
+    const strictest = await getProject("ws-old", "user-1", undefined, { forDisplay: true });
+    expect(strictest?.pipeline.privacyMode).toBe("strict-privacy");
+    expect(strictest?.pipeline.piiPolicy).toMatchObject({ enabled: true, action: "block_indexing" });
+    expect(strictest?.pipeline.webTools).toBe(false);
+
+    // The same row read to start work or to draft a save still fails: nothing is guessed there.
+    sqlMock.mockResolvedValueOnce(row(stale));
+    await expect(getProject("ws-old", "user-1")).rejects.toThrow();
     error.mockRestore();
   });
 

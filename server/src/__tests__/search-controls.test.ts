@@ -170,13 +170,26 @@ describe("stored project search settings", () => {
     const read = readProjectUiSettings({ projectUi: {
       retrievalDefaults: { resultCount: 5, rerankProvider: "a-retired-provider", rerankModel: "a/renamed-model", summaryTree: "no-such-mode" },
       chat: { mode: "no-such-mode" },
-    } });
+    } }, "project per-field");
     expect(read.retrievalDefaults.resultCount).toBe(5);
     expect(read.retrievalDefaults.rerankProvider).toBe(defaultProjectSearchSettings.retrievalDefaults.rerankProvider);
     expect(read.retrievalDefaults.rerankModel).toBe(defaultProjectSearchSettings.retrievalDefaults.rerankModel);
     expect(read.retrievalDefaults.summaryTree).toBe(defaultProjectSearchSettings.retrievalDefaults.summaryTree);
     expect(read.chat).toEqual(defaultProjectSearchSettings.chat);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining("stored retrievalDefaults has fields that no longer validate"));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("stored retrievalDefaults of project per-field has fields that no longer validate"));
+    error.mockRestore();
+  });
+
+  it("never turn chat on from an unreadable off switch", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const enabled of ["false", 0, null, "off"]) {
+      expect(readProjectUiSettings({ projectUi: { chat: { enabled } } }, `project chat-${String(enabled)}`).chat.enabled, String(enabled)).toBe(false);
+    }
+    expect(readProjectUiSettings({ projectUi: { chat: "garbage" } }, "project chat-garbage").chat.enabled).toBe(false);
+    expect(readProjectUiSettings({ projectUi: { chat: { enabled: false } } }).chat.enabled).toBe(false);
+    expect(readProjectUiSettings({ projectUi: { chat: { enabled: true } } }).chat.enabled).toBe(true);
+    // The log names the project, once.
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("stored chat of project chat-false"));
     error.mockRestore();
   });
 

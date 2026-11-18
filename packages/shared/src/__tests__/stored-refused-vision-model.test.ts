@@ -85,7 +85,8 @@ describe("a stored vision model that is no longer admitted", () => {
 
   it("an older row's embedding model the catalog no longer has falls back to the profile; a known one is kept", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const gone = normalizeStoredPipelineFeatures({ embedding: { profile: "cheapest-local", model: "retired/embedder", runtime: "local", provider: "transformers.js", batchSize: 32 } } as never, "project p10");
+    const gone = normalizeStoredPipelineFeatures({ embedding: { profile: "cheapest-local", model: "retired/embedder", runtime: "local", provider: "transformers.js", batchSize: 32, dimensions: 768, target: "hosted" } } as never, "project p10");
+    expect(normalizeStoredPipelineFeatures({ embedding: { profile: "cheapest-hosted", model: null, dimensions: 384 } } as never, "project p10b").embedding.profile).toBe("cheapest-hosted");
     expect(gone.embedding.profile).toBe("cheapest-local");
     expect(gone.embedding.modelUri).toBe(normalizePipelineFeatures({ embedding: { profile: "cheapest-local" } } as never).embedding.modelUri);
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/project p10.*embedding\.model/));
@@ -94,12 +95,37 @@ describe("a stored vision model that is no longer admitted", () => {
     expect(kept.embedding.modelUri).toBe("llm://transformers.js/Xenova/bge-small-en-v1.5");
   });
 
-  it("an unreadable stored pipeline keeps its privacy mode when everything else falls back to defaults", () => {
+  it("a tolerant read never weakens the settings that restrict what happens to content", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    // A stored vision id with its own endpoint is refused by the legacy migration with a plain Error, not a schema issue.
-    const row = { privacyMode: "local-only", vision: { model: "gpt-4.1-mini", baseUrl: "https://eu.example.com/v1" } };
-    const read = parseStoredPipelineFeatures(row, "project p12");
-    expect(read.privacyMode).toBe("local-only");
+    // A plain Error from the legacy migration (a stored vision id with its own endpoint), not a schema issue.
+    const row = { privacyMode: "local-only", piiPolicy: { enabled: true, action: "block_indexing" }, webTools: false, quality: "retired-level", vision: { model: "gpt-4.1-mini", baseUrl: "https://eu.example.com/v1" } };
+    expect(parseStoredPipelineFeatures(row, "project p12")).toMatchObject({ privacyMode: "local-only", webTools: false, piiPolicy: { enabled: true, action: "block_indexing" } });
+    // Unreadable values become the strictest, on the per-field path too.
+    for (const [stored, expected] of [
+      [{ privacyMode: "strict" }, { privacyMode: "strict-privacy" }],
+      [{ privacyMode: "Local-Only" }, { privacyMode: "strict-privacy" }],
+      [{ piiPolicy: { enabled: true, action: "block" } }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
+      [{ piiPolicy: { enabled: "true" } }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
+      [{ piiPolicy: "on" }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
+      [{ webTools: "off" }, { webTools: false }],
+    ] as const) {
+      expect(parseStoredPipelineFeatures({ ...stored, quality: "retired-level" }, "project p13"), JSON.stringify(stored)).toMatchObject(expected);
+    }
+    // A restricted mode never reads with a hosted model.
+    const strict = parseStoredPipelineFeatures({ privacyMode: "strict", quality: "retired-level" }, "project p14");
+    expect(strict.embedding.modelUri.startsWith("llm://openrouter/")).toBe(false);
+    // Valid stored values are untouched, and a row with none of these settings still reads as defaults.
+    expect(parseStoredPipelineFeatures({ webTools: true, privacyMode: "standard", quality: "retired-level" }, "project p15")).toMatchObject({ webTools: true, privacyMode: "standard" });
+    expect(parseStoredPipelineFeatures({ quality: "retired-level" }, "project p16").privacyMode).toBe("standard");
+  });
+
+  it("a URI that names its own endpoint is never swapped for the default hosted model", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const remote = "llm://vllm/Qwen/Qwen2-VL-2B-Instruct?baseUrl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1";
+    expect(sanitizeStoredPipeline({ vision: { modelUri: remote } }, "run r10")).toEqual({ vision: { modelUri: remote } });
+    expect(() => normalizeStoredPipelineFeatures({ vision: { modelUri: remote } } as never, "run r10")).toThrow();
+    const privateRoute = "llm://private/not-registered/model";
+    expect(sanitizeStoredPipeline({ vision: { modelUri: privateRoute } }, "run r11")).toEqual({ vision: { modelUri: privateRoute } });
   });
 
   it("is never the deployment default either", () => {
