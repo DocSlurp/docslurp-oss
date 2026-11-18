@@ -5,5 +5,5 @@
 --
 -- Operator-facing only: the customer view of these records (server document-page-extracts.ts) does not select them.
 ALTER TABLE document_page_extracts
-  ADD COLUMN model_uri text CHECK (model_uri IS NULL OR (model_uri ~ '^llm://[a-z0-9][a-z0-9.-]*/' AND length(model_uri) <= 400)),
-  ADD COLUMN model_class text CHECK (model_class IS NULL OR length(model_class) <= 200);
+  ADD COLUMN IF NOT EXISTS model_uri text CHECK (model_uri IS NULL OR (model_uri ~ '^llm://[a-z0-9][a-z0-9.-]*/' AND length(model_uri) <= 400)),
+  ADD COLUMN IF NOT EXISTS model_class text CHECK (model_class IS NULL OR length(model_class) <= 200);
