@@ -61,7 +61,10 @@ describe.skipIf(!available)("Doppler math and table encodings (real converter)",
     const [table, growth, matrix, prose] = pages.map((page) => page.status === "known" ? page.route : null);
     expect(table).toMatchObject({ table: "text-layer", tableFlags: ["booktabs"], math: "none" });
     expect(growth?.math).not.toBe("none");
-    expect(growth?.table).toBe("none");
+    // Display formulas set in aligned columns: since the released d317bea (DocSlurp/doppler#51) the facts name the
+    // whitespace table the default converter writes there (its Markdown is unchanged from 0cf2981); a text-layer route,
+    // never a read, and never a math grid. With --math the converter writes the formulas, not a table.
+    expect(growth).toMatchObject({ table: "text-layer", tableFlags: ["whitespace"], mathGrid: false });
     expect(matrix).toMatchObject({ table: "none", mathGrid: true });
     expect(matrix?.mathFlags).toContain("math-matrix");
     expect(prose).toMatchObject({ table: "none", math: "none", mathFlags: [], tableFlags: [] });

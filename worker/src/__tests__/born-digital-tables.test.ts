@@ -20,6 +20,15 @@ const route = (text: string) => {
   return surface.pages[0]!;
 };
 
+// A bulleted agenda laid out as a table: Doppler's Markdown and streaming HTML for routing-table-bullet-list.pdf before
+// d317bea (DocSlurp/doppler#51 keeps bullet lists out of tables). Kept inline so the list repair stays covered.
+const AGENDA_ITEMS = [["Approve the minutes of the last meeting", "Chair", "5 min"], ["Review the quarterly survey results", "Planning", "20 min"],
+  ["Agree the revised district schedule", "Committee", "15 min"], ["Archive the inspection notes", "Records", "5 min"],
+  ["Confirm the next meeting date", "Secretary", "5 min"], ["Any other business", "All", "10 min"]];
+const AGENDA_INTRO = "### Agenda\n\nThe committee reviewed the quarterly report and agreed the revised schedule for the district program. Members noted that the field survey was completed on time and that the archive copy\n\n";
+const AGENDA_PIPE_TABLE = AGENDA_INTRO + AGENDA_ITEMS.map((cells, i) => `| - | ${cells.join(" | ")} |${i === 0 ? "\n| --- | --- | --- | --- |" : ""}`).join("\n");
+const AGENDA_HTML_TABLE = `${AGENDA_INTRO}<table>\n<tbody>\n${AGENDA_ITEMS.map((cells) => `<tr><td>-</td>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("\n")}\n</tbody>\n</table>`;
+
 // Ground truth: what generate-routing-layout-fixtures.py draws (FINANCIAL and the regional table).
 const FINANCIAL = [["Account", "2024", "2025", "Change"], ["Revenue", "48,210", "52,934", "+9.8%"], ["Cost of sales", "21,877", "23,015", "+5.2%"],
   ["Gross profit", "26,333", "29,919", "+13.6%"], ["Operating expenses", "15,012", "15,890", "+5.8%"], ["Operating income", "11,321", "14,029", "+23.9%"],
@@ -81,8 +90,21 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
     expect(route(markdown).ocrDecision?.authorized ?? false).toBe(false);
   });
 
-  it("a bulleted agenda Doppler laid out as a table is rendered as a list and not escalated", () => {
+  it("Doppler writes a bulleted agenda as a list, not a table, and it is not escalated", () => {
+    // Since d317bea (DocSlurp/doppler#51) the converter itself keeps bullet lists out of tables: nothing is left to repair.
     const { markdown, repairs } = recorded("routing-table-bullet-list");
+    expect(repairs).toEqual({ mergedHeaders: 0, listsRestored: 0 });
+    expect(rowsOf(markdown)).toEqual([]);
+    expect(markdown).toContain("- Approve the minutes of the last meeting Chair 5 min");
+    expect(markdown.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(6);
+    const page = route(markdown);
+    expect(page.route).not.toBe("table-heavy");
+    expect(page.ocrDecision?.authorized ?? false).toBe(false);
+  });
+
+  it("a bulleted agenda laid out as a table is rendered as a list and not escalated", () => {
+    // What Doppler wrote for the same fixture before d317bea; other converters can still write it.
+    const { markdown, repairs } = repairMarkdownTables(AGENDA_PIPE_TABLE);
     expect(repairs.listsRestored).toBe(1);
     expect(rowsOf(markdown)).toEqual([]);
     expect(markdown).toContain("- Approve the minutes of the last meeting — Chair — 5 min");
@@ -102,7 +124,7 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
   });
 
   describe("the VM guest's HTML tables get the same repairs (real-Modal finding F3)", () => {
-    /** The streaming converter's `--html` output (Doppler 0cf2981, the guest's mode) for the same fixtures, repaired. */
+    /** The streaming converter's `--html` output (Doppler d317bea, the guest's mode) for the same fixtures, repaired. */
     const html = (name: string) => repairMarkdownTables(readFileSync(path.resolve("testdata/pdf-fixtures/doppler-md-html", `${name}.pdf.md`), "utf8"));
     const htmlRows = (markdown: string) => [...markdown.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
       .map((row) => [...row[1]!.matchAll(/<t[dh]>([\s\S]*?)<\/t[dh]>/g)].map((cell) => cell[1]!));
@@ -119,8 +141,17 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
       expect(route(markdown).ocrDecision?.authorized ?? false).toBe(false);
     });
 
-    it("a bulleted agenda laid out as an HTML table is rendered as a list", () => {
+    it("the streaming converter writes the bulleted agenda as a list (d317bea): nothing to repair", () => {
       const { markdown, repairs } = html("routing-table-bullet-list");
+      expect(repairs).toEqual({ mergedHeaders: 0, listsRestored: 0 });
+      expect(markdown).not.toContain("<table");
+      expect(markdown.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(6);
+      expect(route(markdown).route).not.toBe("table-heavy");
+    });
+
+    it("a bulleted agenda laid out as an HTML table is rendered as a list", () => {
+      // The streaming converter's HTML for the same fixture before d317bea.
+      const { markdown, repairs } = repairMarkdownTables(AGENDA_HTML_TABLE);
       expect(repairs).toEqual({ mergedHeaders: 0, listsRestored: 1 });
       expect(markdown).not.toContain("<table");
       expect(markdown).toContain("- Approve the minutes of the last meeting — Chair — 5 min");

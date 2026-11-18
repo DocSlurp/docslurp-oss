@@ -76,7 +76,8 @@ function vmRunner() {
 }
 
 const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "testdata", "pdf-fixtures", "doppler-md-html");
-const FIXTURES = ["routing-table-bullet-list.pdf.md", "routing-table-clean-financial.pdf.md", "routing-table-two-line-header.pdf.md"];
+// The HTML fixtures that hold a table (routing-table-bullet-list is a list since Doppler d317bea).
+const FIXTURES = ["routing-table-clean-financial.pdf.md", "routing-table-two-line-header.pdf.md"];
 
 /** A fixture's table grown past the chunk budget (rows repeated), so chunking reads its cells rather than the source. */
 function grown(markdown: string, copies: number): string {
