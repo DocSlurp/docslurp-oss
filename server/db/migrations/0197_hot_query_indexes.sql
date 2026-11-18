@@ -83,7 +83,8 @@ CREATE INDEX IF NOT EXISTS api_key_usage_minute_brin ON api_key_usage USING brin
 -- monthly_run_capacity runs on every run insert and every move into an active status. It summed the organization's
 -- month of usage (through the derived org_id, which no index serves), every active run's remaining reservation and the
 -- run's own usage before looking at the caps, so an organization without any monthly budget paid three scans of
--- usage_events per run. It now returns once it knows neither scope has a cap, and the month sum filters on the stamped
+-- usage_events per run. It now returns once it knows neither scope has a cap (after the same privilege check on the
+-- capacity view, which keeps refusing worker reactivation), and the month sum filters on the stamped
 -- columns first (the exact superset orgAttributedUsage uses, migration 0187). Errors and their order are unchanged.
 CREATE OR REPLACE FUNCTION reserve_monthly_run_capacity() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE org_cap numeric; project_cap numeric; org_used numeric; project_used numeric; demand numeric;
@@ -95,6 +96,9 @@ BEGIN
  SELECT monthly_budget_cents INTO org_cap FROM organizations WHERE id=NEW.org_id;
  SELECT monthly_budget_cents INTO project_cap FROM projects WHERE id=NEW.project_id AND org_id=NEW.org_id;
  IF NOT FOUND THEN RAISE EXCEPTION 'Run billing scope mismatch'; END IF;
+ -- Admission into an active status reads API-only capacity state, so a role without access to it (the worker) is still
+ -- refused here with or without a cap (db-roles.test.ts). WHERE false keeps the privilege check and reads nothing.
+ PERFORM 1 FROM pending_monthly_capacity WHERE false;
  IF org_cap IS NULL AND project_cap IS NULL THEN RETURN NEW; END IF;
  SELECT coalesce(sum(cost_cents),0), coalesce(sum(cost_cents) FILTER (WHERE project_id=NEW.project_id),0)
  INTO org_used, project_used FROM usage_attribution
