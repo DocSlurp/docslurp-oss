@@ -7,6 +7,8 @@ import { sql } from "../db.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { env } from "../config.js";
 import { reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
+import { settleBounded } from "../lib/bounded-settle.js";
+import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
 import {
   abortMultipartUpload,
@@ -68,13 +70,18 @@ export interface CreateDirectUploadSessionInput {
   extract?: IntakeExtract | null;
 }
 
-export interface CompleteDirectUploadFileInput {
-  sessionId: string;
-  userId: string;
+export interface CompleteDirectUploadFileEntry {
   fileId: string;
   etag?: string;
+  /** Final byte count; required to finalize an unknown-size (streamed) file. */
   sizeBytes?: number;
+  /** Accepted for clients that send it; storage's own part list is authoritative. */
   parts?: Array<{ partNumber: number; etag: string }>;
+}
+
+export interface CompleteDirectUploadFileInput extends CompleteDirectUploadFileEntry {
+  sessionId: string;
+  userId: string;
 }
 
 export type UploadSessionRow = {
@@ -451,13 +458,16 @@ export async function getDirectUploadSessionDescription(
     await assertSessionProjectStillContributable(loaded.session, userId);
     // Inspect all final objects before authorizing any retry. An outage is not absence.
     try {
-      for (const file of loaded.files) {
-        if (file.status !== "pending" || file.unknown_size) continue;
+      const open = loaded.files.filter(file => file.status === "pending" && !file.unknown_size);
+      const inspected = await settleBounded(open, env.directUploadFinalizeConcurrency, async file => {
         let exists = false;
         try { await getUploadedObjectMetadata(file.source_key); exists = true; }
         catch (error) { if (!isStorageNotFound(error)) throw error; }
         if (exists) await finalizeDirectUploadFile(file);
-      }
+      });
+      // Every file is inspected before any failure is reported; the first failure (in file order) decides the answer.
+      const failure = inspected.find(result => result.status === "rejected");
+      if (failure) throw failure.reason;
       loaded = (await loadDirectUploadSession(sessionId, userId))!;
       return await describeDirectUploadSession(loaded);
     } catch (error) {
@@ -476,7 +486,7 @@ export function assertUploadSessionActive(session: UploadSessionRow): number {
 }
 
 /** Cross-process serialization: the dedicated connection owns the lock until release. */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode?: ProjectIntakeErrorCode): Promise<T> {
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy"): Promise<T> {
   const { connection, release } = await reserveDirectUploadLockConnection();
   try {
     const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
@@ -576,19 +586,85 @@ async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null)
   return sealed;
 }
 
-export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput) {
-  await withDirectUploadLock(input.sessionId, async () => {
-    const loaded = await loadDirectUploadSession(input.sessionId, input.userId);
+export { MAX_DIRECT_UPLOAD_COMPLETE_BATCH };
+/**
+ * How long a `files/complete` call holds the reconciler off its session while files remain open. A client that stops
+ * completing loses the hold after this and the reconciler takes over; an expired session is reconciled regardless.
+ */
+export const CLIENT_FINALIZING_HOLD_SECONDS = 30;
+
+export type DirectUploadFileCompletion =
+  | { fileId: string; status: "completed" }
+  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string } };
+
+type FinalizeOutcome = { fileId: string; completed: true } | { fileId: string; completed: false; error: unknown };
+
+/**
+ * Finalizes the named files of one session under ONE hold of its lock, at most `directUploadFinalizeConcurrency` at a
+ * time. Session-level problems (not found, closed, expired, a revoked share, a held lock) throw before any file is
+ * touched. Each file is looked up in this caller's session only (an id from another session or user is "not found"),
+ * and a file is completed only through `finalizeDirectUploadFile`: verified size, sealed by an If-Match copy or a
+ * storage-validated multipart assembly, re-admitted by intake policy. A file's failure never affects the others.
+ */
+async function finalizeSessionFiles(sessionId: string, userId: string, entries: readonly CompleteDirectUploadFileEntry[]): Promise<{ outcomes: FinalizeOutcome[]; sessionComplete: boolean }> {
+  if (entries.length < 1 || entries.length > MAX_DIRECT_UPLOAD_COMPLETE_BATCH) {
+    throw new ProjectIntakeError(`Complete between 1 and ${MAX_DIRECT_UPLOAD_COMPLETE_BATCH} files per request`, 400);
+  }
+  // Two finalizers on one file would race the sealing copy and the completion write.
+  if (new Set(entries.map(entry => entry.fileId)).size !== entries.length) throw new ProjectIntakeError("Each fileId may appear once per request", 400);
+  return withDirectUploadLock(sessionId, async () => {
+    const loaded = await loadDirectUploadSession(sessionId, userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
     assertUploadSessionActive(loaded.session);
     if (["aborted", "failed"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
     const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
-    await assertSessionProjectStillContributable(loaded.session, input.userId);
-    const file = loaded.files.find(item => item.id === input.fileId);
-    if (!file) throw new ProjectIntakeError("Upload file not found", 404);
-    if (!await finalizeDirectUploadFile(file, input.sizeBytes)) throw new ProjectIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
-    await sql`update upload_sessions set next_reconcile_at = now() where id = ${input.sessionId}`;
+    await assertSessionProjectStillContributable(loaded.session, userId);
+    const byId = new Map(loaded.files.map(file => [file.id, file]));
+    const settled = await settleBounded(entries, env.directUploadFinalizeConcurrency, async entry => {
+      const file = byId.get(entry.fileId);
+      if (!file) throw new ProjectIntakeError("Upload file not found", 404);
+      if (!await finalizeDirectUploadFile(file, entry.sizeBytes)) throw new ProjectIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
+    });
+    const outcomes = settled.map((result, i): FinalizeOutcome => result.status === "fulfilled"
+      ? { fileId: entries[i]!.fileId, completed: true }
+      : { fileId: entries[i]!.fileId, completed: false, error: result.reason });
+    const completedNow = new Set(outcomes.filter(outcome => outcome.completed).map(outcome => outcome.fileId));
+    const sessionComplete = loaded.files.every(file => file.status === "completed" || completedNow.has(file.id));
+    // Every file ready: the reconciler confirms on its next sweep. Files still open: this client is finalizing, so hold the
+    // reconciler (and webhook nudges, which only move next_reconcile_at) off the session instead of letting a full sweep
+    // take the lock between this client's calls.
+    if (sessionComplete) {
+      await sql`update upload_sessions set next_reconcile_at = now(), client_finalizing_until = null where id = ${sessionId}`;
+    } else if (["pending", "uploading"].includes(loaded.session.status)) {
+      await sql`update upload_sessions set client_finalizing_until = now() + ${CLIENT_FINALIZING_HOLD_SECONDS}::int * interval '1 second' where id = ${sessionId}`;
+    }
+    return { outcomes, sessionComplete };
   });
+}
+
+/** The single-file `files/complete` body: throws the file's own error, exactly as before batching existed. */
+export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput) {
+  const { outcomes: [outcome] } = await finalizeSessionFiles(input.sessionId, input.userId, [input]);
+  if (outcome && !outcome.completed) throw outcome.error;
+}
+
+/**
+ * The batched `files/complete` body. Good files complete and bad ones are reported per file (with the status code and
+ * message the single-file call would have answered); only a session-level problem fails the request.
+ */
+export async function completeDirectUploadFiles(input: { sessionId: string; userId: string; files: readonly CompleteDirectUploadFileEntry[] }): Promise<{ files: DirectUploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean }> {
+  const { outcomes, sessionComplete } = await finalizeSessionFiles(input.sessionId, input.userId, input.files);
+  const files = outcomes.map((outcome): DirectUploadFileCompletion => {
+    if (outcome.completed) return { fileId: outcome.fileId, status: "completed" };
+    if (outcome.error instanceof ProjectIntakeError) {
+      return { fileId: outcome.fileId, status: "failed", error: { statusCode: outcome.error.statusCode, code: outcome.error.code ?? rejectionCode(outcome.error), message: outcome.error.message } };
+    }
+    // Provider and database errors can carry credentials or internals: log the name only, answer a generic retryable error.
+    console.error(`[direct-upload] status=complete-failed session=${input.sessionId} file=${outcome.fileId}`, outcome.error instanceof Error ? outcome.error.name : "unknown");
+    return { fileId: outcome.fileId, status: "failed", error: { statusCode: 503, code: "upload_storage_unavailable", message: "Upload storage evidence is unavailable; retry this file" } };
+  });
+  const completedCount = files.filter(file => file.status === "completed").length;
+  return { files, completedCount, failedCount: files.length - completedCount, sessionComplete };
 }
 
 export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[]) {

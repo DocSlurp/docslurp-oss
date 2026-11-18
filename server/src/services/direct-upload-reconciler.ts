@@ -1,4 +1,6 @@
 import { sql } from "../db.js";
+import { env } from "../config.js";
+import { settleBounded } from "../lib/bounded-settle.js";
 import { abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, queueAbandonedDirectUploadCleanup, withDirectUploadLock } from "./direct-upload-session.js";
 import { ProjectIntakeError } from "./project-intake.js";
 import { confirmDirectUploadProjectIntake } from "./project-intake-actions.js";
@@ -18,6 +20,8 @@ export async function reconcileDirectUploads(): Promise<void> {
     const sessions = await sql<Array<{ id: string; user_id: string; expired: boolean; status: string }>>`
       select id, user_id, status, expires_at < now() as expired from upload_sessions
       where (status in ('pending', 'uploading', 'ingesting') or (status = 'initializing' and expires_at < now())) and next_reconcile_at <= now()
+        -- A client completing its own files holds the session briefly (files/complete); an expired one is swept regardless.
+        and (client_finalizing_until is null or client_finalizing_until <= now() or expires_at < now())
       order by next_reconcile_at limit 25`;
     for (const session of sessions) {
       if (stopped) break;
@@ -30,11 +34,12 @@ export async function reconcileDirectUploads(): Promise<void> {
         const ready = await withDirectUploadLock(session.id, async () => {
           const loaded = await loadDirectUploadSession(session.id, session.user_id);
           if (!loaded || !["pending", "uploading", "ingesting"].includes(loaded.session.status)) return false;
-          let ready = true;
-          for (const file of loaded.files) {
-            if (!await finalizeDirectUploadFile(file)) ready = false;
-          }
-          return ready;
+          // Files are independent in storage: verify and seal them a few at a time. Every file is attempted; the first
+          // failure (in file order) then decides the session's retry or terminal handling below.
+          const outcomes = await settleBounded(loaded.files, env.directUploadFinalizeConcurrency, file => finalizeDirectUploadFile(file));
+          const failure = outcomes.find(outcome => outcome.status === "rejected");
+          if (failure) throw failure.reason;
+          return outcomes.every(outcome => outcome.status === "fulfilled" && outcome.value);
         });
         if (ready && !stopped) await confirmDirectUploadProjectIntake({ sessionId: session.id, userId: session.user_id });
       } catch (error) {

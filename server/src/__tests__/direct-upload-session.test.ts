@@ -192,7 +192,10 @@ describe("Direct Upload Session Module", () => {
         expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
       } else {
         await expect(completing).rejects.toThrow();
-        expect(sqlMock).toHaveBeenCalledTimes(3);
+        // Session, files, membership, then only the client-finalizing hold: nothing is completed.
+        expect(sqlMock).toHaveBeenCalledTimes(4);
+        expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(false);
+        expect(sqlMock.mock.calls.at(-1)?.[0].join("?")).toContain("client_finalizing_until = now() +");
       }
     }
   });
@@ -295,7 +298,8 @@ describe("Direct Upload Session Module", () => {
   it("fences a concurrent finalizer without executing it", async () => {
     lockMock.mockResolvedValueOnce([{acquired:false}]);
     const work = vi.fn();
-    await expect(withDirectUploadLock("session-1",work)).rejects.toMatchObject({statusCode:409});
+    // Coded, so clients can tell a held lock (repeat shortly) from a real conflict.
+    await expect(withDirectUploadLock("session-1",work)).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
     expect(work).not.toHaveBeenCalled();
     expect(lockMock.release).toHaveBeenCalled();
   });

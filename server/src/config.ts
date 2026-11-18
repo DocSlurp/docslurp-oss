@@ -238,6 +238,11 @@ export const env = {
   lancedb: resolveLanceDbConfig(process.env, storage),
   maxUploadBytes: readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
   /**
+   * How many files of one direct-upload session are verified and sealed at once (a batched `files/complete` call, the
+   * reconciler, a recovery read). Storage operations per file are independent; the session lock is held for the batch.
+   */
+  directUploadFinalizeConcurrency: Math.min(32, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY, 8)))),
+  /**
    * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct
    * upload sessions (/v1/uploads/direct/sessions), which go straight to storage.

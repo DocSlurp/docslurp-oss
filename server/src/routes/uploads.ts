@@ -36,6 +36,7 @@ import { validationErrorResponse, type ValidationErrorSource, validationHook } f
 import {
   abortDirectUploadSession,
   completeDirectUploadFile,
+  completeDirectUploadFiles,
   createDirectUploadSession,
   getDirectUploadSessionDescription,
   loadDirectUploadSession,
@@ -63,6 +64,7 @@ import {
   type ProjectIntakePorts,
 } from "../services/project-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
 import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 import { findDefaultProject, getProject } from "../services/projects.js";
 import { IndexingModeError } from "../services/project-indexing-mode.js";
@@ -152,8 +154,27 @@ const completeDirectFileSchema = z.object({
         etag: z.string().min(1),
       }),
     )
+    .max(10_000)
     .optional(),
 });
+
+/**
+ * `files/complete` takes one file (`{ fileId, ... }`, answered `{ ok: true }` or the file's error) or a batch
+ * (`{ files: [{ fileId, ... }] }`, up to 100, answered per file). A body naming both is refused.
+ */
+export const completeDirectFilesSchema = z.union([
+  z.object({
+    files: z.array(completeDirectFileSchema).min(1).max(MAX_DIRECT_UPLOAD_COMPLETE_BATCH),
+  }).strict().superRefine((body, ctx) => {
+    if (new Set(body.files.map(file => file.fileId)).size !== body.files.length) {
+      ctx.addIssue({ code: "custom", path: ["files"], message: "Each fileId may appear once per request" });
+    }
+  }),
+  completeDirectFileSchema.extend({ files: z.undefined().optional() }),
+]);
+
+/** A full single-file manifest is about 0.6 MB; a batch whose entries carry manifests stays well below this. */
+const COMPLETE_BODY_LIMIT_BYTES = 8 * 1024 * 1024;
 
 export const uploadValidationHook = (
   result: { success: boolean; error?: ValidationErrorSource },
@@ -373,11 +394,21 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     })
   .post(
     "/direct/sessions/:sessionId/files/complete",
-    zValidator("json", completeDirectFileSchema, validationHook),
+    nativeBodyLimit(COMPLETE_BODY_LIMIT_BYTES),
+    zValidator("json", completeDirectFilesSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const sessionId = c.req.param("sessionId");
       const body = c.req.valid("json");
+      if ("files" in body && body.files) {
+        // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
+        try {
+          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files });
+          return c.json({ ok: result.failedCount === 0, ...result });
+        } catch (error) {
+          return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 503, reportPublicError(error));
+        }
+      }
       try {
         await completeDirectUploadFile({
           sessionId,
