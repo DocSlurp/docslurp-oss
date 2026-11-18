@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizePipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, type CanonicalDocument, type PiiMatch } from "@docslurp/shared";
+import { normalizePipelineFeatures, pageImageReferenceMarkdown, PII_BLOCKED_DOCUMENT_STATUS, type CanonicalDocument, type PiiMatch } from "@docslurp/shared";
 
 import { fromEnv } from "../config.js";
 import { buildCanonicalChunksFromDocument } from "../lib/canonical-document.js";
@@ -502,7 +502,9 @@ describe("piiPolicy redact_artifacts is page-scoped for page images", () => {
   }
 
   it("withholds only the images of the page a match is on; other pages stay servable, text is redacted", async () => {
-    const { sink, state, stage, storage, images } = threePage();
+    const { sink, state, stage, storage, images, prefix, documentId } = threePage();
+    // A pageless source holding the value would fail the scope closed (below): this document's HTML has none.
+    storage.objects.set(`${prefix}/html/${documentId}.html`, "<p>Payroll</p>");
     await stage.run(state);
     const outcome = sink.outcomes[0]!.outcome;
     expect(outcome.redacted).toBe(true);
@@ -533,6 +535,76 @@ describe("piiPolicy redact_artifacts is page-scoped for page images", () => {
     const outcome = sink.outcomes[0]!.outcome;
     expect(outcome.pageScoped).toBe(false);
     for (const uri of images[1]!) expect(outcome.withheldArtifactUris).toContain(uri);
+  });
+
+  it("withholds every page image when a page carries no scanned text (kept as its image, never read)", async () => {
+    // Page 3 is a Fast page-image reference: a scanned ID card nobody read may hold PII on it.
+    const { sink, state, stage, storage, prefix, documentId, images } = threePage();
+    storage.objects.set(`${prefix}/html/${documentId}.html`, "<p>Payroll</p>");
+    const canonical = JSON.parse(storage.objects.get(`${prefix}/canonical/${documentId}.json`)!);
+    canonical.blocks[2] = { ...canonical.blocks[2], text: pageImageReferenceMarkdown(3), metadata: { extractor: "page-image" } };
+    storage.objects.set(`${prefix}/canonical/${documentId}.json`, JSON.stringify(canonical));
+    await stage.run(state);
+    const outcome = sink.outcomes[0]!.outcome;
+    expect(outcome.pageScoped).toBe(false);
+    for (const uri of Object.values(images).flat()) expect(outcome.withheldArtifactUris).toContain(uri);
+  });
+
+  it("withholds every page image when the document has an image artifact that is not a page image", async () => {
+    const { sink, state, stage, storage, prefix, documentId, images } = threePage();
+    storage.objects.set(`${prefix}/html/${documentId}.html`, "<p>Payroll</p>");
+    state.artifactLedger.recordDocument(documentId, "embedded-image-artifact:0" as never, storage.uri(`${prefix}/images/${documentId}/embedded-0.jpg`));
+    await stage.run(state);
+    const outcome = sink.outcomes[0]!.outcome;
+    expect(outcome.pageScoped).toBe(false);
+    for (const uri of images[1]!) expect(outcome.withheldArtifactUris).toContain(uri);
+  });
+
+  it("withholds every page image when another source holds the same value on a different page", async () => {
+    const { sink, state, stage, storage, prefix, documentId, images } = threePage({ markdown: `Quarterly results beat estimates.\fPayroll.\fFlights to London. SSN ${SSN}.` });
+    storage.objects.set(`${prefix}/html/${documentId}.html`, "<p>Payroll</p>");
+    await stage.run(state);
+    const outcome = sink.outcomes[0]!.outcome;
+    expect(outcome.pageScoped).toBe(false);
+    for (const uri of images[3]!) expect(outcome.withheldArtifactUris).toContain(uri);
+  });
+
+  it("places a match found only in block metadata on its block's page", async () => {
+    const { sink, state, stage, storage, prefix, documentId, images } = threePage({ markdown: "Quarterly results beat estimates.\fPayroll.\fFlights to London booked." });
+    storage.objects.set(`${prefix}/html/${documentId}.html`, "<p>Payroll</p>");
+    storage.objects.set(`${prefix}/extraction/${documentId}.contract.json`, JSON.stringify({ documentId, pages: [] }));
+    const canonical = JSON.parse(storage.objects.get(`${prefix}/canonical/${documentId}.json`)!);
+    canonical.blocks[1] = { ...canonical.blocks[1], text: "Payroll.", metadata: { caption: `SSN ${SSN}` } };
+    storage.objects.set(`${prefix}/canonical/${documentId}.json`, JSON.stringify(canonical));
+    await stage.run(state);
+    const outcome = sink.outcomes[0]!.outcome;
+    expect(outcome.redacted).toBe(true);
+    expect(outcome.pageScoped).toBe(true);
+    expect(outcome.withheldPages).toEqual([2]);
+    for (const uri of images[2]!) expect(outcome.withheldArtifactUris).toContain(uri);
+  });
+
+  it.each([
+    ["the page count is unknown", { pageCount: null }],
+    ["the page breaks do not line up with the pages", { pageCount: 3, canonical: false, markdown: `Quarterly results.\fPayroll SSN ${SSN}. London.` }],
+  ] as const)("withholds every page image when %s", async (_name, options) => {
+    const { sink, state, stage, storage, prefix, documentId, document, images } = threePage({ canonical: (options as { canonical?: boolean }).canonical, markdown: (options as { markdown?: string }).markdown });
+    storage.objects.set(`${prefix}/html/${documentId}.html`, "<p>Payroll</p>");
+    document.pageCount = options.pageCount as never;
+    await stage.run(state);
+    const outcome = sink.outcomes[0]!.outcome;
+    expect(outcome.pageScoped).toBe(false);
+    for (const uri of images[1]!) expect(outcome.withheldArtifactUris).toContain(uri);
+  });
+
+  it("keeps the source file withheld when an unmatched page's image is the original (an image upload)", async () => {
+    const { sink, state, stage, storage, prefix, documentId } = threePage();
+    storage.objects.set(`${prefix}/html/${documentId}.html`, "<p>Payroll</p>");
+    const source = "s3://test-bucket/u1/run-1/source/doc-1";
+    state.artifactLedger.recordDocument(documentId, "page-1" as never, source);
+    await stage.run(state);
+    const outcome = sink.outcomes[0]!.outcome;
+    expect(outcome.withheldArtifactUris).toContain(source);
   });
 
   it("block_indexing still withholds every page image", async () => {

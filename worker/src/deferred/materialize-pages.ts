@@ -51,6 +51,7 @@ import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-
 import { DocumentNotFoundError } from "../db/missing-document.js";
 import { billLockedMaterializedPages, lockPageRows } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
+import { piiPageWithholding } from "@docslurp/shared";
 import { OcrInfrastructureError } from "../ocr/mode.js";
 import { finalizePageExtracts, logFinalizeOutcome, materializedPageRecords, pageExtractStatements, recordPageExtracts, type PageExtractState } from "../pipeline/page-extracts.js";
 
@@ -279,6 +280,42 @@ type ChunkRow = {
   id: string; documentId: string; runId: string; userId: string; chunkIndex: number; text: string;
   headingPath: string[]; pageNumber: number; tokenEstimate: number; metadata: Record<string, unknown>;
 };
+
+/**
+ * Records pages a query-time read found PII on (pii-detect ran before their text existed) in the document's PII
+ * outcome, so their page images are withheld (piiPageWithholding): appended to a page-scoped outcome's withheldPages;
+ * a document with no withholding yet gets a page-scoped outcome naming them, with its source file and those pages'
+ * images withheld. An outcome that already withholds every page (a block, a redaction of unknown pages, a malformed
+ * record) is left alone. Malformed page entries are never cast: they keep the record fail closed.
+ */
+export async function recordLatePiiPages(
+  client: Sql,
+  documentId: string,
+  pages: number[],
+  args: { sourceUri: string; pageSlots: string[]; runId: string | null },
+): Promise<void> {
+  const [row] = await client<{ metadata: unknown }[]>`select metadata from documents where id = ${documentId} for update`;
+  if (!row) return;
+  const metadata = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata) ? row.metadata as Record<string, unknown> : {};
+  const withholding = piiPageWithholding(metadata);
+  if (withholding.all) return;
+  const pii = metadata.pii && typeof metadata.pii === "object" && !Array.isArray(metadata.pii) ? metadata.pii as Record<string, unknown> : {};
+  const [artifacts] = args.runId
+    ? await client<{ uris: string[] | null }[]>`
+        select array(select r.artifacts->>slot from project_runs r, unnest(${args.pageSlots}::text[]) as slot
+          where r.id = ${args.runId} and r.artifacts->>slot is not null) as uris`
+    : [{ uris: [] as string[] }];
+  const previousUris = Array.isArray(pii.withheldArtifactUris) ? pii.withheldArtifactUris.filter((uri): uri is string => typeof uri === "string") : [];
+  const next = {
+    ...pii,
+    redacted: true,
+    pageScoped: true,
+    withheldPages: [...new Set([...withholding.pages, ...pages])].sort((a, b) => a - b),
+    withheldArtifactUris: [...new Set([...previousUris, args.sourceUri, ...(artifacts?.uris ?? [])])].sort(),
+    latePiiPagesAt: new Date().toISOString(),
+  };
+  await client`update documents set metadata = coalesce(metadata, '{}'::jsonb) || ${client.json({ pii: next } as never)}::jsonb where id = ${documentId}`;
+}
 
 /** Store.insertPages on the publication transaction. */
 async function insertPageRows(client: Sql, pages: PageRow[]): Promise<void> {
@@ -782,6 +819,15 @@ export async function materializePageRange(
         { costCredits: 0, embeddingModel: profile.model, embeddingModelUri: embeddingRouteSpaceUri(profile, profile.dimensions), claimedBy });
       const ownedBlocked = blocked.filter((page) => held.has(page));
       if (ownedBlocked.length > 0) await markPages(client, documentId, ownedBlocked, "blocked-pii", { failureReason: "pii-policy", claimedBy });
+      // A page read after pii-detect that holds PII withholds its page images too, in this transaction.
+      const piiPages = [...piiMatched].filter((page) => held.has(page)).sort((a, b) => a - b);
+      if (piiPages.length > 0) {
+        await recordLatePiiPages(client, documentId, piiPages, {
+          sourceUri: deps.storage.uri(document.sourceKey),
+          pageSlots: piiPages.map((page) => `${documentId}:page-${page}`),
+          runId: document.runId,
+        });
+      }
       const byReason = new Map<string, number[]>();
       for (const [page, reason] of failed) {
         if (!held.has(page) || released.includes(page)) continue;

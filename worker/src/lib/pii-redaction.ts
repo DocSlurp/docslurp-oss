@@ -69,9 +69,11 @@ type CanonicalLikeBlock = {
 export function redactCanonicalDocument<T extends { blocks?: unknown }>(
   document: T,
   scan: PiiTextScanner,
-): { document: T; matches: PiiMatch[]; changed: boolean } {
+): { document: T; matches: PiiMatch[]; changed: boolean; extraMatches: PiiMatch[] } {
   const blocks = Array.isArray(document.blocks) ? (document.blocks as CanonicalLikeBlock[]) : [];
   const matches: PiiMatch[] = [];
+  // Heading and block-metadata hits: redacted, not counted as detections, but their pages still need withholding.
+  const extraMatches: PiiMatch[] = [];
   let changed = false;
 
   const redactedBlocks = blocks.map((block) => {
@@ -89,16 +91,18 @@ export function redactCanonicalDocument<T extends { blocks?: unknown }>(
         const result = scan(heading, page);
         // Heading text repeats on every block below it; detections count block text only.
         if (result.matches.length > 0) changed = true;
+        extraMatches.push(...result.matches);
         return result.redacted;
       });
     }
     if (block.metadata && typeof block.metadata === "object") {
       const result = redactJsonText(block.metadata, scan, page);
       if (result.matches.length > 0) changed = true;
+      extraMatches.push(...result.matches);
       next.metadata = result.value;
     }
     return next;
   });
 
-  return { document: { ...document, blocks: redactedBlocks }, matches, changed };
+  return { document: { ...document, blocks: redactedBlocks }, matches, changed, extraMatches };
 }

@@ -152,6 +152,13 @@ it("renders a page a page-scoped PII redaction did not match, and refuses a matc
   await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
   await setPii({ redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: true, withheldPages: ["1"] });
   await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
+  // Any blocked value but false, a redaction naming no page, and a non-boolean pageScoped withhold every page.
+  await setPii({ blocked: "true", redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: true, withheldPages: [2] });
+  await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
+  await setPii({ redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: true, withheldPages: [] });
+  await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
+  await setPii({ redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: "true", withheldPages: [2] });
+  await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
   expect(mocks.render).not.toHaveBeenCalled();
   // Only page 2 matched: page 1 renders although the source file itself stays withheld.
   await setPii({ redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: true, withheldPages: [2] });
