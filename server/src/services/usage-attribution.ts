@@ -85,7 +85,9 @@ export interface OuterColumn {
 function scopeRef(scope: string | OuterColumn, client: SqlClient): string | SqlFragment {
   if (typeof scope === "string") return scope;
   if (!/^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/.test(scope.column)) throw new Error(`Invalid outer column: ${scope.column}`);
-  return client.unsafe(scope.column) as unknown as SqlFragment;
+  // A literal template part (not a parameter): any tagged-template client, including test wrappers, can build it.
+  const parts = Object.assign([scope.column], { raw: [scope.column] }) as unknown as TemplateStringsArray;
+  return client(parts);
 }
 
 /**
