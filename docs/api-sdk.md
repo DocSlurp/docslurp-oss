@@ -365,20 +365,29 @@ or from its current byte total.
 ### Completing many files
 
 `/files/complete` also takes a batch: `{ "files": [{ "fileId": "A" }, { "fileId": "B", "sizeBytes": 12345 }] }`,
-up to 100 entries, each `fileId` once. The server finalizes the batch under one
-session lock, several files at a time, and answers per file:
+up to 100 entries, each `fileId` once. A batch entry takes only `fileId`,
+`etag` and `sizeBytes` (no part manifest: the server reads the parts from
+storage), and a batch body is at most 32 KiB. The server finalizes the batch
+under one session lock, several files at a time, and answers per file:
 
 ```json
 { "ok": false, "completedCount": 1, "failedCount": 1, "sessionComplete": false,
   "files": [{ "fileId": "A", "status": "completed" },
-            { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "rejected", "message": "..." } }] }
+            { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "conflict", "message": "...",
+              "retryable": false, "action": "reupload", "blocksSession": false } }] }
 ```
 
 A file's failure carries the status the single-file call would have answered,
-and `retryable`. Only a session-level problem (not found, closed, no longer
+and what to do about it: `retryable` (repeat the same request for this file as
+it is; `action: "retry"`), `action: "reupload"` (put the bytes again or finish
+the parts, then repeat), `action: "none"` (a repeat cannot fix it), and
+`blocksSession` (left as is, this file makes the whole session fail once you
+stop completing files). One call starts files for about five seconds; files it
+did not reach come back as retryable `upload_session_busy`. Only a session-level problem (not found, closed, no longer
 permitted, or `409` `upload_session_busy` while another request holds the
 session) fails the whole request. While a client is completing files, the
-background reconciler leaves the session alone for 30 seconds after each call.
+background reconciler leaves the session alone for 30 seconds after each call
+that completes a file (at most 15 minutes in all).
 The call that completes the last file starts ingestion within a second or two;
 calling `/confirm` yourself is still fine and returns the same run. The SDK's
 `completeUploadFiles()` splits larger lists into batches.
