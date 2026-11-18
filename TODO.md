@@ -39,6 +39,14 @@
 - Realtime row triggers still on per-page tables (council, 2026-11-13): 0153 moved `document_chunks`, `document_pages` and `page_stage_states` to statement triggers (`realtime_statement_changed()`; a 20,000-row chunk insert went from about 1.5 s to about 10 ms in the trigger). `document_page_states` (`realtime_materialization_changed()`) and `document_run_stage_states` still pay the lookup and two counter inserts per row; measure a deferred-materialization run and a many-document run, then move them the same way if the trigger shows up.
 - Retire the search-session project backfill (2026-11-13, migration 0152): once every deployment has run `sweepSearchSessionProjectBackfill` to completion (it logs `nothing left`), drop the sweep and, one release after no writer omits the column, the `search_sessions_set_project_id` trigger. Until the sweep finishes on a deployment, project reads undercount sessions older than the migration.
 
+## Stored settings that stop validating (2026-11-17, project list 500)
+
+- [ ] Projects hold a level (profile, quality), never a model. Old project rows still carry `vision.model`, `vision.remoteFallbackModel`, `vision.runtime`, `vision.baseUrl` and `embedding.model`; reads ignore the vision ones now. Remove the keys from the rows with a migration, and decide what a legacy `embedding.model` means (it still selects the embedding model, which matters for existing vectors).
+- [ ] Audit the other model fields for the same failure (a stored value the catalog later refuses or removes): `embedding`, `textGeneration`, `pageRouter.decisionModel`, chart export. Catalog entries should be marked refused, never deleted, while rows can name them.
+- [ ] `visionModelRefusal` matches the exact URI: a refused model stored with query parameters or different case still fails a direct stored read (lists tolerate it).
+- [ ] Single-row reads (`getProject`, worker run reads) stay strict on purpose. Give the project page a readable "these settings need attention" state instead of a 500 when its row no longer validates.
+- [ ] Check that page, document and run history records the model that actually ran as an `llm://` URI, with its class and configuration at the time, everywhere a model is called.
+
 ## Device login pages lose their HTML on errors (2026-11-17)
 
 - [ ] `/oauth/mcp/device` renders HTML pages with 400, 403 and 429 statuses (wrong or expired code, form sent from another site, too many attempts), but the public error filter (`safeErrorResponse`) replaces every 4xx body with the JSON envelope, so the visitor sees a raw error. The signed-out case now redirects to sign-in instead; the others need either 200 pages or a way for first-party HTML to pass the filter.

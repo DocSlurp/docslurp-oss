@@ -18,6 +18,8 @@ import {
   inferenceLaneSchema,
   vectorBackendSchema,
   visionConfigSchema,
+  visionModelCatalog,
+  visionModelRefusal,
   parseLlmModelUri,
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
@@ -1197,11 +1199,47 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   // Legacy chart export keys (rows from before migration 0151 or from an older API during a deploy): mapped, not dropped.
   let next: Record<string, unknown> = readStoredExtractionShape(upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored)), source);
   const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
+  // Reason codes for the log (no stored values): what kind of setting stopped validating.
+  const reasons = new Set<string>(retired.length > 0 ? ["extractor-retired"] : []);
   if (isPlainRecord(next.documentExtraction)) {
     const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
     if (extraction.dropped.length > 0) {
       next = { ...next, documentExtraction: extraction.value };
       dropped.push(...extraction.dropped);
+      reasons.add("extraction-setting-invalid");
+    }
+  }
+  // A vision model that was allowed when the row was written and is refused now (no stated US or EU hosting region,
+  // an unproven image-token bound): the setting is dropped, so the row reads with its profile's or the default model.
+  // No page is sent to the refused model either way; without this one such project fails every read, including its
+  // owner's project list. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
+  if (isPlainRecord(next.vision)) {
+    const vision = { ...next.vision } as Record<string, unknown>;
+    const refused = ["model", "modelUri", "remoteFallbackModel", "remoteFallbackModelUri"]
+      .filter((key) => typeof vision[key] === "string" && visionModelRefusal(vision[key] as string) !== null);
+    if (refused.length > 0) {
+      // A row that pinned its own endpoint is not rerouted to the default one: it keeps failing, as it did before.
+      const customEndpoint = typeof vision.baseUrl === "string" && vision.baseUrl !== ""
+        && vision.baseUrl.replace(/\/$/, "") !== "https://openrouter.ai/api/v1";
+      if (!(refused.includes("model") && customEndpoint)) {
+        for (const key of refused) delete vision[key];
+        // The stored target described the dropped model; the profile's or the default model brings its own.
+        if (refused.includes("model") || refused.includes("modelUri")) delete vision.target;
+        if (refused.includes("model")) {
+          // The legacy shape is converted only while `model` is present (stored-model-settings.ts): finish it here.
+          delete vision.runtime;
+          delete vision.baseUrl;
+          if (vision.remoteFallbackModel !== undefined && vision.remoteFallbackModel !== null) {
+            const fallback = visionModelCatalog.find((spec) => spec.id === vision.remoteFallbackModel);
+            if (fallback) vision.remoteFallbackModelUri ??= fallback.uri;
+            else refused.push("remoteFallbackModel");
+          }
+          delete vision.remoteFallbackModel;
+        }
+        next = { ...next, vision };
+        dropped.push(...refused.map((key) => `vision.${key}`));
+        reasons.add("vision-model-refused");
+      }
     }
   }
   if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
@@ -1211,10 +1249,11 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
       const unknown = patterns.filter((pattern) => !piiPatternTypeSchema.safeParse(pattern).success);
       next = { ...next, piiPolicy: { ...stored.piiPolicy, patterns: known } };
       dropped.push(...unknown.map((pattern) => `piiPolicy.patterns[${typeof pattern === "string" ? pattern.slice(0, 64) : typeof pattern}]`));
+      reasons.add("pii-pattern-unknown");
     }
   }
   if (dropped.length === 0) return next as T;
-  console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")}`);
+  console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")} reasons=${[...reasons].join(",")}`);
   return next as T;
 }
 
