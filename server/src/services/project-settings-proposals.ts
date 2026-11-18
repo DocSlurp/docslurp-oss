@@ -10,7 +10,7 @@ import { openSettingsProposal, sealSettingsProposal } from "../lib/settings-prop
 import { mergeProjectSearchSettings, getProjectSearchSettings, upsertProjectSearchSettings } from "./search-controls.js";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { ChartExportUnavailableError } from "./chart-export-availability.js";
-import { applyProjectChange, ConfigConflictError, planProjectChange, ReindexRequiredError, reindexTargetSignature, type ProjectChangePlan } from "./config-change.js";
+import { applyProjectChange, ConfigConflictError, hasInFlightIngest, planProjectChange, ReindexRequiredError, reindexTargetSignature, type ProjectChangePlan } from "./config-change.js";
 import { appendAuditLog } from "./audit-log.js";
 import { getRun } from "./runs.js";
 import { runLifecycle } from "./run-lifecycle.js";
@@ -147,8 +147,16 @@ export async function applySettingsProposal(args: { actor: RequestActor; project
   const planned = prepared.config;
   if (planned.rowVersion !== claims.rowVersion || prepared.digest !== claims.fingerprint) return fail(409, "settings_proposal_stale", "Settings or affected work changed; request a fresh proposal");
   if (planned.reindex === "required" && planned.targets.length && !args.reprocessExisting) return fail(409, "reprocess_consent_required", "This change requires explicit consent to reprocess existing documents");
-  if (args.reprocessExisting && (!planned.reindex || !planned.targets.length)) return fail(400, "reprocess_unavailable", "This proposal does not include existing-document reprocessing");
-  if (!args.reprocessExisting) { planned.input = { ...planned.input, apply: "new-uploads" }; planned.willReindex = false; }
+  // Locked index settings with no document to re-run yet. Uploads still processing would finish on the old index config:
+  // wait for them. Otherwise (only archived or not fully indexed documents) there is nothing to reprocess, so the change
+  // applies and is recorded against them, as a confirmed re-index would.
+  const recordOnly = planned.lockedSettings.length > 0 && planned.targets.length === 0;
+  if (recordOnly && await hasInFlightIngest(args.projectId)) {
+    return fail(409, "uploads_in_progress", "Uploads are still processing in this project. Wait for them to finish, then apply this change.");
+  }
+  if (args.reprocessExisting && !recordOnly && (!planned.reindex || !planned.targets.length)) return fail(400, "reprocess_unavailable", "This proposal does not include existing-document reprocessing");
+  if (recordOnly) planned.input = { ...planned.input, apply: "reindex" };
+  else if (!args.reprocessExisting) { planned.input = { ...planned.input, apply: "new-uploads" }; planned.willReindex = false; }
   let applied;
   try {
     applied = await applyProjectChange({ plan: planned, userId: args.actor.userId, maxAttempts: 1,

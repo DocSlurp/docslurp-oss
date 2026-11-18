@@ -32,6 +32,7 @@ They are exactly the inputs of the index identity (`INDEX_IDENTITY_SETTINGS` in 
 - **What locks:** a change locks only when it changes the index identity (`indexConfigHash`). A reordered `vectorBackends` list, an explicit default or an option the vectors don't depend on (`embedding.task`) changes nothing, and it never re-indexes.
 - **Documents that count:** completed documents, archived ones (they keep their vectors and can be restored), documents still queued or processing, and upload runs still queued, blocked or processing. Runs embed with the pipeline they were created with.
 - **Embedding switched off:** the lock still applies. Turning `embed` or `indexVectors` back on is locked too while vectorized documents carry another index config; the refusal then names `embed` / `indexVectors`.
+- **Uploads:** an upload, URL ingest or direct-upload session whose `pipeline` overrides would change these settings on a project with documents is refused as a whole with `409 reindex_required`, before any bytes are stored. Change the project with the reindex command first.
 - **Where it applies:** plain updates, settings publication, chat proposals, ingest-report recommendations and version rollbacks (`POST /v1/projects/:id/versions/:versionId/rollback` takes `apply` and `confirmEstimate` like `PATCH`).
 
 A plain `PATCH /v1/projects/:id` that changes a locked setting is refused, and none of the body is saved, including other fields in the same request:

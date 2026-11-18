@@ -19,6 +19,7 @@ import { Transform, type Readable } from "node:stream";
 
 import {
   applyProjectPipelineOverrides,
+  changedIndexIdentitySettings,
   VM_PDF_MAX_SOURCE_BYTES,
   sandboxedPdfConfigured,
   defaultPipelineFeatures,
@@ -67,7 +68,7 @@ export type ProjectIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 
  * the session remembered for the key can no longer take uploads, so use a new key. `upload_session_busy`: another request (or the
  * reconciler) holds the session's lock, so repeat the same request shortly.
  */
-export type ProjectIntakeErrorCode = "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "upload_session_busy" | "chart_export_tier_unavailable" | "visuals_unavailable";
+export type ProjectIntakeErrorCode = "reindex_required" | "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "upload_session_busy" | "chart_export_tier_unavailable" | "visuals_unavailable";
 
 export class ProjectIntakeError extends Error {
   constructor(
@@ -262,6 +263,11 @@ export interface ProjectIntakeRecords {
    */
   nameFromUpload?(args: { projectId: string; filenames: string[]; urls?: string[] }): Promise<string | null>;
   appendAudit(entry: Parameters<typeof appendAuditLog>[0]): Promise<void>;
+  /**
+   * Whether an existing project holds documents (or in-flight uploads) whose index identity a request override must not
+   * change (config-change.ts `hasIndexStakes`). The Postgres records always answer; fakes that omit it skip the check.
+   */
+  hasIndexStakes?(projectId: string): Promise<boolean>;
 }
 
 export interface ProjectIntakePorts {
@@ -302,6 +308,11 @@ export function withoutBilledRaises<T extends Record<string, unknown> | null | u
 }
 
 export const postgresIntakeRecords: ProjectIntakeRecords = {
+  async hasIndexStakes(projectId) {
+    const { hasIndexStakes } = await import("./config-change.js");
+    const { sql } = await import("../db.js");
+    return await hasIndexStakes(sql, projectId);
+  },
   async findProject(ref, scope) {
     const found = await findProjectForInput(ref, scope);
     return found ? await getProject(found.id, scope.userId) : null;
@@ -588,6 +599,29 @@ async function resolveIntakeTarget(
   return existing ? { existing } : create({ name: ref.name, slug: ref.slug });
 }
 
+/**
+ * An upload's overrides may not move an existing project's index identity (embedding, chunking, vector backends) once it
+ * holds documents or in-flight uploads: the new documents would be embedded in another space. A request-level setting,
+ * so the whole request is refused (409 `reindex_required`); change the project with the reindex command instead. Direct
+ * upload sessions check at creation too, before any bytes are sent.
+ */
+export async function assertUploadKeepsIndexIdentity(
+  project: Pick<ProjectRecord, "id" | "pipeline" | "templateKey">,
+  overrides: PipelineFeatureOverrides | null | undefined,
+  records: Pick<ProjectIntakeRecords, "hasIndexStakes"> = postgresIntakeRecords,
+): Promise<void> {
+  if (!overrides) return;
+  const base = project.pipeline ?? defaultPipelineFeatures;
+  const changed = changedIndexIdentitySettings(base, applyProjectPipelineOverrides(base, overrides, project.templateKey));
+  if (changed.length === 0 || !(await records.hasIndexStakes?.(project.id))) return;
+  throw new ProjectIntakeError(
+    `This project already has indexed documents, so an upload cannot change its index settings (${changed.join(", ")}). Upload without them, or change the project with POST /v1/projects/${project.id}/reindex first.`,
+    409,
+    changed.map((field) => ({ path: `pipeline.${field}`, message: "Locked index setting", code: "reindex_required" })),
+    "reindex_required",
+  );
+}
+
 /** Every file was rejected: fail the request, naming each file. */
 export function allRejectedError(rejected: RejectedIntakeFile[]): ProjectIntakeError {
   const statuses = new Set(rejected.map((file) => file.statusCode));
@@ -622,6 +656,9 @@ export async function intakeIntoProject(
     const target = await resolveIntakeTarget(request, records);
     const existing = "existing" in target ? target.existing : null;
     const toCreate = "create" in target ? target.create : {};
+    // Checked before any bytes are read or stored (see assertUploadKeepsIndexIdentity).
+    if (existing) await assertUploadKeepsIndexIdentity(existing, request.pipeline, records);
+
     // "Untitled project" is the placeholder for "name it for me", not a chosen name.
     const chosenName = toCreate.name && !isUntitledProjectName(toCreate.name) ? toCreate.name : undefined;
 

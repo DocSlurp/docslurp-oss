@@ -353,3 +353,52 @@ describe("council fixes", () => {
     expect(queued.outcome).toBe("queued");
   });
 });
+
+describe("re-check fixes", () => {
+  it("refuses upload overrides that change a populated project's index settings, before storing anything", async () => {
+    const intake = await import("../services/project-intake.js");
+    const { getProject } = await import("../services/projects.js");
+    const project = (await getProject("proj-a", "ua"))!;
+    const stored: string[] = [];
+    const ports = {
+      storage: { async put(key: string) { stored.push(key); }, async remove() {} },
+      records: { ...intake.postgresIntakeRecords, async findProject() { return project; } },
+    } as unknown as import("../services/project-intake.js").ProjectIntakePorts;
+    const request = (pipeline: Record<string, unknown>) => ({
+      userId: "ua", orgId: "org-a", project: "proj-a", kind: "upload" as const, pipeline: pipeline as never,
+      items: [{ filename: "a.txt", mimeType: "text/plain", content: { bytes: Buffer.from("hello") } }, { filename: "b.txt", mimeType: "text/plain", content: { bytes: Buffer.from("again") } }],
+    });
+    for (const pipeline of [{ embedding: { profile: "fastest-local" } }, { chunkOverlap: true }, { vectorBackends: ["lancedb", "orama"] }]) {
+      await expect(intake.intakeIntoProject(request(pipeline), ports)).rejects.toMatchObject({ statusCode: 409, code: "reindex_required" });
+    }
+    expect(stored).toEqual([]);
+    expect((await sql`select count(*)::int as n from project_runs where project_id = 'proj-a'`)[0]!.n).toBe(1);
+    // An override that leaves the index alone passes the check, and so does any override on a project without documents.
+    await expect(intake.assertUploadKeepsIndexIdentity(project, { summarize: true } as never)).resolves.toBeUndefined();
+    const empty = (await getProject("proj-empty", "ua"))!;
+    await expect(intake.assertUploadKeepsIndexIdentity(empty, { embedding: { profile: "fastest-local" } } as never)).resolves.toBeUndefined();
+    // The direct-upload session check uses the same Postgres records.
+    await expect(intake.assertUploadKeepsIndexIdentity(project, { embedding: { profile: "fastest-local" } } as never)).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("refuses a managed-model change that moves a populated project's index identity", async () => {
+    const managed = await import("../services/managed-models.js");
+    // Allowed while the project is empty (a local profile, so a local model override fits it).
+    await sql`update projects set pipeline = ${sql.json({ ...defaultPipelineFeatures, embedding: embedding("cheapest-local") } as never)} where id = 'proj-empty'`;
+    await managed.setProjectManagedModels("proj-empty", { pipeline: { embedding: { modelUri: "llm://transformers.js/Xenova/gte-small" } } }, { userId: "ua" });
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('proj-empty-d0', 'org-a', 'ua', 'proj-empty', 'src-proj-a', 'f.pdf', 'application/pdf', 'k', 'completed', 1, 'c-empty')`;
+    // Dropping the override set would change the embedding model under the stored vectors.
+    await expect(managed.setProjectManagedModels("proj-empty", { pipeline: null }, { userId: "ua" })).rejects.toThrow(/re-index/);
+    // A change that leaves the index alone is still allowed.
+    await expect(managed.setProjectManagedModels("proj-empty", { chat: {} }, { userId: "ua" })).resolves.not.toBeNull();
+  });
+
+  it("counts legacy vectorized documents with no index stamp when vectors are switched back on", async () => {
+    const off = { ...defaultPipelineFeatures, embed: false, indexVectors: false };
+    await sql`update projects set pipeline = ${sql.json(off as never)} where id = 'proj-a'`;
+    await sql`update documents set index_config_hash = null where project_id = 'proj-a'`;
+    const response = await send("PATCH", "/v1/projects/proj-a", asUser("ua"), { pipeline: { ...off, embed: true, indexVectors: true } });
+    expect(response.status).toBe(409);
+  });
+});

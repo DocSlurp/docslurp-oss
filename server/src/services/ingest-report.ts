@@ -1,4 +1,4 @@
-import { assertIndexIdentityUnchanged, vectorsReenabled, visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
+import { assertIndexIdentityUnchanged, visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   buildByteHistogram,
   classifyIngestFailure,
@@ -1580,21 +1580,27 @@ async function editableRecommendation(args: RecommendationAction): Promise<Inges
 export async function applyIngestRecommendation(args: RecommendationAction): Promise<{ project: ProjectRecord; recommendation: IngestReportRecommendation; pipeline: PipelineFeatures }> {
   const recommendation = await editableRecommendation(args);
   if (!recommendation.patch) throw new IngestReportActionError("This recommendation has no setting to turn on.", 409);
-  const { getProject, updateProject } = await import("./projects.js");
+  const { getProject } = await import("./projects.js");
   // Merge onto the pipeline as stored now, so a settings edit made meanwhile is kept.
   const current = await getProject(args.project.id, args.userId);
   if (!current) throw new IngestReportActionError("Project not found", 404);
   const next = applyRecommendationPatch(current.pipeline, recommendation.patch);
-  // Recommendations never change the index identity; turning vectors back on over vectors built under another index
-  // config is locked like any settings change (409 reindex_required: use the reindex command).
+  // Recommendations never change the index identity.
   assertIndexIdentityUnchanged(current.pipeline, next, "An ingest recommendation");
-  if (vectorsReenabled(current.pipeline, next).length > 0) {
-    const { assertReindexConfirmed, planProjectChange } = await import("./config-change.js");
-    const plan = await planProjectChange({ projectId: args.project.id, userId: args.userId, input: { pipeline: next, apply: "new-uploads" } });
-    if (plan) assertReindexConfirmed(plan);
+  // The regular settings path, for new uploads only: turning vectors back on over vectors built under another index
+  // config is locked (409 reindex_required: use the reindex command), rechecked under the configuration lock.
+  const { applyProjectChange, ConfigConflictError, planProjectChange } = await import("./config-change.js");
+  const plan = await planProjectChange({ projectId: args.project.id, userId: args.userId, input: { pipeline: next, apply: "new-uploads" } });
+  if (!plan) throw new IngestReportActionError("Project not found", 404);
+  let applied: Awaited<ReturnType<typeof applyProjectChange>>;
+  try {
+    applied = await applyProjectChange({ plan, userId: args.userId, maxAttempts: 1, updateOptions: { expectedUpdatedAt: args.project.updatedAt } });
+  } catch (error) {
+    if (error instanceof ConfigConflictError) throw new IngestReportActionError("The project changed while applying this recommendation; reload the report and try again.", 409);
+    throw error;
   }
-  const updated = await updateProject(args.project.id, args.userId, { pipeline: next }, { expectedUpdatedAt: args.project.updatedAt });
-  if (!updated) throw new IngestReportActionError("Only project editors can change ingest settings.", 403);
+  if (!applied) throw new IngestReportActionError("Only project editors can change ingest settings.", 403);
+  const updated = applied.project;
   if (!patchHolds(updated.pipeline, recommendation.patch)) {
     throw new IngestReportActionError("The project template locks this setting, so it was not changed.", 409);
   }

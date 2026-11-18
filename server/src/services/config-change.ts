@@ -284,7 +284,7 @@ async function lockingDocumentsExist(client: typeof sql | Tx, plan: ProjectChang
  * not failed or cancelled, in every indexing mode (completed, archived, or still queued or processing), or an ingest
  * run still queued, blocked or processing (runs embed with the pipeline they were created with).
  */
-async function hasIndexStakes(client: typeof sql | Tx, projectId: string): Promise<boolean> {
+export async function hasIndexStakes(client: typeof sql | Tx, projectId: string): Promise<boolean> {
   const db = client as typeof sql;
   const [row] = await db<{ present: boolean }[]>`
     select exists (
@@ -299,14 +299,32 @@ async function hasIndexStakes(client: typeof sql | Tx, projectId: string): Promi
   return Boolean(row?.present);
 }
 
-/** Whether live or archived vectorized documents were stamped with an index config other than `hash`. */
+/** Whether the project has documents or upload runs still in flight (queued or processing, not re-index work). */
+export async function hasInFlightIngest(projectId: string): Promise<boolean> {
+  const [row] = await sql<{ present: boolean }[]>`
+    select exists (
+      select 1 from project_runs r
+      where r.project_id = ${projectId} and r.kind <> 'reindex' and r.status in ('queued', 'blocked', 'processing')
+    ) or exists (
+      select 1 from documents d join project_runs r on r.id = d.run_id
+      where d.project_id = ${projectId} and r.kind <> 'reindex' and d.superseded_at is null and d.purged_at is null
+        and d.status not in ('completed', 'failed', 'cancelled', 'pii_blocked')
+    ) as present
+  `;
+  return Boolean(row?.present);
+}
+
+/**
+ * Whether live or archived vectorized documents were stamped with an index config other than `hash`. A legacy document
+ * with no stamp counts: nothing proves its vectors match.
+ */
 async function hasVectorsOffConfig(client: typeof sql | Tx, projectId: string, hash: string): Promise<boolean> {
   const db = client as typeof sql;
   const [row] = await db<{ present: boolean }[]>`
     select exists (
       select 1 from documents d
       where d.project_id = ${projectId} and d.superseded_at is null and d.purged_at is null and d.status = 'completed'
-        and d.index_config_hash is not null and d.index_config_hash <> ${hash}
+        and (d.index_config_hash is null or d.index_config_hash <> ${hash})
         and exists (select 1 from vector_indexes v where v.document_id = d.id)
     ) as present
   `;
