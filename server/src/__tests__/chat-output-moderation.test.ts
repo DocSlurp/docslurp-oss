@@ -65,7 +65,9 @@ describe("output moderation", () => {
     expect(out).toMatchObject({ answer: MODERATED_ANSWER, citations: [], evidenceSpans: [] });
     expect(mocks.recordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({
       scope: { orgId: "org-1", projectId: "ws-1", sessionId: "chat-1" },
-      usage: expect.objectContaining({ metric: "chat-output-moderation", model: LLAMA_GUARD_MODEL, inputTokens: 800, outputTokens: 5 }),
+      usage: expect.objectContaining({ metric: "chat-output-moderation", model: LLAMA_GUARD_MODEL, inputTokens: 800, outputTokens: 5,
+        metadata: expect.objectContaining({ modelClass: expect.objectContaining({ role: "output-moderation" }),
+          modelConfig: { operation: "chat-output-moderation", maxOutputTokens: 16, temperature: 0, hostPreference: "pinned" } }) }),
     }));
   });
 

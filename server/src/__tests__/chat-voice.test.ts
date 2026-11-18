@@ -60,7 +60,8 @@ describe("Mastra project speech input", () => {
     expect(mocks.record).toHaveBeenCalledWith({ ...context, usage: expect.objectContaining({
       provider: "openrouter", model: "microsoft/mai-transcribe-2", metric: "chat.transcription",
       inputTokens: 0, outputTokens: 0, amount: 12.5, unit: "second", costCents: usage.cost * 100,
-      metadata: expect.objectContaining({ generationId: "gen-1", costSource: "provider" }),
+      metadata: expect.objectContaining({ generationId: "gen-1", costSource: "provider",
+        modelClass: { role: "chat-voice" }, modelConfig: { operation: "chat-transcription", format: "wav", responseFormat: "json" } }),
     }) });
   });
 

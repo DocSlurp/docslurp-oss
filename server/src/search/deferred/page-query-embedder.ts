@@ -93,7 +93,8 @@ async function embedWithJina(
     metric: "page-query-embedding",
     inputTokens,
     costCents: cost.costCents,
-    metadata: { ...cost.metadata, servedModel: call.model, embedding: true },
+    metadata: { ...cost.metadata, servedModel: call.model, embedding: true,
+      modelConfig: { inputType: "query", queryPrefix: true, dimensions: embedding.length, normalize: true, timeoutMs: EMBED_TIMEOUT_MS } },
   });
   return l2Normalize(embedding);
 }
@@ -135,7 +136,8 @@ async function embedWithGemini(
     metric: "page-query-embedding",
     // Actual provider usage; only a response without any usage falls back to an estimate, labelled as such.
     inputTokens: reported ?? estimateTextTokens(args.query),
-    metadata: { embedding: true, usageSource: reported === undefined ? "estimated" : "provider" },
+    metadata: { embedding: true, usageSource: reported === undefined ? "estimated" : "provider",
+      modelConfig: { inputType: "query", queryPrefix: false, dimensions: values.length, normalize: true, timeoutMs: EMBED_TIMEOUT_MS } },
   });
   return l2Normalize(values);
 }

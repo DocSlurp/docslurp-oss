@@ -167,7 +167,10 @@ export async function moderateChatAnswer(response: ProjectChatResponse, args: {
       scope: { orgId: args.orgId ?? null, projectId: args.projectId, sessionId: response.sessionId },
       usage: { provider: "openrouter", model: verdict.usage.model, metric: "chat-output-moderation",
         inputTokens: verdict.usage.inputTokens, outputTokens: verdict.usage.outputTokens, costCents: verdict.usage.costCents,
-        metadata: { ...verdict.usage.metadata, moderator: moderator.name, flagged: verdict.flagged } },
+        metadata: { ...verdict.usage.metadata, moderator: moderator.name, flagged: verdict.flagged,
+          // The level (the configured moderator, a deployment choice) and its fixed request settings (model-provenance.ts).
+          modelClass: { moderator: moderator.name, role: "output-moderation" },
+          modelConfig: { operation: "chat-output-moderation", maxOutputTokens: 16, temperature: 0, hostPreference: "pinned" } } },
     });
   }
   if (verdict.unavailable) return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
