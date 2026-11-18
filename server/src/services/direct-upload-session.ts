@@ -750,9 +750,36 @@ export const CLIENT_FINALIZING_HOLD_SECONDS = 30;
 export const CLIENT_FINALIZING_MAX_HOLD_SECONDS = 15 * 60;
 export const PARTS_INCOMPLETE_MESSAGE = "Upload parts are incomplete or have incorrect sizes";
 
+/**
+ * What a client does about a failed file:
+ * - `retryable` (with `action: "retry"`): repeat the same request for this file as it is (storage briefly unavailable,
+ *   the session busy, or this call's time budget spent).
+ * - `action: "reupload"`: put the file's bytes again (or finish its parts), then repeat (missing object, parts
+ *   incomplete, bytes changed or of the wrong size).
+ * - `action: "none"`: nothing a repeat can fix (unknown file, refused type or size, changed declared size).
+ * - `blocksSession`: left as is, this file makes the reconciler fail the whole session once the client stops
+ *   finalizing (its stored bytes are refused); repair it or abort the session.
+ */
+export type DirectUploadFileError = { statusCode: number; code: string; message: string; retryable: boolean; action: "retry" | "reupload" | "none"; blocksSession: boolean };
+
 export type DirectUploadFileCompletion =
   | { fileId: string; status: "completed" }
-  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string; retryable: boolean } };
+  | { fileId: string; status: "failed"; error: DirectUploadFileError };
+
+const REUPLOAD_MESSAGES = ["Upload parts are incomplete", "No object found", "Uploaded size for", "Multipart completion for"];
+
+/** The public, per-file description of a file's failure (see DirectUploadFileError). */
+export function describeFileFailure(error: ProjectIntakeError): DirectUploadFileError {
+  const code = error.code ?? rejectionCode(error);
+  const retryable = error.statusCode >= 500 || code === "upload_session_busy";
+  const reupload = !retryable && (error.message.includes("changed while its upload was being completed")
+    || REUPLOAD_MESSAGES.some(prefix => error.message.startsWith(prefix)));
+  // Mirrors the reconciler's terminal rule (a 4xx other than 409) for what it meets on its own: an absent object is
+  // only "not yet", and an unknown file or a changed declared size never reaches it.
+  const blocksSession = error.statusCode < 500 && error.statusCode !== 409 && error.statusCode !== 404
+    && !error.message.startsWith("No object found") && error.message !== DECLARED_SIZE_CHANGE_MESSAGE;
+  return { statusCode: error.statusCode, code, message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession };
+}
 
 type FinalizeOutcome = { fileId: string; completed: true } | { fileId: string; completed: false; error: unknown };
 
@@ -836,12 +863,11 @@ export async function completeDirectUploadFiles(input: { sessionId: string; user
   const files = outcomes.map((outcome): DirectUploadFileCompletion => {
     if (outcome.completed) return { fileId: outcome.fileId, status: "completed" };
     if (outcome.error instanceof ProjectIntakeError) {
-      const code = outcome.error.code ?? rejectionCode(outcome.error);
-      return { fileId: outcome.fileId, status: "failed", error: { statusCode: outcome.error.statusCode, code, message: outcome.error.message, retryable: outcome.error.statusCode >= 500 || code === "upload_session_busy" } };
+      return { fileId: outcome.fileId, status: "failed", error: describeFileFailure(outcome.error) };
     }
     // Provider and database errors can carry credentials or internals: log the name only, answer a generic retryable error.
     const unavailable = uploadStorageUnavailable(outcome.error, `session=${input.sessionId} file=${outcome.fileId}`);
-    return { fileId: outcome.fileId, status: "failed", error: { statusCode: unavailable.statusCode, code: unavailable.code!, message: unavailable.message, retryable: true } };
+    return { fileId: outcome.fileId, status: "failed", error: describeFileFailure(unavailable) };
   });
   const completedCount = files.filter(file => file.status === "completed").length;
   return { files, completedCount, failedCount: files.length - completedCount, sessionComplete };

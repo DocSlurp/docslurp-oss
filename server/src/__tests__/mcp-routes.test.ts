@@ -289,6 +289,14 @@ describe("mcpRoutes", () => {
     expect((await request()).status).toBe(201);
     expect(uploadRequest.mock.calls.map(([call]) => call.path)).toEqual([`/direct/sessions/${sessionId}/files/complete`, `/direct/sessions/${sessionId}/confirm`]);
     expect(loadDirectUploadSession).toHaveBeenCalledWith(sessionId, "user-1");
+    // One batched completion, not a call per file.
+    expect(uploadRequest.mock.calls[0]![0].body).toEqual({ files: [{ fileId }] });
+    uploadRequest.mockClear();
+    uploadRequest.mockReturnValueOnce(Response.json({ ok: false, completedCount: 0, failedCount: 1, sessionComplete: false,
+      files: [{ fileId, status: "failed", error: { statusCode: 409, code: "conflict", message: "Upload parts are incomplete or have incorrect sizes", retryable: false, action: "reupload", blocksSession: false } }] }));
+    const partial = await request();
+    expect(partial.status).toBe(409);
+    expect(uploadRequest).toHaveBeenCalledTimes(1);
     uploadRequest.mockClear();
     uploadRequest.mockReturnValueOnce(Response.json({ error: "File is incomplete" }, { status: 400 }));
     expect((await request()).status).toBe(400);
