@@ -39,6 +39,12 @@
 - Realtime row triggers still on per-page tables (council, 2026-11-13): 0153 moved `document_chunks`, `document_pages` and `page_stage_states` to statement triggers (`realtime_statement_changed()`; a 20,000-row chunk insert went from about 1.5 s to about 10 ms in the trigger). `document_page_states` (`realtime_materialization_changed()`) and `document_run_stage_states` still pay the lookup and two counter inserts per row; measure a deferred-materialization run and a many-document run, then move them the same way if the trigger shows up.
 - Retire the search-session project backfill (2026-11-13, migration 0152): once every deployment has run `sweepSearchSessionProjectBackfill` to completion (it logs `nothing left`), drop the sweep and, one release after no writer omits the column, the `search_sessions_set_project_id` trigger. Until the sweep finishes on a deployment, project reads undercount sessions older than the migration.
 
+## Device login pages lose their HTML on errors (2026-11-17)
+
+- [ ] `/oauth/mcp/device` renders HTML pages with 400, 403 and 429 statuses (wrong or expired code, form sent from another site, too many attempts), but the public error filter (`safeErrorResponse`) replaces every 4xx body with the JSON envelope, so the visitor sees a raw error. The signed-out case now redirects to sign-in instead; the others need either 200 pages or a way for first-party HTML to pass the filter.
+- [ ] `GET /oauth/mcp/authorize` redirects a visitor whose session is not usable yet (second factor pending, organization MFA policy not met) to the app's sign-in page, which sends them straight back: a redirect loop. The device page now renders a page for that case; do the same here, or have the app's page not resume while two-factor is pending.
+- [ ] Magic-link and MFA-interrupted sign-ins started from the device or consent page return to `/app` instead of the page that sent them (app side: the return path only accepts `/app…`).
+
 ## Host-only cookie follow-ups (2026-11-17 council on the `__Host-` cookie change)
 
 - [ ] Cookie names with non-token bytes: the cookie parser trims with `.trim()` and takes the first match, so a name that starts with a raw 0xA0 byte reads as the `__Host-` session cookie. No browser route to store such a name from a sibling host was found; drop cookie pairs whose name has non-token bytes before the request reaches Better Auth.
