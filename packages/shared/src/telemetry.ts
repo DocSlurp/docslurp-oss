@@ -440,6 +440,20 @@ export async function withBackgroundSpan<T>(task: string, run: () => Promise<T>)
   }
 }
 
+/**
+ * Direct-upload finalization and wave metrics (meter `docslurp.uploads`, instruments `docslurp.upload.<name>`). Labels
+ * are bounded categories (outcome, path, protocol, trigger, lock class, error class); ids belong on logs, never here.
+ */
+export function recordUploadTelemetry(name: string, value: number, labels: Record<string, string>, kind: "counter" | "histogram" = "counter", unit?: string): void {
+  const meter = getRuntime()?.metrics?.getMeter("docslurp.uploads");
+  if (!meter) return;
+  bestEffort(() => {
+    const instrument = `docslurp.upload.${name}`;
+    if (kind === "histogram") meter.createHistogram(instrument, unit ? { unit } : {}).record(value, labels);
+    else meter.createCounter(instrument, unit ? { unit } : {}).add(value, labels);
+  });
+}
+
 /** IDs stay on logs/spans; media metric labels are bounded provider/model categories. */
 export function recordMediaTelemetry(args: { provider: string; model: string; operation: string; outcome: string;
   durationSeconds: number; audioSeconds?: number; costUsd?: number; costSource?: string; candidateFrames?: number; selectedFrames?: number; inputTokens?: number; outputTokens?: number }): void {
