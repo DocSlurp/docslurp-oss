@@ -44,7 +44,7 @@ import {
   type ExtractionContract,
   type ExtractionArtifactRef, switchDisabled } from "@docslurp/shared";
 import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
-import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
+import { mayHaveHtmlTables, storeEmbedTableCells, tableCellsInactiveStatus, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
 import { visionMayReadDocumentPages } from "../lib/vision-reads-pages.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
@@ -1404,6 +1404,8 @@ export class ExtractMarkdownStage implements Stage {
     extracted: { markdown: string; canonicalDocument: import("@docslurp/shared").CanonicalDocument; needsVision: boolean },
     signal?: AbortSignal,
   ): Promise<StoreEmbedTableCellsStats> {
+    const inactive = tableCellsInactiveStatus(state.run.pipeline);
+    if (inactive) return { status: inactive };
     if (!mayHaveHtmlTables(extracted.markdown, extracted.canonicalDocument.blocks)) return { status: "no-tables" };
     // vision-extract is then the last stage to write this document's tables before pii-detect; it stores them fresh.
     if (visionMayReadDocumentPages(state, document, extracted.needsVision)) return { status: "vision-pending" };

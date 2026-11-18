@@ -22,7 +22,8 @@ import {
   writeTableCellsArtifact,
   type TableCellsStorage,
 } from "../pipeline/html-table-cells-cache.js";
-import { embedTextFromMarkdown } from "./embedding-runtime.js";
+import { htmlTableSources } from "../pipeline/chunking.js";
+import { imageAnchorsToAltText } from "@docslurp/shared";
 import { normalizeNfc } from "../lib/unicode-text.js";
 
 /** Total time the best-effort writer may take (one warm VM command plus one read and one write). */
@@ -42,19 +43,34 @@ export interface StoreEmbedTableCellsStats {
 const diagnostic = (error: unknown) => (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 200);
 
 /**
- * What embed will derive from the Markdown and canonical document a stage just wrote (in memory): the document text
- * (extractTextForEmbedding's derivation) and the canonical blocks NFC-normalized as readCanonicalDocumentArtifact does
- * on read. Its table sources are embed's own set, and its generation is the one embed computes over what it reads.
+ * The table sources embed will chunk for the Markdown and canonical document a stage just wrote, and their generation
+ * (tableCellsGeneration), without copying the document: tables are found in the raw Markdown and in the canonical
+ * blocks that contain one (htmlTableSources), and only each table's own source goes through embed's text derivation
+ * (NFC, image anchors to alt text, NFC; canonical block text NFC, as readCanonicalDocumentArtifact does on read). A
+ * table embed derives differently (one inside a page later kept as an image) only makes the artifact stale: a miss.
  */
 export function writerEmbedInputs(markdown: string, canonicalDocument: CanonicalDocument | undefined): { sources: string[]; generation: string } {
-  const canonical = canonicalDocument && { ...canonicalDocument, blocks: canonicalDocument.blocks.map((block) => ({ ...block, text: normalizeNfc(block.text) })) };
-  const extracted = { text: embedTextFromMarkdown(markdown, canonical), canonicalDocument: canonical };
-  return { sources: embedHtmlTableSources(extracted), generation: tableCellsGeneration(extracted) };
+  const sources: string[] = [];
+  for (const block of canonicalDocument?.blocks ?? []) {
+    if (!/<table/i.test(block.text)) continue;
+    const text = normalizeNfc(block.text);
+    sources.push(text.trim(), ...htmlTableSources(text));
+  }
+  if (/<table/i.test(markdown)) {
+    for (const table of htmlTableSources(markdown)) sources.push(normalizeNfc(imageAnchorsToAltText(normalizeNfc(table))).trim());
+  }
+  return { sources, generation: tableCellsGeneration(sources) };
 }
 
 /** The table sources embed will chunk for this Markdown and canonical document (writerEmbedInputs). */
 export function writerTableSources(markdown: string, canonicalDocument: CanonicalDocument | undefined): string[] {
   return writerEmbedInputs(markdown, canonicalDocument).sources;
+}
+
+/** Why this run stores no table cells at all (`off`, `pii-policy`), or null when it may. Checked before anything else. */
+export function tableCellsInactiveStatus(pipeline: { piiPolicy?: { enabled?: boolean } | null } | null | undefined): "off" | "pii-policy" | null {
+  if (tableCellsCacheActive(pipeline)) return null;
+  return pipeline && tableCellsCacheActive({}) ? "pii-policy" : "off";
 }
 
 /** Cheap in-memory check before any work: no `<table` anywhere means embed has no VM table work. */
@@ -75,9 +91,8 @@ export async function storeEmbedTableCells(args: {
   deadlineMs?: number;
 }): Promise<StoreEmbedTableCellsStats> {
   const started = Date.now();
-  if (!tableCellsCacheActive(args.run.pipeline)) {
-    return { status: args.run.pipeline && tableCellsCacheActive({}) ? "pii-policy" : "off" };
-  }
+  const inactive = tableCellsInactiveStatus(args.run.pipeline);
+  if (inactive) return { status: inactive };
   // The key is the run's; a document of another run never writes under it (fails closed: no stored cells).
   if (args.document.runId !== args.run.id) return { status: "unavailable", error: "document belongs to another run" };
   if (!mayHaveHtmlTables(args.markdown, args.canonicalDocument?.blocks)) return { status: "no-tables" };

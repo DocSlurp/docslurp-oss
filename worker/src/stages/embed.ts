@@ -194,12 +194,13 @@ export class EmbedStage implements Stage {
               runId: state.run.id,
               documentId: document.id,
               // Bound to exactly what embed read: an artifact written for other content (an older write landing late) is refused.
-              generation: tableCellsGeneration(extracted),
+              generation: tableCellsGeneration(tableSources),
               guestVersion: guest.version,
               sources: tableSources,
               signal,
             });
             const reason = "reason" in tableCells ? tableCells.reason : null;
+            // `stale` (written for other table sources, e.g. a late older write) is expected and logged at info.
             (tableCells.status === "invalid" || tableCells.status === "unavailable" ? console.warn : console.log)(
               `[table-cells] embed document=${document.id} status=${tableCells.status} hits=${tableCells.hits} ` +
                 `misses=${tableCells.misses}${reason ? ` reason=${reason}` : ""} ms=${Date.now() - lookupStarted}`,

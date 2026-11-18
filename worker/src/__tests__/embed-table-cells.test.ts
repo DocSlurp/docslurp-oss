@@ -279,7 +279,7 @@ describe("stored HTML table cells: identity with the VM path", () => {
     const embedVm = vmRunner();
     const result = await embed(storage, "partial", later, slots, embedVm);
     expect(embedVm.batches.flat().sort()).toEqual(vmTableSources(htmlTableSources(later)).sort());
-    expect(result.reuse?.metadata).toMatchObject({ status: "invalid", hits: 0, misses: 2 });
+    expect(result.reuse?.metadata).toMatchObject({ status: "stale", hits: 0, misses: 2 });
     const before = await oldPath("partial", later);
     expect(stable(result.artifact)).toBe(stable(before.artifact));
   });
@@ -313,7 +313,8 @@ describe("stored HTML table cells: identity with the VM path", () => {
     const slots = await seed(storage, "race", later);
     const embedVm = vmRunner();
     const result = await embed(storage, "race", later, slots, embedVm);
-    expect(result.reuse?.metadata).toMatchObject({ status: "invalid", reason: expect.stringContaining("header mismatch") });
+    // Reported as `stale` (a well-formed artifact for other table sources), logged at info, not as invalid.
+    expect(result.reuse?.metadata).toMatchObject({ status: "stale", reason: "artifact written for other table sources" });
     expect(embedVm.run).toHaveBeenCalled();
     expect(stable(result.artifact)).toBe(stable((await oldPath("race", later)).artifact));
     // The same content written twice is the same generation: a hit.
@@ -537,6 +538,17 @@ describe("stored HTML table cells: stage wiring", () => {
     expect(storage.writes.some((key) => key.includes("/table-cells/"))).toBe(expected === "written");
   });
 
+  it("with the flag off, the status is `off`, never `vision-pending` (Low-3)", async () => {
+    vi.stubEnv("DOCSLURP_TABLE_CELLS_CACHE", "");
+    const { stats, vm } = await wired(runState("wired", "", { quality: "auto", visionFallback: true }), true);
+    expect(stats).toEqual({ status: "off" });
+    expect(vm.run).not.toHaveBeenCalled();
+    const pii = await wired(runState("wired", "", { quality: "good", visionFallback: true, piiPolicy: { enabled: true, patterns: ["ssn"], action: "redact_artifacts" } }), true);
+    vi.stubEnv("DOCSLURP_TABLE_CELLS_CACHE", "on");
+    expect((await wired(runState("wired", "", { quality: "good", visionFallback: true, piiPolicy: { enabled: true, patterns: ["ssn"], action: "redact_artifacts" } }), true)).stats).toEqual({ status: "pii-policy" });
+    expect(pii.stats).toEqual({ status: "off" });
+  });
+
   it.each([
     // The Fast playbook disallows vision without evidence routing (v1); with evidence routing (v3) a page's own evidence decides.
     ["v1", "written"],
@@ -657,7 +669,7 @@ describe("stored HTML table cells: stage wiring", () => {
       expect(new Set(vmTableSources(writerTableSources(markdown.normalize("NFD"), canonical)))).toEqual(new Set(vmTableSources(fromSlots)));
       // And the same generation: what the writer derived is exactly what embed read.
       const read = await extractTextForEmbedding(document("same", markdown), {} as CommandRunner, storage as unknown as ArtifactStore, slots.markdownUri, undefined, slots.canonicalUri);
-      expect(writerEmbedInputs(markdown, canonical).generation).toBe(tableCellsGeneration(read));
+      expect(writerEmbedInputs(markdown, canonical).generation).toBe(tableCellsGeneration(embedHtmlTableSources(read)));
     }
   });
 });
@@ -854,6 +866,73 @@ describe("the parser VM path's memory bounds (H2b)", () => {
   });
 });
 
+describe("the structural output bound covers real guest output (Low-8, Low-9)", () => {
+  // Escape-heavy fragments: control characters, quotes, backslashes, named and numeric references (including the
+  // multi-code-point and longest-expanding named ones, C0/C1 and surrogate numerics), `<br>`, inline markup.
+  const fragments = ["a", "B c", " ", "\t", "\n", "\r\n", "\r", "\"", "\\", "&amp;", "&lt;", "&quot;", "&bsol;", "&#9;", "&#10;", "&#1;",
+    "&#x1F600;", "&nbsp;", "&acE;", "&nvlt;", "&bne;", "&NotEqualTilde;", "&nGt;", "&nLt;", "&Afr;", "&#0;", "&#128;", "&#x7f;",
+    "&#xD800;", "&#xDFFF;", "&#x10FFFF;", "&#1114112;", "&amp", "&copy", "&", "<", "\u0001", "\u001f", "\u007f", "\u2028", "\u0085",
+    "é", "漢", "😀", "\ud800", "\udc00", "<br>", "<br/>", "<b>x</b>", "<i>", "</i>", "\u0000", "\u00a0", "\ufffd"];
+  let seed = 4242;
+  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+  const pick = <T,>(items: T[]) => items[Math.floor(random() * items.length)]!;
+  const text = () => Array.from({ length: Math.floor(random() * 7) }, () => pick(fragments)).join("");
+  const table = () => {
+    let body = random() < 0.2 ? `<caption>${text()}</caption>` : "";
+    for (let row = 0, rows = 1 + Math.floor(random() * 4); row < rows; row++) {
+      body += "<tr>";
+      for (let column = 0, columns = 1 + Math.floor(random() * 4); column < columns; column++) {
+        const tag = random() < 0.3 ? "th" : "td";
+        body += `<${tag}${random() < 0.2 ? ` colspan="${1 + Math.floor(random() * 3)}"` : ""}>${text()}</${tag}>`;
+      }
+      body += "</tr>";
+    }
+    return `<table>${random() < 0.5 ? `<tbody>${body}</tbody>` : body}</table>`;
+  };
+  // The bound before the single-scan rewrite, kept as the reference the scan must reproduce exactly.
+  const regexBound = (source: string) => {
+    const growth = 5 * (source.match(/[\u0000-\u001f\u007f]/g)?.length ?? 0) + (source.match(/["\\]/g)?.length ?? 0)
+      + 2 * (source.match(/&/g)?.length ?? 0) + 3 * (source.match(/[\uD800-\uDFFF]/g)?.length ?? 0);
+    return Buffer.byteLength(source, "utf8") + growth + 96 * (source.match(/<(?:td|th|caption)(?=[\t\n\f\r />])/gi)?.length ?? 0) + 8;
+  };
+
+  it("on 20,000 fuzzed escape-heavy tables, real guest output never exceeds the bound, and the scan equals the reference formula", () => {
+    let parsed = 0, worst = 0;
+    const batch: string[] = [];
+    for (let i = 0; i < 20_000; i++) {
+      const source = table();
+      expect(htmlTableCellsOutputBound([source]) - 64).toBe(regexBound(source));
+      const cells = readTableCells(source);
+      if (!cells) continue;
+      parsed++;
+      const real = Buffer.byteLength(JSON.stringify(cells)) + 1;
+      const bound = htmlTableCellsOutputBound([source]) - 64;
+      expect(real, source).toBeLessThanOrEqual(bound);
+      worst = Math.max(worst, real / bound);
+      if (batch.length < 64) batch.push(source);
+    }
+    // Most escape-heavy tables are refused by the guest (parse errors: null cells); hundreds still parse.
+    expect(parsed).toBeGreaterThan(500);
+    expect(worst).toBeLessThan(1);
+    // A whole batch, exactly as the guest writes it.
+    expect(Buffer.byteLength(JSON.stringify(batch.map(readTableCells)))).toBeLessThanOrEqual(htmlTableCellsOutputBound(batch));
+  });
+
+  it("every numeric character reference in the edge ranges stays within the bound", () => {
+    const ranges: Array<[number, number]> = [[0, 0x2ff], [0xd7f0, 0xe010], [0xfff0, 0x10010], [0x10fff0, 0x110010]];
+    for (const [from, to] of ranges) {
+      for (let code = from; code <= to; code++) {
+        for (const ref of [`&#${code};`, `&#x${code.toString(16)};`, `&#${code}`]) {
+          const source = `<table><tr><td>${ref}${ref}</td></tr></table>`;
+          const cells = readTableCells(source);
+          if (!cells) continue;
+          expect(Buffer.byteLength(JSON.stringify(cells)) + 1, ref).toBeLessThanOrEqual(htmlTableCellsOutputBound([source]) - 64);
+        }
+      }
+    }
+  });
+});
+
 describe("stored HTML table cells: keys and limits", () => {
   it("hashes the exact parser input: sources differing only by an unpaired surrogate do not collide", () => {
     const lone = "<table><tr><td>\uD800</td></tr></table>", replaced = "<table><tr><td>�</td></tr></table>";
@@ -1019,6 +1098,20 @@ describe("stored HTML table cells: fail closed to the VM path", () => {
     const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, sources: [table] });
     expect(lookup).toMatchObject({ status: "invalid", reason: expect.stringMatching(/JSON (scalar count|string length) exceeds limit/) });
     expect(parse).not.toHaveBeenCalled();
+  });
+
+  it("reads into one buffer of the recorded length, with no concatenation of the body (Low-7)", async () => {
+    const tables = Array.from({ length: 8 }, (_, i) => `<table><tr><td>${String(i).repeat(40_000)}</td></tr></table>`);
+    const storage = new MemoryStorage();
+    await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, prepared: new Map(tables.map((t) => [t, readTableCells(t)])), byteCap: tableCellsByteCap(tables) });
+    const length = storage.objects.get("k")!.length;
+    expect(length).toBeGreaterThan(4 * 64 * 1024);
+    const concat = vi.spyOn(Buffer, "concat");
+    const allocUnsafe = vi.spyOn(Buffer, "allocUnsafe");
+    expect((await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, sources: tables })).status).toBe("hit");
+    // One concatenation, of the first chunk (the header); the body is allocated once at the recorded length.
+    expect(concat.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(allocUnsafe.mock.calls.filter(([size]) => size === length)).toHaveLength(1);
   });
 
   it("bytes past the recorded length stop the transfer there", async () => {

@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import type { CanonicalDocument } from "@docslurp/shared";
 import { htmlTableSources } from "./chunking.js";
-import { assertHtmlTableCells, HTML_TABLE_DOCUMENT_LIMITS, htmlTableCellTagCount, htmlTableValueBound, tableParseMemoryBudget, vmTableSources, type PreparedHtmlTableCells } from "./html-table-vm.js";
+import { assertHtmlTableCells, HTML_TABLE_DOCUMENT_LIMITS, htmlTableCellTagCount, htmlTableValueBound, tableParseMemoryBudget, vmTableSources, type HtmlTableStatsMemo, type PreparedHtmlTableCells } from "./html-table-vm.js";
 import { HTML_TABLE_MAX_CELLS, HTML_TABLE_MAX_SOURCE_CHARS } from "./html-table-limits.js";
 import { assertJsonShape } from "../lib/json-shape.js";
 import type { HtmlTableCell } from "./table-cells-guest.js";
@@ -32,7 +32,7 @@ const ROW_LABEL = /^row ([1-9][0-9]{0,3}) column ([1-9][0-9]{0,3}) rowspan ([1-9
 export type TableCellsStorage = Pick<ArtifactStore, "putBytes" | "openStream">;
 
 /**
- * DOCSLURP_TABLE_CELLS_CACHE. Default off (owner, 2026-11-17: turned on after a production comparison). Only `on`
+ * DOCSLURP_TABLE_CELLS_CACHE. Off until a production comparison (owner, 2026-11-17). Only `on`
  * (or `1`, `true`) stores table cells before embed and lets embed reuse them; anything else, unset included, keeps the
  * old path, where embed parses every table in a VM of its own. Only meaningful where parsing is VM-only.
  */
@@ -81,21 +81,23 @@ export function embedHtmlTableSources(extracted: { text: string; canonicalDocume
  * record (one per cell tag) and 80 per table, plus the header; never above TABLE_CELLS_ARTIFACT_MAX_BYTES. The writer
  * does not store above it; the reader refuses a longer artifact before reading its body.
  */
-export function tableCellsByteCap(sources: string[]): number {
+export function tableCellsByteCap(sources: string[], memo?: HtmlTableStatsMemo): number {
   let bound = 1024;
-  for (const source of vmTableSources(sources)) bound += htmlTableValueBound(source) + 40 * htmlTableCellTagCount(source) + 80;
+  for (const source of vmTableSources(sources)) bound += htmlTableValueBound(source, memo) + 40 * htmlTableCellTagCount(source, memo) + 80;
   return Math.min(TABLE_CELLS_ARTIFACT_MAX_BYTES, bound);
 }
 
 /**
- * The generation an artifact belongs to: sha256 over the exact inputs embed derives its tables from, the document text
- * and every canonical block's text (each JSON-encoded, so the hash is lossless and unambiguous). The writer hashes what
- * it derived from the Markdown and canonical document it wrote; embed hashes what it read. Only an exact match is used,
- * so a late write of an older generation (a retried stage's slower PUT) is never served for a newer one.
+ * The generation an artifact belongs to: sha256 over the distinct VM table sources it holds cells for, sorted and each
+ * JSON-encoded (lossless, unambiguous). Cells depend on nothing else (they are a pure function of the source and the
+ * guest), so this is exactly the content a stored artifact is valid for. The writer hashes the sources it derived from
+ * what it wrote; embed hashes the sources it derived from what it read. Only an exact match is used, so a late write of
+ * an older generation (a retried stage's slower PUT) is never served for a newer one, and neither side copies or
+ * hashes the whole document text.
  */
-export function tableCellsGeneration(extracted: { text: string; canonicalDocument?: CanonicalDocument }): string {
-  const hash = createHash("sha256").update(JSON.stringify(extracted.text), "utf8");
-  for (const block of extracted.canonicalDocument?.blocks ?? []) hash.update("\n").update(JSON.stringify(block.text), "utf8");
+export function tableCellsGeneration(sources: string[]): string {
+  const hash = createHash("sha256");
+  for (const source of vmTableSources(sources).sort()) hash.update(JSON.stringify(source), "utf8").update("\n");
   return hash.digest("hex");
 }
 
@@ -240,9 +242,12 @@ function jsonStringBound(value: string): number {
 
 export type TableCellsLookup =
   | { status: "hit" | "partial" | "unused"; cached: Map<string, HtmlTableCell[] | null>; hits: number; misses: number }
-  | { status: "missing" | "invalid" | "unavailable"; cached: Map<string, HtmlTableCell[] | null>; hits: 0; misses: number; reason: string };
+  | { status: "missing" | "stale" | "invalid" | "unavailable"; cached: Map<string, HtmlTableCell[] | null>; hits: 0; misses: number; reason: string };
 
-class TableCellsRefused extends Error {}
+class TableCellsRefused extends Error {
+  /** `stale`: a well-formed artifact for this run, document and guest, written for other table sources. */
+  constructor(message: string, readonly stale = false) { super(message); }
+}
 
 function isStorageNotFound(error: unknown): boolean {
   for (let current: unknown = error, depth = 0; current && depth < 4; current = (current as { cause?: unknown }).cause, depth++) {
@@ -256,16 +261,17 @@ function isStorageNotFound(error: unknown): boolean {
 /** The limits a stored artifact for these tables must fit, from their structure alone (never from the artifact). */
 interface ReadBudget { bytes: number; tables: number; containers: number; scalars: number; longestString: number }
 function readBudget(unique: string[]): ReadBudget {
-  const tags = unique.reduce((total, source) => total + htmlTableCellTagCount(source), 0);
+  const memo: HtmlTableStatsMemo = new Map();
+  const tags = unique.reduce((total, source) => total + htmlTableCellTagCount(source, memo), 0);
   return {
-    bytes: tableCellsByteCap(unique),
+    bytes: tableCellsByteCap(unique, memo),
     tables: unique.length,
     // { tables [ [sha, [ [cell] ] ] ] }: the object, the tables list, a pair and a records list per table, one per record.
     containers: 2 + 2 * unique.length + tags,
     // 7 header keys and values, a hash (or null) per table, at most 6 per record.
     scalars: 16 + 2 * unique.length + 6 * tags,
     // A value is at most its table's encoded text; header strings (ids, hashes) are short.
-    longestString: Math.max(256, ...unique.map((source) => htmlTableValueBound(source) + 2)),
+    longestString: Math.max(256, ...unique.map((source) => htmlTableValueBound(source, memo) + 2)),
   };
 }
 
@@ -280,33 +286,62 @@ async function readArtifactBytes(storage: Pick<ArtifactStore, "openStream">, key
   const headerBytes = head.length + LENGTH_DIGITS + HEADER_TAIL.length;
   const { stream, size } = await storage.openStream(key, signal);
   const iterator = stream[Symbol.asyncIterator]();
-  const stop = async (reason: string): Promise<never> => {
+  const stop = async (reason: string, stale = false): Promise<never> => {
     await iterator.return?.();
     (stream as { destroy?: () => void }).destroy?.();
-    throw new TableCellsRefused(reason);
+    throw new TableCellsRefused(reason, stale);
   };
   if (size !== null && size > maxBytes) return await stop("artifact exceeds the read budget for these tables");
-  const chunks: Buffer[] = [];
+  // Until the header is known, at most a header's worth of chunks is held; then one buffer of exactly the recorded
+  // length is allocated and filled in place (no concatenation copy).
+  const pending: Buffer[] = [];
   let received = 0;
-  let total = Number.POSITIVE_INFINITY;
+  let body: Buffer | null = null;
   for (;;) {
     const next = await iterator.next();
     if (next.done) break;
-    chunks.push(Buffer.from(next.value));
-    received += next.value.length;
-    if (total === Number.POSITIVE_INFINITY && received >= headerBytes) {
-      const header = Buffer.concat(chunks, received).subarray(0, headerBytes);
-      if (!header.subarray(0, head.length).equals(head) || header.subarray(head.length + LENGTH_DIGITS).toString("utf8") !== HEADER_TAIL) return await stop("artifact header mismatch (schema, run, document, generation or guest)");
-      const digits = header.subarray(head.length, head.length + LENGTH_DIGITS).toString("utf8");
-      if (!/^[0-9]{10}$/.test(digits)) return await stop("invalid artifact length");
-      total = Number(digits);
-      if (total > maxBytes) return await stop("artifact exceeds the read budget for these tables");
-      if (total < headerBytes + FOOTER.length || (size !== null && size !== total)) return await stop("artifact length mismatch");
+    const chunk = Buffer.from(next.value.buffer, next.value.byteOffset, next.value.byteLength);
+    if (body) {
+      if (received + chunk.length > body.length) return await stop("artifact exceeds its recorded length");
+      chunk.copy(body, received);
+      received += chunk.length;
+      continue;
     }
-    if (received > total || (total === Number.POSITIVE_INFINITY && received > Math.max(headerBytes, 64 * 1024))) return await stop("artifact exceeds its recorded length");
+    pending.push(chunk);
+    received += chunk.length;
+    if (received < headerBytes) {
+      if (received > 64 * 1024) return await stop("artifact header mismatch (schema, run, document, generation or guest)");
+      continue;
+    }
+    const start = Buffer.concat(pending, received);
+    const header = start.subarray(0, headerBytes);
+    const tailMatches = header.subarray(head.length + LENGTH_DIGITS).toString("utf8") === HEADER_TAIL;
+    if (!header.subarray(0, head.length).equals(head) || !tailMatches) {
+      return await stop(staleGeneration(header.subarray(0, head.length), head) ? "artifact written for other table sources" : "artifact header mismatch (schema, run, document or guest)", staleGeneration(header.subarray(0, head.length), head) && tailMatches);
+    }
+    const digits = header.subarray(head.length, head.length + LENGTH_DIGITS).toString("utf8");
+    if (!/^[0-9]{10}$/.test(digits)) return await stop("invalid artifact length");
+    const total = Number(digits);
+    if (total > maxBytes) return await stop("artifact exceeds the read budget for these tables");
+    if (total < headerBytes + FOOTER.length || (size !== null && size !== total)) return await stop("artifact length mismatch");
+    if (received > total) return await stop("artifact exceeds its recorded length");
+    body = Buffer.allocUnsafe(total);
+    start.copy(body, 0, 0, received);
+    pending.length = 0;
   }
-  if (received !== total) throw new TableCellsRefused("artifact truncated");
-  return Buffer.concat(chunks, received).toString("utf8");
+  if (!body || received !== body.length) throw new TableCellsRefused("artifact truncated");
+  return body.toString("utf8");
+}
+
+/** Whether a header differs from the expected one only in its 64-hex generation. */
+function staleGeneration(actual: Buffer, expected: Buffer): boolean {
+  if (actual.length !== expected.length) return false;
+  const marker = Buffer.from('"generation":"');
+  const at = expected.indexOf(marker);
+  if (at < 0) return false;
+  const from = at + marker.length, to = from + 64;
+  return actual.subarray(0, from).equals(expected.subarray(0, from)) && actual.subarray(to).equals(expected.subarray(to))
+    && /^[0-9a-f]{64}$/.test(actual.subarray(from, to).toString("latin1"));
 }
 
 /**
@@ -356,7 +391,7 @@ export async function readTableCellsArtifact(args: {
   signal?: AbortSignal;
 }): Promise<TableCellsLookup> {
   const unique = vmTableSources(args.sources);
-  const miss = (status: "missing" | "invalid" | "unavailable", reason: string): TableCellsLookup => ({ status, cached: new Map(), hits: 0, misses: unique.length, reason: reason.replace(/\s+/g, " ").slice(0, 200) });
+  const miss = (status: "missing" | "stale" | "invalid" | "unavailable", reason: string): TableCellsLookup => ({ status, cached: new Map(), hits: 0, misses: unique.length, reason: reason.replace(/\s+/g, " ").slice(0, 200) });
   if (unique.length === 0) return { status: "unused", cached: new Map(), hits: 0, misses: 0 };
   if (!args.guestVersion) return miss("unavailable", "guest parser version unknown");
   if (unique.length > HTML_TABLE_DOCUMENT_LIMITS.tables) return miss("unavailable", "more tables than an artifact may hold");
@@ -369,7 +404,7 @@ export async function readTableCellsArtifact(args: {
       body = await readArtifactBytes(args.storage, args.key, scope, budget.bytes, args.signal);
     } catch (error) {
       if (args.signal?.aborted) throw error;
-      if (error instanceof TableCellsRefused) return miss("invalid", error.message);
+      if (error instanceof TableCellsRefused) return miss(error.stale ? "stale" : "invalid", error.message);
       if (isStorageNotFound(error)) return miss("missing", "no stored table cells");
       return miss("invalid", `artifact unreadable: ${error instanceof Error ? error.message : String(error)}`);
     }

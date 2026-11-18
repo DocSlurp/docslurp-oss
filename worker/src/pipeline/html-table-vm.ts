@@ -64,28 +64,78 @@ export interface PrepareHtmlTablesOptions {
    */
   cached?: ReadonlyMap<string, HtmlTableCell[] | null>;
 }
-/** Cell-creating tags (`<td`, `<th`, `<caption`): each guest record needs one, so their count bounds the record count. */
-const CELL_TAG = /<(?:td|th|caption)(?=[\t\n\f\r />])/gi;
-export function htmlTableCellTagCount(source: string): number {
-  return source.match(CELL_TAG)?.length ?? 0;
+/** What the output bounds need to know about one table source, from a single character scan (htmlTableSourceStats). */
+export interface HtmlTableSourceStats {
+  /** UTF-8 bytes (a lone surrogate counts 3, as its replacement). */
+  bytes: number;
+  /** Bytes JSON escaping can add to its text (see htmlTableValueBound). */
+  growth: number;
+  /** Cell-creating tags (`<td`, `<th`, `<caption` followed by whitespace, `/` or `>`), case-insensitive. */
+  tags: number;
+}
+
+/** One pass over the source's character codes, no allocation. */
+export function htmlTableSourceStats(source: string): HtmlTableSourceStats {
+  let bytes = 0, growth = 0, tags = 0;
+  const n = source.length;
+  for (let i = 0; i < n; i++) {
+    const c = source.charCodeAt(i);
+    if (c < 0x80) {
+      bytes += 1;
+      if (c < 32 || c === 127) growth += 5;
+      else if (c === 34 || c === 92) growth += 1;
+      else if (c === 38) growth += 2;
+      else if (c === 60) tags += cellTagAt(source, i + 1);
+    } else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdfff) {
+      growth += 3;
+      const next = i + 1 < n ? source.charCodeAt(i + 1) : 0;
+      if (c <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) { bytes += 4; growth += 3; i++; }
+      else bytes += 3;
+    } else bytes += 3;
+  }
+  return { bytes, growth, tags };
+}
+
+/** 1 when `<` at position at-1 opens a td, th or caption tag (any case), else 0. */
+function cellTagAt(source: string, at: number): number {
+  const lower = (k: number) => source.charCodeAt(at + k) | 0x20;
+  let length = 0;
+  if (lower(0) === 116 && (lower(1) === 100 || lower(1) === 104)) length = 2; // td, th
+  else if (lower(0) === 99 && lower(1) === 97 && lower(2) === 112 && lower(3) === 116 && lower(4) === 105 && lower(5) === 111 && lower(6) === 110) length = 7; // caption
+  if (!length) return 0;
+  const after = source.charCodeAt(at + length);
+  return after === 9 || after === 10 || after === 12 || after === 13 || after === 32 || after === 47 || after === 62 ? 1 : 0;
+}
+
+/** Per-operation memo of htmlTableSourceStats: each source is scanned once however many bounds read it. */
+export type HtmlTableStatsMemo = Map<string, HtmlTableSourceStats>;
+export function statsOf(source: string, memo?: HtmlTableStatsMemo): HtmlTableSourceStats {
+  let stats = memo?.get(source);
+  if (!stats) { stats = htmlTableSourceStats(source); memo?.set(source, stats); }
+  return stats;
+}
+
+export function htmlTableCellTagCount(source: string, memo?: HtmlTableStatsMemo): number {
+  return statsOf(source, memo).tags;
 }
 /**
  * The most bytes a table's text can take once JSON-encoded: never more than the source, except where escaping grows it.
  * A control character becomes 6 bytes (+5), a quote or backslash 2 (+1), a lone surrogate 6 (+3 over its UTF-8
- * replacement), and a character reference, which starts with `&`, at most 6 (`&#1;`, +2). Markup and `<br>` only shrink.
+ * replacement; counted for every surrogate code unit), and a character reference, which starts with `&`, at most 6
+ * (`&#1;`, +2). Markup and `<br>` only shrink it.
  */
-export function htmlTableValueBound(source: string): number {
-  const growth = 5 * (source.match(/[\u0000-\u001f\u007f]/g)?.length ?? 0) + (source.match(/["\\]/g)?.length ?? 0)
-    + 2 * (source.match(/&/g)?.length ?? 0) + 3 * (source.match(/[\uD800-\uDFFF]/g)?.length ?? 0);
-  return Buffer.byteLength(source, "utf8") + growth;
+export function htmlTableValueBound(source: string, memo?: HtmlTableStatsMemo): number {
+  const stats = statsOf(source, memo);
+  return stats.bytes + stats.growth;
 }
 /**
  * The most bytes the guest can legitimately return for these tables, from their structure: their text (above) plus at
  * most 96 bytes of label, header and punctuation per record (one record per cell tag). The transfer cap of a batch.
  */
-export function htmlTableCellsOutputBound(sources: readonly string[]): number {
+export function htmlTableCellsOutputBound(sources: readonly string[], memo?: HtmlTableStatsMemo): number {
   let bound = 64;
-  for (const source of sources) bound += htmlTableValueBound(source) + 96 * htmlTableCellTagCount(source) + 8;
+  for (const source of sources) { const stats = statsOf(source, memo); bound += stats.bytes + stats.growth + 96 * stats.tags + 8; }
   return bound;
 }
 /** Several tables share a batch only while their output bound stays under this. */
@@ -169,14 +219,14 @@ export async function prepareHtmlTableCells(sources: string[], runner: Pick<Comm
 interface TableBatch { sources: string[]; cap: number; single: boolean }
 
 /** Group tables into batches: by input bytes, at most 64, and by output bound; a table over the per-table cap alone. */
-function planBatches(misses: string[], tableCap: number): TableBatch[] {
+function planBatches(misses: string[], tableCap: number, memo: HtmlTableStatsMemo): TableBatch[] {
   const batches: TableBatch[] = [];
   let current: TableBatch | null = null;
   let inputBytes = 2;
   for (const source of misses) {
     const bytes = Buffer.byteLength(JSON.stringify(source)) + 1;
     if (bytes + 2 > HTML_TABLE_MAX_BATCH_BYTES) throw new Error("HTML table source exceeds VM batch limit");
-    const bound = htmlTableCellsOutputBound([source]) - 64;
+    const bound = htmlTableCellsOutputBound([source], memo) - 64;
     if (bound + 64 > tableCap) {
       batches.push({ sources: [source], cap: tableCap, single: true });
       continue;
@@ -211,7 +261,8 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
   if (misses.length) {
     const tableCap = htmlTableMaxOutputBytes();
     const budget = tableParseMemoryBudget();
-    const batches = planBatches(misses, tableCap);
+    const memo: HtmlTableStatsMemo = new Map();
+    const batches = planBatches(misses, tableCap, memo);
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-tables-"));
     // A failed batch stops its sibling: one document's batches share this controller.
     const stop = new AbortController();
@@ -245,12 +296,12 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
             }
             // Before JSON.parse builds anything: the guest's result is [ table [ record {…} ] ], one record per cell tag,
             // each with at most three keys and three values, and no string longer than its table's text can encode to.
-            const tags = batch.sources.reduce((total, source) => total + htmlTableCellTagCount(source), 0);
+            const tags = batch.sources.reduce((total, source) => total + htmlTableCellTagCount(source, memo), 0);
             assertJsonShape(text, {
               maxDepth: 3,
               maxContainers: 1 + batch.sources.length + tags,
               maxScalars: batch.sources.length + 6 * tags,
-              maxStringLength: Math.max(...batch.sources.map(htmlTableValueBound)) + 64,
+              maxStringLength: Math.max(...batch.sources.map((source) => htmlTableValueBound(source, memo))) + 64,
             });
             const result = JSON.parse(text) as unknown;
             text = null;
