@@ -72,15 +72,21 @@ test("direct uploads match session files by index: names the server sanitizes st
 });
 
 /** A direct session that answers every file as a single PUT; `onComplete` decides each files/complete reply. */
-function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete }) {
+function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete, sessionStatus = "uploading" }) {
   const live = { put: 0, maxPut: 0, complete: 0, maxComplete: 0 };
+  const files = [];
+  const done = new Set();
   const settle = (key, ms) => setTimeout(() => { live[key]--; }, ms);
   const respond = (request, count, base) => {
     if (request.url === "/v1/uploads/direct/sessions") {
       const body = JSON.parse(request.body.toString());
-      return { status: 201, body: { sessionId: "s1", files: body.files.map((file, index) => ({
+      files.splice(0, files.length, ...body.files.map((file, index) => ({
         index, clientId: file.clientId, id: `f${index}`, filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes, mode: "single", putUrl: `${base}/storage/${index}`,
-      })) } };
+      })));
+      return { status: 201, body: { sessionId: "s1", files } };
+    }
+    if (request.method === "GET" && request.url.startsWith("/v1/uploads/direct/sessions/s1")) {
+      return { body: { sessionId: "s1", status: sessionStatus, files: files.map((file) => ({ ...file, status: done.has(file.id) ? "completed" : "pending" })) } };
     }
     if (request.url.startsWith("/storage/")) {
       live.put++; live.maxPut = Math.max(live.maxPut, live.put); settle("put", putDelayMs);
@@ -88,7 +94,9 @@ function directSessionServer({ putDelayMs = 0, completeDelayMs = 0, onComplete }
     }
     if (request.url.endsWith("/files/complete")) {
       live.complete++; live.maxComplete = Math.max(live.maxComplete, live.complete); settle("complete", completeDelayMs);
-      return { delayMs: completeDelayMs, ...onComplete(JSON.parse(request.body.toString())) };
+      const reply = onComplete(JSON.parse(request.body.toString()));
+      if ((reply.status ?? 200) < 300) done.add(JSON.parse(request.body.toString()).fileId);
+      return { delayMs: completeDelayMs, ...reply };
     }
     if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
     return { status: 404, body: {} };
@@ -111,7 +119,8 @@ test("direct uploads send files in parallel but complete them one at a time, wai
     const completed = new Set();
     const { live, respond } = directSessionServer({ putDelayMs: 150, completeDelayMs: 30, onComplete: ({ fileId }) => {
       // The reconciler holds the lock: an older server's uncoded reply, then the coded one.
-      if (busy-- > 0) return { status: 409, body: { error: { code: busy === 1 ? "conflict" : "upload_session_busy", message: "Upload session is being finalized; retry shortly" } } };
+      // Production replaces the message with a generic public one, so only the code (and the session's state) can tell.
+      if (busy-- > 0) return { status: 409, body: { error: { code: busy === 1 ? "conflict" : "upload_session_busy", message: "Check your request and try again." } } };
       completed.add(fileId);
       return { body: { ok: true } };
     } });
@@ -129,16 +138,44 @@ test("direct uploads send files in parallel but complete them one at a time, wai
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("a conflict that is not the session lock still fails the upload", async () => {
+test("an uncoded conflict on a closed session still fails the upload", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
   try {
     const files = await directFiles(dir, 2);
-    const { respond } = directSessionServer({ onComplete: () => ({ status: 409, body: { error: { code: "conflict", message: "Upload session is closed" } } }) });
+    const { respond } = directSessionServer({ sessionStatus: "aborted", onComplete: () => ({ status: 409, body: { error: { code: "conflict", message: "Check your request and try again." } } }) });
     const result = await invoke(["upload", ...files], respond);
     assert.notEqual(result.code, 0);
     const completes = result.requests.filter((request) => request.url.endsWith("/files/complete")).map((request) => JSON.parse(request.body.toString()).fileId);
     assert.ok(completes.length >= 1);
     assert.equal(new Set(completes).size, completes.length, "no file's complete is retried");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an uncoded 409 for a file the reconciler already finalized counts as done; a rate-limited complete is repeated", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 3);
+    let calls = 0;
+    const server = directSessionServer({ onComplete: ({ fileId }) => {
+      if (fileId === "f2" && calls++ === 0) return { status: 429, headers: { "retry-after": "0" }, body: { error: { code: "rate_limited", message: "slow down" } } };
+      if (fileId === "f1") { server.finalizedByReconciler = true; return { status: 409, body: { error: { code: "conflict", message: "Check your request and try again." } } }; }
+      return { body: { ok: true } };
+    } });
+    const result = await invoke(["upload", ...files], (request, count, base) => {
+      // The reconciler finalized f1 while it held the lock: the session reports it completed.
+      if (request.method === "GET" && request.url.startsWith("/v1/uploads/direct/sessions/s1") && server.finalizedByReconciler) {
+        const reply = server.respond(request, count, base);
+        reply.body.files = reply.body.files.map((file) => (file.id === "f1" ? { ...file, status: "completed" } : file));
+        return reply;
+      }
+      return server.respond(request, count, base);
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const f1 = result.requests.filter((request) => request.url.endsWith("/files/complete") && JSON.parse(request.body.toString()).fileId === "f1");
+    assert.equal(f1.length, 1, "not repeated once the session says it is completed");
+    const f2 = result.requests.filter((request) => request.url.endsWith("/files/complete") && JSON.parse(request.body.toString()).fileId === "f2");
+    assert.equal(f2.length, 2, "the rate-limited complete is sent again");
+    assert.equal(result.requests.filter((request) => request.url.endsWith("/abort")).length, 0);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

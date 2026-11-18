@@ -506,28 +506,49 @@ const storageSlot = limiter(uploadConcurrency());
 const sessionSlot = limiter(1);
 
 /**
- * 409 for a session lock someone else holds (the server's reconciler finalizing the session, or another request of this upload).
- * Older servers send the generic `conflict` code with the message "Upload session is being finalized; retry shortly".
+ * The 409 code of a session-locked request: `upload_session_busy` when someone else holds the session's lock (the server's
+ * reconciler finalizing the session, or another request of this upload). Older servers send the generic `conflict` for that and
+ * for real conflicts alike, with a generic public message, so the caller asks the session which one it was.
  */
-async function isSessionBusy(response: Response): Promise<boolean> {
-  if (response.status !== 409) return false;
+async function conflictCode(response: Response): Promise<string | null> {
+  if (response.status !== 409) return null;
   try {
-    const body = await response.clone().json() as { code?: unknown; message?: unknown; error?: { code?: unknown; message?: unknown } | unknown };
-    const error = body.error && typeof body.error === "object" ? body.error as { code?: unknown; message?: unknown } : body;
-    return error.code === "upload_session_busy" || (error.code === "conflict" && /being finalized; retry shortly/.test(String(error.message ?? "")));
+    const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
+    const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
+    return typeof code === "string" ? code : "conflict";
   } catch {
-    return false;
+    return "conflict";
   }
 }
 
-/** Sends a session-locked request, waiting out a busy lock with backoff. `complete` and `confirm` are idempotent, so a repeat is safe. */
-async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<string, string | boolean>): Promise<Response> {
+/** What the session says about an uncoded 409: the request already took effect, a repeat may succeed, or it is a real failure. */
+type SessionProbe = () => Promise<Response | "retry" | "fail">;
+
+/**
+ * Sends a session-locked request (`files/complete`, `confirm`; both idempotent, so a repeat is safe) one at a time per upload.
+ * It waits out a busy lock and rate limiting with backoff, and asks `probe` about an uncoded 409 from an older server.
+ */
+async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<string, string | boolean>, probe: SessionProbe): Promise<Response> {
   const giveUpAt = Date.now() + Math.max(120_000, Number(flags.timeout ?? 30) * 1000);
   for (let attempt = 0; ; attempt++) {
     const response = await sessionSlot(send);
-    if (!(await isSessionBusy(response)) || Date.now() >= giveUpAt) return response;
+    const backoff = Math.min(2_000, 200 * 2 ** Math.min(attempt, 6)) * (0.5 + Math.random() / 2);
+    let waitMs: number;
+    if (response.status === 429) {
+      waitMs = Math.max(backoff, Math.min(30, retryAfterSeconds(response.headers.get("retry-after")) ?? 1) * 1000);
+    } else {
+      const code = await conflictCode(response);
+      if (code === null || (code !== "upload_session_busy" && code !== "conflict")) return response;
+      if (code === "conflict") {
+        const verdict = await probe().catch(() => "retry" as const);
+        if (verdict instanceof Response) { await response.body?.cancel(); return verdict; }
+        if (verdict === "fail") return response;
+      }
+      waitMs = backoff;
+    }
+    if (Date.now() + waitMs >= giveUpAt) return response;
     await response.body?.cancel();
-    await sleepMs(Math.min(2_000, 200 * 2 ** attempt) * (0.5 + Math.random() / 2));
+    await sleepMs(waitMs);
   }
 }
 
@@ -713,12 +734,28 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
         }
       }
       const body = json(complete);
-      const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, body), flags);
+      const fileId = descriptor.id;
+      const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, body), flags, async () => {
+        // An older server's uncoded 409: the reconciler may hold the lock (and may already have finalized this file), or the
+        // session may be closed. Only an open session with this file still pending is worth another try.
+        const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
+        if (!refreshed.ok) return "fail";
+        const state = await refreshed.json() as DirectSession;
+        if (state.files.find((file) => file.id === fileId)?.status === "completed") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        return ["pending", "uploading"].includes(String(state.status ?? "pending")) ? "retry" : "fail";
+      });
       if (!done.ok) throw await responseFailure(done);
     });
     let confirmed: Response | null;
     try {
-      confirmed = await sendWhenSessionFree(() => apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" }), flags);
+      confirmed = await sendWhenSessionFree(() => apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" }), flags, async () => {
+        // The reconciler may be confirming this session itself: its result is the answer. A closed session is a real failure.
+        const status = await apiFetchRepeatable(`${sessionPath}?statusOnly=true`, flags, {});
+        if (!status.ok) return "fail";
+        const state = await status.json() as { status?: string; result?: unknown };
+        if (state.result) return new Response(JSON.stringify(state.result), { status: 201, headers: { "content-type": "application/json" } });
+        return ["pending", "uploading", "ingesting"].includes(String(state.status ?? "")) ? "retry" : "fail";
+      });
     } catch (error) {
       if (!isLostResponse(error)) throw error;
       confirmed = await pollConfirmedSession(sessionPath, flags);
