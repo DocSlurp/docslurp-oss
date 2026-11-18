@@ -83,3 +83,26 @@ export async function loadComputeObservations(sql: postgres.Sql<Record<string, u
     calibrations: calibrations.filter((row) => valid.has(row.offer_id)).map((row) => decodeComputeObservation<ComputeCalibrationObservation>(row, computeCalibrationColumns)),
   };
 }
+
+const SPEND_LABEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+
+/**
+ * Recorded `sandbox_compute` spend (cents) of one provider and model across every organization in the window, read
+ * through usage_attribution (the one spend reader; migration 0194's partial index serves the window).
+ */
+export async function computeSpendCents(sql: postgres.Sql<Record<string, unknown>>, query: { provider: string; model: string; sinceSeconds: number }): Promise<number> {
+  if (!SPEND_LABEL.test(query.provider) || !SPEND_LABEL.test(query.model) || !Number.isSafeInteger(query.sinceSeconds) || query.sinceSeconds < 1 || query.sinceSeconds > 86_400) {
+    throw new Error("Invalid compute spend query");
+  }
+  // A cap read must never hold a pool connection on a slow database (2 s); a correction row never lowers the total.
+  const [row] = await sql.begin(async (tx) => {
+    await tx`set local statement_timeout = '2s'`;
+    return await tx<{ cents: string | number | null }[]>`
+      select coalesce(sum(greatest(cost_cents, 0)), 0) as cents from usage_attribution
+      where metric = 'sandbox_compute' and provider = ${query.provider} and model = ${query.model}
+        and created_at > now() - (${query.sinceSeconds} * interval '1 second')`;
+  });
+  const cents = Number(row?.cents ?? 0);
+  if (!Number.isFinite(cents) || cents < 0) throw new Error("Invalid compute spend total");
+  return cents;
+}

@@ -67,7 +67,8 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   }
 }
 
-const embeddingChange = () => ({ pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
+/** Index-identity changes on a project with documents are locked: the confirmation (`apply: "reindex"`) unlocks them. */
+const embeddingChange = () => ({ apply: "reindex" as const, pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
 
 async function patch(input: Record<string, unknown>) {
   const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never });

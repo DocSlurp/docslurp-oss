@@ -161,7 +161,10 @@ export const projectSchema = z.object({
    * `allowChinaProviders`: requests use those providers only when both are true (docs/provider-regions.md).
    */
   allowChinaProviders: z.boolean().default(true),
-  /** Skip the confirm dialog for re-index-queuing changes; recommended changes re-index when `apply` is omitted. */
+  /**
+   * Skip the confirm dialog for recommended re-indexes; they re-index when `apply` is omitted. Never confirms an
+   * index-identity change (`INDEX_IDENTITY_SETTINGS`), which needs the reindex command or `apply: "reindex"`.
+   */
   autoConfirmReindex: z.boolean().default(false),
   runCount: z.number().int().nonnegative().default(0),
   searchSessionCount: z.number().int().nonnegative().default(0),
@@ -1041,12 +1044,23 @@ export const updateProjectSchema = z.object({
   /** Null (or 0) keeps runs indefinitely. */
   runRetentionDays: z.number().int().min(0).max(3650).nullable().optional(),
   /**
-   * What to do with existing documents when the change affects them. A required re-index always queues;
-   * a recommended one re-indexes on "reindex" (or when omitted and `autoConfirmReindex` is on).
+   * What to do with existing documents when the change affects them. "reindex" is the explicit confirmation: it applies
+   * the change and re-indexes, exactly like `POST /v1/projects/:id/reindex`. Once a project has ingested documents, a
+   * change to an index-identity setting (`INDEX_IDENTITY_SETTINGS`: embedding, chunking, vector backends) without it is
+   * refused with 409 `reindex_required` and nothing is saved. Other required re-indexes (a stricter PII or privacy
+   * policy) always queue; a recommended one re-indexes on "reindex" (or when omitted and `autoConfirmReindex` is on).
    */
   apply: z.enum(["new-uploads", "reindex"]).optional(),
-  /** Skip the confirm dialog for re-index-queuing changes; also the default `apply` for recommended changes. */
+  /**
+   * The project default for `apply` on recommended re-indexes (new extraction features, higher quality). It never
+   * confirms an index-identity change: those always need `apply: "reindex"` or the reindex command.
+   */
   autoConfirmReindex: z.boolean().optional(),
+  /**
+   * With `apply: "reindex"`: the `signature` an estimate (or a `reindex_required` refusal) returned. The update is
+   * refused with 409 `estimate_stale`, and nothing saved, when the re-index work or its price changed since.
+   */
+  confirmEstimate: z.string().regex(/^[a-f0-9]{64}$/, "confirmEstimate must be the signature an estimate returned").optional(),
   /** Versions kept per document chain; null inherits the organization setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().optional(),
   /** False keeps China-based model providers out of this project's requests; true cannot widen an org opt-out. */

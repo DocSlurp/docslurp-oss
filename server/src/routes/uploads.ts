@@ -61,6 +61,8 @@ import {
   parseProjectIntakeTemplateKey,
 } from "../services/project-intake-actions.js";
 import {
+  assertUploadKeepsIndexIdentity,
+  uploadOverridesTouchIndexIdentity,
   ProjectIntakeError,
   projectIntakePorts,
   type ProjectIntakePorts,
@@ -406,6 +408,12 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         const target = await directUploadTarget(getRequestActor(c), input, orgId);
         // Overrides only; confirm merges them onto the project pipeline and its template locks.
         const pipeline = parseProjectIntakePipeline({ ...input.pipeline, speedBoost: input.speedBoost === true, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
+        // Refuse overrides that would change a populated project's index settings before any bytes are sent (confirm
+        // checks again).
+        if (target.projectId && uploadOverridesTouchIndexIdentity(pipeline)) {
+          const targetProject = await getProject(target.projectId, userId);
+          if (targetProject) await assertUploadKeepsIndexIdentity(targetProject, pipeline, ports.records);
+        }
         const actor = getRequestActor(c);
         const parsedKey = parseIdempotencyKey(c.req.header("Idempotency-Key"));
         if ("error" in parsedKey) return apiStatusError(c, 400, parsedKey.error);
