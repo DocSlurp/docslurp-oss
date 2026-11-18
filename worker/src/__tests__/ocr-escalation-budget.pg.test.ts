@@ -159,7 +159,7 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     try {
       const activities = await Promise.all(["ocrb-tiff-a", "ocrb-tiff-b"].map(async (id) => {
         const created = store();
-        const state = WorkflowState.create(await created.loadRun("ocrb-tiff-run"), [(await created.loadDocument(id))!]);
+        const state = WorkflowState.create(await created.loadRun("ocrb-tiff-run"), [(await created.loadDocument(id, { runId: "ocrb-tiff-run" }))!]);
         state.bindStore(created);
         state.usageLedger.runId = "ocrb-tiff-run";
         return { id, state };

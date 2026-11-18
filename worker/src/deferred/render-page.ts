@@ -20,7 +20,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const quality = input.quality ?? "reader";
   if (quality !== "reader" && quality !== "export") throw new Error("Invalid page quality");
   const sql = store.stageSql;
-  const document = await store.loadDocument(input.documentId);
+  const document = await store.loadDocument(input.documentId, { runId: input.runId });
   if (document.runId !== input.runId || document.status !== "completed" || document.mimeType !== "application/pdf" || !Number.isInteger(input.pageNumber) || input.pageNumber < 1 || input.pageNumber > document.pageCount) throw new Error("Document page is not renderable");
   // Fail closed (council R7-H1): a document with no parse decision from this build's quarantine (one quarantined before it)
   // is never rasterized from its upload. Final: a retry cannot decide it; a reprocess re-quarantines it.

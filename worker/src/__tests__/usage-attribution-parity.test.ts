@@ -4,6 +4,7 @@ import type postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import { applyRemainingMigrations, createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -105,7 +106,7 @@ describe("worker budget alerts use the same rule", () => {
     // Old worker rule: only metadata.orgId = 'org-2' (1 credit) counted here.
     await sql`update organizations set monthly_budget_cents = 3 where id = 'org-2'`;
 
-    await store.processBudgetAlerts();
+    await new Maintenance(store.stageSql).processBudgetAlerts();
 
     const projects = await sql<{ id: string; level: number; paused: boolean }[]>`
       select id, budget_alert_level as level, budget_paused as paused from projects
@@ -125,7 +126,7 @@ describe("worker budget alerts use the same rule", () => {
   it("re-pauses an over-budget scope whose budget_paused was cleared without a level change", async () => {
     // A budget edit clears budget_paused but leaves budget_alert_level at 100.
     await sql`update organizations set budget_alert_level = 100, budget_paused = false where id = 'org-2'`;
-    await store.processBudgetAlerts();
+    await new Maintenance(store.stageSql).processBudgetAlerts();
     const [org] = await sql<{ level: number; paused: boolean }[]>`
       select budget_alert_level as level, budget_paused as paused from organizations where id = 'org-2'`;
     expect(org).toEqual({ level: 100, paused: true });
@@ -134,7 +135,7 @@ describe("worker budget alerts use the same rule", () => {
   it("keeps a deleted project's spend in its org budget", async () => {
     await sql`update organizations set budget_alert_level = 0, budget_paused = false, monthly_budget_cents = 20 where id = 'org-1'`;
     await sql`delete from projects where id = 'ws-a'`;
-    await store.processBudgetAlerts();
+    await new Maintenance(store.stageSql).processBudgetAlerts();
     const [org] = await sql<{ level: number; paused: boolean }[]>`
       select budget_alert_level as level, budget_paused as paused from organizations where id = 'org-1'`;
     // ingest 10 + search 4 (both in the deleted project) + session 2 + two split thirds 4 = 20.

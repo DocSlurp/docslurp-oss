@@ -27,6 +27,7 @@ import { ApplicationFailure } from "@temporalio/common";
 
 import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
+import { DocumentOutOfScopeError } from "../db/missing-document.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { MaterializePagesInput } from "@docslurp/shared";
 import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
@@ -107,6 +108,12 @@ export function pageTaskSpendPausedFailure(error: unknown): ApplicationFailure |
 }
 
 export function toActivityFailure(error: unknown, attempt?: number, ordinaryAttemptLimit?: number): unknown {
+  // A document outside its run's scope stays outside it: never retried (db/missing-document.ts).
+  for (let link = error, depth = 0; link && depth < 8; link = (link as { cause?: unknown }).cause, depth += 1) {
+    if (link instanceof DocumentOutOfScopeError) {
+      return ApplicationFailure.create({ type: "DocumentOutOfScope", message: link.message, nonRetryable: true, cause: link });
+    }
+  }
   const throttled = findProviderRetryableError(error);
   if (!throttled) {
     const exhausted = attempt !== undefined && ordinaryAttemptLimit !== undefined && attempt >= ordinaryAttemptLimit;
@@ -415,7 +422,7 @@ export function createActivities(deps: ActivityDependencies) {
             }
             // The previous stage's completion checkpoint already read the control state.
             let controlRequested: boolean | undefined;
-            let preloaded: import("../db/store.js").PreloadedRunState | undefined;
+            let preloaded: import("../db/run-ledger.js").PreloadedRunState | undefined;
             for (const [position, stageName] of input.stageNames.entries()) {
               if (position < resumeAt) continue;
               if (position > resumeAt && input.yieldToControl && (controlRequested ?? await store.hasRunControlRequest(input.runId))) {

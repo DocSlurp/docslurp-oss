@@ -1044,7 +1044,7 @@ export class ExtractMarkdownStage implements Stage {
                   // Per-page routing facts (text layer, scan class) from the winning VM job, whatever the figure setting: the
                   // walker's layout facts first, then Doppler's validated page facts (DOCSLURP_DOPPLER_PAGE_FACTS store or use;
                   // off never parses them). Closed enums only; never billing.
-                  await recordPageFacts(state.store, buildRoutingPageFacts({
+                  await recordPageFacts(state, buildRoutingPageFacts({
                     documentId: document.id, runId: state.run.id, pageCount: document.pageCount,
                     layoutFacts: routingFactsWithDopplerFacts(winningCandidate.layoutFacts, winningCandidate.pageFacts),
                   }));
@@ -1398,7 +1398,7 @@ export class ExtractMarkdownStage implements Stage {
     sourcePath: string,
     markdown: string,
   ): Promise<void> {
-    if (!state.store?.setDocumentTitleIfAbsent) return;
+    if (!state.store) return;
     try {
       const metadataTitles = format === "html" ? [htmlDocumentTitle(await readFileHead(sourcePath, 256 * 1024))] : [];
       const derived = deriveDocumentTitle({
@@ -1407,7 +1407,7 @@ export class ExtractMarkdownStage implements Stage {
         filename: document.filename,
       });
       if (!derived) return;
-      const written = await state.store.setDocumentTitleIfAbsent(document.id, derived);
+      const written = await state.store.records.setDocumentTitleIfAbsent({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id }, derived);
       console.log(`[extract-debug] document=${document.id} title-source=${derived.source} title-written=${written}`);
     } catch (error) {
       console.warn(`[extract-markdown] title derivation failed document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1887,7 +1887,7 @@ export class ExtractMarkdownStage implements Stage {
     // raise its charge, so it keeps going without them.
     const legacyBilling = runBillsScansAtCompletion(state);
     const rows = legacyBilling ? [] : pageFactRowsFromDopplerFacts({ facts: candidate.pageFacts, pageCount, pageTexts, ocrPages, documentId: document.id, runId: state.run.id });
-    await recordPageFacts(state.store, rows);
+    await recordPageFacts(state, rows);
     console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${legacyBilling ? " rows-skipped=legacy-billing" : ""}`);
     return {
       pageImageEvidenceUri,
@@ -1913,7 +1913,7 @@ export class ExtractMarkdownStage implements Stage {
     sandboxedPdfRoute = false,
     sandboxReason: string | null = null,
   ): Promise<void> {
-    if (!pageFactsEnabled() || !state.store?.upsertPageFacts) return;
+    if (!pageFactsEnabled() || !state.store) return;
     if (format === "pdf" && sandboxedPdfRoute) {
       this.skipHostPdfEvidence(document, "page-facts", sandboxReason);
       return;
@@ -1922,7 +1922,7 @@ export class ExtractMarkdownStage implements Stage {
     if (state.documentStage(document.id, this.name)?.status === "completed") return;
     try {
       if (format === "image") {
-        await recordPageFacts(state.store, [{
+        await recordPageFacts(state, [{
           documentId: document.id, runId: state.run.id, pageNumber: 1,
           textBytes: 0, wordCount: 0, imageCount: 1, factsSource: "image-file",
         }]);
@@ -1941,7 +1941,7 @@ export class ExtractMarkdownStage implements Stage {
         onImagesList: (listing) => this.imageListings.set(this.imageListingKey(state, document), listing),
         onPageText: (listing) => this.textLayerListings.set(this.imageListingKey(state, document), listing),
       });
-      await recordPageFacts(state.store, rows);
+      await recordPageFacts(state, rows);
     } catch (error) {
       rethrowIfTeardown(error);
       console.warn(`[page-facts] skipped document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);

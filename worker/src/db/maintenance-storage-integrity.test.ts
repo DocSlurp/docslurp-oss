@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildStorageIntegrityReport } from "../db/store.js";
+import { buildStorageIntegrityReport, groupReferencesByRunPrefix, Maintenance } from "./maintenance.js";
 
 describe("buildStorageIntegrityReport", () => {
   it("reports missing objects, orphaned objects, and dangling index metadata", () => {
@@ -67,7 +67,6 @@ describe("buildStorageIntegrityReport", () => {
 
 describe("groupReferencesByRunPrefix", () => {
   it("groups artifact keys by user/run prefix and leaves shorter keys for HEAD", async () => {
-    const { groupReferencesByRunPrefix } = await import("../db/store.js");
     const { byPrefix, ungrouped } = groupReferencesByRunPrefix([
       "u1/run-a/markdown/doc-1.md", "u1/run-a/pages/doc-1/manifest.json", "u1/run-b/x.json", "u2/raw/upload.pdf", "loose.json", "u3/onlytwo",
     ]);
@@ -82,13 +81,13 @@ describe("groupReferencesByRunPrefix", () => {
 
 describe("runStorageIntegritySweep existence checks", () => {
   it("lists each run prefix once and HEADs only what the listing lacks", async () => {
-    const { Store } = await import("../db/store.js");
     const references = ["u1/run-a/a.json", "u1/run-a/b.json", "u1/run-a/gone.json", "u1/run-b/c.json", "loose.json"].map((key) => ({ kind: "stage-artifact", key, runId: null, documentId: null, projectId: null, orgId: null, userId: null, source: key }));
-    const store = Object.create(Store.prototype) as InstanceType<typeof Store>;
+    const store = Object.create(Maintenance.prototype) as Maintenance;
     Object.assign(store, {
+      // appendAuditLog writes through this client; the sweep's own reads are stubbed below.
+      sql: Object.assign(async () => [], { json: (value: unknown) => value }),
       loadStorageIntegrityReferences: async () => references,
       loadStorageIntegrityRunChecks: async () => [],
-      appendAuditLog: async () => undefined,
     });
     const listed: string[] = [];
     const heads: string[] = [];

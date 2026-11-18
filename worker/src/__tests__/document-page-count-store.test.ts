@@ -1,6 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { Store } from "../db/store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -48,7 +49,7 @@ describe("PostgresPageBasisLedger.setBillingPages", () => {
     const [row] = (await db.query<{ page_count: number; billing_pages: number; billing_pages_method: string }>(
       `select page_count, billing_pages, billing_pages_method from documents where id = 'long-docx'`)).rows;
     expect(row).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion" });
-    const document = await store.loadDocument("long-docx");
+    const document = await loadFixtureDocument(store, "long-docx");
     expect(document).toMatchObject({ pageCount: 1, billingPages: 300, fileFacts: { format: "office-word", mismatch: "same-family", declaredMimeType: "application/msword" } });
   }, 60_000);
 
@@ -78,15 +79,15 @@ describe("Store.setDocumentFileFacts", () => {
   } as never;
 
   it("replaces a document's provisional facts and MIME type with the worker's full inspection", async () => {
-    expect(await store.setDocumentFileFacts("run1", "long-docx", full)).toBe(true);
-    const document = await store.loadDocument("long-docx");
+    expect(await store.records.setDocumentFileFacts("run1", "long-docx", full)).toBe(true);
+    const document = await loadFixtureDocument(store, "long-docx");
     expect(document).toMatchObject({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileFacts: { inspection: "full", mismatch: "corrected" } });
   }, 60_000);
 
   it("never writes another run's document or a deduplicated copy", async () => {
-    expect(await store.setDocumentFileFacts("run1", "other-run", full)).toBe(false);
-    expect(await store.setDocumentFileFacts("run1", "copy", full)).toBe(false);
-    expect(await store.setDocumentFileFacts("run1", "missing", full)).toBe(false);
+    expect(await store.records.setDocumentFileFacts("run1", "other-run", full)).toBe(false);
+    expect(await store.records.setDocumentFileFacts("run1", "copy", full)).toBe(false);
+    expect(await store.records.setDocumentFileFacts("run1", "missing", full)).toBe(false);
     const rows = (await db.query<{ id: string; mime_type: string }>(`select id, mime_type from documents where id in ('other-run','copy') order by id`)).rows;
     expect(rows).toEqual([{ id: "copy", mime_type: "application/msword" }, { id: "other-run", mime_type: "application/msword" }]);
   }, 60_000);
@@ -100,7 +101,7 @@ describe("Store.triggerWebhooks", () => {
         error = 'connect ECONNREFUSED 10.0.3.7:5432 at Pool.connect (/app/worker/src/db/store.ts:123) password=hunter2'
         where id = 'run1';
     `);
-    await store.triggerWebhooks("run1", "run.failed");
+    await store.notifications.triggerWebhooks("run1", "run.failed");
     const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox where payload->>'runId' = 'run1'`)).rows;
     expect(row!.payload).toMatchObject({ event: "run.failed", runId: "run1", projectId: "w1", status: "failed" });
     expect(JSON.stringify(row!.payload)).not.toMatch(/ECONNREFUSED|10\.0\.3\.7|hunter2|store\.ts/);
@@ -110,7 +111,7 @@ describe("Store.triggerWebhooks", () => {
   it("sends a null error for a run that did not fail", async () => {
     await db.exec(`update project_runs set status = 'completed', error = null where id = 'run2'`);
     await db.exec(`delete from webhook_outbox`);
-    await store.triggerWebhooks("run2", "run.failed");
+    await store.notifications.triggerWebhooks("run2", "run.failed");
     const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox`)).rows;
     expect(row!.payload.error).toBeNull();
   }, 60_000);

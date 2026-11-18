@@ -4,9 +4,9 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultGraphConfig, graphConfigFingerprint, normalizePipelineFeatures } from "@docslurp/shared";
 
-import { replaceDocumentGraph } from "../graph/graph-store.js";
-vi.mock("../graph/graph-store.js", async (original) => {
-  const actual = await original<typeof import("../graph/graph-store.js")>();
+import { replaceDocumentGraph } from "./graph-store.js";
+vi.mock("./graph-store.js", async (original) => {
+  const actual = await original<typeof import("./graph-store.js")>();
   return { ...actual, replaceDocumentGraph: vi.fn(actual.replaceDocumentGraph) };
 });
 
@@ -18,10 +18,11 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { GraphEnrichStage } from "../stages/graph-enrich.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import { refreshKnowledgeGraphNodes } from "../db/superseded-purge.js";
-import { refreshProjectCommunities } from "../graph/communities.js";
-import { graphNodeKey, type DocumentGraph } from "../graph/extract.js";
-import { countGraphJobDocuments, runGraphJobs } from "../graph/rebuild-job.js";
+import { refreshProjectCommunities } from "./communities.js";
+import { graphNodeKey, type DocumentGraph } from "./extract.js";
+import { countGraphJobDocuments, runGraphJobs } from "./rebuild-job.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 import type { ArtifactStore } from "../tools/storage.js";
@@ -124,7 +125,7 @@ function documentGraph(documentId: string, supplier: string, customers: string[]
 }
 
 const write = (documentId: string, graph: DocumentGraph, configHash = "g1-test") =>
-  store.replaceDocumentGraph({ projectId: "w", userId: "u1", runId: `run-${documentId}`, documentId, configHash, graph });
+  store.graph.replaceDocumentGraph({ projectId: "w", userId: "u1", runId: `run-${documentId}`, documentId, configHash, graph });
 
 const nodes = () =>
   sql<{ name: string; mentions: number; documents: number }[]>`
@@ -263,7 +264,7 @@ describe("project knowledge graph persistence", () => {
   });
 
   const retention = () =>
-    store as unknown as {
+    new Maintenance(store.stageSql) as unknown as {
       purgeExpiredArtifacts(storage: ArtifactStore, batchSize: number): Promise<void>;
       deleteExpiredRuns(batchSize: number): Promise<void>;
     };
@@ -432,11 +433,11 @@ describe("project knowledge graph persistence", () => {
 
     // The fallback graph is stored and searchable, but never counts as current.
     expect(await nodes()).toContainEqual({ name: "hooli", mentions: 1, documents: 1 });
-    expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1"]));
+    expect(await store.graph.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1"]));
     expect(await countGraphJobDocuments(sql, { projectId: "w", mode: "stale", configHash })).toBe(1);
 
     await write("d2", documentGraph("d2", "Acme", ["Hooli"]), configHash);
-    expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1", "d2"]));
+    expect(await store.graph.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1", "d2"]));
   });
 });
 

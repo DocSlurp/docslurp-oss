@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 import { defaultPipelineFeatures, type DerivedDocumentTitle } from "@docslurp/shared";
 
@@ -56,17 +57,10 @@ async function extractWithTitle(args: { filename: string; mimeType: string; form
     const state = WorkflowState.create(createRun(), [document]);
     state.artifactLedger.recordDocument("doc-1", "normalizedFormat", args.format);
     const titles: Array<{ documentId: string; title: DerivedDocumentTitle }> = [];
-    // Every other checkpoint call is a no-op; only the title write is observed.
-    state.store = new Proxy({}, {
-      get: (_target, prop) => {
-        if (prop === "then") return undefined;
-        if (prop === "getCompletedPages") return async () => new Set<number>();
-        if (prop === "setDocumentTitleIfAbsent") {
-          return async (documentId: string, title: DerivedDocumentTitle) => { titles.push({ documentId, title }); return true; };
-        }
-        return async () => undefined;
-      },
-    }) as never;
+    // An in-memory store; only the title write is observed.
+    const store = memoryCheckpointStore();
+    store.records.setDocumentTitleIfAbsent = async (scope, title: DerivedDocumentTitle) => { titles.push({ documentId: scope.documentId, title }); return true; };
+    state.store = store;
     await stage.run(state);
     return { titles, status: state.documentStage("doc-1", "extract-markdown")?.status };
   } finally {

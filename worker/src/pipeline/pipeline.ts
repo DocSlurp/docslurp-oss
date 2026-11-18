@@ -1,11 +1,16 @@
-import type { GeoAttempt, GeoFinalSource } from "../db/geo-final-source.js";
-import type { DerivedDocumentTitle, PrivacyAuditEntry } from "@docslurp/shared";
+import type { GeoFinalSource } from "../db/geo-final-source.js";
+import type { PrivacyAuditEntry } from "@docslurp/shared";
 import type { StageState, ProjectRunEvent } from "../models.js";
-import type { Document, ParserEvaluation, PerformanceEvent, UsageEvent, ProjectRun } from "../models.js";
+import type { Document, ParserEvaluation, PerformanceEvent, ProjectRun } from "../models.js";
 import { cloneArtifacts, cloneJsonMap } from "../models.js";
 import { DocumentArtifactLedger } from "./artifact-ledger.js";
 import { PipelineUsageEventLedger } from "./usage-ledger.js";
-import type { PageFactUpsert } from "./page-facts.js";
+import type { DocumentContentWriter } from "../db/document-content.js";
+import type { DocumentRecords } from "../db/document-records.js";
+import type { DocumentAssets } from "../db/document-asset-ledger.js";
+import type { FleetBudgets } from "../db/fleet-budgets.js";
+import type { OcrEscalationLog } from "../db/ocr-escalation-reads.js";
+import type { KnowledgeGraphStore } from "../graph/knowledge-graph-store.js";
 import { runUsesOcrPageClass } from "./ocr-page-class.js";
 import { PageBasis, type PageBasisLedger } from "./page-basis.js";
 import {
@@ -14,18 +19,13 @@ import {
   refreshRunProgressStats,
 } from "./run-ledger.js";
 
-/** One persisted OCR escalation call (ocr_escalation_reads). */
-export interface OcrEscalationReadRow {
-  attempt: number;
-  status: "completed" | "failed";
-  text: string | null;
-  model: string;
-  /** The call's usage events, under the ids they were buffered with. */
-  usageEvents: UsageEvent[];
-}
-
+/**
+ * The ports a run's stages write through, bound to every loaded state (WorkflowState.bindStore). Run and stage checkpoints
+ * are the run ledger's own (db/run-ledger.ts); each other concern is a required port owned by its module, so a bound state never
+ * probes for a capability and never skips a write because a method is missing. A state without a store (unit tests, a page
+ * task that must not flush a stale run snapshot) has none of them; every caller decides explicitly what that means.
+ */
 export interface CheckpointStore {
-  beginGeoAttempt?(state: WorkflowState, documentId: string, schema: Record<string, unknown>): Promise<GeoAttempt | undefined>;
   updateProgress(state: WorkflowState): Promise<void>;
   startRunStage(state: WorkflowState, stage: string): Promise<void>;
   completeRunStage(
@@ -42,8 +42,9 @@ export interface CheckpointStore {
    * Count one parser-sandbox infrastructure failure under this document's stage, durably across activity retries, and
    * return the new count (recheck S #2: a document that keeps breaking fresh VMs fails instead of retrying the stage).
    */
-  noteSandboxInfrastructureStrike?(state: WorkflowState, documentId: string, stage: string): Promise<number>;
-  noteBlamedSandboxStrike?(state: WorkflowState, documentId: string): Promise<number | null>;
+  noteSandboxInfrastructureStrike(state: WorkflowState, documentId: string, stage: string): Promise<number>;
+  /** The same strike on a blamed document's row for the stage it last ran; null when it has no stage row in this run. */
+  noteBlamedSandboxStrike(state: WorkflowState, documentId: string): Promise<number | null>;
   completeDocumentStage(
     state: WorkflowState,
     documentId: string,
@@ -66,62 +67,33 @@ export interface CheckpointStore {
    * Credit leases: true when the run's usage not yet checkpointed would use up
    * the lease this process last saw, so the caller should checkpoint now.
    */
-  creditLeaseWouldExhaust?(state: WorkflowState): boolean;
-  setPagesStageComplete?(runId: string, documentId: string, stageName: string, pageNumbers: number[]): Promise<void>;
+  creditLeaseWouldExhaust(state: WorkflowState): boolean;
+  setPagesStageComplete(runId: string, documentId: string, stageName: string, pageNumbers: number[]): Promise<void>;
   /** Stamps a run milestone once; null when already stamped (pipeline/run-milestones.ts). */
-  markRunMilestone?(runId: string, milestone: import("./run-milestones.js").RunMilestone): Promise<import("./run-milestones.js").RunMilestoneHit | null>;
+  markRunMilestone(runId: string, milestone: import("./run-milestones.js").RunMilestone): Promise<import("./run-milestones.js").RunMilestoneHit | null>;
   setPageStageComplete(runId: string, documentId: string, stageName: string, pageNumber: number): Promise<void>;
   getCompletedPages(runId: string, documentId: string, stageName: string): Promise<Set<number>>;
-  recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
-  /** Document asset ledger and extraction level (db/document-asset-ledger.ts), in one org-scoped transaction. */
-  writeDocumentAssetLedger?(write: import("../db/document-asset-ledger.js").DocumentAssetLedgerWrite): Promise<unknown>;
-  /** Figure uploads in progress (db/document-asset-ledger.ts): pending before each upload step, stored after it. */
-  markAssetsPending?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsPending>[1]): Promise<unknown>;
-  markAssetsStored?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsStored>[1]): Promise<unknown>;
-  replaceUnvouchedObject?(args: Parameters<typeof import("../db/document-asset-ledger.js").replaceUnvouchedObject>[1]): Promise<void>;
-  /** Pages whose image Doppler left to the host (db/document-asset-ledger.ts listHostPageImagePages); read-only, org-scoped. */
-  listHostPageImagePages?(scope: { orgId: string; documentId: string }): Promise<number[]>;
-  /**
-   * PII withholding for artifacts written after the document's PII stage (the first pass's figure step): whether the
-   * document's recorded PII outcome withholds artifacts (it redacted or blocked), and adding URIs to its withheld list.
-   */
-  documentPiiWithholds?(documentId: string): Promise<boolean>;
-  appendWithheldArtifactUris?(documentId: string, uris: readonly string[]): Promise<void>;
-  /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
-  upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
-  /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */
-  reserveFastPageImageRenders?(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number>;
-  /** Reserves one free-tier chart-export VM run against the org's hourly cap (db/chart-export-free-vm-cap.ts). */
-  reserveChartExportFreeVmRun?(args: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean>;
-  /**
-   * Stores the derived display title in documents.metadata unless one is already set
-   * (re-runs do not churn it and a user rename wins). Returns whether it was written.
-   */
-  setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
+  /** Audit rows for provider calls the run's privacy mode blocked (lib/privacy-guard.ts). */
+  recordPrivacyAudit(entries: readonly PrivacyAuditEntry[]): Promise<void>;
+  /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
+  loadShardObservations(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
   /**
    * The page basis port (pipeline/page-basis.ts): document page counts, billing pages and the spend check they owe. Required:
    * a store without it does not type-check, so no state bound to a store can skip a page-count spend check.
    */
   readonly pageBasisLedger: PageBasisLedger;
-  /** This run's persisted OCR escalation reads of a page, oldest first (migration 0129). */
-  ocrEscalationReads?(runId: string, documentId: string, pageNumber: number): Promise<OcrEscalationReadRow[]>;
-  /**
-   * Persist one OCR escalation call as soon as it returns, under the next free attempt number (assigned atomically, so
-   * concurrent calls of a page never share one); returns that number.
-   */
-  recordOcrEscalationRead?(row: Omit<OcrEscalationReadRow, "attempt"> & { runId: string; documentId: string; pageNumber: number }): Promise<number>;
-  /**
-   * Replaces the API's provisional file facts (header inspection) with the worker's full inspection, and the document's
-   * MIME type with the one the bytes are. Scoped to the run's own document.
-   */
-  setDocumentFileFacts?(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean>;
-  /**
-   * Quarantine's parse decision for this run's own document (lib/parse-source.ts): `{ copy }` (an encrypted PDF's scanned copy),
-   * `{ copy: null }` (the upload it scanned), or null to clear it (refused).
-   */
-  setDocumentParseSource?(runId: string, documentId: string, decision: import("../lib/parse-source.js").ParseSourceDecisionRecord | null): Promise<boolean>;
-  /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
-  loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
+  /** Search content a stage derives (db/document-content.ts): pages, chunks, propositions, summaries, page facts, reuse refs. */
+  readonly content: DocumentContentWriter;
+  /** Facts a stage settles on its document's row (db/document-records.ts): file facts, parse source, title, PII, geo. */
+  readonly records: DocumentRecords;
+  /** Figure rows beside each upload and the pages the host renders (db/document-asset-ledger.ts). */
+  readonly assets: DocumentAssets;
+  /** The project knowledge graph (graph/knowledge-graph-store.ts). */
+  readonly graph: KnowledgeGraphStore;
+  /** Reservations against caps every worker shares (db/fleet-budgets.ts). */
+  readonly budgets: FleetBudgets;
+  /** Each OCR escalation call, persisted as it returns (db/ocr-escalation-reads.ts). */
+  readonly ocrEscalation: OcrEscalationLog;
 }
 
 export interface Stage {
@@ -218,7 +190,7 @@ export class WorkflowState {
   /**
    * Set while this state runs one document shard of a stage beside other
    * shards: what the run row already holds from this state, so progress
-   * checkpoints write only this shard's additions (see Store.writeProgress).
+   * checkpoints write only this shard's additions (see PostgresRunLedger.writeProgress).
    */
   shard: { artifacts: Record<string, string> } | null = null;
 

@@ -24,7 +24,7 @@ export const webhookEventCatalog: WebhookEventDefinition[] = [
   {
     type: "run.completed",
     description: "Emitted when a project run finishes. failedDocuments counts Documents that failed and were skipped; retry the Run to reprocess them.",
-    // The worker outbox's payload (worker/src/db/store.ts triggerWebhooks), field for field.
+    // The worker outbox's payload (worker/src/db/run-notifications.ts triggerWebhooks), field for field.
     examplePayload: {
       event: "run.completed",
       runId: "run_123",
