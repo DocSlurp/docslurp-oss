@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({ sql: vi.fn(), load: vi.fn(), finalize: vi.fn()
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../services/direct-upload-session.js", () => ({
   loadDirectUploadSession: mocks.load, finalizeDirectUploadFile: mocks.finalize,
+  abortAbandonedMultipartUploads: async () => 0,
   lockHoldBudget: () => ({ signal: new AbortController().signal, shouldStart: () => true }),
   abortDirectUploadSession: vi.fn(), queueAbandonedDirectUploadCleanup: vi.fn(),
   withDirectUploadLock: (_id: string, work: () => Promise<unknown>) => mocks.lock(work),

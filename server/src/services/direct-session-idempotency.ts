@@ -1,5 +1,5 @@
 import { getCachedIdempotentResponse, hashIdempotencyPayload, IdempotencyConflictError, scopedIdempotencyKey, storeIdempotentResponse, type IdempotencyScope } from "./idempotency.js";
-import { withDirectUploadLock } from "./direct-upload-session.js";
+import { principalLockTenant, withDirectUploadLock } from "./direct-upload-session.js";
 import { ProjectIntakeError } from "./project-intake.js";
 import { sql } from "../db.js";
 import { canContributeToProject, getProjectAccess } from "./organizations.js";
@@ -9,16 +9,17 @@ export const DIRECT_SESSION_ROUTE_KEY = "uploads.direct-session";
 export interface DirectSessionIdempotencyDeps {
   getCached: typeof getCachedIdempotentResponse;
   store: typeof storeIdempotentResponse;
-  /** Serializes same-key requests; a second concurrent one is told to retry. */
-  lock: <T>(name: string, run: () => Promise<T>, orgId?: string | null) => Promise<T>;
+  /** Serializes same-key requests; a second concurrent one is told to retry. `scope` names the principal it counts against. */
+  lock: <T>(name: string, run: () => Promise<T>, scope: IdempotencyScope) => Promise<T>;
 }
 
 const defaultDeps: DirectSessionIdempotencyDeps = {
   getCached: getCachedIdempotentResponse,
   store: storeIdempotentResponse,
   // Session creation opens provider multipart uploads per file under the lock: a capped storage-work holder.
-  lock: (name, run, orgId) => withDirectUploadLock(name, run, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
-    { lockClass: "batch", orgId: orgId ?? null }),
+  // The tenant comes from stored rows (the key's or the user's organization), never the request's orgId.
+  lock: async (name, run, scope) => withDirectUploadLock(name, run, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
+    { lockClass: "batch", tenant: await principalLockTenant(scope.userId, scope.apiKeyId) }),
 };
 
 /**
@@ -106,32 +107,43 @@ export async function createSessionIdempotently<T extends CreatedSession>(args: 
   if (!args.key) return { body: await args.create(), status: 201, replayed: false };
   const scoped = scopedIdempotencyKey(args.scope, args.key);
   const requestHash = hashIdempotencyPayload({ scope: args.scope, request: args.request });
-  return await deps.lock(`idem:${scoped}`, async () => {
-    let cached;
-    try {
-      cached = await deps.getCached({ idempotencyKey: scoped, routeKey: DIRECT_SESSION_ROUTE_KEY, requestHash });
-    } catch (error) {
-      // Only the conflict is the caller's to see; a database fault stays a server error with its detail in telemetry.
-      if (error instanceof IdempotencyConflictError) throw new ProjectIntakeError(error.message, 409, undefined, "idempotency_key_reused");
-      throw error;
-    }
-    const cachedId = typeof cached?.body.sessionId === "string" ? cached.body.sessionId : null;
-    if (cachedId) {
-      const described = await args.describe(cachedId);
-      if (described) {
-        const rejected = Array.isArray(cached!.body.rejected) ? (cached!.body.rejected as unknown[]) : undefined;
-        return { body: { ...described, ...(rejected?.length ? { rejected } : {}) } as T, status: 200 as const, replayed: true };
+  // The idempotency lock covers only the cache read and a creation. A replay's description takes the session's own
+  // lock, so it runs after this one is released: holding both would need two capped slots for one request (with a
+  // single batch slot per process, a client that lost its response could never replay it).
+  let skipCachedId: string | null = null;
+  for (;;) {
+    const step = await deps.lock(`idem:${scoped}`, async (): Promise<{ replay: string; rejected?: unknown[] } | { created: T }> => {
+      let cached;
+      try {
+        cached = await deps.getCached({ idempotencyKey: scoped, routeKey: DIRECT_SESSION_ROUTE_KEY, requestHash });
+      } catch (error) {
+        // Only the conflict is the caller's to see; a database fault stays a server error with its detail in telemetry.
+        if (error instanceof IdempotencyConflictError) throw new ProjectIntakeError(error.message, 409, undefined, "idempotency_key_reused");
+        throw error;
       }
+      const cachedId = typeof cached?.body.sessionId === "string" ? cached.body.sessionId : null;
+      if (cachedId && cachedId !== skipCachedId) {
+        const rejected = Array.isArray(cached!.body.rejected) ? (cached!.body.rejected as unknown[]) : undefined;
+        return { replay: cachedId, ...(rejected ? { rejected } : {}) };
+      }
+      const created = await args.create();
+      await deps.store({
+        idempotencyKey: scoped,
+        routeKey: DIRECT_SESSION_ROUTE_KEY,
+        requestHash,
+        userId: args.scope.userId,
+        status: 201,
+        body: { sessionId: created.sessionId, ...(created.rejected?.length ? { rejected: created.rejected } : {}) },
+      });
+      return { created };
+    }, args.scope);
+    if ("created" in step) return { body: step.created, status: 201 as const, replayed: false };
+    // `describe` authorizes the replay (organization, key, allowlist, live access) and signs fresh URLs.
+    const described = await args.describe(step.replay);
+    if (described) {
+      return { body: { ...described, ...(step.rejected?.length ? { rejected: step.rejected } : {}) } as T, status: 200 as const, replayed: true };
     }
-    const created = await args.create();
-    await deps.store({
-      idempotencyKey: scoped,
-      routeKey: DIRECT_SESSION_ROUTE_KEY,
-      requestHash,
-      userId: args.scope.userId,
-      status: 201,
-      body: { sessionId: created.sessionId, ...(created.rejected?.length ? { rejected: created.rejected } : {}) },
-    });
-    return { body: created, status: 201 as const, replayed: false };
-  }, args.scope.orgId ?? null);
+    // The remembered session no longer exists: create a new one for this key (under the lock again).
+    skipCachedId = step.replay;
+  }
 }

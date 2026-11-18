@@ -24,6 +24,8 @@ vi.mock("../services/api-keys.js", () => ({
 vi.mock("../services/direct-upload-session.js", () => ({
   loadDirectUploadSession: async () => ({ session: { status: "completed", org_id: "o", api_key_id: "key-a", result: { payload: { project: { id: "p" }, run: { id: "r" }, documents: [] }, status: 201 } }, files: [] }),
   // Carries the stored result: the lock-free replay of a confirmed session re-authorizes it (the cases below).
+  principalLockTenant: async () => "org:o",
+  lockTenant: (orgId: string | null, userId: string) => orgId ? `org:${orgId}` : `user:${userId}`,
   loadDirectUploadSessionRow: async () => ({ status: "completed", org_id: "o", api_key_id: "key-a", result: { payload: { project: { id: "p" }, run: { id: "r" }, documents: [] }, status: 201 } }),
   withDirectUploadLock: async (name: string, run: () => Promise<unknown>) => {
     if (state.locks.has(name)) throw Object.assign(new Error("in flight"), { statusCode: 409 });

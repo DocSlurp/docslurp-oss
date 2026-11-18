@@ -254,6 +254,8 @@ export const env = {
   directUploadLockStartMax: process.env.DOCSLURP_UPLOAD_LOCK_START_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_MAX, 2) : undefined,
   /** Concurrent run starts per organization in one process (default 1). */
   directUploadLockStartPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_PER_ORG, 1),
+  /** Short lock holders (part signing, abort) per organization in one process (default 2). */
+  directUploadLockShortPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_SHORT_PER_ORG, 2),
   /** Concurrent files/complete holders per process (default 1 at pool 5, 3 at 8). */
   directUploadLockBatchMax: process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX, 3) : undefined,
   /** Concurrent files/complete holders per organization in one process (default 2, at most the batch cap). */

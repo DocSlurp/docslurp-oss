@@ -482,7 +482,7 @@ export async function getDirectUploadSessionDescription(
       if (error instanceof ProjectIntakeError && error.code === "intake_reconciliation_required") throw error;
       throw new ProjectIntakeError("Upload storage evidence is unavailable; retry status later", 503, undefined, "upload_storage_unavailable");
     }
-  }, undefined, undefined, { lockClass: "batch", orgId: owned.org_id });
+  }, undefined, undefined, { lockClass: "batch", tenant: lockTenant(owned.org_id, userId) });
 }
 
 /** Confirmed results remain readable after the transfer deadline. */
@@ -501,8 +501,24 @@ export interface DirectUploadLockOptions {
   waitMs?: number;
   /** Which connection class to hold (lib/direct-upload-locks.ts); default `short`. */
   lockClass?: DirectUploadLockClass;
-  /** The organization a `batch` holder counts against. */
-  orgId?: string | null;
+  /** The tenant the holder counts against (`lockTenant`); required for every class but `reconcile`. */
+  tenant?: string;
+}
+
+/** The lock-accounting tenant of a stored session or principal: its organization, else its user. Never a request field. */
+export function lockTenant(orgId: string | null | undefined, userId: string): string {
+  return orgId ? `org:${orgId}` : `user:${userId}`;
+}
+
+/**
+ * The lock-accounting tenant of a request's principal, from stored rows: the API key's organization, else the user's
+ * organization membership (one per user), else the user. A request's own `orgId` field is never trusted for it.
+ */
+export async function principalLockTenant(userId: string, apiKeyId?: string | null): Promise<string> {
+  const [row] = apiKeyId
+    ? await sql<Array<{ org_id: string | null }>>`select org_id from api_keys where id = ${apiKeyId} and user_id = ${userId} limit 1`
+    : await sql<Array<{ org_id: string | null }>>`select org_id from org_memberships where user_id = ${userId} order by created_at, org_id limit 1`;
+  return lockTenant(row?.org_id ?? null, userId);
 }
 
 /**
@@ -510,13 +526,17 @@ export interface DirectUploadLockOptions {
  * `upload_session_busy` at once, or after `waitMs` of retries; so does a saturated lock pool, on the caller's deadline.
  * A waiting caller releases its lock connection between tries: the pool must stay free for the holder and other sessions.
  */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy", waitOrOptions: number | DirectUploadLockOptions = 0): Promise<T> {
-  const options = typeof waitOrOptions === "number" ? { waitMs: waitOrOptions } : waitOrOptions;
-  const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage: string | undefined, busyCode: ProjectIntakeErrorCode | undefined, options: DirectUploadLockOptions): Promise<T> {
+  busyMessage ??= "Upload session is being finalized; retry shortly";
+  busyCode ??= "upload_session_busy";
+  const waitMs = Math.max(0, options.waitMs ?? 0);
+  // A caller that states its wait gets exactly that deadline, for the slot, the connection and every retry; one that
+  // does not waits the lock library's short default for a slot and a connection, then answers busy.
+  const deadline = Date.now() + waitMs;
   for (;;) {
     let reserved: Awaited<ReturnType<typeof reserveDirectUploadLockConnection>>;
     try {
-      reserved = await reserveDirectUploadLockConnection({ lockClass: options.lockClass, orgId: options.orgId, deadline });
+      reserved = await reserveDirectUploadLockConnection({ lockClass: options.lockClass, tenant: options.tenant, ...(waitMs > 0 ? { deadline } : {}) });
     } catch (error) {
       if (error instanceof DirectUploadLockUnavailable) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
       throw error;
@@ -843,7 +863,7 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
         where id = ${sessionId} and status in ('pending', 'uploading')`;
     }
     return { outcomes, sessionComplete };
-  }, undefined, undefined, { lockClass: "batch", orgId: owned.org_id });
+  }, undefined, undefined, { lockClass: "batch", tenant: lockTenant(owned.org_id, userId) });
 }
 
 /** The single-file `files/complete` body: throws the file's own error, exactly as before batching existed. */
@@ -873,33 +893,40 @@ export async function completeDirectUploadFiles(input: { sessionId: string; user
   return { files, completedCount, failedCount: files.length - completedCount, sessionComplete };
 }
 
+/** How long part signing may spend on provider reads while it holds a short lock connection. */
+export const SIGN_PROVIDER_BUDGET_MS = 2_000;
+
 export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[]) {
+  const owned = await loadDirectUploadSessionRow(sessionId, userId);
+  if (!owned) throw new ProjectIntakeError("Upload session not found", 404);
   return withDirectUploadLock(sessionId, async () => {
-  const loaded = await loadDirectUploadSession(sessionId, userId);
-  if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
-  const ttl = assertUploadSessionActive(loaded.session);
+  const session = await loadDirectUploadSessionRow(sessionId, userId);
+  if (!session) throw new ProjectIntakeError("Upload session not found", 404);
+  assertUploadSessionActive(session);
   const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
-  await assertSessionProjectStillContributable(loaded.session, userId);
-  if (!["pending", "uploading"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
-  const file = loaded.files.find(item => item.id === fileId);
+  await assertSessionProjectStillContributable(session, userId);
+  if (!["pending", "uploading"].includes(session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
+  const [file] = await loadDirectUploadSessionFiles(sessionId, [fileId]);
   if (!file || file.status !== "pending" || !file.upload_id) throw new ProjectIntakeError("Open multipart file not found", 404);
+  // Short work: the provider reads below share one tight budget, so a stalled provider cannot hold this connection.
+  const signal = AbortSignal.timeout(SIGN_PROVIDER_BUDGET_MS);
   try {
-    await getUploadedObjectMetadata(file.source_key);
+    await getUploadedObjectMetadata(file.source_key, signal);
     // A completed object closes the transfer; completion will seal it without another PUT.
     throw new ProjectIntakeError("Upload object already exists; refresh session", 409);
   } catch (error) {
     if (!isStorageNotFound(error)) {
       if (error instanceof ProjectIntakeError) throw error;
-      throw new ProjectIntakeError("Upload storage evidence is unavailable", 503);
+      throw new ProjectIntakeError("Upload storage evidence is unavailable", 503, undefined, "upload_storage_unavailable");
     }
   }
-  try { await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id }); }
-  catch { throw new ProjectIntakeError("Upload storage evidence is unavailable", 503); }
+  try { await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id, signal }); }
+  catch { throw new ProjectIntakeError("Upload storage evidence is unavailable", 503, undefined, "upload_storage_unavailable"); }
   return { parts: await Promise.all(partNumbers.map(async partNumber => {
     if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
-    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(loaded.session) }) };
+    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(session) }) };
   })) };
-  });
+  }, undefined, undefined, { tenant: lockTenant(owned.org_id, userId) });
 }
 
 async function abortDirectUploadSessionUnlocked(
@@ -937,8 +964,21 @@ async function abortDirectUploadSessionUnlocked(
 }
 
 /** `lockWaitMs`: how long to wait out a reconciler pass or another request holding the session (0: answer busy at once). */
+/**
+ * Aborts a session. Under the lock it only marks the session and its files aborted and records the cleanup (fast,
+ * database only); the provider's multipart aborts run afterwards outside any lock (abortAbandonedMultipartUploads),
+ * and the reconciler's sweep finishes any it could not.
+ */
 export async function abortDirectUploadSession(sessionId: string, userId: string, lockWaitMs = 0): Promise<boolean> {
-  return withDirectUploadLock(sessionId, () => abortDirectUploadSessionUnlocked(sessionId, userId), undefined, undefined, lockWaitMs);
+  const owned = await loadDirectUploadSessionRow(sessionId, userId);
+  if (!owned) return false;
+  const aborted = await withDirectUploadLock(sessionId, () => abortDirectUploadSessionUnlocked(sessionId, userId), undefined, undefined,
+    { waitMs: lockWaitMs, tenant: lockTenant(owned.org_id, userId) });
+  if (aborted) {
+    void abortAbandonedMultipartUploads({ sessionId }).catch(error =>
+      console.error(`[upload-cleanup] multipart aborts deferred to the sweep session=${sessionId}`, error instanceof Error ? error.name : "unknown"));
+  }
+  return aborted;
 }
 
 export function assertDirectUploadSessionReadyForIntake(
@@ -1076,18 +1116,12 @@ function multipartCompletionError(error: unknown, filename: string): unknown {
   }
 }
 
-/** Wait out outstanding signed PUTs before deleting abandoned raw objects. */
+/**
+ * Records an aborted or failed session's cleanup; database only, so it may run under the session lock. Its open
+ * multipart uploads are left for abortAbandonedMultipartUploads (they are the files with an upload id and no
+ * multipart_aborted_at). Raw objects are deleted by the storage cleanup queue after outstanding signed PUTs expire.
+ */
 export async function queueAbandonedDirectUploadCleanup(sessionId: string): Promise<void> {
-  const files = await sql<Array<{ source_key: string; upload_id: string }>>`
-    select f.source_key, f.upload_id from upload_session_files f join upload_sessions s on s.id = f.session_id
-    where s.id = ${sessionId} and s.status in ('aborted', 'failed') and f.upload_id is not null`;
-  for (const file of files) {
-    // Abort is idempotent at the service boundary; an assembled or already
-    // aborted MPU may legitimately return NoSuchUpload.
-    await abortMultipartUpload({ key: file.source_key, uploadId: file.upload_id }).catch(error => {
-      if (storageErrorName(error) !== "NoSuchUpload") console.error(`[upload-cleanup] multipart abort failed session=${sessionId}`);
-    });
-  }
   await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason, not_before)
     select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
       jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'
@@ -1096,4 +1130,39 @@ export async function queueAbandonedDirectUploadCleanup(sessionId: string): Prom
     group by s.id
     on conflict (kind, target) do update set artifact_uris = excluded.artifact_uris,
       not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)`;
+}
+
+/** At most this many provider multipart aborts run at once. */
+const MULTIPART_ABORT_CONCURRENCY = 4;
+
+/**
+ * Aborts the open multipart uploads of aborted and failed sessions (one session, or a bounded batch of any), never
+ * under a session lock: bounded concurrency, a per-call deadline, and a durable mark per file. An abort that fails is
+ * left unmarked for the reconciler's next sweep; NoSuchUpload (assembled or already aborted) counts as done.
+ */
+export async function abortAbandonedMultipartUploads(options: { sessionId?: string; limit?: number } = {}): Promise<number> {
+  const limit = Math.max(1, Math.min(options.limit ?? 100, 500));
+  const files = options.sessionId
+    ? await sql<Array<{ id: string; source_key: string; upload_id: string }>>`
+      select f.id, f.source_key, f.upload_id from upload_session_files f join upload_sessions s on s.id = f.session_id
+      where s.id = ${options.sessionId} and s.status in ('aborted', 'failed') and f.upload_id is not null and f.multipart_aborted_at is null
+      limit ${limit}`
+    : await sql<Array<{ id: string; source_key: string; upload_id: string }>>`
+      select f.id, f.source_key, f.upload_id from upload_session_files f join upload_sessions s on s.id = f.session_id
+      where s.status in ('aborted', 'failed') and f.upload_id is not null and f.multipart_aborted_at is null
+      limit ${limit}`;
+  let done = 0;
+  await settleBounded(files, MULTIPART_ABORT_CONCURRENCY, async file => {
+    try {
+      await abortMultipartUpload({ key: file.source_key, uploadId: file.upload_id });
+    } catch (error) {
+      if (storageErrorName(error) !== "NoSuchUpload") {
+        console.error(`[upload-cleanup] multipart abort failed file=${file.id}`, error instanceof Error ? error.name : "unknown");
+        return;
+      }
+    }
+    await sql`update upload_session_files set multipart_aborted_at = now() where id = ${file.id}`;
+    done += 1;
+  });
+  return done;
 }

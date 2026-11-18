@@ -2324,6 +2324,8 @@ export const uploadSessionFiles = pgTable(
     status: text().default("pending").notNull(),
     etag: text(),
     completedParts: jsonb("completed_parts").default([]).notNull(),
+    /** Set once the provider multipart upload of an aborted or failed session was aborted (migration 0192). */
+    multipartAbortedAt: timestamp("multipart_aborted_at", { withTimezone: true, mode: "string" }),
     sha256: text(),
     contentIdentity: jsonb("content_identity").$type<{ algorithm: "sha256"; digest: string }>(),
     canonicalId: text("canonical_id"),

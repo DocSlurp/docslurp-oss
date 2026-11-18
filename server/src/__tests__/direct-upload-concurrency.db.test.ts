@@ -13,11 +13,15 @@ const store = vi.hoisted(() => ({
   copies: 0,
   headDelayMs: 0,
   intakeDelayMs: 0,
+  /** Storage calls on keys under this prefix stall until their signal aborts or `releaseStalls` runs. */
+  stallPrefix: null as string | null,
+  stalls: [] as Array<() => void>,
   ports: null as unknown,
 }));
 vi.mock("../lib/storage.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/storage.js")>(),
-  getUploadedObjectMetadata: async (key: string) => {
+  getUploadedObjectMetadata: async (key: string, signal?: AbortSignal) => {
+    await stallFor(key, signal);
     if (store.headDelayMs) await new Promise(resolve => setTimeout(resolve, store.headDelayMs));
     const object = store.objects.get(key);
     if (!object) throw Object.assign(new Error("not found"), { name: "NotFound" });
@@ -31,10 +35,20 @@ vi.mock("../lib/storage.js", async importOriginal => ({
     return { etag: source.etag };
   },
   deleteUploadedObject: async (key: string) => { store.objects.delete(key); },
-  abortMultipartUpload: async () => {},
-  listMultipartUploadParts: async () => [],
+  abortMultipartUpload: async (args: { key: string; signal?: AbortSignal }) => { await stallFor(args.key, args.signal); },
+  listMultipartUploadParts: async (args: { key: string; signal?: AbortSignal }) => { await stallFor(args.key, args.signal); return []; },
   signMultipartUploadPart: async () => "https://storage.example/part",
+  signSingleUploadPut: async () => "https://storage.example/put",
 }));
+/** A stalled provider: waits until the caller's deadline aborts it, or until the test releases every stall. */
+async function stallFor(key: string, signal?: AbortSignal): Promise<void> {
+  if (!store.stallPrefix || !key.startsWith(store.stallPrefix)) return;
+  await new Promise<void>((resolve, reject) => {
+    store.stalls.push(resolve);
+    signal?.addEventListener("abort", () => reject(Object.assign(new Error("timed out"), { name: "TimeoutError" })), { once: true });
+  });
+}
+
 // Every confirm path (the route, the kick, the sweep) runs intake through the same in-memory ports.
 vi.mock("../services/project-intake.js", async importOriginal => {
   const original = await importOriginal<typeof import("../services/project-intake.js")>();
@@ -55,7 +69,7 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     ({ sql } = await import("../db.js"));
     const { createProjectIntakeFakes, fakeProject } = await import("./helpers/project-intake-fakes.js");
     // The project exists in the database too: a replayed confirm re-authorizes it there.
-    fakes = createProjectIntakeFakes({ projects: [fakeProject({ id: "upl-p", orgId: "upl-o", name: "Uploads", slug: "uploads" })] });
+    fakes = createProjectIntakeFakes({ projects: [fakeProject({ id: "upl-p", orgId: "upl-o", name: "Uploads", slug: "uploads" }), fakeProject({ id: "upl-p2", orgId: "upl-o2", name: "Uploads 2", slug: "uploads-2" })] });
     store.ports = fakes.ports;
     // Intake that takes a while, so the session lock is visibly held during a confirm.
     const createRun = fakes.ports.records.createRun.bind(fakes.ports.records);
@@ -74,7 +88,7 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     await sql`insert into "user" (id, name, email) values ('upl-u', 'Uploader', 'upl-u@example.test'), ('upl-v', 'Other', 'upl-v@example.test'), ('upl-w', 'Third', 'upl-w@example.test') on conflict do nothing`;
     await sql`insert into organizations (id, name, slug, created_by_user_id) values ('upl-o', 'Org', 'upl-o', 'upl-u'), ('upl-o2', 'Org 2', 'upl-o2', 'upl-v'), ('upl-o3', 'Org 3', 'upl-o3', 'upl-w') on conflict do nothing`;
     await sql`insert into org_memberships (org_id, user_id, role) values ('upl-o', 'upl-u', 'owner'), ('upl-o2', 'upl-v', 'owner'), ('upl-o3', 'upl-w', 'owner') on conflict do nothing`;
-    await sql`insert into projects (id, org_id, user_id, name) values ('upl-p', 'upl-o', 'upl-u', 'Uploads') on conflict do nothing`;
+    await sql`insert into projects (id, org_id, user_id, name) values ('upl-p', 'upl-o', 'upl-u', 'Uploads'), ('upl-p2', 'upl-o2', 'upl-v', 'Uploads 2') on conflict do nothing`;
   }, 60_000);
 
   afterAll(async () => {
@@ -83,7 +97,10 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     await sql?.end({ timeout: 5 });
   });
 
-  beforeEach(() => { store.headDelayMs = 0; store.intakeDelayMs = 0; store.copies = 0; });
+  beforeEach(() => {
+    store.headDelayMs = 0; store.intakeDelayMs = 0; store.copies = 0;
+    store.stallPrefix = null; for (const release of store.stalls.splice(0)) release();
+  });
 
   /** A pending session of `count` single-part files whose bytes are already in storage. */
   async function seedSession(count: number, user = "upl-u", org = "upl-o", projectId: string | null = null): Promise<{ id: string; fileIds: string[] }> {
@@ -203,4 +220,64 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
       expect(response.status === 409 || response.status < 300).toBe(true);
     }
   }, 60_000);
+
+  it("replays an idempotent session create whose response was lost, at the default pool", async () => {
+    const create = () => app.request("/uploads/direct/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-user": "upl-u", "idempotency-key": "lost-response-1" },
+      body: JSON.stringify({ orgId: "upl-o", files: [{ filename: "notes.txt", mimeType: "text/plain", sizeBytes: 10 }] }),
+    });
+    const first = await create();
+    expect(first.status).toBe(201);
+    const { sessionId } = await first.json() as { sessionId: string };
+    // The client never saw that answer and repeats the request: the same session comes back, not upload_session_busy.
+    for (let i = 0; i < 3; i++) {
+      const replay = await create();
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("idempotency-replayed")).toBe("true");
+      expect(await replay.json()).toMatchObject({ sessionId });
+    }
+  }, 20_000);
+
+  it("a stalled provider during one organization's many aborts and signings leaves another's signing and confirm served", async () => {
+    // Org A: six sessions, each with an open multipart file; its provider calls stall.
+    const orgA = [];
+    for (let i = 0; i < 6; i++) {
+      const seeded = await seedSession(0);
+      const fileId = `${seeded.id.slice(-6)}-mp`;
+      await sql`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+        values (${fileId}, ${seeded.id}, 'big.pdf', 'application/pdf', ${20 * 1024 * 1024}, ${`upl-u/${seeded.id}/raw/big.pdf`}, 'multipart', ${`up-${i}`}, ${8 * 1024 * 1024}, 'pending')`;
+      orgA.push({ id: seeded.id, fileId });
+    }
+    // Org B: a file to sign parts for, and a finished session to confirm.
+    const signable = await seedSession(0, "upl-v", "upl-o2");
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+      values (${`${signable.id.slice(-6)}-mp`}, ${signable.id}, 'big.pdf', 'application/pdf', ${20 * 1024 * 1024}, ${`upl-v/${signable.id}/raw/big.pdf`}, 'multipart', 'up-b', ${8 * 1024 * 1024}, 'pending')`;
+    const ready = await seedSession(1, "upl-v", "upl-o2", "upl-p2");
+    expect((await post(`${ready.id}/files/complete`, { files: [{ fileId: ready.fileIds[0]! }] }, "upl-v")).status).toBe(200);
+    store.stallPrefix = "upl-u/";
+    const signings = orgA.map(session => post(`${session.id}/files/${session.fileId}/parts/sign`, { partNumbers: [1] }));
+    const aborts = orgA.map(session => post(`${session.id}/abort`));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    let started = Date.now();
+    const signed = await post(`${signable.id}/files/${signable.id.slice(-6)}-mp/parts/sign`, { partNumbers: [1, 2] }, "upl-v");
+    expect(signed.status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    started = Date.now();
+    const confirmed = await post(`${ready.id}/confirm`, undefined, "upl-v");
+    expect(confirmed.status).toBeLessThan(300);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    // Org A's aborts only change state under the lock: they answer promptly although the provider is stalled.
+    // (or, behind the org's capped short slots, a retryable busy). Each one that answered 200 closed its session.
+    const abortAnswers = await Promise.all(aborts);
+    for (const [i, response] of abortAnswers.entries()) {
+      expect([200, 409]).toContain(response.status);
+      if (response.status === 200) expect(await status(orgA[i]!.id)).toBe("aborted");
+    }
+    expect(abortAnswers.some(response => response.status === 200)).toBe(true);
+    // Its signings give up on their own budget or slot deadline: retryable answers, never a hang.
+    for (const response of await Promise.all(signings)) expect([409, 503]).toContain(response.status);
+    store.stallPrefix = null;
+    for (const release of store.stalls.splice(0)) release();
+  }, 30_000);
 });

@@ -23,6 +23,7 @@ import {
   createDirectUploadSession,
   validMultipartLayout,
   queueAbandonedDirectUploadCleanup,
+  abortAbandonedMultipartUploads,
   finalizeDirectUploadFile,
   withDirectUploadLock,
   describeDirectUploadSession,
@@ -310,7 +311,7 @@ describe("Direct Upload Session Module", () => {
     lockMock.mockResolvedValueOnce([{acquired:false}]);
     const work = vi.fn();
     // Coded, so clients can tell a held lock (repeat shortly) from a real conflict.
-    await expect(withDirectUploadLock("session-1",work)).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { tenant: "org:org-1" })).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
     expect(work).not.toHaveBeenCalled();
     expect(lockMock.release).toHaveBeenCalled();
   });
@@ -319,13 +320,13 @@ describe("Direct Upload Session Module", () => {
     lockMock.mockClear(); lockMock.release.mockClear();
     lockMock.mockResolvedValueOnce([{acquired:false}]).mockResolvedValueOnce([{acquired:false}]);
     const work = vi.fn(async () => "done");
-    await expect(withDirectUploadLock("session-1", work, undefined, undefined, 2_000)).resolves.toBe("done");
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { waitMs: 2_000, tenant: "org:org-1" })).resolves.toBe("done");
     expect(work).toHaveBeenCalledOnce();
     // Each failed try released its connection before waiting.
     expect(lockMock.release).toHaveBeenCalledTimes(3);
     lockMock.mockResolvedValue([{acquired:false}]);
     const started = Date.now();
-    await expect(withDirectUploadLock("session-1", work, undefined, undefined, 300)).rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { waitMs: 300, tenant: "org:org-1" })).rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
     expect(Date.now() - started).toBeGreaterThanOrEqual(250);
     expect(work).toHaveBeenCalledOnce();
     lockMock.mockReset().mockResolvedValue([{acquired:true}]);
@@ -372,12 +373,27 @@ describe("Direct Upload Session Module", () => {
     expect(signSingleUploadPut).not.toHaveBeenCalled();
   });
 
-  it("aborts known abandoned multiparts idempotently and waits out signed PUTs for object cleanup", async () => {
-    sqlMock.mockReset().mockResolvedValueOnce([{source_key:"raw/a",upload_id:"mpu-a"}]).mockResolvedValue([]);
-    abortMultipartUpload.mockRejectedValueOnce(Object.assign(new Error("gone"),{name:"NoSuchUpload"}));
+  it("records abandoned-session cleanup without provider calls, and aborts multiparts later, idempotently, marking each", async () => {
+    // Under the session lock: database only, waiting out signed PUTs before raw objects are deleted.
+    sqlMock.mockReset().mockResolvedValue([]);
+    abortMultipartUpload.mockClear();
     await expect(queueAbandonedDirectUploadCleanup("session-1")).resolves.toBeUndefined();
-    expect(abortMultipartUpload).toHaveBeenCalledWith({key:"raw/a",uploadId:"mpu-a"});
+    expect(abortMultipartUpload).not.toHaveBeenCalled();
     expect(sqlMock.mock.calls.some(([strings]) => strings.join("").includes("interval '16 minutes'"))).toBe(true);
+    // Outside any lock: each open multipart is aborted (NoSuchUpload counts as done) and marked; a failure stays unmarked.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("").includes("multipart_aborted_at is null")
+      ? [{ id: "f-a", source_key: "raw/a", upload_id: "mpu-a" }, { id: "f-b", source_key: "raw/b", upload_id: "mpu-b" }, { id: "f-c", source_key: "raw/c", upload_id: "mpu-c" }]
+      : []);
+    abortMultipartUpload.mockReset()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error("gone"), { name: "NoSuchUpload" }))
+      .mockRejectedValueOnce(Object.assign(new Error("down"), { name: "InternalError", $metadata: { httpStatusCode: 500 } }));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(abortAbandonedMultipartUploads({ sessionId: "session-1" })).resolves.toBe(2);
+    log.mockRestore();
+    expect(abortMultipartUpload).toHaveBeenCalledWith({ key: "raw/a", uploadId: "mpu-a" });
+    const marked = sqlMock.mock.calls.filter(([strings]) => strings.join("").includes("set multipart_aborted_at = now()")).map(call => call[1]);
+    expect(marked.sort()).toEqual(["f-a", "f-b"]);
   });
 
   it("computes multipart part counts at the protocol seam", () => {

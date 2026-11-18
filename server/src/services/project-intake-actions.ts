@@ -40,6 +40,8 @@ import {
   prepareDirectUploadProjectIntake,
   loadDirectUploadSession,
   loadDirectUploadSessionRow,
+  lockTenant,
+  principalLockTenant,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
@@ -251,7 +253,7 @@ async function idempotently(
     return result;
   }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
   // Holds the lock through run creation: a capped run-start holder, counted against the organization.
-  { lockClass: "start", orgId: args.orgId ?? null });
+  { lockClass: "start", tenant: await principalLockTenant(args.userId, args.apiKeyId) });
 }
 
 /**
@@ -395,7 +397,7 @@ export async function confirmDirectUploadProjectIntake(
     const result = actionResult(intake);
     await persistDirectUploadResult(args.sessionId, result);
     return result;
-  }, undefined, undefined, { waitMs: args.lockWaitMs ?? 0, lockClass: "start", orgId: owned.org_id });
+  }, undefined, undefined, { waitMs: args.lockWaitMs ?? 0, lockClass: "start", tenant: lockTenant(owned.org_id, args.userId) });
 }
 
 async function persistDirectUploadResult(sessionId: string, result: ProjectIntakeActionResult) {

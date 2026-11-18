@@ -73,6 +73,33 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
     expect(admitted).toBe(false);
   }, 20_000);
 
+  it("refuses a key that expired while the admission waited for the spend lock", async () => {
+    // Live when the admission's transaction starts (its now()), expired by the time the spend lock is granted.
+    await sql`update api_keys set expires_at = clock_timestamp() + interval '150 milliseconds' where id = 'adm-k'`;
+    const { admitted, error } = await admitAcrossChange("select 1");
+    expect(error).toBeInstanceOf(runCreation.RunAdmissionRefusedError);
+    expect(admitted).toBe(false);
+  }, 20_000);
+
+  it("never deadlocks with a membership removal that deletes the membership and then revokes the key", async () => {
+    // The removal's order (membership, then key) is the admission's lock order too.
+    const remover = await connect();
+    await remover.query("begin");
+    await remover.query("delete from org_memberships where org_id = 'adm-o' and user_id = 'adm-u'");
+    let admitted = false;
+    const admission = admitRunSpend("adm-o", "adm-p", async () => { admitted = true; return true; }, {
+      authorize: tx => runCreation.assertPrincipalAtAdmission(tx, principal),
+    }).then(() => null, (error: unknown) => error);
+    // The admission now waits on the deleted membership row; the removal goes on to the key and commits.
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await remover.query("update api_keys set revoked_at = now() where org_id = 'adm-o' and user_id = 'adm-u' and revoked_at is null");
+    await remover.query("commit");
+    const error = await admission;
+    expect(error).toBeInstanceOf(runCreation.RunAdmissionRefusedError);
+    expect((error as { code?: string }).code).not.toBe("40P01");
+    expect(admitted).toBe(false);
+  }, 20_000);
+
   it("is not refused for its principal when nothing changed", async () => {
     const { error } = await admitAcrossChange("select 1");
     // Spend may still refuse an unfunded test organization; the principal check must not.

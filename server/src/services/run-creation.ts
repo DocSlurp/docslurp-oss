@@ -622,27 +622,37 @@ export function replayChartExport<T extends PipelineFeatures>(
 }
 
 /**
- * The principal check for `principalAtAdmission`, run with the admission transaction's client. FOR SHARE on the key row
- * and the membership rows serializes it with key revocation and edits and with membership removal (they update or
- * delete those rows); access is then computed from the same transaction.
+ * The principal check for `principalAtAdmission`, run with the admission transaction's client.
+ *
+ * Lock order is global: membership rows first, then the API key row, the order membership removal uses (it deletes
+ * the membership, then revokes the key), so the two never deadlock. FOR SHARE serializes this check with key
+ * revocation and edits and with membership removal. Time-based validity (key expiry) is read with clock_timestamp()
+ * after the locks are held: now() is the transaction's start, which can be long before the admission lock was granted.
  */
 export async function assertPrincipalAtAdmission(
   tx: Parameters<Parameters<typeof admitRunSpend>[2]>[0],
   args: { orgId: string; projectId: string; userId: string; apiKeyId: string | null; scope: string },
 ): Promise<void> {
+  const [membership] = await tx<Array<{ one: number }>>`select 1 as one from org_memberships
+    where org_id = ${args.orgId} and user_id = ${args.userId} for share`;
+  await tx`select 1 from project_members where project_id = ${args.projectId} and user_id = ${args.userId} for share`;
   if (args.apiKeyId) {
+    // A key acts only for a current member of its organization.
+    if (!membership) throw new RunAdmissionRefusedError();
     const [key] = await tx<Array<{ user_id: string; org_id: string; key_type: string; scopes: string[] | null; project_ids: string[] | null }>>`
       select user_id, org_id, key_type, scopes, project_ids from api_keys
-      where id = ${args.apiKeyId} and revoked_at is null and (expires_at is null or expires_at > now())
+      where id = ${args.apiKeyId} and revoked_at is null
       for share`;
     const projectIds = key?.project_ids ?? [];
     if (!key || key.org_id !== args.orgId || key.user_id !== args.userId || key.key_type !== "server"
       || !(key.scopes ?? []).includes(args.scope) || (projectIds.length > 0 && !projectIds.includes(args.projectId))) {
       throw new RunAdmissionRefusedError();
     }
+    // Statement time, after the row locks: a key that expired while this admission waited is refused.
+    const [live] = await tx<Array<{ live: boolean }>>`select (expires_at is null or expires_at > clock_timestamp()) as live
+      from api_keys where id = ${args.apiKeyId}`;
+    if (!live?.live) throw new RunAdmissionRefusedError();
   }
-  await tx`select 1 from org_memberships where org_id = ${args.orgId} and user_id = ${args.userId} for share`;
-  await tx`select 1 from project_members where project_id = ${args.projectId} and user_id = ${args.userId} for share`;
   const access = await getProjectAccess(args.projectId, args.userId, tx);
   if (!access || access.orgId !== args.orgId || !canContributeToProject(access, args.userId)) throw new RunAdmissionRefusedError();
 }

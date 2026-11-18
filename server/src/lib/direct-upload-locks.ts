@@ -13,8 +13,10 @@ import { processSingleton } from "./process-singleton.js";
  *  - `start`: a run start (the client's confirm, the reconciler's or kick's confirm, an idempotent bulk or URL intake),
  *    which holds the lock through run creation. At most `startMax` per process and `startPerOrg` per organization.
  *  - `reconcile`: the background sweep's and kick's finalize pass. One at a time.
- *  - `short`: genuinely short work (part signing, abort). Uncapped, and the only class that may use the last
- *    `shortReserve` connections: the heavy classes together never hold more than pool size minus that reserve.
+ *  - `short`: genuinely short work (part signing with a 2 s provider budget, abort's status change). The only class
+ *    that may use the last `shortReserve` connections: the heavy classes together never hold more than pool size
+ *    minus that reserve. One organization holds at most `shortPerOrg` short connections at a time.
+ * Every capped holder names its tenant (`tenant`): the organization, resolved from stored rows, never a request field.
  * Every reservation has a deadline: a caller that cannot get a slot or a connection in time gets
  * DirectUploadLockUnavailable (answered as 409 upload_session_busy), never an unbounded wait.
  */
@@ -45,7 +47,9 @@ export function directUploadLockLimits() {
   const batchMax = intOr(env.directUploadLockBatchMax, Math.max(1, heavyMax - 1 - startMax), 1, heavyMax - 2);
   const batchPerOrg = intOr(env.directUploadLockBatchPerOrg, 2, 1, batchMax);
   const startPerOrg = intOr(env.directUploadLockStartPerOrg, 1, 1, startMax);
-  return { poolMax, heavyMax, batchMax, batchPerOrg, startMax, startPerOrg, reconcileMax: 1 };
+  // One organization can never hold every connection short work may use.
+  const shortPerOrg = intOr(env.directUploadLockShortPerOrg, SHORT_RESERVE, 1, poolMax - 1);
+  return { poolMax, heavyMax, batchMax, batchPerOrg, startMax, startPerOrg, shortPerOrg, reconcileMax: 1 };
 }
 
 const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => ({
@@ -57,6 +61,8 @@ const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => (
   batchByOrg: new Map<string, number>(),
   start: 0,
   startByOrg: new Map<string, number>(),
+  short: 0,
+  shortByOrg: new Map<string, number>(),
   reconcile: 0,
   waiters: new Set<() => void>(),
 }));
@@ -79,10 +85,10 @@ function heavyInUse(): number {
 }
 
 async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, deadline: number): Promise<() => void> {
-  if (lockClass === "short") return () => {};
   for (;;) {
     const limits = directUploadLockLimits();
-    if (heavyInUse() < limits.heavyMax) {
+    if (lockClass === "short" && (state.shortByOrg.get(orgKey) ?? 0) < limits.shortPerOrg) return take("short", state.shortByOrg, orgKey);
+    if (lockClass !== "short" && heavyInUse() < limits.heavyMax) {
       if (lockClass === "batch" && state.batch < limits.batchMax && (state.batchByOrg.get(orgKey) ?? 0) < limits.batchPerOrg) {
         return take("batch", state.batchByOrg, orgKey);
       }
@@ -100,7 +106,7 @@ async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, dea
   }
 }
 
-function take(kind: "batch" | "start", byOrg: Map<string, number>, orgKey: string): () => void {
+function take(kind: "batch" | "start" | "short", byOrg: Map<string, number>, orgKey: string): () => void {
   state[kind] += 1;
   byOrg.set(orgKey, (byOrg.get(orgKey) ?? 0) + 1);
   let released = false;
@@ -116,14 +122,23 @@ function take(kind: "batch" | "start", byOrg: Map<string, number>, orgKey: strin
 
 export async function reserveDirectUploadLockConnection(options: {
   lockClass?: DirectUploadLockClass;
-  /** The tenant a batch or start holder counts against. */
-  orgId?: string | null;
-  /** Epoch ms by which a slot and a connection must be had (at least MIN_LOCK_RESERVE_MS from now). */
+  /**
+   * The tenant a short, batch or start holder counts against: its organization (or, only for a principal without
+   * one, `user:<id>`), resolved from stored rows. Required for every class but `reconcile`.
+   */
+  tenant?: string;
+  /**
+   * Epoch ms by which a slot and a connection must be had. Given, it is kept exactly (a caller's documented wait is
+   * never exceeded); omitted, the caller waits MIN_LOCK_RESERVE_MS.
+   */
   deadline?: number;
 } = {}): Promise<{ connection: ReservedSql; release: () => void }> {
   if (state.closing) await state.closing;
-  const deadline = Math.max(options.deadline ?? 0, Date.now() + MIN_LOCK_RESERVE_MS);
-  const releaseSlot = await acquireSlot(options.lockClass ?? "short", options.orgId ?? "", deadline);
+  const lockClass = options.lockClass ?? "short";
+  // Fail closed: a capped holder without a tenant would share (and could exhaust) an anonymous bucket.
+  if (lockClass !== "reconcile" && !options.tenant) throw new Error(`Upload lock holder of class ${lockClass} needs a tenant`);
+  const deadline = options.deadline ?? Date.now() + MIN_LOCK_RESERVE_MS;
+  const releaseSlot = await acquireSlot(lockClass, options.tenant ?? "", deadline);
   state.pool ??= createApiPool(env.databaseUrl, { max: directUploadLockLimits().poolMax, applicationName: "docslurp-upload-locks" });
   state.active += 1;
   const done = () => {

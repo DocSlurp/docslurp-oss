@@ -270,7 +270,7 @@ export async function signDownloadGet(args: { key: string; filename: string; exp
 }
 
 /** Per-call deadlines for upload finalization's storage calls, combined with the caller's own cancellation. */
-const UPLOAD_STORAGE_TIMEOUTS_MS = { head: 10_000, list: 30_000, copy: 60_000, complete: 120_000 } as const;
+const UPLOAD_STORAGE_TIMEOUTS_MS = { head: 10_000, list: 30_000, copy: 60_000, complete: 120_000, abort: 10_000 } as const;
 function storageCallSignal(kind: keyof typeof UPLOAD_STORAGE_TIMEOUTS_MS, signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(UPLOAD_STORAGE_TIMEOUTS_MS[kind]);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -353,14 +353,15 @@ export async function completeMultipartUpload(args: {
   );
 }
 
-export async function abortMultipartUpload(args: { key: string; uploadId: string }): Promise<void> {
+export async function abortMultipartUpload(args: { key: string; uploadId: string; signal?: AbortSignal }): Promise<void> {
   await ensureBucketExists();
   await s3Client.send(
     new AbortMultipartUploadCommand({
       Bucket: env.s3Bucket,
       Key: args.key,
       UploadId: args.uploadId
-    })
+    }),
+    { abortSignal: storageCallSignal("abort", args.signal) }
   );
 }
 

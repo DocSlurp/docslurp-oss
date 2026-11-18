@@ -1,7 +1,7 @@
 import { sql } from "../db.js";
 import { env } from "../config.js";
 import { NOT_STARTED, settleBounded } from "../lib/bounded-settle.js";
-import { abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, lockHoldBudget, queueAbandonedDirectUploadCleanup, withDirectUploadLock } from "./direct-upload-session.js";
+import { abortAbandonedMultipartUploads, abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, lockHoldBudget, queueAbandonedDirectUploadCleanup, withDirectUploadLock } from "./direct-upload-session.js";
 import { ProjectIntakeError } from "./project-intake.js";
 import { confirmDirectUploadProjectIntake } from "./project-intake-actions.js";
 
@@ -42,6 +42,12 @@ export async function reconcileDirectUploads(): Promise<void> {
     for (const session of sessions) {
       if (stopped) break;
       await reconcileSession(session);
+    }
+    // Provider multipart aborts of aborted and failed sessions run here, outside any session lock: the ones an abort
+    // request started but could not finish, and those of sessions the sweep failed or expired.
+    if (!stopped) {
+      await abortAbandonedMultipartUploads({ limit: 50 }).catch(error =>
+        console.error("[upload-reconcile] multipart abort drain failed", error instanceof Error ? error.name : "unknown"));
     }
   } finally { running = false; resolveSweepCompletion?.(); resolveSweepCompletion = null; sweepCompletion = null; }
 }
