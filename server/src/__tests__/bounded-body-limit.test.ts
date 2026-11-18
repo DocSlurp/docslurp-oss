@@ -44,4 +44,23 @@ describe("bounded request bodies before readers", () => {
   it("answers 413 before the NUL reader scans an oversized JSON body", async () => {
     expect((await app().request(request(['{"q":"\\u0000', 'x'.repeat(65), '"}'], { "content-type": "application/json" }))).status).toBe(413);
   });
+  it("keeps data after a zero-length first chunk", async () => {
+    const response = await app().request(request(["", "abc"], { "content-type": "text/plain" }));
+    expect(await response.text()).toBe("abc");
+  });
+  it("drops an empty body but keeps the client's abort signal", async () => {
+    const seen: { body?: boolean; aborted?: boolean } = {};
+    const client = new AbortController();
+    const limited = new Hono();
+    limited.use("*", nativeBodyLimit(64));
+    limited.post("/v1/x", c => {
+      seen.body = c.req.raw.body !== null;
+      client.abort();
+      seen.aborted = c.req.raw.signal.aborted;
+      return c.text("ok");
+    });
+    const body = new ReadableStream({ start(controller) { controller.close(); } });
+    await limited.request(new Request("http://localhost/v1/x", { method: "POST", body, duplex: "half", signal: client.signal } as RequestInit));
+    expect(seen).toEqual({ body: false, aborted: true });
+  });
 });
