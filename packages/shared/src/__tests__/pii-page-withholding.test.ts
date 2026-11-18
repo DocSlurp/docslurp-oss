@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { pagedTextSegments, pageImageSlotPage, pageOfTextOffset, piiPageWithholding, piiWithholdsPage, piiWithholdsPageImageSlot } from "../pii.js";
+import { pageImageSlotPage, pageOfTextOffset, piiPageWithholding, piiWithholdsPage, piiWithholdsPageImageSlot } from "../pii.js";
 
 describe("page-scoped PII withholding", () => {
   it("recognizes page-image slots of this document only", () => {
@@ -30,13 +30,6 @@ describe("page-scoped PII withholding", () => {
       { redacted: true, withheldArtifactUris: [], pageScoped: true, withheldPages: [0] },
       { redacted: true, pageScoped: true, withheldPages: "2" },
       { withheldArtifactUris: "corrupt" },
-      // Any blocked value but false withholds everything (the SQL check agrees).
-      { blocked: "true", redacted: true, pageScoped: true, withheldPages: [2] },
-      { blocked: 1, redacted: true, pageScoped: true, withheldPages: [2] },
-      // A redaction that names no page withholds every page.
-      { redacted: true, withheldArtifactUris: ["s3://b/source"], pageScoped: true, withheldPages: [] },
-      // pageScoped must be the boolean true.
-      { redacted: true, withheldArtifactUris: ["s3://b/source"], pageScoped: "true", withheldPages: [2] },
     ]) expect(piiWithholdsPage({ pii }, 1)).toBe(true);
   });
 
@@ -53,17 +46,5 @@ describe("page-scoped PII withholding", () => {
     expect(pageOfTextOffset(text, text.indexOf("three"), 3)).toBe(3);
     expect(pageOfTextOffset("no breaks", 2, 1)).toBe(1);
     expect(pageOfTextOffset("no breaks", 2, 5)).toBeNull();
-  });
-
-  it("refuses page-separated text whose breaks do not line up with the pages", () => {
-    // Unknown page count, a dropped break (two segments for three pages), an extra leading break.
-    expect(pageOfTextOffset("one\ftwo", 5, null)).toBeNull();
-    expect(pageOfTextOffset("no breaks", 2, null)).toBeNull();
-    expect(pageOfTextOffset("one\ftwo", 5, 3)).toBeNull();
-    expect(pageOfTextOffset("\fone\ftwo\fthree", 6, 3)).toBeNull();
-    // One trailing empty segment (a closing break) is allowed.
-    expect(pagedTextSegments("one\ftwo\fthree\f", 3)).toEqual(["one", "two", "three"]);
-    expect(pagedTextSegments("one\ftwo", 3)).toBeNull();
-    expect(pageOfTextOffset("one\ftwo", -1, 2)).toBeNull();
   });
 });

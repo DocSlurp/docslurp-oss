@@ -15,19 +15,18 @@ import { assertParseSourceDecided } from "../lib/parse-source.js";
 
 /**
  * SQL: does document `d`'s PII outcome withhold this page's image (piiPageWithholding)? A redaction that recorded its
- * match pages withholds only those; any other withholding outcome (a block, any `blocked` value but false, a redaction
- * of unknown or no pages, a malformed or pre-page-scoping record) withholds every page, fail closed.
+ * match pages withholds only those; any other withholding outcome (a block, a redaction of unknown pages, a malformed
+ * or pre-page-scoping record) withholds every page, fail closed.
  */
 function piiWithholdsPageSql(client: Store["stageSql"], pageNumber: number) {
   return client`(case
     when d.metadata->'pii' is null or jsonb_typeof(d.metadata->'pii') <> 'object' then false
-    when d.metadata->'pii' ? 'blocked' and d.metadata->'pii'->'blocked' not in ('false'::jsonb, 'null'::jsonb) then true
+    when d.metadata->'pii'->>'blocked' = 'true' then true
     when not (d.metadata->'pii'->>'redacted' = 'true'
       or jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') is distinct from 'array'
         and d.metadata->'pii'->'withheldArtifactUris' is not null
       or (jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array' and jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris') > 0)) then false
-    when d.metadata->'pii'->'pageScoped' = 'true'::jsonb and jsonb_typeof(d.metadata->'pii'->'withheldPages') = 'array'
-      and jsonb_array_length(d.metadata->'pii'->'withheldPages') > 0
+    when d.metadata->'pii'->>'pageScoped' = 'true' and jsonb_typeof(d.metadata->'pii'->'withheldPages') = 'array'
       and not exists (select 1 from jsonb_array_elements(d.metadata->'pii'->'withheldPages') as page(value)
         where jsonb_typeof(page.value) <> 'number' or (page.value)::text !~ '^[1-9][0-9]*$')
       then d.metadata->'pii'->'withheldPages' @> to_jsonb(${pageNumber}::int)

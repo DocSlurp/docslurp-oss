@@ -371,13 +371,11 @@ export function piiPageWithholding(metadata: unknown): PiiPageWithholding {
   const pii = metadata && typeof metadata === "object" ? (metadata as { pii?: unknown }).pii : null;
   if (!pii || typeof pii !== "object") return NOTHING_WITHHELD;
   const record = pii as { blocked?: unknown; redacted?: unknown; withheldArtifactUris?: unknown; pageScoped?: unknown; withheldPages?: unknown };
-  // Any blocked value but an explicit false (or absent) withholds everything: a string "true", a number, an object.
-  if (record.blocked !== undefined && record.blocked !== null && record.blocked !== false) return { all: true, pageScoped: false, pages: new Set() };
+  if (record.blocked === true) return { all: true, pageScoped: false, pages: new Set() };
   const withholds = record.redacted === true || (Array.isArray(record.withheldArtifactUris) && record.withheldArtifactUris.length > 0)
     || (record.withheldArtifactUris !== undefined && !Array.isArray(record.withheldArtifactUris));
   if (!withholds) return NOTHING_WITHHELD;
-  // Page-scoped only with a non-empty list of valid pages: a redaction that names no page withholds every page.
-  if (record.pageScoped === true && Array.isArray(record.withheldPages) && record.withheldPages.length > 0
+  if (record.pageScoped === true && Array.isArray(record.withheldPages)
     && record.withheldPages.every((page) => Number.isInteger(page) && (page as number) >= 1)) {
     return { all: false, pageScoped: true, pages: new Set(record.withheldPages as number[]) };
   }
@@ -397,25 +395,12 @@ export function piiWithholdsPageImageSlot(metadata: unknown, documentId: string,
 }
 
 /**
- * The pages of page-separated (`\f`) text when its segments line up with the document's pages, else null: the page
- * count must be known, and the segment count must equal it (one trailing empty segment, from a closing page break, is
- * allowed). A parser that dropped or added a page break would shift every later page, so any mismatch is unknown.
- */
-export function pagedTextSegments(text: string, pageCount: number | null | undefined): string[] | null {
-  if (!Number.isInteger(pageCount) || (pageCount as number) < 1) return null;
-  const segments = text.split("\f");
-  if (segments.length === (pageCount as number) + 1 && segments[segments.length - 1]!.trim() === "") segments.pop();
-  return segments.length === pageCount ? segments : null;
-}
-
-/**
- * 1-based page of a character offset in page-separated (`\f`) text, or null when it cannot be known: the page count
- * is unknown, or the text's page breaks do not line up with the document's pages (pagedTextSegments).
+ * 1-based page of a character offset in page-separated (`\f`) text, or null when the text has no page breaks and
+ * the document has more than one page (the page cannot be known).
  */
 export function pageOfTextOffset(text: string, charOffset: number, pageCount: number | null | undefined): number | null {
-  if (!pagedTextSegments(text, pageCount)) return null;
-  if (!Number.isInteger(charOffset) || charOffset < 0 || charOffset > text.length) return null;
+  if (!text.includes("\f")) return (pageCount ?? 1) <= 1 ? 1 : null;
   let page = 1;
   for (let index = text.indexOf("\f"); index !== -1 && index < charOffset; index = text.indexOf("\f", index + 1)) page += 1;
-  return page <= (pageCount as number) ? page : null;
+  return page;
 }

@@ -33,9 +33,7 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   // PII (page-scoped under redact_artifacts): a page a match is on is never served or rendered; a block, or a
   // redaction whose match pages are unknown, withholds every page (piiPageWithholding, fail closed).
   const [piiRow] = await sql<{ metadata: unknown }[]>`select metadata from documents where id = ${doc.id}`;
-  // No row (deleted or moved between reads): nothing is known about its PII outcome, so nothing is served.
-  if (!piiRow) return { status: "unavailable" as const, reason: "withheld" as const, document: doc };
-  const pii = piiPageWithholding(piiRow.metadata ?? null);
+  const pii = piiPageWithholding(piiRow?.metadata ?? null);
   if (pii.all || pii.pages.has(pageNumber)) return { status: "unavailable" as const, reason: "withheld" as const, document: doc };
   const artifact = viewer.artifacts.find(item => item.slot === pageRenderSlot(documentId, pageNumber, quality, dpi));
   if (!artifact && quality === "reader") {

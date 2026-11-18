@@ -6,7 +6,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import { connect } from "@lancedb/lancedb";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
-import { defaultPipelineFeatures, pageCredits, piiWithholdsPage, speedBoostMultiplier } from "@docslurp/shared";
+import { defaultPipelineFeatures, pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
@@ -114,7 +114,7 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
   };
   h.deps = {
     sql, store, usage,
-    storage: { uri: (key: string) => `s3://test-bucket/${key}` } as never, runner: {} as never,
+    storage: {} as never, runner: {} as never,
     config: { lancedb: { root: "/tmp/none", storageOptions: undefined, params: new URLSearchParams() }, defaultInferenceLane: "balanced", vectorBackends: ["lancedb"] } as unknown as Config,
     ops,
   };
@@ -204,11 +204,6 @@ describe("materializePageRange", () => {
     expect(h.embedCalls.flat().join(" ")).not.toContain("123-45-6789");
     const state = await db.query<{ state: string }>(`select state from document_page_states where page_number = 2`);
     expect(state.rows[0]!.state).toBe("blocked-pii");
-    // The blocked page's images are withheld too (pii-detect never saw its text); other pages stay servable.
-    const [row] = (await db.query<{ metadata: unknown }>(`select metadata from documents where id = 'd1'`)).rows;
-    expect(piiWithholdsPage(row!.metadata, 2)).toBe(true);
-    expect(piiWithholdsPage(row!.metadata, 1)).toBe(false);
-    await db.exec(`update documents set metadata = metadata - 'pii' where id = 'd1'`);
   });
 
   it("redacts page text when the policy redacts artifacts", async () => {
@@ -220,11 +215,6 @@ describe("materializePageRange", () => {
     const result = await claimAndMaterialize(h.deps, input(h, [1], pipeline));
     expect(result.indexed).toEqual([1]);
     expect(h.embedCalls.flat().join(" ")).not.toContain("123-45-6789");
-    // pii-detect ran before this page had text: the page's images are withheld now, in the publish transaction.
-    const [row] = (await db.query<{ metadata: unknown }>(`select metadata from documents where id = 'd1'`)).rows;
-    expect(piiWithholdsPage(row!.metadata, 1)).toBe(true);
-    expect(piiWithholdsPage(row!.metadata, 2)).toBe(false);
-    await db.exec(`update documents set metadata = metadata - 'pii' where id = 'd1'`);
   });
 
   it("re-running a range republishes the pages under a new id generation, without duplicates", async () => {

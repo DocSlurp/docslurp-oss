@@ -19,10 +19,8 @@ import {
   type PiiMatch,
   type PiiPolicy,
   type PiiPatternType,
-  isPageImageReferenceBlock,
   pageImageSlotPage,
   pageOfTextOffset,
-  pagedTextSegments,
   piiPatternTypeSchema,
 } from "@docslurp/shared";
 import { createPiiTextScanner, redactCanonicalDocument, redactJsonText, type PiiTextScanner } from "../lib/pii-redaction.js";
@@ -86,109 +84,48 @@ export type PiiDocumentOutcome = {
 };
 
 type ScanFindings = {
-  canonicalResult: { matches: PiiMatch[]; extraMatches?: PiiMatch[]; changed?: boolean } | null;
+  canonicalResult: { matches: PiiMatch[] } | null;
   markdownResult: { matches: PiiMatch[] } | null;
   htmlResult: { matches: PiiMatch[] } | null;
   contractResult: { matches: PiiMatch[] } | null;
   fallbackResult: { matches: PiiMatch[] } | null;
 };
 
-/** The text a page carries once Fast page-image references (pages kept as images, never read) are removed. */
-const PAGE_IMAGE_REFERENCE = /!\[Page \d+: scanned page image, no text layer\]\([^)]*\)/g;
-const IMAGE_URI = /\.(?:png|jpe?g|webp|gif|tiff?|bmp|avif|heic)(?:[?#].*)?$/i;
-
-type ScopeSources = {
-  /** Canonical blocks (pre-redaction shape), when the document has a canonical document. */
-  canonicalBlocks: ReadonlyArray<{ pageNumber?: unknown; text?: unknown; metadata?: Record<string, unknown> | null }> | null;
-  markdownText: string | null;
-  fallbackText: string;
-  /** The run's artifact ledger slots (slot -> URI). */
-  artifactSlots: Readonly<Record<string, string>>;
-};
-
 /**
- * Pages a redaction's matches are on, or `unknown` (why the pages cannot be trusted). Page scoping is allowed only when
- * every fact lines up, so any doubt withholds every page image (fail closed):
- *
- * - the page count is known, and every page carries scanned text: a page kept as its image, unread, failed, empty or
- *   deferred may hold PII no scan saw (H1);
- * - the document has no image artifact other than its page images (an embedded image or figure nobody read);
- * - canonical block pages lie within the page count; page-separated text has exactly one segment per page;
- * - every match, heading and block-metadata hits included, has a page;
- * - every other source's match is the same value on the same page (fingerprint and page), and a source that cannot
- *   place a match (HTML, the structured result) holds none on a multi-page document;
- * - at least one page holds a match.
+ * Pages a redaction's matches are on. The paged source is the canonical document (block page numbers), else the
+ * markdown, else the source text (page breaks). `unknown` names why the pages cannot be trusted: a match with no page,
+ * or another source holding a value the paged one lacks (a value only in the HTML or the structured result).
  */
 export function matchPageScope(
-  document: Pick<Document, "id" | "pageCount">,
+  document: Pick<Document, "pageCount">,
   findings: ScanFindings,
-  sources: ScopeSources,
+  markdownText: string | null,
+  fallbackText: string,
 ): { pages: Set<number>; unknown: string | null } {
   const pages = new Set<number>();
-  const unknown = (reason: string) => ({ pages: new Set<number>(), unknown: reason });
-  const pageCount = document.pageCount;
-  if (!Number.isInteger(pageCount) || pageCount < 1) return unknown("page-count-unknown");
-  const inRange = (page: unknown): page is number => Number.isInteger(page) && (page as number) >= 1 && (page as number) <= pageCount;
-
-  // Unread images: an image artifact that is not a page image (embedded image, figure, crop) was never PII-scanned.
-  const prefix = `${document.id}:`;
-  for (const [slot, uri] of Object.entries(sources.artifactSlots)) {
-    if (slot.startsWith(prefix) && IMAGE_URI.test(uri) && pageImageSlotPage(document.id, slot) === null) return unknown("unscanned-image-artifact");
-  }
-
-  // Every page must carry scanned text.
-  const covered = new Set<number>();
-  const pagedText = sources.markdownText ?? (sources.fallbackText || null);
-  const segments = pagedText !== null ? pagedTextSegments(pagedText, pageCount) : null;
-  if (sources.canonicalBlocks) {
-    for (const block of sources.canonicalBlocks) {
-      const page = block.pageNumber;
-      if (page !== null && page !== undefined && !inRange(page)) return unknown("block-page-out-of-range");
-      if (inRange(page) && typeof block.text === "string" && block.text.trim() && !isPageImageReferenceBlock(block)) covered.add(page);
-    }
-  } else {
-    if (!segments) return unknown("page-breaks-mismatch");
-    segments.forEach((segment, index) => { if (segment.replace(PAGE_IMAGE_REFERENCE, "").trim()) covered.add(index + 1); });
-  }
-  if (covered.size < pageCount) return unknown("page-without-scanned-text");
-
-  // The paged source: canonical blocks (block page numbers), else the page breaks of the scanned text.
-  const textPage = (text: string | null) => (match: PiiMatch) =>
-    inRange(match.pageNumber) ? match.pageNumber : text !== null ? pageOfTextOffset(text, match.charOffset, pageCount) : null;
   const source = findings.canonicalResult
-    ? { name: "canonical-document", matches: [...findings.canonicalResult.matches, ...(findings.canonicalResult.extraMatches ?? [])], page: (match: PiiMatch) => match.pageNumber }
+    ? { name: "canonical-document", matches: findings.canonicalResult.matches, page: (match: PiiMatch) => match.pageNumber }
     : findings.markdownResult
-      ? { name: "markdown", matches: findings.markdownResult.matches, page: textPage(sources.markdownText) }
+      ? { name: "markdown", matches: findings.markdownResult.matches, page: (match: PiiMatch) => match.pageNumber ?? pageOfTextOffset(markdownText ?? "", match.charOffset, document.pageCount) }
       : findings.fallbackResult
-        ? { name: "source-text", matches: findings.fallbackResult.matches, page: textPage(sources.fallbackText) }
+        ? { name: "source-text", matches: findings.fallbackResult.matches, page: (match: PiiMatch) => match.pageNumber ?? pageOfTextOffset(fallbackText, match.charOffset, document.pageCount) }
         : null;
-  if (!source) return unknown("no-paged-source");
-  const known = new Set<string>();
-  const key = (match: PiiMatch, page: number) => `${match.patternType}:${match.matchedPrefix}@${page}`;
+  if (!source) return { pages, unknown: "no-paged-source" };
   for (const match of source.matches) {
     const page = source.page(match);
-    if (!inRange(page)) return unknown(`${source.name}-match-without-page`);
+    if (page === null || !Number.isInteger(page) || page < 1) return { pages, unknown: `${source.name}-match-without-page` };
     pages.add(page);
-    known.add(key(match, page));
   }
-
-  // Every other source renders the same text: each value it holds must be one the paged source holds on the same page.
-  const others: Array<[string, { matches: PiiMatch[] } | null, (match: PiiMatch) => number | null]> = [
-    ["markdown", findings.markdownResult, textPage(sources.markdownText)],
-    ["html", findings.htmlResult, textPage(null)],
-    ["extraction-contract", findings.contractResult, textPage(null)],
-    ["source-text", findings.fallbackResult, textPage(sources.fallbackText || null)],
+  const others: Array<[string, { matches: PiiMatch[] } | null]> = [
+    ["markdown", findings.markdownResult], ["html", findings.htmlResult], ["extraction-contract", findings.contractResult], ["source-text", findings.fallbackResult],
   ];
-  for (const [name, result, pageOf] of others) {
+  // Every other source renders the same text: a value it holds that the paged source lacks (by match fingerprint)
+  // came from somewhere the pages cannot place.
+  const known = new Set(source.matches.map((match) => `${match.patternType}:${match.matchedPrefix}`));
+  for (const [name, result] of others) {
     if (name === source.name || !result) continue;
-    for (const match of result.matches) {
-      const page = pageOf(match) ?? (pageCount === 1 ? 1 : null);
-      if (!inRange(page)) return unknown(`${name}-match-without-page`);
-      if (!known.has(key(match, page))) return unknown(`${name}-holds-unplaced-value`);
-    }
+    if (result.matches.some((match) => !known.has(`${match.patternType}:${match.matchedPrefix}`))) return { pages, unknown: `${name}-holds-unplaced-value` };
   }
-  // A redaction that names no page (a change no match explains) withholds every page.
-  if (pages.size === 0) return unknown("no-match-pages");
   return { pages, unknown: null };
 }
 
@@ -520,16 +457,7 @@ export class PiiDetectStage implements Stage {
     // Redaction is page-scoped (owner rule): page images withhold only on pages a match is on. Pages come from the
     // canonical blocks, else the page breaks of the scanned text. A match whose page cannot be known, or a value only
     // a source without pages holds (HTML, the structured result), withholds every page image, as before (logged).
-    const scope = redacted
-      ? matchPageScope(document, findings, {
-          canonicalBlocks: canonical && Array.isArray((canonical.value as { blocks?: unknown }).blocks)
-            ? (canonical.value as { blocks: ScopeSources["canonicalBlocks"] & unknown[] }).blocks
-            : canonical ? [] : null,
-          markdownText: markdown?.text ?? null,
-          fallbackText,
-          artifactSlots: ledger.all(),
-        })
-      : null;
+    const scope = redacted ? matchPageScope(document, findings, markdown?.text ?? null, fallbackText) : null;
     if (scope?.unknown) {
       console.warn(`[pii-detect] document=${document.id} run=${state.run.id} match page unknown (${scope.unknown}): every page image withheld`);
     }
@@ -608,21 +536,20 @@ export class PiiDetectStage implements Stage {
   /** Every artifact URI recorded for this document so far, minus the ones known to be clean. */
   private withheldArtifactUris(state: WorkflowState, document: Document, servable: Set<string>, keepSlot: (slot: string) => boolean = () => false): string[] {
     const uris = new Set<string>();
+    const kept = new Set<string>();
     const prefix = `${document.id}:`;
     for (const [slot, uri] of Object.entries(state.artifactLedger.all())) {
       if (!slot.startsWith(prefix) || slot === `${prefix}pii-detect` || !uri.includes("://")) continue;
-      // A kept page image (an unmatched page under page scoping) is not withheld by its slot.
-      if (!keepSlot(slot)) uris.add(uri);
+      if (keepSlot(slot)) kept.add(uri);
+      else uris.add(uri);
     }
+    // A URI recorded under both a kept page slot and another slot stays withheld.
+    for (const uri of kept) if (!uris.has(uri)) servable.add(uri);
     for (const stage of state.documentStages.get(document.id)?.values() ?? []) {
       if (stage.stageName !== this.name && stage.artifactUri) uris.add(stage.artifactUri);
     }
-    const source = this.storage.uri(document.sourceKey);
-    uris.add(source);
-    // A kept page image whose URI another slot, a stage artifact or the source file also uses stays withheld (an
-    // image upload's page 1 can be the original). `servable` (clean, redacted text artifacts) never un-withholds the
-    // source file.
-    return [...uris].filter((uri) => uri === source || !servable.has(uri)).sort();
+    uris.add(this.storage.uri(document.sourceKey));
+    return [...uris].filter((uri) => !servable.has(uri)).sort();
   }
 
   /**
