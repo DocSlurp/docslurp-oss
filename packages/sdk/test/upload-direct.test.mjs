@@ -212,3 +212,21 @@ test("reports every run a direct upload started in waves, while following it and
   assert.deepEqual(result.runs.map((run) => run.runId), ["s1", "run-2"]);
   assert.deepEqual(seen, [["s1"], ["s1", "run-2"]]);
 });
+
+test("reports a partly succeeded direct upload (confirmed with aborted files) instead of failing it", async () => {
+  const api = fakeApi();
+  const fetch = async (url, init = {}) => {
+    if (String(url).endsWith("/s1?statusOnly=true")) {
+      return json({ status: "confirmed", protocol: "waves", result: { ...uploadResult, run: { id: "s1" } }, failedFileCount: 1, abortedFileCount: 2,
+        runs: [{ runId: "s1", wave: 1, status: "started", fileCount: 5, documentCount: 5, createdAt: "2026-11-17T00:00:00.000Z" }] });
+    }
+    return api.fetch(url, init);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  const big = new Blob([new Uint8Array(DIRECT_UPLOAD_THRESHOLD_BYTES + 1)], { type: "application/pdf" });
+  const result = await client.upload({ data: big, filename: "big.pdf" });
+  assert.equal(result.run.id, "s1");
+  assert.equal(result.failedFileCount, 1);
+  assert.equal(result.abortedFileCount, 2);
+  assert.equal(result.runs.length, 1);
+});

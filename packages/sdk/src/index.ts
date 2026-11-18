@@ -674,6 +674,12 @@ export type UploadRunSummary = {
 export type UploadResponse = {
   /** Direct uploads: every run the upload started, in order (`run` is the first). Absent for single-run uploads. */
   runs?: UploadRunSummary[];
+  /**
+   * Direct uploads that partly succeeded: files whose stored bytes were refused, and files no run took because the
+   * session ended first (aborted or expired). Every other file is in `runs`; never upload the whole session again.
+   */
+  failedFileCount?: number;
+  abortedFileCount?: number;
   documents: DocumentRecord[];
   /** Files an upload left out while accepting the rest (one bad file never fails the request). Absent when every file was taken. */
   rejected?: RejectedUpload[];
@@ -1357,6 +1363,11 @@ export type UploadSession = {
   runs?: UploadRunSummary[];
   /** The project the runs went to, once the first run started. */
   projectId?: string | null;
+  /** 'single' (one run once every file is in) or 'waves' (runs while uploading); fixed when the session was created. */
+  protocol?: "single" | "waves";
+  /** A `confirmed` session with these partly succeeded: see UploadResponse. */
+  failedFileCount?: number;
+  abortedFileCount?: number;
   error?: string | null;
   /** Files the server left out of the session (the others were accepted), keyed by request index. */
   rejected?: RejectedUpload[];
@@ -2363,7 +2374,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
             try { options.onRuns?.(runs); } catch { /* a caller's callback never fails the upload */ }
           }
           // Every run the upload started; `result` (the first run's response) is set once every file is in one.
-          if (session.result) return runs.length > 0 ? { ...session.result, runs } : session.result;
+          if (session.result) {
+            const partial = (session.failedFileCount ?? 0) + (session.abortedFileCount ?? 0) > 0
+              ? { failedFileCount: session.failedFileCount ?? 0, abortedFileCount: session.abortedFileCount ?? 0 } : {};
+            return runs.length > 0 || Object.keys(partial).length > 0 ? { ...session.result, ...(runs.length > 0 ? { runs } : {}), ...partial } : session.result;
+          }
           if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
         } catch (error) {
           if (!(error instanceof DocSlurpApiError)) throw error;
