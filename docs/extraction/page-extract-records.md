@@ -1,8 +1,9 @@
 # Page extract records
 
 Every page carries a record of how its text was produced: which pass wrote it, by what method and route, the page class
-it was billed in, tags describing the page, and a few quality signals. Records are labels only: they never hold page
-text, a document-supplied value or a model id.
+it was billed in, tags describing the page, and a few quality signals. Records never hold page text or a
+document-supplied value. The model that served a pass is recorded in two operator-facing columns (`model_uri`,
+`model_class`) that the API does not return; every other column is a label.
 
 ## Table
 
@@ -13,8 +14,9 @@ project by composite foreign keys to the document and the run.
 | --- | --- |
 | `pass` | `extract` (the primary extractor), `scan-ocr` (OCR of pages without words, inside extraction), `critique` (self-critique correction), `vision` (the vision stage), `human` (reserved for human corrections) |
 | `method` | `text-layer`, `ocr`, `ocr-second-read` (page reader or escalation read), `vision`, `transcription` (audio and video), `correction`, `kept-as-image` (Fast pages without a text layer, textless images), `none` |
-| `engine` | Route token: an extractor id or a route word (`page-ocr`, `ocr-escalation`, `gpu-page-reader`, `hosted-ocr`, `vision-model`, `chart-export`, `self-critique`). Never a model id. |
+| `engine` | Route token: an extractor id or a route word (`page-ocr`, `ocr-escalation`, `gpu-page-reader`, `hosted-ocr`, `vision-model`, `chart-export`, `self-critique`). Never a model id: that is `model_uri`. |
 | `member_id`, `region` | The capability-pool member that served the page and its region (not yet populated; not served by the API until they hold tier-safe values) |
+| `model_uri`, `model_class` | Migration 0191, operator-facing, never returned by the API: the model that served the pass as an `llm://provider/model` URI (the same provider and model as the read's usage event; an OCR read is named by its reader), and the run's levels at the time (`quality=…;visionProfile=…`). Null for a text layer and for rows written before the columns existed. |
 | `billed_class` | `fast` (Text), `ocr` (Scan), `rich` (Vision): the class the pass's read is billed in |
 | `tags` | `scanned`, `table`, `math`, `garbled-text-layer`, `drawn`, `image-only`, `low-confidence`, `escalation-capped`, `escalation-unfunded`, `pii-withheld`, `blank`, `yield-deficit`, `ladder-capped`, `failed`, `truncated`, `rejected` |
 | `confidence`, `plausibility` | OCR mean confidence, extraction plausibility, in [0, 1] |

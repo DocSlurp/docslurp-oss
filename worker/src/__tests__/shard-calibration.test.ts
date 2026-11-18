@@ -107,9 +107,8 @@ describe("calibratedShardProfile", () => {
 });
 
 describe("createShardCalibration", () => {
-  it("uses priors without a store that can load observations", async () => {
+  it("uses priors without a store", async () => {
     expect(await createShardCalibration(undefined).profile(KEY)).toBe(prior);
-    expect(await createShardCalibration({}).profile(KEY)).toBe(prior);
   });
 
   it("reads through the store", async () => {

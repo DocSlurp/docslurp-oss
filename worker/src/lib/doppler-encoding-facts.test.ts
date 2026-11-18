@@ -10,7 +10,7 @@ import {
   dopplerFlagBit, encodingRouteFromFlags, pageEncodingRoute, parsePageEncodingRoute, type DopplerMathFlag, type DopplerTableFlag,
 } from "./doppler-encoding-facts.js";
 import { dopplerPageFactsJsonl, dopplerPageFactsRequest, parseDopplerPageFacts, withoutWalkerParityFacts, type DopplerPageFacts } from "./doppler-page-facts.js";
-import { pageLayoutFactsFromDopplerPage, routingFactsWithDopplerFacts, withEncodingRoutes } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerPage, routingFactsWithDopplerFacts, withEncodingRoutes } from "./page-evidence-doppler.js";
 import { parsePageLayoutFacts, type PageLayoutFacts } from "./page-layout-facts.js";
 import { buildRoutingPageFacts } from "../pipeline/page-facts.js";
 import { acceptSandboxedPdfResult, sandboxedPdfLayoutFacts, type SandboxedPdfJob } from "../extractors/plugins.js";

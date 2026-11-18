@@ -35,6 +35,16 @@ describe("project cutover rejects stale scope instead of selecting default", () 
     expect((await raw.request("/", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ params: { arguments: { workspaceId: "other" } } }) })).status).toBe(400);
   });
 
+  it("lets an empty body stream through without a Content-Type", async () => {
+    // Node hosts give every POST a body stream; with no bytes it is not content, even with no body limit in front.
+    const route = new Hono().use("*", rejectLegacyProjectSelection).on(["POST", "DELETE"], "/", c => c.json({ ok: true }));
+    for (const method of ["POST", "DELETE"]) for (const headers of [{}, { "content-type": "text/plain" }]) {
+      const body = new ReadableStream({ start(controller) { controller.close(); } });
+      const response = await route.request(new Request("http://localhost/", { method, headers, body, duplex: "half" } as RequestInit));
+      expect(response.status).toBe(200);
+    }
+  });
+
   it("cannot hide stale selection behind a non-JSON Content-Type", async () => {
     for (const contentType of ["text/plain", "application/octet-stream"]) {
       expect((await app().request("/", { method: "POST", headers: { "content-type": contentType }, body: JSON.stringify({ workspaceId: "foreign" }) })).status).toBe(400);

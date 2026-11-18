@@ -18,6 +18,12 @@ Compose passes every variable in `.env.selfhost` to the server and workers (`env
 | `RESEND_API_KEY` / `EMAIL_FROM` | unset (not in the template) | Email delivery through Resend for verification codes, sign-in codes and magic links. Without both, email and password sign-up is disabled (`isEmailAuthConfigured` in `packages/shared/src/auth-security.ts`), so configure them or an OAuth provider before anyone can create an account. |
 | `MAX_UPLOAD_BYTES` | `524288000` (500 MiB) | Largest accepted upload. |
 | `MAX_MULTIPART_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest file on the buffered `POST /v1/uploads/bulk` path, which holds the body in memory; larger files must use direct upload sessions. Capped at `MAX_UPLOAD_BYTES`. |
+| `DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY` | `8` (1–32) | Files of one direct-upload session verified and sealed at once (a batched `files/complete`, the reconciler, a recovery read). |
+| `DOCSLURP_UPLOAD_LOCK_POOL_MAX` | `6` (at least 3) | Database connections per API process for direct-upload session locks. Two are always left to the reconciler and to short operations (part signing, confirm, abort). |
+| `DOCSLURP_UPLOAD_LOCK_BATCH_MAX` | pool minus two | Concurrent `files/complete` calls finalizing files, per API process. |
+| `DOCSLURP_UPLOAD_LOCK_BATCH_PER_ORG` | `2` | Of those, how many one organization may hold at once in a process. |
+| `DOCSLURP_UPLOAD_LOCK_HOLD_BUDGET_MS` | `5000` | How long one `files/complete` call (or reconciler pass) keeps starting new files; files it did not reach are answered as retryable `upload_session_busy`. |
+| `DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS` | `30000` | Hard cap on one call's storage work under the session lock; in-flight storage calls are cancelled after it. |
 | `STORAGE_PUBLIC_ENDPOINT` | unset | Browser-reachable `http(s)` origin that presigned upload URLs are signed against, when the `STORAGE_URI` endpoint (`http://minio:9000` in Compose) only resolves inside Docker. Server-side storage calls keep using `STORAGE_URI`. See [MCP Apps uploader and MinIO](../self-host.md#mcp-apps-uploader-and-minio). |
 
 Storage is preconfigured in `compose.selfhost.yml` as

@@ -10,7 +10,6 @@ import {
   TEXT_LAYER_DISAGREES_SIGNAL,
   assessTextLayer,
   decidePageRaster,
-  isTableHeavy,
   markdownTables,
   rasterPageSignal,
   type PageTable,
@@ -41,6 +40,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
+import { pageEvidenceFromLayout, pageTableDecision, type PageTableDecision } from "../lib/page-evidence.js";
 import { encodingMathVisionFlags, TEXT_LAYER_TABLE_FLAGS, VISION_TABLE_FLAGS, type PageEncodingRoute } from "../lib/doppler-encoding-facts.js";
 import { readEncodingFactsRouting } from "../routing/flags.js";
 import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence, type PageTextLayerEvidence } from "../lib/page-image-evidence.js";
@@ -1135,20 +1135,21 @@ function buildAdaptivePageRoutesFromTexts(
 const ALIGNED_TABLE_MIN_ROWS = 3;
 
 /**
- * Owner rule: a page is table-heavy only when some table has PAGE_TABLE_ROUTING.tableHeavyMinRows rows or its tables cover
- * PAGE_TABLE_ROUTING.tableHeavyMinCoverage of the page (shared isTableHeavy). Tables are the extractor's own (pipe and
- * HTML tables), rows a layout-preserving extractor or OCR kept aligned, and, when known, the layout walker's tables with
- * their coverage. Never words that name a table ("total", "amount").
+ * The page's table decision (lib/page-evidence.ts pageTableDecision). Owner rule: a page is table-heavy only when some table
+ * has PAGE_TABLE_ROUTING.tableHeavyMinRows rows or its tables cover PAGE_TABLE_ROUTING.tableHeavyMinCoverage of the page
+ * (shared isTableHeavy). Tables are the extractor's own (pipe and HTML tables), rows a layout-preserving extractor or OCR
+ * kept aligned, the known ruled grids (a drawn table the extractor flattened still counts by its rows), and, when known,
+ * the layout walker's tables with their coverage. Never words that name a table ("total", "amount"). Unknown grids take the
+ * table path; Doppler's encodings only add a table.
  */
-function pageIsTableHeavy(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null; tableScan?: HtmlTableScan | null }): boolean {
-  const tables: PageTable[] = args.layout?.tables
-    ? [...args.layout.tables]
-    : markdownTables(args.text, args.tableScan).map((table) => ({ ...table, coverage: null }));
-  // Ruled grids: a drawn table the extractor flattened still counts by its rows.
-  tables.push(...(args.layout?.grids ?? []));
-  if (args.alignedRows >= ALIGNED_TABLE_MIN_ROWS) tables.push({ rows: args.alignedRows, columns: 3, coverage: null });
-  if (args.numericRows > 0) tables.push({ rows: args.numericRows, columns: 3, coverage: null });
-  return isTableHeavy(tables, args.layout?.tableCoverage ?? null);
+function pageTable(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null; tableScan?: HtmlTableScan | null; encodings: PageEncodingRoute | null; pageNumber: number }): PageTableDecision {
+  const textRows: PageTable[] = [];
+  if (args.alignedRows >= ALIGNED_TABLE_MIN_ROWS) textRows.push({ rows: args.alignedRows, columns: 3, coverage: null });
+  if (args.numericRows > 0) textRows.push({ rows: args.numericRows, columns: 3, coverage: null });
+  // The extractor's Markdown tables count only where the layout does not list the extractor's tables with their geometry.
+  const evidence = args.layout ? pageEvidenceFromLayout(args.pageNumber, args.layout) : null;
+  const markdown = evidence?.tables ? [] : markdownTables(args.text, args.tableScan).map((table) => ({ ...table, coverage: null }));
+  return pageTableDecision(evidence, { markdownTables: markdown, textRows, encodings: args.encodings });
 }
 
 /** Cells separated by a run of two or more spaces (or a tab) after the line's own indentation. */
@@ -1269,6 +1270,7 @@ export function classifyAdaptivePage(
   const withoutTables = withoutHtmlTables(normalized, text.length - text.trimStart().length, tableScan)
     .split("\n").filter((line) => !/^\s*\|.*\|\s*$/.test(line)).join("\n");
   const specializedContent = detectSpecializedContent(withoutTables, withoutTables.split(/\n+/).filter(Boolean), routingV2);
+  const table = pageTable({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, encodings, pageNumber, ...(tableScan !== undefined ? { tableScan } : {}) });
 
   let route: AdaptivePageRoute = "straightforward-text";
   let extractorHint: AdaptivePageRoutingEntry["extractorHint"] = "cheap-text";
@@ -1297,14 +1299,14 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (encodings?.table === "vision") {
+  } else if (table.reason === "encoding-vision") {
     // A table drawn as glyph outlines (Doppler `outlined-text-grid`): no text layer holds it, whatever its size. The read
     // itself is evidence routing's (encodingReadDecision, capped per document); the hint never asks for one on its own.
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.72;
-    signals.push(encodingTableSignal(encodings));
-  } else if (options.layout?.gridsUnknown === true) {
+    signals.push(encodingTableSignal(encodings!));
+  } else if (table.reason === "grids-unknown") {
     // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
     // path, never a guessed "no table" a document could steer its own pages into. Doppler's encodings never change that;
     // a text-layer table bit only names the encoding (`encoding-table:*`).
@@ -1313,18 +1315,18 @@ export function classifyAdaptivePage(
     confidence = encodings?.table === "text-layer" ? 0.74 : 0.6;
     signals.push("grids-unknown");
     if (encodings?.table === "text-layer") signals.push(encodingTableSignal(encodings));
-  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
+  } else if (table.reason === "table-heavy") {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
     signals.push("table-markers");
-  } else if (encodings?.table === "text-layer" && !(options.layout?.grids?.length)) {
+  } else if (table.reason === "encoding-text-layer") {
     // A table the text layer holds that no grid or Markdown table showed (rules only across, whitespace columns, shaded
     // rows, tagged structure): the encodings add the table route.
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.7;
-    signals.push(encodingTableSignal(encodings));
+    signals.push(encodingTableSignal(encodings!));
   } else if (!routingV2 && chartMarkers >= 2) {
     route = "chart-or-figure";
     extractorHint = "vision-rescue";

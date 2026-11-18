@@ -13,6 +13,7 @@ import {
 } from "../lib/provider-retry.js";
 import { shouldFailOpenVisionError } from "../stages/vision-extract.js";
 import { toActivityFailure } from "../temporal/activities.js";
+import { DocumentOutOfScopeError } from "../db/missing-document.js";
 import { PROVIDER_RATE_LIMITED } from "../temporal/shared.js";
 import { resolveActivityConcurrency } from "../concurrency.js";
 import { perSlotShare, resolveWorkerDeploymentProfile } from "../pipeline/local-compute-cost.js";
@@ -185,5 +186,15 @@ describe("per-slot compute allocation", () => {
     expect(resolveWorkerDeploymentProfile(machine, 4)).toMatchObject({ allocatedVcpu: 2, allocatedMemoryGb: 4 });
     expect(resolveWorkerDeploymentProfile({ ...machine, WORKER_ACTIVITY_CONCURRENCY: "8" })).toMatchObject({ allocatedVcpu: 1, allocatedMemoryGb: 2 });
     expect(perSlotShare("16", 4)).toBe(4);
+  });
+});
+
+describe("toActivityFailure: a document outside its run's scope", () => {
+  it("is non-retryable on the first attempt, found anywhere in the cause chain", () => {
+    for (const error of [new DocumentOutOfScopeError("d1", "org"), new Error("stage failed", { cause: new DocumentOutOfScopeError("d1", "run") })]) {
+      const failure = toActivityFailure(error) as ApplicationFailure;
+      expect(failure).toBeInstanceOf(ApplicationFailure);
+      expect(failure).toMatchObject({ type: "DocumentOutOfScope", nonRetryable: true });
+    }
   });
 });

@@ -4,10 +4,10 @@ import {
   DOPPLER_PAGE_FACTS_MAX_BYTES, DOPPLER_PAGE_FACTS_MAX_LINE_BYTES, dopplerPageFactsJsonl, dopplerPageFactsByteBudget, dopplerPageFactsMode,
   parseDopplerPageFacts, type DopplerPageFactsDocument,
 } from "./doppler-page-facts.js";
-import { pageLayoutFactsFromDopplerFacts, routingFactsWithDopplerFacts } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts, routingFactsWithDopplerFacts } from "./page-evidence-doppler.js";
 import { parsePageLayoutFacts } from "./page-layout-facts.js";
-import { probeRowsFromDopplerFacts } from "../routing/probe/doppler-facts.js";
-import { pageInputFromProbeRow } from "../routing/page-input.js";
+import { documentEvidenceFromDoppler } from "./page-evidence-doppler.js";
+import { pageInputFromEvidence } from "../routing/page-input.js";
 import {
   PRODUCER_MARKER, SCHEMA, docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage,
 } from "../test/doppler-page-facts-fixture.js";
@@ -279,7 +279,7 @@ describe("parseDopplerPageFacts: hostile input", () => {
       }
       // The mappers accept whatever the reader kept.
       pageLayoutFactsFromDopplerFacts(result.facts);
-      probeRowsFromDopplerFacts(result.facts, 3);
+      documentEvidenceFromDoppler(result.facts, { pageCount: 3 });
     }
   }, 60_000);
 
@@ -368,35 +368,37 @@ describe("pageLayoutFactsFromDopplerFacts (golden)", () => {
   });
 });
 
-describe("probeRowsFromDopplerFacts (golden)", () => {
-  it("maps pages to probe rows the router accepts", async () => {
-    const rows = probeRowsFromDopplerFacts(parse(fullFixture()), 3);
-    expect(rows.map((row) => [row.pageNumber, row.pageCount, row.textLayerStatus, row.tableRuleScore, row.needsAttention])).toEqual([
-      [1, 3, "ok", 5, true],
-      [2, 3, "ocr-layer", 0, false],
-      [3, 3, "ok", 0, false],
+describe("documentEvidenceFromDoppler (golden)", () => {
+  it("maps pages to the page evidence the router reads, and router inputs without host paths", async () => {
+    const pages = documentEvidenceFromDoppler(parse(fullFixture()), { pageCount: 3 });
+    expect(pages.map((page) => [page.page, page.state, page.text.status, page.vectors?.ruleScore, page.grids.state])).toEqual([
+      [1, "known", "ok", 5, "unknown"],
+      [2, "known", "ocr-layer", 0, "known"],
+      [3, "known", "ok", 0, "known"],
     ]);
-    expect(rows[1]).toEqual({
-      pageNumber: 2, pageCount: 3, charCount: 1800, wordCount: 300, textCoverage: 0.55, fontCount: 1, unmappedGlyphRatio: 0, mathGlyphRatio: 0,
-      tableRuleScore: 0, imageCoverage: 1, largestImageCoverage: 1, fullPageImage: true, vectorDrawingCount: 0, uncoveredVectorRatio: 0,
-      garbled: false, textLayerStatus: "ocr-layer", imageCount: 2,
-      textFacts: { wordCount: 300, imageCount: 2, imageCoverage: 1, textLayerStatus: "ocr-layer" },
-      invisibleTextRatio: 1, textOverImageRatio: 1,
-      images: [{ bbox: [0, 0, 612, 792], coverage: 1 }, { bbox: [36, 36, 108, 72], coverage: 0.0103 }],
-      smallestFontPt: 9.5, widthPt: 612, heightPt: 792, rotation: 90, probeMs: 2.5, unusualFeatures: ["rotated-page", "scan-page"],
-      needsAttention: false, probeEngine: "doppler-facts",
+    expect(pages[1]).toMatchObject({
+      page: 2, source: "doppler-facts", state: "known", size: { widthPt: 612, heightPt: 792 }, rotation: 90,
+      text: { words: 300, chars: 1800, invisibleWords: 300, layer: "invisible", coverage: 0.55, mathGlyphRatio: 0, invisibleTextRatio: 1, textOverImageRatio: 1, garbled: false, status: "ocr-layer" },
+      unmappedGlyphRatio: 0, fonts: { count: 1, smallestPt: 9.5 },
+      images: { count: 2, coverage: 1, largestCoverage: 1, fullPageImage: true, boxes: [{ bbox: [0, 0, 612, 792], coverage: 1 }, { bbox: [36, 36, 108, 72], coverage: 0.0103 }] },
+      vectors: { paths: 0, uncoveredRatio: null, ruleScore: 0 }, grids: { state: "known", grids: [] }, tables: null,
+      features: ["rotated-page", "scan-page"], probeMs: 2.5,
     });
-    expect(rows.every((row) => row.thumbnail === undefined)).toBe(true);
-    for (const row of rows) {
-      const input = await pageInputFromProbeRow(row, null);
-      expect(input.features.pageNumber).toBe(row.pageNumber);
+    for (const page of pages) {
+      const input = await pageInputFromEvidence(page, null, "pdf", { pageCount: 3 });
+      expect(input.features.pageNumber).toBe(page.page);
+      expect(input.features.provenance.probe).toBe("doppler-facts");
       expect(input.thumbnail).toBeUndefined();
     }
   });
 
-  it("gives a locked document the probe's single locked row, and an unreadable one none", () => {
+  it("gives a locked document its single locked page, and an unreadable one none", async () => {
     const locked = parse(jsonl([{ schema: SCHEMA, type: "doc", locked: true, unusualFeatures: ["encrypted-user-password"] }]), 5);
-    expect(probeRowsFromDopplerFacts(locked, 5)).toMatchObject([{ locked: true, textLayerStatus: "unknown", needsAttention: true, probeEngine: "doppler-facts" }]);
-    expect(probeRowsFromDopplerFacts(parse(jsonl([{ schema: SCHEMA, type: "doc", error: "open-failed" }]), 5), 5)).toEqual([]);
+    const pages = documentEvidenceFromDoppler(locked, { pageCount: 5 });
+    expect(pages).toMatchObject([{ page: 1, state: "locked", source: "doppler-facts", features: ["encrypted-user-password"] }]);
+    const input = await pageInputFromEvidence(pages[0]!, null, "pdf", { pageCount: 5 });
+    expect(input.features).toMatchObject({ pageNumber: 1, pageCount: 1 });
+    expect(input.textFacts).toMatchObject({ wordCount: null, textLayerStatus: "unknown" });
+    expect(documentEvidenceFromDoppler(parse(jsonl([{ schema: SCHEMA, type: "doc", error: "open-failed" }]), 5), { pageCount: 5 })).toEqual([]);
   });
 });

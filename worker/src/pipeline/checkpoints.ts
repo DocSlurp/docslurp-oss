@@ -368,7 +368,7 @@ export async function runDocumentStage(
         const blamed = typeof failure.blameDocumentId === "string" && failure.blameDocumentId !== document.id ? failure.blameDocumentId : null;
         if (!ownCommand && blamed) {
           // On the blamed document's own row for the stage it last ran (council X #1), never this document's stage name.
-          const recorded = state.store?.noteBlamedSandboxStrike
+          const recorded = state.store
             ? await state.store.noteBlamedSandboxStrike(state, blamed).catch((error: unknown) => {
               console.warn(`[checkpoint-debug] document=${blamed} blamed sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
               return null;
@@ -376,7 +376,7 @@ export async function runDocumentStage(
             : null;
           if (recorded === null) console.warn(`[checkpoint-debug] document=${blamed} run=${state.run.id} blamed sandbox strike not recorded: no stage row for that document in this run`);
         }
-        const strikes = (ownCommand || failure.blameDocumentId === document.id) && state.store?.noteSandboxInfrastructureStrike
+        const strikes = (ownCommand || failure.blameDocumentId === document.id) && state.store
           ? await state.store.noteSandboxInfrastructureStrike(state, document.id, stageName).catch((error: unknown) => {
             console.warn(`[checkpoint-debug] document=${document.id} stage=${stageName} sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
             return 0;
@@ -668,11 +668,7 @@ export async function completeDocumentPages(
 ): Promise<void> {
   for (let offset = 0; offset < pages.length; offset += 100) {
     const batch = pages.slice(offset, offset + 100);
-    if (state.store?.setPagesStageComplete) {
-      await state.store.setPagesStageComplete(state.run.id, document.id, stageName, batch);
-    } else if (state.store) {
-      for (const page of batch) await state.store.setPageStageComplete(state.run.id, document.id, stageName, page);
-    }
+    if (state.store) await state.store.setPagesStageComplete(state.run.id, document.id, stageName, batch);
     if (batch.length > 0) await noteRunPageStage(state, stageName);
     if (!emitProgress) continue;
     for (const pageNumber of batch) recordPageProgress(state, { documentId: document.id, stageName, pageNumber, pageCount, status: "completed" });

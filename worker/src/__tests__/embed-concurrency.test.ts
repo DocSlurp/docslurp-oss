@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 import { normalizePipelineFeatures } from "@docslurp/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 const calls = vi.hoisted(() => ({ embed: 0, inFlight: 0, peak: 0, preamble: 0, progress: 0, pages: [] as number[][] }));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -59,18 +60,13 @@ class MemoryStorage {
 }
 
 function store() {
-  return {
+  const checkpoints = memoryCheckpointStore({
     updateProgress: async () => { calls.progress++; await sleep(1); },
-    startRunStage: async () => {}, completeRunStage: async () => {}, failRunStage: async () => {},
-    startDocumentStage: async () => {}, completeDocumentStage: async () => {}, failDocumentStage: async () => {},
-    appendEvent: async () => {},
-    setPageStageComplete: async () => {},
     setPagesStageComplete: async (_run: string, _doc: string, _stage: string, pages: number[]) => { calls.pages.push([...pages]); },
-    getCompletedPages: async () => new Set<number>(),
-    findEmbeddingReuseRefs: async () => [],
-    recordEmbeddingReuseRefs: async () => {},
-    forgetEmbeddingReuseRefs: async () => {},
-  };
+  });
+  // No embedding reuse: every document embeds (and pays for) its own chunks.
+  checkpoints.content.findEmbeddingReuseRefs = async () => [];
+  return checkpoints;
 }
 
 const PAGES = 24;
@@ -103,12 +99,11 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   const state = WorkflowState.create(run, docs);
   state.docConcurrency = 1;
   const materialized = new Map<string, { id: string; documentId: string; metadata: Record<string, unknown> }>();
-  state.store = {
-    ...store(),
-    insertChunks: async (chunks: Array<{ id: string; documentId: string; metadata: Record<string, unknown> }>) => {
-      for (const chunk of chunks) materialized.set(chunk.id, structuredClone(chunk));
-    },
-  } as unknown as WorkflowState["store"];
+  const checkpoints = store();
+  checkpoints.content.insertChunks = async (_scope, chunks) => {
+    for (const chunk of chunks) materialized.set(chunk.id, structuredClone(chunk));
+  };
+  state.store = checkpoints;
   let error: unknown;
   await new EmbedStage(runner as CommandRunner, storage as unknown as ArtifactStore, { ...fromEnv(), openRouterApiKey: "k", openAiApiKey: "k" })
     .run(state).catch((caught: unknown) => { error = caught; });

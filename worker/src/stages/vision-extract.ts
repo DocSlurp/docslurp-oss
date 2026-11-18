@@ -1,4 +1,5 @@
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { mayHaveHtmlTables, storeEmbedTableCells } from "./embed-table-cells.js";
 import { recordPageExtracts, visionPageRecords } from "../pipeline/page-extracts.js";
 import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { recordPageEscalation } from "../pipeline/run-milestones.js";
@@ -136,6 +137,10 @@ export interface VisionPageOutput {
   finishReason?: string | null;
   /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
   servedModel?: string;
+  /** The provider on this read's usage row, so the page record names the same model as the usage event. */
+  provider?: string;
+  /** The OCR engine's reader label for the page (a recogniser, or `hosted:`/`escalated:`/`page-reader:` + id). */
+  reader?: string;
   orientation?: import("../lib/image-orientation.js").OrientationResult | { status: "skipped-limit" };
   /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
   modelSwap?: { requested: string; served: string; provider: string | null };
@@ -381,7 +386,7 @@ export class VisionExtractStage implements Stage {
               totalCost: runSpentCents(state),
             },
           });
-          await recordPageFacts(state.store, buildVisionPageFacts({
+          await recordPageFacts(state, buildVisionPageFacts({
             documentId: document.id, runId: state.run.id, pageCount: maxInt(1, document.pageCount),
             selected: [], processed: [], costCapped: true,
           }));
@@ -460,7 +465,7 @@ export class VisionExtractStage implements Stage {
                 ...(needsVision.ladder ? { ladder: needsVision.ladder } : {}),
               });
 
-              await recordPageFacts(state.store, buildVisionPageFacts({
+              await recordPageFacts(state, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
                 selected: [], processed: [],
               }));
@@ -542,7 +547,7 @@ export class VisionExtractStage implements Stage {
                 },
               });
 
-              await recordPageFacts(state.store, buildVisionPageFacts({
+              await recordPageFacts(state, buildVisionPageFacts({
                 documentId: document.id, runId: state.run.id, pageCount: pages,
                 selected: needsVision.selectedPages, processed: [],
               }));
@@ -668,7 +673,7 @@ export class VisionExtractStage implements Stage {
               },
             });
 
-            await recordPageFacts(state.store, buildVisionPageFacts({
+            await recordPageFacts(state, buildVisionPageFacts({
               documentId: document.id, runId: state.run.id, pageCount: pages,
               selected: needsVision.selectedPages, processed: outputs,
               costCapped: isCostCapExceeded(state),
@@ -687,6 +692,17 @@ export class VisionExtractStage implements Stage {
               outputs, skips: failedPages, reconciliation, ocrPageClass: runUsesOcrPageClass(state.artifactLedger),
             }));
 
+            // Pages vision rewrote with HTML tables: parse their cells in this activity's warm VM lane and add them to the
+            // document's stored table cells, so embed reuses them (DOCSLURP_TABLE_CELLS_CACHE). Best effort, never fails the stage.
+            const tableCells = reconciliation.changedPages.length > 0 && outputs.some((page) => mayHaveHtmlTables(page.text))
+              ? await storeEmbedTableCells({
+                  run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
+                  markdownUri: state.artifactLedger.readDocument(document.id, "markdown"),
+                  canonicalUri: state.artifactLedger.readDocument(document.id, "canonical-document"),
+                  signal,
+                })
+              : null;
+
             console.log(
               `[extract-debug] document=${document.id} visionCompleted ` +
                 `documentPages=${pages} selectedPages=${needsVision.selectedPages.length} failedPages=${failedPages.length} ` +
@@ -698,6 +714,7 @@ export class VisionExtractStage implements Stage {
             return {
               artifactUri: this.storage.uri(key),
               stats: {
+                ...(tableCells ? { tableCells } : {}),
                 pages: outputs.length,
                 inputTokens,
                 outputTokens,
@@ -1348,6 +1365,7 @@ export class VisionExtractStage implements Stage {
         read.add(page.pageNumber);
         outputs.push({
           pageNumber: page.pageNumber, runtime: "ocr-vm", model: "page-ocr", prompt: "", baseUrl: null,
+          ...(typeof (page as { reader?: unknown }).reader === "string" ? { reader: (page as { reader: string }).reader } : {}),
           latencyMs: Math.round(latencyMs / batch.length), inputTokens: 0, outputTokens: 0, usageSource: "ocr-ledger",
           fallbackUsed: false, fallbackReason: null, text: page.text, costCents: 0,
         });
@@ -1740,7 +1758,7 @@ export class VisionExtractStage implements Stage {
             // Kept as soon as it is validated: a later error in this batch never sends a read page to the hosted route too.
             onRead: (page, result) => {
               const output: VisionPageOutput = {
-                pageNumber: page.pageNumber, runtime: "page-reader", model: provider.model, prompt: "", baseUrl: null,
+                pageNumber: page.pageNumber, runtime: "page-reader", provider: `page-reader:${provider.id}`, model: provider.model, prompt: "", baseUrl: null,
                 latencyMs: 0, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
                 usageSource: "page-reader", fallbackUsed: false, fallbackReason: null, text: result.text,
                 // Provider cost is on the usage ledger (vision-page-reader, 0 credits); the page's charge is its Rich page.
@@ -1883,6 +1901,7 @@ export class VisionExtractStage implements Stage {
       const output: VisionPageOutput = {
         pageNumber: page.pageNumber,
         runtime: result.runtime,
+        provider: result.route.provider,
         model: result.model,
         prompt: result.prompt,
         baseUrl: result.baseUrl,
@@ -2341,7 +2360,7 @@ export class VisionExtractStage implements Stage {
       recordUsage: (event) => { state.usageLedger.enqueue(event); },
       // The per-org hourly cap on free-tier VM runs, shared by every worker. No store or no org: refused (fail closed).
       reserveFreeVmRun: async () => {
-        const reserve = state.store?.reserveChartExportFreeVmRun?.bind(state.store);
+        const reserve = state.store?.budgets.reserveChartExportFreeVmRun.bind(state.store.budgets);
         if (!reserve || !state.run.orgId) return false;
         try {
           return await reserve({ orgId: state.run.orgId, runId: state.run.id, documentId: document.id, perHour: chartExportFreeVmCap() });

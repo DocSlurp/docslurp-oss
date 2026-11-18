@@ -52,6 +52,9 @@ class GroupStore {
     return new Set(stages.filter((stage) => this.stages.get(stage)?.status === "completed"));
   }
   async hasRunControlRequest() { return this.controlRequest; }
+  async loadShardObservations() { return []; }
+  async markRunMilestone() { return null; }
+  async fleetAdvertises() { return false; }
 }
 
 function harness(failOnce: string | null) {

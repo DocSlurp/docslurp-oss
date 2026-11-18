@@ -35,7 +35,7 @@ export async function allowHostedCall(
 
   console.warn(`${formatPrivacyBlockLog(mode, call)} run=${state.run.id}`);
   // A document shard's stage is blocked again by the unsharded pass, which audits every document once.
-  if (privacyModeAuditsBlockedCalls(mode) && state.store?.recordPrivacyAudit && !state.shard) {
+  if (privacyModeAuditsBlockedCalls(mode) && state.store && !state.shard) {
     const targets: Array<string | null> = documentIds.length > 0 ? [...documentIds] : [null];
     try {
       await state.store.recordPrivacyAudit(

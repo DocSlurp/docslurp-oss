@@ -238,11 +238,11 @@ export class StructuredExtractStage implements Stage {
           artifactSlot,
           "structured extraction complete",
           async () => {
-            if (geoSchemaFields(outputSchema).length && (!state.store?.beginGeoAttempt || !state.run.projectId || !state.run.orgId)) {
+            if (geoSchemaFields(outputSchema).length && (!state.store || !state.run.projectId || !state.run.orgId)) {
               throw new Error("Geo extraction requires a scoped persistent store");
             }
             const geoAttempt = geoSchemaFields(outputSchema).length
-              ? await state.store!.beginGeoAttempt!(state, document.id, outputSchema) : undefined;
+              ? await state.store!.records.beginGeoAttempt(state, document.id, outputSchema) : undefined;
             const pageCount = Math.max(1, document.pageCount);
             await emitDocumentPageProgress(
               state,

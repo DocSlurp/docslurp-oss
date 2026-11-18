@@ -50,7 +50,8 @@ afterAll(async () => {
 });
 
 function state(runId: string, orgId: string | null, projectId: string): PageExtractState {
-  return { run: { id: runId, orgId, projectId }, pendingPageExtracts: [], pendingPageExtractTags: [] };
+  return { run: { id: runId, orgId, projectId }, usageLedger: { modelClass: { quality: "auto", visionProfile: "good-fast-hosted" } },
+    pendingPageExtracts: [], pendingPageExtractTags: [] };
 }
 
 /** What a checkpoint does: write the queued rows in one transaction, then drop what it wrote. */
@@ -69,11 +70,13 @@ async function finalize(runId: string, documentId: string, pages?: number[]): Pr
 }
 
 type Row = { page_number: number; run_id: string; pass: string; method: string; engine: string | null; billed_class: string | null;
-  tags: string[]; confidence: number | null; adopted: boolean; is_final: boolean; superseded_by_pass: string | null; org_id: string };
+  tags: string[]; confidence: number | null; adopted: boolean; is_final: boolean; superseded_by_pass: string | null; org_id: string;
+  model_uri: string | null; model_class: string | null };
 
 async function rows(documentId: string): Promise<Row[]> {
   return await sql<Row[]>`
-    select page_number, run_id, pass, method, engine, billed_class, tags, confidence, adopted, is_final, superseded_by_pass, org_id
+    select page_number, run_id, pass, method, engine, billed_class, tags, confidence, adopted, is_final, superseded_by_pass, org_id,
+      model_uri, model_class
     from document_page_extracts where document_id = ${documentId} order by page_number, run_id, pass`;
 }
 
@@ -105,12 +108,38 @@ function mixedPdf(s: PageExtractState): void {
 
 function vision(s: PageExtractState, accepted: boolean): void {
   recordPageExtracts(s, DOC_A, visionPageRecords({
-    outputs: [{ pageNumber: 2, runtime: "openai-compatible", text: "| Q1 | Q2 |", latencyMs: 900, finishReason: "stop" }],
+    outputs: [{ pageNumber: 2, runtime: "openai-compatible", text: "| Q1 | Q2 |", latencyMs: 900, finishReason: "stop",
+      model: "z-ai/glm-5.3-flash", provider: "openrouter" }],
     skips: [{ pageNumber: 5, outcome: "ladder-capped" }],
     reconciliation: { changedPages: accepted ? [2] : [], decisions: [{ pageNumber: 2, outcome: accepted ? "accepted" : "rejected" }] },
     ocrPageClass: true,
   }));
 }
+
+describe("page extract records: what read the page", () => {
+  it("names the same provider and model as the read's usage row, an OCR read by its reader, and nothing it does not know", () => {
+    const records = visionPageRecords({
+      outputs: [
+        { pageNumber: 1, runtime: "openai-compatible", provider: "private", model: "gpu1/acme-vision", text: "a", latencyMs: 1 },
+        { pageNumber: 2, runtime: "openai-compatible", provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", text: "b", latencyMs: 1 },
+        { pageNumber: 3, runtime: "page-reader", provider: "page-reader:gpu-a", model: "reader-v2", text: "c", latencyMs: 1 },
+        { pageNumber: 4, runtime: "ocr-vm", model: "page-ocr", reader: "escalated:qwen/qwen3-vl-30b", text: "d", latencyMs: 1 },
+        { pageNumber: 5, runtime: "ocr-vm", model: "page-ocr", reader: "latin", text: "e", latencyMs: 1 },
+        // No reader label and no provider: unknown stays unset instead of a made-up model.
+        { pageNumber: 6, runtime: "ocr-vm", model: "page-ocr", text: "f", latencyMs: 1 },
+        { pageNumber: 7, runtime: "chart-export", model: "chart-export", text: "", latencyMs: 1 },
+        { pageNumber: 8, runtime: "ocr-vm", model: "page-ocr", reader: "none", text: "", latencyMs: 1 },
+        // An endpoint that reports an address as its model names nothing.
+        { pageNumber: 9, runtime: "openai-compatible", provider: "openrouter", model: "http://10.0.0.5:8000/v1", text: "g", latencyMs: 1 },
+      ],
+      skips: [], reconciliation: { changedPages: [], decisions: [] }, ocrPageClass: true,
+    });
+    expect(records.map((record) => record.modelUri)).toEqual([
+      "llm://private/gpu1/acme-vision", "llm://openrouter/z-ai/glm-5.3-flash:nitro", "llm://page-reader-gpu-a/reader-v2",
+      "llm://ocr-escalation/qwen/qwen3-vl-30b", "llm://page-ocr/latin", null, null, null, null,
+    ]);
+  });
+});
 
 describe("page extract records", () => {
   it("a mixed PDF yields exactly one final record per page once the document completes", async () => {
@@ -141,13 +170,18 @@ describe("page extract records", () => {
     expect(find(3, "extract")).toMatchObject({ method: "none", is_final: false, superseded_by_pass: "scan-ocr" });
     expect(find(3, "scan-ocr")).toMatchObject({ engine: "page-ocr", billed_class: "ocr", tags: ["scanned"] });
     expect(find(3, "scan-ocr").confidence).toBeCloseTo(0.93, 5);
-    // The escalated page: a second read, Vision class; no model id is stored.
-    expect(find(4, "scan-ocr")).toMatchObject({ engine: "ocr-escalation", billed_class: "rich", tags: ["math", "scanned"] });
+    // The escalated page: a second read, Vision class. The engine stays a route word; the model is in model_uri only.
+    expect(find(4, "scan-ocr")).toMatchObject({ engine: "ocr-escalation", billed_class: "rich", tags: ["math", "scanned"], model_uri: "llm://ocr-escalation/some-model" });
+    // What read each page, as an llm:// URI, with the run's levels at the time; nothing for a text layer.
+    expect(find(2, "vision")).toMatchObject({ model_uri: "llm://openrouter/z-ai/glm-5.3-flash", model_class: "quality=auto;visionProfile=good-fast-hosted" });
+    expect(find(3, "scan-ocr")).toMatchObject({ model_uri: "llm://page-ocr/latin", model_class: "quality=auto;visionProfile=good-fast-hosted" });
+    expect(find(1, "extract")).toMatchObject({ model_uri: null, model_class: null });
+    expect(find(5, "vision")).toMatchObject({ model_uri: null, model_class: null });
     expect(find(5, "scan-ocr").tags).toEqual(["escalation-capped", "low-confidence", "scanned"]);
     // Vision did not read page 5: recorded, not adopted, never final; the OCR read stays the page's source.
     expect(find(5, "vision")).toMatchObject({ method: "none", adopted: false, is_final: false, superseded_by_pass: null, tags: ["ladder-capped"] });
     expect(all.every((row) => row.org_id === "org-a")).toBe(true);
-    expect(JSON.stringify(all)).not.toContain("some-model");
+    expect(JSON.stringify(all.map(({ model_uri: _modelUri, ...rest }) => rest))).not.toContain("some-model");
   });
 
   it("a retried stage and checkpoint rewrite the same rows (idempotent)", async () => {

@@ -24,7 +24,17 @@ import { env } from "../config.js";
 import { resolveS3ClientTuning, rfc5987Encode, s3ClientConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { uploadSigningTarget } from "./upload-signing-target.js";
 
-const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
+/**
+ * A connection attempt that hangs must not hold an upload-session lock: connect within 5 s unless
+ * S3_CONNECTION_TIMEOUT_MS says otherwise. Request deadlines are per call (see UPLOAD_STORAGE_TIMEOUTS_MS).
+ */
+function serverS3ClientConfig() {
+  const config = s3ClientConfig(env.storage);
+  const handler = (config.requestHandler ?? {}) as Record<string, unknown>;
+  return { ...config, requestHandler: { connectionTimeout: 5_000, ...handler } };
+}
+
+const s3Client = instrumentS3Client(new S3Client(serverS3ClientConfig()), env.storage.endpoint);
 
 /** Storage config for signing browser-facing URLs: STORAGE_PUBLIC_ENDPOINT replaces the endpoint when set. */
 export function presignStorageConfig(storage: ObjectStorageConfig, publicEndpoint: string | null): ObjectStorageConfig {

@@ -2,6 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { BILLABLE_UNIT_METRICS, PAGE_READ_METRICS, defaultPipelineFeatures, normalizePipelineFeatures, pageCredits, splitTextIntoPagesStrict } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
@@ -80,11 +81,11 @@ const sql = () => (store as unknown as { sql: Parameters<typeof recordPageBaseFe
 describe("a measured DOCX: page rows and billing", () => {
   it("keeps the page basis the text splits into and bills the measured 300 pages", async () => {
     const run = await store.loadRun("run1");
-    const loaded = (await store.loadDocument("docx1"))!;
+    const loaded = (await loadFixtureDocument(store, "docx1"))!;
     const measured = await recordMeasuredPageCount(basis(run), loaded, "office-word", { extractor: "pandoc", markdown: markdownOfPages(300) });
     expect(measured).toEqual({ pages: 300, method: "text-rule", intakePages: 1 });
 
-    const document = (await store.loadDocument("docx1"))!;
+    const document = (await loadFixtureDocument(store, "docx1"))!;
     expect(document).toMatchObject({ pageCount: 1, billingPages: 300, billingPagesMethod: "text-rule" });
 
     // The extractor's text for a Word file has no form feeds: with the basis at 1 it splits into one page (page rows and
@@ -111,13 +112,13 @@ describe("a measured DOCX: page rows and billing", () => {
   it("pauses the run when a hostile DOCX measures far above intake's one page and the owed credits no longer fit", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const run = await store.loadRun("run2");
-    const document = (await store.loadDocument("docx2"))!;
+    const document = (await loadFixtureDocument(store, "docx2"))!;
     // 20,000 blank pages: a few credits of base fee plus every enabled feature on them, against a 20-credit balance.
     const owed = extraCreditsForMeasuredPages(run.pipeline, 1, 20_000);
     expect(owed).toBeGreaterThan(20);
     // The count is recorded, the run is paused and the document is stopped (a run-policy stop), not carried on.
     await expect(recordMeasuredPageCount(basis(run), document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
-    expect((await store.loadDocument("docx2"))!.billingPages).toBe(20_000);
+    expect((await loadFixtureDocument(store, "docx2"))!.billingPages).toBe(20_000);
     const { rows } = await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from project_runs where id = 'run2'`);
     expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
     // A run already paused (or stopped) by something else: the check reports blocked without pausing, and still stops it.
@@ -135,7 +136,7 @@ describe("a measured DOCX: page rows and billing", () => {
     const state = async () => (await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run3'`)).rows[0]!.control_state;
     let pausedAt = 0;
     for (let n = 1; n <= 10 && !pausedAt; n += 1) {
-      const stopped = await recordMeasuredPageCount(basis(run), (await store.loadDocument(`big${n}`))!, "office-word", counted(400))
+      const stopped = await recordMeasuredPageCount(basis(run), (await loadFixtureDocument(store, `big${n}`))!, "office-word", counted(400))
         .then(() => false, (error: Error) => error.name === "RunPolicyError");
       if (await state() === "paused") {
         expect(stopped).toBe(true);
@@ -157,7 +158,7 @@ describe("a measured DOCX: page rows and billing", () => {
     expect(extraCreditsForMeasuredPages(defaultPipelineFeatures, 5, 3)).toBe(0);
     await db.exec(`update project_runs set control_state = null, pause_reason = null where id = 'run1'`);
     const run = await store.loadRun("run1");
-    const document = (await store.loadDocument("docx1"))!;
+    const document = (await loadFixtureDocument(store, "docx1"))!;
     await recordMeasuredPageCount(basis(run), document, "office-word", counted(40));
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run1'`);
     expect(rows[0]!.control_state).toBeNull();
@@ -168,7 +169,7 @@ describe("a measured DOCX: page rows and billing", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     await db.exec(`update project_runs set control_state = null, pause_reason = null where id = 'run1'`);
     const run = await store.loadRun("run1");
-    const document = (await store.loadDocument("docx1"))!;
+    const document = (await loadFixtureDocument(store, "docx1"))!;
     await db.exec(`alter function org_spend_status(text, text, numeric) rename to org_spend_status_unavailable`);
     try {
       await expect(recordMeasuredPageCount(basis(run), document, "office-word", counted(4_000)))
@@ -186,11 +187,11 @@ describe("a measured DOCX: page rows and billing", () => {
 describe("an Office file always bills a measured outcome, never intake's assumed page", () => {
   it("nothing extracted: measured 0 pages; no page fee and no feature", async () => {
     const run = await store.loadRun("run4");
-    const blank = (await store.loadDocument("blank"))!;
+    const blank = (await loadFixtureDocument(store, "blank"))!;
     expect(blank).toMatchObject({ pageCount: 1, pageCountSource: "assumed" });
     expect(await recordMeasuredPageCount(basis(run), blank, "office-word", { extractor: "pandoc", markdown: "  \n\n " }))
       .toEqual({ pages: 0, method: "empty", intakePages: 1 });
-    const stored = (await store.loadDocument("blank"))!;
+    const stored = (await loadFixtureDocument(store, "blank"))!;
     expect(stored).toMatchObject({ billingPages: 0, billingPagesMethod: "empty" });
     const state = WorkflowState.create(run, [stored]);
     expect(featurePages(state, stored)).toBe(0);
@@ -199,18 +200,18 @@ describe("an Office file always bills a measured outcome, never intake's assumed
 
   it("text extracted but no sheet tables: counted by the text rule", async () => {
     const run = await store.loadRun("run4");
-    const sheet = (await store.loadDocument("sheetless"))!;
+    const sheet = (await loadFixtureDocument(store, "sheetless"))!;
     const measured = await recordMeasuredPageCount(basis(run), sheet, "office-excel", { extractor: "xlsx", markdown: markdownOfPages(12) });
     expect(measured).toMatchObject({ method: "text-rule" });
     expect(measured.pages).toBeGreaterThanOrEqual(12);
-    const stored = (await store.loadDocument("sheetless"))!;
+    const stored = (await loadFixtureDocument(store, "sheetless"))!;
     expect(stored.billingPages).toBe(measured.pages);
     expect(featurePages(WorkflowState.create(run, [stored]), stored)).toBe(measured.pages);
   }, 60_000);
 
   it("the page fee bills only the measured outcomes: 0 for the blank file, the text-rule count for the other", async () => {
     const run = await store.loadRun("run4");
-    const docs = [(await store.loadDocument("blank"))!, (await store.loadDocument("sheetless"))!];
+    const docs = [(await loadFixtureDocument(store, "blank"))!, (await loadFixtureDocument(store, "sheetless"))!];
     const charges = await recordPageBaseFee(sql(), WorkflowState.create(run, docs));
     expect(charges.fastPages).toBe(docs[1]!.billingPages);
   }, 60_000);

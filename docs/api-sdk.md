@@ -414,25 +414,35 @@ or from its current byte total.
 ### Completing many files
 
 `/files/complete` also takes a batch: `{ "files": [{ "fileId": "A" }, { "fileId": "B", "sizeBytes": 12345 }] }`,
-up to 100 entries, each `fileId` once. The server finalizes several files at a
-time, each under its own short lease (no session-wide lock), and answers per file:
+up to 100 entries, each `fileId` once. A batch entry takes only `fileId`,
+`etag` and `sizeBytes` (no part manifest: the server reads the parts from
+storage), and a batch body is at most 32 KiB. The server finalizes several
+files at a time, each under its own short lease (no session-wide lock), and
+answers per file:
 
 ```json
 { "ok": false, "completedCount": 1, "failedCount": 1, "sessionComplete": false,
   "files": [{ "fileId": "A", "status": "completed" },
-            { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "rejected", "message": "..." } }] }
+            { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "conflict", "message": "...",
+              "retryable": false, "action": "reupload", "blocksSession": false } }] }
 ```
 
 A file's failure carries the status the single-file call would have answered,
-and `retryable`. Only a session-level problem (not found, closed or no longer
-permitted) fails the whole request. Completing is idempotent: a file the
-storage notification already finalized answers `completed`, even after the
-session was confirmed. A file another finalizer is working on is waited for
-briefly, then answers `409` `upload_session_busy` (`retryable`). While a client
-is completing files, the fallback checks leave the session's files to it for 30
-seconds after each call. Finalized files start runs on their own (see
-[Runs in waves](#runs-in-waves)), and calling `/confirm` yourself starts one at
-once. The SDK's `completeUploadFiles()` splits larger lists into batches.
+and what to do about it: `retryable` (repeat the same request for this file as
+it is; `action: "retry"`), `action: "reupload"` (put the bytes again or finish
+the parts, then repeat), `action: "none"` (a repeat cannot fix it), and
+`blocksSession`. One call starts files for about five seconds; files it did not
+reach come back as retryable `upload_session_busy`. Only a session-level
+problem (not found, closed or no longer permitted) fails the whole request.
+Completing is idempotent: a file the storage notification already finalized
+answers `completed`, even after the session was confirmed. A file another
+finalizer is working on is waited for briefly, then answers `409`
+`upload_session_busy` (`retryable`). While a client is completing files, the
+fallback checks leave the session's files to it for 30 seconds after each call
+that completes a file (at most 15 minutes in all). Finalized files start runs
+on their own (see [Runs in waves](#runs-in-waves)), and calling `/confirm`
+yourself starts one at once. The SDK's `completeUploadFiles()` splits larger
+lists into batches.
 
 Retry rules for session calls (`/files/complete`, `/confirm`, `/abort`):
 

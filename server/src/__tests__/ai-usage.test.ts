@@ -150,6 +150,8 @@ describe("Usage Event ledger", () => {
       providerCostCents: 7,
       billable: false,
       costRole: "provider",
+      // What ran, as one llm:// URI (shared model-provenance.ts).
+      modelUri: "llm://openrouter/model-1",
     });
   });
 

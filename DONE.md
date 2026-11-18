@@ -1,3 +1,9 @@
+## Page evidence: one module owns what is known about a page (2026-11-17)
+
+- `worker/src/lib/page-evidence.ts` owns, per page, each quantity known or unknown (words, text layer, images and furniture, grids, rule score, math glyphs, garbling, page size), the whole-page states (failed, low confidence, locked) and the routing decisions: the table decision (unknown grids take the table path; encodings only add), the router's table rule score, text-layer trust rules, the one math-glyph gate with its three purposes, readable image boxes and the page cost route. Adapters for Doppler facts (`lib/page-evidence-doppler.ts`, replacing `doppler-page-facts-layout.ts` and `routing/probe/doppler-facts.ts`), walker layout pages and native probe rows.
+- classify-route, the v2 router (page inputs built from evidence), cost stats, chart-export, page-image evidence and extract-markdown (facts gates run once) read it. The v2 router no longer reads a low-confidence (`xref-repaired-earlier`) page's images, rules, math or text counts, and gives a page with unknown grids the table path, as classify-route does.
+- A decision parity harness (`worker/src/__tests__/page-evidence-parity.test.ts`) snapshots every consumer's decisions on one synthetic corpus.
+
 ## Doppler math and table encoding facts in routing; math reading by default (2026-11-16)
 
 - The page-facts reader validates Doppler's `mathtables` family: the packed `mathBits`, `tableBits` and `encodingCounts` words (all or none, agreeing with their names and count nibbles) and the full level's readable fields. One bit table (`worker/src/lib/doppler-encoding-facts.ts`, positions pinned by a test) decodes them; `analysis-truncated` or a bit this build does not name leaves a page's encodings unknown, never "no table" or "no math".

@@ -1,5 +1,6 @@
 import { recordOcrEscalationPages } from "../ocr/escalation-stats.js";
 import { describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 import {
   DocumentStageError,
@@ -69,7 +70,7 @@ function makeDocument(overrides: Partial<Document> = {}): Document {
 }
 
 function makeCheckpointStore(overrides: Partial<CheckpointStore> = {}): CheckpointStore {
-  return {
+  return memoryCheckpointStore({
     startDocumentStage: vi.fn(async () => undefined),
     completeDocumentStage: vi.fn(async () => undefined),
     failDocumentStage: vi.fn(async () => undefined),
@@ -79,10 +80,10 @@ function makeCheckpointStore(overrides: Partial<CheckpointStore> = {}): Checkpoi
     failRunStage: vi.fn(async () => undefined),
     appendEvent: vi.fn(async () => undefined),
     setPageStageComplete: vi.fn(async () => undefined),
+    setPagesStageComplete: vi.fn(async () => undefined),
     getCompletedPages: vi.fn(async () => new Set<number>()),
     ...overrides,
-    pageBasisLedger: overrides.pageBasisLedger ?? new MemoryPageBasisLedger(),
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------

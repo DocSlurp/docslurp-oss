@@ -18,7 +18,7 @@ import {
 import { sql, type SqlClient } from "../db.js";
 import { currentChatTurn, trackChatTurnWrite, type ChatTurnContext } from "./chat-turn-context.js";
 import { currentRequestApiKeyId } from "./request-context.js";
-import { withServedUsageModel } from "@docslurp/shared";
+import { withModelProvenance, withServedUsageModel } from "@docslurp/shared";
 
 /**
  * Usage Event ledger (write side).
@@ -320,7 +320,8 @@ function logUsage({ id, ...raw }: UsageInput): UsageEvent {
       includeOutputTokens: input.logOutputTokens,
     }),
   );
-  event.metadata = { ...usageTraceContext(), ...event.metadata };
+  // What ran: the model as one llm:// URI with its settings, and the level that selected it (model-provenance.ts).
+  event.metadata = { ...usageTraceContext(), ...withModelProvenance(event).metadata };
   return event;
 }
 

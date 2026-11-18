@@ -53,7 +53,7 @@ import {
   type DocumentAssetLedgerScope, type FigureObjectReader,
 } from "../db/document-asset-ledger.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
-import { documentParseSource } from "../db/store.js";
+import { documentParseSource } from "../db/document-records.js";
 import { isUnscannedParseSourceKey } from "../lib/parse-source.js";
 import { SourceRefusalError, stageSourceFile } from "../sandbox/source-integrity.js";
 import { spendBlockCode, spendCheckConfig } from "../db/spend-check.js";
@@ -792,7 +792,9 @@ async function resumeUnit(
       }
       // The new manifest staged by content before any file (R2-L4): a crash anywhere later still finds it.
       await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "stage", signal });
-      const ledger = figureLedgerHooks({ store: { markAssetsPending: (args) => markAssetsPending(deps.sql, args), markAssetsStored: (args) => markAssetsStored(deps.sql, args) }, run: { id: row.run_id, orgId: row.org_id, projectId: row.project_id } }, row.document_id, row.lease);
+      // No repair hook (as before): the resume runner's writes are fenced by its lease, and an object it cannot vouch for fails
+      // the resume rather than being replaced.
+      const ledger = figureLedgerHooks({ store: { assets: { markAssetsPending: (args) => markAssetsPending(deps.sql, args), markAssetsStored: (args) => markAssetsStored(deps.sql, args), replaceUnvouchedObject: null } }, run: { id: row.run_id, orgId: row.org_id, projectId: row.project_id } }, row.document_id, row.lease);
       // Figure files only: the folder's manifests, Markdown and index are never rewritten before the ledger commits.
       const result = await storeDopplerFigures({ storage: deps.storage, document, runId: row.run_id, figures: set, markdown: "", folderFiles: false, ...(ledger ? { ledger } : {}), signal });
       const pending = ledgerWriteForStoredFigures({ set, stored: result, outcome });

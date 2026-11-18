@@ -7,6 +7,7 @@ import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-lega
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import {
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
@@ -260,7 +261,7 @@ describe("delete triggers enqueue external cleanup", () => {
 
 describe("run retention", () => {
   const retention = () =>
-    store as unknown as {
+    new Maintenance(store.stageSql) as unknown as {
       purgeExpiredArtifacts(storage: ArtifactStore, batchSize: number): Promise<void>;
       deleteExpiredRuns(batchSize: number): Promise<void>;
     };

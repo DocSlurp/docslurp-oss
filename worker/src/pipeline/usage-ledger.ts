@@ -14,7 +14,7 @@ import {
 } from "@docslurp/shared";
 
 import type { UsageEvent } from "../models.js";
-import { withServedUsageModel } from "@docslurp/shared";
+import { withModelProvenance, withServedUsageModel, type ModelCallClass } from "@docslurp/shared";
 import {
   buildWorkerAiUsageEvent,
   hasWorkerAiUsage,
@@ -132,6 +132,12 @@ export class PipelineUsageEventLedger {
 
   /** Run being billed; set by WorkflowState. Rich page charges need it for their idempotent ids. */
   runId: string | null = null;
+
+  /**
+   * The levels this run was configured with (quality, vision and embedding profile, page router): recorded on every
+   * model call as the class that selected the model. Set by WorkflowState; a call may add its own (a role, a tier).
+   */
+  modelClass: ModelCallClass | null = null;
 
   /**
    * Record an AI/embedding call: price it, log it, buffer it. `visionAttemptTicket` is the vision
@@ -391,7 +397,9 @@ export class PipelineUsageEventLedger {
       (event.inputTokens ?? 0) > 0 || (event.outputTokens ?? 0) > 0 ? priceAiUsageEvent(event) : event,
       this.speedBoost,
     );
-    const stamped = { ...priced, id: event.id ?? randomUUID(), metadata: { ...usageTraceContext(), ...priced.metadata } };
+    // What ran: the model as one llm:// URI with its settings, and the level that selected it (model-provenance.ts).
+    const named = withModelProvenance(priced, { modelClass: this.modelClass });
+    const stamped = { ...named, id: event.id ?? randomUUID(), metadata: { ...usageTraceContext(), ...named.metadata } };
     recordUsageReceipt(stamped);
     this.pending.push(stamped);
     if (credit > 0) this.settleCredit.set(stamped, credit * speedBoostMultiplier(this.speedBoost));

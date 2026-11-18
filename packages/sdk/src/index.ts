@@ -1335,6 +1335,12 @@ export type DirectUploadDescriptor = {
   expiresInSeconds?: number;
   partSize?: number;
   pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  /** `pending`, `completed` (finalized), `failed` (final, see `error`) or `aborted`. */
+  status?: string;
+  /** The run (wave) that took this file. */
+  runId?: string;
+  /** Why the file failed, in the shape a batched completion answers; a failed file is final (`action: "none"`). */
+  error?: UploadFileCompletionError;
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
@@ -1363,7 +1369,11 @@ export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag
  *   session busy, or the call's time budget spent).
  * - `action: "reupload"`: put the file's bytes again (or finish its parts), then repeat.
  * - `action: "none"`: a repeat cannot fix it (unknown file, refused type or size).
- * - `blocksSession`: left as is, this file makes the whole session fail once the client stops completing files.
+ * - `blocksSession`: false from servers that finalize files one by one (a file whose stored bytes are refused then fails
+ *   on its own, permanently, and the session's other files go on); true only from older servers, where such a file
+ *   fails the whole session once the client stops completing files.
+ *
+ * A file already failed (session status `files[].status: "failed"`) carries this same shape with `action: "none"`.
  */
 export type UploadFileCompletionError = { statusCode: number; code: string; message: string; retryable: boolean; action: "retry" | "reupload" | "none"; blocksSession: boolean };
 export type UploadFileCompletion =
@@ -1597,6 +1607,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const credential = await bearer();
     if (credential) headers.set("Authorization", `Bearer ${credential}`);
     if (SEND_CLIENT_TAG) headers.set(CLIENT_HEADER, CLIENT_TAG);
+    if (init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     // A provider gets one forced refresh after a 401, when the body can be sent again.
     let refreshedAfter401 = typeof tokenSource !== "function" || isStreamBody(init.body);
     const timeoutMs = positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs");
@@ -1612,6 +1623,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         bound.signal.throwIfAborted();
         const response = await fetchImpl(`${apiUrl}${path}`, {
           ...init,
+          // A body-less POST goes out as an empty JSON object: the API refuses an upload-path POST with no content type.
+          ...(init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") ? { body: "{}" } : {}),
           credentials: init.credentials ?? (hasBearer ? "omit" : "include"),
           headers,
           signal: bound.signal,

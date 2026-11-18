@@ -42,6 +42,9 @@ class CheckpointStore {
     for (const checkpoint of this.stages.values()) state.setRunStage(checkpoint);
   }
   async renewHeartbeat() {}
+  async markRunMilestone() { return null; }
+  async loadShardObservations() { return []; }
+  async fleetAdvertises() { return false; }
   private upsert(stage: string, status: string, error = "") {
     const current = this.stages.get(stage);
     this.stages.set(stage, {
@@ -62,8 +65,7 @@ class CheckpointStore {
   async appendEvent() {}
   async completeRun() {}
   async failRun() {}
-  async triggerRunEmails() {}
-  async triggerWebhooks() {}
+  readonly notifications = { triggerRunEmails: async () => {} };
 }
 
 type Behavior = "deploy" | "recycle" | "sigkill" | "error" | "hang" | "succeed";

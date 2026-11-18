@@ -424,7 +424,11 @@ describe("waves", () => {
     expect(rows.slice(2).every(row => row.run_id === sessionId)).toBe(true);
     expect((await session(sessionId)).status).toBe("confirmed");
     const described = await getDirectUploadSessionDescription(sessionId, "u", true);
-    expect(described?.files[0]).toMatchObject({ status: "failed", error: { code: "unreadable_source" } });
+    // The same per-file error shape a batched complete answers; a failed file is final.
+    const finalError = { code: "unreadable_source", retryable: false, action: "none", blocksSession: false };
+    expect(described?.files[0]).toMatchObject({ status: "failed", error: finalError });
+    const again = await completeDirectUploadFiles({ sessionId, userId: "u", files: [{ fileId: seeded[0]!.id }] });
+    expect(again.files[0]).toMatchObject({ status: "failed", error: finalError });
   });
 
   it("recovers a wave whose holder died before its run existed: the files are released and taken again", async () => {

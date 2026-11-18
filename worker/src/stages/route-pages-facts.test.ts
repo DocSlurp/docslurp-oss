@@ -39,7 +39,7 @@ import type { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { StorageObjectTooLargeError } from "../tools/storage.js";
 import { testCatalog } from "../routing/testing.js";
-import { pageInputFromProbeRow } from "../routing/page-input.js";
+import { pageInputFromEvidence } from "../routing/page-input.js";
 import { HostPdfRefusedError, sandboxedPdfDeploymentReason } from "../routing/host-pdf-guard.js";
 import { createDopplerFactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
@@ -168,18 +168,6 @@ describe("route-pages on a sandboxed deployment", () => {
     expect(metrics("page-route-fallback")[0]!.metadata).toMatchObject({ reason: "facts-mode-store", probeSource: "native-probe", sandboxed: "sandboxed-pdf-deployment", fallback: "v3" });
   });
 
-  it("refuses loudly when anything would hand the router a host path (a facts row carrying a thumbnail)", async () => {
-    const thumbRunner = vi.fn(async () => ({
-      status: "ok" as const, locked: false, pagesKnown: 1, pagesFailed: 0, linesDropped: 0,
-      rows: [{ ...(await createDopplerFactsProbeRunner(async () => Buffer.from(fullFixture()))({ documentId: "doc", pageCount: 3 }) as { rows: object[] }).rows[0], thumbnail: "/etc/passwd" }],
-    }));
-    const { plan, metrics } = await route({ facts: fullFixture(), deps: { factsProbe: thumbRunner as never } });
-    expectNoHostPdfAccess();
-    expect(plan).toBeNull();
-    expect(metrics("page-route-host-pdf-refused")[0]!.metadata).toMatchObject({ operation: "facts-thumbnail", reason: "sandboxed-pdf-deployment" });
-    expect(String(metrics("page-route-error")[0]!.metadata!.reason)).toContain("host PDF access refused");
-  });
-
   it("missing facts: no plan, v3 routing, nothing read or charged", async () => {
     const { plan, metrics, state, storage } = await route({ facts: null, factsKey: null });
     expectNoHostPdfAccess();
@@ -277,15 +265,15 @@ describe("route-pages on a sandboxed deployment", () => {
   it.each([
     ["user-password-required", { encryption: "user-password-required" }],
     ["locked", { locked: true }],
-  ])("encrypted doc line (%s): one locked row, no host byte scan", async (_name, extra) => {
+  ])("encrypted doc line (%s): one locked page, no host byte scan", async (_name, extra) => {
     const facts = jsonl([docLine(extra), textPage(1), scanPage(2), figurePage(3), runLine()]);
     const runner = createDopplerFactsProbeRunner(async () => Buffer.from(facts));
     const result = await runner({ documentId: "doc", pageCount: 3 });
     expect(result).toMatchObject({ status: "ok", locked: true });
-    const rows = (result as unknown as { rows: Array<Record<string, unknown>> }).rows;
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ locked: true, needsAttention: true, textLayerStatus: "unknown", probeEngine: "doppler-facts" });
-    expect(rows[0]!.unusualFeatures).toContain("encrypted-user-password");
+    if (result.status !== "ok") throw new Error(result.reason);
+    expect(result.pages).toHaveLength(1);
+    expect(result.pages[0]).toMatchObject({ page: 1, state: "locked", source: "doppler-facts", text: { status: "unknown" } });
+    expect(result.pages[0]!.features).toContain("encrypted-user-password");
 
     const { plan, metrics } = await route({ facts });
     expectNoHostPdfAccess();
@@ -311,7 +299,8 @@ describe("golden decisions on fixture facts", () => {
   it("maps the three fixture pages to stable page inputs", async () => {
     const result = await createDopplerFactsProbeRunner(async () => Buffer.from(fullFixture()))({ documentId: "doc", pageCount: 3 });
     expect(result.status).toBe("ok");
-    const pages = await Promise.all((result as { rows: Parameters<typeof pageInputFromProbeRow>[0][] }).rows.map((row) => pageInputFromProbeRow(row, null)));
+    if (result.status !== "ok") throw new Error(result.reason);
+    const pages = await Promise.all(result.pages.map((page) => pageInputFromEvidence(page, null, "pdf", { pageCount: 3 })));
     expect(pages.every((page) => page.features.provenance.probe === "doppler-facts")).toBe(true);
     expect(pages.map((page) => ({
       page: page.features.pageNumber,

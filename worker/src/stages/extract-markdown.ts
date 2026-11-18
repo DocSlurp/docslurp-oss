@@ -44,6 +44,7 @@ import {
   type ExtractionContract,
   type ExtractionArtifactRef, switchDisabled } from "@docslurp/shared";
 import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
+import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
@@ -123,12 +124,12 @@ import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-pag
 import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
 import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
-import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
+import { routingFactsWithDopplerFacts } from "../lib/page-evidence-doppler.js";
 import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
 import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
 import { documentCostStats } from "../lib/document-cost-stats.js";
-import { DOPPLER_FACTS_EVIDENCE_SOURCE, dopplerFactsCoverEvidence, dopplerFactsTextDisagreement, pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "../lib/doppler-page-facts-evidence.js";
+import { DOPPLER_FACTS_EVIDENCE_SOURCE, checkDopplerFactsEvidence, pageFactRowsFromCheckedFacts, pageImageEvidenceFromCheckedFacts } from "../lib/doppler-page-facts-evidence.js";
 import { runBillsScansAtCompletion } from "../db/page-base-fee.js";
 import { extractionPageRecords, recordPageExtracts, type ScanFillPageRead } from "../pipeline/page-extracts.js";
 import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
@@ -1044,7 +1045,7 @@ export class ExtractMarkdownStage implements Stage {
                   // Per-page routing facts (text layer, scan class) from the winning VM job, whatever the figure setting: the
                   // walker's layout facts first, then Doppler's validated page facts (DOCSLURP_DOPPLER_PAGE_FACTS store or use;
                   // off never parses them). Closed enums only; never billing.
-                  await recordPageFacts(state.store, buildRoutingPageFacts({
+                  await recordPageFacts(state, buildRoutingPageFacts({
                     documentId: document.id, runId: state.run.id, pageCount: document.pageCount,
                     layoutFacts: routingFactsWithDopplerFacts(winningCandidate.layoutFacts, winningCandidate.pageFacts),
                   }));
@@ -1228,9 +1229,20 @@ export class ExtractMarkdownStage implements Stage {
                       `artifactUri=${artifactUri}`,
                   );
 
+                  // Embed parses HTML tables into cells in a parser VM; this activity's VM lane is warm for the document, so parse
+                  // them here and store them for embed (DOCSLURP_TABLE_CELLS_CACHE). Run after the other commands of this stage, not
+                  // beside them, so it takes the idle warm lane instead of growing a new one. Best effort: never fails extraction.
+                  // Documents without `<table` do no extra work.
+                  const tableCells: StoreEmbedTableCellsStats = mayHaveHtmlTables(winningText, parserAwareCanonicalDocument.blocks)
+                    ? await storeEmbedTableCells({
+                        run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
+                        markdownUri: artifactUri, canonicalUri, signal,
+                      })
+                    : { status: "no-tables" };
                   const completedResult: DocumentStageResult = {
                     artifactUri,
                     stats: {
+                      tableCells,
                       // What later stages read: a first-pass checkpoint after this one runs again only if it changed (C1).
                       markdownSha256: createHash("sha256").update(winningText).digest("hex"),
                       strategy,
@@ -1398,7 +1410,7 @@ export class ExtractMarkdownStage implements Stage {
     sourcePath: string,
     markdown: string,
   ): Promise<void> {
-    if (!state.store?.setDocumentTitleIfAbsent) return;
+    if (!state.store) return;
     try {
       const metadataTitles = format === "html" ? [htmlDocumentTitle(await readFileHead(sourcePath, 256 * 1024))] : [];
       const derived = deriveDocumentTitle({
@@ -1407,7 +1419,7 @@ export class ExtractMarkdownStage implements Stage {
         filename: document.filename,
       });
       if (!derived) return;
-      const written = await state.store.setDocumentTitleIfAbsent(document.id, derived);
+      const written = await state.store.records.setDocumentTitleIfAbsent({ orgId: state.run.orgId ?? null, runId: state.run.id, documentId: document.id }, derived);
       console.log(`[extract-debug] document=${document.id} title-source=${derived.source} title-written=${written}`);
     } catch (error) {
       console.warn(`[extract-markdown] title derivation failed document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1856,15 +1868,12 @@ export class ExtractMarkdownStage implements Stage {
     // The host's own measured count; never coerced: without one, facts have nothing to be checked against.
     const pageCount = document.pageCount;
     if (!Number.isSafeInteger(pageCount) || pageCount < 1) return skipped("no-host-page-count");
-    const coverage = dopplerFactsCoverEvidence(candidate.pageFacts, pageCount);
-    if (!coverage.covered) return skipped(coverage.reason);
-    const pageTexts = pageAlignedTexts(winningText, pageCount);
-    if (!pageTexts) return skipped("text-not-page-aligned");
+    // One check (coverage, page alignment, agreement with the extracted text) for both the evidence and the rows.
     const ocrPages = new Set([...(candidate.ocrPages ?? []), ...modelReadPages]);
-    const disagreement = dopplerFactsTextDisagreement(candidate.pageFacts, pageTexts, ocrPages);
-    if (disagreement !== null) {
-      console.warn(`[doppler-page-facts] document=${document.id} facts disagree with the extracted text page=${disagreement}`);
-      return skipped("words-disagree");
+    const check = checkDopplerFactsEvidence({ facts: candidate.pageFacts, pageCount, pageTexts: () => pageAlignedTexts(winningText, pageCount), ocrPages });
+    if (!check.ok) {
+      if (check.reason === "words-disagree") console.warn(`[doppler-page-facts] document=${document.id} facts disagree with the extracted text page=${check.page}`);
+      return skipped(check.reason);
     }
     let pageImageEvidenceUri: string | null = null;
     let evidencePages = 0;
@@ -1872,7 +1881,7 @@ export class ExtractMarkdownStage implements Stage {
     try {
       if (!state.run.pipeline.visionFallback) evidenceReason = "vision-fallback-off";
       else {
-        const pages = pageImageEvidenceFromDopplerFacts({ facts: candidate.pageFacts, pageCount, pageTexts, ocrPages });
+        const pages = pageImageEvidenceFromCheckedFacts(check.checked);
         if (pages) {
           pageImageEvidenceUri = await this.storePageImageEvidence(document, state, pages, DOPPLER_FACTS_EVIDENCE_SOURCE);
           evidencePages = pages.length;
@@ -1886,8 +1895,8 @@ export class ExtractMarkdownStage implements Stage {
     // A run without a page billing pin bills pages with no text bytes and an image as scans at completion: facts rows would
     // raise its charge, so it keeps going without them.
     const legacyBilling = runBillsScansAtCompletion(state);
-    const rows = legacyBilling ? [] : pageFactRowsFromDopplerFacts({ facts: candidate.pageFacts, pageCount, pageTexts, ocrPages, documentId: document.id, runId: state.run.id });
-    await recordPageFacts(state.store, rows);
+    const rows = legacyBilling ? [] : pageFactRowsFromCheckedFacts(check.checked, { documentId: document.id, runId: state.run.id });
+    await recordPageFacts(state, rows);
     console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${legacyBilling ? " rows-skipped=legacy-billing" : ""}`);
     return {
       pageImageEvidenceUri,
@@ -1913,7 +1922,7 @@ export class ExtractMarkdownStage implements Stage {
     sandboxedPdfRoute = false,
     sandboxReason: string | null = null,
   ): Promise<void> {
-    if (!pageFactsEnabled() || !state.store?.upsertPageFacts) return;
+    if (!pageFactsEnabled() || !state.store) return;
     if (format === "pdf" && sandboxedPdfRoute) {
       this.skipHostPdfEvidence(document, "page-facts", sandboxReason);
       return;
@@ -1922,7 +1931,7 @@ export class ExtractMarkdownStage implements Stage {
     if (state.documentStage(document.id, this.name)?.status === "completed") return;
     try {
       if (format === "image") {
-        await recordPageFacts(state.store, [{
+        await recordPageFacts(state, [{
           documentId: document.id, runId: state.run.id, pageNumber: 1,
           textBytes: 0, wordCount: 0, imageCount: 1, factsSource: "image-file",
         }]);
@@ -1941,7 +1950,7 @@ export class ExtractMarkdownStage implements Stage {
         onImagesList: (listing) => this.imageListings.set(this.imageListingKey(state, document), listing),
         onPageText: (listing) => this.textLayerListings.set(this.imageListingKey(state, document), listing),
       });
-      await recordPageFacts(state.store, rows);
+      await recordPageFacts(state, rows);
     } catch (error) {
       rethrowIfTeardown(error);
       console.warn(`[page-facts] skipped document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);

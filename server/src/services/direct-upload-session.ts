@@ -456,10 +456,11 @@ export async function describeDirectUploadSession(
 }
 
 /** A file's run, or its definite rejection: only what the uploader may see. */
-function fileOutcome(file: UploadSessionFileRow): { runId?: string; error?: StoredFinalizeError } {
+function fileOutcome(file: UploadSessionFileRow): { runId?: string; error?: DirectUploadFileError } {
   return {
     ...(file.run_id ? { runId: file.run_id } : {}),
-    ...(file.status === "failed" && file.finalize_error ? { error: { statusCode: file.finalize_error.statusCode, code: file.finalize_error.code, message: file.finalize_error.message } } : {}),
+    // The same per-file shape a batched files/complete answers: a failed file is final.
+    ...(file.status === "failed" ? { error: describeFileFailure(storedFinalizeFailure(file, file.finalize_error ?? null)) } : {}),
   };
 }
 
@@ -680,8 +681,13 @@ async function readFileState(file: Pick<UploadSessionFileRow, "id" | "session_id
 /** The rejection the background finalizer recorded, answered again with its own status and message. */
 function storedFinalizeFailure(file: Pick<UploadSessionFileRow, "filename">, stored: StoredFinalizeError | null): ProjectIntakeError {
   const status = stored && [400, 409, 413, 415, 422].includes(stored.statusCode) ? stored.statusCode as 400 : 400;
-  return new ProjectIntakeError(stored?.message ?? `${file.filename} was rejected`, status);
+  const error = new ProjectIntakeError(stored?.message ?? `${file.filename} was rejected`, status);
+  finalFileFailures.set(error, stored?.code ?? rejectionCode(error));
+  return error;
 }
+
+/** Failures of a file already marked `failed`, with their stored code: final, so no repeat or re-upload changes them. */
+const finalFileFailures = new WeakMap<ProjectIntakeError, string>();
 
 /** Storage is authoritative: never assemble a caller's unverified part manifest. */
 export async function finalizeDirectUploadFile(file: UploadSessionFileRow, finalSize?: number, options: { signal?: AbortSignal } = {}): Promise<boolean> {
@@ -876,8 +882,10 @@ export const PARTS_INCOMPLETE_MESSAGE = "Upload parts are incomplete or have inc
  * - `action: "reupload"`: put the file's bytes again (or finish its parts), then repeat (missing object, parts
  *   incomplete, bytes changed or of the wrong size).
  * - `action: "none"`: nothing a repeat can fix (unknown file, refused type or size, changed declared size).
- * - `blocksSession`: left as is, this file makes the reconciler fail the whole session once the client stops
- *   finalizing (its stored bytes are refused); repair it or abort the session.
+ * - `blocksSession`: always false. Files are finalized one by one, so no file fails its session: a file whose stored
+ *   bytes are definitely refused (wrong size, refused type or size) is failed on its own, permanently, by the storage
+ *   webhook or the fallback reconciler once the client stops completing it, and the session's other files go on.
+ *   A file already failed answers with its stored error and `action: "none"`.
  */
 export type DirectUploadFileError = { statusCode: number; code: string; message: string; retryable: boolean; action: "retry" | "reupload" | "none"; blocksSession: boolean };
 
@@ -893,11 +901,10 @@ export function describeFileFailure(error: ProjectIntakeError): DirectUploadFile
   const retryable = error.statusCode >= 500 || code === "upload_session_busy";
   const reupload = !retryable && (error.message.includes("changed while its upload was being completed")
     || REUPLOAD_MESSAGES.some(prefix => error.message.startsWith(prefix)));
-  // Mirrors the reconciler's terminal rule (a 4xx other than 409) for what it meets on its own: an absent object is
-  // only "not yet", and an unknown file or a changed declared size never reaches it.
-  const blocksSession = error.statusCode < 500 && error.statusCode !== 409 && error.statusCode !== 404
-    && !error.message.startsWith("No object found") && error.message !== DECLARED_SIZE_CHANGE_MESSAGE;
-  return { statusCode: error.statusCode, code, message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession };
+  // A file already failed is final; anything else may still be fixed by a repeat or a re-upload before the file fails.
+  const finalCode = finalFileFailures.get(error);
+  if (finalCode) return { statusCode: error.statusCode, code: finalCode, message: error.message, retryable: false, action: "none", blocksSession: false };
+  return { statusCode: error.statusCode, code, message: error.message, retryable, action: retryable ? "retry" : reupload ? "reupload" : "none", blocksSession: false };
 }
 
 type FinalizeOutcome = { fileId: string; completed: true } | { fileId: string; completed: false; error: unknown };

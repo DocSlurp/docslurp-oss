@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { assertProviderAllowed, normalizePipelineFeatures, type PipelineFeatureOverrides, resolveLanceDbConfig, VectorNamespaceManager } from "@docslurp/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 const providerCalls = vi.hoisted(() => ({ embed: [] as string[][], context: 0 }));
 
@@ -104,24 +105,23 @@ class MemoryReuseStore implements EmbeddingReuseStore {
   }
 }
 
-/** Checkpoint no-ops plus the reuse store, like the worker's Store. */
-function checkpointStore(reuse: MemoryReuseStore) {
-  return {
-    updateProgress: async () => {},
-    startRunStage: async () => {},
-    completeRunStage: async () => {},
-    failRunStage: async () => {},
-    startDocumentStage: async () => {},
-    completeDocumentStage: async () => {},
-    failDocumentStage: async () => {},
-    appendEvent: async () => {},
-    setPageStageComplete: async () => {},
-    setPagesStageComplete: async () => {},
-    getCompletedPages: async () => new Set<number>(),
+/** An in-memory checkpoint store whose content port uses this reuse table and any replaced content writes. */
+function checkpointStore(reuse: MemoryReuseStore, extras: Record<string, unknown> = {}) {
+  const store = memoryCheckpointStore();
+  const { failDocumentStage, ...legacy } = extras;
+  // The extras are written against the writes' rows (and a document id); the port takes the write's scope first.
+  const content = Object.fromEntries(Object.entries(legacy).map(([name, fn]) => {
+    const write = fn as (...args: unknown[]) => unknown;
+    const byDocument = ["staleDocumentChunkIds", "deleteStaleDocumentChunks", "markDocumentLexicalSearchable"].includes(name);
+    return [name, (scope: { documentId: string }, ...rest: unknown[]) => (byDocument ? write(scope.documentId, ...rest) : write(...rest))];
+  }));
+  Object.assign(store.content, {
     findEmbeddingReuseRefs: reuse.findEmbeddingReuseRefs.bind(reuse),
     recordEmbeddingReuseRefs: reuse.recordEmbeddingReuseRefs.bind(reuse),
     forgetEmbeddingReuseRefs: reuse.forgetEmbeddingReuseRefs.bind(reuse),
-  };
+  }, content);
+  if (failDocumentStage) Object.assign(store, { failDocumentStage });
+  return store;
 }
 
 const SECTIONS = ["Overview", "Payroll", "Benefits", "Leave"].map((title, index) =>
@@ -145,7 +145,7 @@ type EmbedArgs = {
   allowFailure?: boolean;
   /** Applied after validation: a pipeline whose hosted route predates a privacy switch. */
   privacyMode?: "local-only" | "strict-privacy";
-  /** Extra store methods (e.g. chunk materialization) merged over the checkpoint store. */
+  /** Content writes (e.g. chunk materialization) replaced on the store's content port, and failDocumentStage. */
   storeExtras?: Record<string, unknown>;
   /** EmbedStage's LanceDB delete (default: none recorded). */
   deleteVectors?: (uri: string, table: string, ids: readonly string[]) => Promise<void>;
@@ -183,7 +183,7 @@ async function runEmbed(args: EmbedArgs) {
   } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   for (const [hash, uri] of args.dedupHashes ?? []) state.contentHashes.set(hash, uri);
-  if (args.reuse) state.store = { ...checkpointStore(args.reuse), ...args.storeExtras } as unknown as WorkflowState["store"];
+  if (args.reuse) state.store = checkpointStore(args.reuse, args.storeExtras);
   const config = { ...fromEnv(), openRouterApiKey: args.openRouter ? "test-key" : "" };
   const embedCallsBefore = providerCalls.embed.length;
   const contextCallsBefore = providerCalls.context;

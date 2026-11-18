@@ -174,14 +174,15 @@ export function markFirstPassDocumentForTest(runId: string, documentId: string):
 // ── Planning ──
 
 export interface FirstPassStore {
-  markRunMilestone?: import("./run-milestones.js").RunMilestoneStore["markRunMilestone"];
+  markRunMilestone: import("./run-milestones.js").RunMilestoneStore["markRunMilestone"];
   loadRun: Parameters<typeof loadRunState>[0]["loadRun"];
   loadDocumentsForRun: Parameters<typeof loadRunState>[0]["loadDocumentsForRun"];
   hydrateState: Parameters<typeof loadRunState>[0]["hydrateState"];
   readStageStates?: Parameters<typeof loadRunState>[0]["readStageStates"];
   /** The page basis port every loaded state checks spend through (pipeline/page-basis.ts). */
   pageBasisLedger: Parameters<typeof loadRunState>[0]["pageBasisLedger"];
-  documentScopes(documentIds: readonly string[]): Promise<Map<string, { orgId: string | null; runId: string; bytes: number }>>;
+  /** The organization and run each document belongs to (db/document-records.ts documentScopes). */
+  readonly records: Pick<import("../db/document-records.js").DocumentRecords, "documentScopes">;
   updateProgress(state: WorkflowState): Promise<void>;
 }
 
@@ -202,7 +203,7 @@ export async function planFirstPass(store: FirstPassStore, runId: string): Promi
     .filter((document) => !taken.has(document.id) && sniffedPdf(document) && document.pageCountSource === "assumed" && document.status !== "failed")
     .map((document) => document.id);
   if (!provider) return { batches: [], limits: null, coversRun: false, countFirst: deferred(new Set()) };
-  const scopes = await store.documentScopes(state.documents.map((document) => document.id));
+  const scopes = await store.records.documentScopes(state.documents.map((document) => document.id));
   const candidates = state.documents.flatMap((document) => {
     const scope = scopes.get(document.id);
     if (!scope || scope.runId !== runId || scope.orgId !== state.run.orgId) return [];
@@ -288,7 +289,7 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
   state.beginShard(input.documentIds);
   const documents = new Map(state.documents.map((document) => [document.id, document]));
   if (documents.size !== new Set(input.documentIds).size) throw new Error("First-pass batch names documents outside its run");
-  const scopes = await deps.store.documentScopes(input.documentIds);
+  const scopes = await deps.store.records.documentScopes(input.documentIds);
   const pipeline = state.run.pipeline;
   const options = firstPassBatchOptions(pipeline);
   // The ordinary loop extracts these documents again (C1): keep each batch result where it can be served without a VM.
@@ -697,8 +698,8 @@ export async function storeFirstPassFigures(args: {
   // before any slot is recorded, and no `document.md` is stored. A store that cannot say or cannot add stores nothing
   // (fail closed). Otherwise `document.md` is exactly the Markdown slot's bytes, the text the PII stage scanned.
   const piiEnabled = !!state.run.pipeline?.piiPolicy?.enabled;
-  const pii = state.store;
-  if (piiEnabled && (!pii?.documentPiiWithholds || !pii.appendWithheldArtifactUris)) {
+  const pii = state.store?.records;
+  if (piiEnabled && !pii) {
     console.warn(`[first-pass] figures document=${documentId} status=failed rule=pii-unverifiable`);
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
     return { stats: { dopplerFigures: { status: "failed", rule: "pii-unverifiable", ledger } } };
@@ -707,7 +708,8 @@ export async function storeFirstPassFigures(args: {
   // Pending, then stored, per upload step: kept whatever later fails (owner rule).
   const ledgerHooks = figureLedgerHooks(state, documentId);
   try {
-    const withhold = piiEnabled ? await pii!.documentPiiWithholds!(documentId) : false;
+    const rowScope = { orgId: state.run.orgId ?? null, runId: state.run.id, documentId };
+    const withhold = piiEnabled ? await pii!.documentPiiWithholds(rowScope) : false;
     figures = await readDopplerFigureDir(args.dir, {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
       sourceSha256: document.sourceSha256 ?? null, gaps: outcome.gaps ?? null,
@@ -715,7 +717,7 @@ export async function storeFirstPassFigures(args: {
     const committedUris = committedDocumentUris(state, documentId);
     // Withheld before any byte is uploaded or any row is marked stored (the ledger serves stored rows): every object this
     // store can make reachable joins the list first. A failed append stores nothing (fail closed) and deletes nothing.
-    if (withhold) await pii!.appendWithheldArtifactUris!(documentId, dopplerFigureUris(args.storage, document, args.runId, figures));
+    if (withhold) await pii!.appendWithheldArtifactUris(rowScope, dopplerFigureUris(args.storage, document, args.runId, figures));
     const stored = await storeDopplerFigures({
       storage: args.storage, document, runId: args.runId, figures, markdown: args.markdownSlot?.toString("utf8") ?? "",
       documentMarkdown: withhold ? null : args.markdownSlot, source: dopplerSourcePointer(document), signal: args.signal,
@@ -723,7 +725,7 @@ export async function storeFirstPassFigures(args: {
       ...(ledgerHooks ? { ledger: ledgerHooks } : {}),
     });
     // Every recorded slot is withheld (a no-op union when the list above already covers it); never a delete.
-    if (withhold) await pii!.appendWithheldArtifactUris!(documentId, stored.slots.map(({ uri }) => uri));
+    if (withhold) await pii!.appendWithheldArtifactUris(rowScope, stored.slots.map(({ uri }) => uri));
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));

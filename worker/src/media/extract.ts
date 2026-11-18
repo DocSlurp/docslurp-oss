@@ -1,4 +1,5 @@
 import { configuredVisionProvider } from "./vision.js";
+import { modelRecordUri } from "@docslurp/shared";
 import { RunPolicyError } from "../lib/document-failure.js";
 import { videoPolicy } from "./video-policy.js";
 import { scanVideo, prepareVideoFrame, describeVideoChunk } from "./video-processing.js";
@@ -194,9 +195,11 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       state.artifactLedger.recordDocument(document.id, "canonical-document", storage.uri(`${prefix}.canonical.json`));
       state.artifactLedger.recordDocument(document.id, "markdown-manifest", storage.uri(`${prefix}.manifest.json`));
       document.pageCount = 1;
-      // Page extract record: the one page is the transcript (labels only; the provider stays out of the record).
+      // Page extract record: the one page is the transcript. The engine stays a route word; the model that transcribed
+      // it is recorded beside it (operator-facing, not in the customer view).
       recordPageExtracts(state, document, [{ pageNumber: 1, pass: "extract", method: "transcription", engine: `media-${mediaKind}`,
-        textBytes: Buffer.byteLength(text, "utf8"), finishReason: text.trim() ? "stop" : "empty" }]);
+        textBytes: Buffer.byteLength(text, "utf8"), finishReason: text.trim() ? "stop" : "empty",
+        modelUri: modelRecordUri({ provider: provider.id, model: provider.model }) }]);
       return { artifactUri: storage.uri(`${prefix}.md`), stats: { provider: provider.id, model: provider.model,
         durationSeconds: duration, segments: segments.length, speakers: summary.speakerCount, visualSegments: visualSegments.length, coverage } };
     } finally {
