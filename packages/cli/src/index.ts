@@ -529,7 +529,10 @@ type SessionProbe = () => Promise<Response | "retry" | "fail">;
  * It waits out a busy lock and rate limiting with backoff, and asks `probe` about an uncoded 409 from an older server.
  */
 async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<string, string | boolean>, probe: SessionProbe, transient400 = 0): Promise<Response> {
-  const giveUpAt = Date.now() + Math.max(120_000, Number(flags.timeout ?? 30) * 1000);
+  // How long to wait out a held lock: --timeout when given, else a minute. A direct upload that is still locked out after
+  // that hands the rest to the server's reconciler (sessionCompleter), so a long wait buys nothing.
+  const waitMs = Number(flags.timeout) > 0 ? Number(flags.timeout) * 1000 : 60_000;
+  const giveUpAt = Date.now() + waitMs;
   let bad400 = 0;
   for (let attempt = 0; ; attempt++) {
     const response = await sessionSlot(send);
@@ -663,8 +666,8 @@ function localFileFor(descriptor: DirectUploadDescriptor, files: Array<{ blob: B
 }
 
 /** After a lost confirm response, the session says whether intake already finished: poll it rather than confirming again. */
-async function pollConfirmedSession(sessionPath: string, flags: Record<string, string | boolean>): Promise<Response | null> {
-  const stopAt = Date.now() + Math.max(60_000, Number(flags.timeout ?? 30) * 1000);
+async function pollConfirmedSession(sessionPath: string, flags: Record<string, string | boolean>, minWaitMs = 60_000, intervalMs = 1000): Promise<Response | null> {
+  const stopAt = Date.now() + Math.max(minWaitMs, Number(flags.timeout ?? 30) * 1000);
   while (Date.now() < stopAt) {
     try {
       const response = await apiFetch(`${sessionPath}?statusOnly=true`, flags);
@@ -676,7 +679,7 @@ async function pollConfirmedSession(sessionPath: string, flags: Record<string, s
     } catch (error) {
       if (!isLostResponse(error)) throw error;
     }
-    await sleepMs(1000);
+    await sleepMs(intervalMs);
   }
   return null;
 }
@@ -695,6 +698,9 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
   const queue: Pending[] = [];
   let batched: boolean | null = null; // unknown until the first batch call answers
   let draining: Promise<void> | null = null;
+  // Set when the server's reconciler keeps the session lock past our deadline: it finalizes and confirms the session itself,
+  // so we stop completing and wait for its result instead of abandoning the upload.
+  let handedOver = false;
   const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const fileOf = (body: Record<string, unknown>) => String(body.fileId);
 
@@ -710,9 +716,19 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
     return ["pending", "uploading"].includes(String(state.status ?? "pending")) ? "retry" : "fail";
   };
 
+  /** Still locked out after the deadline, yet the session is open: leave the rest to the server (see `handedOver`). */
+  async function handOverIfOpen(response: Response, fileIds: string[]): Promise<boolean> {
+    if (response.status !== 409 || await probeFor(fileIds)() !== "retry") return false;
+    await response.body?.cancel();
+    if (!handedOver) console.error("The server is busy finalizing this upload; leaving the remaining files to it and waiting for its run.");
+    handedOver = true;
+    return true;
+  }
+
   async function completeOne(item: Pending): Promise<void> {
     const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(item.body)), flags, probeFor([fileOf(item.body)]), 3);
-    if (!done.ok) throw await responseFailure(done);
+    if (done.ok || await handOverIfOpen(done, [fileOf(item.body)])) return;
+    throw await responseFailure(done);
   }
 
   async function completeBatch(items: Pending[]): Promise<void> {
@@ -728,6 +744,7 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
       return;
     }
     if (!response.ok) {
+      if (await handOverIfOpen(response, items.map((item) => fileOf(item.body)))) { for (const item of items) item.resolve(); return; }
       const failure = await responseFailure(response);
       for (const item of items) item.reject(failure);
       return;
@@ -751,6 +768,7 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
 
   async function drain(): Promise<void> {
     while (queue.length > 0) {
+      if (handedOver) { for (const item of queue.splice(0)) item.resolve(); break; }
       if (batched === false) {
         const item = queue.shift()!;
         await completeOne(item).then(item.resolve, item.reject);
@@ -768,6 +786,7 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
   }
 
   return {
+    get handedOver(): boolean { return handedOver; },
     complete(body: Record<string, unknown>): Promise<void> {
       return new Promise<void>((resolve, reject) => { queue.push({ body, tries: 0, resolve, reject }); kick(); });
     },
@@ -834,7 +853,11 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
       await completer.complete(complete);
     });
     let confirmed: Response | null;
-    try {
+    if (completer.handedOver) {
+      // The server finalizes the files we could not complete and confirms the session itself: wait for its run.
+      confirmed = await pollConfirmedSession(sessionPath, flags, 30 * 60_000, 3000);
+      if (!confirmed) throw new Error(`The server did not finish this upload in time; its session is ${session.sessionId} (check it with the status of that session).`);
+    } else try {
       confirmed = await sendWhenSessionFree(() => apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" }), flags, async () => {
         // The reconciler may be confirming this session itself: its result is the answer. A closed session is a real failure.
         const status = await apiFetchRepeatable(`${sessionPath}?statusOnly=true`, flags, {});

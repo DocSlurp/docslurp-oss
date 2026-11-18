@@ -263,6 +263,30 @@ test("an older server's generic 400 on complete (a storage hiccup) is retried a 
   }
 });
 
+test("locked out past the wait while the session is open, the CLI leaves the files to the server and reports its run", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 4);
+    let reconciled = false;
+    const server = directSessionServer({ onComplete: () => ({ status: 409, body: { error: { code: "upload_session_busy", message: "x" } } }) });
+    const result = await invoke(["upload", ...files, "--timeout", "2"], (request, count, base) => {
+      if (request.method === "GET" && request.url.includes("statusOnly=true")) {
+        // The server's reconciler finishes the session a moment after the CLI hands over.
+        const polls = result_polls.count++;
+        if (polls >= 3) reconciled = true;
+        return { body: { sessionId: "s1", status: reconciled ? "confirmed" : "pending", result: reconciled ? intakeResult : null, files: [] } };
+      }
+      return server.respond(request, count, base);
+    }, { killAfterMs: 60_000 });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /leaving the remaining files to it/);
+    assert.match(result.stdout, /Run ID:\s+run/);
+    assert.equal(result.requests.filter((request) => request.url.endsWith("/confirm")).length, 0, "no confirm: the server confirms");
+    assert.equal(result.requests.filter((request) => request.url.endsWith("/abort")).length, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+const result_polls = { count: 0 };
+
 test("more than 1,000 files go up as several sessions; a failed session does not stop the rest", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
   try {
