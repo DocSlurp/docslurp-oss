@@ -114,7 +114,7 @@ describe("request actor helpers", () => {
     expect(validateApiKey).toHaveBeenCalledWith("dslp_test", {
       origin: "https://app.docslurp.dev",
       referer: "https://app.docslurp.dev/widget"
-    });
+    }, {});
     expect(actor).toEqual({ type: "apiKey", userId: "user-1", apiKey: validatedKey });
   });
 

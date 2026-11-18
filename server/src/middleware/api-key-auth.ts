@@ -1,8 +1,8 @@
-import { requestIp } from "../lib/request-context.js";
 import type { MiddlewareHandler } from "hono";
 import { middlewareErrorResponse } from "../lib/api-error.js";
 
-import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
+import { type ApiKeyPolicyError, setRequestActor } from "../lib/request-actor.js";
+import { recordResolvedApiKeyUsage, resolveRequestApiKey } from "../lib/route-credentials.js";
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -26,18 +26,13 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     return middlewareErrorResponse(c, 401, "unauthorized", "Missing or invalid Authorization header");
   }
 
-  let actor;
-  try {
-    actor = await resolveApiKeyActor(header, {
-      origin: c.req.header("origin"),
-      referer: c.req.header("referer") ?? c.req.header("referrer"),
-      ip: requestIp(c),
-    });
-  } catch (error) {
-    if (!(error instanceof ApiKeyPolicyError)) throw error;
-    c.set("apiKeyPolicyRefusal", error);
-    return middlewareErrorResponse(c, 403, error.code, error.message);
+  // Shared with the request body budget (lib/route-credentials.ts): one lookup per request.
+  const resolution = await resolveRequestApiKey(c, header);
+  if (resolution.policyError) {
+    c.set("apiKeyPolicyRefusal", resolution.policyError);
+    return middlewareErrorResponse(c, 403, resolution.policyError.code, resolution.policyError.message);
   }
+  const actor = resolution.actor;
   if (!actor) {
     // Repeated refusals from one IP look like key guessing: the IP limiter jails it.
     c.set("apiKeyRejected", true);
@@ -52,6 +47,7 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
   }
 
   setRequestActor(c, actor);
+  recordResolvedApiKeyUsage(c, resolution);
   const limited = await enforceAuthenticatedApiRateLimit(c);
   if (limited) return limited;
   await next();

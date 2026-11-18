@@ -148,11 +148,13 @@ export function boundedBodyLimit(requestedMaxSize: number, onError: (c: Context)
   return async (c, next) => {
     // A body-less request is charged nothing, so its owner is never resolved.
     if (!c.req.raw.body) return next();
+    const header = c.req.header("content-length");
+    const declared = header === undefined || header.trim() === "" ? Number.NaN : Number(header);
+    // Over the route's absolute cap: refused before any credential lookup.
+    if (Number.isFinite(declared) && declared > routeMaxSize) return onError(c);
     const owner = (await options.owner?.(c)) ?? { pool: "authenticated", key: "unknown" };
     // A public (unauthenticated) request is small whatever its route allows.
     const maxSize = owner.pool === "public" ? Math.min(routeMaxSize, bodyReads.publicRequestBytes) : routeMaxSize;
-    const header = c.req.header("content-length");
-    const declared = header === undefined || header.trim() === "" ? Number.NaN : Number(header);
     if (Number.isFinite(declared) && declared > maxSize) return onError(c);
     // Sized from the declared length when there is one (capped by maxSize): a small body gets a short deadline.
     const expectedBytes = Number.isFinite(declared) && declared >= 0 ? declared : maxSize;

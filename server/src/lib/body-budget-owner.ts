@@ -15,14 +15,6 @@ export type BodyBudgetCredentialResolver = (c: Context) => Promise<{ orgId: stri
 
 let credentialResolver: BodyBudgetCredentialResolver | null = null;
 
-/**
- * Routes that authenticate a key or bearer inside their handler, after the body
- * limit. Only these pre-verify a credential: every other route either set its
- * actor already or must never look an API key up (the sensitive SSO start).
- * The OAuth endpoints' callers are not yet authenticated, so they stay public.
- */
-const SELF_AUTHENTICATING_BODY_ROUTES = /^\/(?:v1\/(?:chat\/completions|mcp)(?:\/|$)|compat\/)/;
-
 export function registerBodyBudgetCredentialResolver(resolver: BodyBudgetCredentialResolver | null): void {
   credentialResolver = resolver;
 }
@@ -43,7 +35,8 @@ export async function bodyBudgetOwner(c: Context): Promise<BodyBudgetOwner> {
   if (apiKey) return { pool: "authenticated", key: apiKey.orgId ? `org:${apiKey.orgId}` : `key:${apiKey.keyId}` };
   const user = c.get("sessionUser");
   if (user?.id) return { pool: "authenticated", key: `user:${user.id}` };
-  const verified = credentialResolver && SELF_AUTHENTICATING_BODY_ROUTES.test(c.req.path) ? await credentialResolver(c).catch(() => null) : null;
+  // The resolver checks only its own exact routes (body-budget-credentials.ts) and returns null elsewhere.
+  const verified = credentialResolver ? await credentialResolver(c).catch(() => null) : null;
   if (verified) return { pool: "authenticated", key: verified.orgId ? `org:${verified.orgId}` : `key:${verified.keyId}` };
   return publicOwner(c);
 }

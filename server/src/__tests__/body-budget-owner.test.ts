@@ -1,16 +1,20 @@
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { validateMcpToken, resolveApiKeyActor } = vi.hoisted(() => ({ validateMcpToken: vi.fn(), resolveApiKeyActor: vi.fn() }));
+const { validateMcpToken, validateApiKey, recordApiKeyRequest } = vi.hoisted(() => ({ validateMcpToken: vi.fn(), validateApiKey: vi.fn(), recordApiKeyRequest: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: Object.assign(vi.fn(), { json: (value: unknown) => value, array: (value: unknown) => value }) }));
-vi.mock("../services/mcp-oauth.js", () => ({ validateMcpToken, mcpResource: (url: string) => `${new URL(url).origin}/v1/mcp` }));
-vi.mock("../lib/request-actor.js", () => ({ resolveApiKeyActor }));
+// The real request-actor and route-credentials code; only the key stores are faked.
+vi.mock("../services/mcp-oauth.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/mcp-oauth.js")>(), validateMcpToken, validateOAuthApiToken: vi.fn(async () => null) }));
+vi.mock("../services/api-keys.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/api-keys.js")>(), validateApiKey }));
+vi.mock("../services/api-key-usage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/api-key-usage.js")>(), recordApiKeyRequest }));
 
 const { nativeBodyLimit } = await import("../lib/api-error.js");
 const { v1BodyLimit } = await import("../lib/v1-body-limit.js");
 const { bodyReadSettings, bufferedBodyBytes, configureBodyReads } = await import("../lib/bounded-body-limit.js");
 const { registerBodyBudgetCredentialResolver } = await import("../lib/body-budget-owner.js");
-const { verifyBodyBudgetCredential } = await import("../lib/body-budget-credentials.js");
+const { PREVERIFY_TIMEOUT_MS, verifyBodyBudgetCredential } = await import("../lib/body-budget-credentials.js");
+const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
+const { mcpResource } = await import("../services/mcp-oauth.js");
 
 let saved: ReturnType<typeof bodyReadSettings>;
 beforeEach(() => {
@@ -73,16 +77,6 @@ describe("routes that authenticate in their handler are charged to the authentic
     for (const response of await Promise.all(pending)) expect(response.status).toBe(200);
   });
 
-  it("never pre-verifies a credential on routes that must not look keys up", async () => {
-    const resolver = vi.fn(async () => ({ orgId: "org-a", keyId: "k-a" }));
-    registerBodyBudgetCredentialResolver(resolver);
-    const hono = new Hono();
-    hono.use("/v1/*", v1BodyLimit({ maxMultipartUploadBytes: 25 * 1024 * 1024 }));
-    hono.post("/v1/auth/sensitive-sso/start", c => c.text("ok"));
-    await hono.request("/v1/auth/sensitive-sso/start", { method: "POST", headers: { "content-type": "application/json", Authorization: "Bearer good" }, body: "{}" });
-    expect(resolver).not.toHaveBeenCalled();
-  });
-
   it("charges an unauthenticated request to the public pool", async () => {
     const { post, release } = app();
     const pending = post("/v1/chat/completions", 100 * 1024);
@@ -94,26 +88,90 @@ describe("routes that authenticate in their handler are charged to the authentic
   });
 });
 
-describe("the production credential check", () => {
-  const context = (headers: Record<string, string>, url = "http://localhost/v1/mcp") => {
-    const request = new Request(url, { headers });
-    return { req: { url: request.url, header: (name: string) => request.headers.get(name) ?? undefined }, env: {} } as never;
+describe("the production credential check: the route's own verifier and admission rule", () => {
+  /** A context as the pre-check sees it. */
+  const context = (method: string, path: string, headers: Record<string, string>) => {
+    const request = new Request(`http://localhost${path}`, { method, headers });
+    return { req: { url: request.url, path, method, header: (name: string) => request.headers.get(name) ?? undefined }, env: {} } as never;
   };
-
-  it("verifies MCP tokens against the MCP resource and other bearers as API keys", async () => {
-    validateMcpToken.mockResolvedValue({ orgId: "org-m", keyId: "k-m" });
-    expect(await verifyBodyBudgetCredential(context({ Authorization: "Bearer dsmcp_x" }))).toEqual({ orgId: "org-m", keyId: "k-m" });
-    expect(validateMcpToken).toHaveBeenCalledWith("dsmcp_x", "http://localhost/v1/mcp", expect.anything());
-    resolveApiKeyActor.mockResolvedValue({ apiKey: { orgId: "org-k", keyId: "k-k" } });
-    expect(await verifyBodyBudgetCredential(context({ "X-Algolia-API-Key": "dslp_priv_abc" }, "http://localhost/compat/algolia/1/indexes/x/query"))).toEqual({ orgId: "org-k", keyId: "k-k" });
-    expect(resolveApiKeyActor).toHaveBeenCalledWith("Bearer dslp_priv_abc", expect.anything());
+  const key = (overrides: Record<string, unknown>) => ({
+    keyId: "k", userId: "u", orgId: "org-k", keyType: "server", allowedDomains: [], scopes: ["search", "chat"], rateLimits: [], projectIds: [], ...overrides,
   });
 
-  it("treats a missing, unknown or policy-refused credential as unverified", async () => {
-    expect(await verifyBodyBudgetCredential(context({}))).toBeNull();
-    resolveApiKeyActor.mockResolvedValue(null);
-    expect(await verifyBodyBudgetCredential(context({ Authorization: "Bearer unknown" }))).toBeNull();
-    resolveApiKeyActor.mockRejectedValue(new Error("api_key_ip_not_allowed"));
-    expect(await verifyBodyBudgetCredential(context({ Authorization: "Bearer refused" }))).toBeNull();
+  it("charges public a search-only browser key on chat, a browser key on MCP and an MCP token on chat", async () => {
+    validateApiKey.mockResolvedValue(key({ keyType: "client", scopes: ["search"] }));
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer dslp_pub_search" }))).toBeNull();
+    validateApiKey.mockResolvedValue(key({ keyType: "client", scopes: ["search", "chat"] }));
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/mcp", { Authorization: "Bearer dslp_pub_browser" }))).toBeNull();
+    validateMcpToken.mockResolvedValue(key({}));
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer dsmcp_token" }))).toBeNull();
+  });
+
+  it("charges the org of a credential the route admits", async () => {
+    validateApiKey.mockResolvedValue(key({}));
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer dslp_priv_chat" }))).toEqual({ orgId: "org-k", keyId: "k" });
+    validateMcpToken.mockResolvedValue(key({ orgId: "org-m", keyId: "k-m" }));
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/mcp", { Authorization: "Bearer dsmcp_token" }))).toEqual({ orgId: "org-m", keyId: "k-m" });
+    // Validated against the MCP resource, exactly as mcp-auth validates it.
+    expect(validateMcpToken).toHaveBeenCalledWith("dsmcp_token", mcpResource("http://localhost/v1/mcp"), expect.anything());
+    expect(await verifyBodyBudgetCredential(context("POST", "/compat/algolia/1/indexes/docs/query", { "X-Algolia-API-Key": "dslp_priv_algolia" }))).toEqual({ orgId: "org-k", keyId: "k" });
+  });
+
+  it("reads X-Algolia-API-Key on Algolia routes only, and binds admission to the exact route and method", async () => {
+    validateApiKey.mockResolvedValue(key({}));
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { "X-Algolia-API-Key": "dslp_priv_algolia" }))).toBeNull();
+    expect(await verifyBodyBudgetCredential(context("PATCH", "/v1/chat/completions", { Authorization: "Bearer dslp_priv_chat" }))).toBeNull();
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions/extra", { Authorization: "Bearer dslp_priv_chat" }))).toBeNull();
+    // A route that must never look a key up (the sensitive SSO start) resolves nothing.
+    validateApiKey.mockClear();
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/auth/sensitive-sso/start", { Authorization: "Bearer dslp_priv_chat" }))).toBeNull();
+    expect(validateApiKey).not.toHaveBeenCalled();
+  });
+
+  it("treats a missing, unknown or policy-refused credential as unverified, and never records usage", async () => {
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", {}))).toBeNull();
+    validateApiKey.mockResolvedValue(null);
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer unknown" }))).toBeNull();
+    validateApiKey.mockRejectedValue(Object.assign(new Error("ip"), { code: "api_key_ip_not_allowed" }));
+    expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer refused" }))).toBeNull();
+    for (const call of validateApiKey.mock.calls) expect(call[2]).toEqual({ recordUsage: false });
+    expect(recordApiKeyRequest).not.toHaveBeenCalled();
+  });
+
+  it("gives up after its wait bound (public), without failing the request", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      validateApiKey.mockReturnValue(new Promise(() => {}));
+      const pending = verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer slow" }));
+      await vi.advanceTimersByTimeAsync(PREVERIFY_TIMEOUT_MS);
+      expect(await pending).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("makes one key lookup and one usage record per request: the route's auth reuses the pre-check", async () => {
+    registerBodyBudgetCredentialResolver(verifyBodyBudgetCredential);
+    validateApiKey.mockResolvedValue(key({}));
+    const hono = new Hono();
+    hono.use("/v1/*", v1BodyLimit({ maxMultipartUploadBytes: 25 * 1024 * 1024 }));
+    hono.use("/v1/chat/completions", apiKeyAuth);
+    hono.post("/v1/chat/completions", c => c.text("ok"));
+    const response = await hono.request("/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json", Authorization: "Bearer dslp_priv_chat" }, body: "{}" });
+    expect(response.status).toBe(200);
+    expect(validateApiKey).toHaveBeenCalledTimes(1);
+    expect(recordApiKeyRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a body over the route's absolute cap before any credential lookup", async () => {
+    registerBodyBudgetCredentialResolver(verifyBodyBudgetCredential);
+    const hono = new Hono();
+    hono.use("/v1/*", v1BodyLimit({ maxMultipartUploadBytes: 25 * 1024 * 1024 }));
+    hono.post("/v1/chat/completions", c => c.text("ok"));
+    const response = await hono.request("/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json", Authorization: "Bearer dslp_priv_chat", "content-length": String(9 * 1024 * 1024) }, body: "{}",
+    });
+    expect(response.status).toBe(413);
+    expect(validateApiKey).not.toHaveBeenCalled();
   });
 });

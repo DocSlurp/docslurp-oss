@@ -636,7 +636,9 @@ export interface ValidatedKey {
 
 export async function validateApiKey(
   rawKey: string,
-  requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null }
+  requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
+  /** `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts). */
+  options: { recordUsage?: boolean } = {},
 ): Promise<ValidatedKey | null> {
   const keyHash = hashKey(rawKey);
 
@@ -679,7 +681,7 @@ export async function validateApiKey(
 
   // Usage statistics are buffered; every limit, including the daily page cap,
   // is enforced by the rate-limit middleware.
-  recordApiKeyRequest(row.id, Date.now(), requestContext?.ip ?? null);
+  if (options.recordUsage !== false) recordApiKeyRequest(row.id, Date.now(), requestContext?.ip ?? null);
 
   return {
     keyId: row.id,

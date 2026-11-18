@@ -1,4 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
+import { algoliaAuthorization } from "../lib/route-credentials.js";
 import { randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
@@ -445,12 +446,9 @@ const searchBodyLimit = bodyLimit({
 
 export const algoliaCompatRoutes = new Hono()
   .use("*", async (c, next) => {
-    let header = c.req.header("Authorization");
-    const algoliaKey = c.req.header("X-Algolia-API-Key");
-    if (!header && algoliaKey) {
-      header = `Bearer ${algoliaKey}`;
-      c.req.raw.headers.set("Authorization", header);
-    }
+    // The same parse the request body budget uses (lib/route-credentials.ts).
+    const header = algoliaAuthorization(c);
+    if (header && !c.req.header("Authorization")) c.req.raw.headers.set("Authorization", header);
     await next();
   })
   .use("*", apiKeyAuth)
