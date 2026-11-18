@@ -360,10 +360,10 @@ stored bytes.
 `tiled`, `layered`). They are written through the ordinary page-facts write whatever the figure setting: `text_layer` from
 the VM's layout facts today, `scan_class` later.
 
-**Page facts.** The provider's `page-facts.jsonl` is never uploaded: its document line can carry the PDF's own producer
-and creator strings, untrusted text. Facts are stored only once a validating reader exists that re-serialises them from
-validated fields (a later change adds that upload); until then the folder may hold the file, and the host neither reads
-nor stores it, and records no slot for it.
+**Page facts.** The provider's own `page-facts.jsonl` in the figures folder is never read or uploaded: its document line
+can carry the PDF's own producer and creator strings, untrusted text. The facts the VM job returns (`pageFacts`) are parsed
+by the strict reader and stored as canonical lines re-serialised from validated fields
+(`<artifact root>/doppler/<document>/images/page-facts.jsonl`, slot `doppler-page-facts`), never the guest's bytes.
 
 A sharded document also has one `document_extraction_shards` row per shard (scoped like the other tables, with the same
 composite foreign keys): its range, its stored manifest's key and SHA-256, its `source_sha256` and `settings_sha256`, its
@@ -372,6 +372,14 @@ the shards'. The document's level is the aggregate: `complete` only if every sha
 resume would retry remains, else `partial`; its `shards` column counts the shards and its manifest key is null. A write
 for a single manifest (or a failed, `none` or `disabled` level) removes the shard rows. The level's `gaps` keeps the
 provider's gaps, capped at 128.
+
+**First pass.** A document the batched first pass converts has its figures stored, and its level written, by the first
+pass's own stage (`first-pass:figures`), whose checkpoint can commit before the extraction stage commits the Markdown. The
+extraction stage then queues a Markdown-only mark (`markFigureLevelMarkdownComplete`) for its own checkpoint: the level of
+that run becomes `markdown_complete` (and earlier runs' folders are queued for purge, as a full write does), and when the
+run has no level yet, a level-only `failed` level is written with it. Within one run `markdown_complete` only goes from
+false to true, so a figure write that lands later keeps it. Before this, every first-pass document kept
+`markdown_complete = false`, and the resume runner, which claims only committed Markdown, never resumed one.
 
 **Reading it.** `GET /v1/documents/:id/assets` returns the level and the images, a page at a time: `limit` (1 to 1,000,
 default 500), `after` (the previous page's `nextCursor`) and an optional `pageFrom`/`pageTo` range. It answers only for a
@@ -616,6 +624,36 @@ stored, before the failure stands, so a retry or resume starts from them.
   - the gauges `resumable_backlog` and `resume_oldest_age_s` (live documents only);
   - `gc.orphan_files`, `gc.orphan_bytes`, `gc.expired_files`, `audit.ledger_storage_drift`, `audit.adopted_files` and
     `audit.skipped_truncated`.
+
+## Doppler output record
+
+Every document whose Markdown Doppler wrote (`vm-pdf` or `doppler-md`) also gets one `document_doppler_outputs` row
+(migration 0190, `worker/src/db/doppler-outputs.ts`), so each Doppler document has an auditable map of what was kept and
+why anything is missing. The figure files, manifests and images level stay in the asset ledger above; the record covers
+the rest:
+
+| Field | What it holds |
+| --- | --- |
+| `extractor`, `served_by` | The extractor id and `vm` (the document's own job) or `first-pass` (served from the batch). |
+| `doppler_build`, `doppler_version`, `doppler_commit` | The provider's reported build (`SandboxedPdfResult.build`, validated), and the version and commit from Doppler's own facts run line. |
+| `markdown_key`, `markdown_sha256`, `markdown_bytes` | Doppler's Markdown as uploaded (`<root>/markdown/<document>.<extractor>.md`), hashed from the candidate's file in a stream. |
+| `page_facts_status` and `page_facts_*` | `stored` (key, SHA-256, bytes, pages known and failed, lines dropped, complete), `absent`, `off`, `refused` or `failed`. |
+| `layout_facts_key`, `layout_facts_pages` | The VM's layout facts (`<root>/page-layout-facts/<document>.json`), when stored. |
+| `engine_pages_emitted`, `engine_pages_failed`, `engine_ms`, `engine_peak_rss_kib` | Doppler's run line. Telemetry only, never billing. |
+| `ocr_pages` | How many pages the provider's OCR read (billing records them separately). |
+
+Rules, as for the asset ledger: the record is queued on the run's state and written after the checkpoint that commits the
+Markdown (a document whose Markdown slot did not commit gets none, and a failed attempt drops its record); the scope must
+be the document's own organization, project and current run, and an older run never replaces a newer run's record
+(`stale-write`); every key must equal the key derived from the run's artifact root (`key-mismatch`), and the database
+checks the shapes again; values are validated integers, hashes and closed vocabularies, never document text or
+PDF-supplied metadata. A refused or failed write is logged (`[doppler-outputs] document=... status=refused rule=...`) and
+never fails the document. `readDopplerOutputs` reads one organization's rows a page at a time and skips (and logs) a row
+that does not validate. The row cascades with its document, and a purged superseded version's row is deleted with its
+other derived rows.
+
+When a figure answer names no build, the level's `doppler_build` takes the result's build, else Doppler's commit from its
+page facts run line (`figureOutcomeWithBuild`).
 
 ## Storage billing
 

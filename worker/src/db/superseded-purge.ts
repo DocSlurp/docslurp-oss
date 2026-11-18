@@ -57,6 +57,8 @@ const DERIVED_TABLES = [
   // Summary tree registry (no text); the summaries table rows go through deleteDocumentSummaries.
   "document_summary_tree_nodes",
   "document_summary_trees",
+  // Doppler output record (keys and measured fields of the purged version's objects).
+  "document_doppler_outputs",
 ] as const;
 
 /**

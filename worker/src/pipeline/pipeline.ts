@@ -184,6 +184,8 @@ export class WorkflowState {
    * Markdown and figure slots: the store writes them after that checkpoint commits, never before.
    */
   readonly pendingAssetLedger = new Map<string, import("../db/document-asset-ledger.js").PendingAssetLedgerWrite>();
+  /** Doppler output records (db/doppler-outputs.ts) waiting, like the asset ledger, for the checkpoint that commits the Markdown. */
+  readonly pendingDopplerOutputs = new Map<string, import("../db/doppler-outputs.js").DopplerOutputsRecord>();
   vectorIndexes: VectorIndex[];
   contentHashes: Map<string, string> = new Map();
   /** The document whose extraction registered each content hash (checkDedup never serves a document its own attempt). */

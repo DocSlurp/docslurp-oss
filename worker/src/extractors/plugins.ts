@@ -173,6 +173,11 @@ export interface SandboxedPdfResult extends SandboxResult {
    */
   pageFacts?: unknown;
   /**
+   * The converter's build (a version or commit), for the document's output record and extraction level. Untrusted: kept only
+   * when it matches DOPPLER_BUILD, else dropped. Omit when unknown. A figure answer's own `build` takes precedence there.
+   */
+  build?: string;
+  /**
    * Required when the job asked for `figures`: `extracted` when the provider wrote the folder (the host still validates
    * all of it), `failed` when Doppler kept the Markdown but could not extract images (its exit status 5). `reason` is raw
    * diagnostic text for telemetry only; it never reaches a user or an API response.
@@ -779,6 +784,23 @@ const reportedPageCount = new WeakMap<SandboxedPdfJob, number>();
 const settledLayouts = new WeakMap<SandboxedPdfJob, SettledLayout | null>();
 interface SettledLayout { layout: Map<number, PageLayoutFacts>; fromFacts: number; unknown: number; filled: number; walker: number }
 const reportedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
+/** The provider's reported converter build per job (validated; sandboxedPdfBuild). */
+const reportedBuilds = new WeakMap<SandboxedPdfJob, string>();
+
+/** The converter build the provider reported for the job's accepted result, when it was a valid build string. */
+export function sandboxedPdfBuild(job: SandboxedPdfJob): string | undefined {
+  return reportedBuilds.get(job);
+}
+
+/**
+ * A figure answer with the converter build filled in when it named none, for the extraction level's `doppler_build`: the
+ * result's own build, else the commit Doppler wrote in its page facts run line (kept by the strict reader only as hex).
+ */
+export function figureOutcomeWithBuild<T extends { build?: string }>(job: SandboxedPdfJob | undefined, outcome: T): T {
+  if (outcome.build !== undefined || !job) return outcome;
+  const build = reportedBuilds.get(job) ?? sandboxedPdfPageFacts(job)?.run?.commit;
+  return build && DOPPLER_BUILD.test(build) ? { ...outcome, build } : outcome;
+}
 
 /**
  * What a figure request came back as. `extracted`: every image the run linked was written (Doppler exit 0). `partial`:
@@ -878,8 +900,17 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   reportedPageCount.delete(job);
   settledLayouts.delete(job);
   reportedFigures.delete(job);
+  reportedBuilds.delete(job);
   clearSandboxedPdfPageFacts(job);
-  const figures = figureOutcome(job, result.figures, pages);
+  const build = typeof result.build === "string" && DOPPLER_BUILD.test(result.build) ? result.build : undefined;
+  if (result.build !== undefined) {
+    if (!build) console.warn("[vm-pdf] build dropped: not a build string");
+    result = { ...result, build: undefined };
+  }
+  if (build) reportedBuilds.set(job, build);
+  let figures = figureOutcome(job, result.figures, pages);
+  // The figure answer's own build wins; otherwise the result's (the same converter ran both).
+  if (figures && figures.build === undefined && build) figures = { ...figures, build };
   if (figures) reportedFigures.set(job, figures);
   if (result.figures !== undefined) result = { ...result, figures: undefined };
   const pageFacts = result.pageFacts;

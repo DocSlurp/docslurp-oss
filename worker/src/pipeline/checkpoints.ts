@@ -242,6 +242,7 @@ export function needsDocumentProgressCheckpoint(state: WorkflowState, now = Date
     || state.vectorIndexes.length > 0
     || state.pendingParserEvaluations.length > 0
     || state.pendingAssetLedger.size > 0
+    || (state.pendingDopplerOutputs?.size ?? 0) > 0
     || now - state.lastProgressFlushAt >= DOCUMENT_PROGRESS_CHECKPOINT_MS;
 }
 
@@ -324,11 +325,15 @@ export async function runDocumentStage(
   let lastFailure: DocumentStageFailure | undefined;
   // An attempt that does not complete leaves no asset ledger write behind (it describes output that was not kept).
   const ledgerBefore = state.pendingAssetLedger.get(document.id);
+  const outputsBefore = state.pendingDopplerOutputs?.get(document.id);
   const dropAttemptLedger = () => {
     const attempted = state.pendingAssetLedger.get(document.id);
     if (attempted && attempted !== ledgerBefore) void disposePendingAssetLedger(attempted);
     if (ledgerBefore) state.pendingAssetLedger.set(document.id, ledgerBefore);
     else state.pendingAssetLedger.delete(document.id);
+    // The same for the Doppler output record: it describes output this attempt did not keep.
+    if (outputsBefore) state.pendingDopplerOutputs?.set(document.id, outputsBefore);
+    else state.pendingDopplerOutputs?.delete(document.id);
   };
 
   for (const attempt of attemptsToTry) {

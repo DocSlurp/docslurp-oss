@@ -21,6 +21,14 @@ type Job = object;
 const accepted = new WeakMap<Job, { facts: DopplerPageFactsDocument; layout: Map<number, PageLayoutFacts> | null; mathRead: boolean }>();
 
 /**
+ * What became of a job's page facts, for the document's output record (db/doppler-outputs.ts): `accepted`, `absent` (the
+ * provider returned none), `off` (DOCSLURP_DOPPLER_PAGE_FACTS=off dropped them unread) or `refused` (no host page count,
+ * or the strict reader refused them). A fixed vocabulary: never the reader's detail.
+ */
+export type SandboxedPdfPageFactsOutcome = "accepted" | "absent" | "off" | "refused";
+const outcomes = new WeakMap<Job, SandboxedPdfPageFactsOutcome>();
+
+/**
  * Parse a run's raw `pageFacts` for `job` (replacing anything an earlier result left), bounded by `pages`, the host's own
  * page count. Never throws on provider input: unusable facts are dropped with a warning.
  *
@@ -30,9 +38,14 @@ const accepted = new WeakMap<Job, { facts: DopplerPageFactsDocument; layout: Map
  */
 export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: number, env: NodeJS.ProcessEnv = process.env, options: { glyphs?: boolean } = {}): void {
   accepted.delete(job);
+  outcomes.set(job, "absent");
   if (raw === undefined) return;
   const mode = dopplerPageFactsMode(env);
-  if (mode === "off") return;
+  if (mode === "off") {
+    outcomes.set(job, "off");
+    return;
+  }
+  outcomes.set(job, "refused");
   // Without a page count the host measured, facts have nothing to be bounded by: unknown.
   if (!Number.isSafeInteger(pages) || pages < 1) {
     console.warn("[vm-pdf] page facts dropped: no host page count");
@@ -57,11 +70,18 @@ export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: numbe
   const mathRead = options.glyphs === true;
   const layout = mode === "use" ? pageLayoutFactsFromDopplerFacts(facts, { mathRead }) : null;
   accepted.set(job, { facts, layout: layout && layout.size > 0 ? layout : null, mathRead });
+  outcomes.set(job, "accepted");
+}
+
+/** What became of the job's page facts (absent when the job never returned a result). */
+export function sandboxedPdfPageFactsOutcome(job: Job): SandboxedPdfPageFactsOutcome {
+  return outcomes.get(job) ?? "absent";
 }
 
 /** Forget what an earlier result of `job` left (before anything about a new result can throw). */
 export function clearSandboxedPdfPageFacts(job: Job): void {
   accepted.delete(job);
+  outcomes.delete(job);
 }
 
 /** The validated page facts of a finished job, or undefined when it returned none usable (or they are off). */

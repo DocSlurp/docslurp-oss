@@ -6,9 +6,9 @@ import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import { DOPPLER_PAGE_FACTS_SLOT, DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFolderKey, dopplerSourcePointer, DOPPLER_MARKDOWN_SLOT, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
-import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
+import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForMarkdownCommitted, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
-  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfGridSettlement, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfLayoutWalkerUnknown, sandboxedPdfOcrPages,
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, figureOutcomeWithBuild, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfBuild, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfGridSettlement, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfLayoutWalkerUnknown, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -125,7 +125,8 @@ import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
 import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
-import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { sandboxedPdfPageFacts, sandboxedPdfPageFactsOutcome } from "../extractors/sandboxed-pdf-page-facts.js";
+import { dopplerOutputsRecordFrom, type DopplerPageFactsStatus } from "../db/doppler-outputs.js";
 import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
 import { documentCostStats } from "../lib/document-cost-stats.js";
 import { DOPPLER_FACTS_EVIDENCE_SOURCE, dopplerFactsCoverEvidence, dopplerFactsTextDisagreement, pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "../lib/doppler-page-facts-evidence.js";
@@ -1052,9 +1053,17 @@ export class ExtractMarkdownStage implements Stage {
                   // from what the strict reader kept: never the guest's bytes, so no producer, creator or lang. Recorded as a
                   // document artifact slot, so the file proxy's artifact and PII checks apply. Only in store and use modes (off
                   // never parses facts, so none arrive here).
-                  if (isPdf && winningCandidate.pageFacts) {
-                    const pageFactsUri = await this.storeDopplerPageFactsFile(document, state.run.id, winningCandidate.pageFacts);
-                    if (pageFactsUri) state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_SLOT, pageFactsUri);
+                  const storedPageFacts = isPdf && winningCandidate.pageFacts
+                    ? await this.storeDopplerPageFactsFile(document, state.run.id, winningCandidate.pageFacts)
+                    : null;
+                  if (storedPageFacts) state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_SLOT, storedPageFacts.uri);
+                  // The document's Doppler output record (db/doppler-outputs.ts): where each output of this run is stored and
+                  // the key fields Doppler measured, written after this stage's checkpoint commits the Markdown.
+                  if (DOPPLER_PDF_EXTRACTORS.has(winningCandidate.label)) {
+                    const record = await this.dopplerOutputsRecord({
+                      document, state, candidate: winningCandidate, storedPageFacts, pageLayoutFactsUri,
+                    });
+                    if (record) state.pendingDopplerOutputs.set(document.id, record);
                   }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
@@ -1798,6 +1807,55 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /**
+   * The winning Doppler candidate's output record: its Markdown object (hashed from the candidate's own file, streamed, so
+   * memory stays flat whatever the page count), the page facts outcome and object, the layout facts object, Doppler's
+   * build and its run line. Null (logged) when the Markdown cannot be hashed: the record never guesses a hash.
+   */
+  private async dopplerOutputsRecord(args: {
+    document: import("../models.js").Document;
+    state: import("../pipeline/pipeline.js").WorkflowState;
+    candidate: ExtractedCandidate;
+    storedPageFacts: { key: string; sha256: string; bytes: number } | null;
+    pageLayoutFactsUri: string | null;
+  }): Promise<import("../db/doppler-outputs.js").DopplerOutputsRecord | null> {
+    const { document, state, candidate } = args;
+    let markdown: { key: string; sha256: string; bytes: number };
+    try {
+      const hash = createHash("sha256");
+      let bytes = 0;
+      for await (const chunk of createReadStream(candidate.tempTextPath, { highWaterMark: 1024 * 1024 })) {
+        hash.update(chunk as Buffer);
+        bytes += (chunk as Buffer).byteLength;
+      }
+      markdown = { key: candidate.textKey, sha256: hash.digest("hex"), bytes };
+    } catch (error) {
+      rethrowIfTeardown(error);
+      console.warn(`[doppler-outputs] document=${document.id} status=skipped reason=markdown-unreadable`);
+      return null;
+    }
+    const job = candidate.plan.sandboxedPdf;
+    const facts = candidate.pageFacts;
+    const outcome = job ? sandboxedPdfPageFactsOutcome(job) : "absent";
+    const status: DopplerPageFactsStatus = args.storedPageFacts ? "stored"
+      : facts ? "failed"
+      : outcome === "accepted" ? "absent" : outcome;
+    const layoutKey = args.pageLayoutFactsUri ? keyFromStorageUri(args.pageLayoutFactsUri, this.storage.bucket) : null;
+    return dopplerOutputsRecordFrom({
+      extractor: candidate.label,
+      servedBy: firstPassServesDocument(state.run.id, document.id) ? "first-pass" : "vm",
+      reportedBuild: job ? sandboxedPdfBuild(job) : undefined,
+      markdown,
+      pageFacts: {
+        status,
+        ...(args.storedPageFacts ? { key: args.storedPageFacts.key, sha256: args.storedPageFacts.sha256, bytes: args.storedPageFacts.bytes } : {}),
+        ...(facts ? { facts } : {}),
+      },
+      layoutFacts: layoutKey && candidate.layoutFacts ? { key: layoutKey, pages: candidate.layoutFacts.size } : null,
+      ocrPages: candidate.ocrPages?.length ?? 0,
+    });
+  }
+
+  /**
    * Write the validated page facts as `<artifact root>/doppler/<document>/images/page-facts.jsonl` (dopplerFolderKey, the
    * document's own tenant-scoped root). Best effort: a failed write leaves no slot, and routing keeps its database rows.
    */
@@ -1805,13 +1863,13 @@ export class ExtractMarkdownStage implements Stage {
     document: import("../models.js").Document,
     runId: string,
     facts: import("../lib/doppler-page-facts.js").DopplerPageFactsDocument,
-  ): Promise<string | null> {
+  ): Promise<{ uri: string; key: string; sha256: string; bytes: number } | null> {
     const key = dopplerFolderKey(document, runId, "pageFacts");
     try {
       const body = Buffer.from(dopplerPageFactsJsonl(facts), "utf8");
       await this.storage.putBytes(key, body, "text/plain; charset=utf-8");
       console.log(`[extract-debug] document=${document.id} dopplerPageFacts pages=${facts.summary.pagesKnown} failed=${facts.summary.pagesFailed} dropped=${facts.summary.linesDropped} complete=${facts.summary.complete} bytes=${body.byteLength}`);
-      return this.storage.uri(key);
+      return { uri: this.storage.uri(key), key, sha256: createHash("sha256").update(body).digest("hex"), bytes: body.byteLength };
     } catch (error) {
       rethrowIfTeardown(error);
       console.warn(`[extract-markdown] page facts not stored document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -3220,13 +3278,20 @@ export class ExtractMarkdownStage implements Stage {
       this.firstPassLedger.delete(key);
       throw error;
     }
-    if (this.firstPassLedger.delete(key)) return result;
+    // The first pass owns this document's figures (its own stage writes the level, maybe before this checkpoint commits the
+    // Markdown): record that the Markdown committed, or the level of this run would keep markdown_complete = false and the
+    // resume runner would never claim it.
+    const markMarkdown = () => {
+      if (!state.pendingAssetLedger.has(document.id)) queueAssetLedger(state, document.id, ledgerWriteForMarkdownCommitted());
+      return result;
+    };
+    if (this.firstPassLedger.delete(key)) return markMarkdown();
     if (state.pendingAssetLedger.has(document.id)) return result;
     // Figures for this run: the deploy flag, the provider, and the project not opted out (`figures: false`). A project
     // that opted out gets `disabled` for every document, first-pass ones included (the batch asked for no figures), so
     // an earlier resumable level leaves the resume queue and no new figure storage accrues.
     const figuresOn = figuresEnabled(state.run.pipeline as { figures?: boolean | null }, process.env) && !!sandboxedPdfProvider()?.figures;
-    if (figuresOn && firstPassServesDocument(state.run.id, document.id)) return result;
+    if (figuresOn && firstPassServesDocument(state.run.id, document.id)) return markMarkdown();
     queueAssetLedger(state, document.id, ledgerWriteForNoFigures(figuresOn ? "none" : "disabled"));
     return result;
   }
@@ -3259,7 +3324,7 @@ export class ExtractMarkdownStage implements Stage {
         result.figures.slots.push({ slot: DOPPLER_MARKDOWN_SLOT, uri: this.storage.uri(key) });
       }
     }
-    const outcome = args.candidate.figures!.outcome;
+    const outcome = figureOutcomeWithBuild(args.candidate.plan.sandboxedPdf, args.candidate.figures!.outcome);
     if (!args.state) return result.figures;
     // The asset ledger: every image Doppler reported and the document's extraction level, queued for this stage's
     // checkpoint (written after it commits the Markdown and the figure slots).
