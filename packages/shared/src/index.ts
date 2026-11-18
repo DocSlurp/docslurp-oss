@@ -68,6 +68,8 @@ export * from "./upload-quote.js";
 export * from "./config-change.js";
 export * from "./privacy.js";
 export * from "./private-endpoints.js";
+export * from "./private-model-mode.js";
+export * from "./private-model-pipeline.js";
 export * from "./model-uri.js";
 export * from "./model-provenance.js";
 export * from "./live-model-prices.js";

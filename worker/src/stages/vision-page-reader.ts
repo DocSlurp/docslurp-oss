@@ -21,7 +21,7 @@
  *   goes to the run's hosted vision route as it would without the reader. The hosted route is the run's own configured
  *   model, never an automatic fallback the system picks.
  */
-import { PRIVATE_MODEL_PROVIDER, resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
+import { PRIVATE_MODEL_PROVIDER, privacyModeAllowsHosted, resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
 
 import { pageImageReaderProvider, type PageImageReaderProvider } from "../extractors/plugins.js";
 import { visionPageReaderMode } from "../ocr/page-reader-mode.js";
@@ -77,7 +77,7 @@ export function visionPageReaderDecision(
   if (!provider) return { refused: "no-provider" };
   // Only a project that allows hosted vision may have its pages read by the reader: local-only and strict-privacy keep
   // the route their own policy admits.
-  if ((state.run.pipeline.privacyMode ?? "standard") !== "standard") return { refused: "privacy-mode" };
+  if (!privacyModeAllowsHosted(state.run.pipeline.privacyMode ?? "standard")) return { refused: "privacy-mode" };
   // A cost-capped run admits one hosted page at a time; a reader job of many pages could pass the cap by its batch.
   if ((state.run.pipeline.maxCostCents ?? 0) > 0) return { refused: "cost-capped" };
   if (typeof state.run.orgId !== "string" || !state.run.orgId || !state.run.id) return { refused: "no-org-scope" };

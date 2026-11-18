@@ -141,12 +141,15 @@ describe("API private endpoint text", () => {
     expect(auditInserts()).toHaveLength(0);
   });
 
-  it("selects a private text model only for non-standard projects", () => {
-    expect(privateTextModelForProject({ textGeneration: { model: TEXT } }, "standard")).toBeUndefined();
-    expect(privateTextModelForProject({ textGeneration: { model: TEXT } }, "strict-privacy")).toBe(TEXT);
-    expect(privateTextModelForProject({ textGeneration: { model: "qwen/qwen3.5-flash-02-23" } }, "strict-privacy")).toBeUndefined();
+  it("selects the operator's mapped text model only where hosted models are not allowed", () => {
+    // Nothing mapped: unavailable, whatever a project row once stored (privateTextModelForProject takes no row).
+    expect(privateTextModelForProject("strict-privacy")).toBeUndefined();
     vi.stubEnv("DOCSLURP_PRIVATE_TEXT_MODEL", TEXT);
-    expect(privateTextModelForProject({}, "local-only")).toBe(TEXT);
+    expect(privateTextModelForProject("standard")).toBeUndefined();
+    expect(privateTextModelForProject("local-only")).toBe(TEXT);
+    expect(privateTextModelForProject("strict-privacy")).toBe(TEXT);
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    expect(privateTextModelForProject("standard")).toBe(TEXT);
   });
 });
 
