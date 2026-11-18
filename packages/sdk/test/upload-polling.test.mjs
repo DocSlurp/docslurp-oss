@@ -382,7 +382,8 @@ for (const descriptorCase of ["unknown", "duplicate"]) {
       throw new Error(`Unexpected request ${href}`);
     } });
     await assert.rejects(client.upload(new Blob(["hello"]), { filename: "doc.txt" }), /returned a file this upload did not send/);
-    assert.deepEqual(puts, descriptorCase === "unknown" ? [] : ["https://storage.invalid/intended"]);
+    // Every descriptor is matched before any bytes move, so neither case sends anything.
+    assert.deepEqual(puts, []);
     assert.equal(aborts, 1);
   });
 }

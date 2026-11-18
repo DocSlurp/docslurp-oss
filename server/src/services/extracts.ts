@@ -41,6 +41,7 @@ import {
   type ExtractStatus,
 } from "@docslurp/shared";
 
+import { env } from "../config.js";
 import { sql } from "../db.js";
 import { recordCostEvent } from "../lib/ai-usage.js";
 import { apiKeyCanUseProject, type RequestActor } from "../lib/request-actor.js";
@@ -682,8 +683,8 @@ interface DeletionClaim {
   stored_bytes: string | number | null;
 }
 
-/** Upper bound on a presigned direct-upload PUT (direct-upload-session.ts SIGNED_UPLOAD_TTL_SECONDS) plus a margin. */
-const LATE_WRITE_GRACE_MINUTES = 30;
+/** Longer than a presigned direct-upload URL stays valid (UPLOAD_URL_TTL_SECONDS), plus a margin. */
+const LATE_WRITE_GRACE_MINUTES = Math.ceil(env.uploadTransfer.urlTtlSeconds / 60) + 15;
 /** A deleted extract's prefix is listed once more this long after deletion, for writes that landed after the purge. */
 const RELIST_AFTER_HOURS = 6;
 /** Failed passes back off 2^attempts minutes, up to this. */

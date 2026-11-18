@@ -19,6 +19,7 @@ import {
   signMultipartUploadPart,
   signSingleUploadPut,
 } from "../lib/storage.js";
+import { MAX_SINGLE_PUT_BYTES, partSizeAt, planDirectUpload } from "../lib/upload-transfer-policy.js";
 import {
   admitIntakeFile,
   allRejectedError,
@@ -31,9 +32,12 @@ import {
   type ProjectIntakeItem,
 } from "./project-intake.js";
 
-const SIGNED_UPLOAD_TTL_SECONDS = 900;
-const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
-const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
+/** Lifetime of one signed PUT or part URL, never longer than its session (UPLOAD_URL_TTL_SECONDS, default 3 h). */
+export const SIGNED_UPLOAD_TTL_SECONDS = env.uploadTransfer.urlTtlSeconds;
+/** Part size recorded before part sizes were stored per file. Every current row stores its own. */
+const LEGACY_PART_SIZE_BYTES = 8 * 1024 * 1024;
+/** Storage calls in flight while one session is created (one multipart upload per large file). */
+const SESSION_CREATE_CONCURRENCY = 8;
 
 export interface DirectUploadSessionFileInput {
   /** The client's own id for this file; echoed on the session's file and on a rejection so clients never match by filename. */
@@ -200,7 +204,7 @@ async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: n
     throw error;
   }
   return parts.filter((part) => part.partNumber <= partCount
-    && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
+    && part.sizeBytes === partSizeAt(part.partNumber, file.size_bytes, partSize));
 }
 
 export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow, ttl = SIGNED_UPLOAD_TTL_SECONDS, expiresAt?: Date | string) {
@@ -223,12 +227,13 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
       putUrl: await signSingleUploadPut({
         key: file.source_key,
         contentType: file.mime_type,
+        contentLength: file.size_bytes,
         expiresInSeconds: remainingTtl(),
       }),
     };
   }
 
-  const partSize = file.part_size ?? MULTIPART_PART_SIZE_BYTES;
+  const partSize = file.part_size ?? LEGACY_PART_SIZE_BYTES;
   const partCount = file.unknown_size ? 0 : toDirectUploadPartCount(file.size_bytes, partSize);
   if (!file.upload_id) {
     throw new Error(`Multipart session missing upload id for ${file.id}`);
@@ -237,30 +242,22 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   // instead of re-sending the whole file. A part counts only at its exact expected size.
   const stored = file.unknown_size ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
   const completed = new Set(stored.map((part) => part.partNumber));
-  const pendingParts: Array<{
-    partNumber: number;
-    sizeBytes: number;
-    url: string;
-  }> = [];
-
-  for (let partNumber = 1; partNumber <= partCount; partNumber += 1) {
-    if (completed.has(partNumber)) {
-      continue;
-    }
-    const offset = (partNumber - 1) * partSize;
-    const remaining = Math.max(0, file.size_bytes - offset);
-    const sizeBytes = Math.min(partSize, remaining);
-    pendingParts.push({
-      partNumber,
-      sizeBytes,
-      url: await signMultipartUploadPart({
-        key: file.source_key,
-        uploadId: file.upload_id,
-        partNumber,
-        expiresInSeconds: remainingTtl(),
+  const uploadId = file.upload_id;
+  const expiresInSeconds = remainingTtl();
+  // Signing is local (no storage round trip), so every missing part is signed at once. Each URL is bound to its part's
+  // exact size.
+  const pendingParts: Array<{ partNumber: number; sizeBytes: number; url: string }> = await Promise.all(
+    Array.from({ length: partCount }, (_, index) => index + 1)
+      .filter((partNumber) => !completed.has(partNumber))
+      .map(async (partNumber) => {
+        const sizeBytes = partSizeAt(partNumber, file.size_bytes, partSize);
+        return {
+          partNumber,
+          sizeBytes,
+          url: await signMultipartUploadPart({ key: file.source_key, uploadId, partNumber, contentLength: sizeBytes, expiresInSeconds }),
+        };
       }),
-    });
-  }
+  );
 
   return {
     ...fileRef(file),
@@ -277,8 +274,22 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     pendingParts,
     completedParts: stored,
     transferState: file.unknown_size || stored.length ? "incomplete" as const : "missing" as const,
-    verifiedBytes: file.unknown_size ? null : stored.reduce((sum, part) => sum + Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize), 0),
+    verifiedBytes: file.unknown_size ? null : stored.reduce((sum, part) => sum + partSizeAt(part.partNumber, file.size_bytes, partSize), 0),
   };
+}
+
+/** `run` over `items` with at most `limit` in flight; results keep the input order. The first failure rejects. */
+async function mapLimited<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await run(items[index]!);
+    }
+  });
+  await Promise.all(lanes);
+  return results;
 }
 
 export async function createDirectUploadSession(input: CreateDirectUploadSessionInput) {
@@ -289,7 +300,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
   const files: Array<DirectUploadSessionFileInput & { index: number; unknownSize: boolean; sizeBytes: number; filename: string; mimeType: string }> = [];
   input.files.forEach((file, index) => {
     try {
-      if (file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > 5 * 1024 ** 3)) {
+      if (file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > MAX_SINGLE_PUT_BYTES)) {
         throw new ProjectIntakeError("Single-part uploads cannot exceed 5 GiB", 413);
       }
       files.push({
@@ -350,56 +361,33 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
     )
   `;
 
-  for (const file of files) {
+  // Each large file needs its own multipart upload (a storage round trip): open them a few at a time, then record every
+  // file in one insert.
+  const prepared = await mapLimited(files, SESSION_CREATE_CONCURRENCY, async (file) => {
     const sourceKey = rawSourceKey(input.userId, file.filename, input.extract);
-    const isMultipart = file.unknownSize || (!file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES);
-    const partSize = isMultipart ? MULTIPART_PART_SIZE_BYTES : null;
-    const uploadId = isMultipart
-      ? await createMultipartUpload(sourceKey, file.mimeType)
-      : null;
-    const fileId = randomUUID();
-
-    await sql`
-      insert into upload_session_files (
-        id,
-        session_id,
-        filename,
-        mime_type,
-        size_bytes,
-        source_key,
-        upload_mode,
-        upload_id,
-        part_size,
-        status,
-        sha256,
-        canonical_id,
-        source_path,
-        unknown_size,
-        request_index,
-        client_id,
-        content_identity
-      )
-      values (
-        ${fileId},
-        ${sessionId},
-        ${file.filename},
-        ${file.mimeType},
-        ${file.sizeBytes},
-        ${sourceKey},
-        ${isMultipart ? "multipart" : "single"},
-        ${uploadId},
-        ${partSize},
-        'pending',
-        ${file.sha256 ?? null},
-        ${file.canonicalId ?? null},
-        ${normalizeUploadPath(file.path)},
-        ${file.unknownSize},
-        ${file.index},
-        ${file.clientId ?? null},
-        ${file.identity ? sql.json(file.identity) : null}
-      )
-    `;
-  }
+    const plan = planDirectUpload({ sizeBytes: file.unknownSize ? undefined : file.sizeBytes, singlePart: file.singlePart }, env.uploadTransfer);
+    const uploadId = plan.mode === "multipart" ? await createMultipartUpload(sourceKey, file.mimeType) : null;
+    return {
+      id: randomUUID(),
+      session_id: sessionId,
+      filename: file.filename,
+      mime_type: file.mimeType,
+      size_bytes: file.sizeBytes,
+      source_key: sourceKey,
+      upload_mode: plan.mode,
+      upload_id: uploadId,
+      part_size: plan.partSize,
+      status: "pending",
+      sha256: file.sha256 ?? null,
+      canonical_id: file.canonicalId ?? null,
+      source_path: normalizeUploadPath(file.path),
+      unknown_size: file.unknownSize,
+      request_index: file.index,
+      client_id: file.clientId ?? null,
+      content_identity: file.identity ? sql.json(file.identity) : null,
+    };
+  });
+  await sql`insert into upload_session_files ${sql(prepared)}`;
 
   await sql`update upload_sessions set status = 'pending', next_reconcile_at = now() where id = ${sessionId}`;
   const loaded = await loadDirectUploadSession(sessionId, input.userId);
@@ -510,7 +498,7 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
     if (!isStorageNotFound(error) && !(error instanceof ProjectIntakeError && error.message.startsWith("No object found"))) throw error;
     if (file.upload_mode !== "multipart" || !file.upload_id) return false;
     const parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id });
-    if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return false;
+    if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? LEGACY_PART_SIZE_BYTES)) return false;
     try { await completeMultipartUpload({ key: file.source_key, uploadId: file.upload_id, parts }); }
     catch (error) { throw multipartCompletionError(error, file.filename); }
     verified = await verifyCompletedDirectUpload(file);
@@ -613,9 +601,13 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
   }
   try { await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id }); }
   catch { throw new ProjectIntakeError("Upload storage evidence is unavailable", 503); }
+  const partSize = file.part_size ?? LEGACY_PART_SIZE_BYTES;
   return { parts: await Promise.all(partNumbers.map(async partNumber => {
-    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
-    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(loaded.session) }) };
+    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / partSize)) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, partSize))) throw new ProjectIntakeError("Invalid part number", 400);
+    // A known-size file's part is bound to its exact size. A stream's parts are not known until it ends; its layout is
+    // checked against the final size at completion.
+    const contentLength = file.unknown_size ? undefined : partSizeAt(partNumber, file.size_bytes, partSize);
+    return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, contentLength, expiresInSeconds: assertUploadSessionActive(loaded.session) }) };
   })) };
   });
 }
@@ -805,7 +797,7 @@ export async function queueAbandonedDirectUploadCleanup(sessionId: string): Prom
   }
   await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason, not_before)
     select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
-      jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'
+      jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + make_interval(secs => ${SIGNED_UPLOAD_TTL_SECONDS + 60})
     from upload_sessions s join upload_session_files f on f.session_id = s.id
     where s.id = ${sessionId} and s.status in ('aborted', 'failed')
     group by s.id

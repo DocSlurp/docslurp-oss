@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { resolveLanceDbConfig, resolveObjectStorageConfig } from "@docslurp/shared";
 
 import { storageAccessKeyIdProblem } from "./lib/storage-credentials.js";
+import { readUploadTransferPolicy } from "./lib/upload-transfer-policy.js";
 
 const defaultDatabaseUrl = "postgres://docslurp:docslurp@localhost:5432/docslurp";
 
@@ -206,6 +207,7 @@ function validateProductionSecrets(): void {
 validateProductionSecrets();
 
 const storage = resolveObjectStorageConfig();
+const maxUploadBytes = readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024);
 
 export const env = {
   chatMcpEnabled: readBoolean(process.env.DOCSLURP_CHAT_MCP_ENABLED, true),
@@ -236,7 +238,9 @@ export const env = {
   s3Bucket: storage.bucket,
   /** LanceDB root and storage options from LANCEDB_URI. */
   lancedb: resolveLanceDbConfig(process.env, storage),
-  maxUploadBytes: readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
+  maxUploadBytes,
+  /** Direct upload part sizes and signed-URL lifetime (UPLOAD_PART_SIZE_MB, UPLOAD_STREAM_PART_SIZE_MB, UPLOAD_URL_TTL_SECONDS). */
+  uploadTransfer: readUploadTransferPolicy(process.env, maxUploadBytes),
   /**
    * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct

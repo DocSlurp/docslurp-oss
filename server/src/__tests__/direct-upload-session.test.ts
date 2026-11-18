@@ -12,6 +12,8 @@ const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
 const createMultipartUpload = vi.hoisted(() => vi.fn());
 const copyUploadedObject = vi.hoisted(() => vi.fn(async () => ({ etag: "sealed-etag" })));
+/** Rows passed to the `sql(rows)` insert helper (a plain array, unlike a tagged template's strings). */
+const insertedRows = () => sqlMock.mock.calls.filter(([first]) => Array.isArray(first) && !("raw" in first)).flatMap(([rows]) => rows as Array<Record<string, unknown>>);
 vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({ connection: lockMock, release: lockMock.release }) }));
 vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signMultipartUploadPart, signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
@@ -110,12 +112,49 @@ describe("Direct Upload Session Module", () => {
     expect(result.files).toHaveLength(10);
     expect(result.files.every(file => file.mode === "single" && "putUrl" in file)).toBe(true);
     expect(signSingleUploadPut).toHaveBeenCalledTimes(10);
-    expect(result.files[0]).toMatchObject({ method: "PUT", headers: { "Content-Type": "application/pdf" }, expiresInSeconds: 900 });
-    expect(signSingleUploadPut).toHaveBeenCalledWith(expect.objectContaining({ expiresInSeconds: 900 }));
+    // The session ends in an hour, so its URLs do too (the configured lifetime is 3 hours).
+    const ttl = (result.files[0] as { expiresInSeconds: number }).expiresInSeconds;
+    expect(ttl).toBeGreaterThan(3500);
+    expect(ttl).toBeLessThanOrEqual(3600);
+    expect(result.files[0]).toMatchObject({ method: "PUT", headers: { "Content-Type": "application/pdf" } });
+    // Each PUT is bound to the declared size: storage refuses any other body length.
+    expect(signSingleUploadPut).toHaveBeenCalledWith(expect.objectContaining({ contentLength: 40 * 1024 * 1024, expiresInSeconds: ttl }));
     expect(createMultipartUpload).not.toHaveBeenCalled();
-    const insertedFiles = sqlMock.mock.calls.filter(([strings]) => strings.join("?").includes("insert into upload_session_files"));
-    expect(insertedFiles).toHaveLength(10);
-    expect(insertedFiles.every(call => call.includes("single"))).toBe(true);
+    // One insert for the whole batch.
+    expect(sqlMock.mock.calls.filter(([strings]) => "raw" in strings && strings.join("?").includes("insert into upload_session_files"))).toHaveLength(1);
+    expect(insertedRows()).toHaveLength(10);
+    expect(insertedRows().every(row => row.upload_mode === "single")).toBe(true);
+  });
+
+  it("opens multipart only above one part, with 64 MiB parts, and signs every part at its exact size", async () => {
+    const fixture = directUploadSessionFixture();
+    const MIB = 1024 * 1024;
+    sqlMock.mockReset();
+    const stored: Array<Record<string, unknown>> = [];
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray | Array<Record<string, unknown>>) => {
+      if (!("raw" in strings)) { stored.push(...strings); return []; }
+      const query = strings.join("?");
+      if (query.includes("from upload_sessions")) return [fixture.session];
+      if (query.includes("from upload_session_files")) return stored;
+      return [];
+    });
+    createMultipartUpload.mockReset().mockResolvedValue("mpu-1");
+    listMultipartUploadParts.mockReset().mockResolvedValue([]);
+    signMultipartUploadPart.mockClear();
+    signSingleUploadPut.mockClear();
+    const big = 130 * MIB;
+    const result = await createDirectUploadSession({ userId: "user-1", orgId: "org-1", pipeline: {}, files: [
+      { filename: "small.pdf", mimeType: "application/pdf", sizeBytes: 60 * MIB },
+      { filename: "big.pdf", mimeType: "application/pdf", sizeBytes: big },
+    ] });
+    expect(stored.map((row) => [row.upload_mode, row.part_size])).toEqual([["single", null], ["multipart", 64 * MIB]]);
+    expect(createMultipartUpload).toHaveBeenCalledTimes(1);
+    const multipart = result.files.find((file) => file.mode === "multipart") as { partSize: number; pendingParts: Array<{ partNumber: number; sizeBytes: number }> };
+    expect(multipart.partSize).toBe(64 * MIB);
+    expect(multipart.pendingParts.map((part) => [part.partNumber, part.sizeBytes])).toEqual([[1, 64 * MIB], [2, 64 * MIB], [3, 2 * MIB]]);
+    expect(signMultipartUploadPart.mock.calls.map(([args]) => [(args as { partNumber: number }).partNumber, (args as { contentLength: number }).contentLength]))
+      .toEqual([[1, 64 * MIB], [2, 64 * MIB], [3, 2 * MIB]]);
+    expect(signSingleUploadPut).toHaveBeenCalledWith(expect.objectContaining({ contentLength: 60 * MIB }));
   });
 
   it("rejects oversized single-part uploads before creating a session", async () => {
@@ -127,9 +166,9 @@ describe("Direct Upload Session Module", () => {
   it("accepts the good files of a batch, rejects the unsupported one by request index, and echoes client ids", async () => {
     sqlMock.mockReset();
     const stored: Array<Record<string, unknown>> = [];
-    sqlMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray | Array<Record<string, unknown>>) => {
+      if (!("raw" in strings)) { for (const row of strings) stored.push({ filename: row.filename, index: row.request_index, clientId: row.client_id }); return []; }
       const query = strings.join("?");
-      if (query.includes("insert into upload_session_files")) stored.push({ filename: values[2], index: values[13], clientId: values[14] });
       if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", expires_at: new Date(Date.now() + 3600_000), status: "pending" }];
       if (query.includes("from upload_session_files")) return stored.map((file, i) => ({ id: `file-${i}`, session_id: "s", filename: file.filename, mime_type: "application/pdf", size_bytes: 10, source_key: `k${i}`, upload_mode: "single", status: "pending", request_index: file.index, client_id: file.clientId }));
       return [];
@@ -314,7 +353,9 @@ describe("Direct Upload Session Module", () => {
     abortMultipartUpload.mockRejectedValueOnce(Object.assign(new Error("gone"),{name:"NoSuchUpload"}));
     await expect(queueAbandonedDirectUploadCleanup("session-1")).resolves.toBeUndefined();
     expect(abortMultipartUpload).toHaveBeenCalledWith({key:"raw/a",uploadId:"mpu-a"});
-    expect(sqlMock.mock.calls.some(([strings]) => strings.join("").includes("interval '16 minutes'"))).toBe(true);
+    // Cleanup waits out the longest a signed URL can still write: its lifetime plus a minute.
+    const queued = sqlMock.mock.calls.find(([strings]) => "raw" in strings && strings.join("").includes("abandoned_upload"));
+    expect(queued?.slice(1)).toContain(3 * 60 * 60 + 60);
   });
 
   it("computes multipart part counts at the protocol seam", () => {
@@ -379,7 +420,8 @@ describe("Direct Upload Session Module", () => {
 describe("authoritative recovery evidence", () => {
   it("refuses expired sessions before the sweeper and caps live URL lifetime", () => {
     const fixture = directUploadSessionFixture();
-    expect(assertUploadSessionActive(fixture.session)).toBe(900);
+    expect(assertUploadSessionActive({ ...fixture.session, expires_at: new Date(Date.now() + 24 * 3600_000) })).toBe(3 * 60 * 60);
+    expect(assertUploadSessionActive(fixture.session)).toBeLessThanOrEqual(3600);
     expect(assertUploadSessionActive({ ...fixture.session, expires_at: new Date(Date.now() + 60_000) })).toBeLessThanOrEqual(60);
     expect(() => assertUploadSessionActive({ ...fixture.session, expires_at: new Date(0) })).toThrow("expired");
     expect(() => assertUploadSessionActive({ ...fixture.session, expires_at: undefined })).toThrow("expired");
