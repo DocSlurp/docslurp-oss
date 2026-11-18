@@ -122,8 +122,10 @@ test("direct uploads send files in parallel but complete them one at a time, wai
     assert.equal(live.maxComplete, 1, "files/complete never overlaps within one upload");
     assert.equal(completed.size, files.length);
     assert.equal(result.requests.filter((request) => request.url.endsWith("/abort")).length, 0);
-    // A body-less POST must carry Content-Length: 0 (the production API refuses one without it).
-    assert.equal(result.requests.find((request) => request.url.endsWith("/confirm")).headers["content-length"], "0");
+    // A body-less POST goes out as JSON `{}` (the production API refuses an upload-path POST with no content type).
+    const confirm = result.requests.find((request) => request.url.endsWith("/confirm"));
+    assert.match(confirm.headers["content-type"], /application\/json/);
+    assert.equal(confirm.body.toString(), "{}");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

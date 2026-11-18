@@ -1532,6 +1532,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     const credential = await bearer();
     if (credential) headers.set("Authorization", `Bearer ${credential}`);
     if (SEND_CLIENT_TAG) headers.set(CLIENT_HEADER, CLIENT_TAG);
+    if (init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     // A provider gets one forced refresh after a 401, when the body can be sent again.
     let refreshedAfter401 = typeof tokenSource !== "function" || isStreamBody(init.body);
     const timeoutMs = positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs");
@@ -1547,8 +1548,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         bound.signal.throwIfAborted();
         const response = await fetchImpl(`${apiUrl}${path}`, {
           ...init,
-          // A body-less POST goes out with Content-Length: 0; without it (fetch's default for no body) the API answers 400.
-          body: init.body ?? (/^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") ? "" : undefined),
+          // A body-less POST goes out as an empty JSON object: the API refuses an upload-path POST with no content type.
+          ...(init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") ? { body: "{}" } : {}),
           credentials: init.credentials ?? (hasBearer ? "omit" : "include"),
           headers,
           signal: bound.signal,

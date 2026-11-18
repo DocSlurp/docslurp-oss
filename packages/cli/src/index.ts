@@ -418,8 +418,11 @@ async function apiFetch(
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${await auth.token({ forceRefresh })}`);
     headers.set("X-DocSlurp-Client", cliClientTag);
-    // A body-less POST goes out with Content-Length: 0. Without it (fetch's default for no body) the production API answers 400.
-    const body = init.body ?? (/^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") ? "" : undefined);
+    // A body-less POST goes out as an empty JSON object: the production API refuses an upload-path POST that has no
+    // content type (fetch's default when there is no body) with a 400.
+    const bodyless = init.body == null && /^(POST|PUT|PATCH)$/i.test(init.method ?? "GET");
+    if (bodyless && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const body = bodyless ? "{}" : init.body;
     return fetch(`${apiUrl}${pathname}`, { ...init, body, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
   };
   const response = await send(false);
