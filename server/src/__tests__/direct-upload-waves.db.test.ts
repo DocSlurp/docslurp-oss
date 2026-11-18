@@ -380,6 +380,17 @@ describe("waves", () => {
     expect(fakes.runs).toHaveLength(1);
   });
 
+  it("starts no run for a session whose API key was revoked: billable admission is checked per wave", async () => {
+    const { sessionId, files: seeded } = await seedSession(5);
+    for (const file of seeded) put(file.key);
+    await db.query("update upload_sessions set api_key_id = 'revoked-key' where id = $1", [sessionId]);
+    await webhook(seeded.map(file => file.key));
+    await expect(advance(sessionId)).rejects.toMatchObject({ statusCode: 403 });
+    expect(fakes.runs).toHaveLength(0);
+    expect(await runs(sessionId)).toEqual([]);
+    expect((await session(sessionId)).status).toBe("failed");
+  });
+
   it("fails only the files a wave could not read, and confirms with the rest", async () => {
     Object.assign(env, { directUploadWaveFiles: 2 });
     const { sessionId, files: seeded } = await seedSession(4);

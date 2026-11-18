@@ -138,6 +138,35 @@ export async function authorizeReceiptProject(projectId: string, userId: string,
   }
 }
 
+/**
+ * Re-validates a direct-upload session's principal at billable admission: the user may still contribute to the
+ * session's project (or, for a session that creates its project, still belongs to its organization); a session opened
+ * with an API key needs that key live (not revoked or expired, owner still a member), a server key of the session's
+ * organization with the `ingest` scope, and a project allowlist that still admits the target. The allowlist used is
+ * the live one narrowed by the session's own, never wider than either. Refusals are 403s: no run starts, nothing bills.
+ */
+export async function liveDirectUploadAdmission(
+  session: { org_id: string | null; project_id: string | null; project_name?: string | null; api_key_id?: string | null; allowed_project_ids?: string[] | null },
+  userId: string,
+): Promise<{ allowedProjectIds: string[] | null }> {
+  const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
+  await assertSessionProjectStillContributable(session, userId);
+  const stored = session.allowed_project_ids ?? [];
+  if (!session.api_key_id) return { allowedProjectIds: stored.length ? stored : null };
+  const key = await getLiveApiKeyById(session.api_key_id);
+  if (!key || key.keyType !== "server" || !session.org_id || key.orgId !== session.org_id || !key.scopes.includes("ingest")) {
+    throw new ProjectIntakeError("API key no longer permits this upload", 403);
+  }
+  const live = key.projectIds;
+  const allowed = stored.length && live.length ? stored.filter(id => live.includes(id)) : stored.length ? stored : live;
+  if ((stored.length || live.length) && (allowed.length === 0 || (session.project_id && !allowed.includes(session.project_id)))) {
+    throw new ProjectIntakeError("API key no longer permits this upload", 403);
+  }
+  // A project-scoped key never creates a project (SEC-2026-10-07).
+  if (allowed.length && !session.project_id && !session.project_name) throw new ProjectIntakeError("API key no longer permits this upload", 403);
+  return { allowedProjectIds: allowed.length ? allowed : null };
+}
+
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
   args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null },

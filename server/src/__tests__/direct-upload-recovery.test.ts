@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
   load: vi.fn(), prepare: vi.fn(), intake: vi.fn(), discard: vi.fn(), project: vi.fn(), multipart: vi.fn(),
 }));
 vi.mock("../services/organizations.js", () => ({ getProjectAccess: async () => ({ orgId: "org" }), canContributeToProject: () => true }));
-vi.mock("../services/api-keys.js", () => ({ getLiveApiKeyById: async () => ({ orgId: "org", scopes: ["ingest"], projectIds: ["project"] }) }));
+vi.mock("../services/api-keys.js", () => ({ getLiveApiKeyById: async () => ({ orgId: "org", keyType: "server", scopes: ["ingest"], projectIds: ["project"] }) }));
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../services/run-creation.js", () => ({ discardUnstartedRun: mocks.discard }));
 vi.mock("../services/projects.js", () => ({ getProject: mocks.project }));

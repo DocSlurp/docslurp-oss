@@ -1,3 +1,4 @@
+import { PAGE_READ_METRICS, runMeasuredPagesCredits } from "@docslurp/shared";
 import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { apiPool, sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelinePause, signalPipelineResume } from "../lib/temporal.js";
@@ -30,6 +31,26 @@ export interface SpendPausedRunsDeps {
 type PausedRunRow = { id: string; org_id: string; project_id: string; user_id: string; pause_reason: string };
 
 export const ORG_SPEND_CHANGED_CHANNEL = "org_spend_changed";
+
+/**
+ * Credits a spend-paused run must have covered before it resumes: the larger of what the worker's charge check last refused
+ * (project_runs.spend_pause_credits, migration 0190: its run-wide measured pages, feature extras and buffered charges, priced
+ * as the worker prices them) and the run's measured pages no charge covers yet (run_measured_pages, the worker's run-wide
+ * sum, at the run's speed boost). Holding the worker's own refused amount means the sweep never resumes a run the worker
+ * would refuse again at once. Fails closed: a failed read throws.
+ */
+export async function runMeasuredCredits(client: SqlClient, runId: string): Promise<number> {
+  const [row] = await client<{ fast_pages: string | number; ocr_frames: string | number; speed_boost: boolean | null; refused: string | number | null }[]>`
+    select m.fast_pages, m.ocr_frames, (r.pipeline ->> 'speedBoost')::boolean as speed_boost, r.spend_pause_credits as refused
+    from project_runs r cross join run_measured_pages(r.id, ${[...PAGE_READ_METRICS]}::text[], null) m
+    where r.id = ${runId}
+  `;
+  if (!row) return 0;
+  const measured = runMeasuredPagesCredits({ fastPages: Number(row.fast_pages), ocrFrames: Number(row.ocr_frames) }, row.speed_boost === true);
+  const refused = row.refused === null ? 0 : Number(row.refused);
+  if (!Number.isFinite(refused) || !Number.isFinite(measured)) throw new Error(`run ${runId} owes a non-finite amount`);
+  return Math.max(measured, refused);
+}
 
 /** Clear a spend pause and resume the workflow. Returns whether the run changed. */
 export async function resumeSpendPausedRun(runId: string, deps: SpendPausedRunsDeps = {}): Promise<boolean> {
@@ -79,7 +100,20 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       if (!row) return { status: "not-spend-paused" } as const;
       await restoreRunMonthlyCapacity(tx, row.id);
       if (!spendGuardsSkipped()) {
-        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client, reusingRunId: row.id, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() }));
+        // The run already owes its measured pages no charge covers yet (run_measured_pages, migration 0190: Fast pages above
+        // intake, uncharged image frames), the same sum the worker's page-basis check pauses on. Resuming before the balance
+        // covers them would only re-pause the run at its next check, forever; it stays paused until it does. A failed read
+        // throws: the transaction rolls back and the pause is kept.
+        let owed: number;
+        try {
+          owed = await runMeasuredCredits(client, row.id);
+        } catch (error) {
+          console.error(`[spend-paused-runs] run=${row.id} measured_owed_read_failed=true pause_preserved=true: ${error instanceof Error ? error.message : String(error)}`);
+          throw error;
+        }
+        const status = await loadSpendStatus(row.org_id, row.project_id, { client, reusingRunId: row.id, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() });
+        // The owed credits are held like credits in-flight runs hold: the run resumes only when what is left after them may spend.
+        const reason = spendBlockReason(status && owed > 0 ? { ...status, reserved: status.reserved + owed } : status);
         if (reason) {
           blockedReason = reason.code;
           // Restoration must roll back together with the refused pause/lease.
@@ -88,7 +122,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       }
       await tx`
         update project_runs set control_state = null, control_requested_at = null,
-          pause_reason = null, spend_unchecked_pages = 0, spend_unchecked_credits = 0,
+          pause_reason = null, spend_pause_credits = null, spend_unchecked_pages = 0, spend_unchecked_credits = 0,
           last_heartbeat_at = now(), lease_expires_at = now() + interval '5 minutes', updated_at = now()
         where id = ${runId}
       `;

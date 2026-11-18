@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
 import { defaultPipelineFeatures, pricingVersion } from "@docslurp/shared";
 
@@ -35,6 +36,7 @@ function makeDocument(): Document {
 
 /** In-memory store implementing only the narrow Stage Execution interface. */
 class FakeStore implements StageExecutionStore {
+  pageBasisLedger = new MemoryPageBasisLedger();
   run = makeRun();
   documents = [makeDocument()];
   checkpoints: StageState[] = [];

@@ -19,8 +19,6 @@ import { projectTemplateKeySchema, sanitizeStoredPipeline, type ChartExportTier 
 import { sql } from "../db.js";
 import { env } from "../config.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
-import { getLiveApiKeyById } from "./api-keys.js";
-import { assertSessionProjectStillContributable } from "./direct-session-idempotency.js";
 import {
   assertUploadSessionActive,
   listDirectUploadRuns,
@@ -36,6 +34,7 @@ import {
   actionResult,
   assertIntakeChartExportTier,
   authorizeReceiptProject,
+  liveDirectUploadAdmission,
   requiredIntake,
   type ProjectIntakeActionResult,
   type ProjectIntakePayload,
@@ -80,7 +79,8 @@ type AdvanceOutcome = { nextCheckMs: number | null; refusal?: unknown };
  * lock (busy: 409 `upload_session_busy`). Used by the reconciler's sweep and its in-process wave timers.
  */
 export async function advanceDirectUploadWaves(sessionId: string, userId: string, lockWaitMs = 0): Promise<AdvanceOutcome> {
-  return withDirectUploadLock(sessionId, () => advanceLocked(sessionId, userId, { flush: false, ports: wavePorts }), undefined, undefined, lockWaitMs);
+  // The reconciler's own lock class: one background holder per process, so waves never take every lock connection.
+  return withDirectUploadLock(sessionId, () => advanceLocked(sessionId, userId, { flush: false, ports: wavePorts }), undefined, undefined, { waitMs: lockWaitMs, lockClass: "reconcile" });
 }
 
 async function advanceLocked(sessionId: string, userId: string, options: AdvanceOptions): Promise<AdvanceOutcome> {
@@ -152,20 +152,6 @@ async function releaseWave(sessionId: string, wave: number, runId: string): Prom
   await sql`delete from upload_session_runs where session_id = ${sessionId} and wave = ${wave} and status = 'creating'`;
 }
 
-/** Every billable wave re-checks that its uploader may still contribute and its API key may still ingest. */
-async function assertSessionMayStartRun(session: UploadSessionRow): Promise<void> {
-  await assertSessionProjectStillContributable(session, session.user_id);
-  if (!session.api_key_id) return;
-  if (session.project_id) {
-    await authorizeReceiptProject(session.project_id, session.user_id, session.org_id, session.api_key_id);
-    return;
-  }
-  const key = await getLiveApiKeyById(session.api_key_id);
-  if (!key || (session.org_id && key.orgId !== session.org_id) || !key.scopes.includes("ingest")) {
-    throw new ProjectIntakeError("API key no longer permits this upload", 403);
-  }
-}
-
 async function startWave(session: UploadSessionRow, waiting: WaitingFile[], options: AdvanceOptions): Promise<void> {
   const [last] = await sql<Array<{ wave: number | null; started: number }>>`
     select max(wave) as wave, count(*) filter (where status = 'started')::int as started from upload_session_runs where session_id = ${session.id}`;
@@ -173,8 +159,12 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
   const earlierRuns = Number(last?.started ?? 0) > 0;
   const runId = wave === 1 ? session.id : randomUUID();
 
+  // Billable admission per wave: the principal's rights as they are now (the user may still contribute; a key-opened
+  // session needs a live server key of its organization with `ingest` and an allowlist that still admits the target),
+  // never as stored when the session was opened.
+  let admission: { allowedProjectIds: string[] | null };
   try {
-    await assertSessionMayStartRun(session);
+    admission = await liveDirectUploadAdmission(session, session.user_id);
   } catch (error) {
     // Fail closed: a revoked share, membership or key stops every further wave (runs already started are left alone).
     if (error instanceof ProjectIntakeError && [403, 404].includes(error.statusCode)) {
@@ -251,7 +241,7 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
       apiKeyId: session.api_key_id,
       // Recorded from the principal that opened the session (never a request field); older rows are machine.
       origin: session.origin === "app" ? "app" : "machine",
-      allowedProjectIds: session.allowed_project_ids,
+      allowedProjectIds: admission.allowedProjectIds,
       runId,
       kind: "direct-upload",
       items,

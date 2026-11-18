@@ -440,7 +440,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
     try {
-    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true");
+    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true", c.req.raw.signal);
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
@@ -465,8 +465,9 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         const body = parsedBody;
         // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
         try {
-          // Finalized files start runs (waves) on their own; the service schedules them.
-          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files });
+          // Finalized files start runs (waves) on their own; the service schedules them. A client that disconnects
+          // cancels its in-flight storage work (fenced, so nothing is half-published).
+          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files, signal: c.req.raw.signal });
           return c.json({ ok: result.failedCount === 0, ...result });
         } catch (error) {
           return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
@@ -481,6 +482,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           etag: body.etag,
           sizeBytes: body.sizeBytes,
           parts: body.parts,
+          signal: c.req.raw.signal,
         });
       } catch (error) {
         // Never a 400 for a server-side failure: a client would treat it as permanent and abandon the upload.

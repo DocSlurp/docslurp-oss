@@ -20,6 +20,7 @@ vi.mock("../ocr/hosted-reader.js", () => ({ createHostedOcrReader: () => null })
 
 const { VisionExtractStage, legacyPageHints } = await import("../stages/vision-extract.js");
 const { WorkflowState } = await import("../pipeline/pipeline.js");
+const { bindMemoryPageBasis } = await import("../pipeline/page-basis-memory.js");
 
 /**
  * A scan beside native text (MIXED_SCAN_IMAGE_SIGNAL) is read by the OCR engine in its VM, as scanned pages are, never
@@ -28,7 +29,9 @@ const { WorkflowState } = await import("../pipeline/pipeline.js");
 function harness() {
   const rendered: number[] = [];
   const document = { id: "mixed-doc", filename: "mixed.pdf", mimeType: "application/pdf", sourceKey: "mixed.pdf", pageCount: 3 } as never;
-  const state = WorkflowState.create({ id: "mixed-run", spentCents: 0, pipeline: { ...defaultPipelineFeatures } } as never, [document]);
+  const state = WorkflowState.create({ id: "mixed-run", orgId: "org-1", userId: "user-1", spentCents: 0, pipeline: { ...defaultPipelineFeatures } } as never, [document]);
+  // A funded run: the OCR batch is checked against the balance through the page basis.
+  bindMemoryPageBasis(state);
   const rasters = {
     sourcePath: async () => "/cache/mixed.pdf",
     renderSelectedPages: async ({ pageNumbers }: { pageNumbers: number[] }) => {

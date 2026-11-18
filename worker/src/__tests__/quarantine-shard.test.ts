@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import { QuarantineStage } from "../stages/quarantine.js";
 import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { sha256Bytes } from "../sandbox/source-integrity.js";
 import type { Document, ProjectRun } from "../models.js";
@@ -44,9 +45,9 @@ async function fixture() {
     startDocumentStage: vi.fn(async () => {}), completeDocumentStage: vi.fn(async () => {}), failDocumentStage: vi.fn(async () => {}),
     updateProgress: vi.fn(async (current) => { persisted.push({ ...current.artifacts }); }),
     startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
-    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()),
+    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()), pageBasisLedger: new MemoryPageBasisLedger(),
   };
-  state.store = store;
+  state.bindStore(store);
   const downloads: string[] = []; let sequence = 0;
   const artifacts = new Map<string, unknown>();
   const storage = {

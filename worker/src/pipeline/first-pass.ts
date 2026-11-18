@@ -32,7 +32,6 @@ import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/fir
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { PdfPageCountError, reconcileProcessedPdfPages, recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
-import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { cleanupTempFile, keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
@@ -180,8 +179,9 @@ export interface FirstPassStore {
   loadDocumentsForRun: Parameters<typeof loadRunState>[0]["loadDocumentsForRun"];
   hydrateState: Parameters<typeof loadRunState>[0]["hydrateState"];
   readStageStates?: Parameters<typeof loadRunState>[0]["readStageStates"];
+  /** The page basis port every loaded state checks spend through (pipeline/page-basis.ts). */
+  pageBasisLedger: Parameters<typeof loadRunState>[0]["pageBasisLedger"];
   documentScopes(documentIds: readonly string[]): Promise<Map<string, { orgId: string | null; runId: string; bytes: number }>>;
-  setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean>;
   updateProgress(state: WorkflowState): Promise<void>;
 }
 
@@ -426,7 +426,7 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       timings.allTextMs = textMs;
       timings.pages += event.pages;
       // The measured count first: recorded and authorized before anything that bills.
-      await recordBatchPageCount(deps.store, state, document, event.pages, event.processedPages);
+      await recordBatchPageCount(state, document, event.pages, event.processedPages);
       // Page facts go on as the validated canonical lines (never the guest's raw bytes), to be accepted again when served.
       const resentFacts = pageFactsForResend(batchFileJob(job, event.index)!);
       const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) }, ...(job.options.math ? { glyphs: true } : {}) };
@@ -589,7 +589,7 @@ export async function countDeferredPdfPages(args: {
     }, args.signal);
     // On every attempt (a retry finds the count recorded and must still be authorized).
     if (document.pageCountSource === "counted" && state.documentStages.get(document.id)?.get(FIRST_PASS_PAGE_COUNT_STAGE)?.status !== "failed") {
-      await authorizeMeasuredPages(state, document);
+      await state.pageBasis.authorize(document);
     }
   }
 }
@@ -654,14 +654,12 @@ export async function primeFirstPassResults(state: WorkflowState, storage: Pick<
 }
 
 /** Record the batch's structural page count before any stage bills, then authorize pages above intake's estimate. */
-async function recordBatchPageCount(store: FirstPassStore, state: WorkflowState, document: Document, pages: number, processedPages?: number): Promise<void> {
+async function recordBatchPageCount(state: WorkflowState, document: Document, pages: number, processedPages?: number): Promise<void> {
   if (document.pageCountSource === "assumed") {
-    if (!(await store.setDocumentPageCount(state.run.id, document.id, pages))) throw new Error("First-pass page count could not be recorded");
-    state.run.pagesTotal = Math.max(0, (Number(state.run.pagesTotal) || 0) + pages - Math.max(1, Math.trunc(document.pageCount) || 1));
-    document.pageCount = pages;
-    document.pageCountSource = "counted";
+    if (!(await state.pageBasis.record(document, { kind: "page-count", pages })).persisted) throw new Error("First-pass page count could not be recorded");
   }
-  await authorizeMeasuredPages(state, document);
+  // On every attempt: a retry finds the count recorded and must still be authorized.
+  await state.pageBasis.authorize(document);
   // The converter read fewer pages than the structure holds: bill what was extracted and flag the document partially
   // extracted (N of M pages), exactly as a single-file run does.
   if (processedPages !== undefined && processedPages < pages) await reconcileProcessedPdfPages(state, document, processedPages);

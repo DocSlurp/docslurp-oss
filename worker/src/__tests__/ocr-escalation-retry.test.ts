@@ -71,7 +71,7 @@ function activity(runId: string, execute: typeof executeVisionRuntime, env: Node
     id: runId, orgId: "esc-org", projectId: "esc-ws", userId: "esc-u", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
     pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
   } as unknown as ProjectRun, []);
-  state.store = created;
+  state.bindStore(created);
   state.visionAttempts = created.visionAttempts;
   state.usageLedger.runId = runId;
   const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { DOCSLURP_OCR_ESCALATION: "on", ...env }, execute });

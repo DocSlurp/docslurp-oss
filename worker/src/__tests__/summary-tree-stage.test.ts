@@ -31,6 +31,7 @@ import type { Document, ProjectRun } from "../models.js";
 import { runUsageEventStatements } from "../db/usage-event-store.js";
 import { runSpentCents } from "../pipeline/checkpoints.js";
 import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { createStages } from "../stages/index.js";
 import {
@@ -174,9 +175,9 @@ async function seed(storage: MemoryStorage, pipeline: PipelineFeatures, document
     startDocumentStage: vi.fn(async () => undefined), completeDocumentStage: vi.fn(async () => undefined), failDocumentStage: vi.fn(async () => undefined),
     updateProgress: vi.fn(async () => undefined), startRunStage: vi.fn(async () => undefined), completeRunStage: vi.fn(async () => undefined),
     failRunStage: vi.fn(async () => undefined), appendEvent: vi.fn(async () => undefined), setPageStageComplete: vi.fn(async () => undefined),
-    getCompletedPages: vi.fn(async () => new Set<number>()),
+    getCompletedPages: vi.fn(async () => new Set<number>()), pageBasisLedger: new MemoryPageBasisLedger(),
   } satisfies CheckpointStore;
-  state.store = store;
+  state.bindStore(store);
   return { state, store };
 }
 

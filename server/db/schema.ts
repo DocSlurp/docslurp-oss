@@ -2255,11 +2255,11 @@ export const uploadSessions = pgTable(
     lastError: text("last_error"),
     reconcileAttempts: integer("reconcile_attempts").default(0).notNull(),
     nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
-    /** A client completing its own files holds the reconciler off the session until then (migration 0190). */
+    /** A client completing its own files holds the reconciler off the session until then (migration 0191). */
     clientFinalizingUntil: timestamp("client_finalizing_until", { withTimezone: true, mode: "string" }),
-    /** When the current run of client holds began; total hold time is capped from it (migration 0190). */
+    /** When the current run of client holds began; total hold time is capped from it (migration 0191). */
     clientFinalizingSince: timestamp("client_finalizing_since", { withTimezone: true, mode: "string" }),
-    /** A wave refused by billing or admission is retried no sooner than this (migration 0191). */
+    /** A wave refused by billing or admission is retried no sooner than this (migration 0192). */
     waveBlockedUntil: timestamp("wave_blocked_until", { withTimezone: true, mode: "string" }),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
@@ -2332,10 +2332,10 @@ export const uploadSessionFiles = pgTable(
     sourcePath: text("source_path").default("").notNull(),
     requestIndex: integer("request_index"),
     clientId: text("client_id"),
-    /** The run (wave) that took this file; null while it waits for one (migration 0191). */
+    /** The run (wave) that took this file; null while it waits for one (migration 0192). */
     runId: text("run_id"),
     finalizedAt: timestamp("finalized_at", { withTimezone: true, mode: "string" }),
-    /** One finalizer at a time per file: webhook, client complete or fallback (migration 0191). */
+    /** One finalizer at a time per file: webhook, client complete or fallback (migration 0192). */
     finalizeLeaseUntil: timestamp("finalize_lease_until", { withTimezone: true, mode: "string" }),
     finalizeLeaseToken: text("finalize_lease_token"),
     /** When the fallback reconciler next checks storage for this file. */
@@ -2368,7 +2368,7 @@ export const uploadSessionFiles = pgTable(
   ],
 );
 
-/** One row per run a direct-upload session started (waves); wave 1's run id is the session id (migration 0191). */
+/** One row per run a direct-upload session started (waves); wave 1's run id is the session id (migration 0192). */
 export const uploadSessionRuns = pgTable(
   "upload_session_runs",
   {

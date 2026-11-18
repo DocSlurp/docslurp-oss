@@ -3,7 +3,6 @@ import { billedPagePageEquivalents, DENSE_PAGE_EQUIVALENTS, imageAreaEquivalents
 import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { formatNeedsMeasuredPages } from "./office-page-count.js";
-import { authorizeMeasuredPages } from "./measured-page-authorization.js";
 import { ocrMaxLongEdge } from "../ocr/engine.js";
 import { MAX_MEASURED_PDF_PAGES, splitProcessedPdfPages } from "./pdf-page-count.js";
 
@@ -89,19 +88,11 @@ export async function recordExtractedPageEquivalents(
     ? above.length > 0
     : equivalents > Math.max(Number(document.billingPages) || 0, Math.trunc(Number(document.pageCount)) || 0);
   if (measuredAbove) {
-    if (paged) {
-      if (!state.store?.recordPageEquivalents) throw new Error("page equivalents measured but the store cannot persist them");
-      billingPages = await state.store.recordPageEquivalents(state.run.id, document.id, above, allowance);
-    } else {
-      if (!state.store?.recordWholeDocumentPages) throw new Error("page equivalents measured but the store cannot persist them");
-      billingPages = await state.store.recordWholeDocumentPages(state.run.id, document.id, equivalents);
-    }
-    if (billingPages !== null && billingPages > (Number(document.billingPages) || 0)) {
-      document.billingPages = billingPages;
-      document.billingPagesMethod = "page-equivalents";
-    }
     console.log(`[page-equivalents] document=${document.id} pages=${pages.length} equivalents=${equivalents} billed=${billed} allowance=${allowance} dense=${densePages.length}`);
-    await authorizeMeasuredPages(state, document);
+    // Recorded (billing_pages raised, never lowered) and authorized by the page basis.
+    billingPages = (await state.pageBasis.record(document, paged
+      ? { kind: "page-equivalents", rows: above, allowance }
+      : { kind: "whole-document", pages: equivalents })).billingPages;
   }
   return { pages: pages.length, equivalents, billed, densePages, billingPages };
 }
