@@ -62,10 +62,13 @@ export function firstPassDrainConcurrency(env: NodeJS.ProcessEnv = process.env):
 export const DOPPLER_MATH_DEFAULT_ENV = "DOCSLURP_DOPPLER_MATH_DEFAULT";
 
 /**
- * DOCSLURP_DOPPLER_MATH_DEFAULT (default on): whether a project that says nothing about math gets Doppler's math reader
- * (`pdftomarkdown --math`). Doppler's table-safe `--math` scores the same as without it on every table class and reads
- * typeset math as LaTeX, so it is the default; a project opts out with the vm-pdf option `math: false`. `off`, `0` or
- * `false` restores opt-in (`math: true` only). Anything else keeps the default.
+ * DOCSLURP_DOPPLER_MATH_DEFAULT (default on): whether a project that says nothing about math asks for Doppler's math reader
+ * (`pdftomarkdown --math`); a project opts out with the vm-pdf option `math: false`. `off`, `0` or `false` restores opt-in
+ * (`math: true` only). Anything else keeps the default. This is only the project's request: no batch reads math unless
+ * the deploy gate DOCSLURP_FIRST_PASS_MATH is `on` (default off; firstPassBatchOptions), so production does not read math.
+ * Since Doppler d317bea (#51) `--math` keeps numeric tables as tables, but not every table class scores the same: on an
+ * invoice (kreuzberg-tables-invoice.pdf) it still moves the header row out of the table as italic text and escapes `$`
+ * as `\$`, as before #51. The gate stays off until those pass (doppler-encoding-facts.integration.test.ts).
  */
 const warnedMathDefault = new Set<string>();
 export function dopplerMathDefault(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -80,7 +83,8 @@ export function dopplerMathDefault(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 /**
- * The batch options a project's pipeline asks for: math by default (DOCSLURP_DOPPLER_MATH_DEFAULT) unless the project opts
+ * The batch options a project's pipeline asks for: math (requested by default, DOCSLURP_DOPPLER_MATH_DEFAULT, and read only
+ * where the deploy gate DOCSLURP_FIRST_PASS_MATH is on; default off) unless the project opts
  * out (`math: false`), figures when the deploy has them and the project did not opt out (`figures: false`), and the page
  * facts routing reads (`mathtables`) unless page facts are off.
  */
@@ -89,8 +93,9 @@ export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.Pr
   const projectWantsMath = dopplerMathDefault(env) ? vmOptions?.math !== false : vmOptions?.math === true;
   const pageFacts = dopplerPageFactsRequest(env);
   return {
-    // Math reading also stays behind its deploy flag (DOCSLURP_FIRST_PASS_MATH, default off) until the open council
-    // follow-up on the math reader is closed (TODO.md: bound its scan on hostile pages); no project setting turns it on.
+    // Math reading stays behind its deploy flag (DOCSLURP_FIRST_PASS_MATH, default off; no project setting turns it on)
+    // until `--math` no longer costs a table its header row or escapes `$` in cells (TODO.md, the invoice case in
+    // doppler-encoding-facts.integration.test.ts).
     math: projectWantsMath && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
     figures: figuresEnabled(pipeline as { figures?: boolean | null }, env) && !!sandboxedPdfProvider()?.figures,
     ...(pageFacts ? { pageFacts } : {}),

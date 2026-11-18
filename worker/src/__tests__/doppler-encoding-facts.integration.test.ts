@@ -49,6 +49,11 @@ function routes(fixture: string, math = false) {
   const parsed = parseDopplerPageFacts(facts, { pageCount: pages });
   if (!parsed.ok) throw new Error(parsed.reason);
   expect(parsed.facts.doc.include).toContain("mathtables");
+  // Wherever Doppler wrote a structure family (ActualText counts only, at `full`), the reader keeps it, never drops it.
+  for (const line of facts.split("\n").filter((l) => l.includes("\"structure\""))) {
+    const raw = JSON.parse(line) as { page?: number; structure?: unknown };
+    if (raw.page !== undefined && raw.structure !== undefined) expect(parsed.facts.pages.get(raw.page)?.structure, `page ${raw.page}`).toEqual(raw.structure);
+  }
   return { parsed: parsed.facts, routes: [...parsed.facts.pages.values()].map((page) => pageEncodingRoute(page, { mathRead: math })) };
 }
 
@@ -61,7 +66,10 @@ describe.skipIf(!available)("Doppler math and table encodings (real converter)",
     const [table, growth, matrix, prose] = pages.map((page) => page.status === "known" ? page.route : null);
     expect(table).toMatchObject({ table: "text-layer", tableFlags: ["booktabs"], math: "none" });
     expect(growth?.math).not.toBe("none");
-    expect(growth?.table).toBe("none");
+    // Display formulas set in aligned columns: since the released d317bea (DocSlurp/doppler#51) the facts name the
+    // whitespace table the default converter writes there (its Markdown is unchanged from 0cf2981); a text-layer route,
+    // never a read, and never a math grid. With --math the converter writes the formulas, not a table.
+    expect(growth).toMatchObject({ table: "text-layer", tableFlags: ["whitespace"], mathGrid: false });
     expect(matrix).toMatchObject({ table: "none", mathGrid: true });
     expect(matrix?.mathFlags).toContain("math-matrix");
     expect(prose).toMatchObject({ table: "none", math: "none", mathFlags: [], tableFlags: [] });
@@ -101,6 +109,43 @@ describe.skipIf(!available)("Doppler math and table encodings (real converter)",
     expect(matrix.signals).toContain("encoding-math-grid");
     // The booktabs page gets a table route from its encodings.
     expect(classifyAdaptivePage(1, "Region Q1 Q2 Q3", { routingV2: true, layout: layout.get(1)!, encodings: layout.get(1)!.encodings }).route).toBe("table-heavy");
+  });
+
+  it("keeps the released structure family at `full` (ActualText counts only)", () => {
+    const factsPath = path.join(scratch, "structure-full.jsonl");
+    const fd = openSync(factsPath, "w");
+    try {
+      const run = spawnSync(converter, ["--stream", "--html", "--page-facts-level", "full", "--page-facts-fd", "3", path.join(FIXTURES, "encoding-tables-math.pdf")],
+        { stdio: ["ignore", "pipe", "pipe", fd], timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+      expect(run.status, String(run.stderr)).toBe(0);
+    } finally {
+      closeSync(fd);
+    }
+    const facts = readFileSync(factsPath, "utf8");
+    const parsed = parseDopplerPageFacts(facts, { pageCount: 4 });
+    if (!parsed.ok) throw new Error(parsed.reason);
+    expect([...parsed.facts.pages.values()].map((page) => page.structure)).toEqual(Array(4).fill({ actualText: 0, actualTextTexLike: 0, truncated: false }));
+  });
+
+  // DOCSLURP_FIRST_PASS_MATH stays off (first-pass.ts) while the `it.fails` below fails: on the invoice, `--math` moves the
+  // header row out of the table as italic text and writes `$12.00` as `\$12.00`, as Doppler did before #51. When a Doppler
+  // build passes it, the `it.fails` fails: drop `.fails`, then decide on the gate. The conversions run in an ordinary test
+  // first, so a crash, a non-zero exit or a timeout fails there and is never taken for the expected failure.
+  const invoice: { plain?: string; math?: string } = {};
+  it("converts the invoice with and without --math (both exit 0) and the default keeps `$` in cells", () => {
+    invoice.plain = convert("kreuzberg-tables-invoice.pdf", false).markdown;
+    invoice.math = convert("kreuzberg-tables-invoice.pdf", true).markdown;
+    expect(invoice.plain).toContain("<td>$12.00</td>");
+    expect(invoice.plain).toContain("<thead>");
+    expect(invoice.math.length).toBeGreaterThan(0);
+  });
+
+  it.fails("--math leaves the invoice table as the default writes it: header row in the table, `$` in cells as written", () => {
+    // Only the math output's own assertions: missing output (the conversion test failed) fails this test outright.
+    if (invoice.math === undefined) throw new TypeError("invoice conversion did not run");
+    expect(invoice.math).toContain("<td>$12.00</td>");
+    expect(invoice.math).not.toContain("\\$");
+    expect(invoice.math).toContain("<thead>");
   });
 
   it("a --math batch never costs a ruled table its table route (council #467)", () => {
