@@ -1,3 +1,10 @@
+## Video frame reads get their own page extract record; kept reads name their model (2026-11-18)
+
+- Migration 0193: `document_page_extracts.pass` accepts `video-frames`, a contributing pass: the vision model's read of a video's sampled frames. The wider check is added NOT VALID in a catalog-guarded block and the old inline check dropped; superseded_by_pass keeps its check (it only names a final pass).
+- The media pipeline records one `video-frames` row on the video's page (method `vision`, engine `media-video-frames`, the frame batches' summed text size and request time) named by the vision model (`model_uri`, `model_class`), beside the transcript's `extract` row. Finalization ranks only `PAGE_EXTRACT_FINAL_PASSES`, so the row is adopted, names `extract` as the page's final pass and is never final: the ingest report and `final=true` reads still show the transcript. The API serves the pass name, never the model.
+- Rollback: release N-1's finalization gives the new pass a null rank and would write `is_final = NULL`; a BEFORE UPDATE trigger (fires only on NULL) keeps it false.
+- A query-time publication of a page another claim read and kept (`read_text`) records the model that read it, from the reading run's usage row (`metadata.modelUri`).
+
 ## Exact model records: embedding spaces, request settings, run models (2026-11-18)
 
 - Migration 0192: nullable `embedding_model_uri` (and `embedding_model_class`, the embedding profile) on `vector_indexes`, `embedding_model_uri` on `document_page_states`, `model_uri` on `document_page_vectors`, and `project_runs.resolved_models`. No default, rewrite or backfill.
