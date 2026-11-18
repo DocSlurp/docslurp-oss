@@ -14,7 +14,7 @@ describe("separate direct upload lock connections", () => {
   it("uses a lazy bounded pool separate from intake query connections", async () => {
     setup();
     const lock = await reserveDirectUploadLockConnection();
-    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:6,applicationName:"docslurp-upload-locks"});
+    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:8,applicationName:"docslurp-upload-locks"});
     lock.release(); lock.release();
     expect(mocks.release).toHaveBeenCalledOnce();
     await closeDirectUploadLockPool();
@@ -50,13 +50,13 @@ describe("lock classes and deadlines", () => {
       await vi.advanceTimersByTimeAsync(3_100);
       await a3;
       expect(refused).toMatchObject({ name: "DirectUploadLockUnavailable" });
-      // The process has 4 batch slots (pool 6: 4 batch, 1 reconcile, the rest short): the fourth fills them.
-      const b2 = await reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-b" });
+      // The process has 3 batch slots (pool 8: 2 kept for short work; of the other 6, 3 batch, 2 start, 1 reconcile).
       let processFull: unknown = null;
       const c1 = reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-c" }).catch(error => { processFull = error; });
       await vi.advanceTimersByTimeAsync(2_100);
       await c1;
       expect(processFull).toMatchObject({ name: "DirectUploadLockUnavailable" });
+      const b2 = short; // keeps the release list below unchanged
       // Short operations and the reconciler still get connections with every batch slot taken.
       const reconcile = await reserveDirectUploadLockConnection({ lockClass: "reconcile" });
       const short2 = await reserveDirectUploadLockConnection();
@@ -64,7 +64,7 @@ describe("lock classes and deadlines", () => {
       const waiting = reserveDirectUploadLockConnection({ lockClass: "batch", orgId: "org-c", deadline: Date.now() + 5_000 });
       a1.release();
       const c2 = await waiting;
-      for (const lock of [a2, b1, short, b2, reconcile, short2, c2]) lock.release();
+      for (const lock of [a2, b1, b2, reconcile, short2, c2]) lock.release();
     } finally { vi.useRealTimers(); }
   });
 

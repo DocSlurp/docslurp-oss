@@ -7,16 +7,18 @@ import { processSingleton } from "./process-singleton.js";
  * Dedicated connections for direct-upload session advisory locks. Lock holders must never reserve the query pool:
  * intake needs it while locked.
  *
- * Holders come in classes so a slow class can never take every connection:
- *  - `batch`: a files/complete call finalizing files (storage work under the lock). At most `batchMax` per process
- *    (pool size minus two) and `batchPerOrg` per organization at a time.
- *  - `reconcile`: the background sweep and the in-process kick. One at a time.
- *  - `short`: everything else (part signing, confirm, abort, status recovery, idempotency). Unlimited, and always left
- *    at least one connection by the caps above.
+ * Holders come in classes so a slow class, or one tenant, can never take every connection:
+ *  - `batch`: storage work under the lock (a files/complete call, a recovery read, an idempotent session create). At
+ *    most `batchMax` per process and `batchPerOrg` per organization at a time.
+ *  - `start`: a run start (the client's confirm, the reconciler's or kick's confirm, an idempotent bulk or URL intake),
+ *    which holds the lock through run creation. At most `startMax` per process and `startPerOrg` per organization.
+ *  - `reconcile`: the background sweep's and kick's finalize pass. One at a time.
+ *  - `short`: genuinely short work (part signing, abort). Uncapped, and the only class that may use the last
+ *    `shortReserve` connections: the heavy classes together never hold more than pool size minus that reserve.
  * Every reservation has a deadline: a caller that cannot get a slot or a connection in time gets
  * DirectUploadLockUnavailable (answered as 409 upload_session_busy), never an unbounded wait.
  */
-export type DirectUploadLockClass = "short" | "batch" | "reconcile";
+export type DirectUploadLockClass = "short" | "batch" | "start" | "reconcile";
 
 export class DirectUploadLockUnavailable extends Error {
   constructor() { super("Upload lock connection unavailable"); this.name = "DirectUploadLockUnavailable"; }
@@ -30,11 +32,18 @@ function intOr(value: number | undefined, fallback: number, min: number, max: nu
   return Math.min(max, Math.max(min, n));
 }
 
+/** Connections only short operations may use. */
+const SHORT_RESERVE = 2;
+
 export function directUploadLockLimits() {
-  const poolMax = intOr(env.directUploadLockPoolMax, 6, 3, 64);
-  const batchMax = intOr(env.directUploadLockBatchMax, poolMax - 2, 1, poolMax - 2);
+  const poolMax = intOr(env.directUploadLockPoolMax, 8, SHORT_RESERVE + 3, 64);
+  // Batch, start and reconcile holders together.
+  const heavyMax = poolMax - SHORT_RESERVE;
+  const startMax = intOr(env.directUploadLockStartMax, Math.max(1, Math.floor((heavyMax - 1) / 2)), 1, heavyMax - 2);
+  const batchMax = intOr(env.directUploadLockBatchMax, Math.max(1, heavyMax - 1 - startMax), 1, heavyMax - 2);
   const batchPerOrg = intOr(env.directUploadLockBatchPerOrg, 2, 1, batchMax);
-  return { poolMax, batchMax, batchPerOrg, reconcileMax: 1 };
+  const startPerOrg = intOr(env.directUploadLockStartPerOrg, 1, 1, startMax);
+  return { poolMax, heavyMax, batchMax, batchPerOrg, startMax, startPerOrg, reconcileMax: 1 };
 }
 
 const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => ({
@@ -44,6 +53,8 @@ const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => (
   drained: [] as Array<() => void>,
   batch: 0,
   batchByOrg: new Map<string, number>(),
+  start: 0,
+  startByOrg: new Map<string, number>(),
   reconcile: 0,
   waiters: new Set<() => void>(),
 }));
@@ -61,36 +72,49 @@ function waitForRelease(deadline: number): Promise<void> {
   });
 }
 
+function heavyInUse(): number {
+  return state.batch + state.start + state.reconcile;
+}
+
 async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, deadline: number): Promise<() => void> {
   if (lockClass === "short") return () => {};
-  const limits = directUploadLockLimits();
   for (;;) {
-    if (lockClass === "batch" && state.batch < limits.batchMax && (state.batchByOrg.get(orgKey) ?? 0) < limits.batchPerOrg) {
-      state.batch += 1;
-      state.batchByOrg.set(orgKey, (state.batchByOrg.get(orgKey) ?? 0) + 1);
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        state.batch -= 1;
-        const left = (state.batchByOrg.get(orgKey) ?? 1) - 1;
-        if (left > 0) state.batchByOrg.set(orgKey, left); else state.batchByOrg.delete(orgKey);
-        wake();
-      };
-    }
-    if (lockClass === "reconcile" && state.reconcile < limits.reconcileMax) {
-      state.reconcile += 1;
-      let released = false;
-      return () => { if (!released) { released = true; state.reconcile -= 1; wake(); } };
+    const limits = directUploadLockLimits();
+    if (heavyInUse() < limits.heavyMax) {
+      if (lockClass === "batch" && state.batch < limits.batchMax && (state.batchByOrg.get(orgKey) ?? 0) < limits.batchPerOrg) {
+        return take("batch", state.batchByOrg, orgKey);
+      }
+      if (lockClass === "start" && state.start < limits.startMax && (state.startByOrg.get(orgKey) ?? 0) < limits.startPerOrg) {
+        return take("start", state.startByOrg, orgKey);
+      }
+      if (lockClass === "reconcile" && state.reconcile < limits.reconcileMax) {
+        state.reconcile += 1;
+        let released = false;
+        return () => { if (!released) { released = true; state.reconcile -= 1; wake(); } };
+      }
     }
     if (Date.now() >= deadline) throw new DirectUploadLockUnavailable();
     await waitForRelease(deadline);
   }
 }
 
+function take(kind: "batch" | "start", byOrg: Map<string, number>, orgKey: string): () => void {
+  state[kind] += 1;
+  byOrg.set(orgKey, (byOrg.get(orgKey) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    state[kind] -= 1;
+    const left = (byOrg.get(orgKey) ?? 1) - 1;
+    if (left > 0) byOrg.set(orgKey, left); else byOrg.delete(orgKey);
+    wake();
+  };
+}
+
 export async function reserveDirectUploadLockConnection(options: {
   lockClass?: DirectUploadLockClass;
-  /** The tenant a batch holder counts against. */
+  /** The tenant a batch or start holder counts against. */
   orgId?: string | null;
   /** Epoch ms by which a slot and a connection must be had (at least MIN_LOCK_RESERVE_MS from now). */
   deadline?: number;

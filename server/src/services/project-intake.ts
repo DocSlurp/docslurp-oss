@@ -113,6 +113,8 @@ export type ProjectIntakeAudit = {
 };
 
 export interface ProjectIntakeRequest {
+  /** Re-validate the principal inside the run's admission transaction (CreateRunInput.principalAtAdmission). */
+  principalAtAdmission?: { scope: string };
   speedBoost?: boolean;
   tags?: string[];
   userId: string;
@@ -243,6 +245,8 @@ export interface ProjectIntakeRecords {
     autoNamed: boolean;
   }): Promise<ProjectRecord>;
   createRun(args: {
+    /** Re-validate the principal inside the admission transaction (CreateRunInput.principalAtAdmission). */
+    principalAtAdmission?: { scope: string };
     speedBoost?: boolean;
     userId: string;
     projectId: string;
@@ -686,6 +690,7 @@ export async function intakeIntoProject(
         runId: request.runId,
         files,
         ...(request.extract ? { extract: request.extract } : {}),
+        ...(request.principalAtAdmission ? { principalAtAdmission: request.principalAtAdmission } : {}),
       });
     } catch (error) {
       if (!(error instanceof AllSourcesUnreadableError)) throw error;

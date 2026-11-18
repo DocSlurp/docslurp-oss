@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../services/organizations.js", () => ({ getProjectAccess: async () => ({ orgId: "org" }), canContributeToProject: () => true }));
 vi.mock("../services/api-keys.js", () => ({ getLiveApiKeyById: async () => ({ orgId: "org", keyType: "server", scopes: ["ingest"], projectIds: ["project"] }) }));
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
-vi.mock("../services/run-creation.js", () => ({ discardUnstartedRun: mocks.discard }));
+vi.mock("../services/run-creation.js", () => ({ discardUnstartedRun: mocks.discard, RunAdmissionRefusedError: class RunAdmissionRefusedError extends Error {} }));
 vi.mock("../services/projects.js", () => ({ getProject: mocks.project }));
 vi.mock("../services/run-records.js", () => ({ mapProjectRun: (v: unknown) => v, mapDocument: (v: unknown) => v }));
 vi.mock("../services/idempotency.js", () => ({ getCachedIdempotentResponse: vi.fn(), hashIdempotencyPayload: vi.fn(), storeIdempotentResponse: vi.fn() }));
@@ -20,6 +20,7 @@ vi.mock("../services/project-intake.js", () => ({
 vi.mock("../services/direct-upload-session.js", async original => ({
   ...await original<typeof import("../services/direct-upload-session.js")>(),
   loadDirectUploadSession: mocks.load, prepareDirectUploadProjectIntake: mocks.prepare,
+  loadDirectUploadSessionRow: async (...args: [string, string]) => (await mocks.load(...args))?.session ?? null,
   withDirectUploadLock: async (_id: string, run: () => Promise<unknown>) => run(),
 }));
 import { confirmDirectUploadProjectIntake } from "../services/project-intake-actions.js";
@@ -58,6 +59,15 @@ describe("durable direct upload acceptance", () => {
     await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports);
     expect(mocks.discard).toHaveBeenCalledWith("session");
     expect(mocks.intake).toHaveBeenCalledWith(expect.objectContaining({ runId: "session", apiKeyId: "key", allowedProjectIds: ["project"] }), expect.anything());
+  });
+  it("asks run admission to re-check the principal, and turns a refusal there into a final 403", async () => {
+    const { RunAdmissionRefusedError } = await import("../services/run-creation.js");
+    mocks.intake.mockRejectedValueOnce(new RunAdmissionRefusedError());
+    await expect(confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports)).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.intake).toHaveBeenCalledWith(expect.objectContaining({ principalAtAdmission: { scope: "ingest" } }), expect.anything());
+    // The session goes back to the status it had: nothing was admitted.
+    const restored = mocks.sql.mock.calls.find(([s]) => s.join("").includes("and status = 'ingesting'"));
+    expect(restored?.slice(1)).toEqual(["ingesting", "session"]);
   });
   it("clears a newly created target if intake rolls the project back", async () => {
     const discardProject = vi.fn(async () => {});

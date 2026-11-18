@@ -35,7 +35,7 @@ import {
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
-import { canContributeToProject, canEditProject, getProjectAccessWithPipeline } from "./organizations.js";
+import { canContributeToProject, canEditProject, getProjectAccess, getProjectAccessWithPipeline } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
@@ -81,7 +81,21 @@ export type RunSources =
    */
   | { kind: "versionsOf"; documentIds: string[]; reuse?: boolean };
 
+/** The run's principal no longer permits it, found inside the admission transaction: nothing was reserved or created. */
+export class RunAdmissionRefusedError extends Error {
+  readonly statusCode = 403;
+  constructor() { super("The credential that started this upload no longer permits it"); this.name = "RunAdmissionRefusedError"; }
+}
+
 export interface CreateRunInput {
+  /**
+   * Re-validate the principal at billable admission: inside the admission transaction, after the organization's spend
+   * lock is held, the requesting user's access and the API key (live, this organization, `scope`, project allowlist,
+   * owner still a member) are read again from rows locked FOR SHARE. A revocation, scope or allowlist change, or a
+   * membership removal either commits first and refuses the run (RunAdmissionRefusedError, nothing reserved), or waits
+   * for this admission to commit.
+   */
+  principalAtAdmission?: { scope: string };
   /** Explicit admission opt-in; never inherit this from project or prior-run settings. */
   speedBoost?: boolean;
   /** Internal durable intake identity; never accepted from HTTP input. */
@@ -607,6 +621,32 @@ export function replayChartExport<T extends PipelineFeatures>(
   return { ...stamped, chartExport: { ...stamped.chartExport, tier } };
 }
 
+/**
+ * The principal check for `principalAtAdmission`, run with the admission transaction's client. FOR SHARE on the key row
+ * and the membership rows serializes it with key revocation and edits and with membership removal (they update or
+ * delete those rows); access is then computed from the same transaction.
+ */
+export async function assertPrincipalAtAdmission(
+  tx: Parameters<Parameters<typeof admitRunSpend>[2]>[0],
+  args: { orgId: string; projectId: string; userId: string; apiKeyId: string | null; scope: string },
+): Promise<void> {
+  if (args.apiKeyId) {
+    const [key] = await tx<Array<{ user_id: string; org_id: string; key_type: string; scopes: string[] | null; project_ids: string[] | null }>>`
+      select user_id, org_id, key_type, scopes, project_ids from api_keys
+      where id = ${args.apiKeyId} and revoked_at is null and (expires_at is null or expires_at > now())
+      for share`;
+    const projectIds = key?.project_ids ?? [];
+    if (!key || key.org_id !== args.orgId || key.user_id !== args.userId || key.key_type !== "server"
+      || !(key.scopes ?? []).includes(args.scope) || (projectIds.length > 0 && !projectIds.includes(args.projectId))) {
+      throw new RunAdmissionRefusedError();
+    }
+  }
+  await tx`select 1 from org_memberships where org_id = ${args.orgId} and user_id = ${args.userId} for share`;
+  await tx`select 1 from project_members where project_id = ${args.projectId} and user_id = ${args.userId} for share`;
+  const access = await getProjectAccess(args.projectId, args.userId, tx);
+  if (!access || access.orgId !== args.orgId || !canContributeToProject(access, args.userId)) throw new RunAdmissionRefusedError();
+}
+
 export function createRunCreation(deps: RunCreationDeps) {
   const { sql, start } = deps;
 
@@ -677,7 +717,12 @@ export function createRunCreation(deps: RunCreationDeps) {
       // The extract learns its run in the same transaction, so a failure after commit never orphans the run.
       if (input.extract) await tx`update extracts set run_id = ${args.id}, updated_at = now() where id = ${input.extract.id} and (run_id is null or run_id = ${args.id})`;
       return rows;
-    }, { leaseRunId: args.id, speedBoost: args.pipeline.speedBoost });
+    }, {
+      leaseRunId: args.id, speedBoost: args.pipeline.speedBoost,
+      ...(input.principalAtAdmission ? { authorize: (tx) => assertPrincipalAtAdmission(tx, {
+        orgId: args.orgId, projectId: input.projectId, userId: input.userId, apiKeyId: input.apiKeyId ?? null, scope: input.principalAtAdmission!.scope,
+      }) } : {}),
+    });
     return row!;
   }
 

@@ -242,9 +242,13 @@ export const env = {
    * reconciler, a recovery read). Storage operations per file are independent; the session lock is held for the batch.
    */
   directUploadFinalizeConcurrency: Math.min(32, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY, 8)))),
-  /** Upload-session lock connections per process (default 6, at least 3); see lib/direct-upload-locks.ts. */
-  directUploadLockPoolMax: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX, 6),
-  /** Concurrent files/complete holders per process (default: pool size minus two). */
+  /** Upload-session lock connections per process (default 8, at least 5; two are kept for short operations); see lib/direct-upload-locks.ts. */
+  directUploadLockPoolMax: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX, 8),
+  /** Concurrent run starts (confirms, idempotent intakes) holding a lock connection per process (default 2 of 8). */
+  directUploadLockStartMax: process.env.DOCSLURP_UPLOAD_LOCK_START_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_MAX, 2) : undefined,
+  /** Concurrent run starts per organization in one process (default 1). */
+  directUploadLockStartPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_PER_ORG, 1),
+  /** Concurrent files/complete holders per process (default 3 of 8). */
   directUploadLockBatchMax: process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX, 4) : undefined,
   /** Concurrent files/complete holders per organization in one process (default 2). */
   directUploadLockBatchPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_PER_ORG, 2),

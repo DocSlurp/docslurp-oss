@@ -32,6 +32,8 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   },
   deleteUploadedObject: async (key: string) => { store.objects.delete(key); },
   abortMultipartUpload: async () => {},
+  listMultipartUploadParts: async () => [],
+  signMultipartUploadPart: async () => "https://storage.example/part",
 }));
 // Every confirm path (the route, the kick, the sweep) runs intake through the same in-memory ports.
 vi.mock("../services/project-intake.js", async importOriginal => {
@@ -169,4 +171,35 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     expect(Date.now() - shortStarted).toBeLessThan(1_000);
     expect((await holding).status).toBe(200);
   }, 30_000);
+
+  it("many concurrent run starts from one organization never block another organization's abort or part signing", async () => {
+    // Org A: six sessions ready to confirm, each with a slow run start.
+    const sessions = [];
+    for (let i = 0; i < 6; i++) {
+      const seeded = await seedSession(1, "upl-u", "upl-o", "upl-p");
+      expect((await post(`${seeded.id}/files/complete`, { files: [{ fileId: seeded.fileIds[0]! }] })).status).toBe(200);
+      sessions.push(seeded);
+    }
+    // Org B: an open multipart file to sign parts for, and a session to abort.
+    const signable = await seedSession(0, "upl-v", "upl-o2");
+    await sql`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+      values (${`${signable.id.slice(-6)}-mp`}, ${signable.id}, 'big.pdf', 'application/pdf', ${20 * 1024 * 1024}, ${`upl-v/${signable.id}/raw/big.pdf`}, 'multipart', 'up-1', ${8 * 1024 * 1024}, 'pending')`;
+    const abortable = await seedSession(1, "upl-v", "upl-o2");
+    store.intakeDelayMs = 1_500;
+    const confirms = sessions.map(session => post(`${session.id}/confirm`));
+    await new Promise(resolve => setTimeout(resolve, 400));
+    // Org A's starts hold (or wait for) the capped run-start slots; org B's short work answers at once.
+    let started = Date.now();
+    const signed = await post(`${signable.id}/files/${signable.id.slice(-6)}-mp/parts/sign`, { partNumbers: [1, 2] }, "upl-v");
+    expect(signed.status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    started = Date.now();
+    expect((await post(`${abortable.id}/abort`, undefined, "upl-v")).status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // Each of org A's confirms either started its run or was told to repeat (its slot wait ran out): never a 5xx.
+    for (const response of await Promise.all(confirms)) {
+      if (response.status >= 300) expect(await response.json()).toMatchObject({ error: { code: "upload_session_busy" } });
+      expect(response.status === 409 || response.status < 300).toBe(true);
+    }
+  }, 60_000);
 });

@@ -10,13 +10,15 @@ export interface DirectSessionIdempotencyDeps {
   getCached: typeof getCachedIdempotentResponse;
   store: typeof storeIdempotentResponse;
   /** Serializes same-key requests; a second concurrent one is told to retry. */
-  lock: <T>(name: string, run: () => Promise<T>) => Promise<T>;
+  lock: <T>(name: string, run: () => Promise<T>, orgId?: string | null) => Promise<T>;
 }
 
 const defaultDeps: DirectSessionIdempotencyDeps = {
   getCached: getCachedIdempotentResponse,
   store: storeIdempotentResponse,
-  lock: (name, run) => withDirectUploadLock(name, run, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight"),
+  // Session creation opens provider multipart uploads per file under the lock: a capped storage-work holder.
+  lock: (name, run, orgId) => withDirectUploadLock(name, run, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
+    { lockClass: "batch", orgId: orgId ?? null }),
 };
 
 /**
@@ -131,5 +133,5 @@ export async function createSessionIdempotently<T extends CreatedSession>(args: 
       body: { sessionId: created.sessionId, ...(created.rejected?.length ? { rejected: created.rejected } : {}) },
     });
     return { body: created, status: 201 as const, replayed: false };
-  });
+  }, args.scope.orgId ?? null);
 }

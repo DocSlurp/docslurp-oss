@@ -19,8 +19,10 @@ Compose passes every variable in `.env.selfhost` to the server and workers (`env
 | `MAX_UPLOAD_BYTES` | `524288000` (500 MiB) | Largest accepted upload. |
 | `MAX_MULTIPART_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest file on the buffered `POST /v1/uploads/bulk` path, which holds the body in memory; larger files must use direct upload sessions. Capped at `MAX_UPLOAD_BYTES`. |
 | `DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY` | `8` (1–32) | Files of one direct-upload session verified and sealed at once (a batched `files/complete`, the reconciler, a recovery read). |
-| `DOCSLURP_UPLOAD_LOCK_POOL_MAX` | `6` (at least 3) | Database connections per API process for direct-upload session locks. Two are always left to the reconciler and to short operations (part signing, confirm, abort). |
-| `DOCSLURP_UPLOAD_LOCK_BATCH_MAX` | pool minus two | Concurrent `files/complete` calls finalizing files, per API process. |
+| `DOCSLURP_UPLOAD_LOCK_POOL_MAX` | `8` (at least 5) | Database connections per API process for direct-upload session locks. Two are kept for short operations (part signing, abort); the rest are shared by file finalization, run starts and the reconciler, each capped below. |
+| `DOCSLURP_UPLOAD_LOCK_START_MAX` | `2` (with the default pool) | Concurrent run starts (a confirm, the reconciler's confirm, an idempotent bulk or URL upload) per API process. |
+| `DOCSLURP_UPLOAD_LOCK_START_PER_ORG` | `1` | Of those, how many one organization may hold at once in a process. |
+| `DOCSLURP_UPLOAD_LOCK_BATCH_MAX` | `3` (with the default pool) | Concurrent `files/complete` calls finalizing files, per API process. |
 | `DOCSLURP_UPLOAD_LOCK_BATCH_PER_ORG` | `2` | Of those, how many one organization may hold at once in a process. |
 | `DOCSLURP_UPLOAD_LOCK_HOLD_BUDGET_MS` | `5000` | How long one `files/complete` call (or reconciler pass) keeps starting new files; files it did not reach are answered as retryable `upload_session_busy`. |
 | `DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS` | `30000` | Hard cap on one call's storage work under the session lock; in-flight storage calls are cancelled after it. |

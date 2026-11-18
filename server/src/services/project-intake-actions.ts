@@ -24,7 +24,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
-import { discardUnstartedRun } from "./run-creation.js";
+import { discardUnstartedRun, RunAdmissionRefusedError } from "./run-creation.js";
 import { type ProjectRunRow } from "./run-records.js";
 import { canContributeToProject, getProjectAccess } from "./organizations.js";
 import { getLiveApiKeyById } from "./api-keys.js";
@@ -39,6 +39,7 @@ import {
 import {
   prepareDirectUploadProjectIntake,
   loadDirectUploadSession,
+  loadDirectUploadSessionRow,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
 import { canonicalIdForUrl } from "../lib/canonical-id.js";
@@ -248,7 +249,9 @@ async function idempotently(
       body: result.payload as unknown as Record<string, unknown>,
     });
     return result;
-  }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight");
+  }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
+  // Holds the lock through run creation: a capped run-start holder, counted against the organization.
+  { lockClass: "start", orgId: args.orgId ?? null });
 }
 
 /**
@@ -307,6 +310,9 @@ export async function confirmDirectUploadProjectIntake(
   args: { sessionId: string; userId: string; audit?: ProjectIntakeAudit; lockWaitMs?: number },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
+  // The organization a run start counts against is known before the lock (the row is scoped to this user).
+  const owned = await loadDirectUploadSessionRow(args.sessionId, args.userId);
+  if (!owned) throw new ProjectIntakeError("Upload session not found", 404);
   return withDirectUploadLock(args.sessionId, async () => {
     const loaded = await loadDirectUploadSession(args.sessionId, args.userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
@@ -365,16 +371,23 @@ export async function confirmDirectUploadProjectIntake(
       // Recorded from the principal that opened the session (never a request field); older rows are machine.
       origin: session.origin === "app" ? "app" : "machine",
       allowedProjectIds: admission.allowedProjectIds,
+      // The check above can go stale while admission waits on the organization's spend lock: repeat it there.
+      principalAtAdmission: { scope: "ingest" },
       runId: args.sessionId,
       kind: "direct-upload",
       items,
       audit: args.audit,
       ...(extract ? { extract } : {}),
-    }, intakePorts);
+    }, intakePorts).catch(async (error: unknown) => {
+      if (!(error instanceof RunAdmissionRefusedError)) throw error;
+      // Refused inside admission (nothing reserved or created): leave the session as it was, so the refusal is final.
+      await sql`update upload_sessions set status = ${session.status} where id = ${args.sessionId} and status = 'ingesting'`;
+      throw new ProjectIntakeError("API key no longer permits this upload", 403);
+    });
     const result = actionResult(intake);
     await persistDirectUploadResult(args.sessionId, result);
     return result;
-  }, undefined, undefined, args.lockWaitMs ?? 0);
+  }, undefined, undefined, { waitMs: args.lockWaitMs ?? 0, lockClass: "start", orgId: owned.org_id });
 }
 
 async function persistDirectUploadResult(sessionId: string, result: ProjectIntakeActionResult) {
