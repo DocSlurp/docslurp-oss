@@ -24,7 +24,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
-import { normalizeUploadPath } from "../lib/canonical-id.js";
+import { normalizeUploadPath, opaqueCanonicalIdForUrl, tryCanonicalIdForUrl } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
@@ -188,6 +188,33 @@ export function isRunCreationBlockedError(
   error: unknown,
 ): error is SpendBlockedError {
   return error instanceof SpendBlockedError;
+}
+
+/**
+ * URL documents ingested before canonical IDs became opaque store the URL
+ * itself (canonicalIdForUrl) as their canonical ID; new ingests of the same URL
+ * use `url:<sha256>`. When a URL document is ingested under the server-derived
+ * opaque ID, this project's legacy rows of that URL (with `sourceUrl` metadata)
+ * are re-keyed to it first, under the advisory lock of the legacy key, so the
+ * version lookup and the supersession trigger (which match canonical_id
+ * exactly) treat them as earlier versions. A caller's own canonical ID is never
+ * touched. Lazy, per ingest; no migration.
+ */
+export async function adoptLegacyUrlVersions(
+  client: SqlClient,
+  args: { projectId: string; canonicalId: string; metadata?: Record<string, unknown> | null },
+): Promise<number> {
+  const sourceUrl = typeof args.metadata?.sourceUrl === "string" ? args.metadata.sourceUrl : null;
+  if (!sourceUrl || args.canonicalId !== opaqueCanonicalIdForUrl(sourceUrl)) return 0;
+  const legacy = tryCanonicalIdForUrl(sourceUrl);
+  if (!legacy || legacy === args.canonicalId) return 0;
+  await client`select pg_advisory_xact_lock(hashtextextended(${`${args.projectId}:${legacy}`}, 0))`;
+  const adopted = await client<{ id: string }[]>`
+    update documents set canonical_id = ${args.canonicalId}, updated_at = now()
+    where project_id = ${args.projectId} and canonical_id = ${legacy} and (metadata ->> 'sourceUrl') is not null
+    returning id
+  `;
+  return adopted.length;
 }
 
 export async function enforceLiveBudgetCaps(
@@ -724,6 +751,8 @@ export function createRunCreation(deps: RunCreationDeps) {
             canonicalId: file.canonicalId,
           });
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
+        // A URL re-ingest also takes over the version chain of this URL's legacy rows (raw-URL canonical ID).
+        if (!input.extract) await adoptLegacyUrlVersions(client, { projectId: input.projectId, canonicalId, metadata: file.metadata });
         const [existing] = input.extract ? [] : await client<{ id: string; version_number: number }[]>`
           select id, version_number from documents
           where project_id = ${input.projectId} and canonical_id = ${canonicalId}
