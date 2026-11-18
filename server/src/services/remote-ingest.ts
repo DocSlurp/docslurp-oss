@@ -14,13 +14,27 @@ function parseKnownContentLength(raw: string | null): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-/**
- * A URL that could not be taken. It is named by its position (`urls[2]`), never
- * by the URL itself: a download link often carries its access grant in the path
- * or query, and this name and message reach the response and telemetry.
- */
-function rejectedUrl(index: number, message: string): ProjectIntakeItem {
-  return { filename: `urls[${index}]`, content: { rejected: new ProjectIntakeError(message, 400) } };
+/** How refusals name the URL at `index`: never the URL or its path, which can carry its access grant. */
+function urlRef(index: number) {
+  return { name: `urls[${index}]`, index };
+}
+
+/** Why a URL could not be fetched, as clients are told it: a fixed vocabulary. */
+export type UrlFetchFailure = "blocked" | "timeout" | "unreachable" | "http_status";
+
+/** Classifies a fetch failure; the raw cause goes to the logs, never to the client. */
+export function classifyUrlFetchFailure(error: unknown): { failure: UrlFetchFailure; message: string } {
+  // Our own URL policy messages are fixed text ("Only https URLs are allowed", ...).
+  if (error instanceof UnsafeExternalUrlError) return { failure: "blocked", message: error.message };
+  const name = error instanceof Error ? error.name : "";
+  if (name === "TimeoutError" || name === "AbortError") return { failure: "timeout", message: "The URL did not respond in time" };
+  return { failure: "unreachable", message: "The URL could not be fetched" };
+}
+
+function rejectedUrl(index: number, failure: UrlFetchFailure, message: string, cause: unknown): ProjectIntakeItem {
+  const raw = cause instanceof Error ? `${cause.name}: ${cause.message}${cause.cause instanceof Error ? ` (cause: ${cause.cause.message})` : ""}` : String(cause);
+  console.warn(`[remote-ingest] url_fetch_failed ref=urls[${index}] failure=${failure} cause=${JSON.stringify(raw)}`);
+  return { filename: `urls[${index}]`, refusalRef: urlRef(index), content: { rejected: new ProjectIntakeError(message, 400) } };
 }
 
 /**
@@ -45,14 +59,14 @@ export async function* remoteUrlIntakeItems(
         signal: options.signal ?? AbortSignal.timeout(15_000),
       });
     } catch (error) {
-      // Our own URL policy messages are fixed text; anything else (DNS, TLS, sockets) may quote the URL.
-      yield rejectedUrl(index, error instanceof UnsafeExternalUrlError ? error.message : "The URL could not be fetched");
+      const { failure, message } = classifyUrlFetchFailure(error);
+      yield rejectedUrl(index, failure, message, error);
       continue;
     }
 
     try {
       if (!response.ok) {
-        yield rejectedUrl(index, `The URL's server answered HTTP ${response.status}`);
+        yield rejectedUrl(index, "http_status", `The URL's server answered HTTP ${response.status}`, `HTTP ${response.status} ${response.statusText}`);
         continue;
       }
       const filename = path.basename(new URL(safeUrl).pathname) || `remote-${randomUUID()}`;
@@ -69,6 +83,8 @@ export async function* remoteUrlIntakeItems(
         mimeType,
         canonicalId: options.canonicalIds?.[index] ?? canonicalIdForUrl(safeUrl),
         metadata: { sourceUrl: safeUrl },
+        // Screening, storage and unreadable refusals name it urls[i], never its path segment.
+        refusalRef: urlRef(index),
         content: response.body
           ? { stream: Readable.fromWeb(response.body as NodeReadableStream), contentLength }
           : { bytes: Buffer.from(await response.arrayBuffer()) },
