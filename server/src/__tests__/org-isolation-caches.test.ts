@@ -55,6 +55,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "server/src/search/eligible-documents.ts#lastInvalidatedAt": { class: "tenant-id", why: "invalidation timestamps by project" },
   "server/src/search/eligible-documents.ts#pendingInvalidations": { class: "tenant-id", why: "invalidation timers by project" },
   "server/src/search/eligible-documents.ts#runProjects": { class: "tenant-id", why: "run id to its project" },
+  "server/src/search/index-serving.ts#TtlLruCache": { class: "tenant-id", why: "live document counts per index config, keyed by project id, read after the search access check" },
   "server/src/search/embedding-cache.ts#TtlLruCache": { class: "org", why: "embeddingCacheKey requires and hashes the org id" },
   "server/src/search/lancedb.ts#connections": { class: "operational", why: "connections per database URI" },
   "server/src/search/lancedb.ts#lastPrewarm": { class: "tenant-id", why: "prewarm timestamps per project table" },
