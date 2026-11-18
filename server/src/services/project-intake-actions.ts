@@ -41,11 +41,12 @@ import {
   loadDirectUploadSession,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
-import { canonicalIdForUrl } from "../lib/canonical-id.js";
+import { canonicalIdForUrl, opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
 import { attachExtractRun, chargeExtractRetention, describeExtractById, loadIntakeExtract } from "./extracts.js";
-import { remoteUrlIntakeItems } from "./remote-ingest.js";
+import { extensionForMimeType, looksLikeUrlFilename, remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
   intakeIntoProject,
+  REFERENCED_REFUSAL_MESSAGES,
   ProjectIntakeError,
   projectIntakePorts,
   type ProjectIntakeAudit,
@@ -115,9 +116,7 @@ function actionResult(
       documents: intake.documents,
       warnings: [
         ...(intake.deferredReason ? [intake.deferredReason] : []),
-        ...(intake.rejected.length > 0
-          ? [`${intake.rejected.length} of ${intake.rejected.length + intake.documents.length} files were not accepted: ${intake.rejected.map((file) => file.filename).join(", ")}.`]
-          : []),
+        ...(intake.rejected.length > 0 ? [notAcceptedWarning(intake.rejected, intake.documents.length)] : []),
       ],
       ...(intake.rejected.length > 0 ? { rejected: intake.rejected } : {}),
       ...(intake.extract ? { extract: intake.extract } : {}),
@@ -140,6 +139,47 @@ async function authorizeReceiptProject(projectId: string, userId: string, orgId?
       throw new ProjectIntakeError("API key no longer permits this upload", 403);
     }
   }
+}
+
+const URL_INTAKE_ROUTES = new Set(["uploads.url", "extracts.url"]);
+const NOT_ACCEPTED_WARNING = /files were not accepted:/;
+
+function notAcceptedWarning(rejected: ProjectIntakeResult["rejected"], documentCount: number): string {
+  return `${rejected.length} of ${rejected.length + documentCount} files were not accepted: ${rejected.map((file) => file.filename).join(", ")}.`;
+}
+
+/**
+ * A URL intake's receipt as it may be replayed: receipts written before URL
+ * refusals were named `urls[i]` can hold a URL, its path segment or a raw
+ * reason. Rejections keep their fixed copy only when already named `urls[i]`;
+ * otherwise they get that name and the per-code copy. Documents keep a
+ * filename only when it looks like one, and a URL canonical ID becomes opaque.
+ */
+export function sanitizeReplayedUrlIntake(payload: ProjectIntakePayload): ProjectIntakePayload {
+  const rejected = payload.rejected?.map((file, position) => {
+    if (/^urls\[\d+\]$/.test(file.filename)) return file;
+    const index = typeof file.index === "number" ? file.index : position;
+    return { ...file, index, filename: `urls[${index}]`, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
+  });
+  const safeName = (filename: string, position: number, mimeType: string) =>
+    looksLikeUrlFilename(filename) ? filename : `url-${position}${extensionForMimeType(mimeType)}`;
+  const documents = payload.documents.map((document, position) => ({
+    ...document,
+    filename: safeName(document.filename, position, document.mimeType),
+    ...(typeof document.canonicalId === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(document.canonicalId)
+      ? { canonicalId: opaqueCanonicalIdForUrl(document.canonicalId) }
+      : {}),
+  }));
+  return {
+    ...payload,
+    documents,
+    ...(rejected ? { rejected } : {}),
+    ...(payload.ingested ? { ingested: payload.ingested.map((file, position) => ({ ...file, filename: safeName(file.filename, position, file.mimeType) })) } : {}),
+    warnings: [
+      ...payload.warnings.filter((warning) => !NOT_ACCEPTED_WARNING.test(warning)),
+      ...(rejected?.length ? [notAcceptedWarning(rejected, documents.length)] : []),
+    ],
+  };
 }
 
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
@@ -197,7 +237,11 @@ async function idempotently(
           !stable.payload.run?.id || !Array.isArray(stable.payload.documents) || !Array.isArray(stable.payload.warnings)) {
         throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
       }
-      return { ...stable, idempotencyReplayed: true };
+      return {
+        ...stable,
+        payload: URL_INTAKE_ROUTES.has(args.routeKey) ? sanitizeReplayedUrlIntake(stable.payload) : stable.payload,
+        idempotencyReplayed: true,
+      };
     }
 
     // Claim before work. Safe preparation can retry under this same lock; a crawl

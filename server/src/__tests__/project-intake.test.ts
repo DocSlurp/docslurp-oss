@@ -546,7 +546,7 @@ describe("Project Intake from remote URLs", () => {
     expect(file.fileSize).toBe(Buffer.byteLength(decoded));
   });
 
-  it("streams fetched bodies into storage, titles from the URL, and audits only origins", async () => {
+  it("streams fetched bodies into storage, titles from the URL's host only, and audits only origins", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello from upstream", {
       status: 200,
       headers: { "content-type": "text/plain", "content-length": "19" },
@@ -559,7 +559,8 @@ describe("Project Intake from remote URLs", () => {
     const [file] = fakes.runs[0].files;
     expect(file).toMatchObject({ filename: "q1-pipeline.txt", mimeType: "text/plain" });
     expect(fakes.objects.get(file.sourceKey)).toMatchObject({ via: "stream", body: Buffer.from("hello from upstream") });
-    expect(fakes.createdProjects[0].name).toBe("Q1 pipeline");
+    // Never the path or query (a grant can live there): the content phases of auto-titling rename it later.
+    expect(fakes.createdProjects[0].name).toBe("Import from docs.example.com");
     expect(fakes.audit[0].metadata).toMatchObject({ mode: "url-ingest", urlCount: 1, urlOrigins: ["https://docs.example.com"] });
     expect(JSON.stringify(fakes.audit)).not.toContain("secret");
   });
@@ -623,8 +624,9 @@ describe("Project Intake from remote URLs", () => {
       return new Response("down", { status: 503 });
     }));
     const fakes = createProjectIntakeFakes();
-    // createRun finds this stored file unreadable (stage 3); its name is the URL's last path segment.
-    fakes.state.unreadable.add("GRANT2SECRETabcdef0123456789.txt");
+    // createRun finds this stored file unreadable (stage 3). Its grant-like path segment is never
+    // used as the stored filename: it is `<host>-<index><ext>`.
+    fakes.state.unreadable.add("example.com-2.txt");
     const urls = [
       "https://example.com/fine.txt",
       "https://example.com/d/GRANT1SECRET0123456789abcdef.exe",
@@ -647,7 +649,7 @@ describe("Project Intake from remote URLs", () => {
       expect(JSON.stringify(result?.rejected)).not.toMatch(/SECRET/);
       // Telemetry keeps the raw reason (owner decision 2026-11-18).
       const logs = warn.mock.calls.map((call) => String(call[0])).join("\n");
-      expect(logs).toMatch(/\[intake\] source_refused ref=urls\[1\] code=unsupported_type .*GRANT1SECRET/);
+      expect(logs).toMatch(/\[intake\] source_refused ref=urls\[1\] code=unsupported_type status=415 reason=/);
       expect(logs).toMatch(/\[remote-ingest\] url_fetch_failed ref=urls\[4\] failure=timeout codes=TimeoutError/);
     } finally {
       warn.mockRestore();

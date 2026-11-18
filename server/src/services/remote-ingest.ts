@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
-import { canonicalIdForUrl } from "../lib/canonical-id.js";
+import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { MIME_BY_EXTENSION, canonicalMimeType, bareMimeType } from "@docslurp/shared";
 import { assertSafeExternalUrl, safeExternalFetch, UnsafeExternalUrlError } from "../lib/network-security.js";
 import { inferMimeType } from "./documents.js";
 import { ProjectIntakeError, type ProjectIntakeItem } from "./project-intake.js";
@@ -12,6 +12,32 @@ function parseKnownContentLength(raw: string | null): number | undefined {
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+/** At most this long, with an extension, and no run of 24+ base64 or hex characters (a grant, key or signature). */
+const MAX_URL_FILENAME_CHARS = 100;
+const OPAQUE_RUN = /[A-Za-z0-9+/=]{24,}|[0-9a-fA-F]{24,}/;
+
+/** Whether a URL's last path segment reads as a filename rather than an opaque token. */
+export function looksLikeUrlFilename(segment: string): boolean {
+  return segment.length > 0 && segment.length <= MAX_URL_FILENAME_CHARS && /\.[A-Za-z0-9]{1,10}$/.test(segment) && !OPAQUE_RUN.test(segment);
+}
+
+/** The first extension whose canonical MIME type is `mimeType` (`.pdf`), or `.bin`. */
+export function extensionForMimeType(mimeType: string): string {
+  const canonical = canonicalMimeType(mimeType) ?? bareMimeType(mimeType);
+  return Object.entries(MIME_BY_EXTENSION).find(([, mime]) => mime === canonical)?.[0] ?? ".bin";
+}
+
+/**
+ * The stored name of the file fetched from `url` (the `index`-th URL): its last
+ * path segment when that looks like a filename, otherwise `<host>-<index><ext>`
+ * with the extension of the sniffed type.
+ */
+export function urlDerivedFilename(url: URL, index: number, mimeType: string): string {
+  let segment = path.basename(url.pathname);
+  try { segment = decodeURIComponent(segment); } catch { /* keep the encoded form */ }
+  return looksLikeUrlFilename(segment) ? segment : `${url.hostname}-${index}${extensionForMimeType(mimeType)}`;
 }
 
 /** How refusals name the URL at `index`: never the URL or its path, which can carry its access grant. */
@@ -74,7 +100,9 @@ function rejectedUrl(index: number, failure: UrlFetchFailure, message: string, c
  * Project Intake adapter for remote URLs. Each URL is fetched lazily and
  * yielded as a streaming item; the response stays open until Project Intake
  * has validated and stored it, then it is cancelled. Each item's canonical ID
- * defaults to the URL, so re-ingesting a page supersedes its previous version.
+ * defaults to an opaque ID derived from the URL (`url:<sha256>`), so
+ * re-ingesting a page supersedes its previous version without a signed URL's
+ * query ever being returned as a canonical ID.
  * A URL that cannot be fetched is yielded as a rejected item, so the other
  * URLs are still ingested.
  */
@@ -102,8 +130,10 @@ export async function* remoteUrlIntakeItems(
         yield rejectedUrl(index, "http_status", `The URL's server answered HTTP ${response.status}`, [`HTTP_${response.status}`]);
         continue;
       }
-      const filename = path.basename(new URL(safeUrl).pathname) || `remote-${randomUUID()}`;
       const mimeType = inferMimeType(url, response.headers.get("content-type"));
+      // The stored filename (and the source key built from it) is the URL's last path
+      // segment only when it looks like a filename; a grant-like segment never is.
+      const filename = urlDerivedFilename(new URL(safeUrl), index, mimeType);
       // Fetch decodes compressed responses but retains their wire headers. The
       // encoded length is not the length of the stream we send to object storage.
       const encoding = response.headers.get("content-encoding")?.trim().toLowerCase();
@@ -114,7 +144,7 @@ export async function* remoteUrlIntakeItems(
       yield {
         filename,
         mimeType,
-        canonicalId: options.canonicalIds?.[index] ?? canonicalIdForUrl(safeUrl),
+        canonicalId: options.canonicalIds?.[index] ?? opaqueCanonicalIdForUrl(safeUrl),
         metadata: { sourceUrl: safeUrl },
         // Screening, storage and unreadable refusals name it urls[i], never its path segment.
         refusalRef: urlRef(index),

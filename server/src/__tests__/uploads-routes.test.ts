@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi, afterAll } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import { createUploadsRoutes } from "../routes/uploads.js";
+import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
 import { RunCreationBlockedError } from "../services/runs.js";
 import { withTestSession } from "./helpers/session-app.js";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
@@ -179,6 +180,26 @@ describe("uploadsRoutes over Project Intake", () => {
     await expect(response.json()).resolves.toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
   });
 
+  it("never returns a refused URL's grant anywhere in the response, even when it is submitted first", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => String(input).includes("GRANT")
+      ? new Response("gone", { status: 503 })
+      : new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })));
+    const { app } = setup([]);
+    const urls = [
+      "https://files.example.com/d/GRANTSECRET0123456789abcdefXYZ/report.pdf?X-Amz-Signature=SIGSECRET",
+      "https://docs.example.com/notes.txt?token=TOKSECRET",
+      "https://docs.example.com/s/QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ1Njc4OTA",
+    ];
+    const response = await app.request("/uploads/url", json({ newProject: true, urls }));
+    expect(response.status).toBe(201);
+    const text = await response.text();
+    expect(text).not.toMatch(/GRANTSECRET|SIGSECRET|TOKSECRET|QWxhZGRpbjpvcGVuIHNlc2FtZTEy/);
+    const body = JSON.parse(text);
+    expect(body.project.name).toBe("Import from files.example.com");
+    expect(body.rejected).toEqual([expect.objectContaining({ index: 0, filename: "urls[0]" })]);
+    expect(body.documents.map((document: { filename: string }) => document.filename)).toEqual(["notes.txt", "docs.example.com-2.txt"]);
+  });
+
   it("reports what URL ingest fetched", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain", "content-length": "5" } })));
     const { app } = setup();
@@ -195,7 +216,9 @@ describe("uploadsRoutes over Project Intake", () => {
       { url: "https://example.com/products.mdx", canonicalId: "/products" },
     ] }));
     expect(response.status).toBe(201);
-    expect(fakes.runs[0].files.map((file) => file.canonicalId)).toEqual(["https://example.com/products", "/products"]);
+    // Opaque and server-derived (a signed URL's query is a credential); the same URL always maps to the same ID.
+    expect(fakes.runs[0].files.map((file) => file.canonicalId)).toEqual([opaqueCanonicalIdForUrl("https://example.com/products"), "/products"]);
+    expect(fakes.runs[0].files[0].canonicalId).toMatch(/^url:[0-9a-f]{64}$/);
     expect(fakes.runs[0].files[0].metadata).toMatchObject({ sourceUrl: "https://example.com/products/#pricing" });
   });
 

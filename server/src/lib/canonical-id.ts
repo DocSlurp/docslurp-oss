@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { normalizeSourcePath } from "@docslurp/shared";
 
 export const MAX_CANONICAL_ID_LENGTH = 2048;
@@ -31,7 +32,17 @@ export function normalizeCanonicalId(value: unknown): string | null {
   return trimmed;
 }
 
-/** Default identity for fetched URLs: the URL without its fragment or a trailing slash. */
+/**
+ * Default identity for a URL-intake document: `url:` plus the sha256 hex of
+ * the URL (without fragment or trailing slash, as canonicalIdForUrl). Opaque,
+ * because canonical IDs are returned in document responses and a signed URL's
+ * query is a credential; re-ingesting the same URL still matches.
+ */
+export function opaqueCanonicalIdForUrl(rawUrl: string): string {
+  return `url:${createHash("sha256").update(canonicalIdForUrl(rawUrl)).digest("hex")}`;
+}
+
+/** The URL without its fragment or a trailing slash. */
 export function canonicalIdForUrl(rawUrl: string): string {
   const url = new URL(rawUrl);
   url.hash = "";

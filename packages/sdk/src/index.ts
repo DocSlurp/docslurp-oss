@@ -716,7 +716,7 @@ export type UploadUrlsInput = {
   newProject?: boolean;
   orgId?: string;
   templateKey?: ProjectTemplateKey;
-  /** Each URL's canonical ID defaults to the URL; pass an object to map it elsewhere (e.g. "/products"). */
+  /** Each URL's canonical ID defaults to an opaque ID derived from the URL (`url:<sha256>`; the same URL always matches); pass an object to map it elsewhere (e.g. "/products"). */
   urls: Array<string | { url: string; canonicalId?: string }>;
   /** Project ID, slug or name. A name that matches no project creates one with that name. */
   project?: string;
