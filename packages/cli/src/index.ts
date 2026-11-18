@@ -528,8 +528,9 @@ type SessionProbe = () => Promise<Response | "retry" | "fail">;
  * Sends a session-locked request (`files/complete`, `confirm`; both idempotent, so a repeat is safe) one at a time per upload.
  * It waits out a busy lock and rate limiting with backoff, and asks `probe` about an uncoded 409 from an older server.
  */
-async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<string, string | boolean>, probe: SessionProbe): Promise<Response> {
+async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<string, string | boolean>, probe: SessionProbe, transient400 = 0): Promise<Response> {
   const giveUpAt = Date.now() + Math.max(120_000, Number(flags.timeout ?? 30) * 1000);
+  let bad400 = 0;
   for (let attempt = 0; ; attempt++) {
     const response = await sessionSlot(send);
     const backoff = Math.min(2_000, 200 * 2 ** Math.min(attempt, 6)) * (0.5 + Math.random() / 2);
@@ -537,7 +538,9 @@ async function sendWhenSessionFree(send: () => Promise<Response>, flags: Record<
     if (response.status === 429) {
       waitMs = Math.max(backoff, Math.min(30, retryAfterSeconds(response.headers.get("retry-after")) ?? 1) * 1000);
     } else {
-      const code = await conflictCode(response);
+      // An older server reports a transient storage failure while finalizing as a generic 400. Up to `transient400` times,
+      // ask the session: a file still pending in an open session is worth another try.
+      const code = response.status === 400 && bad400 < transient400 ? (bad400++, "conflict") : await conflictCode(response);
       if (code === null || (code !== "upload_session_busy" && code !== "conflict")) return response;
       if (code === "conflict") {
         const verdict = await probe().catch(() => "retry" as const);
@@ -697,9 +700,10 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
 
   /** An older server's uncoded 409: ask the session whether the file is done, worth retrying, or a real failure. */
   const probeFor = (fileIds: string[]): SessionProbe => async () => {
-    const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
-    // A rate-limited or unavailable read says nothing about the session: ask again later.
-    if (refreshed.status === 429 || refreshed.status >= 500) { await refreshed.body?.cancel(); return "retry"; }
+    // The status-only read takes no session lock (the full one signs URLs under the lock, so it is busy whenever we are).
+    const refreshed = await apiFetchRepeatable(`${sessionPath}?statusOnly=true`, flags, {});
+    // A rate-limited, busy or unavailable read says nothing about the session: ask again later.
+    if (refreshed.status === 429 || refreshed.status === 409 || refreshed.status >= 500) { await refreshed.body?.cancel(); return "retry"; }
     if (!refreshed.ok) return "fail";
     const state = await refreshed.json() as DirectSession;
     if (fileIds.every((id) => state.files.find((file) => file.id === id)?.status === "completed")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -707,7 +711,7 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
   };
 
   async function completeOne(item: Pending): Promise<void> {
-    const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(item.body)), flags, probeFor([fileOf(item.body)]));
+    const done = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(item.body)), flags, probeFor([fileOf(item.body)]), 3);
     if (!done.ok) throw await responseFailure(done);
   }
 
@@ -715,7 +719,7 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
     const response = await sendWhenSessionFree(
       // A batch entry carries the file id and its single-PUT etag only: the server reads a multipart file's parts from storage.
       () => apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json({ files: items.map(({ body }) => ({ fileId: body.fileId, ...(body.etag ? { etag: body.etag } : {}) })) })),
-      flags, probeFor(items.map((item) => fileOf(item.body))));
+      flags, probeFor(items.map((item) => fileOf(item.body))), batched === true ? 3 : 0);
     if (batched === null && response.status === 400) {
       // No batch support: settle these one by one, and every later file too.
       await response.body?.cancel();
@@ -818,7 +822,8 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           if (round >= 2 || !(isLostResponse(error) || (error instanceof CliApiError && (error.status === 403 || RETRYABLE_STATUSES.has(error.status))))) throw error;
           // Resume from what storage holds: the session lists the parts still missing, with fresh signed URLs.
           await sleepMs(250 * 2 ** round);
-          const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
+          // The full read signs fresh URLs under the session lock: wait out a busy lock or a rate limit.
+          const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(sessionPath, flags, {}), flags, async () => "retry");
           if (!refreshed.ok) throw error;
           const next = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
           if (!next) throw error;
@@ -833,7 +838,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
       confirmed = await sendWhenSessionFree(() => apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" }), flags, async () => {
         // The reconciler may be confirming this session itself: its result is the answer. A closed session is a real failure.
         const status = await apiFetchRepeatable(`${sessionPath}?statusOnly=true`, flags, {});
-        if (status.status === 429 || status.status >= 500) { await status.body?.cancel(); return "retry"; }
+        if (status.status === 429 || status.status === 409 || status.status >= 500) { await status.body?.cancel(); return "retry"; }
         if (!status.ok) return "fail";
         const state = await status.json() as { status?: string; result?: unknown };
         if (state.result) return new Response(JSON.stringify(state.result), { status: 201, headers: { "content-type": "application/json" } });

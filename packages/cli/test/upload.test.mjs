@@ -245,6 +245,24 @@ test("a rate-limited session read while checking an uncoded 409 is retried, not 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("an older server's generic 400 on complete (a storage hiccup) is retried a few times while the file is pending", async () => {
+  for (const [failures, expectOk] of [[1, true], [10, false]]) {
+    const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+    try {
+      const files = await directFiles(dir, 2);
+      let left = failures;
+      const { respond } = directSessionServer({ onComplete: ({ fileId }) => (
+        fileId === "f1" && left-- > 0 ? { status: 400, body: { error: { code: "invalid_request", message: "Please check the information you entered and try again." } } } : { body: { ok: true } }
+      ) });
+      const result = await invoke(["upload", ...files], respond, { killAfterMs: 60_000 });
+      assert.equal(result.code === 0, expectOk, result.stderr);
+      const probes = result.requests.filter((request) => request.method === "GET" && request.url.includes("statusOnly=true"));
+      assert.ok(probes.length >= 1, "the probe uses the lock-free status read");
+      if (!expectOk) assert.equal(result.requests.filter((request) => request.url.endsWith("/files/complete") && JSON.parse(request.body.toString()).fileId === "f1").length, 4, "three retries, then fail");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+});
+
 test("more than 1,000 files go up as several sessions; a failed session does not stop the rest", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
   try {
