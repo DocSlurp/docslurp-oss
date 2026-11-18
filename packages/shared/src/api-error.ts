@@ -58,6 +58,10 @@ export const API_ERROR_CODES = [
   "policy_publication_unavailable",
   "settings_idempotency_conflict",
   "settings_reprocess_consent_required",
+  "reindex_required",
+  "estimate_stale",
+  "privacy_mode_violation",
+  "uploads_in_progress",
   "payload_too_large",
   "rate_limited",
   "spend_limit_exceeded",
@@ -182,6 +186,10 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   project_settings_unreadable: "This project's settings were saved by a newer version and cannot be changed here. Try again shortly.",
   settings_idempotency_conflict: "This settings request ID was already used with different parameters. Reuse the original request, or start a new intentional publication.",
   settings_reprocess_consent_required: "This change queues existing-document work. Estimate it and explicitly confirm reprocessing before saving.",
+  reindex_required: "This change alters how the project's search index is built, and the project already has indexed documents. Nothing was saved. Apply it with the reindex command (POST /v1/projects/{projectId}/reindex) or resend it with apply: \"reindex\" to re-index the existing documents.",
+  uploads_in_progress: "Uploads are still processing in this project. Wait for them to finish, then apply this change (it re-indexes them with the rest).",
+  privacy_mode_violation: "This project's privacy mode doesn't allow that setting. A restricted privacy mode needs local models (a local embedding profile).",
+  estimate_stale: "The re-index work or its price changed since the estimate. Nothing was saved. Estimate again (POST /v1/projects/{projectId}/reindex/estimate or /estimate) and retry with the new signature.",
   payload_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   rate_limited: PUBLIC_ERROR_MESSAGES.rateLimit,
   spend_limit_exceeded: PUBLIC_ERROR_MESSAGES.spendLimit,
@@ -294,6 +302,12 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
   if (code === "project_not_found" && typeof details?.projectSlug === "string") {
     return `No project matching "${details.projectSlug}" was found. Pass a project ID, slug or name from this organization, or omit project to use the default project.`;
   }
+  if (code === "reindex_required") {
+    const reindex = publicReindexRequiredDetails(details?.reindex);
+    if (!reindex) return base;
+    const work = reindex.documents > 0 ? ` It re-indexes ${reindex.documents} document${reindex.documents === 1 ? "" : "s"} (${reindex.pages} page${reindex.pages === 1 ? "" : "s"})${reindex.credits ? `, about ${formatCreditRange(reindex.credits)} credits` : ""}.` : "";
+    return `Locked index settings changed: ${reindex.lockedSettings.join(", ")}. ${base}${work}`;
+  }
   const links = publicApiErrorLinks(details?.links);
   if (!links) return base;
   switch (code) {
@@ -371,6 +385,8 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   }
   const links = publicApiErrorLinks(source.links);
   if (links) safe.links = links;
+  const reindex = publicReindexRequiredDetails(source.reindex);
+  if (reindex) safe.reindex = reindex;
   const usage = publicChatTurnUsage(source.usage);
   if (usage) safe.usage = usage;
   const direct = source.directUpload;
@@ -381,6 +397,50 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
     }
   }
   return Object.keys(safe).length ? safe : undefined;
+}
+
+/** Lockable settings (`REINDEX_SETTINGS` in config-change.ts; repeated here so this module stays leaf-level). */
+const LOCKED_INDEX_SETTINGS: ReadonlySet<string> = new Set(["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends", "embed", "indexVectors"]);
+
+/**
+ * A `reindex_required` refusal's `details.reindex`: the locked settings the change altered, the re-index work it
+ * needs (documents, pages, credit range or null when billing is off), the estimate `signature` to confirm and the
+ * reindex command's path. Server-computed; dropped unless every field has the expected shape.
+ */
+export type ReindexRequiredDetails = {
+  lockedSettings: string[];
+  documents: number;
+  pages: number;
+  credits: { low: number; high: number } | null;
+  signature: string;
+  reindexUrl: string;
+};
+
+function publicReindexRequiredDetails(value: unknown): ReindexRequiredDetails | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const settings = source.lockedSettings;
+  if (!Array.isArray(settings) || settings.length === 0 || !settings.every((name) => typeof name === "string" && LOCKED_INDEX_SETTINGS.has(name))) return undefined;
+  const count = (n: unknown) => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  if (!count(source.documents) || !count(source.pages)) return undefined;
+  const credits = source.credits as { low?: unknown; high?: unknown } | null | undefined;
+  if (credits !== null && !(credits && count(credits.low) && count(credits.high))) return undefined;
+  if (typeof source.signature !== "string" || !/^[a-f0-9]{64}$/.test(source.signature)) return undefined;
+  if (typeof source.reindexUrl !== "string" || !/^\/v1\/projects\/[\w.-]{1,120}\/reindex$/.test(source.reindexUrl)) return undefined;
+  return {
+    lockedSettings: [...settings] as string[],
+    documents: source.documents as number,
+    pages: source.pages as number,
+    credits: credits ? { low: credits.low as number, high: credits.high as number } : null,
+    signature: source.signature,
+    reindexUrl: source.reindexUrl,
+  };
+}
+
+function formatCreditRange(credits: { low: number; high: number }): string {
+  const round = (n: number) => (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
+  const [low, high] = [round(credits.low), round(credits.high)];
+  return low === high ? String(low) : `${low}-${high}`;
 }
 
 const CHAT_TURN_USAGE_NUMBERS = ["providerCostCents", "creditCents", "refundedCreditCents", "chargedCreditCents"] as const;

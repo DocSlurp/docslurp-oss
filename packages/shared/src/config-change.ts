@@ -13,6 +13,8 @@ import { costEstimateSchema, type CostEstimate } from "./jobs.js";
 import {
   affectedStages,
   compilePipelinePlan,
+  fieldRebuildStages,
+  pipelineFeatureOverridesSchema,
   pipelineStageOrder,
   pipelineValuesEqual,
   type PipelineFeatures,
@@ -260,11 +262,18 @@ export function analyzePipelineChange(
   let kind: ConfigChangeKind = "none";
   const reasons: ConfigChangeImpact["reasons"] = [];
   let reindexFields = 0;
+  // Identity fields whose change leaves `indexConfigHash` as it was (a reordered backend list, an explicit default,
+  // a request option the vectors do not depend on) never re-index.
+  const identityUnchanged = indexConfigHash(indexConfigOf(before)) === indexConfigHash(indexConfigOf(after));
   for (const field of Object.keys(PIPELINE_FIELD_IMPACT) as Array<keyof PipelineFeatures>) {
     if (pipelineValuesEqual(before[field], after[field])) continue;
     const rule = PIPELINE_FIELD_IMPACT[field];
     let fieldKind = typeof rule === "function" ? rule(before, after, ctx) : rule;
     let effect = FIELD_EFFECTS[field]?.[fieldKind] ?? EFFECTS[fieldKind] ?? "No effect on stored data.";
+    if (identityUnchanged && isIndexIdentitySetting(field)) {
+      fieldKind = "new-uploads";
+      effect = "Does not change how existing vectors are built; no re-index.";
+    }
     if (KIND_RANK[fieldKind] >= KIND_RANK["reindex-recommended"]) {
       // Only a field with an effective seed stage in the new config can re-index anything. Otherwise (e.g. the
       // embedding model changes while embedding is off) existing data is left as is and the field applies to
@@ -282,6 +291,94 @@ export function analyzePipelineChange(
   const stages: PipelineRunStage[] = reindexFields > 0 ? affectedStages(before, after) : [];
   return { kind, stages, reasons, documents: ctx.documents, pages: ctx.pages };
 }
+
+// ---------------------------------------------------------------------------
+// Index identity: settings locked once a project has ingested documents
+// ---------------------------------------------------------------------------
+
+/**
+ * The pipeline settings that define a project's search index: the embedding (profile, model, dimensions,
+ * normalization, task, late chunking), chunking (overlap, contextual preambles) and the vector backends. They are
+ * exactly the inputs of `indexConfigOf`. Vectors built under one value are not comparable with queries or chunks built
+ * under another, so once a project has ingested documents a plain settings update that changes any of them is refused
+ * with 409 `reindex_required`; `POST /v1/projects/:id/reindex` (or a PATCH with `apply: "reindex"`) applies the change
+ * and re-indexes the existing documents in one step.
+ */
+export const INDEX_IDENTITY_SETTINGS = ["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"] as const satisfies readonly (keyof PipelineFeatures)[];
+export type IndexIdentitySetting = (typeof INDEX_IDENTITY_SETTINGS)[number];
+
+export function isIndexIdentitySetting(value: unknown): value is IndexIdentitySetting {
+  return typeof value === "string" && (INDEX_IDENTITY_SETTINGS as readonly string[]).includes(value);
+}
+
+/**
+ * The vector switches. Re-enabling either while existing vectors were built under another index config would leave the
+ * project serving two embedding spaces, so that is locked like an identity change (see `vectorsReenabled`).
+ */
+export const VECTOR_SWITCH_SETTINGS = ["embed", "indexVectors"] as const satisfies readonly (keyof PipelineFeatures)[];
+
+/** Every setting the reindex command takes and a `reindex_required` refusal may name. */
+export const REINDEX_SETTINGS = [...INDEX_IDENTITY_SETTINGS, ...VECTOR_SWITCH_SETTINGS] as const;
+export type ReindexSetting = (typeof REINDEX_SETTINGS)[number];
+
+export function isReindexSetting(value: unknown): value is ReindexSetting {
+  return typeof value === "string" && (REINDEX_SETTINGS as readonly string[]).includes(value);
+}
+
+/**
+ * The index-identity settings `after` changes, when the change actually alters the index identity (`indexConfigHash`
+ * differs): a reordered backend list, an explicit default or a field the vectors do not depend on changes nothing and is
+ * not listed. Listed even when no enabled stage uses the setting (embedding off): re-enabling it later would otherwise
+ * turn the change on silently. Pure; in `INDEX_IDENTITY_SETTINGS` order.
+ */
+export function changedIndexIdentitySettings(before: PipelineFeatures, after: PipelineFeatures): IndexIdentitySetting[] {
+  if (indexConfigHash(indexConfigOf(before)) === indexConfigHash(indexConfigOf(after))) return [];
+  return INDEX_IDENTITY_SETTINGS.filter((field) => !pipelineValuesEqual(before[field], after[field]));
+}
+
+/** The vector switches `after` turns back on. */
+export function vectorsReenabled(before: PipelineFeatures, after: PipelineFeatures): Array<(typeof VECTOR_SWITCH_SETTINGS)[number]> {
+  return VECTOR_SWITCH_SETTINGS.filter((field) => !before[field] && after[field]);
+}
+
+/**
+ * Refuses a change that alters the index identity, for writers that must never do so (ingest recommendations, graph
+ * settings). They change other settings only; a violation is a programming error, not a request to re-index.
+ */
+export function assertIndexIdentityUnchanged(before: PipelineFeatures, after: PipelineFeatures, writer: string): void {
+  const changed = changedIndexIdentitySettings(before, after);
+  if (changed.length > 0) throw new Error(`${writer} may not change index settings (${changed.join(", ")}); use the reindex command`);
+}
+
+/** The stages a plain index rebuild (no settings change) re-runs: those the index-identity settings feed, closed over data flow. */
+export function indexRebuildStages(features: PipelineFeatures): PipelineRunStage[] {
+  return fieldRebuildStages(features, INDEX_IDENTITY_SETTINGS);
+}
+
+/** An estimate signature: what `POST /v1/projects/:id/reindex` and a confirming PATCH accept as `confirmEstimate`. */
+export const reindexEstimateSignatureSchema = z.string().regex(/^[a-f0-9]{64}$/, "confirmEstimate must be the signature an estimate returned");
+
+/**
+ * `POST /v1/projects/:id/reindex` (and its `/estimate` twin): applies index-identity setting changes and re-indexes the
+ * project's existing documents in one step. `pipeline` takes only the index-identity settings (other settings change
+ * through PATCH) and the vector switches; omitted or empty, the command rebuilds the index under the current settings,
+ * re-running the embedding and indexing stages of every live document (billed like any re-index). `confirmEstimate` is the
+ * `signature` an estimate (or a `reindex_required` refusal) returned: the command is refused with 409 `estimate_stale`
+ * when the work or its price changed since.
+ */
+export const reindexProjectSchema = z.object({
+  pipeline: pipelineFeatureOverridesSchema.optional().superRefine((value, ctx) => {
+    for (const key of Object.keys(value ?? {})) {
+      if (!isReindexSetting(key)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `Only index settings (${REINDEX_SETTINGS.join(", ")}) change through reindex; change '${key}' with PATCH /v1/projects/:id` });
+      }
+    }
+  }),
+  /** Explicit opt-in to speed-boosted processing for the re-index runs, as on PATCH. */
+  speedBoost: z.boolean().optional(),
+  confirmEstimate: reindexEstimateSignatureSchema.optional(),
+}).strict();
+export type ReindexProjectInput = z.infer<typeof reindexProjectSchema>;
 
 /** Search and chat settings apply immediately; there is never a job. */
 export function analyzeSearchSettingsChange(
