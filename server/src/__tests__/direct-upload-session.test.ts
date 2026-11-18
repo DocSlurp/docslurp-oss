@@ -157,6 +157,25 @@ describe("Direct Upload Session Module", () => {
     expect(signSingleUploadPut).toHaveBeenCalledWith(expect.objectContaining({ contentLength: 60 * MIB }));
   });
 
+  it("aborts the multipart uploads it opened when session creation fails, and starts no more after the failure", async () => {
+    const MIB = 1024 * 1024;
+    sqlMock.mockReset().mockResolvedValue([]);
+    abortMultipartUpload.mockReset().mockResolvedValue(undefined);
+    let opened = 0;
+    createMultipartUpload.mockReset().mockImplementation(async () => {
+      opened += 1;
+      if (opened === 3) throw new Error("storage unavailable");
+      return `mpu-${opened}`;
+    });
+    const files = Array.from({ length: 40 }, (_, i) => ({ filename: `big-${i}.pdf`, mimeType: "application/pdf", sizeBytes: 100 * MIB }));
+    await expect(createDirectUploadSession({ userId: "user-1", orgId: "org-1", pipeline: {}, files })).rejects.toThrow("storage unavailable");
+    // Lanes stop at the failure: a few beyond the eight in flight at most, never all forty.
+    expect(opened).toBeLessThan(16);
+    expect(abortMultipartUpload.mock.calls.map(([args]) => (args as { uploadId: string }).uploadId).sort()).toEqual(
+      Array.from({ length: opened }, (_, i) => `mpu-${i + 1}`).filter((id) => id !== "mpu-3").sort());
+    expect(sqlMock.mock.calls.some(([strings]) => "raw" in strings && strings.join("?").includes("insert into upload_session_files"))).toBe(false);
+  });
+
   it("rejects oversized single-part uploads before creating a session", async () => {
     sqlMock.mockClear();
     await expect(createDirectUploadSession({ userId: "user-1", pipeline: {}, files: [{ filename: "large.pdf", mimeType: "application/pdf", sizeBytes: 5 * 1024 ** 3 + 1, singlePart: true }] })).rejects.toThrow("5 GiB");
@@ -353,9 +372,10 @@ describe("Direct Upload Session Module", () => {
     abortMultipartUpload.mockRejectedValueOnce(Object.assign(new Error("gone"),{name:"NoSuchUpload"}));
     await expect(queueAbandonedDirectUploadCleanup("session-1")).resolves.toBeUndefined();
     expect(abortMultipartUpload).toHaveBeenCalledWith({key:"raw/a",uploadId:"mpu-a"});
-    // Cleanup waits out the longest a signed URL can still write: its lifetime plus a minute.
+    // Cleanup waits out the longest a signed URL can still write, plus a minute.
     const queued = sqlMock.mock.calls.find(([strings]) => "raw" in strings && strings.join("").includes("abandoned_upload"));
-    expect(queued?.slice(1)).toContain(3 * 60 * 60 + 60);
+    // The maximum lifetime, not the current one: URLs signed under a longer setting are still live.
+    expect(queued?.slice(1)).toContain(12 * 60 * 60 + 60);
   });
 
   it("computes multipart part counts at the protocol seam", () => {

@@ -17,9 +17,9 @@ Compose passes every variable in `.env.selfhost` to the server and workers (`env
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`, `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | blank | Optional OAuth sign-in. Configure provider callbacks at `SELFHOST_URL/api/auth/callback/github` or `/google`. |
 | `RESEND_API_KEY` / `EMAIL_FROM` | unset (not in the template) | Email delivery through Resend for verification codes, sign-in codes and magic links. Without both, email and password sign-up is disabled (`isEmailAuthConfigured` in `packages/shared/src/auth-security.ts`), so configure them or an OAuth provider before anyone can create an account. |
 | `MAX_UPLOAD_BYTES` | `524288000` (500 MiB) | Largest accepted upload. |
-| `UPLOAD_PART_SIZE_MB` | `64` | Direct uploads: files up to this size go up as one signed PUT; larger files use multipart with parts of at least this size (5–5120). |
-| `UPLOAD_STREAM_PART_SIZE_MB` | `16` | Part size for unknown-size (streamed) direct uploads, which clients buffer in memory (5–5120; raised automatically so `MAX_UPLOAD_BYTES` fits in 10,000 parts). |
-| `UPLOAD_URL_TTL_SECONDS` | `10800` (3 h) | Lifetime of a signed upload URL, capped by its 24 h session (300–43200). Abandoned-upload cleanup waits this long. |
+| `UPLOAD_PART_SIZE_MB` | `64` | Direct uploads: files up to this size go up as one signed PUT; larger files use multipart with parts of at least this size (5–2047). |
+| `UPLOAD_STREAM_PART_SIZE_MB` | `16` | Part size for unknown-size (streamed) direct uploads, which clients buffer in memory (5–2047; raised automatically so `MAX_UPLOAD_BYTES` fits in 10,000 parts). |
+| `UPLOAD_URL_TTL_SECONDS` | `10800` (3 h) | Lifetime of a signed upload URL, capped by its 24 h session (300–43200). Cleanup of abandoned uploads and deleted extracts waits the 12 h maximum, so lowering this never strands a write from an older URL. |
 | `MAX_MULTIPART_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest file on the buffered `POST /v1/uploads/bulk` path, which holds the body in memory; larger files must use direct upload sessions. Capped at `MAX_UPLOAD_BYTES`. |
 | `STORAGE_PUBLIC_ENDPOINT` | unset | Browser-reachable `http(s)` origin that presigned upload URLs are signed against, when the `STORAGE_URI` endpoint (`http://minio:9000` in Compose) only resolves inside Docker. Server-side storage calls keep using `STORAGE_URI`. See [MCP Apps uploader and MinIO](../self-host.md#mcp-apps-uploader-and-minio). |
 

@@ -41,7 +41,7 @@ describe("upload transfer policy", () => {
     expect(planDirectUpload({}, policy)).toEqual({ mode: "multipart", partSize: 16 * MIB });
   });
 
-  it("never needs more than 10,000 parts and never exceeds the 5 GiB part limit", () => {
+  it("never needs more than 10,000 parts, and parts fit the 32-bit part_size column", () => {
     for (const size of [65 * MIB, 640 * GIB, 641 * GIB, 5 * 1024 * GIB]) {
       const part = partSizeFor(size, policy);
       expect(part % MIB).toBe(0);
@@ -49,6 +49,9 @@ describe("upload transfer policy", () => {
       expect(Math.ceil(size / part)).toBeLessThanOrEqual(MAX_PARTS);
     }
     expect(partSizeFor(641 * GIB, policy)).toBeGreaterThan(64 * MIB);
+    expect(MAX_PART_BYTES).toBeLessThanOrEqual(2 ** 31 - 1);
+    expect(() => readUploadTransferPolicy({ UPLOAD_PART_SIZE_MB: "2048" }, GIB)).toThrow("UPLOAD_PART_SIZE_MB");
+    expect(readUploadTransferPolicy({ UPLOAD_PART_SIZE_MB: "2047" }, GIB).partSizeBytes).toBe(MAX_PART_BYTES);
   });
 
   it("sizes every part exactly, with the remainder in the last", () => {

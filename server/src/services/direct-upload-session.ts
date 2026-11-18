@@ -19,7 +19,7 @@ import {
   signMultipartUploadPart,
   signSingleUploadPut,
 } from "../lib/storage.js";
-import { MAX_SINGLE_PUT_BYTES, partSizeAt, planDirectUpload } from "../lib/upload-transfer-policy.js";
+import { MAX_SINGLE_PUT_BYTES, MAX_URL_TTL_SECONDS, partSizeAt, planDirectUpload } from "../lib/upload-transfer-policy.js";
 import {
   admitIntakeFile,
   allRejectedError,
@@ -278,17 +278,23 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   };
 }
 
-/** `run` over `items` with at most `limit` in flight; results keep the input order. The first failure rejects. */
+/**
+ * `run` over `items` with at most `limit` in flight; results keep the input order. After the first failure no new item
+ * starts; it rejects with that failure once the items in flight have settled, so the caller can clean up after all of them.
+ */
 async function mapLimited<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  let failure: { error: unknown } | undefined;
   const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
+    while (!failure && next < items.length) {
       const index = next++;
-      results[index] = await run(items[index]!);
+      try { results[index] = await run(items[index]!); }
+      catch (error) { failure ??= { error }; }
     }
   });
   await Promise.all(lanes);
+  if (failure) throw failure.error;
   return results;
 }
 
@@ -362,32 +368,41 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
   `;
 
   // Each large file needs its own multipart upload (a storage round trip): open them a few at a time, then record every
-  // file in one insert.
-  const prepared = await mapLimited(files, SESSION_CREATE_CONCURRENCY, async (file) => {
-    const sourceKey = rawSourceKey(input.userId, file.filename, input.extract);
-    const plan = planDirectUpload({ sizeBytes: file.unknownSize ? undefined : file.sizeBytes, singlePart: file.singlePart }, env.uploadTransfer);
-    const uploadId = plan.mode === "multipart" ? await createMultipartUpload(sourceKey, file.mimeType) : null;
-    return {
-      id: randomUUID(),
-      session_id: sessionId,
-      filename: file.filename,
-      mime_type: file.mimeType,
-      size_bytes: file.sizeBytes,
-      source_key: sourceKey,
-      upload_mode: plan.mode,
-      upload_id: uploadId,
-      part_size: plan.partSize,
-      status: "pending",
-      sha256: file.sha256 ?? null,
-      canonical_id: file.canonicalId ?? null,
-      source_path: normalizeUploadPath(file.path),
-      unknown_size: file.unknownSize,
-      request_index: file.index,
-      client_id: file.clientId ?? null,
-      content_identity: file.identity ? sql.json(file.identity) : null,
-    };
-  });
-  await sql`insert into upload_session_files ${sql(prepared)}`;
+  // file in one insert. If any of that fails, abort the uploads already opened: no row would lead cleanup to them.
+  const opened: Array<{ key: string; uploadId: string }> = [];
+  try {
+    const prepared = await mapLimited(files, SESSION_CREATE_CONCURRENCY, async (file) => {
+      const sourceKey = rawSourceKey(input.userId, file.filename, input.extract);
+      const plan = planDirectUpload({ sizeBytes: file.unknownSize ? undefined : file.sizeBytes, singlePart: file.singlePart }, env.uploadTransfer);
+      const uploadId = plan.mode === "multipart" ? await createMultipartUpload(sourceKey, file.mimeType) : null;
+      if (uploadId) opened.push({ key: sourceKey, uploadId });
+      return {
+        id: randomUUID(),
+        session_id: sessionId,
+        filename: file.filename,
+        mime_type: file.mimeType,
+        size_bytes: file.sizeBytes,
+        source_key: sourceKey,
+        upload_mode: plan.mode,
+        upload_id: uploadId,
+        part_size: plan.partSize,
+        status: "pending",
+        sha256: file.sha256 ?? null,
+        canonical_id: file.canonicalId ?? null,
+        source_path: normalizeUploadPath(file.path),
+        unknown_size: file.unknownSize,
+        request_index: file.index,
+        client_id: file.clientId ?? null,
+        content_identity: file.identity ? sql.json(file.identity) : null,
+      };
+    });
+    await sql`insert into upload_session_files ${sql(prepared)}`;
+  } catch (error) {
+    await Promise.all(opened.map(({ key, uploadId }) => abortMultipartUpload({ key, uploadId }).catch(() => {
+      console.error(`[upload-session] abort of an unrecorded multipart upload failed session=${sessionId}`);
+    })));
+    throw error;
+  }
 
   await sql`update upload_sessions set status = 'pending', next_reconcile_at = now() where id = ${sessionId}`;
   const loaded = await loadDirectUploadSession(sessionId, input.userId);
@@ -511,7 +526,7 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
   const sourceKey = file.upload_mode === "single" ? await sealSingleUpload(file, verified.etag) : file.source_key;
   if (sourceKey !== file.source_key) {
     // Publish the sealed key and durable cleanup together: a crash must not lose the old key.
-    // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
+    // Wait a day beyond completion: longer than any PUT URL can stay valid (MAX_URL_TTL_SECONDS) and in-flight writes.
     const published = await sql<{ id: string; source_key: string }[]>`with ownership as (
       insert into upload_cleanup_owners (original_key, sealed_key, org_id)
       select ${file.source_key}, ${sourceKey}, s.org_id from upload_sessions s where s.id = ${file.session_id}
@@ -783,7 +798,10 @@ function multipartCompletionError(error: unknown, filename: string): unknown {
   }
 }
 
-/** Wait out outstanding signed PUTs before deleting abandoned raw objects. */
+/**
+ * Wait out outstanding signed PUTs before deleting abandoned raw objects: the longest any URL can live, not the current
+ * setting, since URLs signed under a longer UPLOAD_URL_TTL_SECONDS (or by another host) are still valid.
+ */
 export async function queueAbandonedDirectUploadCleanup(sessionId: string): Promise<void> {
   const files = await sql<Array<{ source_key: string; upload_id: string }>>`
     select f.source_key, f.upload_id from upload_session_files f join upload_sessions s on s.id = f.session_id
@@ -797,7 +815,7 @@ export async function queueAbandonedDirectUploadCleanup(sessionId: string): Prom
   }
   await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason, not_before)
     select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
-      jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + make_interval(secs => ${SIGNED_UPLOAD_TTL_SECONDS + 60})
+      jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + make_interval(secs => ${MAX_URL_TTL_SECONDS + 60})
     from upload_sessions s join upload_session_files f on f.session_id = s.id
     where s.id = ${sessionId} and s.status in ('aborted', 'failed')
     group by s.id

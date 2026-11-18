@@ -2463,9 +2463,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
 
-  /** PUT to a presigned storage URL: no API credentials, its own long deadline. */
+  /**
+   * PUT to a presigned storage URL: no API credentials, its own long deadline. The deadline grows with the body (16 KB/s
+   * floor) so a large part sharing a slow uplink with the other transfers still finishes.
+   */
   async function putToStorage(url: string, body: Blob, contentType: string | undefined, options: UploadOptions): Promise<string | null> {
-    const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs"), options.signal);
+    const bound = deadline(positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs") + Math.ceil(body.size / 16), options.signal);
     try {
       for (let attempt = 0; ; attempt++) {
         let response: Response;
@@ -2661,6 +2664,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       await Promise.all(work.map(({ descriptor, blob }) => transferFile(sessionPath, descriptor, blob, transferOptions, slot).catch((error) => {
         if (!failure) { failure = { error }; stop.abort(error); }
       })));
+      // The caller's cancel wins over the error it caused.
+      options.signal?.throwIfAborted();
       if (failure) throw failure.error;
     } catch (error) {
       await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});

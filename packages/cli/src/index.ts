@@ -622,7 +622,8 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
     try {
       const response = await storageSlot(() => fetch(url, {
         method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined,
-        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 100_000) * 1000))),
+        // 16 KB/s floor: several large parts may share a slow uplink.
+        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 16_000) * 1000))),
       }));
       if (response.ok) return response.headers.get("etag");
       if (attempt >= 2 || !RETRYABLE_STATUSES.has(response.status)) throw await responseFailure(response);

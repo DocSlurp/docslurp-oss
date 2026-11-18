@@ -8,9 +8,13 @@
  */
 
 const MIB = 1024 * 1024;
-/** S3-compatible limits: every part but the last at least 5 MiB, at most 5 GiB, at most 10,000 parts. */
+/**
+ * S3-compatible limits: every part but the last at least 5 MiB, at most 10,000 parts. Parts are capped at 2047 MiB (below
+ * the provider's 5 GiB) because `upload_session_files.part_size` is a 32-bit integer.
+ */
 export const MIN_PART_BYTES = 5 * MIB;
-export const MAX_PART_BYTES = 5 * 1024 * MIB;
+export const MAX_PART_BYTES = 2047 * MIB;
+const MAX_PART_MIB = MAX_PART_BYTES / MIB;
 export const MAX_PARTS = 10_000;
 /** The largest object one signed PUT may create. */
 export const MAX_SINGLE_PUT_BYTES = 5 * 1024 * MIB;
@@ -20,6 +24,7 @@ export const DEFAULT_STREAM_PART_SIZE_MIB = 16;
 /** Long enough for a slow connection to send a large file without re-signing; capped below the 24 h session. */
 export const DEFAULT_URL_TTL_SECONDS = 3 * 60 * 60;
 export const MIN_URL_TTL_SECONDS = 5 * 60;
+/** Cleanup waits this long after the last URL could have been signed, whatever the current setting. */
 export const MAX_URL_TTL_SECONDS = 12 * 60 * 60;
 
 export interface UploadTransferPolicy {
@@ -41,8 +46,8 @@ function boundedInt(raw: string | undefined, fallback: number, min: number, max:
 }
 
 /**
- * UPLOAD_URL_TTL_SECONDS (300–43200, default 10800), UPLOAD_PART_SIZE_MB (5–5120, default 64) and
- * UPLOAD_STREAM_PART_SIZE_MB (5–5120, default 16). A value out of range fails startup instead of being clamped.
+ * UPLOAD_URL_TTL_SECONDS (300–43200, default 10800), UPLOAD_PART_SIZE_MB (5–2047, default 64) and
+ * UPLOAD_STREAM_PART_SIZE_MB (5–2047, default 16). A value out of range fails startup instead of being clamped.
  */
 export function readUploadTransferPolicy(env: Record<string, string | undefined>, maxUploadBytes: number): UploadTransferPolicy {
   const named = (name: string, fallback: number, min: number, max: number) => {
@@ -50,10 +55,10 @@ export function readUploadTransferPolicy(env: Record<string, string | undefined>
     catch (error) { throw new Error(`${name}: ${(error as Error).message}`); }
   };
   const urlTtlSeconds = named("UPLOAD_URL_TTL_SECONDS", DEFAULT_URL_TTL_SECONDS, MIN_URL_TTL_SECONDS, MAX_URL_TTL_SECONDS);
-  const partSizeBytes = named("UPLOAD_PART_SIZE_MB", DEFAULT_PART_SIZE_MIB, 5, 5120) * MIB;
+  const partSizeBytes = named("UPLOAD_PART_SIZE_MB", DEFAULT_PART_SIZE_MIB, 5, MAX_PART_MIB) * MIB;
   // An unknown-size stream cannot grow its parts later, so its part must fit the largest accepted upload in 10,000 parts.
   const streamPartSizeBytes = Math.max(
-    named("UPLOAD_STREAM_PART_SIZE_MB", DEFAULT_STREAM_PART_SIZE_MIB, 5, 5120) * MIB,
+    named("UPLOAD_STREAM_PART_SIZE_MB", DEFAULT_STREAM_PART_SIZE_MIB, 5, MAX_PART_MIB) * MIB,
     roundUpToMiB(Math.ceil(maxUploadBytes / MAX_PARTS)),
   );
   return { urlTtlSeconds, partSizeBytes, streamPartSizeBytes: Math.min(MAX_PART_BYTES, streamPartSizeBytes) };
