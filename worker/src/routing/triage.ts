@@ -10,7 +10,7 @@
  * the whole request: a half-parsed triage would silently skew routing.
  */
 
-import { TRUST_RULE } from "./trust.js";
+import { mathGlyphsNeedTriage } from "../lib/page-evidence.js";
 import {
   decisionQuestionIds,
   imageKinds,
@@ -137,8 +137,6 @@ export interface TriageDecision {
   reason: string;
 }
 
-const MATH_RATIO_TRIAGE_FLOOR = TRUST_RULE.mathGlyphRatio;
-
 /** Skip rule: nothing to look at when every page has a healthy text layer and no images. */
 export function shouldTriage(pages: readonly PageInput[]): TriageDecision {
   if (pages.length === 0) return { triage: false, reason: "no-pages" };
@@ -151,7 +149,7 @@ export function shouldTriage(pages: readonly PageInput[]): TriageDecision {
     if (features.native.garbled || features.raster.fullPageImage) {
       return { triage: true, reason: `page-${features.pageNumber}-suspect-layer` };
     }
-    if (features.native.mathGlyphRatio >= MATH_RATIO_TRIAGE_FLOOR) {
+    if (mathGlyphsNeedTriage(features.native.mathGlyphRatio)) {
       return { triage: true, reason: `page-${features.pageNumber}-math-glyphs` };
     }
   }

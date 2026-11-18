@@ -92,7 +92,7 @@ describe("page facts", () => {
   it("never throws when the write fails", async () => {
     const store = { upsertPageFacts: vi.fn(async () => { throw new Error("db down"); }) };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    await expect(recordPageFacts(store, [{ documentId: "d", runId: "r", pageNumber: 1, textBytes: 1 }])).resolves.toBeUndefined();
+    await expect(recordPageFacts({ store: { content: store }, run: { id: "r", orgId: "o" } }, [{ documentId: "d", runId: "r", pageNumber: 1, textBytes: 1 }])).resolves.toBeUndefined();
     expect(store.upsertPageFacts).toHaveBeenCalledOnce();
     warn.mockRestore();
   });

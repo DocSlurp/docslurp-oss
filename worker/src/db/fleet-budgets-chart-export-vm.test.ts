@@ -3,8 +3,8 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { chartExportDefaultsWarnings } from "@docslurp/shared";
-import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
-import { Store } from "../db/store.js";
+import { chartExportFreeVmCap } from "./chart-export-free-vm-cap.js";
+import { Store } from "./store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -55,28 +55,28 @@ describe("per-org hourly cap on free chart-export VM runs (Postgres, shared by w
   it("never grants more than the cap in one org-hour across concurrent workers; other orgs are unaffected", { timeout: 60_000 }, async () => {
     const workers = [worker(), worker(), worker()];
     const grants = await Promise.all(Array.from({ length: DOCUMENTS }, (_, index) =>
-      workers[index % workers.length]!.reserveChartExportFreeVmRun({ orgId: "o1", runId: "r1", documentId: `r1-d${index}`, perHour: 4 })));
+      workers[index % workers.length]!.budgets.reserveChartExportFreeVmRun({ orgId: "o1", runId: "r1", documentId: `r1-d${index}`, perHour: 4 })));
     expect(grants.filter(Boolean)).toHaveLength(4);
     // A retry gets the same answer back without spending the cap again.
     for (let index = 0; index < DOCUMENTS; index += 1) {
-      expect(await workers[0]!.reserveChartExportFreeVmRun({ orgId: "o1", runId: "r1", documentId: `r1-d${index}`, perHour: 4 })).toBe(grants[index]);
+      expect(await workers[0]!.budgets.reserveChartExportFreeVmRun({ orgId: "o1", runId: "r1", documentId: `r1-d${index}`, perHour: 4 })).toBe(grants[index]);
     }
     const [hour] = await db.query<{ used: number }>(`select used from chart_export_free_vm_hours where org_id = 'o1'`).then((r) => r.rows);
     expect(Number(hour!.used)).toBe(4);
     // Another tenant has its own cap.
-    expect(await workers[1]!.reserveChartExportFreeVmRun({ orgId: "o2", runId: "r2", documentId: "r2-d0", perHour: 4 })).toBe(true);
+    expect(await workers[1]!.budgets.reserveChartExportFreeVmRun({ orgId: "o2", runId: "r2", documentId: "r2-d0", perHour: 4 })).toBe(true);
   });
 
   it("refuses a document that is not the run's, or a run claimed under another org, and reserves nothing", async () => {
     const store = worker();
-    await expect(store.reserveChartExportFreeVmRun({ orgId: "o1", runId: "r1", documentId: "r2-d1", perHour: 100 })).rejects.toThrow(/does not belong/);
-    await expect(store.reserveChartExportFreeVmRun({ orgId: "o2", runId: "r1", documentId: "r1-d1", perHour: 100 })).rejects.toThrow(/does not belong/);
+    await expect(store.budgets.reserveChartExportFreeVmRun({ orgId: "o1", runId: "r1", documentId: "r2-d1", perHour: 100 })).rejects.toThrow(/does not belong/);
+    await expect(store.budgets.reserveChartExportFreeVmRun({ orgId: "o2", runId: "r1", documentId: "r1-d1", perHour: 100 })).rejects.toThrow(/does not belong/);
     const rows = await db.query<{ n: number }>(`select count(*)::int as n from chart_export_free_vm_grants where document_id = 'r2-d1'`);
     expect(rows.rows[0]!.n).toBe(0);
   });
 
   it("a cap of 0 stops free VM runs; the env value is parsed strictly", async () => {
-    expect(await worker().reserveChartExportFreeVmRun({ orgId: "o2", runId: "r2", documentId: "r2-d9", perHour: 0 })).toBe(false);
+    expect(await worker().budgets.reserveChartExportFreeVmRun({ orgId: "o2", runId: "r2", documentId: "r2-d9", perHour: 0 })).toBe(false);
     expect(chartExportFreeVmCap({})).toBe(200);
     expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "0" })).toBe(0);
     expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "" })).toBe(200);

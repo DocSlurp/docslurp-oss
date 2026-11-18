@@ -19,7 +19,7 @@ export const RUN_MILESTONE_COLUMNS: Readonly<Record<RunMilestone, string>> = {
 };
 
 export type RunMilestoneHit = { seconds: number; pages: number };
-export type RunMilestoneStore = { markRunMilestone?(runId: string, milestone: RunMilestone): Promise<RunMilestoneHit | null> };
+export type RunMilestoneStore = { markRunMilestone(runId: string, milestone: RunMilestone): Promise<RunMilestoneHit | null> };
 
 /** Stages whose page checkpoint means the page has extracted content, by any method. */
 const EXTRACTION_STAGES: ReadonlySet<string> = new Set(["extract-markdown", "extract-html", "vision-extract"]);
@@ -51,7 +51,7 @@ export function workerStartKind(uptimeSeconds = process.uptime()): "cold" | "war
 /** Telemetry only: never fails or delays the stage beyond one conditional update per run, milestone and process. */
 export async function noteRunMilestone(store: RunMilestoneStore | undefined, runId: string, milestone: RunMilestone,
   labels: Record<string, string> = {}): Promise<void> {
-  if (!store?.markRunMilestone) return;
+  if (!store) return;
   const key = `${runId}:${milestone}`;
   if (attempted.has(key)) return;
   if (attempted.size >= MAX_TRACKED) attempted.clear();
@@ -70,8 +70,8 @@ export async function noteRunMilestone(store: RunMilestoneStore | undefined, run
 
 /** A page of the run finished `stageName`: stamps first-extracted and, for the plan's last page stage, first-completed. */
 export async function noteRunPageStage(state: Pick<WorkflowState, "run" | "store">, stageName: string): Promise<void> {
-  const store = state.store as RunMilestoneStore | undefined;
-  if (!store?.markRunMilestone) return;
+  const store = state.store;
+  if (!store) return;
   const runId = state.run.id;
   if (EXTRACTION_STAGES.has(stageName)) await noteRunMilestone(store, runId, "first_page_extracted");
   let final = finalStages.get(runId);
@@ -98,7 +98,7 @@ export async function noteDocumentStageComplete(state: Pick<WorkflowState, "run"
   if (!milestone) return;
   recordDocumentMilestone(state.run, milestone, pageCount);
   if (stage !== "index") return;
-  const store = state.store as RunMilestoneStore | undefined;
+  const store = state.store;
   await noteRunMilestone(store, state.run.id, "first_page_extracted");
   await noteRunMilestone(store, state.run.id, "first_page_completed");
 }
@@ -120,7 +120,7 @@ export function resetRunMilestoneMemory(): void {
  */
 export async function noteRunOutcome(store: RunMilestoneStore | undefined, run: { id: string; createdAt: Date; pagesTotal: number },
   outcome: "completed" | "completed_with_failures" | "failed", failedStage?: string): Promise<void> {
-  if (!store?.markRunMilestone) return;
+  if (!store) return;
   try {
     if (await store.markRunMilestone(run.id, "outcome_recorded")) recordRunOutcome(run, outcome, failedStage);
   } catch (error) {

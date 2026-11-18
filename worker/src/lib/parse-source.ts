@@ -22,7 +22,7 @@
  * Quarantine re-runs in every partial plan (stageDataFlow.quarantine.alwaysRerun), so a reprocessed document always has its
  * own decision and its own copy under its own run: never another run's checkpoint or copy, which that run's retention purges.
  *
- * The loader (db/store.ts mapDocument) never puts the upload's key on a document whose decision is not "original": it
+ * The loader (db/run-ledger.ts mapDocument) never puts the upload's key on a document whose decision is not "original": it
  * keeps it in a module-private WeakMap that only `originalSourceForQuarantine` reads. A parser cannot reach the upload by
  * building a property name at runtime (council R7-L2); staged reads are hash-bound besides (sandbox/source-integrity.ts).
  * With quarantine disabled by configuration (`quarantineRequired()` false: never in production) there is no scan and every
@@ -63,7 +63,7 @@ export interface ScannedParseSource {
   sha256: string;
 }
 
-/** What quarantine records for an accepted document (Store.setDocumentParseSource). */
+/** What quarantine records for an accepted document (db/document-records.ts setDocumentParseSource). */
 export interface ParseSourceDecisionRecord {
   /** The scanned copy parsers read instead of the upload (an encrypted PDF's), or null: they read the upload. */
   copy: ScannedParseSource | null;

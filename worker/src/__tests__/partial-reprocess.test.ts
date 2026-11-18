@@ -11,6 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
+import { Maintenance } from "../db/maintenance.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { Stage } from "../pipeline/pipeline.js";
@@ -129,7 +130,7 @@ function recordingStages(options: { scannedCopy?: boolean } = {}) {
           if (name === "quarantine") {
             const copy = options.scannedCopy ? { key: `u1/${state.run.id}/quarantine/${document.id}.scanned.pdf`, sha256: "c".repeat(64) } : null;
             const decision = { copy, scannedSha256: "a".repeat(64) };
-            await state.store!.setDocumentParseSource!(state.run.id, document.id, decision);
+            await state.store!.records.setDocumentParseSource(state.run.id, document.id, decision);
             applyParseSource(document, decision);
           }
           if (name === "embed") {
@@ -290,7 +291,7 @@ describe("partial reprocess", () => {
     await seedPartialRun(pipeline);
     const deleted: string[] = [];
     const storage = { bucket: "b", deleteKeys: async (keys: string[]) => { deleted.push(...keys); } } as unknown as ArtifactStore;
-    const purge = () => (store as unknown as {
+    const purge = () => (new Maintenance(store.stageSql) as unknown as {
       purgeExpiredArtifacts(storage: ArtifactStore, batchSize: number): Promise<void>;
     }).purgeExpiredArtifacts(storage, 10);
 
@@ -316,6 +317,22 @@ describe("partial reprocess", () => {
     } finally {
       await sql`update projects set artifact_retention_days = null where id = 'w'`;
     }
+  }, 60_000);
+
+  it("never reuses another organization's document as a source: the run start fails and copies nothing", async () => {
+    await seedSourceRun(defaultPipelineFeatures);
+    await sql`insert into "user"(id, name, email) values ('u9', 'Z', 'z@example.com') on conflict do nothing`;
+    await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Other', 'other', 'u9') on conflict do nothing`;
+    await sql`update documents set org_id = 'o9' where id = 'src'`;
+    const pipeline = { ...defaultPipelineFeatures, restartFromStage: "embed" };
+    await seedPartialRun(pipeline);
+    const { stages, executed } = recordingStages();
+    const execution = createStageExecution({ store, stages, config });
+
+    await expect(execution.startRun({ runId: "run-re", executionGeneration: "test-generation", totalStages: 2 })).rejects.toThrow(/has no source document/);
+    expect(executed).toEqual([]);
+    expect(await sql`select id from document_chunks where document_id = 're'`).toEqual([]);
+    expect(await sql`select id from document_pages where document_id = 're'`).toEqual([]);
   }, 60_000);
 
   it("fails the run start instead of running everything when no source document is linked", async () => {

@@ -5,6 +5,7 @@ import type postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Store } from "../db/store.js";
+import { tryMaintenanceLease } from "../db/worker-slot-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions } from "../db/worker-slot-store.js";
 import { createMigratedDatabase, applyRemainingMigrations } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -216,12 +217,12 @@ describe("worker slot semaphore", () => {
   });
 
   it("elects one maintenance leader until its lease lapses", async () => {
-    expect(await store.tryMaintenanceLease("sweeps", "worker-a", 60_000)).toBe(true);
-    expect(await store.tryMaintenanceLease("sweeps", "worker-b", 60_000)).toBe(false);
-    expect(await store.tryMaintenanceLease("sweeps", "worker-a", 60_000)).toBe(true);
+    expect(await tryMaintenanceLease(store.stageSql, { name: "sweeps", holder: "worker-a", ttlMs: 60_000 })).toBe(true);
+    expect(await tryMaintenanceLease(store.stageSql, { name: "sweeps", holder: "worker-b", ttlMs: 60_000 })).toBe(false);
+    expect(await tryMaintenanceLease(store.stageSql, { name: "sweeps", holder: "worker-a", ttlMs: 60_000 })).toBe(true);
     await sql`update worker_maintenance_leases set expires_at = now() - interval '1 second' where name = 'sweeps'`;
-    expect(await store.tryMaintenanceLease("sweeps", "worker-b", 60_000)).toBe(true);
-    expect(await store.tryMaintenanceLease("sweeps", "worker-a", 60_000)).toBe(false);
+    expect(await tryMaintenanceLease(store.stageSql, { name: "sweeps", holder: "worker-b", ttlMs: 60_000 })).toBe(true);
+    expect(await tryMaintenanceLease(store.stageSql, { name: "sweeps", holder: "worker-a", ttlMs: 60_000 })).toBe(false);
   });
 });
 

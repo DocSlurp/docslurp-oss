@@ -15,10 +15,9 @@
  *   no size and no read, and a caller must not write them for a run that bills scanned pages from page facts at completion
  *   (page-base-fee.ts runBillsScansAtCompletion).
  */
-import { PAGE_RASTER_ROUTING } from "@docslurp/shared";
-
 import { MIN_SIGNIFICANT_IMAGE_COVERAGE, MIN_SIGNIFICANT_IMAGE_PIXELS, SPARSE_PAGE_WORDS, pageEvidenceWordCount, type PageImageEvidence } from "./page-image-evidence.js";
 import { dopplerPageFactsLowConfidence, type DopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
+import { isFurnitureShare } from "./page-evidence.js";
 import { PAGE_FACTS_MAX_PAGES, plainTextBytes, type PageFactUpsert } from "../pipeline/page-facts.js";
 
 /** `document_page_facts.facts_source` and the page-image evidence artifact's `source` for facts-built evidence. */
@@ -109,7 +108,7 @@ function repeatedSignificantObjects(facts: DopplerPageFactsDocument, scope: numb
   }
   const out = new Set<number>();
   for (const [obj, set] of pagesOf) {
-    if (set.size >= PAGE_RASTER_ROUTING.repeatedImageMinPages && set.size / Math.max(1, scope) >= PAGE_RASTER_ROUTING.repeatedImageMinShare) out.add(obj);
+    if (isFurnitureShare(set.size, scope)) out.add(obj);
   }
   return out;
 }
@@ -134,13 +133,49 @@ export function dopplerFactsTextDisagreement(
   return null;
 }
 
+/** Facts that passed every gate (`checkDopplerFactsEvidence`): the evidence builders read only these. */
+export interface CheckedDopplerFacts {
+  facts: DopplerPageFactsDocument;
+  pageCount: number;
+  pageTexts: readonly string[];
+  ocrPages: ReadonlySet<number>;
+}
+
+export type DopplerFactsEvidenceCheck =
+  | { ok: true; checked: CheckedDopplerFacts }
+  | { ok: false; reason: string; page?: number };
+
+/**
+ * The one check facts pass before any evidence is built from them, run once per document: they cover every page of the
+ * host's count (`dopplerFactsCoverEvidence`), the extracted text is page-aligned to that count, and no page's facts
+ * disagree with it (`dopplerFactsTextDisagreement`, reason `words-disagree` with the page). `pageTexts`: the winning
+ * extraction's page-aligned texts (or a function giving them, called only for covering facts), null when the text has no
+ * reliable page breaks; `ocrPages`: pages the provider (or a
+ * model) read, whose words came from the pixels.
+ */
+export function checkDopplerFactsEvidence(args: {
+  facts: DopplerPageFactsDocument | undefined;
+  pageCount: number;
+  pageTexts: readonly string[] | null | (() => readonly string[] | null);
+  ocrPages?: ReadonlySet<number>;
+}): DopplerFactsEvidenceCheck {
+  const coverage = dopplerFactsCoverEvidence(args.facts, args.pageCount);
+  if (!coverage.covered) return { ok: false, reason: coverage.reason };
+  // Split the text only for facts that cover the document.
+  const pageTexts = typeof args.pageTexts === "function" ? args.pageTexts() : args.pageTexts;
+  if (!pageTexts || pageTexts.length !== args.pageCount) return { ok: false, reason: "text-not-page-aligned" };
+  const ocrPages = args.ocrPages ?? new Set<number>();
+  const disagreement = dopplerFactsTextDisagreement(args.facts!, pageTexts, ocrPages);
+  if (disagreement !== null) return { ok: false, reason: "words-disagree", page: disagreement };
+  return { ok: true, checked: { facts: args.facts!, pageCount: args.pageCount, pageTexts, ocrPages } };
+}
+
 /**
  * Page-image evidence for classify-route from facts that cover the document (`dopplerFactsCoverEvidence`), the same shape the
  * `pdfimages` probe writes: sparse pages (fewer than SPARSE_PAGE_WORDS words in the text layer, invisible OCR words
  * included, as `pdftotext` reads them) with their significant, non-repeated image totals. No text-layer verdict (the facts
- * carry no layer text). `pageTexts` are the winning extraction's page-aligned texts; `ocrPages` the pages the provider
- * reported it OCR'd. Null when the facts do not cover the document, when they disagree with the extracted text
- * (`dopplerFactsTextDisagreement`), or when no page needs evidence (as the probe returns).
+ * carry no layer text). Null when the facts fail the check (`checkDopplerFactsEvidence`), or when no page needs evidence
+ * (as the probe returns).
  */
 export function pageImageEvidenceFromDopplerFacts(args: {
   facts: DopplerPageFactsDocument | undefined;
@@ -148,14 +183,18 @@ export function pageImageEvidenceFromDopplerFacts(args: {
   pageTexts: string[];
   ocrPages?: ReadonlySet<number>;
 }): PageImageEvidence[] | null {
-  if (!dopplerFactsCoverEvidence(args.facts, args.pageCount).covered || args.pageTexts.length !== args.pageCount) return null;
-  const facts = args.facts!;
-  if (dopplerFactsTextDisagreement(facts, args.pageTexts, args.ocrPages) !== null) return null;
+  const check = checkDopplerFactsEvidence(args);
+  return check.ok ? pageImageEvidenceFromCheckedFacts(check.checked) : null;
+}
+
+/** pageImageEvidenceFromDopplerFacts for facts that already passed the check. */
+export function pageImageEvidenceFromCheckedFacts(checked: CheckedDopplerFacts): PageImageEvidence[] | null {
+  const { facts, pageCount } = checked;
   const sparse = [...facts.pages.values()].filter((page) => (page.text?.wordCount ?? 0) < SPARSE_PAGE_WORDS).map((page) => page.page);
   if (sparse.length === 0) return null;
   // The probe's furniture rule and scope: significant placements only, over the pages it lists (the first 1,000, or up to the
   // last sparse page when that is later).
-  const scope = Math.min(Math.max(Math.max(...sparse), Math.min(args.pageCount, LISTING_SCOPE_PAGES)), args.pageCount);
+  const scope = Math.min(Math.max(Math.max(...sparse), Math.min(pageCount, LISTING_SCOPE_PAGES)), pageCount);
   const repeated = repeatedSignificantObjects(facts, scope);
   const evidence = new Map<number, PageImageEvidence>();
   for (const pageNumber of sparse.sort((a, b) => a - b)) {
@@ -201,7 +240,7 @@ export function pageImageEvidenceFromDopplerFacts(args: {
  * `imageCount` counts images as `pdfimages -list` lists `image` rows: every drawn image, masks and stencils left out.
  * Rows stop at PAGE_FACTS_MAX_PAGES, the table's ceiling per document (the probes stop earlier, at
  * WORKER_PAGE_FACTS_MAX_PAGES, because each page costs them a command; facts cost nothing more per page). Empty when the
- * facts do not cover the document.
+ * facts fail the check (`checkDopplerFactsEvidence`).
  */
 export function pageFactRowsFromDopplerFacts(args: {
   facts: DopplerPageFactsDocument | undefined;
@@ -211,18 +250,22 @@ export function pageFactRowsFromDopplerFacts(args: {
   documentId: string;
   runId: string;
 }): PageFactUpsert[] {
-  if (!dopplerFactsCoverEvidence(args.facts, args.pageCount).covered || args.pageTexts.length !== args.pageCount) return [];
-  const facts = args.facts!;
-  if (dopplerFactsTextDisagreement(facts, args.pageTexts, args.ocrPages) !== null) return [];
+  const check = checkDopplerFactsEvidence(args);
+  return check.ok ? pageFactRowsFromCheckedFacts(check.checked, args) : [];
+}
+
+/** pageFactRowsFromDopplerFacts for facts that already passed the check. */
+export function pageFactRowsFromCheckedFacts(checked: CheckedDopplerFacts, ids: { documentId: string; runId: string }): PageFactUpsert[] {
+  const { facts, pageCount, pageTexts, ocrPages } = checked;
   const rows: PageFactUpsert[] = [];
-  for (let pageNumber = 1; pageNumber <= Math.min(args.pageCount, PAGE_FACTS_MAX_PAGES); pageNumber += 1) {
+  for (let pageNumber = 1; pageNumber <= Math.min(pageCount, PAGE_FACTS_MAX_PAGES); pageNumber += 1) {
     const page = facts.pages.get(pageNumber) as CoveredPage;
     rows.push({
-      documentId: args.documentId,
-      runId: args.runId,
+      documentId: ids.documentId,
+      runId: ids.runId,
       pageNumber,
       // A page a model read holds OCR text, not its layer: its layer size is unknown.
-      textBytes: page.text.charCount === 0 ? 0 : args.ocrPages?.has(pageNumber) ? null : plainTextBytes(args.pageTexts[pageNumber - 1] ?? "") || null,
+      textBytes: page.text.charCount === 0 ? 0 : ocrPages.has(pageNumber) ? null : plainTextBytes(pageTexts[pageNumber - 1] ?? "") || null,
       wordCount: page.text.wordCount,
       imageCount: page.images.items.filter((item) => !item.imageMask).length,
       factsSource: DOPPLER_FACTS_EVIDENCE_SOURCE,

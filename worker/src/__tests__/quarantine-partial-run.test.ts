@@ -7,6 +7,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { quarantineReasonOf } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadFixtureDocument } from "../test/load-document.js";
 
 import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
@@ -205,7 +206,7 @@ describe("scan what we parse (council round 6, R6-H1)", () => {
       const document = fresh.documents[0]!;
       expect(document).toMatchObject({ sourceKey: copyKey, parseSourceDecision: "scanned-copy" });
       expect(JSON.stringify(document)).not.toContain("k-enc");
-      expect((await store.loadDocument("doc-enc")).sourceKey).toBe(copyKey);
+      expect((await loadFixtureDocument(store, "doc-enc")).sourceKey).toBe(copyKey);
       // A parser's staged read gets the scanned copy.
       const staged = await stageSourceFile(storage, document, "x");
       expect(await readFile(staged)).toEqual(scannedCopy);

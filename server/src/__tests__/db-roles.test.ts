@@ -341,7 +341,7 @@ describe("migration ownership preflight", () => {
 });
 
 describe("ocr_escalation_reads (migration 0129)", () => {
-  // The exact statements worker/src/db/store.ts runs (recordOcrEscalationRead, ocrEscalationReads).
+  // The exact statements worker/src/db/ocr-escalation-reads.ts runs (recordOcrEscalationRead, ocrEscalationReads).
   const insert = (attempt: number) => `insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
     values ('esc-roles-run', 'doc-1', 3, ${attempt}, 'completed', 'Hosted transcription', 'qwen', '[{"id":"ocr-escalation:esc-roles-run:doc-1:3:${attempt}"}]'::jsonb)
     on conflict (run_id, document_id, page_number, attempt) do nothing`;

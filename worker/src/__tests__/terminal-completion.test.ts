@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { defaultPipelineFeatures, getPipelineStageOrder, pipelineStageOrder } from "@docslurp/shared";
 import { Store } from "../db/store.js";
+import { RunNotifications } from "../db/run-notifications.js";
 import { createActivities } from "../temporal/activities.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document, ProjectRun } from "../models.js";
@@ -42,7 +43,8 @@ async function complete(statuses: string[]) {
       }
     }),
     writeProgressNow: vi.fn(async (state: WorkflowState) => { persisted.push({ stats: structuredClone(state.run.stats), statuses: state.documents.map(doc => doc.status), processedDocuments: state.run.processedDocuments, pagesProcessed: state.run.pagesProcessed }); }),
-    appendEvent: vi.fn(), triggerRunEmails: vi.fn(async () => {}), triggerWebhooks: vi.fn(async () => {}),
+    appendEvent: vi.fn(),
+    notifications: Object.assign(new RunNotifications(sql as never, 0.3), { triggerRunEmails: vi.fn(async () => {}), triggerWebhooks: vi.fn(async () => {}) }),
   }) as Store;
   const activities = createActivities({ store, storage: {} as never, config: {} as never,
     stages: pipelineStageOrder.map(name => ({ name, run: vi.fn() })) });

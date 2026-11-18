@@ -35,7 +35,7 @@ import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
 import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout, sandboxedPdfPageFactsMathRead } from "./sandboxed-pdf-page-facts.js";
-import { settleUnknownGrids, withEncodingRoutes } from "../lib/doppler-page-facts-layout.js";
+import { settleUnknownGrids, withEncodingRoutes } from "../lib/page-evidence-doppler.js";
 import { dopplerPageFactsMode, type DopplerPageFactsFamily } from "../lib/doppler-page-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";

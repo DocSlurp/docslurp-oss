@@ -17,6 +17,7 @@ import { PAGE_RASTER_ROUTING, assessTextLayer, pageWordCount, type TextLayerVerd
 
 import type { CommandRunner } from "../tools/runner.js";
 import { embeddedImageBytesByPage, pdfImagesListFields } from "./page-yield-evidence.js";
+import { isFurnitureShare } from "./page-evidence.js";
 
 /** Pages with fewer native words than this are "sparse" and get raster evidence. */
 export const SPARSE_PAGE_WORDS = PAGE_RASTER_ROUTING.sparsePageWords;
@@ -204,7 +205,7 @@ export function summarizeImageListing(
   const scope = Math.max(1, options.pagesInScope);
   const repeated = new Set<string>();
   for (const [key, seen] of objectPages) {
-    if (seen.pages >= PAGE_RASTER_ROUTING.repeatedImageMinPages && seen.pages / scope >= PAGE_RASTER_ROUTING.repeatedImageMinShare) repeated.add(key);
+    if (isFurnitureShare(seen.pages, scope)) repeated.add(key);
   }
   const pages = new Map<number, PageImageTotals>();
   for (const [pageNumber, entry] of tracked) {

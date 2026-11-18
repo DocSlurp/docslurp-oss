@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveBudgetAlertLevel } from "../db/store.js";
+import { resolveBudgetAlertLevel } from "./maintenance.js";
 
 describe("resolveBudgetAlertLevel", () => {
   it("returns 0 below the configured threshold", () => {

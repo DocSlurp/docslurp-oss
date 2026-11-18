@@ -5,14 +5,14 @@ import { zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import { QuarantineStage } from "../stages/quarantine.js";
-import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
-import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { sha256Bytes } from "../sandbox/source-integrity.js";
 import type { Document, ProjectRun } from "../models.js";
 import type { Config } from "../config.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import type { CommandRunner } from "../tools/runner.js";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 const dirs: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -41,12 +41,12 @@ async function fixture() {
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: now, updatedAt: now };
   const state = WorkflowState.create(run, documents); state.docConcurrency = 1;
   const persisted: Array<Record<string, string>> = [];
-  const store: CheckpointStore = {
+  const store = memoryCheckpointStore({
     startDocumentStage: vi.fn(async () => {}), completeDocumentStage: vi.fn(async () => {}), failDocumentStage: vi.fn(async () => {}),
-    updateProgress: vi.fn(async (current) => { persisted.push({ ...current.artifacts }); }),
-    startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
-    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()), pageBasisLedger: new MemoryPageBasisLedger(),
-  };
+    updateProgress: vi.fn(async (current: WorkflowState) => { persisted.push({ ...current.artifacts }); }),
+    appendEvent: vi.fn(async () => {}),
+  });
+  for (const document of documents) store.records.add(document.id, { runId: run.id, orgId: run.orgId });
   state.bindStore(store);
   const downloads: string[] = []; let sequence = 0;
   const artifacts = new Map<string, unknown>();

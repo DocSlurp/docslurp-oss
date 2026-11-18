@@ -48,19 +48,6 @@ export interface EmbeddingReuseStore {
   forgetEmbeddingReuseRefs(orgId: string, artifactUri: string, keys: readonly string[]): Promise<void>;
 }
 
-export function asEmbeddingReuseStore(value: unknown): EmbeddingReuseStore | undefined {
-  if (
-    value
-    && typeof value === "object"
-    && typeof (value as EmbeddingReuseStore).findEmbeddingReuseRefs === "function"
-    && typeof (value as EmbeddingReuseStore).recordEmbeddingReuseRefs === "function"
-    && typeof (value as EmbeddingReuseStore).forgetEmbeddingReuseRefs === "function"
-  ) {
-    return value as EmbeddingReuseStore;
-  }
-  return undefined;
-}
-
 export type EmbeddingVectorParams = Pick<
   EmbeddingProfile,
   "runtime" | "provider" | "model" | "baseUrl" | "dimensions" | "task" | "normalize"

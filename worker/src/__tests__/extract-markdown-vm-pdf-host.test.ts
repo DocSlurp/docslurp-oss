@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
 import { defaultPipelineFeatures, normalizeStoredPipelineFeatures } from "@docslurp/shared";
 
@@ -10,7 +11,7 @@ import { acceptSandboxedPdfResult, type SandboxedPdfJob } from "../extractors/pl
 import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
 import type { Document, ProjectRun } from "../models.js";
 import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
-import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
+import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { PRODUCER_MARKER, docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
@@ -92,13 +93,13 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   const state = WorkflowState.create(run(documentExtraction), [document]);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", "pdf");
-  const upsertPageFacts = vi.fn(async (_rows: unknown) => undefined);
-  // A store that accepts every write, so page facts would be recorded if the stage probed for them.
+  const upsertPageFacts = vi.fn(async (_scope: unknown, _rows: unknown) => undefined);
+  // An in-memory store, so page facts would be recorded if the stage wrote them.
   // Its page basis is an in-memory ledger over the run's documents (a funded run).
   const ledger = new MemoryPageBasisLedger().seed([document]);
-  state.bindStore(new Proxy({ upsertPageFacts, getCompletedPages: async () => new Set<number>(), pageBasisLedger: ledger } as Record<string, unknown>, {
-    get: (object, key) => (typeof key !== "string" || key === "then" ? undefined : object[key] ?? (async () => undefined)),
-  }) as unknown as CheckpointStore);
+  const store = memoryCheckpointStore({ pageBasisLedger: ledger });
+  store.content.upsertPageFacts = upsertPageFacts;
+  state.bindStore(store);
   const richIds = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr").map((event) => event.id);
   const hostPdf = () => [
     ...calls.filter((name) => /^pdf|pageText|extractText|ocrPdf|images|info|render|rasteri[sz]e/i.test(name)),
@@ -229,7 +230,7 @@ describe("the sandboxed PDF route on the worker host", () => {
       expect(h.hostPdf()).toEqual([]);
       expect(h.richIds()).toEqual([]);
       // One routing row per page the host counted (page 4 is past it): closed enums only.
-      const rows = h.upsertPageFacts.mock.calls.flatMap((call) => call[0] as Array<Record<string, unknown>>).filter((row) => row.scanClass !== undefined);
+      const rows = h.upsertPageFacts.mock.calls.flatMap((call) => call[1] as Array<Record<string, unknown>>).filter((row) => row.scanClass !== undefined);
       expect(rows).toEqual([1, 2, 3].map((pageNumber) => ({ documentId: "doc-1", runId: "run-1", pageNumber, textLayer: "visible", scanClass: "none" })));
       const everything = JSON.stringify([...h.json.values(), ...h.upsertPageFacts.mock.calls]);
       expect(everything).not.toContain("PRODUCER-MARKER");
@@ -467,7 +468,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     return h;
   }
   const sourceRows = (h: Awaited<ReturnType<typeof harness>>) =>
-    h.upsertPageFacts.mock.calls.flatMap((call) => call[0] as Array<Record<string, unknown>>).filter((row) => row.factsSource !== undefined);
+    h.upsertPageFacts.mock.calls.flatMap((call) => call[1] as Array<Record<string, unknown>>).filter((row) => row.factsSource !== undefined);
   const evidence = (h: Awaited<ReturnType<typeof harness>>) =>
     [...h.json.entries()].find(([key]) => key.includes("/page-image-evidence/"))?.[1] as { source: string; drawnBytesPerPage: unknown; pages: Array<Record<string, unknown>> } | undefined;
 
