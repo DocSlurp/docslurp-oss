@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 
 import { sql } from "../db.js";
@@ -15,6 +16,14 @@ export const RECONCILE_CONCURRENCY = 8;
 /** Immediate confirms in flight per process; past it a completed session is left to the sweep (it is already due). */
 export const IMMEDIATE_CONFIRM_MAX = 4;
 const RECONCILE_BATCH = 25;
+
+/**
+ * The async context at module load: no request. Background work started from a request (a webhook nudge, a last
+ * files/complete) runs inside it, so it never inherits that request's API key, project allowlist, organization, user
+ * or abort signal: the sweep confirms other organizations' sessions, and intake reads those from the request context
+ * when a session has none of its own.
+ */
+const detached = AsyncLocalStorage.snapshot();
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let running = false;
@@ -113,7 +122,7 @@ export async function reconcileDirectUploads(): Promise<void> {
 export function requestDirectUploadSweep(): void {
   if (!timer || stopped) return;
   if (running) { rerunRequested = true; return; }
-  void reconcileDirectUploads().catch(error => console.error("[upload-reconcile] sweep failed", error instanceof Error ? error.name : "unknown"));
+  void detached(() => reconcileDirectUploads()).catch(error => console.error("[upload-reconcile] sweep failed", error instanceof Error ? error.name : "unknown"));
 }
 
 /**
@@ -137,7 +146,7 @@ export function confirmCompletedDirectUploadSoon(args: {
     return;
   }
   const dueAt = Date.now();
-  const task = inBackgroundUploadLane(async () => {
+  const task = detached(() => inBackgroundUploadLane(async () => {
     try {
       const result = await confirmDirectUploadProjectIntake({ sessionId: args.sessionId, userId: args.userId, ...(args.audit ? { audit: args.audit } : {}) }, ...(args.ports ? [args.ports] : []));
       if (!isReplayedDirectUploadConfirm(result)) recordReconcileLag(args.sessionId, "immediate", dueAt);
@@ -145,7 +154,7 @@ export function confirmCompletedDirectUploadSoon(args: {
       if (isSessionBusy(error)) return;
       console.warn(`[upload-reconcile] session=${args.sessionId} immediate confirm deferred to sweep`, error instanceof Error ? error.name : "unknown");
     }
-  });
+  }));
   immediateConfirms.add(task);
   void task.finally(() => immediateConfirms.delete(task));
 }

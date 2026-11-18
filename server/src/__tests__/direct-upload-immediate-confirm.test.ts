@@ -10,6 +10,7 @@ vi.mock("../lib/direct-upload-locks.js", () => ({ inBackgroundUploadLane: (run: 
 vi.mock("../services/project-intake.js", () => ({
   ProjectIntakeError: class extends Error { constructor(message: string, public statusCode: number, public issues?: unknown, public code?: string) { super(message); } },
 }));
+import { AsyncLocalStorage } from "node:async_hooks";
 import { confirmCompletedDirectUploadSoon, settleImmediateConfirms } from "../services/direct-upload-reconciler.js";
 import { ProjectIntakeError } from "../services/project-intake.js";
 
@@ -66,6 +67,20 @@ describe("immediate confirm when the last file completes", () => {
     expect(log.mock.calls.filter(([line]) => String(line).includes("immediate confirm skipped"))).toHaveLength(2);
     resumes.forEach(resume => resume());
     await settleImmediateConfirms();
+    log.mockRestore();
+  });
+
+  it("never runs intake inside the request that triggered it: no request key, allowlist or organization leaks in", async () => {
+    // Stand-in for the request context (lib/request-context.ts): intake falls back to it when a session has no key.
+    const storage = new AsyncLocalStorage<{ apiKeyId: string; allowlist: string[] }>();
+    const seen: Array<unknown> = [];
+    mocks.confirm.mockImplementation(async () => { seen.push(storage.getStore() ?? null); return {}; });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await storage.run({ apiKeyId: "key-of-org-a", allowlist: ["project-a"] }, async () => {
+      confirmCompletedDirectUploadSoon({ sessionId: "s-other", userId: "u-1" });
+    });
+    await settleImmediateConfirms();
+    expect(seen).toEqual([null]);
     log.mockRestore();
   });
 });

@@ -111,6 +111,27 @@ describe("organization activity summary", () => {
     expect((await summary.activitySummaryScopeFor("u-a", "org-b"))?.orgId).toBe("org-b");
   });
 
+  it("honours an API key's project allowlist from the request context, in a plain response and inside an SSE stream", async () => {
+    const { Hono } = await import("hono");
+    const { streamSSE } = await import("hono/streaming");
+    const { requestContextMiddleware, setCurrentRequestApiKeyProjectIds } = await import("../lib/request-context.js");
+    await addRun("a-public", { org: "org-a", project: "p-a", user: "u-a", status: "queued", docs: 1, pages: 10 });
+    await addRun("a-private", { org: "org-a", project: "p-a-private", user: "u-a", status: "queued", docs: 4, pages: 400 });
+    const app = new Hono()
+      .use("*", requestContextMiddleware)
+      .use("*", async (_c, next) => { setCurrentRequestApiKeyProjectIds(["p-a"]); await next(); })
+      .get("/poll", async c => c.json(await summary.getOrgActivitySummary((await summary.activitySummaryScopeFor("u-a", "org-a"))!)))
+      .get("/stream", c => streamSSE(c, async stream => {
+        const scope = await summary.activitySummaryScopeFor("u-a", "org-a");
+        await stream.writeSSE({ event: "activity-summary", data: JSON.stringify(await summary.getOrgActivitySummary(scope!)) });
+      }));
+    // The key may use p-a only: p-a-private's 400 queued pages never appear, though its owner could see them.
+    expect((await (await app.request("/poll")).json()).queued).toEqual({ runs: 1, documents: 1, pages: 10 });
+    summary.clearActivitySummaryCache();
+    const streamed = await (await app.request("/stream")).text();
+    expect(streamed).toContain('"queued":{"runs":1,"documents":1,"pages":10}');
+  });
+
   it("returns an empty summary for an organization with nothing running, not another organization's", async () => {
     await addRun("b-run", { org: "org-b", project: "p-b", user: "u-b", status: "processing", pages: 10, pagesDone: 5, startedMinutesAgo: 1 });
     const empty = await summary.computeOrgActivitySummary(scopeA);
