@@ -27,7 +27,32 @@ export type CredentialResolution = {
   token: string;
   /** The lookup failed or timed out: the credential could not be verified either way (fail closed, retryable). */
   unavailable?: boolean;
+  /** Unavailable because the lookup admission limit was full (no lookup ran). */
+  busy?: boolean;
 };
+
+/**
+ * One admission limit for every credential lookup on these routes, the route's
+ * own auth and the body budget's pre-check alike: at most
+ * CREDENTIAL_LOOKUP_MAX_CONCURRENT at once, each slot held until its lookup
+ * settles (the lookup's own bounds limit how long). Past it a lookup is
+ * unavailable without running: route auth answers 503 with Retry-After.
+ */
+export const CREDENTIAL_LOOKUP_MAX_CONCURRENT = 64;
+let lookupsInFlight = 0;
+
+export function credentialLookupsInFlight(): number {
+  return lookupsInFlight;
+}
+
+function admitted(token: string, lookup: () => Promise<CredentialResolution>): Promise<CredentialResolution> {
+  if (lookupsInFlight >= CREDENTIAL_LOOKUP_MAX_CONCURRENT) {
+    return Promise.resolve({ actor: null, policyError: null, token, unavailable: true, busy: true });
+  }
+  lookupsInFlight++;
+  // Promise.resolve().then: a lookup that throws synchronously still settles here and frees its slot.
+  return Promise.resolve().then(lookup).finally(() => { lookupsInFlight--; });
+}
 
 /** The database lookup behind one credential check is cancelled after this long. */
 export const CREDENTIAL_LOOKUP_TIMEOUT_MS = 3_000;
@@ -57,8 +82,9 @@ export function bearerToken(header: string | undefined): string {
 
 /** An API key or CLI token from an `Authorization: Bearer` header (MCP-audience tokens resolve to none). */
 export function resolveRequestApiKey(c: Context, authorization: string | undefined): Promise<CredentialResolution> {
-  return memoized(c, `api:${authorization ?? ""}`, async () => {
-    const token = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  const token = authorization?.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  if (!token) return memoized(c, "api:", async () => ({ actor: null, policyError: null, token }));
+  return memoized(c, `api:${authorization}`, () => admitted(token, async () => {
     try {
       const actor = await resolveApiKeyActor(authorization, {
         origin: c.req.header("origin"),
@@ -70,7 +96,7 @@ export function resolveRequestApiKey(c: Context, authorization: string | undefin
       if (error instanceof ApiKeyPolicyError) return { actor: null, policyError: error, token };
       return unavailable(error, token, "api-key");
     }
-  });
+  }));
 }
 
 /** The MCP credential exactly as mcp-auth reads it: an MCP-audience token for this resource, else an API key. */
@@ -78,12 +104,14 @@ export function resolveRequestMcpCredential(c: Context): Promise<CredentialResol
   const token = bearerToken(c.req.header("Authorization"));
   return memoized(c, `mcp:${token}`, async () => {
     if (token.startsWith("dsmcp_")) {
-      try {
-        const key = await validateMcpToken(token, mcpResource(c.req.url), { ip: requestIp(c) }, { timeoutMs: CREDENTIAL_LOOKUP_TIMEOUT_MS });
-        return { actor: key ? { type: "apiKey", userId: key.userId, apiKey: key } : null, policyError: null, token };
-      } catch (error) {
-        return unavailable(error, token, "mcp-token");
-      }
+      return admitted(token, async () => {
+        try {
+          const key = await validateMcpToken(token, mcpResource(c.req.url), { ip: requestIp(c) }, { timeoutMs: CREDENTIAL_LOOKUP_TIMEOUT_MS });
+          return { actor: key ? { type: "apiKey", userId: key.userId, apiKey: key } : null, policyError: null, token };
+        } catch (error) {
+          return unavailable(error, token, "mcp-token");
+        }
+      });
     }
     if (!token || token.startsWith("dsmcp")) return { actor: null, policyError: null, token };
     return resolveRequestApiKey(c, `Bearer ${token}`);

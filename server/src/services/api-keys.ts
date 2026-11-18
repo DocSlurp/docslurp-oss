@@ -9,6 +9,7 @@ import { sql } from "../db.js";
 import { ipInRange, parseCidr, parseIp } from "@docslurp/shared/client-ip";
 import { AllowedOriginError, normalizeAllowedOriginEntry, originMatchesAllowlist } from "../lib/allowed-origins.js";
 import { recordApiKeyRequest } from "./api-key-usage.js";
+import { LOOKUP_ACQUIRE_TIMEOUT_MS, withDeadline } from "../lib/bounded-lookup.js";
 import { resolveDefaultOrganization, getOrganization, OrganizationError, withOrganizationLock } from "./organizations.js";
 
 type ApiKeyRow = {
@@ -634,19 +635,9 @@ export interface ValidatedKey {
   };
 }
 
-export async function validateApiKey(
-  rawKey: string,
-  requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
-  /**
-   * `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts).
-   * `timeoutMs` cancels the lookup on the server after that long (it then rejects with 57014).
-   */
-  options: { recordUsage?: boolean; timeoutMs?: number } = {},
-): Promise<ValidatedKey | null> {
-  const keyHash = hashKey(rawKey);
-
-  // An expired key (including the old key after a rotation overlap) never authenticates.
-  const query = sql<ApiKeyRow[]>`
+/** The key row for a hash. An expired key (including the old key after a rotation overlap) never authenticates. */
+function selectKeyRow(client: typeof sql, keyHash: string) {
+  return client<ApiKeyRow[]>`
     select * from api_keys
     where key_hash = ${keyHash} and revoked_at is null
       and (expires_at is null or expires_at > now())
@@ -655,13 +646,50 @@ export async function validateApiKey(
         where om.org_id = api_keys.org_id and om.user_id = api_keys.user_id
       )
   `;
-  const cancel = options.timeoutMs ? setTimeout(() => { void query.cancel(); }, options.timeoutMs) : undefined;
-  let rows: ApiKeyRow[];
-  try {
-    rows = await query;
-  } finally {
-    clearTimeout(cancel);
-  }
+}
+
+/**
+ * selectKeyRow with its two bounds kept apart: a reserved connection within
+ * LOOKUP_ACQUIRE_TIMEOUT_MS (a late one is released), then the select in a
+ * short read-only transaction under `SET LOCAL statement_timeout`, so Postgres
+ * itself cancels a stalled statement. A hard timer rejects the caller on its
+ * own a little after the statement bound (a best-effort cancel, whose failure
+ * is caught); the connection is rolled back if needed and returned to the pool
+ * only once its transaction has ended, so it never leaks mid-transaction.
+ */
+async function selectKeyRowBounded(keyHash: string, timeoutMs: number): Promise<ApiKeyRow[]> {
+  const reserved = await withDeadline(sql.reserve(), LOOKUP_ACQUIRE_TIMEOUT_MS, "acquire", { onLate: (late) => late.release() });
+  let pending: { cancel: () => unknown } | null = null;
+  const run = (async () => {
+    await reserved`begin read only`;
+    await reserved`select set_config('statement_timeout', ${String(Math.max(1, Math.floor(timeoutMs)))}, true)`;
+    const query = selectKeyRow(reserved as unknown as typeof sql, keyHash);
+    pending = query;
+    const rows = await query;
+    await reserved`commit`;
+    return rows;
+  })();
+  // Return the connection only after its transaction ended (committed, or rolled back after a failure).
+  run.then(
+    () => reserved.release(),
+    () => { reserved`rollback`.catch(() => {}).finally(() => reserved.release()); },
+  );
+  return await withDeadline(run, timeoutMs + 500, "execute", { onTimeout: () => pending?.cancel() });
+}
+
+export async function validateApiKey(
+  rawKey: string,
+  requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
+  /**
+   * `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts).
+   * `timeoutMs` bounds the lookup (selectKeyRowBounded): connection acquisition and a database-side
+   * statement_timeout, each with its own bound; it then rejects with a LookupTimeoutError (57014).
+   */
+  options: { recordUsage?: boolean; timeoutMs?: number } = {},
+): Promise<ValidatedKey | null> {
+  const keyHash = hashKey(rawKey);
+
+  const rows = options.timeoutMs ? await selectKeyRowBounded(keyHash, options.timeoutMs) : await selectKeyRow(sql, keyHash);
   const [row] = rows;
 
   // api_keys.org_id is NOT NULL (0125); refusing a key without one anyway keeps this fail-closed if that ever changes.

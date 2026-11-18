@@ -18,7 +18,7 @@ const { mcpResource } = await import("../services/mcp-oauth.js");
 const { mcpAuth } = await import("../middleware/mcp-auth.js");
 const { compatibleChatAuth } = await import("../routes/chat-completions.js");
 const { algoliaCompatRoutes } = await import("../routes/algolia-compat.js");
-const { PREVERIFY_MAX_CONCURRENT, bodyBudgetFallbackCounts, bodyBudgetPreverifyInFlight } = await import("../lib/body-budget-credentials.js");
+const { PREVERIFY_MAX_CONCURRENT, bodyBudgetFallbackCounts, bodyBudgetPreverifyInFlight, preverifiedRoute } = await import("../lib/body-budget-credentials.js");
 const { requestContextMiddleware } = await import("../lib/request-context.js");
 
 let saved: ReturnType<typeof bodyReadSettings>;
@@ -274,6 +274,8 @@ describe("pre-check concurrency", () => {
         return { req: { url: request.url, path: "/v1/chat/completions", method: "POST", header: (name: string) => request.headers.get(name) ?? undefined }, env: {} } as never;
       };
       const waiting = Array.from({ length: PREVERIFY_MAX_CONCURRENT }, (_, i) => verifyBodyBudgetCredential(context(i)));
+      // Each lookup takes its slot a microtask later (a synchronous throw in resolve cannot leak one).
+      await vi.advanceTimersByTimeAsync(0);
       expect(bodyBudgetPreverifyInFlight()).toBe(PREVERIFY_MAX_CONCURRENT);
       const busyBefore = bodyBudgetFallbackCounts().busy;
       expect(await verifyBodyBudgetCredential(context(99))).toBeNull();
@@ -288,6 +290,62 @@ describe("pre-check concurrency", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("budget selection matches the router exactly", () => {
+  it("selects a route only where the router itself would serve that method and path", async () => {
+    const probe = new Hono();
+    const served: Array<{ method: string; path: string }> = [];
+    for (const route of algoliaCompatRoutes.routes) {
+      if (route.method === "ALL") continue;
+      served.push({ method: route.method, path: `/compat/algolia${route.path}` });
+      probe.on(route.method, `/compat/algolia${route.path}`, c => c.text("matched"));
+    }
+    probe.post("/v1/chat/completions", c => c.text("matched"));
+    probe.post("/v1/mcp", c => c.text("matched"));
+    const routerServes = async (method: string, path: string) => (await probe.request(path, { method })).status === 200
+      && (await probe.request(path, { method })).headers.get("content-type")?.startsWith("text/plain");
+    const paths = [
+      "/v1/chat/completions", "/v1/mcp",
+      ...served.map((route) => route.path.replace(":indexName", "docs").replace(":facetName", "brand").replace("*", "docs")),
+      "/compat/algolia/1/indexes/*/queries", "/compat/algolia/1/indexes/a/b/queries",
+    ];
+    for (const base of paths) {
+      for (const path of [base, `${base}/`]) {
+        for (const method of ["POST", "PUT", "PATCH", "GET", "HEAD"]) {
+          // Whatever the budget selects, the router serves with that method, exactly.
+          if (preverifiedRoute(method, path)) expect({ method, path, served: await routerServes(method, path) }).toEqual({ method, path, served: true });
+        }
+        expect({ path, trailing: path.endsWith("/") && Boolean(preverifiedRoute("POST", path) ?? preverifiedRoute("PUT", path)) }).toEqual({ path, trailing: false });
+      }
+    }
+    // And every authenticated Algolia POST or PUT the router serves is budgeted.
+    for (const route of served.filter((entry) => entry.method === "POST" || entry.method === "PUT")) {
+      const path = route.path.replace(":indexName", "docs").replace(":facetName", "brand").replace("*", "docs");
+      expect({ route: `${route.method} ${route.path}`, budgeted: Boolean(preverifiedRoute(route.method, path)) }).toEqual({ route: `${route.method} ${route.path}`, budgeted: true });
+    }
+  });
+});
+
+describe("one admission limit for route auth and the pre-check", () => {
+  it("answers route auth 503 with Retry-After, running no lookup, while the limit is full", async () => {
+    let release!: () => void;
+    validateApiKey.mockReturnValue(new Promise((resolve) => { release = () => resolve(null); }));
+    const hono = new Hono();
+    hono.use("*", requestContextMiddleware);
+    hono.use("/v1/chat/completions", compatibleChatAuth);
+    hono.post("/v1/chat/completions", c => c.text("ok"));
+    const send = (i: number) => hono.request("/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json", Authorization: `Bearer dslp_priv_${i}` }, body: "{}" });
+    const holding = Array.from({ length: PREVERIFY_MAX_CONCURRENT }, (_, i) => send(i));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const lookups = validateApiKey.mock.calls.length;
+    const refused = await send(999);
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("Retry-After")).toBeTruthy();
+    expect(validateApiKey.mock.calls.length).toBe(lookups);
+    release();
+    await Promise.all(holding);
   });
 });
 

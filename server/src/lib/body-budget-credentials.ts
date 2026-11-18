@@ -9,6 +9,8 @@ import {
   resolveRequestApiKey,
   resolveRequestMcpCredential,
   type CredentialResolution,
+  CREDENTIAL_LOOKUP_MAX_CONCURRENT,
+  credentialLookupsInFlight,
 } from "./route-credentials.js";
 
 type Route = {
@@ -34,27 +36,27 @@ const algoliaManage = { resolve: algoliaKey, admits: (r: CredentialResolution) =
  */
 const PREVERIFIED_ROUTES: readonly Route[] = [
   {
-    method: "POST", path: /^\/v1\/chat\/completions\/?$/,
+    method: "POST", path: /^\/v1\/chat\/completions$/,
     resolve: (c) => resolveRequestApiKey(c, c.req.header("Authorization")),
     admits: (r) => chatCompletionsAdmits(r.actor),
   },
-  { method: "POST", path: /^\/v1\/mcp\/?$/, resolve: resolveRequestMcpCredential, admits: (r) => mcpAdmits(r.actor) },
+  { method: "POST", path: /^\/v1\/mcp$/, resolve: resolveRequestMcpCredential, admits: (r) => mcpAdmits(r.actor) },
   // Algolia search: one index's query, the multi-index `queries` batch (sent as `*/queries`), facet query, events.
-  { method: "POST", path: new RegExp(`${ALGOLIA}\\/indexes\\/[^/]+\\/(?:query|queries|facets\\/[^/]+\\/query|analytics\\/(?:click|conversion))\\/?$`), ...algoliaSearch },
+  { method: "POST", path: new RegExp(`${ALGOLIA}\\/indexes\\/[^/]+\\/(?:query|queries|facets\\/[^/]+\\/query|analytics\\/(?:click|conversion))$`), ...algoliaSearch },
   // Algolia admin: settings, synonyms and rules writes, and import.
-  { method: "PUT", path: new RegExp(`${ALGOLIA}\\/indexes\\/[^/]+\\/settings\\/?$`), ...algoliaManage },
-  { method: "POST", path: new RegExp(`${ALGOLIA}\\/indexes\\/[^/]+\\/(?:synonyms|rules)\\/batch\\/?$`), ...algoliaManage },
-  { method: "POST", path: new RegExp(`${ALGOLIA}\\/import\\/?$`), ...algoliaManage },
+  { method: "PUT", path: new RegExp(`${ALGOLIA}\\/indexes\\/[^/]+\\/settings$`), ...algoliaManage },
+  { method: "POST", path: new RegExp(`${ALGOLIA}\\/indexes\\/[^/]+\\/(?:synonyms|rules)\\/batch$`), ...algoliaManage },
+  { method: "POST", path: new RegExp(`${ALGOLIA}\\/import$`), ...algoliaManage },
 ];
 
 /**
- * At most PREVERIFY_MAX_CONCURRENT lookups at once: a slot is held until its
- * lookup settles (which the lookup's own timeout bounds), not merely while the
- * caller waits. The caller waits at most PREVERIFY_TIMEOUT_MS.
+ * Lookups share one admission limit with the routes' own auth
+ * (route-credentials.ts: CREDENTIAL_LOOKUP_MAX_CONCURRENT, a slot held until
+ * its lookup settles); the pre-check waits for its lookup at most
+ * PREVERIFY_TIMEOUT_MS.
  */
-export const PREVERIFY_MAX_CONCURRENT = 64;
+export const PREVERIFY_MAX_CONCURRENT = CREDENTIAL_LOOKUP_MAX_CONCURRENT;
 export const PREVERIFY_TIMEOUT_MS = 2_000;
-let inFlight = 0;
 
 /** Why a pre-check charged a request to the public pool, counted (and sampled into the logs). */
 export type BodyBudgetFallback = "busy" | "timeout" | "unavailable" | "not-admitted" | "no-credential";
@@ -65,9 +67,9 @@ export function bodyBudgetFallbackCounts(): Readonly<Record<BodyBudgetFallback, 
   return { ...fallbacks };
 }
 
-/** The number of pre-check lookups in flight (tests and diagnostics). */
+/** The number of credential lookups in flight, pre-checks and route auth together (tests and diagnostics). */
 export function bodyBudgetPreverifyInFlight(): number {
-  return inFlight;
+  return credentialLookupsInFlight();
 }
 
 function fallBack(reason: BodyBudgetFallback, c: Context): null {
@@ -87,20 +89,23 @@ function fallBack(reason: BodyBudgetFallback, c: Context): null {
  * credential than the route's own. The resolution is memoized for the route's
  * auth to reuse.
  */
+/** The preverified route for a request, by the router's exact method and path (no trailing-slash leniency). */
+export function preverifiedRoute(method: string, path: string): Route | undefined {
+  return PREVERIFIED_ROUTES.find((entry) => entry.method === method && entry.path.test(path));
+}
+
 export const verifyBodyBudgetCredential: BodyBudgetCredentialResolver = async (c: Context) => {
-  const route = PREVERIFIED_ROUTES.find((entry) => entry.method === c.req.method && entry.path.test(c.req.path));
+  const route = preverifiedRoute(c.req.method, c.req.path);
   if (!route) return null;
-  if (inFlight >= PREVERIFY_MAX_CONCURRENT) return fallBack("busy", c);
-  inFlight++;
-  const lookup = route.resolve(c);
-  // The slot is released when the lookup settles, however long the caller waited.
-  void lookup.finally(() => { inFlight--; }).catch(() => {});
+  // A synchronous throw in resolve still becomes a rejected lookup (and the shared limit frees its slot).
+  const lookup = Promise.resolve().then(() => route.resolve(c));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const outcome = await Promise.race([
     lookup.then((resolution) => resolution, () => null),
     new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), PREVERIFY_TIMEOUT_MS); }),
   ]).finally(() => clearTimeout(timer));
   if (outcome === "timeout") return fallBack("timeout", c);
+  if (outcome?.busy) return fallBack("busy", c);
   if (outcome === null || outcome.unavailable) return fallBack("unavailable", c);
   if (!outcome.token) return fallBack("no-credential", c);
   if (!route.admits(outcome) || !outcome.actor) return fallBack("not-admitted", c);
