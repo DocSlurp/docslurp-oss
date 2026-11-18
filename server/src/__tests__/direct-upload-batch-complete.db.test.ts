@@ -18,6 +18,11 @@ const mocks = vi.hoisted(() => ({
   copyAnswerGate: null as Promise<void> | null,
   heads: [] as string[],
   confirm: vi.fn(),
+  /** Runs when a lock is tried (a client acting just before the holder gets the session). */
+  onLock: null as null | (() => Promise<void>),
+  /** Runs at each HEAD, after an optional delay. */
+  onHead: null as null | ((key: string) => Promise<void>),
+  headDelayMs: 0,
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -25,14 +30,20 @@ vi.mock("../db.js", () => ({ sql: Object.assign(
     return { then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
       mocks.query(text, values).then((result: { rows: unknown[] }) => result.rows).then(resolve, reject) };
   }, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) }));
-vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({
-  connection: async (strings: TemplateStringsArray) => strings.join("").includes("pg_try_advisory_lock") ? [{ acquired: !mocks.lockHeld }] : [],
+vi.mock("../lib/direct-upload-locks.js", () => ({ DirectUploadLockUnavailable: class extends Error {}, reserveDirectUploadLockConnection: async () => ({
+  connection: async (strings: TemplateStringsArray) => {
+    if (!strings.join("").includes("pg_try_advisory_lock")) return [];
+    if (mocks.onLock) { const hook = mocks.onLock; mocks.onLock = null; await hook(); }
+    return [{ acquired: !mocks.lockHeld }];
+  },
   release: () => {},
 }) }));
 vi.mock("../lib/storage.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/storage.js")>(),
   getUploadedObjectMetadata: async (key: string) => {
     mocks.heads.push(key);
+    if (mocks.headDelayMs) await new Promise(resolve => setTimeout(resolve, mocks.headDelayMs));
+    if (mocks.onHead) await mocks.onHead(key);
     const object = mocks.objects.get(key);
     if (!object) throw Object.assign(new Error("not found"), { name: "NotFound" });
     return { contentLength: object.size, etag: object.etag };
@@ -97,6 +108,9 @@ beforeEach(async () => {
   mocks.copies.length = 0;
   mocks.copyOutages.clear();
   mocks.copyAnswerGate = null;
+  mocks.onLock = null;
+  mocks.onHead = null;
+  mocks.headDelayMs = 0;
   mocks.heads.length = 0;
   mocks.confirm.mockReset().mockResolvedValue({});
   await db.exec(`delete from upload_session_files; delete from upload_sessions; delete from storage_cleanup_queue; delete from upload_cleanup_owners;
@@ -380,5 +394,99 @@ describe("sealing publishes exactly one verified version", () => {
     // A stale finalizer still holding the pending row repeats the same version: no error, nothing discarded.
     await expect(finalizeDirectUploadFile(row)).resolves.toBe(true);
     expect(mocks.objects.has(sealedSourceKey(row, "\"v1\""))).toBe(true);
+  });
+});
+
+describe("the client hold (M2) and guarded reconciler transitions (M1)", () => {
+  async function hold() {
+    return (await db.query<{ until: string | null; since: string | null; held: boolean; due: string }>(`select client_finalizing_until::text as until,
+      client_finalizing_since::text as since, coalesce(client_finalizing_until > now(), false) as held, next_reconcile_at::text as due
+      from upload_sessions where id = $1`, [SESSION])).rows[0]!;
+  }
+
+  it("opens the hold before taking the lock, so a busy answer still keeps the sweep away", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    mocks.lockHeld = true;
+    await expect(completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "a" }] })).rejects.toMatchObject({ code: "upload_session_busy" });
+    expect(await hold()).toMatchObject({ held: true });
+  });
+
+  it("extends the hold only on new progress, and never past the cap from its start", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    await seedFile(SESSION, "missing", null);
+    await seedFile(SESSION, "b", { size: 10, etag: "\"b\"" });
+    await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "a" }] });
+    const first = await hold();
+    // No progress (the file is not there yet): the hold is not extended.
+    await db.query("update upload_sessions set client_finalizing_until = now() + interval '5 seconds' where id = $1", [SESSION]);
+    const before = await hold();
+    await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "missing" }] });
+    expect((await hold()).until).toBe(before.until);
+    expect((await hold()).since).toBe(first.since);
+    // Progress after the cap: the hold ends at the cap (already past), so the reconciler may take over.
+    await db.query("update upload_sessions set client_finalizing_since = now() - interval '16 minutes' where id = $1", [SESSION]);
+    await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "b" }] });
+    expect(await hold()).toMatchObject({ held: false });
+  });
+
+  it("re-checks the hold under the lock: a client that starts finalizing after selection wins, with no backoff or error", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    await db.query("update upload_sessions set next_reconcile_at = now() - interval '1 second' where id = $1", [SESSION]);
+    const due = (await hold()).due;
+    // The sweep selected the session; before it gets the lock, a client opens a hold.
+    mocks.onLock = async () => { await db.query("update upload_sessions set client_finalizing_until = now() + interval '30 seconds' where id = $1", [SESSION]); };
+    await reconcileDirectUploads();
+    expect(mocks.heads).toEqual([]);
+    expect((await fileRow("a")).status).toBe("pending");
+    const after = await db.query<{ due: string; attempts: number; last_error: string | null }>(
+      "select next_reconcile_at::text as due, reconcile_attempts as attempts, last_error from upload_sessions where id = $1", [SESSION]);
+    expect(after.rows[0]).toEqual({ due, attempts: 0, last_error: null });
+  });
+
+  it("does not push back a session that newer work made due during the pass", async () => {
+    await seedFile(SESSION, "missing", null);
+    await db.query("update upload_sessions set next_reconcile_at = now() - interval '1 second' where id = $1", [SESSION]);
+    // While the sweep inspects the file, a client's last complete (or a webhook) makes the session due again.
+    mocks.onHead = async () => { mocks.onHead = null; await db.query("update upload_sessions set next_reconcile_at = now() where id = $1", [SESSION]); };
+    await reconcileDirectUploads();
+    const after = await db.query<{ backed_off: boolean; attempts: number }>(
+      "select next_reconcile_at > now() + interval '1 second' as backed_off, reconcile_attempts as attempts from upload_sessions where id = $1", [SESSION]);
+    expect(after.rows[0]).toEqual({ backed_off: false, attempts: 0 });
+  });
+
+  it("applies a terminal confirm failure only to the state that produced it", async () => {
+    const { ProjectIntakeError } = await import("../services/project-intake.js");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    await db.query("update upload_sessions set next_reconcile_at = now() - interval '1 second' where id = $1", [SESSION]);
+    // A client changes the session (a file is re-sealed) while the confirm runs; the confirm then fails terminally.
+    mocks.confirm.mockImplementationOnce(async () => {
+      await db.query("update upload_session_files set updated_at = now() + interval '1 second' where id = 'a'");
+      throw new ProjectIntakeError("Upload refused", 400);
+    });
+    await reconcileDirectUploads();
+    expect((await sessionRow()).status).toBe("pending");
+    // The same failure on an unchanged session is applied.
+    await db.query("update upload_sessions set next_reconcile_at = now() - interval '1 second' where id = $1", [SESSION]);
+    mocks.confirm.mockRejectedValueOnce(new ProjectIntakeError("Upload refused", 400));
+    await reconcileDirectUploads();
+    expect((await sessionRow()).status).toBe("failed");
+    log.mockRestore();
+  });
+
+  it("stops starting files when the hold's budget is spent and reports the rest as retryable busy", async () => {
+    const { env } = await import("../config.js");
+    const budget = env.directUploadLockHoldBudgetMs;
+    env.directUploadLockHoldBudgetMs = 30;
+    try {
+      for (let i = 0; i < 20; i++) await seedFile(SESSION, `f${i}`, { size: 10, etag: `"e${i}"` });
+      mocks.headDelayMs = 20;
+      const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: Array.from({ length: 20 }, (_, i) => ({ fileId: `f${i}` })) });
+      const skipped = result.files.filter(file => file.status === "failed");
+      expect(result.completedCount).toBeGreaterThan(0);
+      expect(skipped.length).toBeGreaterThan(0);
+      for (const file of skipped) expect(file).toMatchObject({ error: { statusCode: 409, code: "upload_session_busy", retryable: true, action: "retry" } });
+      for (const file of skipped) expect((await fileRow(file.fileId)).status).toBe("pending");
+    } finally { env.directUploadLockHoldBudgetMs = budget; }
   });
 });
