@@ -24,6 +24,7 @@ import type { BBox } from "@docslurp/shared";
 
 import { DOPPLER_PAGE_FACTS_MAX_PAGES, dopplerPageFactsByteBudget, dopplerPageFactsMode, dopplerPageFactsLowConfidence, parseDopplerPageFacts, type Box, type DopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
 import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
+import { furnitureFloor, pageSize } from "../lib/page-evidence.js";
 import type { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import type { VisualCandidate } from "./types.js";
@@ -52,7 +53,7 @@ export const FACTS_CANDIDATE_RULES = {
   minImagePx: 96,
   /** An image object or cluster box on at least this many pages... */
   furnitureMinPages: 3,
-  /** ...and this share of the pages with facts is furniture (the walker's repeated-image rule). */
+  /** ...and this share of the pages with facts is furniture (the walker's repeated-image rule, page-evidence.ts furnitureFloor). */
   furnitureMinShare: 0.2,
   /** Candidates per page, largest first. */
   maxPerPage: 4,
@@ -66,17 +67,14 @@ export function chartFactsUse(env: NodeJS.ProcessEnv = process.env): { candidate
   return { candidates: mode === "use", dedupe: mode !== "off" };
 }
 
-/** Page sides the layout reader accepts (parsePageLayoutFacts): anything else is not a page a raster maps to. */
-const MIN_SIDE_PT = 1;
-const MAX_SIDE_PT = 14_400;
-
 /**
  * Whether the page's facts boxes are in the space the page raster is cropped in. Facts boxes are MediaBox points, rotated,
  * top-left origin; the raster shows the CropBox. A CropBox that differs from the MediaBox shifts every box: unknown.
  */
 function placeable(page: DopplerPageFacts): boolean {
   const g = page.geometry;
-  if (!g || !(g.widthPt >= MIN_SIDE_PT && g.widthPt <= MAX_SIDE_PT && g.heightPt >= MIN_SIDE_PT && g.heightPt <= MAX_SIDE_PT)) return false;
+  // Page sides page evidence accepts (pageSize): anything else is not a page a raster maps to.
+  if (!g || !pageSize(g.widthPt, g.heightPt)) return false;
   if (g.cropBox && g.mediaBox && g.cropBox.some((v, i) => Math.abs(v - g.mediaBox![i]!) > 0.5)) return false;
   return true;
 }
@@ -117,7 +115,7 @@ export function furnitureOf(facts: Pick<DopplerPageFactsDocument, "pages">): { o
       if (b) boxes.set(boxKey(b), (boxes.get(boxKey(b)) ?? new Set()).add(page.page));
     }
   }
-  const floor = Math.max(FACTS_CANDIDATE_RULES.furnitureMinPages, Math.ceil(FACTS_CANDIDATE_RULES.furnitureMinShare * Math.max(1, considered)));
+  const floor = furnitureFloor(considered, { minPages: FACTS_CANDIDATE_RULES.furnitureMinPages, minShare: FACTS_CANDIDATE_RULES.furnitureMinShare });
   return {
     objects: new Set([...objects].filter(([, pages]) => pages.size >= floor).map(([obj]) => obj)),
     boxes: new Set([...boxes].filter(([, pages]) => pages.size >= floor).map(([key]) => key)),

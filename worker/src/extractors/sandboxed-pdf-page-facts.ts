@@ -12,7 +12,7 @@
  *   also lets them stand in for layout facts when the provider returned none.
  */
 import { parseDopplerPageFacts, dopplerPageFactsJsonl, dopplerPageFactsMode, withoutWalkerParityFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
-import { pageLayoutFactsFromDopplerFacts } from "../lib/doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts } from "../lib/page-evidence-doppler.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 
 /** The job object of a run (extractors/plugins.ts SandboxedPdfJob); only its identity is used here. */

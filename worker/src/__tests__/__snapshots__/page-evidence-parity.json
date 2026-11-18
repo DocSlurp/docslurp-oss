@@ -1,0 +1,10353 @@
+{
+ "full fixture (text, scan, figure)": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": true,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "2": {
+     "words": 300,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 1,
+       "repeated": false,
+       "wordsInside": null
+      },
+      {
+       "coverage": 0.0053,
+       "repeated": true,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "invisible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "3": {
+     "words": 8,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": true,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized:evidence-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized:evidence-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 2,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 2,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    },
+    "2": {
+     "input": {
+      "status": "ocr-layer",
+      "words": 300,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 1,
+      "fullPageImage": true,
+      "images": 2,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "rotated-page",
+       "scan-page"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "ocr-layer-unverified",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page",
+      "skip:image"
+     ],
+     "triage": "page-2-text-layer-ocr-layer",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "3": {
+     "input": {
+      "status": "ok",
+      "words": 8,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "link-uri"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "skip:image"
+     ],
+     "triage": "page-3-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    }
+   },
+   "pageImageEvidence": [
+    {
+     "pageNumber": 3,
+     "wordCount": 8,
+     "imagesKnown": true,
+     "anyImageCount": 1,
+     "repeatedImageCount": 0,
+     "imageCount": 0,
+     "imageCoverage": 0,
+     "largestImageCoverage": 0,
+     "embeddedImageBytes": null
+    }
+   ],
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 2,
+     "words": 300,
+     "images": 2,
+     "textBytes": 2060
+    },
+    {
+     "page": 3,
+     "words": 8,
+     "images": 1,
+     "textBytes": 47
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "2": {
+     "textLayer": "invisible",
+     "scanClass": "single"
+    },
+    "3": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 1,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 1
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 3
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 3
+   }
+  }
+ },
+ "thin-rule build: walker table": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [
+      {
+       "rows": 6,
+       "columns": 4,
+       "coverage": null
+      }
+     ],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "thin-rule build: no walker grid": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": 0,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "thin-rule build: unlisted walker grid": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "older build: grid list absent, rules enough": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "older build: grid list absent, too few rules": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "older build: two-column grid found": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "older build: one-column grid only": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": 0,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "truncated grids": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "drawing limit": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "no vectors family": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "truncated grids, few rules": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "drawing limit, few rules": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "no vectors family, rules unknown, prose": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": true,
+      "reason": "text-layer-ok",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.95,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page"
+     ],
+     "triage": "all-pages-healthy-text-no-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 0,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "prose only, unreadable xref (20 pages)": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "2": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "3": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "4": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "5": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "6": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "7": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "8": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "9": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "10": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "11": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "12": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "13": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "14": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "15": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "16": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "17": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "18": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "19": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "20": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 19
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 19,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": []
+     },
+     "trust": {
+      "trusted": true,
+      "reason": "text-layer-ok",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.95,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "accept-text:page"
+     ],
+     "triage": "all-pages-healthy-text-no-images",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "2": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-2-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "3": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-3-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "4": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-4-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "5": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-5-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "6": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-6-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "7": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-7-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "8": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-8-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "9": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-9-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "10": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-10-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "11": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-11-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "12": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-12-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "13": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-13-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "14": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-14-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "15": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-15-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "16": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-16-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "17": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-17-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "18": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-18-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "19": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-19-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "20": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "table-path-capped"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-20-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "2": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "3": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "4": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "5": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "6": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "7": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "8": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "9": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "10": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "11": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "12": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "13": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "14": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "15": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "16": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "17": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "18": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "19": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "20": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "16": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "17": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "18": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "19": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "20": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 20
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 20
+   }
+  }
+ },
+ "low confidence (xref-repaired-earlier): table rules, a large image, math glyphs": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "facts-low-confidence",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-1-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "low confidence sparse scan page": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "facts-low-confidence",
+       "rotated-page",
+       "scan-page"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-1-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {
+    "1": {
+     "textLayer": "invisible",
+     "scanClass": "single"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "xref-repaired thin-rule build": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "failed page beside a text page": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": null,
+     "encodings": null
+    },
+    "2": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 2
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 1
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "probe-error"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "ocr:page"
+     ],
+     "triage": "page-1-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    },
+    "2": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-2-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {
+    "2": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 2
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 2
+   }
+  }
+ },
+ "locked document": {
+  "use": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "encrypted-user-password"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page"
+     ],
+     "triage": "page-1-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": false
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {},
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "math run (-glyphs): thin-rule table": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "math run (-glyphs): too few rules": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 1,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0.25,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "garbled: unmapped glyphs": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "suspect",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": true,
+      "unmapped": 0.15,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "garbled-text-layer",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.03,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-text-layer-suspect",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "garbled: control characters": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "suspect",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": true,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "garbled-text-layer",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.03,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-text-layer-suspect",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "garbled: font unmapped ratio": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "suspect",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": true,
+      "unmapped": 0.2,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "garbled-text-layer",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.03,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-text-layer-suspect",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "math glyphs below the gate": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.005,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": true,
+      "reason": "text-layer-ok",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0.95,
+      "math": 0.063,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "accept-text:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "math glyphs above the gate": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.05,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.625,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "math:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "mixed scan beside text (centred words)": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      },
+      {
+       "coverage": 0.2897,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.3,
+      "fullPageImage": false,
+      "images": 2,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image",
+      "chart-data:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 2,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "image list truncated": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "encodings: booktabs table without a grid": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": {
+      "table": "text-layer",
+      "math": "none"
+     }
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "encoding-table:booktabs",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none",
+     "mathBits": 0,
+     "tableBits": 4,
+     "encodingCounts": 68719476736
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "encodings: outlined text grid (vision table)": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": {
+      "table": "vision",
+      "math": "none"
+     }
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "vision-rescue",
+     "read": true,
+     "signals": [
+      "encoding-table:outlined-text-grid",
+      "encoding-table:outlined-text-grid",
+      "numeric-heavy",
+      "ocr-authorized:encoding-table-outlines",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none",
+     "mathBits": 0,
+     "tableBits": 128,
+     "encodingCounts": 0
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "encodings: raster math strips": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": {
+      "table": "none",
+      "math": "vision"
+     }
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "vision-rescue",
+     "read": true,
+     "signals": [
+      "dense-prose",
+      "encoding-math-read:raster-strips",
+      "encoding-math:vision",
+      "numeric-heavy",
+      "ocr-authorized:encoding-math-unreadable",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 1,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none",
+     "mathBits": 32,
+     "tableBits": 0,
+     "encodingCounts": 8192
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "encodings: math grid on a ruled page": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [
+      {
+       "rows": 6,
+       "columns": 4,
+       "coverage": null
+      }
+     ],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": {
+      "table": "none",
+      "math": "text"
+     }
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "encoding-math-grid",
+      "encoding-math:text",
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none",
+     "mathBits": 2048,
+     "tableBits": 256,
+     "encodingCounts": 0
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "encodings: analysis truncated": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0053,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none",
+     "mathBits": 0,
+     "tableBits": 512,
+     "encodingCounts": 0
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "encodings on a low-confidence page": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": null,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": null,
+     "textLayer": null,
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "unknown",
+      "words": 0,
+      "tableRuleScore": 4,
+      "mathGlyphRatio": 0,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0,
+      "fullPageImage": false,
+      "images": 0,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "facts-low-confidence",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "text-layer-suspect",
+      "mathGated": false
+     },
+     "needs": {
+      "trust": 0,
+      "math": 0,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "ocr:page"
+     ],
+     "triage": "page-1-text-layer-unknown",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none",
+     "mathBits": 0,
+     "tableBits": 128,
+     "encodingCounts": 0
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "numeric-heavy"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 1
+   }
+  }
+ },
+ "furniture: a logo on 3 of 15 pages": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": true,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "2": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": true,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "3": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": true,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "4": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "5": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "6": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "7": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "8": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "9": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "10": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "11": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "12": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "13": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "14": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    },
+    "15": {
+     "words": 410,
+     "grids": [],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [
+      {
+       "coverage": 0.0619,
+       "repeated": false,
+       "wordsInside": null
+      }
+     ],
+     "textLayer": "visible",
+     "size": [
+      612,
+      792
+     ],
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 15,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 15,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "2": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-2-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "3": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-3-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "4": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-4-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "5": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-5-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "6": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-6-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "7": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-7-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "8": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-8-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "9": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-9-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "10": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-10-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "11": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-11-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "12": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-12-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "13": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-13-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "14": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-14-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    },
+    "15": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 0,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 0,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "extract-text:page",
+      "chart-data:image"
+     ],
+     "triage": "page-15-has-images",
+     "insetCandidates": 1,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 2,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 3,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 4,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 5,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 6,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 7,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 8,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 9,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 10,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 11,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 12,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 13,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 14,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 15,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "2": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "3": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "4": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "5": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "6": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "7": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "8": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "9": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "10": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "11": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "12": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "13": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "14": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "15": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": null,
+   "classify": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "2": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "3": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "4": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "5": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "6": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "7": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "8": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "9": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "10": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "11": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "12": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "13": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "14": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    },
+    "15": {
+     "route": "straightforward-text",
+     "hint": "cheap-text",
+     "read": false,
+     "signals": [
+      "dense-prose",
+      "page-text-unknown"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 15
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 0,
+    "text": 0,
+    "unknown": 15
+   }
+  }
+ },
+ "walker grids unknown, settled from facts": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [
+      {
+       "rows": 6,
+       "columns": 4,
+       "coverage": null
+      }
+     ],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": null,
+     "size": null,
+     "encodings": null
+    },
+    "2": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": null,
+     "size": null,
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 2,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    },
+    "2": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-2-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    },
+    {
+     "page": 2,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    },
+    "2": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [
+      {
+       "rows": 6,
+       "columns": 4,
+       "coverage": null
+      }
+     ],
+     "gridsUnknown": false,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": null,
+     "size": null,
+     "encodings": null
+    },
+    "2": {
+     "words": 410,
+     "grids": null,
+     "gridsUnknown": true,
+     "tableCoverage": null,
+     "images": [],
+     "textLayer": null,
+     "size": null,
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    },
+    "2": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "grids-unknown",
+      "ocr-not-authorized"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 1
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 2,
+    "text": 0,
+    "unknown": 0
+   }
+  }
+ },
+ "walker grids known beside facts": {
+  "use": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [
+      {
+       "rows": 7,
+       "columns": 3,
+       "coverage": 0.3
+      }
+     ],
+     "gridsUnknown": false,
+     "tableCoverage": 0.3,
+     "images": [],
+     "textLayer": null,
+     "size": null,
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "router": {
+    "1": {
+     "input": {
+      "status": "ok",
+      "words": 410,
+      "tableRuleScore": 5,
+      "mathGlyphRatio": 0.0125,
+      "garbled": false,
+      "unmapped": 0,
+      "imageCoverage": 0.0105,
+      "fullPageImage": false,
+      "images": 1,
+      "size": [
+       612,
+       792
+      ],
+      "features": [
+       "acroform-filled",
+       "link-internal",
+       "link-uri",
+       "ocg-visible"
+      ]
+     },
+     "trust": {
+      "trusted": false,
+      "reason": "math-glyphs",
+      "mathGated": true
+     },
+     "needs": {
+      "trust": 0.5,
+      "math": 0.156,
+      "tables": 1,
+      "scanned": 0,
+      "blank": false
+     },
+     "roles": [
+      "table:page",
+      "skip:image"
+     ],
+     "triage": "page-1-has-images",
+     "insetCandidates": 0,
+     "renderNeeded": true
+    }
+   },
+   "pageImageEvidence": null,
+   "pageFactRows": [
+    {
+     "page": 1,
+     "words": 410,
+     "images": 1,
+     "textBytes": 2749
+    }
+   ],
+   "routingFacts": {
+    "1": {
+     "textLayer": "visible",
+     "scanClass": "none"
+    }
+   },
+   "chartCandidates": {
+    "vectorStrong": 0,
+    "vectorVoted": 0,
+    "imageVoted": 0,
+    "furniture": 0,
+    "scanPages": 0
+   }
+  },
+  "store": {
+   "layout": {
+    "1": {
+     "words": 410,
+     "grids": [
+      {
+       "rows": 7,
+       "columns": 3,
+       "coverage": 0.3
+      }
+     ],
+     "gridsUnknown": false,
+     "tableCoverage": 0.3,
+     "images": [],
+     "textLayer": null,
+     "size": null,
+     "encodings": null
+    }
+   },
+   "classify": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "classifyEncodings": {
+    "1": {
+     "route": "table-heavy",
+     "hint": "layout-aware",
+     "read": false,
+     "signals": [
+      "numeric-heavy",
+      "ocr-not-authorized",
+      "table-markers"
+     ]
+    }
+   },
+   "costRoutes": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   },
+   "costRoutesLexical": {
+    "ocr-read": 0,
+    "ocr-blank": 0,
+    "table": 1,
+    "text": 0,
+    "unknown": 0
+   }
+  }
+ },
+ "probe: healthy text": {
+  "input": {
+   "status": "ok",
+   "words": 330,
+   "tableRuleScore": 0,
+   "mathGlyphRatio": 0,
+   "garbled": false,
+   "unmapped": 0,
+   "imageCoverage": 0,
+   "fullPageImage": false,
+   "images": 0,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": true,
+   "reason": "text-layer-ok",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0.95,
+   "math": 0,
+   "tables": 0,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "accept-text:page"
+  ],
+  "triage": "all-pages-healthy-text-no-images",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "probe: ruled table": {
+  "input": {
+   "status": "ok",
+   "words": 330,
+   "tableRuleScore": 6,
+   "mathGlyphRatio": 0,
+   "garbled": false,
+   "unmapped": 0,
+   "imageCoverage": 0,
+   "fullPageImage": false,
+   "images": 0,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": true,
+   "reason": "text-layer-ok",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0.95,
+   "math": 0,
+   "tables": 1,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "table:page"
+  ],
+  "triage": "all-pages-healthy-text-no-images",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "probe: weak rules": {
+  "input": {
+   "status": "ok",
+   "words": 330,
+   "tableRuleScore": 1,
+   "mathGlyphRatio": 0,
+   "garbled": false,
+   "unmapped": 0,
+   "imageCoverage": 0,
+   "fullPageImage": false,
+   "images": 0,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": true,
+   "reason": "text-layer-ok",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0.95,
+   "math": 0,
+   "tables": 0.25,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "accept-text:page"
+  ],
+  "triage": "all-pages-healthy-text-no-images",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "probe: math glyphs": {
+  "input": {
+   "status": "ok",
+   "words": 330,
+   "tableRuleScore": 0,
+   "mathGlyphRatio": 0.02,
+   "garbled": false,
+   "unmapped": 0,
+   "imageCoverage": 0,
+   "fullPageImage": false,
+   "images": 0,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": false,
+   "reason": "math-glyphs",
+   "mathGated": true
+  },
+  "needs": {
+   "trust": 0.5,
+   "math": 0.25,
+   "tables": 0,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "extract-text:page"
+  ],
+  "triage": "page-1-math-glyphs",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "probe: garbled": {
+  "input": {
+   "status": "ok",
+   "words": 330,
+   "tableRuleScore": 0,
+   "mathGlyphRatio": 0,
+   "garbled": true,
+   "unmapped": 0.2,
+   "imageCoverage": 0,
+   "fullPageImage": false,
+   "images": 0,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": false,
+   "reason": "garbled-text-layer",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0,
+   "math": 0,
+   "tables": 0,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "extract-text:page"
+  ],
+  "triage": "page-1-suspect-layer",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "probe: unmapped only": {
+  "input": {
+   "status": "ok",
+   "words": 330,
+   "tableRuleScore": 0,
+   "mathGlyphRatio": 0,
+   "garbled": false,
+   "unmapped": 0.12,
+   "imageCoverage": 0,
+   "fullPageImage": false,
+   "images": 0,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": false,
+   "reason": "garbled-text-layer",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0,
+   "math": 0,
+   "tables": 0,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "extract-text:page"
+  ],
+  "triage": "all-pages-healthy-text-no-images",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "probe: inset image": {
+  "input": {
+   "status": "ok",
+   "words": 330,
+   "tableRuleScore": 0,
+   "mathGlyphRatio": 0,
+   "garbled": false,
+   "unmapped": 0,
+   "imageCoverage": 0.3,
+   "fullPageImage": false,
+   "images": 1,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": true,
+   "reason": "text-layer-ok",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0.95,
+   "math": 0,
+   "tables": 0,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "accept-text:page",
+   "ocr:image"
+  ],
+  "triage": "page-1-has-images",
+  "insetCandidates": 1,
+  "renderNeeded": false
+ },
+ "probe: OCR layer verified": {
+  "input": {
+   "status": "ocr-layer",
+   "words": 330,
+   "tableRuleScore": 0,
+   "mathGlyphRatio": 0,
+   "garbled": false,
+   "unmapped": 0,
+   "imageCoverage": 1,
+   "fullPageImage": true,
+   "images": 1,
+   "size": [
+    612,
+    792
+   ],
+   "features": []
+  },
+  "trust": {
+   "trusted": true,
+   "reason": "ocr-layer-agrees",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0.905,
+   "math": 0,
+   "tables": 0,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "accept-text:page",
+   "ocr:image"
+  ],
+  "triage": "page-1-text-layer-ocr-layer",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "probe: locked": {
+  "input": {
+   "status": "unknown",
+   "words": 0,
+   "tableRuleScore": 0,
+   "mathGlyphRatio": 0,
+   "garbled": false,
+   "unmapped": 0,
+   "imageCoverage": 0,
+   "fullPageImage": false,
+   "images": 0,
+   "size": [
+    612,
+    792
+   ],
+   "features": [
+    "encrypted-user-password"
+   ]
+  },
+  "trust": {
+   "trusted": false,
+   "reason": "text-layer-suspect",
+   "mathGated": false
+  },
+  "needs": {
+   "trust": 0,
+   "math": 0,
+   "tables": 0,
+   "scanned": 0,
+   "blank": false
+  },
+  "roles": [
+   "extract-text:page"
+  ],
+  "triage": "page-1-text-layer-unknown",
+  "insetCandidates": 0,
+  "renderNeeded": false
+ },
+ "walker only": {
+  "classify": {
+   "1": {
+    "route": "straightforward-text",
+    "hint": "cheap-text",
+    "read": false,
+    "signals": [
+     "dense-prose",
+     "ocr-not-authorized"
+    ]
+   },
+   "2": {
+    "route": "table-heavy",
+    "hint": "layout-aware",
+    "read": false,
+    "signals": [
+     "ocr-not-authorized",
+     "table-markers"
+    ]
+   },
+   "3": {
+    "route": "straightforward-text",
+    "hint": "cheap-text",
+    "read": false,
+    "signals": [
+     "dense-prose",
+     "page-text-unknown"
+    ]
+   }
+  },
+  "costRoutes": {
+   "ocr-read": 0,
+   "ocr-blank": 0,
+   "table": 1,
+   "text": 0,
+   "unknown": 2
+  }
+ }
+}

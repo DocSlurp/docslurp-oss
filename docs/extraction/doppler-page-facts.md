@@ -116,7 +116,9 @@ Commands the facts cannot retire, and why:
 
 ## Mappings
 
-`pageLayoutFactsFromDopplerFacts` (`worker/src/lib/doppler-page-facts-layout.ts`) fills `PageLayoutFacts` so
+Facts become page evidence (`pageEvidenceFromDopplerPage`, `worker/src/lib/page-evidence-doppler.ts`; the rules live in
+`worker/src/lib/page-evidence.ts`), the one reading every consumer shares: the v2 router's page inputs, classify-route's
+stored layout, cost stats and chart-export. `pageLayoutFactsFromDopplerFacts` projects it to `PageLayoutFacts`, so
 classify-route and page-image evidence read the facts unchanged:
 
 | `PageLayoutFacts` | from the facts |
@@ -182,8 +184,14 @@ That reaches only the document's own organization and run (a batch is one org an
 Facts never select a mixed-scan read (`mixedScanImage`): a low words-inside count is unknown (above). Walker layout still
 does, for a page with native text and a placed, scan-like, readable image with at most 2 words inside.
 
-`probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
-`probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
+The v2 router reads the same page evidence (`documentEvidenceFromDoppler`, then `pageInputFromEvidence` in
+`worker/src/routing/page-input.ts`), with provenance `doppler-facts` and no thumbnail. A low-confidence page
+(`xref-repaired-earlier`) reaches it as it reaches classify-route: only its size and features are known, so it offers no
+image to the inset gate and no rule, math or text counts, and its grids are unknown, which is the table path (a full table
+rule score), as in classify-route. Table paths that come only from unknown grids are capped per document as classify-route
+caps table-leak reads (`routerTablePaths`, 3 + 5% of the pages, at most 20); the rest keep their own role, flagged
+`table-path-capped`. A low-confidence or failed page's text layer is unread, so it is never served by a text-layer-only
+target: its text roles become OCR, and a table or math role gets an OCR role beside it.
 
 ## Math and table encodings
 
@@ -291,8 +299,8 @@ A page's encodings are unknown also with `xref-repaired` or a drawing cap (`vect
 the `full` level (which includes `mathtables`); core reads them from either. Facts without them (an older build, a provider
 that returns none, the walker alone) leave every page unknown.
 
-The v2 page router's trust cascade keeps its own math gate on `mathGlyphRatio` (0.01, `routing/trust.ts`), which these
-facts do not change.
+The v2 page router's trust cascade keeps its own math gate on `mathGlyphRatio` (0.01, `PAGE_MATH_GLYPHS` in
+`worker/src/lib/page-evidence.ts`), which these facts do not change.
 
 ## Page router
 
@@ -307,7 +315,7 @@ from these facts instead of probing the PDF (`createDopplerFactsProbeRunner`, `w
 - Facts that are missing, refused, oversized, for an unreadable document, for fewer pages than the host counted, or with
   every page failed are unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). Missing
   or refused facts never authorize a model read or a charge. Valid facts (including a failed page, as the native probe's
-  failed row) steer the plan like probe rows do, within the run's quality tier and cost cap. In `active` mode the facts must
+  failed row) steer the plan like probe rows do, read as page evidence, within the run's quality tier and cost cap. In `active` mode the facts must
   cover every host page, so a locked row on a multi-page document is unavailable there. A doc line that says a user
   password is required gives the locked row.
 - On a sandboxed deployment (the checks extract-markdown uses for `sandboxed-pdf-deployment` and for a project whose PDF

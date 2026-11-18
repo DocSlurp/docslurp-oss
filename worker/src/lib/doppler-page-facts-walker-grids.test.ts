@@ -16,7 +16,7 @@ import { buildAdaptiveRoutingDecisionSurface } from "../stages/classify-route.js
 import { SCHEMA, docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts, withoutWalkerParityFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
-import { pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts } from "./page-evidence-doppler.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 

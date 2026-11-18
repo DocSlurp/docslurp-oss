@@ -9,7 +9,7 @@ import { acceptSandboxedPdfResult, sandboxedPdfGridSettlement, sandboxedPdfLayou
 import { classifyAdaptivePage } from "../stages/classify-route.js";
 import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 import { parseDopplerPageFacts } from "./doppler-page-facts.js";
-import { settleUnknownGrids } from "./doppler-page-facts-layout.js";
+import { settleUnknownGrids } from "./page-evidence-doppler.js";
 import { parsePageLayoutFacts, type PageLayoutFacts } from "./page-layout-facts.js";
 
 const NO_RULES = { paths: 4, filled: 0, stroked: 4, coverage: 0.01, uncoveredRatio: 0, hRules: 1, vRules: 0, ruleGridScore: 0, shadings: 0,
