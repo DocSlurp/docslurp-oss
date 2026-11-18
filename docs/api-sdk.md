@@ -323,21 +323,70 @@ document has been processed. Direct uploads have three milestones:
    its `pendingParts[].url`; the range starts at
    `(partNumber - 1) * partSize` and contains that part's `sizeBytes`.
 3. Poll `GET /v1/uploads/direct/sessions/:sessionId?statusOnly=true` until
-   `result` is non-null, or the session becomes `failed` or `aborted`.
-4. Follow `result.run.id` through the run status or progress endpoints.
+   `result` is non-null, or the session becomes `failed` or `aborted`. Its
+   `runs[]` lists every run the upload has started so far (see
+   [Runs in waves](#runs-in-waves)).
+4. Follow each `runs[].runId` (`result.run.id` is the first) through the run
+   status or progress endpoints.
 
 The server uses a single PUT below 32 MiB and multipart at or above 32 MiB,
 with 8 MiB parts. Use the returned descriptors rather than hard-coding those
-values. The reconciler reads storage's part list, checks the part numbers and
-sizes, assembles the object, and verifies the stored file. It starts ingestion
-after all files in the session are ready. Clients do not need to call
-`/files/complete` or `/confirm` for known-size files.
+values. Each file is finalized on its own: the server verifies the stored size,
+seals a single-PUT object by copying exactly the verified version, or reads
+storage's part list, checks the part numbers and sizes and assembles a
+multipart object. Ingestion starts in waves as files are finalized, not only
+after the last one. Clients do not need to call `/files/complete` or `/confirm`
+for known-size files.
 
-The API checks pending sessions every 15 seconds in bounded batches, with
-backoff between attempts. This is not a completion-time guarantee. A Tigris
-object notification makes a session eligible for the next check; polling still
-works without notifications. A webhook does not replace multipart assembly or
+Where storage sends upload notifications (Tigris), the notification for an
+object makes the server finalize that file within moments. Without
+notifications, or when one is lost, a fallback checks files still open about a
+minute after the session was created, then with backoff. This is not a
+completion-time guarantee. A notification is only a hint: storage's own size
+and version decide, and a notification does not replace multipart assembly or
 prove that an unknown-size stream has ended.
+
+### Runs in waves
+
+A direct upload starts runs while it is still uploading. A run (a wave) takes
+every finalized file not yet in a run, once 5 such files are waiting, about 10
+seconds after the first of them was finalized, or when the last file is
+finalized, whichever comes first. A 1,000-file upload becomes several runs, all
+in the same project:
+
+- The first run resolves the project. `newProject`, `projectName` and
+  `templateKey` apply once, and a new project is titled once, from the first
+  run's files. Every later run goes to that project.
+- Each run is an ordinary billable run with its own credit reservation, budget
+  and admission checks. When billing refuses a later run, the runs already
+  started continue. The remaining files wait, and the session's `error` says
+  why. The server tries again about a minute later, or at once on `/confirm`.
+- No file is ingested twice, and once the session is finished every file is in
+  a run or marked `failed` with its own `error`.
+- Aborting a session stops later runs. Runs that already started, and their
+  files, are left alone.
+
+Session status (`GET ...?statusOnly=true`) adds:
+
+```json
+{ "status": "pending", "result": null, "projectId": "PROJECT_ID",
+  "runs": [{ "runId": "SESSION_ID", "wave": 1, "status": "started", "fileCount": 5, "documentCount": 5, "createdAt": "..." },
+           { "runId": "RUN_2", "wave": 2, "status": "starting", "fileCount": 7, "documentCount": null, "createdAt": "..." }],
+  "files": [{ "id": "FILE_ID", "status": "completed", "runId": "SESSION_ID" },
+            { "id": "FILE_ID_2", "status": "failed", "error": { "statusCode": 400, "code": "rejected", "message": "..." } }] }
+```
+
+`result` keeps its meaning: the first run's response (its `run.id` is the
+session ID), set when the session is `confirmed`, which happens once every file
+is in a run. `runs[]` grows before that. In the SDK, `upload()` returns `runs`
+next to `run`, and the `onRuns` option is called each time another run starts.
+
+`POST .../confirm` is a flush. It starts a run with every finalized file not yet
+in one, even fewer than 5, and answers the first run's response plus `runs`,
+`sessionStatus` and `pendingFileCount`. Files still uploading start later runs
+on their own. Confirming a session with no finalized file still answers `409`
+(incomplete files), and an extract session still starts its single run only
+once every file is in.
 
 ### Streams without a known size
 
@@ -365,8 +414,8 @@ or from its current byte total.
 ### Completing many files
 
 `/files/complete` also takes a batch: `{ "files": [{ "fileId": "A" }, { "fileId": "B", "sizeBytes": 12345 }] }`,
-up to 100 entries, each `fileId` once. The server finalizes the batch under one
-session lock, several files at a time, and answers per file:
+up to 100 entries, each `fileId` once. The server finalizes several files at a
+time, each under its own short lease (no session-wide lock), and answers per file:
 
 ```json
 { "ok": false, "completedCount": 1, "failedCount": 1, "sessionComplete": false,
@@ -375,13 +424,15 @@ session lock, several files at a time, and answers per file:
 ```
 
 A file's failure carries the status the single-file call would have answered,
-and `retryable`. Only a session-level problem (not found, closed, no longer
-permitted, or `409` `upload_session_busy` while another request holds the
-session) fails the whole request. While a client is completing files, the
-background reconciler leaves the session alone for 30 seconds after each call.
-The call that completes the last file starts ingestion within a second or two;
-calling `/confirm` yourself is still fine and returns the same run. The SDK's
-`completeUploadFiles()` splits larger lists into batches.
+and `retryable`. Only a session-level problem (not found, closed or no longer
+permitted) fails the whole request. Completing is idempotent: a file the
+storage notification already finalized answers `completed`, even after the
+session was confirmed. A file another finalizer is working on is waited for
+briefly, then answers `409` `upload_session_busy` (`retryable`). While a client
+is completing files, the fallback checks leave the session's files to it for 30
+seconds after each call. Finalized files start runs on their own (see
+[Runs in waves](#runs-in-waves)), and calling `/confirm` yourself starts one at
+once. The SDK's `completeUploadFiles()` splits larger lists into batches.
 
 Retry rules for session calls (`/files/complete`, `/confirm`, `/abort`):
 
@@ -389,9 +440,9 @@ Retry rules for session calls (`/files/complete`, `/confirm`, `/abort`):
   unavailable after the server's own retries. Repeat the same request, or the
   files marked `retryable`, after `Retry-After`. Nothing was completed for those
   files.
-- `409` `upload_session_busy` (with `Retry-After`): another request or the
-  reconciler holds the session. Repeat the same request shortly. `/confirm` and
-  `/abort` wait a few seconds for the session before answering this.
+- `409` `upload_session_busy` (with `Retry-After`): another request, or a run
+  being started, holds the session or the file. Repeat the same request
+  shortly. `/confirm` and `/abort` wait a few seconds before answering this.
 - Other `4xx`: the file or session needs attention; repeating will not help.
 
 Rate limits count requests, not files: a batch of 100 files costs one request

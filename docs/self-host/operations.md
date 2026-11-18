@@ -5,20 +5,26 @@ described in [Docker Compose install](docker-compose.md).
 
 ## Automatic upload completion and Tigris notifications
 
-Direct upload sessions finalize automatically. For known-size multipart uploads,
-the API reconciler lists stored parts, checks every part number and size, and
-assembles the object. Unknown-size streams must send an end-of-stream completion
+Direct upload sessions finalize automatically, one file at a time, and start
+ingestion in waves (several runs per upload, one project) while files are still
+arriving. For known-size multipart uploads, the API lists stored parts, checks
+every part number and size, and assembles the object; single-PUT objects are
+verified and sealed. Unknown-size streams must send an end-of-stream completion
 with their final byte count; the SDK does this after every part succeeds. The SDK
-then polls session status for the accepted run. Acceptance means ingestion has
+then polls session status for the accepted runs. Acceptance means ingestion has
 started or is queued; it does not mean extraction has finished. There is no separate client
 confirmation required to start ingestion.
 
-The API runs the reconciler every 15 seconds, in bounded batches, with per-session
-backoff (up to 30 seconds for incomplete uploads, five minutes after errors).
-Unfinished transfers expire after 24 hours and become `aborted`; sessions already
-starting ingestion continue recovery. It also verifies single-PUT objects,
-so self-hosted S3/MinIO installations do not require webhooks. Keep the API process
-running; a process that sleeps between requests cannot execute background sweeps.
+The API runs the reconciler every 15 seconds. Its fallback checks files still
+open after `DOCSLURP_UPLOAD_FINALIZE_GRACE_SECONDS` (default 60) in bounded
+batches, with per-file backoff up to five minutes, so self-hosted S3/MinIO
+installations do not require notifications. Waves start when
+`DOCSLURP_UPLOAD_WAVE_FILES` finalized files (default 5) are waiting, after
+`DOCSLURP_UPLOAD_WAVE_DELAY_MS` (default 10000) from the first of them, or when
+the last file is finalized. Unfinished transfers expire after 24 hours: files no
+run took become `aborted`, and runs already started continue. Keep the API
+process running; a process that sleeps between requests cannot execute
+background sweeps or wave timers.
 Allow up to two additional on-demand database connections per API process for
 upload advisory locks, beyond `DATABASE_POOL_MAX` and existing listener/probe
 connections. These locks use a separate pool so finalization cannot exhaust the
@@ -33,8 +39,10 @@ Keep the custom-domain CNAME DNS-only, pointing directly to Tigris, as required
 for Tigris TLS issuance/renewal. This storage URL is separate from the API's
 webhook receiver URL.
 
-For Tigris, notifications bring a pending session forward in the reconciliation
-schedule. Configure these **after applying migrations and deploying the receiver**:
+For Tigris, a notification makes the API finalize the file it names at once, in
+the background (`DOCSLURP_UPLOAD_WEBHOOK_FINALIZE_CONCURRENCY` files at a time
+per API process, default 8). Configure these **after applying migrations and
+deploying the receiver**:
 
 1. Set `DOCSLURP_TIGRIS_UPLOAD_WEBHOOK_SECRET` to a long random secret in the API
    runtime. Use the same value as the notification token; do not use an S3 admin
@@ -53,12 +61,16 @@ schedule. Configure these **after applying migrations and deploying the receiver
    ```
 
 6. Enable notifications and save. Upload a small file and a multipart file;
-   verify their session results point to a single ingestion run each. A repeated
+   verify that each session's runs together hold every file once. A repeated
    notification must not create another run.
 
 The receiver authenticates the bearer token, matches the configured storage
-bucket and registered source keys, and persists a reconciliation nudge before
-acknowledging. It never trusts notification byte counts as proof of completion.
+bucket, refuses keys outside the upload prefixes (`<user>/<id>/raw/...` and
+`extracts/<org>/<extract>/raw/...`), maps each remaining key to exactly one open
+file of a live session in that prefix, and finalizes that file from storage's own
+size and version. It uses nothing from a notification except the key and never
+trusts its byte counts. Duplicate or late notifications are harmless; a lost one
+is covered by the fallback.
 Do not configure a localhost URL in Tigris; use a publicly reachable development
 API or rely on reconciliation locally. Missing secret returns 503; invalid token
 returns 401. A successful authenticated empty `{"events":[]}` request returns
