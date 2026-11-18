@@ -12,19 +12,53 @@ Every change is classified as one of these:
 | `search-only` | Retrieval and chat defaults take effect immediately. | No |
 | `new-uploads` | Only future ingestion is affected. | No |
 | `reindex-recommended` | Old documents would benefit (summaries, structured fields, graph, propositions). | Only with `apply: "reindex"`, or when `autoConfirmReindex` is on |
-| `reindex-required` | The index would become inconsistent (embedding model or dimensions, chunking, vector backend, stricter PII or privacy policy). | Always, automatically |
+| `reindex-required` | The index would become inconsistent (embedding model or dimensions, chunking, vector backend, stricter PII or privacy policy). | Locked index settings: only with `apply: "reindex"` or the reindex command (see below). Stricter PII or privacy policy: always, automatically |
 
 The `impact` object carries `kind`, the minimal `stages`, per-field `reasons`, and the affected `documents` and `pages`.
 
+## Locked index settings and the reindex command
+
+The settings that define a project's search index are locked once the project has indexed documents:
+
+| Setting | What it covers |
+| --- | --- |
+| `embedding` | Profile, model, dimensions, normalization, task, late chunking and its window |
+| `chunkOverlap` | Overlapping chunks |
+| `contextualChunkPreambles` | Contextual chunk preambles |
+| `vectorBackends` | Where vectors are stored |
+
+They are exactly the inputs of the index identity (`INDEX_IDENTITY_SETTINGS` in `@docslurp/shared` and `@docslurp/sdk`). Vectors built under one value are not comparable with queries or chunks built under another, so changing one means re-indexing every document, and that costs credits. A plain `PATCH /v1/projects/:id` that changes a locked setting is refused, and none of the body is saved, including other fields in the same request:
+
+```json
+{ "error": { "code": "reindex_required",
+  "message": "Locked index settings changed: embedding. This change alters how the project's search index is built, ... It re-indexes 6 documents (240 pages), about 18-26 credits.",
+  "details": { "reindex": {
+    "lockedSettings": ["embedding"], "documents": 6, "pages": 240,
+    "credits": { "low": 18, "high": 26 }, "signature": "3f1c…(64 hex)",
+    "reindexUrl": "/v1/projects/…/reindex" } },
+  "requestId": "…" } }
+```
+
+`credits` is `null` when billing is off. To apply the change, confirm the re-index in one of two equivalent ways:
+
+- `POST /v1/projects/:id/reindex` with `{ "pipeline": { "embedding": { "profile": "fastest-local" } }, "confirmEstimate": "<signature>" }`. `pipeline` takes only the locked settings; change other settings with `PATCH`. With no `pipeline` the command rebuilds the index under the current settings. It returns `{ project, changedSettings, impact, estimate, runIds, job }`.
+- The same `PATCH` with `apply: "reindex"` (and, optionally, `confirmEstimate`).
+
+Both save the settings and queue the re-index in one transaction. `POST /v1/projects/:id/reindex/estimate` prices the command without changing anything and returns `{ impact, estimate, lockedSettings, signature, quote, billing }`; `POST /v1/projects/:id/estimate` also returns `lockedSettings` and `signature` for a `PATCH` body, and the refusal's `signature` matches the estimate's for the same change. `confirmEstimate` is optional. When it is sent and the documents, stages or price changed since that estimate, the request is refused with `409 estimate_stale` and nothing is saved: estimate again.
+
+The SDK has `reindexProject(project, input)` and `reindexProjectEstimate(project, input)`, and `DocSlurpApiError.reindex` carries the refusal's details. The CLI has `docslurp reindex [--embedding-profile <profile>] [--chunk-overlap on|off] [--contextual-preambles on|off] [--estimate] [--confirm <signature>]`. Access is the same as `PATCH`: an editor of the project, or a server key with `projects:manage` for that project.
+
+Nothing is locked on a project with no indexed documents: changes there apply at once and only shape future uploads. `autoConfirmReindex` never unlocks a locked setting; it still re-indexes recommended changes when `apply` is omitted. A stricter PII or privacy policy is not locked: it still saves and queues its re-index automatically, because delaying enforcement would be worse than the spend.
+
 ## Re-indexing without downtime
 
-Config `PATCH` requests never fail because of a change and never return `409`. For a `reindex-required` change the configuration is saved and the minimal re-index job is queued in the same transaction.
+Apart from locked index settings (above), config `PATCH` requests never fail because of a change. For any other `reindex-required` change, and for a confirmed locked change, the configuration is saved and the minimal re-index job is queued in the same transaction.
 
 Until a document is re-indexed, search serves it from its previous index configuration, scoring the query against that configuration's embedding model. Vectors from different models are never mixed in one table. Each document switches as its re-index finishes.
 
 If spend admission blocks the job (no credits or budget), the configuration is still saved and the job is `blocked` with `reason: "credits"` or `"budget"`. Documents keep serving from the previous index, and the job resumes automatically when spend is available again.
 
-`autoConfirmReindex` (project setting, default `false`) opts a project in to re-indexing without confirmation. The dashboard skips its cost dialog for changes that queue a re-index, and when `apply` is omitted from an API call, recommended changes re-index too. Spend admission and budgets still apply.
+`autoConfirmReindex` (project setting, default `false`) opts a project in to re-indexing recommended changes without confirmation: the dashboard skips its cost dialog for them, and when `apply` is omitted from an API call, recommended changes re-index too. It never confirms a locked index setting. Spend admission and budgets still apply.
 
 ## Estimates
 
@@ -33,6 +67,7 @@ Every route that can create work has a `POST …/estimate` twin with the same bo
 | Operation | Estimate route | SDK | CLI | MCP tool |
 | --- | --- | --- | --- | --- |
 | Update project | `POST /v1/projects/:id/estimate` | `updateProjectEstimate` | Use SDK/HTTP | `updateEstimate` |
+| Re-index project | `POST /v1/projects/:id/reindex/estimate` | `reindexProjectEstimate` | `reindex --estimate` | Use `updateEstimate` |
 | Update search settings | `POST /v1/projects/:id/search-settings/estimate` | `updateSearchSettingsEstimate` | Use SDK/HTTP | `searchSettingsEstimate` |
 | Reprocess a run | `POST /v1/runs/:id/reprocess/estimate` | `reprocessEstimate` | `reprocess <runId> --estimate` | `reprocessEstimate` |
 | Full index (document) | `POST /v1/documents/:id/full-index/estimate` | `fullIndexEstimate({ documentId })` | `full-index --document <id> --estimate` | `fullIndexEstimate` |
@@ -43,7 +78,7 @@ Every route that can create work has a `POST …/estimate` twin with the same bo
 
 An estimate accepts exactly the callers that may perform the operation it prices. With an API key: project update, search-settings, indexing mode and graph rebuild estimates need a server key with `projects:manage`; full-index and upload estimates need `ingest`; reprocess estimates need a server key with `ingest`. The MCP tools follow the same rule and are listed only to keys that may use them. Keys restricted to projects can only price work in those projects.
 
-Config estimates return `{ impact, estimate, billing }`; the others return `{ estimate, billing }`. A `CostEstimate` is:
+Config estimates return `{ impact, estimate, billing }` (project update and reindex estimates add `lockedSettings` and `signature`); the others return `{ estimate, billing }`. A `CostEstimate` is:
 
 ```json
 { "pages": 240, "documents": 6, "billing": "enforced",
@@ -72,7 +107,7 @@ Mutations that queue work return a `job`:
 - Where streaming is unavailable, poll `GET /v1/jobs/:id`. `streamJob` and `jobs watch` fall back to polling on their own.
 
 ```ts
-const { job } = await client.updateProject("legal", { embedding: { model: "…" } });
+const { job } = await client.reindexProject("legal", { pipeline: { embedding: { profile: "fastest-local" } } });
 if (job) for await (const event of client.streamJob(job.id)) console.log(event.event, event.job.status);
 ```
 

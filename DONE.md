@@ -1,3 +1,11 @@
+## Locked index settings and the reindex command (2026-11-18)
+
+Owner: changing a project's embedding after documents are ingested silently re-billed or broke search; lock it once projects have ingests and wrap the change in a reindex command with the similar options.
+
+- `INDEX_IDENTITY_SETTINGS` (`packages/shared/src/config-change.ts`, mirrored in the SDK): `embedding`, `chunkOverlap`, `contextualChunkPreambles`, `vectorBackends`, exactly the inputs of `indexConfigOf`. `changedIndexIdentitySettings` lists those a change alters that an enabled stage uses.
+- Once a project has indexed documents (re-index targets or vectorized documents), a PATCH, settings publication or chat proposal that changes one without `apply: "reindex"` is refused with 409 `reindex_required` and nothing in the body is saved. `details.reindex` carries the locked settings, documents, pages, credit range, the estimate `signature` and `reindexUrl`; the public message names them. The check runs before any write on every (re)plan, and a plan made with nothing to lock re-plans if documents appear before it commits. `autoConfirmReindex` never unlocks it (it still applies to recommended re-indexes); stricter PII or privacy policy still re-indexes automatically.
+- `POST /v1/projects/:id/reindex` and `/reindex/estimate`: apply index settings (`pipeline` takes only those) and queue the re-index in one transaction, or rebuild the index with no settings change. `confirmEstimate` (also on PATCH) refuses stale work with 409 `estimate_stale`. Same gates as PATCH (editor; server key with `projects:manage` bound to the organization and project). Estimates return `lockedSettings` and `signature`. SDK `reindexProject` / `reindexProjectEstimate` and `DocSlurpApiError.reindex`; CLI `docslurp reindex` with `--estimate` and `--confirm`.
+
 ## Exact model records: embedding spaces, request settings, run models (2026-11-18)
 
 - Migration 0192: nullable `embedding_model_uri` (and `embedding_model_class`, the embedding profile) on `vector_indexes`, `embedding_model_uri` on `document_page_states`, `model_uri` on `document_page_vectors`, and `project_runs.resolved_models`. No default, rewrite or backfill.

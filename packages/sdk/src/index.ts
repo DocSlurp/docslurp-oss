@@ -252,6 +252,10 @@ export type EstimateResponse = {
   profile?: EstimateProfile; pricingVersion?: string;
   /** Upload estimates only: the full quote (ingest, monthly hosting and usage) for the project's settings. */
   quote?: EstimateQuote;
+  /** Project and reindex estimates: the locked index settings the change alters (an update needs `apply: "reindex"`). */
+  lockedSettings?: IndexIdentitySetting[];
+  /** Project and reindex estimates: pass as `confirmEstimate` to refuse stale work. */
+  signature?: string;
 };
 
 /**
@@ -283,13 +287,60 @@ export type FileProfile = {
 
 /** Settings accepted by project PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateProjectInput = JsonObject & {
-  /** "reindex" queues a re-index of existing documents; "new-uploads" only changes future ingestion. */
+  /**
+   * "reindex" applies the change and re-indexes existing documents (equivalent to {@link DocSlurpClient.reindexProject});
+   * "new-uploads" only changes future ingestion. Once a project has indexed documents, changing an
+   * {@link INDEX_IDENTITY_SETTINGS} setting without "reindex" is refused: 409 `reindex_required`, nothing saved
+   * ({@link DocSlurpApiError.reindex} has the work and the estimate signature).
+   */
   apply?: "new-uploads" | "reindex";
+  /** Default `apply` for recommended re-indexes. Never unlocks an index-identity change. */
   autoConfirmReindex?: boolean;
+  /** With `apply: "reindex"`: the estimate `signature`; refused with 409 `estimate_stale` when the work changed since. */
+  confirmEstimate?: string;
   retainDocumentVersions?: number | null;
   /** False keeps China-based model providers out of this project's requests; true cannot widen an organization opt-out. */
   allowChinaProviders?: boolean;
 };
+/**
+ * Pipeline settings that define a project's search index (embedding, chunking, vector backends). Locked once the
+ * project has indexed documents: change them with {@link DocSlurpClient.reindexProject}, or an update with
+ * `apply: "reindex"`.
+ */
+export const INDEX_IDENTITY_SETTINGS = ["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"] as const;
+export type IndexIdentitySetting = (typeof INDEX_IDENTITY_SETTINGS)[number];
+
+/** `POST /v1/projects/:id/reindex` body. `pipeline` takes only {@link INDEX_IDENTITY_SETTINGS}; omitted, the index is rebuilt as is. */
+export type ReindexProjectInput = {
+  pipeline?: Partial<Record<IndexIdentitySetting, unknown>>;
+  /** Explicit opt-in to speed-boosted processing for the re-index runs. */
+  speedBoost?: boolean;
+  /** The `signature` from {@link DocSlurpClient.reindexProjectEstimate} (or a `reindex_required` refusal); stale is 409 `estimate_stale`. */
+  confirmEstimate?: string;
+};
+export type ReindexProjectResponse = {
+  project: ProjectRecord;
+  /** Index settings this call changed (empty for a plain rebuild). */
+  changedSettings: IndexIdentitySetting[];
+  impact: ConfigChangeImpact;
+  estimate: CostEstimate | null;
+  /** The queued re-index runs; empty when the project has no documents to re-index. */
+  runIds: string[];
+  job: JobStatus | null;
+};
+
+/** `error.details.reindex` of a 409 `reindex_required`: what the refused change needs. */
+export type ReindexRequiredDetails = {
+  lockedSettings: IndexIdentitySetting[];
+  documents: number;
+  pages: number;
+  credits: { low: number; high: number } | null;
+  /** Pass as `confirmEstimate` to {@link DocSlurpClient.reindexProject} or a confirming update. */
+  signature: string;
+  /** The reindex command's path. */
+  reindexUrl: string;
+};
+
 export type ProjectUpdateResponse = { project: ProjectRecord; impact?: ConfigChangeImpact; job?: JobStatus } & JsonObject;
 /** The stored search and chat settings `PATCH /v1/projects/:id/search-settings` returns. */
 export type ProjectSearchSettingsResponse = { projectId: string; retrievalDefaults: JsonObject; chat: JsonObject } & JsonObject;
@@ -1242,6 +1293,8 @@ export class DocSlurpApiError extends Error {
   readonly requestId?: string;
   /** Buy-credits, auto top-up, billing and docs URLs for credit, budget and rate-limit errors. */
   readonly links?: DocSlurpErrorLinks;
+  /** On 409 `reindex_required`: the locked settings, the re-index work and the estimate signature to confirm. */
+  readonly reindex?: ReindexRequiredDetails;
 
   constructor(message: string, status: number, body: unknown, retryAfterSeconds?: number) {
     const safe = safeHttpFailure(status, body);
@@ -1258,7 +1311,16 @@ export class DocSlurpApiError extends Error {
     if (envelope?.code) this.code = envelope.code;
     if (safe.requestId) this.requestId = safe.requestId;
     if (envelope?.links) this.links = envelope.links;
+    if (envelope?.reindex) this.reindex = envelope.reindex;
   }
+}
+
+function reindexDetails(value: unknown): ReindexRequiredDetails | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const r = value as Record<string, unknown>;
+  if (!Array.isArray(r.lockedSettings) || typeof r.signature !== "string" || typeof r.reindexUrl !== "string") return undefined;
+  if (typeof r.documents !== "number" || typeof r.pages !== "number") return undefined;
+  return r as unknown as ReindexRequiredDetails;
 }
 
 const ERROR_LINK_NAMES = ["billing", "buyCredits", "autoTopUp", "apiKeys", "docs"] as const;
@@ -1274,16 +1336,18 @@ function errorLinks(value: unknown): DocSlurpErrorLinks | undefined {
 }
 
 /** Reads `{ error: { code, requestId, details: { links } } }`; legacy bodies, OpenAI errors without a string code and text yield nothing. */
-function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; links?: DocSlurpErrorLinks } | null {
+function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; links?: DocSlurpErrorLinks; reindex?: ReindexRequiredDetails } | null {
   if (!body || typeof body !== "object") return null;
   const error = (body as { error?: unknown }).error;
   if (!error || typeof error !== "object") return null;
-  const { code, requestId, details } = error as { code?: unknown; requestId?: unknown; details?: { links?: unknown } };
+  const { code, requestId, details } = error as { code?: unknown; requestId?: unknown; details?: { links?: unknown; reindex?: unknown } };
   const links = errorLinks(details?.links);
+  const reindex = reindexDetails(details?.reindex);
   return {
     ...(typeof code === "string" && code ? { code } : {}),
     ...(typeof requestId === "string" && requestId ? { requestId } : {}),
     ...(links ? { links } : {}),
+    ...(reindex ? { reindex } : {}),
   };
 }
 
@@ -2577,6 +2641,18 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** Impact and cost of an {@link UpdateProjectInput}, without applying it. */
     updateProjectEstimate(id: string | undefined, input: UpdateProjectInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`${wsPath(id)}/estimate`, input, requestOptions);
+    },
+    /**
+     * Applies index-identity setting changes ({@link INDEX_IDENTITY_SETTINGS}) and re-indexes the project's existing
+     * documents in one step; with no `pipeline`, rebuilds the index under the current settings. Spends credits: price it
+     * with {@link reindexProjectEstimate} and pass its `signature` as `confirmEstimate`. Server keys need `projects:manage`.
+     */
+    reindexProject(id: string | undefined, input: ReindexProjectInput = {}, requestOptions?: RequestOptions): Promise<ReindexProjectResponse> {
+      return request<ReindexProjectResponse>(`${wsPath(id)}/reindex`, jsonRequest("POST", input as JsonObject), requestOptions);
+    },
+    /** What {@link reindexProject} would do and cost (`lockedSettings`, `signature`), without changing anything. */
+    reindexProjectEstimate(id: string | undefined, input: ReindexProjectInput = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt(`${wsPath(id)}/reindex/estimate`, input as JsonObject, requestOptions);
     },
     /**
      * Changes a project's retrieval defaults, ranking controls and chat settings (omitted fields keep their

@@ -154,6 +154,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | `extract-status <extract-id>` | Print an extract's status, pages, download state and deletion time | `--json` |
 | `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (a server key with `artifacts`, or a login with `read`) | None |
 | `full-index` | Index every remaining page of a project (or one document) | `--project`, `--document`, `--estimate`, `--watch`, `--json` |
+| `reindex` | Change a project's locked index settings (embedding, chunking) and re-index its documents in one step, or rebuild the index as is | `--project`, `--embedding-profile`, `--chunk-overlap on\|off`, `--contextual-preambles on\|off`, `--estimate` (prints the signature), `--confirm <signature>`, `--json` |
 | `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--quality`, `--visuals`, `--estimate`, `--watch`, `--json` |
 | `summary-tree backfill` / `summary-tree status` / `summary-tree cancel <job-id>` | Build the summary tree for a project's already indexed documents, read the backfill's estimate and job, or stop it | `--project`, `--max-cost-cents` (required to start), `--estimate`, `--watch`, `--json` |
 | `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
