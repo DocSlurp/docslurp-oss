@@ -1034,6 +1034,8 @@ export function createRunCreation(deps: RunCreationDeps) {
     // run's snapshot on reprocess, a request body, a template): run-summary-tree.ts.
     const input: CreateRunInput = {
       ...request,
+      // Falls back to the request's key: background callers (the upload reconciler) run outside any request context
+      // (AsyncLocalStorage.snapshot at module load), so they never borrow another caller's key.
       apiKeyId: request.apiKeyId ?? currentRequestApiKeyId(),
       pipeline: withProjectSummaryTree(request.chartExportReplay
         ? replayChartExport(sanitized, request.chartExportReplay.requested ?? null, projectChartExport, request.origin ?? "machine")

@@ -48,6 +48,7 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/admin/projects/{projectId}/managed-models", "put", "admin", "Set a project's managed models (platform admins)", "admin:models", "The stored managed models", jsonBody],
   ["/v1/capabilities", "post", "search", "Mint a sealed search capability (X-DocSlurp-Capability) that bounds query-time page parsing for browser callers. Server keys only", "search:deep", "Capability token, expiry and effective policy", jsonBody],
   ["/v1/runs/activity/stream", "get", "runs", "Stream account run activity over SSE", "ingest, artifacts or any search scope", "Server-sent event stream"],
+  ["/v1/runs/activity/summary", "get", "runs", "Your organization's queued, in-progress and recently completed work, pages per minute and ETA bucket", "ingest, artifacts or any search scope", "Organization activity summary"],
   ["/v1/runs/{runId}/events", "get", "runs", "List a run's events", "ingest, artifacts or any search scope", "Run events"],
   ["/v1/runs/{runId}/events/stream", "get", "runs", "Stream a run's events over SSE", "ingest, artifacts or any search scope", "Server-sent event stream"],
   ["/v1/documents", "get", "documents", "List documents with filters", "artifacts", "Documents"],

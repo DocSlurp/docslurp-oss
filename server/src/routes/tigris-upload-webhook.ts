@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { sql } from "../db.js";
 import { env } from "../config.js";
+import { requestDirectUploadSweep } from "../services/direct-upload-reconciler.js";
 
 const notification = z.object({ events: z.array(z.object({
   eventVersion: z.literal("1"), eventSource: z.literal("tigris"),
@@ -23,5 +24,7 @@ export const tigrisUploadWebhookRoutes = new Hono().post("/tigris/uploads", asyn
   if (keys.length) await sql`update upload_sessions set next_reconcile_at = now()
     where status in ('pending', 'uploading', 'ingesting') and id in
     (select session_id from upload_session_files where source_key = any(${sql.array(keys)}))`;
+  // Sweep now (coalesced, in this process) so a session whose last object just landed starts ingesting at once.
+  if (keys.length) requestDirectUploadSweep();
   return c.json({ ok: true });
 });

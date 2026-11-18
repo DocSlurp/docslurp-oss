@@ -1,5 +1,5 @@
 import { compilePipelinePlan } from "@docslurp/shared";
-import { pageCountBucket, recordPipelineTelemetry } from "@docslurp/shared/observability";
+import { emitTelemetryLog, pageCountBucket, recordPipelineTelemetry } from "@docslurp/shared/observability";
 import type { WorkflowState } from "./pipeline.js";
 
 /**
@@ -124,10 +124,28 @@ export async function noteRunOutcome(store: RunMilestoneStore | undefined, run: 
   outcome: "completed" | "completed_with_failures" | "failed", failedStage?: string): Promise<void> {
   if (!store) return;
   try {
-    if (await store.markRunMilestone(run.id, "outcome_recorded")) recordRunOutcome(run, outcome, failedStage);
+    const hit = await store.markRunMilestone(run.id, "outcome_recorded");
+    if (hit) {
+      recordRunOutcome(run, outcome, failedStage);
+      noteRunEtaActual(run.id, hit, outcome);
+    }
   } catch (error) {
     console.warn(`[run-milestone] run=${run.id} outcome not recorded: ${error instanceof Error ? error.name : "error"}`);
   }
+}
+
+/**
+ * ETA accuracy: a run's actual duration (seconds since acceptance), logged once with its id so SigNoz can join it to
+ * the API's first prediction (`docslurp.run.eta.predicted`) and measure how often the predicted bucket held.
+ */
+export function noteRunEtaActual(runId: string, hit: RunMilestoneHit, outcome: string): void {
+  const seconds = Math.round(hit.seconds);
+  const line = `[run-eta] actual run=${runId} seconds=${seconds} pages=${hit.pages} outcome=${outcome}`;
+  console.log(line);
+  emitTelemetryLog({
+    severityText: "info", body: line, eventName: "docslurp.run.eta.actual",
+    attributes: { "docslurp.run.id": runId, "docslurp.eta.actual_seconds": seconds, "docslurp.run.pages": hit.pages, "docslurp.run.outcome": outcome },
+  });
 }
 
 /**

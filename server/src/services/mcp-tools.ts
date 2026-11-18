@@ -389,6 +389,10 @@ const mcpAdapterRoutes = new Hono()
           (loaded.session.project_id ? !await loadActorScopedProject(loaded.session.project_id, actor) : Boolean(apiKey.projectIds?.length))))) {
           return adapterError(c, 404, "Upload session not found");
         }
+        // As on the HTTP status route: a user who has since lost the session's project (or organization) reads nothing.
+        const { assertSessionProjectStillReadable } = await import("./direct-session-idempotency.js");
+        try { await assertSessionProjectStillReadable(loaded.session, actor.userId); }
+        catch { return adapterError(c, 404, "Upload session not found"); }
         return c.json({ tool: toolId, ...await describeDirectUploadSession(loaded, true) });
       }
       const project = await loadActorScopedProject(

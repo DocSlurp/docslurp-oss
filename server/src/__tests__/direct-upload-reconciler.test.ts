@@ -10,7 +10,7 @@ vi.mock("../services/direct-upload-session.js", () => ({
   abortDirectUploadSession: mocks.abort, queueAbandonedDirectUploadCleanup: mocks.cleanup,
   withDirectUploadLock: async (_id: string, work: () => Promise<unknown>) => work(),
 }));
-vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
+vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm, isReplayedDirectUploadConfirm: (result: { replayed?: boolean }) => result?.replayed === true }));
 vi.mock("../services/project-intake.js", () => ({ ProjectIntakeError: class extends Error { constructor(message: string, public statusCode: number) { super(message); } } }));
 import { reconcileDirectUploads, stopDirectUploadReconciler } from "../services/direct-upload-reconciler.js";
 import { ProjectIntakeError } from "../services/project-intake.js";
@@ -89,6 +89,18 @@ describe("automatic upload reconciler", () => {
     expect(peak).toBeLessThanOrEqual(8);
     expect(queryValues("set status = 'failed'")).toHaveLength(1);
     expect(mocks.confirm).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
+  it("measures due to confirmed, and not for a confirm another path already made", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    scheduled = [{ ...session, due_at: new Date(Date.now() - 2_000).toISOString() } as typeof session];
+    await reconcileDirectUploads();
+    const line = log.mock.calls.map(([text]) => String(text)).find(text => text.includes("confirmed session=session-1 path=sweep"));
+    expect(Number(line?.match(/lag_ms=(\d+)/)?.[1])).toBeGreaterThanOrEqual(1_900);
+    log.mockClear();
+    mocks.confirm.mockResolvedValue({ replayed: true });
+    await reconcileDirectUploads();
+    expect(log.mock.calls.some(([text]) => String(text).includes("confirmed session="))).toBe(false);
     log.mockRestore();
   });
   it("does not overlap sweeps while a provider operation is pending", async () => {
