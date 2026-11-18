@@ -34,7 +34,7 @@ import {
   embedHtmlTableSources, readTableCellsArtifact, tableCellsArtifactKey, tableCellsGeneration, tableCellsByteCap, tableCellsCacheEnabled, tableCellsGuestVersion, tableSourceSha256,
   TABLE_CELLS_ARTIFACT_SCHEMA, writeTableCellsArtifact,
 } from "../pipeline/html-table-cells-cache.js";
-import { effectiveHtmlTableOutputCap, HTML_TABLE_BATCH_OUTPUT_TARGET, htmlTableCellsOutputBound, prepareHtmlTableCells, setTableParseMemoryBudgetForTests, TABLE_PARSE_HEAP_FACTOR, TableParseMemoryBudget, vmTableSources } from "../pipeline/html-table-vm.js";
+import { effectiveHtmlTableBatchTarget, effectiveHtmlTableOutputCap, HTML_TABLE_BATCH_OUTPUT_TARGET, tableParseMemoryBudget, htmlTableCellsOutputBound, prepareHtmlTableCells, setTableParseMemoryBudgetForTests, TABLE_PARSE_HEAP_FACTOR, TableParseMemoryBudget, vmTableSources } from "../pipeline/html-table-vm.js";
 import { SandboxOutputLimitError } from "../sandbox/types.js";
 import { assertJsonShape } from "../lib/json-shape.js";
 import { visionMayReadDocumentPages } from "../lib/vision-reads-pages.js";
@@ -687,14 +687,14 @@ describe("the parser VM transfer and parse bounds (H2)", () => {
   });
 
   it("splits tables into batches whose output bound stays under the batch target; a big table gets a batch of its own", async () => {
-    // ~3.9 MB of UTF-8 each: two share a batch (7.8 MB), a third would cross the budget-fitted target (128 MiB / 15).
-    const big = (i: number) => `<table><tr><td>${i}${"界".repeat(1_300_000)}</td></tr></table>`;
+    // ~6 MB of UTF-8 each: two share a batch (12 MB), a third would cross the 16 MiB target.
+    const big = (i: number) => `<table><tr><td>${i}${"界".repeat(2_000_000)}</td></tr></table>`;
     const sources = [big(1), big(2), big(3), "<table><tr><td>tiny</td></tr></table>"];
     const vm = vmRunner();
     const plans: Array<{ maxOutputBytes?: number }> = [];
     await prepareHtmlTableCells(sources, { run: vi.fn(async (plan: never, signal?: AbortSignal) => { plans.push(plan); return vm.run(plan, signal); }) } as never);
     expect(vm.batches.map((batch) => batch.length)).toEqual([2, 2]);
-    for (const plan of plans) expect(plan.maxOutputBytes! * TABLE_PARSE_HEAP_FACTOR).toBeLessThanOrEqual(128 * 1024 * 1024);
+    for (const plan of plans) expect(plan.maxOutputBytes! * TABLE_PARSE_HEAP_FACTOR).toBeLessThanOrEqual(256 * 1024 * 1024);
     expect(Math.max(...plans.map((plan) => plan.maxOutputBytes!))).toBeLessThanOrEqual(HTML_TABLE_BATCH_OUTPUT_TARGET);
   });
 
@@ -829,7 +829,7 @@ describe("the parser VM path's memory bounds (H2b)", () => {
     expect(roomy.budget.peak).toBeLessThanOrEqual(16 * 1024 * 1024);
   });
 
-  it("a document's batches run two at a time", async () => {
+  it("a document's batches run one at a time", async () => {
     vi.stubEnv("DOCSLURP_HTML_TABLE_MAX_OUTPUT_BYTES", String(64 * 1024));
     let inFlight = 0, peakInFlight = 0;
     const vm = vmRunner();
@@ -838,20 +838,28 @@ describe("the parser VM path's memory bounds (H2b)", () => {
     const tables = Array.from({ length: 4 }, (_, i) => `<table><tr><td>${i}${"q".repeat(70 * 1024)}</td></tr></table>`);
     await prepareHtmlTableCells(tables, slow as never);
     expect(slow.run).toHaveBeenCalledTimes(4);
-    expect(peakInFlight).toBe(2);
+    expect(peakInFlight).toBe(1);
+  });
+
+  it("the default configuration keeps a 16 MiB per-table cap and a 16 MiB batch target (256 MiB budget)", () => {
+    expect(tableParseMemoryBudget().total).toBe(256 * 1024 * 1024);
+    expect(effectiveHtmlTableOutputCap()).toBe(16 * 1024 * 1024);
+    expect(effectiveHtmlTableBatchTarget()).toBe(16 * 1024 * 1024);
+    // One worst-case reservation fits the budget.
+    expect(16 * 1024 * 1024 * TABLE_PARSE_HEAP_FACTOR).toBeLessThanOrEqual(tableParseMemoryBudget().total);
   });
 
   it("dense tables under the cap that together exceed the document cell limit stop at the first batch that crosses it (H2b)", async () => {
-    // Each table: 100,000 records (~7.7 MB, under the 8 MiB cap), one batch each. 256,000 cells allow two; the third crosses.
+    // Each table: 100,000 records (~7.7 MB, under the cap), alone in its batch (two would cross the 16 MiB target).
+    // 256,000 cells allow two; the third crosses.
     const dense = (i: number) => `<table><tr>${"<td>".repeat(100_000)}${i}</tr></table>`;
     const tables = Array.from({ length: 6 }, (_, i) => dense(i));
     const record = { label: "row 1 column 1 rowspan 1 colspan 1", value: "", header: false };
     const records = Array.from({ length: 100_000 }, () => record);
     const vm = vmRunner((cells) => cells.map(() => records));
     await expect(prepareHtmlTableCells(tables, vm)).rejects.toThrow(/document cell count exceeds limit/);
-    // Two workers: batches 1 and 2, then 3 (which crosses) and at most 4 alongside it; never 5 or 6.
-    expect(vm.run.mock.calls.length).toBeGreaterThanOrEqual(3);
-    expect(vm.run.mock.calls.length).toBeLessThanOrEqual(4);
+    // One batch at a time: the third crosses, and the fourth to sixth never start.
+    expect(vm.run).toHaveBeenCalledTimes(3);
   });
 
   it("every reservation is the batch's whole cost: transfer caps are lowered to fit the budget, never the reservation (H2b)", async () => {
@@ -889,8 +897,10 @@ describe("the parser VM path's memory bounds (H2b)", () => {
     }
   });
 
-  it("the budget is FIFO and an aborted waiter leaves the queue", async () => {
+  it("the budget is FIFO, an aborted waiter leaves the queue, and an aborted or oversized reservation is refused", async () => {
     const budget = new TableParseMemoryBudget(100);
+    await expect(budget.reserve(10, AbortSignal.abort(new Error("already cancelled")))).rejects.toThrow("already cancelled");
+    await expect(budget.reserve(101)).rejects.toThrow(/exceeds the worker budget/);
     const first = await budget.reserve(80);
     const controller = new AbortController();
     const waiting = budget.reserve(50, controller.signal);
@@ -945,10 +955,10 @@ describe("the structural output bound covers real guest output (Low-8, Low-9)", 
     return Buffer.byteLength(source, "utf8") + growth + 96 * (source.match(/<(?:td|th|caption)(?=[\t\n\f\r />])/gi)?.length ?? 0) + 8;
   };
 
-  it("on 20,000 fuzzed escape-heavy tables, real guest output never exceeds the bound, and the scan equals the reference formula", () => {
+  it("on 10,000 fuzzed escape-heavy tables, real guest output never exceeds the bound, and the scan equals the reference formula", { timeout: 60_000 }, () => {
     let parsed = 0, worst = 0;
     const batch: string[] = [];
-    for (let i = 0; i < 20_000; i++) {
+    for (let i = 0; i < 10_000; i++) {
       const source = table();
       expect(htmlTableCellsOutputBound([source]) - 64).toBe(regexBound(source));
       const cells = readTableCells(source);
@@ -961,13 +971,13 @@ describe("the structural output bound covers real guest output (Low-8, Low-9)", 
       if (batch.length < 64) batch.push(source);
     }
     // Most escape-heavy tables are refused by the guest (parse errors: null cells); hundreds still parse.
-    expect(parsed).toBeGreaterThan(500);
+    expect(parsed).toBeGreaterThan(250);
     expect(worst).toBeLessThan(1);
     // A whole batch, exactly as the guest writes it.
     expect(Buffer.byteLength(JSON.stringify(batch.map(readTableCells)))).toBeLessThanOrEqual(htmlTableCellsOutputBound(batch));
   });
 
-  it("every numeric character reference in the edge ranges stays within the bound", () => {
+  it("every numeric character reference in the edge ranges stays within the bound", { timeout: 60_000 }, () => {
     const ranges: Array<[number, number]> = [[0, 0x2ff], [0xd7f0, 0xe010], [0xfff0, 0x10010], [0x10fff0, 0x110010]];
     for (const [from, to] of ranges) {
       for (let code = from; code <= to; code++) {

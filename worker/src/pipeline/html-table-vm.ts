@@ -141,16 +141,14 @@ export function htmlTableCellsOutputBound(sources: readonly string[], memo?: Htm
 /** Several tables share a batch only while their output bound stays under this. */
 export const HTML_TABLE_BATCH_OUTPUT_TARGET = 16 * 1024 * 1024;
 /**
- * DOCSLURP_HTML_TABLE_MAX_OUTPUT_BYTES (default 8 MiB): the most guest output one table may produce. A table whose
+ * DOCSLURP_HTML_TABLE_MAX_OUTPUT_BYTES (default 16 MiB): the most guest output one table may produce. A table whose
  * bound is above it runs alone under this cap; if its output really is larger, it is treated as unparseable (null
  * cells, chunked as its source text), exactly like a table the guest cannot read. The document does not fail.
  */
 export function htmlTableMaxOutputBytes(env: NodeJS.ProcessEnv = process.env): number {
   const value = Number(env.DOCSLURP_HTML_TABLE_MAX_OUTPUT_BYTES);
-  return Number.isSafeInteger(value) && value >= 64 * 1024 ? value : 8 * 1024 * 1024;
+  return Number.isSafeInteger(value) && value >= 64 * 1024 ? value : 16 * 1024 * 1024;
 }
-/** Batches of one document parsed at once (each within the worker-wide budget). */
-const DOCUMENT_BATCH_CONCURRENCY = 2;
 /**
  * Worker-budget bytes held per byte of a result being parsed: the transferred bytes (1), the decoded string (at most
  * 2), and JSON.parse's heap for shapes the pre-scan admits (measured at most 12 per input byte, test "worst-case heap").
@@ -164,14 +162,16 @@ export function effectiveHtmlTableOutputCap(): number {
   return Math.min(htmlTableMaxOutputBytes(), Math.floor(tableParseMemoryBudget().total / TABLE_PARSE_HEAP_FACTOR));
 }
 /** The output bound a batch of several tables may reach, likewise fitted to the worker budget. */
-function batchOutputTarget(): number {
+export function effectiveHtmlTableBatchTarget(): number {
   return Math.min(HTML_TABLE_BATCH_OUTPUT_TARGET, Math.floor(tableParseMemoryBudget().total / TABLE_PARSE_HEAP_FACTOR));
 }
 
 /**
- * Worker-wide budget for table-parse results in flight (DOCSLURP_HTML_TABLE_PARSE_MEMORY_BYTES, default 128 MiB):
- * a batch reserves its output cap before its output is staged and releases it once decoded, so concurrent documents
- * never hold more than this between them. FIFO; a reservation larger than the whole budget waits for all of it.
+ * Worker-wide budget for table-parse results in flight (DOCSLURP_HTML_TABLE_PARSE_MEMORY_BYTES, default 256 MiB, which
+ * holds one worst-case 16 MiB batch at TABLE_PARSE_HEAP_FACTOR): a batch reserves its output cap × that factor before
+ * its output is staged and releases it once decoded. A document parses one batch at a time, so it holds at most one
+ * reservation; concurrent documents queue FIFO. Caps are fitted to the budget (effectiveHtmlTableOutputCap), so no
+ * reservation is larger than the whole budget (one that is, is refused).
  */
 export class TableParseMemoryBudget {
   private used = 0;
@@ -181,7 +181,11 @@ export class TableParseMemoryBudget {
   get inUse(): number { return this.used; }
   get peak(): number { return this.peakUsed; }
   async reserve(bytes: number, signal?: AbortSignal): Promise<() => void> {
-    const amount = Math.min(Math.max(0, bytes), this.total);
+    signal?.throwIfAborted();
+    // Never clamped: caps are fitted to the configured budget (effectiveHtmlTableOutputCap), so a reservation over the
+    // whole budget is a bug, refused rather than silently under-reserved.
+    const amount = Math.max(0, bytes);
+    if (amount > this.total) throw new Error(`table-parse reservation of ${amount} bytes exceeds the worker budget of ${this.total}`);
     if (this.waiting.length > 0 || this.used + amount > this.total) {
       await new Promise<void>((resolve, reject) => {
         const entry = { bytes: amount, grant: () => { signal?.removeEventListener("abort", onAbort); resolve(); } };
@@ -206,7 +210,7 @@ let workerBudget: TableParseMemoryBudget | undefined;
 export function tableParseMemoryBudget(env: NodeJS.ProcessEnv = process.env): TableParseMemoryBudget {
   if (!workerBudget) {
     const value = Number(env.DOCSLURP_HTML_TABLE_PARSE_MEMORY_BYTES);
-    workerBudget = new TableParseMemoryBudget(Number.isSafeInteger(value) && value >= 1024 * 1024 ? value : 128 * 1024 * 1024);
+    workerBudget = new TableParseMemoryBudget(Number.isSafeInteger(value) && value >= 1024 * 1024 ? value : 256 * 1024 * 1024);
   }
   return workerBudget;
 }
@@ -281,75 +285,62 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
     const tableCap = effectiveHtmlTableOutputCap();
     const budget = tableParseMemoryBudget();
     const memo: HtmlTableStatsMemo = new Map();
-    const batches = planBatches(misses, tableCap, batchOutputTarget(), memo);
+    const batches = planBatches(misses, tableCap, effectiveHtmlTableBatchTarget(), memo);
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-tables-"));
-    // A failed batch stops its sibling: one document's batches share this controller.
-    const stop = new AbortController();
-    const batchSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
     try {
-      let next = 0;
-      let firstError: unknown;
-      const worker = async () => {
-        while (next < batches.length) {
-          if (batchSignal.aborted) throw batchSignal.reason;
-          const index = next++;
-          const batch = batches[index]!;
-          const release = await budget.reserve(batch.cap * TABLE_PARSE_HEAP_FACTOR, batchSignal);
+      // One batch at a time (main's order): each is charged to the document budget as it decodes, so the first that
+      // crosses stops the document there, and a document holds at most one worker-budget reservation.
+      for (let index = 0; index < batches.length; index++) {
+        signal?.throwIfAborted();
+        const batch = batches[index]!;
+        const release = await budget.reserve(batch.cap * TABLE_PARSE_HEAP_FACTOR, signal);
+        try {
+          // Each batch stages into its own directories: its input, and an output directory holding only its result
+          // file (the command's only writable path), so no batch sees or downloads another's files.
+          const input = path.join(dir, `in-${index}`, "tables.json"), outputDir = path.join(dir, `out-${index}`), output = path.join(outputDir, "cells.json");
+          await mkdir(path.dirname(input), { mode: 0o700 });
+          await mkdir(outputDir, { mode: 0o700 });
+          await writeFile(input, JSON.stringify(batch.sources), { mode: 0o600 });
+          vmCommands++;
+          let text: string | null = null;
           try {
-            // Each batch stages into its own directories: its input, and an output directory holding only its result
-            // file (the command's only writable path), so concurrent batches never see or download each other's files.
-            const input = path.join(dir, `in-${index}`, "tables.json"), outputDir = path.join(dir, `out-${index}`), output = path.join(outputDir, "cells.json");
-            await mkdir(path.dirname(input), { mode: 0o700 });
-            await mkdir(outputDir, { mode: 0o700 });
-            await writeFile(input, JSON.stringify(batch.sources), { mode: 0o600 });
-            vmCommands++;
-            let text: string | null = null;
-            try {
-              // The output may not exceed what these tables can produce (or the per-table cap): enforced while it is
-              // transferred out of the VM (SandboxLimits.maxOutputBytes) and again here, before it is read.
-              await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "table-cells.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000, maxOutputBytes: batch.cap }, batchSignal);
-              if ((await stat(output)).size > batch.cap) throw new Error("HTML table result exceeds limit");
-              text = await readFile(output, "utf8");
-            } catch (error) {
-              // One table larger than the per-table cap is unparseable (null cells), never a document failure.
-              if (!batch.single || !isOutputLimit(error) || batchSignal.aborted) throw error;
-              console.warn(`[table-cells] table output over its ${batch.cap}-byte cap; chunked as source text`);
-              overCap++;
-              prepared.set(batch.sources[0]!, null);
-              continue;
-            }
-            // Before JSON.parse builds anything: the guest's result is [ table [ record {…} ] ], one record per cell tag,
-            // each with at most three keys and three values, and no string longer than its table's text can encode to.
-            const tags = batch.sources.reduce((total, source) => total + htmlTableCellTagCount(source, memo), 0);
-            assertJsonShape(text, {
-              maxDepth: 3,
-              maxContainers: 1 + batch.sources.length + tags,
-              maxScalars: batch.sources.length + 6 * tags,
-              maxStringLength: Math.max(...batch.sources.map((source) => htmlTableValueBound(source, memo))) + 64,
-            });
-            const result = JSON.parse(text) as unknown;
-            text = null;
-            if (!Array.isArray(result) || result.length !== batch.sources.length) throw new Error("invalid HTML table result");
-            for (const cells of result as unknown[]) assertHtmlTableCells(cells);
-            // Charged as soon as it decodes: what this document retains never exceeds its cell and text budgets, and
-            // the first batch that crosses them stops both workers (HtmlTableBudgetError, the over-budget path).
-            for (let i = 0; i < batch.sources.length; i++) {
-              const cells = (result[i] ?? null) as HtmlTableCell[] | null;
-              charge(cells);
-              prepared.set(batch.sources[i]!, cells);
-            }
-          } finally {
-            release();
+            // The output may not exceed what these tables can produce (or the per-table cap): enforced while it is
+            // transferred out of the VM (SandboxLimits.maxOutputBytes) and again here, before it is read.
+            await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "table-cells.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000, maxOutputBytes: batch.cap }, signal);
+            if ((await stat(output)).size > batch.cap) throw new Error("HTML table result exceeds limit");
+            text = await readFile(output, "utf8");
+          } catch (error) {
+            // One table larger than the per-table cap is unparseable (null cells), never a document failure.
+            if (!batch.single || !isOutputLimit(error) || signal?.aborted) throw error;
+            console.warn(`[table-cells] table output over its ${batch.cap}-byte cap; chunked as source text`);
+            overCap++;
+            prepared.set(batch.sources[0]!, null);
+            continue;
           }
+          // Before JSON.parse builds anything: the guest's result is [ table [ record {…} ] ], one record per cell tag,
+          // each with at most three keys and three values, and no string longer than its table's text can encode to.
+          const tags = batch.sources.reduce((total, source) => total + htmlTableCellTagCount(source, memo), 0);
+          assertJsonShape(text, {
+            maxDepth: 3,
+            maxContainers: 1 + batch.sources.length + tags,
+            maxScalars: batch.sources.length + 6 * tags,
+            maxStringLength: Math.max(...batch.sources.map((source) => htmlTableValueBound(source, memo))) + 64,
+          });
+          const result = JSON.parse(text) as unknown;
+          text = null;
+          if (!Array.isArray(result) || result.length !== batch.sources.length) throw new Error("invalid HTML table result");
+          for (const cells of result as unknown[]) assertHtmlTableCells(cells);
+          // Charged as soon as it decodes: what this document retains never exceeds its cell and text budgets, and
+          // the first batch that crosses them stops the document (HtmlTableBudgetError, the over-budget path).
+          for (let i = 0; i < batch.sources.length; i++) {
+            const cells = (result[i] ?? null) as HtmlTableCell[] | null;
+            charge(cells);
+            prepared.set(batch.sources[i]!, cells);
+          }
+        } finally {
+          release();
         }
-      };
-      const workers = Array.from({ length: Math.min(DOCUMENT_BATCH_CONCURRENCY, batches.length) }, () => worker().catch((error: unknown) => {
-        firstError ??= error;
-        stop.abort(error);
-      }));
-      await Promise.all(workers);
-      // The error that stopped the work (not the sibling's resulting abort), so the over-budget path sees its own error.
-      if (firstError !== undefined) throw firstError;
+      }
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
   return { prepared, vmTables: misses.length, cachedTables: unique.length - misses.length, vmCommands, overCap };
