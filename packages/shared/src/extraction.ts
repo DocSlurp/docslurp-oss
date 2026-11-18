@@ -148,9 +148,10 @@ export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSche
 export const vmPdfExtractorOptionsSchema = z.object({
   images: extractionImageConfigSchema.strict().optional(),
   /**
-   * Read typeset math as LaTeX (inline and display). On by default for PDFs (the worker's DOCSLURP_DOPPLER_MATH_DEFAULT);
-   * `false` opts the project out, which saves the math reader's CPU (measured: about a fifth more converter CPU on mixed
-   * small documents, about half more on math-dense pages).
+   * Read typeset math as LaTeX (inline and display). A project that says nothing asks for it (the worker's
+   * DOCSLURP_DOPPLER_MATH_DEFAULT), but no batch reads math unless the deploy gate DOCSLURP_FIRST_PASS_MATH is on (default
+   * off, so production does not read math). `false` opts the project out, which saves the math reader's CPU when the gate
+   * is on (measured: about a fifth more converter CPU on mixed small documents, about half more on math-dense pages).
    */
   math: z.boolean().optional(),
   pdf: extractionPdfOptionsSchema.pick({ extractImages: true }).strict().optional(),
