@@ -22,7 +22,7 @@ import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchEvent, type SandboxedPdfBatchFile, type SandboxedPdfBatchJob, type SandboxedPdfBatchProvider,
 } from "../extractors/sandboxed-pdf-batch.js";
-import { markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
+import { figureOutcomeWithBuild, markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { pageFactsForResend } from "../extractors/sandboxed-pdf-page-facts.js";
 import { dopplerPageFactsRequest } from "../lib/doppler-page-facts.js";
@@ -416,7 +416,8 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
         return;
       }
       if (event.phase === "figures") {
-        if (file.figures) figureReady.set(file.documentId, { dir: file.figures.dir, outcome: event.figures });
+        // The level records the converter build: the figure answer's, else the file's text result's (or its facts commit).
+        if (file.figures) figureReady.set(file.documentId, { dir: file.figures.dir, outcome: figureOutcomeWithBuild(batchFileJob(job, event.index), event.figures) });
         return;
       }
       const textMs = now() - started;

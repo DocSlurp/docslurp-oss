@@ -22,6 +22,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
+import { flushDopplerOutputs, writeDopplerOutputs } from "./doppler-outputs.js";
 import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 import { advertisedWorkerConfig } from "../lib/vm-only-parsing.js";
@@ -846,6 +847,7 @@ export class Store {
     const next = previous.then(async () => {
       const written = await this.writeProgressGuarded(state, prelude, options);
       if (state.pendingAssetLedger.size > 0) await flushAssetLedger(state, (write) => this.writeDocumentAssetLedger(write));
+      if ((state.pendingDopplerOutputs?.size ?? 0) > 0) await flushDopplerOutputs(state, (scope, record) => writeDopplerOutputs(this.sql, scope, record));
       return written;
     });
     const tail = next.catch(() => undefined);

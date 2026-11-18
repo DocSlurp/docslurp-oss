@@ -249,13 +249,15 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
   });
 
-  it("a first-pass placeholder (a host-only mark on the job) stores nothing and queues no ledger write", async () => {
+  it("a first-pass placeholder (a host-only mark on the job) stores nothing and queues only the Markdown mark", async () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
     const out = await runStage(async () => ({ figures: { status: "failed", reason: "figures-stored-by-first-pass" } }), {}, { markServed: true });
     expect(out.stageState?.status).toBe("completed");
     expect(out.stageState?.stats?.dopplerFigures).toBeUndefined();
-    expect(out.pending).toBeUndefined();
+    // The first pass writes the figure level; this stage only records that the Markdown committed (markdown_complete), so
+    // the resume runner can claim the document. Never a row, never a figure status of its own.
+    expect(out.pending).toMatchObject({ markdownOnly: true, levelOnly: true, assets: [] });
   });
 
   it("LOW-6: a provider reason that starts with `first-pass:` is an ordinary failure and still writes the failed level", async () => {
@@ -339,5 +341,45 @@ describe("Doppler figures in the extraction stage", () => {
       expect(out.stageState?.status).toBe("completed");
       expect(out.objects.get(`${folderRoot}/document.md`)?.bytes.toString()).toBe(corrected);
     });
+  });
+});
+
+describe("the Doppler output record (db/doppler-outputs.ts) queued by the extraction stage", () => {
+  const sha = async (bytes: Buffer | undefined) => (await import("node:crypto")).createHash("sha256").update(bytes ?? Buffer.alloc(0)).digest("hex");
+
+  it("queues the Markdown object's key, hash and size, the provider's build and why page facts are missing", async () => {
+    registerProvider(false);
+    const out = await runStage(async () => ({ build: "doppler-1.4.0+g0cf2981" }));
+    expect(out.stageState?.status).toBe("completed");
+    const record = out.state.pendingDopplerOutputs.get(DOC_ID);
+    const stored = out.objects.get(`u/r/markdown/${DOC_ID}.vm-pdf.md`)?.bytes;
+    expect(record).toMatchObject({
+      extractor: "vm-pdf", servedBy: "vm", build: { reported: "doppler-1.4.0+g0cf2981", version: null, commit: null },
+      markdown: { key: `u/r/markdown/${DOC_ID}.vm-pdf.md`, sha256: await sha(stored), bytes: stored!.byteLength },
+      pageFacts: { status: "absent" }, layoutFacts: null, ocrPages: 0,
+    });
+  });
+
+  it("drops a build that is not a build string, and says when page facts were off or refused", async () => {
+    registerProvider(false);
+    const bad = await runStage(async () => ({ build: "1.0 <img src=x>", pageFacts: "not json at all\n" }));
+    expect(bad.state.pendingDopplerOutputs.get(DOC_ID)).toMatchObject({ build: { reported: null }, pageFacts: { status: "refused" } });
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "off");
+    const off = await runStage(async () => ({ pageFacts: "{}\n" }));
+    expect(off.state.pendingDopplerOutputs.get(DOC_ID)).toMatchObject({ pageFacts: { status: "off" } });
+  });
+
+  it("a failed figure answer without its own build records the result's build on the level", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const out = await runStage(async () => ({ build: "0cf2981", figures: { status: "failed", reason: "exit 6" } }));
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "failed", dopplerBuild: "0cf2981" } });
+  });
+
+  it("a failed attempt leaves no record behind", async () => {
+    registerProvider(false);
+    const out = await runStage(async () => { throw new Error("VM lost"); });
+    expect(out.stageState?.status).toBe("failed");
+    expect(out.state.pendingDopplerOutputs.has(DOC_ID)).toBe(false);
   });
 });
