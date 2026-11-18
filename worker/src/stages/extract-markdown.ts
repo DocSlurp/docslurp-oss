@@ -44,7 +44,8 @@ import {
   type ExtractionContract,
   type ExtractionArtifactRef, switchDisabled } from "@docslurp/shared";
 import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
-import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
+import { mayHaveHtmlTables, storeEmbedTableCells, tableCellsInactiveStatus, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
+import { visionMayReadDocumentPages } from "../lib/vision-reads-pages.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
@@ -1229,16 +1230,9 @@ export class ExtractMarkdownStage implements Stage {
                       `artifactUri=${artifactUri}`,
                   );
 
-                  // Embed parses HTML tables into cells in a parser VM; this activity's VM lane is warm for the document, so parse
-                  // them here and store them for embed (DOCSLURP_TABLE_CELLS_CACHE). Run after the other commands of this stage, not
-                  // beside them, so it takes the idle warm lane instead of growing a new one. Best effort: never fails extraction.
-                  // Documents without `<table` do no extra work.
-                  const tableCells: StoreEmbedTableCellsStats = mayHaveHtmlTables(winningText, parserAwareCanonicalDocument.blocks)
-                    ? await storeEmbedTableCells({
-                        run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
-                        markdownUri: artifactUri, canonicalUri, signal,
-                      })
-                    : { status: "no-tables" };
+                  const tableCells = await this.storeTableCellsForEmbed(state, document, {
+                    markdown: winningText, canonicalDocument: parserAwareCanonicalDocument, needsVision,
+                  }, signal);
                   const completedResult: DocumentStageResult = {
                     artifactUri,
                     stats: {
@@ -1395,6 +1389,30 @@ export class ExtractMarkdownStage implements Stage {
         }
       },
     );
+  }
+
+  /**
+   * Embed parses HTML tables into cells in a parser VM; this activity's VM lane is warm for the document, so parse them
+   * here and store them for embed (DOCSLURP_TABLE_CELLS_CACHE). Called after the stage's other commands, not beside
+   * them, so it takes the idle warm lane instead of growing a new one. Skipped when vision will re-read pages (the last
+   * table-writing stage, vision-extract, stores them then) and on PII-policy runs. Best effort: never fails extraction,
+   * except that the stage's own abort propagates. Documents without `<table` do no extra work.
+   */
+  async storeTableCellsForEmbed(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    extracted: { markdown: string; canonicalDocument: import("@docslurp/shared").CanonicalDocument; needsVision: boolean },
+    signal?: AbortSignal,
+  ): Promise<StoreEmbedTableCellsStats> {
+    const inactive = tableCellsInactiveStatus(state.run.pipeline);
+    if (inactive) return { status: inactive };
+    if (!mayHaveHtmlTables(extracted.markdown, extracted.canonicalDocument.blocks)) return { status: "no-tables" };
+    // vision-extract is then the last stage to write this document's tables before pii-detect; it stores them fresh.
+    if (visionMayReadDocumentPages(state, document, extracted.needsVision)) return { status: "vision-pending" };
+    return await storeEmbedTableCells({
+      run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
+      markdown: extracted.markdown, canonicalDocument: extracted.canonicalDocument, signal,
+    });
   }
 
   /**
