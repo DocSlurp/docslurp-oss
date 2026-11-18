@@ -114,6 +114,27 @@ describe("the reader keeps the words only when they are whole and consistent", (
     expect(page.tableLayout?.ruledGrids).toBe(0);
   });
 
+  it("keeps the released structure family: only the ActualText counts, the tree counts absent (unknown, never 0)", () => {
+    // What d317bea writes on every page at `full` (the per-page structure-tree walk was removed in #51's review).
+    const page = parsePage(encodedPage(1, booktabs, { structure: { actualText: 3, actualTextTexLike: 1, truncated: false } }))!;
+    expect(page.structure).toEqual({ actualText: 3, actualTextTexLike: 1, truncated: false });
+    expect(page.structure?.formulas).toBeUndefined();
+    // The three released keys are required: a structure without them, or with a bad value, is dropped (unknown).
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 3, truncated: false } }))!.structure).toBeUndefined();
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: -1, actualTextTexLike: 0, truncated: false } }))!.structure).toBeUndefined();
+    // A TeX-like count above its total is not a fact: the released pair drops the family; an optional pair is left out.
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 1, actualTextTexLike: 2, truncated: false } }))!.structure).toBeUndefined();
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 2, actualTextTexLike: 2, truncated: false } }))!.structure)
+      .toEqual({ actualText: 2, actualTextTexLike: 2, truncated: false });
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 2, actualTextTexLike: 1, truncated: false, altText: 1, altTextTexLike: 3, markedActualText: 4, markedActualTextTexLike: 4 } }))!.structure)
+      .toEqual({ actualText: 2, actualTextTexLike: 1, truncated: false, markedActualText: 4, markedActualTextTexLike: 4 });
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 2, actualTextTexLike: 1, truncated: false, altTextTexLike: 1 } }))!.structure)
+      .toEqual({ actualText: 2, actualTextTexLike: 1, truncated: false });
+    // A bad optional count is left out; the rest stays.
+    expect(parsePage(encodedPage(1, booktabs, { structure: { actualText: 0, actualTextTexLike: 0, truncated: true, formulas: "x" } }))!.structure)
+      .toEqual({ actualText: 0, actualTextTexLike: 0, truncated: true });
+  });
+
   it("reads mathtables' fields inside the other families", () => {
     const base = textPage(1);
     const page = parsePage({

@@ -3,7 +3,7 @@
   "description": "Doppler's Markdown for the routing-eval fixtures: the PDF extractor's output the eval routes on (doppler-md evidence). Regenerate with Doppler built from the pinned commit: pdftotext -q -bbox-layout -wordmeta -rules -compact-layout FILE - | doppler-md (what pdftomarkdown runs). Each fixture also has its -bbox-layout -rules XHTML (.xhtml): the word boxes and ruling lines the layout walker reads.",
   "doppler": {
     "repository": "https://github.com/DocSlurp/doppler",
-    "commit": "0cf298102edc8293b6ca92782124d9761d5b1800"
+    "commit": "e1200cb9d12d95cac71ff902e9a18a6932aa8cd0"
   },
   "files": {
     "academic-latex-ligatures.pdf.md": {
@@ -34,7 +34,7 @@
     "tables-multipage-financials.pdf.md": {
       "source": "tables-multipage-financials.pdf",
       "sourceSha256": "e8575371b043ca42ae2b5dd1b36be445686d2fe89bb718846a8f4e38820cc788",
-      "sha256": "bb380eabff1040396eabc52da1151c2a67b2aafe89e5631473a1e6bdff1954ea"
+      "sha256": "5d8b6552c65c4f7cedbd021c90145f62ce205ba76de252d9f914f911db99fb14"
     },
     "academic-latex-ligatures.pdf.xhtml": {
       "source": "academic-latex-ligatures.pdf",
@@ -124,7 +124,7 @@
     "routing-table-large-coverage.pdf.md": {
       "source": "routing-table-large-coverage.pdf",
       "sourceSha256": "e2b18405ac2bbf6c3d2e24e30e44cc669d1a31cd83b2d97ca884fbaa09ea8565",
-      "sha256": "6d11a410f18318823c4d62fe5cbb2df7970393ff7e71ec53ff6cac7d629ed23b"
+      "sha256": "519a53bd767d7ae57feac7bbf8e64c7155e1ddc91496d9e761b7b5238bd8b4db"
     },
     "routing-table-large-coverage.pdf.xhtml": {
       "source": "routing-table-large-coverage.pdf",
@@ -159,7 +159,7 @@
     "routing-table-bullet-list.pdf.md": {
       "source": "routing-table-bullet-list.pdf",
       "sourceSha256": "f0c6f51da2599bfb0c79479d9998ccdcfd00b58b00c452a5a7b083b628bf5e14",
-      "sha256": "258235cf2caeb41ffba2f413585a671c06fbfa5badc6582e200ed4697f4d51e0"
+      "sha256": "dac09552aceb24264e32f57cf45f0198a0e1f3c2084f92b165d0dfd619841ae4"
     },
     "routing-table-bullet-list.pdf.xhtml": {
       "source": "routing-table-bullet-list.pdf",
