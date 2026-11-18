@@ -50,9 +50,9 @@ beforeAll(async () => {
   await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('a', 'org1', 'u', 'A', ${sql.json(DEFAULT_PIPELINE)})`;
   await sql`insert into projects (id, org_id, user_id, name, pipeline, index_configs) values ('b', 'org1', 'u', 'B', ${sql.json(B_PIPELINE)},
     ${sql.json({ [bHash]: indexConfigOf(bFeatures), [defaultHash]: oldConfig, [legacyHash]: legacyConfig } as never)})`;
-  for (const [id, project] of [["run1", "a"], ["run2", "a"], ["runb", "b"]] as const) {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-      values (${id}, 'org1', 'u', ${project}, 'bulk-upload', 'completed', 'completed', ${sql.json(project === "b" ? B_PIPELINE : DEFAULT_PIPELINE)})`;
+  for (const [id, project, status] of [["run1", "a", "completed"], ["run2", "a", "completed"], ["runb", "b", "completed"], ["run-live", "a", "processing"]] as const) {
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, monthly_reservation_cents)
+      values (${id}, 'org1', 'u', ${project}, 'bulk-upload', ${status}, ${status}, ${sql.json(project === "b" ? B_PIPELINE : DEFAULT_PIPELINE)}, 1)`;
   }
   const docs: Array<[id: string, project: string, run: string, hash: string | null, model: string, dim: number]> = [
     ["match", "a", "run1", defaultHash, defaultRoute.model, DIM],
@@ -82,6 +82,7 @@ beforeAll(async () => {
     ["e-unit", "run1", null, "openrouter", "x/y", "ingest-page-rich", 0, { unitCharge: true }],
     ["e-stamped", "run1", null, "openrouter", "z-ai/glm-5.3-flash", "workspace-chat-tools", 5, { modelUri: "llm://openrouter/kept" }],
     ["e-query", null, null, "transformers.js", "Xenova/bge-m3", "embed-query", 7, {}],
+    ["e-live", "run-live", null, "openrouter", "qwen/qwen3.5-flash-02-23", "summary-generation", 40, {}],
   ];
   for (const [id, runId, doc, provider, model, metric, input, metadata] of events) {
     await sql`insert into usage_events (id, user_id, run_id, document_id, provider, model, metric, amount, unit, input_tokens, metadata, org_id, project_id)
@@ -116,7 +117,8 @@ describe("model URI backfill", () => {
       "model-mismatch": 1, "dimension-mismatch": 1, "document-without-index-config-hash": 1,
       "index-config-normalization-unknown": 1, "index-config-not-recorded": 1,
     });
-    expect(report["usage-events"]).toMatchObject({ scanned: 10, updated: 6, skipped: { "not-a-model-call": 4 } });
+    expect(report["usage-events"]).toMatchObject({ scanned: 11, updated: 7, skipped: { "not-a-model-call": 4 } });
+    expect(report.runs).toMatchObject({ scanned: 3 });
     expect(Object.values(await vectorRows()).every((row) => row.uri === null)).toBe(true);
     expect(await sql`select count(*)::int as n from usage_events where metadata ? 'modelUri'`).toEqual(before);
     expect(await sql`select count(*)::int as n from project_runs where resolved_models is not null`).toEqual([{ n: 0 }]);
@@ -124,8 +126,10 @@ describe("model URI backfill", () => {
 
   it("writes the reader's space URI only where the route's bare id and dimensions match the row", async () => {
     const vectorsBefore = { a: await readyIn("a", defaultRoute, DIM) };
-    const report = await run(true);
+    const report = await backfill.backfillModelUris(sql as never, { write: true, batchSize: 2, log: quiet, verify: true });
     expect(report["vector-indexes"]).toMatchObject({ updated: 3 });
+    expect(report.verify).toMatchObject({ ok: true, decreased: {} });
+    expect(report.verify!.spaces).toBeGreaterThanOrEqual(3);
     const rows = await vectorRows();
     expect(rows.match).toMatchObject({ uri: defaultUri, class: "embeddingProfile=cheapest-hosted" });
     const bRoute = resolveEmbeddingRoute(bFeatures.embedding);
@@ -159,6 +163,8 @@ describe("model URI backfill", () => {
       embedding: { uri: defaultUri, class: "embeddingProfile=cheapest-hosted", backfilled: true },
     });
     expect(runs.run2).toBeNull();
+    // A run that is still processing keeps a null map: the worker sets it, and its usage is not final.
+    expect(runs["run-live"]).toBeNull();
     expect(runs.runb).toBeNull();
   });
 
@@ -167,6 +173,53 @@ describe("model URI backfill", () => {
       select page_number, model_uri, model_class from document_page_extracts order by page_number`;
     expect(rows[0]).toMatchObject({ model_uri: "llm://openrouter/openai/gpt-6-luna", model_class: expect.stringContaining("embeddingProfile=cheapest-hosted") });
     expect(rows[1]).toMatchObject({ model_uri: null, model_class: null });
+  });
+
+  it("--verify reports a space whose vector-ready count fell", async () => {
+    const before = await backfill.vectorReadyCounts(sql as never);
+    await sql`update vector_indexes set embedding_model_uri = 'llm://another-host/x' where id = 'vi-match'`;
+    try {
+      const decreased = backfill.vectorReadyDecreases(before, await backfill.vectorReadyCounts(sql as never));
+      expect(decreased).toEqual({ [`a|${defaultUri}`]: { before: before[`a|${defaultUri}`], after: before[`a|${defaultUri}`]! - 1 } });
+    } finally {
+      await sql`update vector_indexes set embedding_model_uri = ${defaultUri} where id = 'vi-match'`;
+    }
+  });
+
+  it("summarizes the model environment and project routes without secrets", async () => {
+    const summary = await backfill.modelEnvironmentSummary(sql as never, {});
+    expect(summary).toMatchObject({ modelMode: "hosted", privateEndpointRegistry: null, privateServiceMap: null, mappedServices: [], unreadableProjects: 0 });
+    expect(summary.projectEmbeddings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ model: defaultRoute.model, dimensions: DIM, spaceUri: defaultUri, projects: 1 }),
+      expect.objectContaining({ model: "BAAI/bge-m3", projects: 1 }),
+    ]));
+    expect(JSON.stringify(summary)).not.toContain("http");
+    const digested = await backfill.modelEnvironmentSummary(sql as never, { DOCSLURP_PRIVATE_MODEL_ENDPOINTS: "[]", DOCSLURP_PRIVATE_TEXT_MODEL: "llm://private/a/b" });
+    expect(digested.privateEndpointRegistry).toMatch(/^[0-9a-f]{16}$/);
+    expect(digested.privateServiceMap).toMatch(/^[0-9a-f]{16}$/);
+    expect(digested.mappedServices).toEqual(["text"]);
+  });
+
+  it("retries a batch on a lock timeout, deadlock or statement timeout, and fails on other errors", async () => {
+    let failures = ["55P03", "40P01", "57014"];
+    const flaky = new Proxy(sql, {
+      get(target, key, receiver) {
+        if (key !== "begin") return Reflect.get(target, key, receiver);
+        return (fn: never) => {
+          const code = failures.shift();
+          if (code) return Promise.reject(Object.assign(new Error("transient"), { code }));
+          return target.begin(fn);
+        };
+      },
+    });
+    const lines: string[] = [];
+    const report = await backfill.backfillModelUris(flaky as never, { targets: ["usage-events"], write: true, retryBaseMs: 1, log: (line) => lines.push(line) });
+    expect(report["usage-events"]!.updated).toBe(0);
+    expect(lines.filter((line) => line.includes("retry"))).toHaveLength(3);
+    failures = ["55P03", "55P03", "55P03", "55P03"];
+    await expect(backfill.backfillModelUris(flaky as never, { targets: ["usage-events"], write: true, retryBaseMs: 1, log: quiet })).rejects.toMatchObject({ code: "55P03" });
+    failures = ["23505"];
+    await expect(backfill.backfillModelUris(flaky as never, { targets: ["usage-events"], write: true, retryBaseMs: 1, log: quiet })).rejects.toMatchObject({ code: "23505" });
   });
 
   it("is idempotent: a rerun updates nothing", async () => {
