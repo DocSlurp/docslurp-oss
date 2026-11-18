@@ -4,7 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sqlMock = Object.assign(vi.fn(), { begin: vi.fn() });
 vi.mock("../db.js", () => ({ sql: sqlMock }));
-vi.mock("../services/usage-attribution.js", () => ({ attributedUsage: () => "usage_attribution" }));
+vi.mock("../services/usage-attribution.js", () => ({
+  attributedUsage: () => "usage_attribution",
+  orgAttributedUsage: () => "usage_attribution",
+  projectAttributedUsage: () => "usage_attribution",
+}));
 
 const {
   assertCanSpend,

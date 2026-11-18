@@ -1,6 +1,6 @@
 import type { ProjectState } from "@docslurp/shared";
 import { sql, type SqlClient } from "../db.js";
-import { attributedUsage } from "./usage-attribution.js";
+import { projectAttributedUsage } from "./usage-attribution.js";
 import { getProjectSummaryTreeState } from "./project-summary-tree.js";
 
 export type ProjectStateRow = Record<string, unknown>;
@@ -124,7 +124,7 @@ export async function getProjectState(args: { projectId: string; orgId: string; 
     ),
     usage_summary as (
       select coalesce(sum(input_tokens), 0) as input_tokens, coalesce(sum(output_tokens), 0) as output_tokens,
-        coalesce(sum(cost_cents), 0) as cost_cents from ${attributedUsage(null, client)} au where au.project_id = ${args.projectId}
+        coalesce(sum(cost_cents), 0) as cost_cents from ${projectAttributedUsage(args.projectId, null, client)} au
     )
     select clock.observed_at::text, ds.*, ts.*, rs.*, ss.*, us.*,
       (select count(*) from valid_pages) as indexed_pages

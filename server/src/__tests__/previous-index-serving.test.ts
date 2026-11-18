@@ -49,6 +49,7 @@ afterAll(async () => {
 });
 
 async function seed(docHashes: Array<string | null>, configs: Record<string, unknown> | null, pipeline: PipelineFeatures = C) {
+  serving.clearIndexConfigCountsCache();
   await sql`delete from vector_indexes`;
   await sql`delete from documents`;
   await sql`delete from project_runs`;

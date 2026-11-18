@@ -274,8 +274,9 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     // LanceDB-hydrated hits' chunks still exist.
     expect(reads.length).toBeLessThanOrEqual(4);
     expect(reads[0]).toMatch(/from projects w/);
+    // The per-config compatibility counts are cached per project for one eligibility TTL: the warm-up search loaded them.
     const compatibility = reads.slice(1).filter(read => /group by d.index_config_hash/.test(read));
-    expect(compatibility).toHaveLength(1);
+    expect(compatibility).toHaveLength(0);
     for (const read of reads.slice(1).filter(read => !compatibility.includes(read))) expect(read).toMatch(/select id from document_chunks where id in/);
     expect(statements.some((statement) => /insert into search_sessions/.test(statement))).toBe(true);
   });
