@@ -11,8 +11,8 @@ import {
   calculateAiUsageCostCents,
   pageCredits,
   ladderAllowsOffPlanReads,
+  ladderForbidsVision,
   qualityAllowsPageReading,
-  qualityReadsEveryPage,
   richPagesForOutputTokens,
   type MaterializePagesInput,
   type PipelineFeatures, switchDisabled } from "@docslurp/shared";
@@ -142,8 +142,8 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       return Array.from({ length: count }, (_, i) => pages[i] ?? "");
     },
     async ocrPage(document, page, ctx) {
-      // Fail closed: Fast never sends a page to a vision model.
-      if (!qualityAllowsPageReading(ctx.pipeline.quality)) throw new Error(`quality fast does not read page ${page}`);
+      // Fail closed: Fastest (and Read scans off) never sends a page to a vision model.
+      if (!qualityAllowsPageReading(ctx.pipeline.quality) || ladderForbidsVision(ctx.pipeline)) throw new Error(`quality fastest does not read page ${page} with a vision model`);
       const [artifact] = await raster().renderSelectedPages({
         document, runId: ctx.runId, pageNumbers: [page], dpi: OCR_DPI,
         ...(visionRenderLongEdge(ctx.pipeline.vision) !== undefined ? { maxLongEdgePx: visionRenderLongEdge(ctx.pipeline.vision)! } : {}),
@@ -380,14 +380,14 @@ export async function materializePageRange(
       console.warn(`[materialize] text layer failed for ${documentId} p${range.first}-${range.last}: ${reason}`);
     }
   }
-  // Quality decides which pages a model reads, as in the eager pipeline: Fast reads none (pages without a text layer
-  // stay unread, kept as page images that render on demand), Good reads every page, Auto only pages without text.
+  // Quality decides which pages a model reads: query-time reads are vision transcription, so only Smartest reads here,
+  // and only pages without text; Fastest (and Read scans off) reads none (pages without a text layer stay unread, kept
+  // as page images that render on demand).
   // An Auto ladder above-fast share (pipeline.ladder.maxEscalationShare.aboveFast) is planned per document at ingest; query-time reads
   // have no document-wide plan to count against, so they read no page under one (fail closed: the page stays an image). Query-time reads are plain transcription (the
   // ocr rung), so maxRung and the above-ocr share change nothing here.
   // DOCSLURP_DISABLE: `ai` stops every model read here; `ai-rescue` stops reads of pages without a text layer.
-  const readsPages = qualityAllowsPageReading(pipeline.quality) && ladderAllowsOffPlanReads(pipeline).pageReads && !switchDisabled(process.env, "ai-rescue");
-  const readsEveryPage = qualityReadsEveryPage(pipeline.quality) && !switchDisabled(process.env, "ai");
+  const readsPages = qualityAllowsPageReading(pipeline.quality) && !ladderForbidsVision(pipeline) && ladderAllowsOffPlanReads(pipeline).pageReads && !switchDisabled(process.env, "ai-rescue");
   const ocrPages: number[] = [];
   const keptUnread: number[] = [];
   for (const page of pages) {
@@ -399,8 +399,7 @@ export async function materializePageRange(
     const text = texts.get(page) ?? "";
     const hasTextLayer = text.replace(/\s+/g, "").length >= MIN_TEXT_LAYER_CHARS;
     // Text-layer pages bill as Fast pages (charged by billLockedMaterializedPages as they turn indexed).
-    if (readsEveryPage) ocrPages.push(page);
-    else if (hasTextLayer) prepared.set(page, { page, text });
+    if (hasTextLayer) prepared.set(page, { page, text });
     else if (readsPages) ocrPages.push(page);
     else keptUnread.push(page);
   }

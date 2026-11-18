@@ -29,15 +29,18 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   } catch (error) {
     throw ApplicationFailure.nonRetryable("Document page needs a fresh scan: reprocess the document", "ParseSourceUnscanned", error instanceof Error ? error.name : "refused");
   }
-  const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; low: string | null; high: string | null }[]>`
+  const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; page_images: boolean; low: string | null; high: string | null }[]>`
     select d.org_id, d.project_id,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
+      coalesce((p.pipeline->>'pageImages')::boolean, true) as page_images,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 250)} as high
-    from documents d join project_runs r on r.id=d.run_id
+    from documents d join project_runs r on r.id=d.run_id left join projects p on p.id=d.project_id
     where d.id=${document.id} and r.id=${input.runId}
   `;
   if (!row || row.withheld) throw new Error("Document page is unavailable");
+  // Page images off for the project (pipeline.pageImages: false): no viewer page image is rendered (fail closed).
+  if (!row.page_images) throw ApplicationFailure.nonRetryable("Page images are turned off for this project", "PageImagesDisabled");
   const dpi = input.dpi ?? pageRenderDpi(quality);
   if ((dpi !== 120 && dpi !== 250) || (dpi === 250 && quality !== "export")) throw ApplicationFailure.nonRetryable("Page render policy changed; request again", "PageRenderPolicyChanged");
   const slot = pageRenderSlot(input.documentId, input.pageNumber, quality, dpi);

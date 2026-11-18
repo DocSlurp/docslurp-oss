@@ -9,6 +9,7 @@ import {
   defaultPageRouterConfig,
   pageRouterDecisionModels,
   effectiveLadder,
+  ladderForbidsVision,
   qualityAllowsPageReading,
   routePlanSchema,
   type AdaptiveRoutingArtifact,
@@ -183,6 +184,12 @@ export class RoutePagesStage implements Stage {
     // render-images and vision stages never execute a plan anyway.
     if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
       console.log(`[route-pages] skipped run=${state.run.id} reason=quality-fast mode=${mode}`);
+      return;
+    }
+    // Fastest reads with OCR only and never executes a route plan (vision-extract loadRoutedExecution), so no decision
+    // model is asked about its pages.
+    if (ladderForbidsVision(state.run.pipeline)) {
+      console.log(`[route-pages] skipped run=${state.run.id} reason=quality-fastest mode=${mode}`);
       return;
     }
     // An Auto ladder limit (pipeline.ladder) plans reads from page triage and never uses a router plan
