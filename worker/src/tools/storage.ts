@@ -108,14 +108,16 @@ export class ArtifactStore {
     await this.putBytes(key, body, "application/json");
   }
 
-  async putBytes(key: string, data: Uint8Array, contentType: string): Promise<void> {
+  async putBytes(key: string, data: Uint8Array, contentType: string, options?: { signal?: AbortSignal }): Promise<void> {
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
         Body: data,
         ContentType: contentType
-      })
+      }),
+      // An aborted signal cancels the request in flight (the caller's deadline covers the upload).
+      options?.signal ? { abortSignal: options.signal } : undefined,
     );
   }
 

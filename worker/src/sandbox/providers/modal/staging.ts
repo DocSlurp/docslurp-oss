@@ -3,7 +3,7 @@ import path from "node:path";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 
-import { SandboxOutputError } from "../../types.js";
+import { SandboxOutputError, SandboxOutputLimitError } from "../../types.js";
 
 /** One remote filesystem entry. `mtime` is in the remote clock's units (Modal reports whole seconds). */
 export interface RemoteEntry {
@@ -18,7 +18,8 @@ export interface RemoteFs {
   /** The entry at `p`, or null when nothing exists there. */
   stat(p: string): Promise<RemoteEntry | null>;
   writeFile(p: string, data: Uint8Array): Promise<void>;
-  readFile(p: string): Promise<Uint8Array>;
+  /** Read a file, failing (without buffering past it) once it exceeds `limit` bytes. */
+  readFile(p: string, limit?: number): Promise<Uint8Array>;
   /** Direct children of a directory, symlinks excluded. */
   list(p: string): Promise<RemoteEntry[]>;
   mkdir(p: string): Promise<void>;
@@ -85,14 +86,17 @@ export class SessionStaging {
    * files, and new directories. Inputs uploaded for another command meanwhile are not copied
    * back. A root the command never created is skipped silently.
    */
-  async download(snapshot: RemoteSnapshot): Promise<void> {
+  async download(snapshot: RemoteSnapshot, options: { maxBytes?: number } = {}): Promise<void> {
     const changed = this.changes(snapshot, await this.walk(snapshot.roots));
+    // A command's own budget (SandboxLimits.maxOutputBytes) only ever lowers the general limits, per file and in total.
+    const fileLimit = Math.min(128 * 1024 * 1024, options.maxBytes ?? Number.POSITIVE_INFINITY);
+    const totalLimit = Math.min(512 * 1024 * 1024, options.maxBytes ?? Number.POSITIVE_INFINITY);
     let totalBytes = 0;
     for (const entry of changed) {
       if (!entry.isDir) {
-        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 128 * 1024 * 1024) throw new SandboxOutputError("parser VM output file exceeds limit");
+        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > fileLimit) throw new SandboxOutputLimitError("parser VM output file exceeds limit");
         totalBytes += entry.size;
-        if (totalBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM aggregate output exceeds limit");
+        if (totalBytes > totalLimit) throw new SandboxOutputLimitError("parser VM aggregate output exceeds limit");
       }
     }
     let downloadedBytes = 0;
@@ -102,9 +106,10 @@ export class SessionStaging {
       if (entry.isDir) await mkdir(entry.path, { recursive: true });
       else {
         await mkdir(path.dirname(entry.path), { recursive: true });
-        const data = await this.remote.readFile(entry.path);
+        // Each read is bounded by what is left of the budget (a file may grow after its size was listed).
+        const data = await this.remote.readFile(entry.path, Math.min(fileLimit, totalLimit - downloadedBytes));
         downloadedBytes += data.byteLength;
-        if (data.byteLength > 128 * 1024 * 1024 || downloadedBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual output exceeds limit");
+        if (data.byteLength > fileLimit || downloadedBytes > totalLimit) throw new SandboxOutputLimitError("parser VM actual output exceeds limit");
         await writeFile(entry.path, data);
       }
       this.claim(entry.path, "download");
