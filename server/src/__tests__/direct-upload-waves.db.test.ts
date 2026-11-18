@@ -485,6 +485,98 @@ describe("waves", () => {
   });
 });
 
+describe("session expiry", () => {
+  async function expire(sessionId: string) {
+    await db.query("update upload_sessions set expires_at = now() - interval '1 second', next_reconcile_at = now() - interval '1 second' where id = $1", [sessionId]);
+    await reconcileDirectUploads();
+  }
+  async function cleanupKeys() {
+    return (await db.query<{ artifact_uris: string[] }>("select artifact_uris from storage_cleanup_queue where kind = 'storage_prefix'")).rows.flatMap(row => row.artifact_uris).sort();
+  }
+
+  it("flushes finalized files no run took into a last run, then aborts the unfinalized ones", async () => {
+    Object.assign(env, { directUploadWaveFiles: 100 });
+    const { sessionId, files: seeded } = await seedSession(4);
+    for (const file of seeded.slice(0, 3)) put(file.key);
+    await webhook(seeded.slice(0, 3).map(file => file.key));
+    expect(await runs(sessionId)).toEqual([]);
+    await expire(sessionId);
+    expect(await runs(sessionId)).toEqual([expect.objectContaining({ wave: 1, status: "started", file_count: 3 })]);
+    const rows = await files(sessionId);
+    expect(rows.slice(0, 3).every(row => row.status === "completed" && row.run_id === sessionId)).toBe(true);
+    expect(rows[3]).toMatchObject({ status: "aborted", run_id: null });
+    expect((await session(sessionId)).status).toBe("aborted");
+    // Only the file no run took is cleaned up.
+    expect(await cleanupKeys()).toEqual([rows[3]!.source_key]);
+  });
+
+  it("confirms an expired session whose every file the last run took", async () => {
+    Object.assign(env, { directUploadWaveFiles: 100 });
+    const { sessionId, files: seeded } = await seedSession(2);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.map(file => file.key));
+    // The wave the last file would start has not run yet when the session expires.
+    await expire(sessionId);
+    expect(await runs(sessionId)).toHaveLength(1);
+    expect((await session(sessionId)).status).toBe("confirmed");
+  });
+
+  it("aborts and cleans up the leftovers when billing refuses the last run", async () => {
+    Object.assign(env, { directUploadWaveFiles: 100 });
+    const { sessionId, files: seeded } = await seedSession(3);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.slice(0, 2).map(file => file.key));
+    fakes.state.blockRunCreation = new RunCreationBlockedError("This organization has reached its monthly budget cap", 402, "org_budget_paused");
+    await expire(sessionId);
+    expect(await runs(sessionId)).toEqual([]);
+    expect(fakes.runs).toHaveLength(0);
+    const rows = await files(sessionId);
+    expect(rows.every(row => row.status === "aborted" && row.run_id === null)).toBe(true);
+    expect((await session(sessionId)).status).toBe("aborted");
+    expect(await cleanupKeys()).toEqual(rows.map(row => row.source_key).sort());
+  });
+
+  it("aborts the leftovers when the uploader's rights were revoked before the last run", async () => {
+    Object.assign(env, { directUploadWaveFiles: 100 });
+    const { sessionId, files: seeded } = await seedSession(2);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.map(file => file.key).slice(0, 1));
+    await db.exec("delete from org_memberships where org_id = 'o' and user_id = 'u'");
+    await expire(sessionId);
+    expect(fakes.runs).toHaveLength(0);
+    expect((await session(sessionId)).status).toBe("aborted");
+    expect((await files(sessionId)).every(row => row.status === "aborted")).toBe(true);
+  });
+
+  it("never ingests a file twice: earlier waves keep their files, the last run takes only the leftovers", async () => {
+    const { sessionId, files: seeded } = await seedSession(8);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.slice(0, 5).map(file => file.key));
+    await advance(sessionId);
+    await webhook(seeded.slice(5, 7).map(file => file.key));
+    await expire(sessionId);
+    await expire(sessionId);
+    expect((await runs(sessionId)).map(run => run.file_count)).toEqual([5, 2]);
+    const ingested = fakes.runs.flatMap(run => run.files.map(file => file.sourceKey));
+    expect(ingested).toHaveLength(7);
+    expect(new Set(ingested).size).toBe(7);
+    expect((await files(sessionId))[7]).toMatchObject({ status: "aborted", run_id: null });
+  });
+
+  it("never flushes an aborted session: abort is not expiry", async () => {
+    Object.assign(env, { directUploadWaveFiles: 100 });
+    const { sessionId, files: seeded } = await seedSession(3);
+    for (const file of seeded) put(file.key);
+    await webhook(seeded.slice(0, 2).map(file => file.key));
+    expect(await abortDirectUploadSession(sessionId, "u")).toBe(true);
+    await expire(sessionId);
+    await advance(sessionId);
+    expect(await runs(sessionId)).toEqual([]);
+    expect(fakes.runs).toHaveLength(0);
+    expect((await files(sessionId)).every(row => row.status === "aborted")).toBe(true);
+  });
+});
+
 describe("reconciler fallback", () => {
   it("finishes 1,000 files whose webhooks were all lost: every file in exactly one run", async () => {
     Object.assign(env, { directUploadWaveFiles: 100 });

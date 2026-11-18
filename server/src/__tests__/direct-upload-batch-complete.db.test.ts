@@ -67,7 +67,7 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   abortMultipartUpload: async () => {},
 }));
 // Waves have their own suite (direct-upload-waves.db.test.ts); here only whether the sweep asks for them.
-vi.mock("../services/direct-upload-waves.js", () => ({ advanceDirectUploadWaves: mocks.advance, WAVE_BLOCKED_RETRY_SECONDS: 60 }));
+vi.mock("../services/direct-upload-waves.js", () => ({ advanceDirectUploadWaves: mocks.advance, flushExpiredDirectUploadSession: async () => {}, WAVE_BLOCKED_RETRY_SECONDS: 60 }));
 
 const { completeDirectUploadFiles, completeDirectUploadFile, abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, sealedSourceKey, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
 const { reconcileDirectUploads } = await import("../services/direct-upload-reconciler.js");
@@ -205,7 +205,7 @@ describe("fallback reconciler while a client completes files", () => {
     await db.query(`update upload_sessions set client_finalizing_until = now() - interval '1 second', next_reconcile_at = now() - interval '1 second' where id = $1`, [SESSION]);
     await reconcileDirectUploads();
     expect((await fileRow("b")).status).toBe("completed");
-    expect(mocks.advance).toHaveBeenCalledWith(SESSION, "u");
+    expect(mocks.advance).toHaveBeenCalledWith(SESSION, "u", { orgId: "o" });
   });
 
   it("still aborts an expired session that a client was holding", async () => {

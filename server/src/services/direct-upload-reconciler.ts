@@ -3,7 +3,7 @@ import { env } from "../config.js";
 import { settleBounded } from "../lib/bounded-settle.js";
 import { abortDirectUploadSession, finalizeDirectUploadFileInBackground } from "./direct-upload-session.js";
 import { registerDirectUploadWaveCheckHandler, requestDirectUploadWaveCheck, settleDirectUploadWaveChecks } from "./direct-upload-wave-scheduler.js";
-import { advanceDirectUploadWaves, WAVE_BLOCKED_RETRY_SECONDS } from "./direct-upload-waves.js";
+import { advanceDirectUploadWaves, flushExpiredDirectUploadSession, WAVE_BLOCKED_RETRY_SECONDS } from "./direct-upload-waves.js";
 import { ProjectIntakeError } from "./project-intake.js";
 import { isRunCreationBlockedError } from "./run-creation.js";
 
@@ -23,13 +23,14 @@ const FALLBACK_BUDGET_MS = 10_000;
 /** A file the fallback is looking at is not offered to another sweep for this long. */
 const FALLBACK_CLAIM_SECONDS = 15;
 
-type ScheduledSession = { id: string; user_id: string; expired: boolean; status: string; checked_at: Date | string };
+type ScheduledSession = { id: string; user_id: string; org_id: string | null; expired: boolean; status: string; checked_at: Date | string };
 
 /**
  * Two independent passes, each covering lost or skipped work:
  * - files: a file still open past its grace period (`next_check_at`) is checked in storage and finalized, the fallback
  *   for a lost storage webhook or a client that never calls `files/complete`;
- * - sessions: due waves start, finished sessions are confirmed, expired ones are aborted.
+ * - sessions: due waves start, finished sessions are confirmed; an expired one first flushes its finalized files into a
+ *   last run (refused only by admission or billing), then aborts the rest.
  */
 export async function reconcileDirectUploads(): Promise<void> {
   if (running) return;
@@ -38,7 +39,7 @@ export async function reconcileDirectUploads(): Promise<void> {
   try {
     await reconcilePendingUploadFiles();
     const sessions = await sql<ScheduledSession[]>`
-      select id, user_id, status, expires_at < now() as expired, now() as checked_at from upload_sessions
+      select id, user_id, org_id, status, expires_at < now() as expired, now() as checked_at from upload_sessions
       where (status in ('pending', 'uploading', 'ingesting') or (status = 'initializing' and expires_at < now())) and next_reconcile_at <= now()
       order by next_reconcile_at limit 25`;
     for (const session of sessions) {
@@ -85,11 +86,10 @@ async function reconcileSession(session: ScheduledSession, mode: "sweep" | "kick
   let reschedule = true;
   try {
     if (session.expired && session.status !== "ingesting") {
-      // Runs already started keep their files; every file no run took is aborted and cleaned up.
-      await abortDirectUploadSession(session.id, session.user_id);
+      await expireSession(session);
       return;
     }
-    nextCheckMs = (await advanceDirectUploadWaves(session.id, session.user_id)).nextCheckMs;
+    nextCheckMs = (await advanceDirectUploadWaves(session.id, session.user_id, { orgId: session.org_id })).nextCheckMs;
   } catch (error) {
     // Another holder (a wave in another process, an abort, a confirm) has the session: look again shortly.
     if (error instanceof ProjectIntakeError && error.statusCode === 409 && error.code === "upload_session_busy") {
@@ -125,11 +125,34 @@ async function reconcileSession(session: ScheduledSession, mode: "sweep" | "kick
   }
 }
 
+/**
+ * An expired session: files finalized but not in a run go into one last wave, through the same live admission, billing
+ * and budget checks as any wave. Only a definite refusal (402, a revoked right, an expired extract) leaves them to the
+ * abort below; a transient failure (storage, database, a busy session) is retried on the next pass instead. Then every
+ * file no run took (unfinalized ones, or refused ones) is aborted and cleaned up; runs already started are left alone.
+ * A session the flush finished (every file in a run) is confirmed and stays so.
+ */
+async function expireSession(session: ScheduledSession): Promise<void> {
+  if (session.status !== "initializing") {
+    try {
+      await flushExpiredDirectUploadSession(session.id, session.user_id, session.org_id);
+    } catch (error) {
+      const definite = isRunCreationBlockedError(error)
+        || (error instanceof ProjectIntakeError && error.statusCode < 500 && error.code !== "upload_session_busy");
+      if (!definite) throw error;
+      console.error(`[upload-reconcile] session=${session.id} expiry flush refused`, error instanceof Error ? error.name : "unknown");
+    }
+    const [now] = await sql<Array<{ status: string }>>`select status from upload_sessions where id = ${session.id}`;
+    if (now?.status === "confirmed") return;
+  }
+  await abortDirectUploadSession(session.id, session.user_id);
+}
+
 /** The in-process wave timer: one session, now. */
 async function checkSessionWaves(sessionId: string): Promise<void> {
   if (stopped) return;
   const [session] = await sql<ScheduledSession[]>`
-    select id, user_id, status, expires_at < now() as expired, now() as checked_at from upload_sessions
+    select id, user_id, org_id, status, expires_at < now() as expired, now() as checked_at from upload_sessions
     where id = ${sessionId} and status in ('pending', 'uploading', 'ingesting')`;
   if (session) await reconcileSession(session, "kick");
 }

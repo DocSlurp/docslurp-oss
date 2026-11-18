@@ -73,7 +73,7 @@ type WaitingFile = {
 };
 
 /** `background`: started by the reconciler (a refusal then closes the session), not by a client's confirm. */
-type AdvanceOptions = { flush: boolean; background: boolean; audit?: ProjectIntakeAudit; ports: ProjectIntakePorts };
+type AdvanceOptions = { flush: boolean; background: boolean; expiry?: boolean; audit?: ProjectIntakeAudit; ports: ProjectIntakePorts };
 /** When the session should be looked at again (ms from now), or null when nothing is waiting on a timer. */
 type AdvanceOutcome = { nextCheckMs: number | null; refusal?: unknown };
 
@@ -81,9 +81,22 @@ type AdvanceOutcome = { nextCheckMs: number | null; refusal?: unknown };
  * Starts every wave that is due, then finishes the session once every file is in a run or failed. Holds the session
  * lock (busy: 409 `upload_session_busy`). Used by the reconciler's sweep and its in-process wave timers.
  */
-export async function advanceDirectUploadWaves(sessionId: string, userId: string, lockWaitMs = 0): Promise<AdvanceOutcome> {
-  // The reconciler's own lock class: one background holder per process, so waves never take every lock connection.
-  return withDirectUploadLock(sessionId, () => advanceLocked(sessionId, userId, { flush: false, background: true, ports: wavePorts }), undefined, undefined, { waitMs: lockWaitMs, lockClass: "reconcile" });
+export async function advanceDirectUploadWaves(sessionId: string, userId: string, options: { lockWaitMs?: number; orgId?: string | null } = {}): Promise<AdvanceOutcome> {
+  // Background waves hold their own lock class (bounded per process and per organization), so one upload's waves never
+  // wait behind another's or behind the reconciler's sweep, and never take every lock connection.
+  return withDirectUploadLock(sessionId, () => advanceLocked(sessionId, userId, { flush: false, background: true, ports: wavePorts }), undefined, undefined,
+    { waitMs: options.lockWaitMs ?? 0, lockClass: "wave", orgId: options.orgId ?? null });
+}
+
+/**
+ * The last wave of an expired session (see the reconciler's expiry): every finalized file not in a run, at once and
+ * whatever the count, in the `wave` lock class. A refusal by billing is thrown (the caller then aborts the leftovers); a
+ * refused admission has already failed the session. An extract session still takes its one run only with every file in.
+ */
+export async function flushExpiredDirectUploadSession(sessionId: string, userId: string, orgId: string | null): Promise<void> {
+  const outcome = await withDirectUploadLock(sessionId, () => advanceLocked(sessionId, userId, { flush: true, background: true, expiry: true, ports: wavePorts }),
+    undefined, undefined, { lockClass: "wave", orgId });
+  if (outcome.refusal) throw outcome.refusal;
 }
 
 async function advanceLocked(sessionId: string, userId: string, options: AdvanceOptions): Promise<AdvanceOutcome> {
@@ -113,7 +126,7 @@ async function advanceLocked(sessionId: string, userId: string, options: Advance
     const extract = Boolean(session.extract_id);
     // An extract owns exactly one run: it starts once every file is in, as before waves existed.
     if (extract && open) {
-      if (flush) throw new ProjectIntakeError("Upload session still has incomplete files", 409);
+      if (flush && !options.expiry) throw new ProjectIntakeError("Upload session still has incomplete files", 409);
       return { nextCheckMs: null };
     }
     const delayMs = Number(state?.delay_ms ?? 0);

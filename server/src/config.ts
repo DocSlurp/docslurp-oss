@@ -248,6 +248,10 @@ export const env = {
   directUploadLockBatchMax: process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX, 4) : undefined,
   /** Concurrent files/complete holders per organization in one process (default 2). */
   directUploadLockBatchPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_PER_ORG, 2),
+  /** Concurrent background wave holders per process (default 2): one upload's waves never wait for another's. */
+  directUploadLockWaveMax: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_WAVE_MAX, 2),
+  /** Concurrent background wave holders per organization in one process (default 2, at most the process cap). */
+  directUploadLockWavePerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_WAVE_PER_ORG, 2),
   /**
    * How long one lock hold keeps starting new files (default 5 s); files not started are answered retryable
    * `upload_session_busy`. Work already started may run to the hard cap below.
@@ -263,10 +267,10 @@ export const env = {
   directUploadWaveDelayMs: Math.min(600_000, Math.max(0, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_WAVE_DELAY_MS, 10_000)))),
   /**
    * How the wave size grows: wave n starts at `directUploadWaveFiles * growth^(n-1)` waiting files (the delay and the last
-   * file still start a smaller one). 1 keeps every wave at `directUploadWaveFiles`; 2 doubles it, so a large upload becomes
-   * a handful of runs while the first still starts after a few files.
+   * file still start a smaller one). The default 2 doubles it (5, 10, 20, ... files), so a large upload becomes a handful
+   * of runs while the first still starts after a few files; 1 keeps every wave at `directUploadWaveFiles`.
    */
-  directUploadWaveGrowth: Math.min(10, Math.max(1, readNumber(process.env.DOCSLURP_UPLOAD_WAVE_GROWTH, 1))),
+  directUploadWaveGrowth: Math.min(10, Math.max(1, readNumber(process.env.DOCSLURP_UPLOAD_WAVE_GROWTH, 2))),
   /**
    * How long after a file is declared the fallback reconciler first checks storage for it itself. The storage upload
    * webhook and client `files/complete` calls normally finalize a file well before this; the fallback covers lost events.

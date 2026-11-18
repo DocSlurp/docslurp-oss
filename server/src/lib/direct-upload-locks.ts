@@ -11,12 +11,15 @@ import { processSingleton } from "./process-singleton.js";
  *  - `batch`: a files/complete call finalizing files (storage work under the lock). At most `batchMax` per process
  *    (pool size minus two) and `batchPerOrg` per organization at a time.
  *  - `reconcile`: the background sweep and the in-process kick. One at a time.
+ *  - `wave`: a background wave (starting runs for an upload in progress, or its last run at expiry). At most `waveMax`
+ *    per process and `wavePerOrg` per organization, apart from `reconcile`, so one upload's waves never wait behind
+ *    another's or behind the sweep.
  *  - `short`: everything else (part signing, confirm, abort, status recovery, idempotency). Unlimited, and always left
- *    at least one connection by the caps above.
+ *    at least one connection by the caps above (batch + reconcile + wave never exceed the pool size minus one).
  * Every reservation has a deadline: a caller that cannot get a slot or a connection in time gets
  * DirectUploadLockUnavailable (answered as 409 upload_session_busy), never an unbounded wait.
  */
-export type DirectUploadLockClass = "short" | "batch" | "reconcile";
+export type DirectUploadLockClass = "short" | "batch" | "reconcile" | "wave";
 
 export class DirectUploadLockUnavailable extends Error {
   constructor() { super("Upload lock connection unavailable"); this.name = "DirectUploadLockUnavailable"; }
@@ -31,10 +34,13 @@ function intOr(value: number | undefined, fallback: number, min: number, max: nu
 }
 
 export function directUploadLockLimits() {
-  const poolMax = intOr(env.directUploadLockPoolMax, 6, 3, 64);
-  const batchMax = intOr(env.directUploadLockBatchMax, poolMax - 2, 1, poolMax - 2);
+  const poolMax = intOr(env.directUploadLockPoolMax, 6, 4, 64);
+  // Classes with a cap share the pool minus one connection kept for `short`: reconcile 1, then waves, then batches.
+  const waveMax = intOr(env.directUploadLockWaveMax, 2, 1, poolMax - 3);
+  const wavePerOrg = intOr(env.directUploadLockWavePerOrg, 2, 1, waveMax);
+  const batchMax = intOr(env.directUploadLockBatchMax, poolMax - 2 - waveMax, 1, poolMax - 2 - waveMax);
   const batchPerOrg = intOr(env.directUploadLockBatchPerOrg, 2, 1, batchMax);
-  return { poolMax, batchMax, batchPerOrg, reconcileMax: 1 };
+  return { poolMax, batchMax, batchPerOrg, reconcileMax: 1, waveMax, wavePerOrg };
 }
 
 const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => ({
@@ -45,6 +51,8 @@ const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => (
   batch: 0,
   batchByOrg: new Map<string, number>(),
   reconcile: 0,
+  wave: 0,
+  waveByOrg: new Map<string, number>(),
   waiters: new Set<() => void>(),
 }));
 
@@ -78,6 +86,19 @@ async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, dea
         wake();
       };
     }
+    if (lockClass === "wave" && state.wave < limits.waveMax && (state.waveByOrg.get(orgKey) ?? 0) < limits.wavePerOrg) {
+      state.wave += 1;
+      state.waveByOrg.set(orgKey, (state.waveByOrg.get(orgKey) ?? 0) + 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        state.wave -= 1;
+        const left = (state.waveByOrg.get(orgKey) ?? 1) - 1;
+        if (left > 0) state.waveByOrg.set(orgKey, left); else state.waveByOrg.delete(orgKey);
+        wake();
+      };
+    }
     if (lockClass === "reconcile" && state.reconcile < limits.reconcileMax) {
       state.reconcile += 1;
       let released = false;
@@ -90,7 +111,7 @@ async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, dea
 
 export async function reserveDirectUploadLockConnection(options: {
   lockClass?: DirectUploadLockClass;
-  /** The tenant a batch holder counts against. */
+  /** The tenant a batch or wave holder counts against. */
   orgId?: string | null;
   /** Epoch ms by which a slot and a connection must be had (at least MIN_LOCK_RESERVE_MS from now). */
   deadline?: number;

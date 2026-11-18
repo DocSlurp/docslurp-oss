@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 /**
  * Direct-upload finalization under real concurrency: the real routes and services against a real, migrated Postgres
- * with the real advisory-lock pool (DOCSLURP_UPLOAD_LOCK_POOL_MAX=3: one batch slot, one reconcile slot, one or more
+ * with the real advisory-lock pool (DOCSLURP_UPLOAD_LOCK_POOL_MAX=5: two wave slots, one reconcile, one batch, the rest
  * short). Object storage is an in-memory fake; intake runs through the in-memory project fakes so a run can be counted.
  * Opt-in: TEST_DATABASE_URL (a throwaway database; scripts/run-database-tests.mjs provides one per file).
  */
@@ -13,6 +13,8 @@ const store = vi.hoisted(() => ({
   copies: 0,
   headDelayMs: 0,
   intakeDelayMs: 0,
+  /** When each run's creation started and ended (epoch ms), in order. */
+  intakes: [] as Array<{ projectId: string; start: number; end: number }>,
   ports: null as unknown,
 }));
 vi.mock("../lib/storage.js", async importOriginal => ({
@@ -49,7 +51,7 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
 
   beforeAll(async () => {
     process.env.DATABASE_URL = databaseUrl;
-    process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX = "3";
+    process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX = "5";
     ({ sql } = await import("../db.js"));
     const { createProjectIntakeFakes, fakeProject } = await import("./helpers/project-intake-fakes.js");
     // The project exists in the database too: a replayed confirm re-authorizes it there.
@@ -58,7 +60,9 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     // Intake that takes a while, so the session lock is visibly held during a confirm.
     const createRun = fakes.ports.records.createRun.bind(fakes.ports.records);
     fakes.ports.records.createRun = (async (...args: Parameters<typeof createRun>) => {
+      const start = Date.now();
       if (store.intakeDelayMs) await new Promise(resolve => setTimeout(resolve, store.intakeDelayMs));
+      store.intakes.push({ projectId: args[0].projectId, start, end: Date.now() });
       return createRun(...args);
     }) as typeof createRun;
     const { Hono } = await import("hono");
@@ -81,7 +85,7 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     await sql?.end({ timeout: 5 });
   });
 
-  beforeEach(() => { store.headDelayMs = 0; store.intakeDelayMs = 0; store.copies = 0; });
+  beforeEach(() => { store.headDelayMs = 0; store.intakeDelayMs = 0; store.copies = 0; store.intakes.length = 0; });
 
   /** A pending session of `count` single-part files whose bytes are already in storage. */
   async function seedSession(count: number, user = "upl-u", org = "upl-o", projectId: string | null = null): Promise<{ id: string; fileIds: string[] }> {
@@ -170,6 +174,28 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     await vi.waitFor(async () => expect(await status(id)).toBe("confirmed"), { timeout: 5_000 });
     expect(fakes.runs.length - runsBefore).toBe(1);
     expect(fakes.runs.at(-1)!.files).toHaveLength(6);
+  }, 20_000);
+
+  it("two uploads' waves run at once in one process: neither waits for the other's run creation", async () => {
+    const first = await seedSession(3, "upl-u", "upl-o", "upl-p");
+    const second = await seedSession(3, "upl-u", "upl-o", "upl-p");
+    store.intakes.length = 0;
+    store.intakeDelayMs = 800;
+    // Each upload's last complete starts its final wave in the background, in its own wave lock slot.
+    const [a, b] = await Promise.all([
+      post(`${first.id}/files/complete`, { files: first.fileIds.map(fileId => ({ fileId })) }),
+      post(`${second.id}/files/complete`, { files: second.fileIds.map(fileId => ({ fileId })) }),
+    ]);
+    expect(await a.json()).toMatchObject({ sessionComplete: true });
+    expect(await b.json()).toMatchObject({ sessionComplete: true });
+    await vi.waitFor(async () => {
+      expect(await status(first.id)).toBe("confirmed");
+      expect(await status(second.id)).toBe("confirmed");
+    }, { timeout: 10_000 });
+    expect(store.intakes).toHaveLength(2);
+    const [x, y] = store.intakes as [typeof store.intakes[0], typeof store.intakes[0]];
+    // The two run creations overlap: the second started before the first ended.
+    expect(Math.max(x.start, y.start)).toBeLessThan(Math.min(x.end, y.end));
   }, 20_000);
 
   it("repeating a batch whose response was lost changes nothing", async () => {
