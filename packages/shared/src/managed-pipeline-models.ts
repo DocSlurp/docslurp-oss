@@ -114,6 +114,20 @@ export function stripManagedPipelineFields<T>(pipeline: T): T {
   return out as T;
 }
 
+/**
+ * Rows from before model URIs name the vision model by catalog id (`vision.model`, `vision.remoteFallbackModel`, with
+ * `runtime` and `baseUrl`). They are the same choice as `vision.modelUri`, so they are dropped the same way: a project
+ * holds a profile or quality level, never a model. Without this the stored-settings migration turned the old id back
+ * into a model URI after the managed fields were stripped, and the project ran on (or was refused for) that model.
+ */
+const LEGACY_VISION_MODEL_KEYS = ["model", "runtime", "baseUrl", "remoteFallbackModel"] as const;
+
+function stripLegacyVisionModel(pipeline: PipelineLike): PipelineLike {
+  const vision = record(pipeline.vision);
+  if (!vision || !LEGACY_VISION_MODEL_KEYS.some((key) => Object.hasOwn(vision, key))) return pipeline;
+  return { ...pipeline, vision: Object.fromEntries(Object.entries(vision).filter(([key]) => !(LEGACY_VISION_MODEL_KEYS as readonly string[]).includes(key))) };
+}
+
 /** A pipeline as customers read it: managed model, provider and route fields removed. */
 export const customerPipelineView = stripManagedPipelineFields;
 
@@ -178,7 +192,7 @@ export function resolveManagedPipeline(
   overrides: ManagedPipelineOverrides | null | undefined,
   source: string,
 ): ResolvedManagedPipeline {
-  const base = stripManagedPipelineFields(record(stored) ?? {}) as PipelineLike;
+  const base = stripLegacyVisionModel(stripManagedPipelineFields(record(stored) ?? {}) as PipelineLike);
   const entries = overrideEntries(overrides);
   const attempt = (kept: readonly OverrideEntry[]) => {
     // The stored-row reader drops a refused vision model quietly so old rows still read; an override naming one is not

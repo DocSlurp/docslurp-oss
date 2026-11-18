@@ -52,6 +52,19 @@ describe("a stored vision model that is no longer admitted", () => {
     expect(resolved.pipeline.vision.modelUri).toBe(defaultVisionConfig.modelUri);
   });
 
+  it("a project never runs on a model named in an old row, refused or not: the profile decides", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const admittedId = defaultVisionConfig.modelUri.replace("llm://openrouter/", "");
+    for (const model of ["gpt-4.1-mini", admittedId]) {
+      const resolved = resolveManagedPipeline({ vision: { profile: "cheapest-hosted", model, runtime: "openai-compatible", remoteFallbackModel: model } }, null, "project p7");
+      expect(resolved.pipeline.vision.profile).toBe("cheapest-hosted");
+      expect(resolved.pipeline.vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
+      expect(resolved.pipeline.vision.remoteFallbackModelUri).toBeNull();
+    }
+    // Stripped as a managed field, so nothing was "rejected by the schema" and nothing is logged.
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it("leaves an admitted stored model and every other invalid vision setting alone", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const admitted = { vision: { modelUri: defaultVisionConfig.modelUri } };
