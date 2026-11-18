@@ -1414,6 +1414,17 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
  */
 export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "autoTopUp" | "apiKeys" | "docs", string>>;
 
+/** The deleted and remaining ids of a bulk delete the server stopped part-way (`details.policy: "bulk_delete_partial"`). */
+function serverPartialDelete(error: unknown): { deletedDocumentIds: string[]; remainingDocumentIds: string[] } | null {
+  if (!(error instanceof DocSlurpApiError)) return null;
+  const details = (error.body as { error?: { details?: Record<string, unknown> } } | null)?.error?.details;
+  if (details?.policy !== "bulk_delete_partial") return null;
+  const ids = (value: unknown) => (Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : null);
+  const deletedDocumentIds = ids(details.deletedDocumentIds);
+  const remainingDocumentIds = ids(details.remainingDocumentIds);
+  return deletedDocumentIds && remainingDocumentIds ? { deletedDocumentIds, remainingDocumentIds } : null;
+}
+
 /** The most documents one `bulkDocuments` request may name (the server's limit). */
 export const BULK_DOCUMENTS_MAX = 500;
 
@@ -3351,9 +3362,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Reprocesses, retags, deletes or exports many documents at once. Server keys need `ingest` (`artifacts` for
      * `export-artifacts`), and every document must be in a project the key can use (404 before any change otherwise).
      * The server takes at most BULK_DOCUMENTS_MAX (500) documents per request: `delete`, `apply-tags` and
-     * `remove-tags` are sent in requests of that size and their results merged (a later request's failure throws
-     * DocSlurpBulkDocumentsPartialError with what completed); `reprocess` and `export-artifacts` over the limit are
-     * refused before sending.
+     * `remove-tags` are sent in requests of that size and their results merged. A failure part-way throws
+     * DocSlurpBulkDocumentsPartialError: `completed` holds what was done (a delete the server stopped part-way counts
+     * the ids it reports deleted) and `remainingDocumentIds` what to retry, nothing else. `reprocess` and
+     * `export-artifacts` over the limit throw RangeError before sending.
      */
     async bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
       const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`, jsonRequest("POST", { ...input, documentIds }), requestOptions);
@@ -3371,7 +3383,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           total += typeof result[counted] === "number" ? (result[counted] as number) : 0;
           done.push(...chunk);
         } catch (error) {
-          throw new DocSlurpBulkDocumentsPartialError({ [counted]: total, documentIds: done }, input.documentIds.slice(start), error);
+          // The server deleted part of this request before it stopped (details.policy bulk_delete_partial): those ids
+          // are done, and only its remaining ones (and the requests not sent) are left.
+          const partial = serverPartialDelete(error);
+          if (partial) {
+            total += partial.deletedDocumentIds.length;
+            done.push(...partial.deletedDocumentIds);
+          }
+          const remaining = [...(partial ? partial.remainingDocumentIds : chunk), ...input.documentIds.slice(start + BULK_DOCUMENTS_MAX)];
+          throw new DocSlurpBulkDocumentsPartialError({ [counted]: total, documentIds: done }, remaining, error);
         }
       }
       return { [counted]: total, documentIds: done };

@@ -234,3 +234,40 @@ test("a bulkDocuments request failing part-way reports what completed and what r
     return true;
   });
 });
+
+test("a server-side partial delete in a later request counts its deleted ids, and a retry with remainingDocumentIds succeeds", async () => {
+  const ids = Array.from({ length: 1_100 }, (_, i) => `d${i}`);
+  const gone = new Set();
+  let requests = 0;
+  const { calls, client } = recorder((call) => {
+    requests++;
+    const asked = call.body.documentIds;
+    // The second request deletes its first 200 documents, then stops (the server's bulk_delete_partial).
+    if (requests === 2) {
+      const deletedDocumentIds = asked.slice(0, 200);
+      deletedDocumentIds.forEach((id) => gone.add(id));
+      return json({ error: { code: "unavailable", message: "stopped", requestId: "q", details: {
+        policy: "bulk_delete_partial", deleted: 200, deletedDocumentIds, remainingDocumentIds: asked.slice(200),
+      } } }, 503);
+    }
+    // The server refuses any id it has already deleted (404), as the route does.
+    if (asked.some((id) => gone.has(id))) return json({ error: { code: "not_found", message: "Document not found", requestId: "q" } }, 404);
+    asked.forEach((id) => gone.add(id));
+    return json({ deleted: asked.length, documentIds: asked });
+  });
+  let partial;
+  await assert.rejects(client.bulkDocuments({ action: "delete", documentIds: ids }), (error) => {
+    assert.ok(error instanceof DocSlurpBulkDocumentsPartialError);
+    partial = error;
+    return true;
+  });
+  // Done: the first request's 500 and the 200 the server reported; remaining: the server's 300 and the unsent 100.
+  assert.equal(partial.completed.deleted, 700);
+  assert.deepEqual(partial.completed.documentIds, [...ids.slice(0, 500), ...ids.slice(500, 700)]);
+  assert.deepEqual(partial.remainingDocumentIds, ids.slice(700));
+  assert.equal(calls.length, 2);
+  // Retrying exactly the remaining ids deletes the rest; nothing already deleted is named again.
+  const retried = await client.bulkDocuments({ action: "delete", documentIds: partial.remainingDocumentIds });
+  assert.equal(retried.deleted, 400);
+  assert.equal(gone.size, 1_100);
+});

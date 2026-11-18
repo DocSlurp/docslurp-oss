@@ -485,7 +485,7 @@ Environment variables are read once, when the client is created, and only on the
 | `updateSearchSettings(id, input, request?)` / `updateSearchSettingsEstimate(id, input, request?)` | The stored search settings (`retrievalDefaults`, `chat`, ranking controls) / `{ impact, estimate, billing }`. Saves search settings alone without a revision check; to save project and search settings together under revisions, call [`/v1/projects/:id/settings-publication`](https://github.com/DocSlurp/docslurp-oss/blob/main/docs/config-change-jobs.md#coherent-settings-publication) over HTTP | Server key with `projects:manage`; the key owner must be able to edit the project |
 | `reprocessRun(runId, { stageFrom?, stages? }?, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ run, job?, warnings }` / `{ estimate, billing }`. Reprocessing re-extracts files a re-upload of identical bytes would not | Server key with `ingest` |
 | `deleteDocument(documentId, request?)` / `setDocumentTags(documentId, tags, request?)` | Removed identities / `{ documentId, tags }` | Server key with `ingest` |
-| `bulkDocuments({ action, documentIds, tags? }, request?)` | Per-action result (`reprocess`, `apply-tags`, `remove-tags`, `delete`, `export-artifacts`) | Server key with `ingest` (`artifacts` for `export-artifacts`); every document in the key's projects |
+| `bulkDocuments({ action, documentIds, tags? }, request?)` | Per-action result (`reprocess`, `apply-tags`, `remove-tags`, `delete`, `export-artifacts`). The server takes 500 documents per request: deletes and tag changes are split and merged (`DocSlurpBulkDocumentsPartialError` if one fails part-way); `reprocess` and `export-artifacts` over 500 throw `RangeError` | Server key with `ingest` (`artifacts` for `export-artifacts`); every document in the key's projects |
 | `reprocessIngestRecommendation(project?, { recommendationId, runId?, documentIds? })` / `applyIngestRecommendation(...)` | Created runs / applied settings patch | Server key with `ingest` / `projects:manage` |
 | `setRetention({ orgId } or { project? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `projects:manage` |
 | `getJob(jobId, request?)` / `streamJob(jobId, options?)` | `JobStatus` / async iterable of `status`, `progress` (counts merged into `job.progress`) and `done` events (SSE, polling fallback; the timeout never applies while a job is `blocked`) | Same as `getRun` |
@@ -1204,6 +1204,24 @@ try {
 | `streamProgress` in `auto` mode | Switches to polling if the stream fails; each poll retries like a read |
 
 Retries honor the full `Retry-After` delay and stay within the original request deadline. If that delay cannot fit, the SDK immediately throws `DocSlurpApiError` with `retryAfterSeconds` (also in `details`) rather than retrying early. These rules apply to API requests. Replayable storage PUTs have separate retries: up to two retries for network errors or HTTP 408, 429, 500, 502, 503 and 504. API network errors aren't retried, though `streamProgress` in `auto` mode can fall back to polling. When you abort with a signal, the SDK rejects with the signal's reason.
+
+### Bulk document actions
+
+`bulkDocuments` sends at most 500 documents per request (`BULK_DOCUMENTS_MAX`), the server's limit; a request over it is a 400 with `details.policy: "bulk_documents_limit"`. Deletes and tag changes over 500 are split into several requests and merged. If one of them fails part-way, the SDK throws `DocSlurpBulkDocumentsPartialError`. Retry its `remainingDocumentIds` only: the deleted documents are gone, and naming them again returns a 404.
+
+```ts
+import { DocSlurpBulkDocumentsPartialError } from "@docslurp/sdk";
+
+try {
+  await client.bulkDocuments({ action: "delete", documentIds });
+} catch (error) {
+  if (!(error instanceof DocSlurpBulkDocumentsPartialError)) throw error;
+  console.log(`deleted ${error.completed.deleted}; ${error.remainingDocumentIds.length} left`);
+  await client.bulkDocuments({ action: "delete", documentIds: error.remainingDocumentIds });
+}
+```
+
+`completed` includes documents the server deleted before it stopped (`details.policy: "bulk_delete_partial"`, with `deletedDocumentIds` and `remainingDocumentIds`), and `cause` is the failure. `reprocess` and `export-artifacts` with more than 500 documents throw `RangeError` before sending; split them yourself.
 
 ## Project discovery and signed uploads
 

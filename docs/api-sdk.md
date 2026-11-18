@@ -1504,6 +1504,33 @@ JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/
 
 Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/:docId/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with project edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
 
+## Bulk document actions
+
+`POST /v1/documents/bulk` takes `{ action, documentIds, tags? }` for `reprocess`, `apply-tags`, `remove-tags`, `delete` or `export-artifacts`, and `POST /v1/projects/:project/documents/bulk/estimate` prices the same body. Both check the request before anything else:
+
+- **At most 500 documents per request.** More is a `400 invalid_request` with `details: { policy: "bulk_documents_limit", limit: 500 }`. Split larger batches.
+- **Document ids only.** Each `documentIds` entry must be a document id (at most 64 characters). Anything else is a `400 invalid_request`, and nothing is changed.
+
+A bulk delete runs in groups of up to 100 documents, each committed with its own audit record. If a later group fails after earlier ones committed, the response keeps the failure's status (`503` with `Retry-After` when the documents were busy) and reports both sides:
+
+```json
+{
+  "error": {
+    "code": "unavailable",
+    "details": {
+      "policy": "bulk_delete_partial",
+      "deleted": 200,
+      "deletedDocumentIds": ["…"],
+      "remainingDocumentIds": ["…"]
+    }
+  }
+}
+```
+
+Retry with `remainingDocumentIds` only. The deleted documents are gone, and naming them again returns `404 Document not found`.
+
+The SDK's `bulkDocuments` sends `delete`, `apply-tags` and `remove-tags` in requests of 500 and merges the results. If one fails part-way, it throws `DocSlurpBulkDocumentsPartialError`: `completed` is the merged result of what was done (a server-side partial delete counts the ids the server reports deleted), `remainingDocumentIds` is exactly what to retry, and `cause` is the failure. `reprocess` and `export-artifacts` with more than 500 documents throw `RangeError` before any request, because their results (runs, costs, artifacts) cannot be merged across requests.
+
 ## Export documents as a zip
 
 Export one document or a project's current documents as an organized zip. The worker builds the archive in the background and stages it in object storage; the API never holds it in memory.
