@@ -44,6 +44,14 @@ describe("chat executor pricing startup (council E #2)", () => {
     if (built.status !== 0) throw new Error(`@docslurp/shared build failed: ${built.stderr.slice(-2000)}`);
   }, 300_000);
 
+  it("refuses to start with a too-short estimate signing secret, without printing it", () => {
+    // The executor signs chat-proposal estimates the API verifies; a weak shared key stops it before any claim.
+    const run = runExecutor({ DOCSLURP_ESTIMATE_SIGNING_SECRET: "too-short-signing-value" });
+    expect(run.status).toBe(1);
+    expect(run.output).toMatch(/DOCSLURP_ESTIMATE_SIGNING_SECRET must be at least 32 characters/);
+    expect(run.output).not.toContain("too-short-signing-value");
+  }, 120_000);
+
   it("refuses to start with DOCSLURP_PRICING_REQUIRED=1 and no provider", () => {
     const run = runExecutor({ DOCSLURP_PRICING_REQUIRED: "1" });
     expect(run.status).toBe(1);

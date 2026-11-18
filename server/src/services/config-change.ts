@@ -2,7 +2,8 @@ import { lockProjectConfigurationWrite } from "./project-write-lock.js";
 import { isPolicyTightening } from "./policy-transition.js";
 import { withRunEffective } from "./extraction-settings.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { estimateSigningKey } from "../lib/estimate-signing-key.js";
 
 import {
   assertPipelineSpeedBoost,
@@ -201,17 +202,13 @@ export function assertEstimateCurrent(plan: ProjectChangePlan, confirmEstimate: 
   if (confirmEstimate !== undefined && confirmEstimate !== plan.signature) throw new EstimateStaleError();
 }
 
-let signatureKey: Buffer | null = null;
 /**
- * The key estimate signatures are MACed with: the deployment's secret, so a signature (which covers the resolved pipeline,
- * managed model ids included) cannot be tested offline against guessed values. Without one (local development), a
- * per-process random key: signatures then hold for this process only.
+ * Estimate signatures are MACed with the deployment's shared estimate-signing key (lib/estimate-signing-key.ts), so a
+ * signature (which covers the resolved pipeline, managed model ids included) cannot be tested offline against guessed
+ * values and holds on every API and chat-executor process. Production never signs with a per-process random key.
  */
 function planSignatureKey(): Buffer {
-  if (signatureKey) return signatureKey;
-  const secret = process.env.SECRETS_ENCRYPTION_KEY?.trim() || process.env.BETTER_AUTH_SECRET?.trim() || process.env.FILE_TOKEN_SECRET?.trim();
-  signatureKey = secret ? createHash("sha256").update(`docslurp:reindex-estimate-signature:${secret}`).digest() : randomBytes(32);
-  return signatureKey;
+  return estimateSigningKey();
 }
 
 /** Stable signature of a plan's work: the resulting pipeline, stages, target documents and the price. */

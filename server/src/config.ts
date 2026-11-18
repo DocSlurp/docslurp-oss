@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { resolveLanceDbConfig, resolveObjectStorageConfig } from "@docslurp/shared";
 
 import { storageAccessKeyIdProblem } from "./lib/storage-credentials.js";
+import { assertEstimateSigningKeyConfigured } from "./lib/estimate-signing-key.js";
 
 const defaultDatabaseUrl = "postgres://docslurp:docslurp@localhost:5432/docslurp";
 
@@ -201,6 +202,9 @@ function validateProductionSecrets(): void {
     required: Boolean(process.env.GITHUB_CLIENT_ID || process.env.GOOGLE_CLIENT_ID),
     minLength: 32,
   });
+  // Estimate signatures (confirmEstimate) must verify on every API and chat-executor process: a too-short dedicated
+  // secret refuses everywhere, and production refuses to start with no stable key (never a per-process random one).
+  assertEstimateSigningKeyConfigured(process.env);
 }
 
 validateProductionSecrets();

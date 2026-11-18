@@ -102,6 +102,7 @@ Scanner sessions follow these rules:
 | `CREDENTIALS_ENCRYPTION_KEY` | Connector credentials. |
 | `SECRETS_ENCRYPTION_KEY` | Project secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |
 | `METRICS_SECRET` | Access to the metrics endpoint. |
+| `DOCSLURP_ESTIMATE_SIGNING_SECRET` (optional) | Signs cost estimates (the `signature` a reindex or project-change estimate returns, sent back as `confirmEstimate`), so a paid change runs only at the price that was shown. At least 32 characters; every API and chat-executor process needs the same value. Unset, it falls back to `SECRETS_ENCRYPTION_KEY`, then `BETTER_AUTH_SECRET`, then `FILE_TOKEN_SECRET`; production refuses to start when none is set. Rotating it invalidates outstanding estimates only (clients re-estimate). |
 
 ### Rotate AES-GCM at-rest keys
 
