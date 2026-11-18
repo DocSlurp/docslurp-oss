@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
+import { REINDEX_ESTIMATE_TOOL_DESCRIPTION, reindexEstimateToolInput, reindexRouteBody } from "./mcp-reindex-tool.js";
 import { CHART_EXPORT_OVERRIDE_DESCRIPTION, CHART_EXPORT_TIERS, chartExportOverrideSchema, fileProfileSchema, QUALITY_LEVELS, QUALITY_OVERRIDE_DESCRIPTION, qualityLevelSchema, quoteSettingsSchema, VISUALS_LEVELS, VISUALS_OVERRIDE_DESCRIPTION, visualsLevelSchema } from "@docslurp/shared";
 
 /**
@@ -28,6 +30,7 @@ export const ESTIMATE_TOOL_NAMES = [
   "fullIndexEstimate",
   "indexingModeEstimate",
   "graphRebuildEstimate",
+  "reindexEstimate",
   "uploadEstimate",
 ] as const;
 export type EstimateToolName = (typeof ESTIMATE_TOOL_NAMES)[number];
@@ -36,7 +39,7 @@ export type EstimateToolName = (typeof ESTIMATE_TOOL_NAMES)[number];
  * Who may use each estimate tool: exactly the callers that may perform the mutation it prices. Session-only
  * means the mutation (and its estimate route) accepts no API key, so key-authenticated MCP never offers the tool.
  */
-type EstimateAccess = { sessionOnly: true } | { scopes: readonly string[]; server?: boolean };
+type EstimateAccess = { sessionOnly: true } | { scopes: readonly string[]; server?: boolean; noOAuth?: boolean };
 export const ESTIMATE_TOOL_ACCESS: Record<EstimateToolName, EstimateAccess> = {
   "updateEstimate": { scopes: ["projects:manage"], server: true },
   "searchSettingsEstimate": { scopes: ["projects:manage"], server: true },
@@ -44,14 +47,17 @@ export const ESTIMATE_TOOL_ACCESS: Record<EstimateToolName, EstimateAccess> = {
   "fullIndexEstimate": { scopes: ["ingest"] },
   "indexingModeEstimate": { scopes: ["projects:manage"], server: true },
   "graphRebuildEstimate": { scopes: ["projects:manage"], server: true },
+  // The reindex command's own gate: a server API key with projects:manage, never a delegated OAuth token.
+  "reindexEstimate": { scopes: ["projects:manage"], server: true, noOAuth: true },
   "uploadEstimate": { scopes: ["ingest"] },
 };
 
 /** Whether an API key (scopes and type) may use the estimate tool. */
-export function apiKeyMayUseEstimateTool(name: EstimateToolName, key: { scopes: readonly string[]; keyType?: string }): boolean {
+export function apiKeyMayUseEstimateTool(name: EstimateToolName, key: { scopes: readonly string[]; keyType?: string; oauth?: unknown }): boolean {
   const access = ESTIMATE_TOOL_ACCESS[name];
   if ("sessionOnly" in access) return false;
   if (access.server && key.keyType !== "server") return false;
+  if (access.noOAuth && key.oauth) return false;
   return access.scopes.some((scope) => key.scopes.includes(scope));
 }
 
@@ -68,6 +74,7 @@ export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: str
     type: "object", properties: { project, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
   { name: "graphRebuildEstimate", title: "Estimate graph rebuild cost", description: "Cost of rebuilding the project knowledge graph. Read-only.", inputSchema: {
     type: "object", properties: { project } } },
+  { name: "reindexEstimate", title: "Estimate reindex cost", description: REINDEX_ESTIMATE_TOOL_DESCRIPTION, inputSchema: toolInputJsonSchema(reindexEstimateToolInput) },
   { name: "uploadEstimate", title: "Estimate upload cost", description: "Estimated cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Pass `profile` when the file was profiled locally with @docslurp/estimate (its facts narrow the estimate; never billed). Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option. `quote` is the full estimate (ingest, monthly hosting and usage, neutral lines, ranges, pricing version); pass `settings` to quote other knobs than the project's (quality, indexing, features, hostingMonths, searchesPerMonth, chatAnswersPerMonth).", inputSchema: {
     type: "object", properties: { project, files: { type: "array", minItems: 1, maxItems: 500, items: {
       type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 }, profile: { ...freeObject, description: "A file profile from @docslurp/estimate, unchanged." } }, required: ["name", "size"] } }, visuals: visualsJsonSchema, chartExport: deprecatedChartExportJsonSchema, settings: { ...freeObject, description: "Quote knobs overriding the project's: quality (fastest, balanced, smart; fast/auto/good deprecated), visuals (none, figures, charts, charts-ai), indexing (full, on-demand, visual), documentSummary, structuredFields, knowledgeGraph, propositions, videoFrames, speedBoost, hostingMonths (1-60), searchesPerMonth, chatAnswersPerMonth, chatTier, and the deprecated chartExport (off, free or models)." } }, required: ["files"] } },
@@ -88,6 +95,7 @@ const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>>
   "fullIndexEstimate": z.object({ ...common, documentId: z.string().min(1).optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }),
   "indexingModeEstimate": z.object({ ...common, mode: z.enum(["full", "map", "visual"]) }),
   "graphRebuildEstimate": z.object({ ...common }),
+  "reindexEstimate": reindexEstimateToolInput,
   "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional(), type: z.string().max(255).optional(), durationSeconds: z.number().positive().max(24 * 3600).optional(), profile: fileProfileSchema.optional() })).min(1).max(500), visuals: visualsLevelSchema.optional(), chartExport: chartExportOverrideSchema.optional(), settings: quoteSettingsSchema.partial().optional() }),
 };
 
@@ -120,6 +128,7 @@ export function planEstimateTool(
         : { ok: true, plan: { path: `${ws}/full-index/estimate`, body: data.documentIds ? { documentIds: data.documentIds } : {} } };
     case "indexingModeEstimate": return { ok: true, plan: { path: `${ws}/indexing-mode/estimate`, body: { mode: data.mode } } };
     case "graphRebuildEstimate": return { ok: true, plan: { path: `${ws}/graph/jobs/estimate`, body: {} } };
+    case "reindexEstimate": return { ok: true, plan: { path: `${ws}/reindex/estimate`, body: reindexRouteBody(data as Parameters<typeof reindexRouteBody>[0]) } };
     case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, project, ...(data.visuals ? { visuals: data.visuals } : {}), ...(data.chartExport ? { chartExport: data.chartExport } : {}), ...(data.settings ? { settings: data.settings } : {}) } } };
   }
 }

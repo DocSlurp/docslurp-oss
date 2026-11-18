@@ -294,6 +294,19 @@ export const healthRoutes = new Hono()
     c.header("Cache-Control", "no-store");
     return c.json(await workerFleetReport());
   })
+  // Operator view of the estimate signing key: its source variable and a non-secret fingerprint (never the value), to
+  // compare with the chat executor's startup line or `scripts/estimate-signing-fingerprint.ts`. Same bearer as /metrics.
+  .get("/ops/estimate-signing", async (c) => {
+    if (!env.metricsSecret) {
+      return c.json({ error: "Not found" }, 404);
+    }
+    if (!authorizedMetricsRequest(c.req.header("Authorization") ?? undefined)) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    const { estimateSigningKeyReport } = await import("../lib/estimate-signing-key.js");
+    c.header("Cache-Control", "no-store");
+    return c.json(estimateSigningKeyReport());
+  })
   .get("/fly-scaler-metrics", async (c) => {
     // Queue depth, demand and fleet sizing are scraped over Fly's private network
     // (fly.app.toml [metrics]). Public requests need the metrics bearer;

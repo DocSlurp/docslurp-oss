@@ -1,4 +1,7 @@
 import "../src/env.js";
+// Before config.js loads (db.js imports it): refuses to start without a usable estimate signing key, and logs its
+// source and fingerprint for comparison with the API.
+import "./estimate-signing-guard.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { startAutomaticCallPriceRefresh } from "@docslurp/shared";
 
