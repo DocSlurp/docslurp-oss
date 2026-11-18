@@ -184,6 +184,17 @@ describe("Smartest turns vision on", () => {
     expect(normalizePipelineFeatures({ readScans: false } as never)).not.toHaveProperty("readScans");
   });
 
+  it("keeps Smartest when an upload override (parsed without the project) sends Read scans on", () => {
+    const smartest = normalizePipelineFeatures({ quality: "smartest" } as never);
+    const on = pipelineFeatureOverridesSchema.parse({ readScans: true });
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(smartest, on)).quality).toBe("smartest");
+    // On a text-only Fastest project it turns scans on; off still lowers to Fastest without scans.
+    const textOnly = mergePipelineFeatures(normalizePipelineFeatures(null), { readScans: false } as never);
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(textOnly, on))).toEqual({ quality: "fastest", readScans: true });
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(smartest, pipelineFeatureOverridesSchema.parse({ readScans: false })))).toEqual({ quality: "fastest", readScans: false });
+    expect(normalizePipelineFeatures(mergePipelineFeatures(smartest, on))).not.toHaveProperty("readScans");
+  });
+
   it("keeps page images on by default and settable", () => {
     expect(normalizePipelineFeatures(null).pageImages).toBe(true);
     expect(mergePipelineFeatures(normalizePipelineFeatures(null), { pageImages: false }).pageImages).toBe(false);

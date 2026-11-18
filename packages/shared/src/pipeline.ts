@@ -1420,7 +1420,8 @@ export function mergePipelineFeatures(
   );
 }
 
-const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(["outputSchema", "restartFromStage"]));
+// `readScans` is input-only: mergePipelineFeatures converts it against the project (it is never stored).
+const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(["outputSchema", "restartFromStage", "readScans"]));
 
 /**
  * Validates partial pipeline overrides (as sent with an upload) without
@@ -1436,7 +1437,15 @@ export const pipelineFeatureOverridesSchema = z
       const { visuals: _visuals, ...rest } = migrated;
       return rest;
     }
+    // `readScans: true` alone keeps the project's level (Smartest stays Smartest), which only the merge onto the
+    // project can tell: it stays in the override for mergePipelineFeatures to convert against the base.
+    const deferReadScans = isPlainRecord(migrated) && migrated.readScans === true && normalizeQualityLevel(migrated.quality) === null
+      && !(isPlainRecord(migrated.ladder) && migrated.ladder.maxRung !== undefined);
     try {
+      if (deferReadScans) {
+        const { readScans: _readScans, ...rest } = migrated as Record<string, unknown>;
+        return { ...(convertExtractionConfigInput(rest).value as Record<string, unknown>), readScans: true };
+      }
       return convertExtractionConfigInput(migrated).value;
     } catch (error) {
       if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
