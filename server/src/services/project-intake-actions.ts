@@ -313,6 +313,14 @@ export async function confirmDirectUploadProjectIntake(
   // The organization a run start counts against is known before the lock (the row is scoped to this user).
   const owned = await loadDirectUploadSessionRow(args.sessionId, args.userId);
   if (!owned) throw new ProjectIntakeError("Upload session not found", 404);
+  // Confirm is idempotent. A session already confirmed answers its stored result without the lock (re-authorized as in
+  // the locked replay below), so a repeated confirm never waits on, or is refused by, a lock holder.
+  if (owned.result) {
+    const result = owned.result as ProjectIntakeActionResult;
+    await authorizeReceiptProject(result.payload.project.id, args.userId, owned.org_id, owned.api_key_id);
+    return result;
+  }
+  if (["aborted", "failed"].includes(owned.status)) throw new ProjectIntakeError("Upload session is closed", 409);
   return withDirectUploadLock(args.sessionId, async () => {
     const loaded = await loadDirectUploadSession(args.sessionId, args.userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);

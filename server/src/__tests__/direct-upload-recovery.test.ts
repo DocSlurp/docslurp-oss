@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { json: (v: unknown) => v, array: (v: unknown) => v }),
   load: vi.fn(), prepare: vi.fn(), intake: vi.fn(), discard: vi.fn(), project: vi.fn(), multipart: vi.fn(),
+  lock: vi.fn(async (_id: string, run: () => Promise<unknown>) => run()),
 }));
 vi.mock("../services/organizations.js", () => ({ getProjectAccess: async () => ({ orgId: "org" }), canContributeToProject: () => true }));
 vi.mock("../services/api-keys.js", () => ({ getLiveApiKeyById: async () => ({ orgId: "org", keyType: "server", scopes: ["ingest"], projectIds: ["project"] }) }));
@@ -21,7 +22,7 @@ vi.mock("../services/direct-upload-session.js", async original => ({
   ...await original<typeof import("../services/direct-upload-session.js")>(),
   loadDirectUploadSession: mocks.load, prepareDirectUploadProjectIntake: mocks.prepare,
   loadDirectUploadSessionRow: async (...args: [string, string]) => (await mocks.load(...args))?.session ?? null,
-  withDirectUploadLock: async (_id: string, run: () => Promise<unknown>) => run(),
+  withDirectUploadLock: (id: string, run: () => Promise<unknown>) => mocks.lock(id, run),
 }));
 import { confirmDirectUploadProjectIntake } from "../services/project-intake-actions.js";
 import { createDirectUploadSession, directUploadSessionBelongsToOrganization } from "../services/direct-upload-session.js";
@@ -42,6 +43,8 @@ describe("durable direct upload acceptance", () => {
     mocks.load.mockResolvedValue({ ...loaded, session: { ...session, status: "confirmed", result: saved } });
     expect(await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports)).toBe(saved);
     expect(mocks.sql).not.toHaveBeenCalled(); expect(mocks.intake).not.toHaveBeenCalled();
+    // Idempotent and lock-free: a repeated confirm of a confirmed session never waits on a lock holder.
+    expect(mocks.lock).not.toHaveBeenCalled();
   });
   it("refuses reconciliation after publication without the exact durable response", async () => {
     const published = { id: "session", project_id: "project", creation_ready_at: "2026-10-23", pipeline: {} };

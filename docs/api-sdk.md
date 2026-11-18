@@ -404,8 +404,15 @@ Retry rules for session calls (`/files/complete`, `/confirm`, `/abort`):
 - Other `4xx`: the file or session needs attention; repeating will not help.
 
 Rate limits count requests, not files: a batch of 100 files costs one request
-in the upload category, the same as completing one file. The `/confirm` endpoint remains available as an
-explicit fallback, but automatic ingestion does not require it.
+in the upload category, the same as completing one file.
+
+The `/confirm` endpoint remains available as an explicit fallback, but automatic
+ingestion does not require it. Confirm is idempotent: repeating it returns the
+same run, and a session that is already confirmed answers at once. While the
+server is starting the run (an earlier confirm, or its own reconciler, can take
+a while on a large session), confirm waits up to 10 seconds and then answers
+`409` `upload_session_busy` with `Retry-After`. Repeat the same request; it
+never starts a second run.
 
 ### Matching files, partial acceptance and idempotency
 
