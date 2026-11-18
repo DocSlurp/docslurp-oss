@@ -1,5 +1,6 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { boundedBodyLimit } from "./bounded-body-limit.js";
+import { bodyBudgetOwner } from "./body-budget-owner.js";
 import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
@@ -43,6 +44,7 @@ export function nativeBodyLimit(maxSize: number): MiddlewareHandler {
   return boundedBodyLimit(maxSize, (c) => middlewareErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }), {
     onTimeout: bodyTimeoutResponse,
     onBusy: bodyBudgetBusyResponse,
+    owner: bodyBudgetOwner,
   });
 }
 

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeBodyLimit } from "../lib/api-error.js";
-import { BODY_IDLE_TIMEOUT_MS, MAX_IN_MEMORY_BODY_BYTES, bodyReadDeadlineMs, boundedBodyLimit, bufferedBodyBytes, configureBodyReads } from "../lib/bounded-body-limit.js";
+import { BODY_IDLE_TIMEOUT_MS, MAX_IN_MEMORY_BODY_BYTES, bodyReadDeadlineMs, bodyReadSettings, boundedBodyLimit, bufferedBodyBytes, configureBodyReads } from "../lib/bounded-body-limit.js";
 import { multipartBodyLimit } from "../lib/upload-policy.js";
 import { safeErrorResponse } from "../lib/public-errors.js";
 import { rejectNulBytes } from "../lib/reject-nul.js";
@@ -68,31 +68,96 @@ describe("bounded request bodies before readers", () => {
   });
 });
 
-describe("process-wide body buffer budget", () => {
-  it("answers 503 with Retry-After once concurrent buffered bodies exceed the budget, and releases it after", async () => {
-    configureBodyReads({ bufferBudgetBytes: 100 * 1024 });
-    try {
-      let release!: () => void;
-      const held = new Promise<void>(resolve => { release = resolve; });
-      const budget = new Hono();
-      budget.use("*", nativeBodyLimit(1024 * 1024));
-      budget.post("/v1/hold", async c => { await held; return c.text("ok"); });
-      budget.post("/v1/quick", c => c.text("ok"));
-      const body = () => new Uint8Array(60 * 1024);
-      const first = budget.request("/v1/hold", { method: "POST", headers: { "content-type": "application/json" }, body: body() });
-      await new Promise(resolve => setTimeout(resolve, 20));
-      expect(bufferedBodyBytes()).toBe(60 * 1024);
-      const second = await budget.request("/v1/quick", { method: "POST", headers: { "content-type": "application/json" }, body: body() });
-      expect(second.status).toBe(503);
-      expect(second.headers.get("Retry-After")).toBe("5");
-      expect(await second.json()).toMatchObject({ error: { code: "unavailable" } });
-      release();
-      expect((await first).status).toBe(200);
-      expect(bufferedBodyBytes()).toBe(0);
-      expect((await budget.request("/v1/quick", { method: "POST", headers: { "content-type": "application/json" }, body: body() })).status).toBe(200);
-    } finally {
-      configureBodyReads({ bufferBudgetBytes: 256 * 1024 * 1024 });
-    }
+describe("request body buffer budgets", () => {
+  let saved: ReturnType<typeof bodyReadSettings>;
+  beforeEach(() => { saved = bodyReadSettings(); });
+  afterEach(() => configureBodyReads(saved));
+
+  /**
+   * A limiter app whose `/v1/hold` route waits until released. `x-org` makes a
+   * request an API key's (authenticated, charged to that org); without it the
+   * request is public (charged to its client IP).
+   */
+  function budgetApp() {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      const org = c.req.header("x-org");
+      if (org) c.set("apiKey", { orgId: org, keyId: `key-${org}` } as never);
+      await next();
+    });
+    app.use("*", nativeBodyLimit(8 * 1024 * 1024));
+    app.post("/v1/hold", async c => { await held; return c.text("ok"); });
+    app.post("/v1/quick", c => c.text("ok"));
+    const post = (path: string, bytes: number, org?: string) => app.request(path, {
+      method: "POST", headers: { "content-type": "application/json", ...(org ? { "x-org": org } : {}) }, body: new Uint8Array(bytes),
+    });
+    return { post, release: () => release() };
+  }
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+
+  it("keeps public requests in their own pool: they cannot starve authenticated ones", async () => {
+    configureBodyReads({ publicBytes: 100 * 1024, perIpBytes: 1024 * 1024, bufferBudgetBytes: 1024 * 1024 });
+    const { post, release } = budgetApp();
+    const holding = post("/v1/hold", 80 * 1024);
+    await settle();
+    expect(bufferedBodyBytes("public")).toBe(80 * 1024);
+    const second = await post("/v1/quick", 80 * 1024);
+    expect(second.status).toBe(503);
+    expect(second.headers.get("Retry-After")).toBe("5");
+    expect(await second.json()).toMatchObject({ error: { code: "unavailable" } });
+    // An authenticated request draws from its own pool.
+    expect((await post("/v1/quick", 80 * 1024, "org-a")).status).toBe(200);
+    release();
+    expect((await holding).status).toBe(200);
+    expect(bufferedBodyBytes()).toBe(0);
+  });
+
+  it("caps a public request's size whatever its route allows", async () => {
+    configureBodyReads({ publicRequestBytes: 64 * 1024 });
+    const { post } = budgetApp();
+    expect((await post("/v1/quick", 65 * 1024)).status).toBe(413);
+    expect((await post("/v1/quick", 65 * 1024, "org-a")).status).toBe(200);
+  });
+
+  it("leaves another org's small requests working while one org's large bodies fill its share", async () => {
+    configureBodyReads({ bufferBudgetBytes: 1024 * 1024, smallReserveBytes: 256 * 1024, smallRequestBytes: 64 * 1024, perOwnerBytes: 600 * 1024 });
+    const { post, release } = budgetApp();
+    const holding = [post("/v1/hold", 300 * 1024, "org-a"), post("/v1/hold", 300 * 1024, "org-a")];
+    await settle();
+    expect(bufferedBodyBytes("authenticated")).toBe(600 * 1024);
+    // Org A is at its share.
+    expect((await post("/v1/quick", 100 * 1024, "org-a")).status).toBe(503);
+    // Org B's large body would reach into the small-request reserve; its small one never does.
+    expect((await post("/v1/quick", 200 * 1024, "org-b")).status).toBe(503);
+    expect((await post("/v1/quick", 10 * 1024, "org-b")).status).toBe(200);
+    release();
+    for (const response of await Promise.all(holding)) expect(response.status).toBe(200);
+    expect(bufferedBodyBytes()).toBe(0);
+  });
+
+  it("releases an aborted request's reservation and cancels its pending read", async () => {
+    const app = new Hono();
+    app.use("*", nativeBodyLimit(8 * 1024 * 1024));
+    app.post("/v1/x", c => c.text("ok"));
+    const cancel = vi.fn();
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) { sent = true; controller.enqueue(new Uint8Array(50 * 1024)); return; }
+        return new Promise(() => {});
+      },
+      cancel,
+    });
+    const client = new AbortController();
+    const pending = app.request(new Request("http://localhost/v1/x", { method: "POST", headers: { "content-type": "application/json" }, body, duplex: "half", signal: client.signal } as RequestInit));
+    await settle();
+    expect(bufferedBodyBytes()).toBe(50 * 1024);
+    client.abort();
+    await Promise.resolve(pending).catch(() => undefined);
+    expect(bufferedBodyBytes()).toBe(0);
+    expect(cancel).toHaveBeenCalled();
   });
 });
 
@@ -136,6 +201,8 @@ describe("body read deadline", () => {
   /** A limiter app whose body arrives one byte per `everyMs` (fake timers), `chunks` times. */
   function paced(cap: number, everyMs: number, chunks: number, headers: Record<string, string> = {}) {
     const app = new Hono();
+    // An API key's request: public requests are capped at 1 MiB, which would shorten the deadline.
+    app.use("*", async (c, next) => { c.set("apiKey", { orgId: "org-a", keyId: "key-a" } as never); await next(); });
     app.use("*", nativeBodyLimit(cap));
     app.post("/v1/x", async c => c.text(String((await c.req.raw.arrayBuffer()).byteLength)));
     let sent = 0;

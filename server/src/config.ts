@@ -254,6 +254,10 @@ export const env = {
    * multipart and JSON body limits). Past it a request gets 503 + Retry-After.
    */
   maxBufferedRequestBytes: readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES, 256 * 1024 * 1024),
+  /** One org's share of it for large (over 64 KiB) bodies. */
+  maxBufferedRequestBytesPerOrg: readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES_PER_ORG, 64 * 1024 * 1024),
+  /** A separate pool for unauthenticated bodies (SAML callback, webhooks): 1 MiB per client IP and per request. */
+  maxPublicBufferedRequestBytes: readNumber(process.env.MAX_PUBLIC_BUFFERED_REQUEST_BYTES, 8 * 1024 * 1024),
   /**
    * Slowest sustained upload rate a buffered request body may arrive at: its
    * read deadline is 60 s plus its cap at this rate (25 MiB bulk: ~14 min).

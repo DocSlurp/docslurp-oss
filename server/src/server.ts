@@ -177,7 +177,12 @@ export function createApiApp(): Hono {
   app.use("/oauth/mcp/*", nativeBodyLimit(16 * 1024));
   // Bound actual bytes before NUL inspection or any route reader. Select the
   // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
-  configureBodyReads({ bufferBudgetBytes: env.maxBufferedRequestBytes, minBytesPerSecond: env.bodyReadMinBytesPerSecond });
+  configureBodyReads({
+    bufferBudgetBytes: env.maxBufferedRequestBytes,
+    perOwnerBytes: env.maxBufferedRequestBytesPerOrg,
+    publicBytes: env.maxPublicBufferedRequestBytes,
+    minBytesPerSecond: env.bodyReadMinBytesPerSecond,
+  });
   app.use("/v1/*", v1BodyLimit(env));
 
   app.use(

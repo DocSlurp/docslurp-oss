@@ -4,6 +4,7 @@ import { bareMimeType, isSupportedFileType, resolveSupportedMimeType, SUPPORTED_
 import { env } from "../config.js";
 import { apiErrorResponse, bodyBudgetBusyResponse } from "./api-error.js";
 import { boundedBodyLimit } from "./bounded-body-limit.js";
+import { bodyBudgetOwner } from "./body-budget-owner.js";
 
 /** Intake accepts exactly the formats in the shared table the worker, the quote and the estimator card read. */
 function normalizeMimeType(value: string | null | undefined): string | null {
@@ -68,7 +69,7 @@ export function multipartBodyLimit(maxBytes: number) {
   return boundedBodyLimit(maxBytes, (c) => {
     const { message, details } = multipartTooLarge(maxBytes);
     return apiErrorResponse(c, 413, "payload_too_large", message, details);
-  }, { onTimeout: multipartTimeoutResponse, onBusy: bodyBudgetBusyResponse });
+  }, { onTimeout: multipartTimeoutResponse, onBusy: bodyBudgetBusyResponse, owner: bodyBudgetOwner });
 }
 
 /**
