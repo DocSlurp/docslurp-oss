@@ -35,6 +35,7 @@ import {
   type UsageAggregate,
 } from "./usage-attribution.js";
 import { extractNotReprocessable } from "./reprocess-errors.js";
+import { publicDocumentIdentity } from "../lib/url-document-identity.js";
 
 type DocumentRow = {
   id: string;
@@ -672,7 +673,8 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     filename: row.filename,
     title: documentTitle(row),
     mimeType: row.mime_type,
-    sourceKey: row.source_key,
+    // URL-origin documents: legacy canonical IDs and source keys are redacted at this read boundary.
+    sourceKey: publicDocumentIdentity(row).sourceKey,
     status: row.status,
     statusReason: documentStatusReason(row),
     extractionMode: row.extraction_mode,
@@ -683,7 +685,7 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     tags: row.tags ?? [],
     versionNumber: row.version_number ?? 1,
     previousVersionId: row.previous_version_id ?? null,
-    canonicalId: row.canonical_id ?? null,
+    canonicalId: publicDocumentIdentity(row).canonicalId,
     supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
     ...ingestRecordFields(row),

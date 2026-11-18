@@ -39,7 +39,20 @@ export function normalizeCanonicalId(value: unknown): string | null {
  * query is a credential; re-ingesting the same URL still matches.
  */
 export function opaqueCanonicalIdForUrl(rawUrl: string): string {
-  return `url:${createHash("sha256").update(canonicalIdForUrl(rawUrl)).digest("hex")}`;
+  // Never throws: a malformed legacy or caller value hashes as-is.
+  let basis = rawUrl;
+  try { basis = canonicalIdForUrl(rawUrl); } catch { /* not a parseable URL */ }
+  return `url:${createHash("sha256").update(basis).digest("hex")}`;
+}
+
+/** Whether a value is scheme-prefixed like a URL (`https://…`, `s3://…`). */
+export function isUrlShapedCanonicalId(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
+}
+
+/** canonicalIdForUrl, or null for a value `new URL` rejects (never throws). */
+export function tryCanonicalIdForUrl(rawUrl: string): string | null {
+  try { return canonicalIdForUrl(rawUrl); } catch { return null; }
 }
 
 /** The URL without its fragment or a trailing slash. */

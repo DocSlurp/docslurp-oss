@@ -41,7 +41,9 @@ import {
   loadDirectUploadSession,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
-import { canonicalIdForUrl, opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { canonicalIdForUrl, isUrlShapedCanonicalId, opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { sourceKeyWithName } from "../lib/url-document-identity.js";
+import { inferProjectTitleFromUrls } from "./project-naming.js";
 import { attachExtractRun, chargeExtractRetention, describeExtractById, loadIntakeExtract } from "./extracts.js";
 import { extensionForMimeType, remoteUrlIntakeItems } from "./remote-ingest.js";
 import {
@@ -149,42 +151,73 @@ function notAcceptedWarning(rejected: ProjectIntakeResult["rejected"], documentC
 }
 
 /**
- * A URL intake's receipt as it may be replayed: receipts written before URL
- * refusals were named `urls[i]` can hold a URL, its path segment or a raw
- * reason. Rejections keep their fixed copy only when already named `urls[i]`;
- * otherwise they get that name and the per-code copy. Documents keep a
- * filename only when it looks like one, and a URL canonical ID becomes opaque.
+ * Receipt format version. A current-version receipt was written by code that
+ * names every URL-derived field safely; an unversioned (legacy) receipt may hold
+ * a URL, its path segment or a raw reason in any name field.
  */
-export function sanitizeReplayedUrlIntake(payload: ProjectIntakePayload): ProjectIntakePayload {
+export const INTAKE_RECEIPT_VERSION = 2;
+
+/** The payload fields a URL intake response carries; nothing else is replayed. */
+const URL_RECEIPT_FIELDS = ["project", "run", "documents", "warnings", "rejected", "pipeline", "ingested", "extract"] as const;
+
+/** A current-version URL receipt replays only the fields the response defines. */
+export function projectCurrentUrlReceipt(payload: ProjectIntakePayload): ProjectIntakePayload {
+  const projected: Record<string, unknown> = {};
+  for (const field of URL_RECEIPT_FIELDS) if (payload[field] !== undefined) projected[field] = payload[field];
+  return projected as ProjectIntakePayload;
+}
+
+/**
+ * A legacy (unversioned) URL receipt as it may be replayed: every name field is
+ * re-derived, and anything not safely derivable gets the generic value.
+ * - project.name and run.projectName: the host-only title from the request's
+ *   URLs ("Import from example.com"), else "URL import"; project.slug: the project id.
+ * - documents and ingested: `url-<i><ext>` names, source keys renamed to match,
+ *   titles dropped, and a URL-shaped canonical ID made opaque (never throws).
+ * - rejected: `urls[i]` with the per-code copy; the not-accepted warning rebuilt.
+ */
+export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: readonly string[]): ProjectIntakePayload {
+  const title = urls?.length ? inferProjectTitleFromUrls([...urls]) : "URL import";
+  const genericName = (position: number, mimeType: string) => `url-${position}${extensionForMimeType(mimeType ?? "")}`;
   const rejected = payload.rejected?.map((file, position) => {
-    if (/^urls\[\d+\]$/.test(file.filename)) return file;
     const index = typeof file.index === "number" ? file.index : position;
-    return { ...file, index, filename: `urls[${index}]`, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
+    return { index, filename: `urls[${index}]`, statusCode: file.statusCode, code: file.code, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
   });
-  // No name from a legacy receipt is trusted: every URL-derived name becomes the generic one.
-  const safeName = (_filename: string, position: number, mimeType: string) => `url-${position}${extensionForMimeType(mimeType)}`;
-  const documents = payload.documents.map((document, position) => ({
-    ...document,
-    filename: safeName(document.filename, position, document.mimeType),
-    ...(typeof document.canonicalId === "string" && /^[a-z][a-z0-9+.-]*:\/\//i.test(document.canonicalId)
-      ? { canonicalId: opaqueCanonicalIdForUrl(document.canonicalId) }
-      : {}),
-  }));
-  return {
+  const documents = payload.documents.map((document, position) => {
+    const name = genericName(position, document.mimeType);
+    const { title: _title, ...rest } = document as typeof document & { title?: unknown };
+    return {
+      ...rest,
+      filename: name,
+      ...(typeof document.sourceKey === "string" ? { sourceKey: sourceKeyWithName(document.sourceKey, name) } : {}),
+      ...(typeof document.canonicalId === "string" && isUrlShapedCanonicalId(document.canonicalId)
+        ? { canonicalId: opaqueCanonicalIdForUrl(document.canonicalId) }
+        : {}),
+    };
+  });
+  return projectCurrentUrlReceipt({
     ...payload,
-    documents,
+    project: { ...payload.project, name: title, slug: payload.project.id } as ProjectIntakePayload["project"],
+    run: { ...payload.run, projectName: title } as ProjectIntakePayload["run"],
+    documents: documents as ProjectIntakePayload["documents"],
     ...(rejected ? { rejected } : {}),
-    ...(payload.ingested ? { ingested: payload.ingested.map((file, position) => ({ ...file, filename: safeName(file.filename, position, file.mimeType) })) } : {}),
+    ...(payload.ingested ? { ingested: payload.ingested.map((file, position) => ({ ...file, filename: genericName(position, file.mimeType) })) } : {}),
     warnings: [
       ...payload.warnings.filter((warning) => !NOT_ACCEPTED_WARNING.test(warning)),
       ...(rejected?.length ? [notAcceptedWarning(rejected, documents.length)] : []),
     ],
-  };
+  });
+}
+
+/** How a stored receipt is replayed: URL routes by version, every other route as stored. */
+export function replayedPayload(routeKey: string, stable: ProjectIntakeActionResult & { receiptVersion?: unknown }, urls?: readonly string[]): ProjectIntakePayload {
+  if (!URL_INTAKE_ROUTES.has(routeKey)) return stable.payload;
+  return stable.receiptVersion === INTAKE_RECEIPT_VERSION ? projectCurrentUrlReceipt(stable.payload) : sanitizeLegacyUrlReceipt(stable.payload, urls);
 }
 
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
-  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null },
+  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null; urls?: readonly string[] },
   run: () => Promise<ProjectIntakeActionResult>,
 ): Promise<ProjectIntakeActionResult> {
   if (!args.idempotencyKey) return await run();
@@ -238,8 +271,9 @@ async function idempotently(
         throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
       }
       return {
-        ...stable,
-        payload: URL_INTAKE_ROUTES.has(args.routeKey) ? sanitizeReplayedUrlIntake(stable.payload) : stable.payload,
+        payload: replayedPayload(args.routeKey, stable, args.urls),
+        status: stable.status,
+        temporalDeferred: stable.temporalDeferred,
         idempotencyReplayed: true,
       };
     }
@@ -249,7 +283,7 @@ async function idempotently(
     await sql`insert into intake_request_receipts (idempotency_key, route_key, request_hash, user_id, external_effect_started)
       values (${idempotencyKey}, ${args.routeKey}, ${args.requestHash}, ${args.userId}, false)`;
     const result = await intakeReceiptContext.run({ key: idempotencyKey, route: args.routeKey, hash: args.requestHash, userId: args.userId }, run);
-    const [saved] = await sql`update intake_request_receipts set stable_result = ${sql.json(JSON.parse(JSON.stringify(result)))}
+    const [saved] = await sql`update intake_request_receipts set stable_result = ${sql.json(JSON.parse(JSON.stringify({ ...result, receiptVersion: INTAKE_RECEIPT_VERSION })))}
       where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey}
         and request_hash = ${args.requestHash} and user_id = ${args.userId}
       returning run_id`;
@@ -474,6 +508,8 @@ export async function createRemoteUrlProjectIntake(
     {
       idempotencyKey,
       routeKey: target.extract ? "extracts.url" : "uploads.url",
+      // A legacy receipt's replay re-derives its title from these (host only).
+      urls: args.urls,
       requestHash: hashIdempotencyPayload({ ...hashedTarget, canonicalIds: canonicalIds ?? null, idempotencyKey }),
       userId: args.userId,
       orgId: args.orgId,

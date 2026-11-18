@@ -2,7 +2,9 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
-import { MIME_BY_EXTENSION, canonicalMimeType, bareMimeType } from "@docslurp/shared";
+import { extensionForMimeType } from "../lib/url-document-identity.js";
+
+export { extensionForMimeType };
 import { assertSafeExternalUrl, safeExternalFetch, UnsafeExternalUrlError } from "../lib/network-security.js";
 import { inferMimeType } from "./documents.js";
 import { ProjectIntakeError, urlRefusalMessage, type ProjectIntakeItem, type UrlRefusal } from "./project-intake.js";
@@ -11,12 +13,6 @@ function parseKnownContentLength(raw: string | null): number | undefined {
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-/** The first extension whose canonical MIME type is `mimeType` (`.pdf`), or `.bin`. */
-export function extensionForMimeType(mimeType: string): string {
-  const canonical = canonicalMimeType(mimeType) ?? bareMimeType(mimeType);
-  return Object.entries(MIME_BY_EXTENSION).find(([, mime]) => mime === canonical)?.[0] ?? ".bin";
 }
 
 /**
