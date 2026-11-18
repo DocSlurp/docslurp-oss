@@ -109,7 +109,7 @@ describe("documentsRoutes bulk actions", () => {
     const { HTTPException } = await import("hono/http-exception");
     appendAuditLogMock.mockClear();
     const busy = new HTTPException(503, { message: "busy" });
-    deleteDocumentsMock.mockRejectedValue(new DocumentDeletionPartialError([{ documentId: "doc-1" }], ["doc-2", "doc-3"], busy));
+    deleteDocumentsMock.mockRejectedValue(new DocumentDeletionPartialError([{ documentId: "doc-1", projectId: "ws-1", filename: "a.pdf", runId: null, sourceKey: "k/a.pdf" }], ["doc-2", "doc-3"], busy));
     const response = await app.request("/documents/bulk", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", documentIds: ["doc-1", "doc-2", "doc-3"] }),
     });
