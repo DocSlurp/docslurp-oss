@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
 import type { PipelineFeatureOverrides, ProjectTemplateKey } from "@docslurp/shared";
@@ -516,6 +516,8 @@ export function validMultipartLayout(parts: Array<{ partNumber: number; sizeByte
   return parts.every((part, i) => part.partNumber === i + 1 && part.sizeBytes === Math.min(partSize, size - i * partSize));
 }
 
+export const DECLARED_SIZE_CHANGE_MESSAGE = "Declared upload size cannot change";
+
 /**
  * A failure of storage or the database while finalizing is the server's, never the client's: it is a retryable 503
  * (`upload_storage_unavailable`), with the provider's own error only in the log. Definite answers stay as they are.
@@ -526,58 +528,58 @@ export function uploadStorageUnavailable(error: unknown, context: string): Proje
 }
 
 /** Storage is authoritative: never assemble a caller's unverified part manifest. */
-export async function finalizeDirectUploadFile(file: UploadSessionFileRow, finalSize?: number): Promise<boolean> {
+export async function finalizeDirectUploadFile(file: UploadSessionFileRow, finalSize?: number, options: { signal?: AbortSignal } = {}): Promise<boolean> {
   try {
-    return await finalizeDirectUploadFileUnclassified(file, finalSize);
+    return await finalizeDirectUploadFileUnclassified(file, finalSize, options.signal);
   } catch (error) {
     if (error instanceof ProjectIntakeError) throw error;
     throw uploadStorageUnavailable(error, `file=${file.id}`);
   }
 }
 
-async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, finalSize?: number): Promise<boolean> {
+async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, finalSize: number | undefined, signal: AbortSignal | undefined): Promise<boolean> {
   if (file.status === "completed") return true;
   if (file.status !== "pending") return false;
   if (file.unknown_size && finalSize === undefined) return false;
   if (finalSize !== undefined) {
-    if (!file.unknown_size && finalSize !== file.size_bytes) throw new ProjectIntakeError("Declared upload size cannot change", 400);
+    if (!file.unknown_size && finalSize !== file.size_bytes) throw new ProjectIntakeError(DECLARED_SIZE_CHANGE_MESSAGE, 400);
     admitIntakeFile({ filename: file.filename, mimeType: file.mime_type, sizeBytes: finalSize }, "direct-upload");
     file = { ...file, size_bytes: finalSize };
     // Persist EOS before provider completion so recovery can verify an already assembled object.
-    await sql`update upload_session_files set size_bytes = ${finalSize}, unknown_size = false where id = ${file.id}`;
+    await sql`update upload_session_files set size_bytes = ${finalSize}, unknown_size = false where id = ${file.id} and status = 'pending'`;
   }
   let verified: { etag: string | null };
   try {
-    verified = await verifyCompletedDirectUpload(file);
+    verified = await verifyCompletedDirectUpload(file, signal);
   } catch (error) {
     if (!isStorageNotFound(error) && !(error instanceof ProjectIntakeError && error.message.startsWith("No object found"))) throw error;
-    if (file.upload_mode !== "multipart" || !file.upload_id) return false;
-    const uploadId = file.upload_id;
-    const parts = await withStorageRetry(() => listMultipartUploadParts({ key: file.source_key, uploadId }));
-    if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return false;
-    let assembled: { etag: string | null } | null = null;
-    try { await withStorageRetry(() => completeMultipartUpload({ key: file.source_key, uploadId, parts })); }
-    catch (error) {
-      // A retried completion whose earlier answer was lost finds the upload already closed: storage decides. Only the
-      // server completes uploads (clients hold part URLs only), so an object of the verified size is this one.
-      if (storageErrorName(error) !== "NoSuchUpload") throw multipartCompletionError(error, file.filename);
-      assembled = await verifyCompletedDirectUpload(file).catch(() => null);
-      if (!assembled) throw multipartCompletionError(error, file.filename);
-    }
-    verified = assembled ?? await verifyCompletedDirectUpload(file);
-    await sql`update upload_session_files set completed_parts = ${sql.json(parts)} where id = ${file.id}`;
+    // A finalizer holding a stale row may find the original already gone because another one published it.
+    if (file.upload_mode !== "multipart" || !file.upload_id) return await completedMeanwhile(file);
+    const assembled = await assembleMultipartUpload(file, file.upload_id, signal);
+    if (!assembled) return false;
+    verified = assembled;
   }
-  // A single-part file's presigned PUT stays valid for its whole TTL, so the client could replace
-  // the bytes after this check (and after the server hashed them). Seal it: copy exactly the
-  // verified version to a key no URL names, and ingest that. A completed multipart upload needs no
-  // copy: its part URLs are bound to an upload ID that completion closed, and no PUT URL exists.
-  const sourceKey = file.upload_mode === "single" ? await sealSingleUpload(file, verified.etag) : file.source_key;
-  if (sourceKey !== file.source_key) {
-    // Publish the sealed key and durable cleanup together: a crash must not lose the old key.
-    // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
-    const published = await sql<{ id: string; source_key: string }[]>`with ownership as (
+  if (file.upload_mode !== "single") {
+    // A completed multipart upload needs no copy: its part URLs are bound to an upload ID that completion closed.
+    const published = await sql<{ id: string }[]>`update upload_session_files set status = 'completed', updated_at = now()
+      where id = ${file.id} and status = 'pending' and source_key = ${file.source_key} returning id`;
+    if (published.length === 1) return true;
+    return await alreadyPublishedAs(file, file.source_key);
+  }
+  // A single-part file's presigned PUT stays valid for its whole TTL, so the client could replace the bytes after this
+  // check (and after the server hashed them). Seal it: copy exactly the verified version to a key no URL names, and
+  // ingest that. The sealed key is derived from the verified version, so a late or repeated copy of a different
+  // version can never land on the key that was verified and published.
+  const sourceKey = await sealSingleUpload(file, verified.etag, signal);
+  // Publish the sealed key and durable cleanup of the original together, fenced on the row still being pending at
+  // the original key: of two finalizers (a lost lock connection lets an old one run on), only one publishes.
+  // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
+  const published = await sql<{ id: string; source_key: string }[]>`with target as (
+      select s.org_id from upload_sessions s join upload_session_files f on f.session_id = s.id
+      where f.id = ${file.id} and s.id = ${file.session_id} and f.status = 'pending' and f.source_key = ${file.source_key}
+    ), ownership as (
       insert into upload_cleanup_owners (original_key, sealed_key, org_id)
-      select ${file.source_key}, ${sourceKey}, s.org_id from upload_sessions s where s.id = ${file.session_id}
+      select ${file.source_key}, ${sourceKey}, target.org_id from target
       on conflict (original_key) do update set original_key = excluded.original_key
       where upload_cleanup_owners.sealed_key = excluded.sealed_key
         and upload_cleanup_owners.org_id is not distinct from excluded.org_id
@@ -590,33 +592,104 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
       on conflict (kind, target) do update set not_before = greatest(storage_cleanup_queue.not_before, excluded.not_before)
       returning id
     ) update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now()
-      where id = ${file.id} and exists (select 1 from queued)
+      where id = ${file.id} and status = 'pending' and source_key = ${file.source_key} and exists (select 1 from queued)
       returning id, source_key`;
-    if (published.length !== 1 || published[0]?.id !== file.id || published[0]?.source_key !== sourceKey) {
-      throw new ProjectIntakeError("Upload ownership changed during finalization", 409);
-    }
+  if (published.length === 1 && published[0]?.id === file.id && published[0]?.source_key === sourceKey) {
     // The original stays writable until its URL expires; nothing reads it again. Best effort.
     await deleteUploadedObject(file.source_key).catch(() =>
       console.error(`[direct-upload] status=unsealed-delete-failed file=${file.id}`));
-  } else {
-    await sql`update upload_session_files set status = 'completed', source_key = ${sourceKey}, updated_at = now() where id = ${file.id}`;
+    return true;
   }
-  return true;
+  return await alreadyPublishedAs(file, sourceKey);
 }
 
-/** Where a single-part upload is sealed: beside the original, named by the (server-chosen) file id. */
-export function sealedSourceKey(file: Pick<UploadSessionFileRow, "id" | "source_key">): string {
+async function completedMeanwhile(file: UploadSessionFileRow): Promise<boolean> {
+  const [current] = await sql<Array<{ status: string }>>`select status from upload_session_files where id = ${file.id}`;
+  return current?.status === "completed";
+}
+
+/**
+ * After a fenced publish matched nothing: true when this same version was already published (an identical attempt won),
+ * else 409. A losing sealed copy of another version is queued for cleanup once a winner is known, never before (an
+ * identical attempt may still be about to publish it).
+ */
+async function alreadyPublishedAs(file: UploadSessionFileRow, attemptedKey: string): Promise<boolean> {
+  const [current] = await sql<Array<{ status: string; source_key: string; org_id: string | null }>>`
+    select f.status, f.source_key, s.org_id from upload_session_files f join upload_sessions s on s.id = f.session_id where f.id = ${file.id}`;
+  if (current?.status === "completed" && current.source_key === attemptedKey) return true;
+  if (current?.status === "completed" && attemptedKey !== file.source_key && current.source_key !== attemptedKey) {
+    await discardLosingSeal(attemptedKey, current.source_key, current.org_id, file.id);
+  }
+  throw new ProjectIntakeError("Upload ownership changed during finalization", 409);
+}
+
+async function discardLosingSeal(losingKey: string, winningKey: string, orgId: string | null, fileId: string): Promise<void> {
+  // Durable: the worker deletes an 'upload_original' target only while an ownership row vouches for it and nothing
+  // references it. A copy still in flight may recreate the key, so the tombstone repeats the delete.
+  try {
+    await sql`with ownership as (
+        insert into upload_cleanup_owners (original_key, sealed_key, org_id) values (${losingKey}, ${winningKey}, ${orgId})
+        on conflict (original_key) do nothing returning org_id
+      ) insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+        select 'upload_original', ownership.org_id, ${losingKey}, jsonb_build_object('sealedKey', ${winningKey}::text), 'losing_seal', now() + interval '15 minutes'
+        from ownership
+        on conflict (kind, target) do nothing`;
+  } catch { console.error(`[direct-upload] status=losing-seal-queue-failed file=${fileId}`); }
+  await deleteUploadedObject(losingKey).catch(() => console.error(`[direct-upload] status=losing-seal-delete-failed file=${fileId}`));
+}
+
+/**
+ * Assembles a multipart upload from storage's own part list. Returns the verified object, or null when the parts are
+ * not all there yet. A closed upload (NoSuchUpload, from ListParts or from completion) goes through one recovery path.
+ */
+async function assembleMultipartUpload(file: UploadSessionFileRow, uploadId: string, signal: AbortSignal | undefined): Promise<{ etag: string | null } | null> {
+  let parts: Awaited<ReturnType<typeof listMultipartUploadParts>>;
+  try { parts = await withStorageRetry(() => listMultipartUploadParts({ key: file.source_key, uploadId, signal }), undefined, signal); }
+  catch (error) {
+    if (storageErrorName(error) === "NoSuchUpload") return await recoverClosedMultipart(file, error, signal);
+    throw error;
+  }
+  if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return null;
+  try { await withStorageRetry(() => completeMultipartUpload({ key: file.source_key, uploadId, parts, signal }), undefined, signal); }
+  catch (error) {
+    if (storageErrorName(error) === "NoSuchUpload") return await recoverClosedMultipart(file, error, signal);
+    throw multipartCompletionError(error, file.filename);
+  }
+  await sql`update upload_session_files set completed_parts = ${sql.json(parts)} where id = ${file.id} and status = 'pending'`;
+  return await verifyCompletedDirectUpload(file, signal);
+}
+
+/**
+ * The multipart upload is closed: completed by an attempt whose answer was lost, or aborted. Storage decides. Only the
+ * server completes uploads (clients hold part URLs only), so an object of the verified size is this one. No object is
+ * the client's 400; a storage failure while looking stays retryable (it is never turned into a 400).
+ */
+async function recoverClosedMultipart(file: UploadSessionFileRow, closed: unknown, signal: AbortSignal | undefined): Promise<{ etag: string | null }> {
+  try {
+    return await verifyCompletedDirectUpload(file, signal);
+  } catch (error) {
+    if (error instanceof ProjectIntakeError && error.message.startsWith("No object found")) throw multipartCompletionError(closed, file.filename);
+    throw error;
+  }
+}
+
+/**
+ * Where a single-part upload is sealed: beside the original, named by the (server-chosen) file id and the verified
+ * version, so each verified version has its own destination.
+ */
+export function sealedSourceKey(file: Pick<UploadSessionFileRow, "id" | "source_key">, etag: string): string {
   const slash = file.source_key.lastIndexOf("/");
   const name = file.source_key.slice(slash + 1).replace(/^[0-9a-f-]{36}-/i, "");
-  return `${file.source_key.slice(0, slash)}/sealed-${file.id}-${name}`;
+  const version = createHash("sha256").update(etag).digest("hex").slice(0, 16);
+  return `${file.source_key.slice(0, slash)}/sealed-${file.id}-${version}-${name}`;
 }
 
-async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null): Promise<string> {
+async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null, signal: AbortSignal | undefined): Promise<string> {
   if (!etag) throw new ProjectIntakeError(`Unable to verify the uploaded version of ${file.filename}`, 400);
-  const sealed = sealedSourceKey(file);
+  const sealed = sealedSourceKey(file, etag);
   try {
-    // Idempotent: the same If-Match copy repeated after a lost answer writes the same bytes again.
-    await withStorageRetry(() => copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag }));
+    // Idempotent: the same If-Match copy to the same version's key writes the same bytes again.
+    await withStorageRetry(() => copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag, signal }), undefined, signal);
   } catch (error) {
     if (storageErrorName(error) === "PreconditionFailed" || (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 412) {
       throw new ProjectIntakeError(`${file.filename} changed while its upload was being completed; upload it again`, 409);
@@ -624,7 +697,7 @@ async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null)
     throw error;
   }
   // The sealed copy is what is hashed and ingested: check it is the verified size too.
-  await verifyCompletedDirectUpload({ ...file, source_key: sealed });
+  await verifyCompletedDirectUpload({ ...file, source_key: sealed }, signal);
   return sealed;
 }
 
@@ -857,10 +930,11 @@ export function directUploadIntakeItems(
 
 async function verifyCompletedDirectUpload(
   file: UploadSessionFileRow,
+  signal?: AbortSignal,
 ): Promise<{ etag: string | null }> {
   let metadata: Awaited<ReturnType<typeof getUploadedObjectMetadata>>;
   try {
-    metadata = await withStorageRetry(() => getUploadedObjectMetadata(file.source_key));
+    metadata = await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, signal), undefined, signal);
   } catch (error) {
     if (isStorageNotFound(error)) {
       throw new ProjectIntakeError(

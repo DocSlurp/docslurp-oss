@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   copies: [] as Array<{ fromKey: string; toKey: string; ifMatch?: string }>,
   /** Remaining copy attempts per source key that fail with the provider's spurious "bucket does not exist". */
   copyOutages: new Map<string, number>(),
+  /** Holds a copy's answer (after its bytes were written) until released: an ambiguous, late outcome. */
+  copyAnswerGate: null as Promise<void> | null,
   heads: [] as string[],
   confirm: vi.fn(),
 }));
@@ -46,6 +48,8 @@ vi.mock("../lib/storage.js", async importOriginal => ({
     const source = mocks.objects.get(input.fromKey);
     if (!source || (input.ifMatch && source.etag !== input.ifMatch)) throw Object.assign(new Error("precondition"), { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } });
     mocks.objects.set(input.toKey, { ...source });
+    const gate = mocks.copyAnswerGate;
+    if (gate) { mocks.copyAnswerGate = null; await gate; }
     return { etag: source.etag };
   },
   deleteUploadedObject: async (key: string) => { mocks.objects.delete(key); },
@@ -53,7 +57,7 @@ vi.mock("../lib/storage.js", async importOriginal => ({
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
 
-const { completeDirectUploadFiles, completeDirectUploadFile, abortDirectUploadSession, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
+const { completeDirectUploadFiles, completeDirectUploadFile, abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, sealedSourceKey, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
 const { reconcileDirectUploads } = await import("../services/direct-upload-reconciler.js");
 
 const SESSION = "11111111-1111-4111-8111-111111111111";
@@ -92,6 +96,7 @@ beforeEach(async () => {
   mocks.replacedBeforeCopy.clear();
   mocks.copies.length = 0;
   mocks.copyOutages.clear();
+  mocks.copyAnswerGate = null;
   mocks.heads.length = 0;
   mocks.confirm.mockReset().mockResolvedValue({});
   await db.exec(`delete from upload_session_files; delete from upload_sessions; delete from storage_cleanup_queue; delete from upload_cleanup_owners;
@@ -339,5 +344,41 @@ describe("storage outages and held locks are retryable, never client errors", ()
     setTimeout(() => { mocks.lockHeld = false; }, 300);
     await expect(abortDirectUploadSession(SESSION, "u", 3_000)).resolves.toBe(true);
     expect((await sessionRow()).status).toBe("aborted");
+  });
+});
+
+describe("sealing publishes exactly one verified version", () => {
+  it("lets only the fenced winner publish when two finalizers seal different source versions", async () => {
+    const key = await seedFile(SESSION, "a", { size: 10, etag: "\"v1\"" });
+    const row = (await loadDirectUploadSession(SESSION, "u"))!.files[0]!;
+    // Finalizer 1 verifies v1 and copies it, but its copy's answer is held (a lost lock connection lets it run on).
+    let release!: () => void;
+    mocks.copyAnswerGate = new Promise<void>(resolve => { release = resolve; });
+    const first = finalizeDirectUploadFile(row).then(() => "published", error => error);
+    await vi.waitFor(() => expect(mocks.copies).toHaveLength(1));
+    // Meanwhile the client replaces the bytes (still a valid PUT URL) and finalizer 2 seals and publishes v2.
+    mocks.objects.set(key, { size: 10, etag: "\"v2\"" });
+    await expect(finalizeDirectUploadFile(row)).resolves.toBe(true);
+    const v1 = sealedSourceKey(row, "\"v1\"");
+    const v2 = sealedSourceKey(row, "\"v2\"");
+    expect(v1).not.toBe(v2);
+    expect(await fileRow("a")).toMatchObject({ status: "completed", source_key: v2 });
+    // Finalizer 1 resumes: its fenced publish matches nothing, so v1 is never published and its copy is discarded.
+    release();
+    expect(await first).toMatchObject({ statusCode: 409 });
+    expect(await fileRow("a")).toMatchObject({ status: "completed", source_key: v2 });
+    expect(mocks.objects.has(v1)).toBe(false);
+    expect(mocks.objects.get(v2)).toMatchObject({ etag: "\"v2\"" });
+    const queued = await db.query<{ target: string; payload: { sealedKey: string } }>("select target, payload from storage_cleanup_queue where reason = 'losing_seal'");
+    expect(queued.rows).toEqual([{ target: v1, payload: { sealedKey: v2 } }]);
+  });
+
+  it("treats a repeat of the same version as already published", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"v1\"" });
+    const row = (await loadDirectUploadSession(SESSION, "u"))!.files[0]!;
+    await expect(finalizeDirectUploadFile(row)).resolves.toBe(true);
+    // A stale finalizer still holding the pending row repeats the same version: no error, nothing discarded.
+    await expect(finalizeDirectUploadFile(row)).resolves.toBe(true);
+    expect(mocks.objects.has(sealedSourceKey(row, "\"v1\""))).toBe(true);
   });
 });
