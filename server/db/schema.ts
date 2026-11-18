@@ -3707,7 +3707,7 @@ export const documentPageExtracts = pgTable("document_page_extracts", {
   textBytes: integer("text_bytes"),
   finishReason: text("finish_reason"),
   durationMs: integer("duration_ms"),
-  // Migration 0190: the model that served the pass as an llm:// URI, and the run's levels at the time (operator-facing).
+  // Migration 0191: the model that served the pass as an llm:// URI, and the run's levels at the time (operator-facing).
   modelUri: text("model_uri"),
   modelClass: text("model_class"),
   isFinal: boolean("is_final").default(false).notNull(),

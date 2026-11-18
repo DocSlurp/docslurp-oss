@@ -8,6 +8,7 @@ import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { SandboxedOcrJob } from "../extractors/plugins.js";
 import type { Document, ProjectRun } from "../models.js";
+import { bindMemoryPageBasis } from "../pipeline/page-basis-memory.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import { fakeOcrRunner, type FakeFrame } from "../test/fake-ocr.js";
@@ -94,6 +95,8 @@ async function harness(args: {
     extractionMode: "hybrid", pageCount: args.pageCount ?? 1, createdAt: new Date(), updatedAt: new Date(),
   } as Document;
   const state = WorkflowState.create(run(args.pipeline), [document]);
+  // A funded run: OCR reads are checked against the balance through the page basis.
+  bindMemoryPageBasis(state);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", args.format);
   const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr");

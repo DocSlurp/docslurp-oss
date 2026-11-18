@@ -17,7 +17,7 @@ export const TEXT_MEASURE_MAX_BYTES = 128 * 1024 * 1024;
 /**
  * A text file whose intake count is not `counted` (the API sampled a file over 2 MB and scaled the count, or had no evidence):
  * count its pages with the same text rule over the whole decoded text, record that as the document's `counted` page count
- * before any stage uses it or anything bills. Authorizing pages above intake's is separate (authorizeMeasuredPages). Decoding is the shared pure
+ * before any stage uses it or anything bills. The page basis authorizes pages above intake's (pipeline/page-basis.ts). Decoding is the shared pure
  * TypeScript decoder (the encoding intake sniffed); no parser runs. Billing reads only this count: a document still `assumed`
  * with no measured pages never bills (db/page-base-fee.ts).
  */
@@ -43,12 +43,8 @@ export async function recordMeasuredTextPageCount(args: {
   if (bytes.length > TEXT_MEASURE_MAX_BYTES) throw new Error(`text file too large to measure (over ${TEXT_MEASURE_MAX_BYTES} bytes)`);
   verifyStagedSource(document, sha256Bytes(bytes));
   const pages = bytes.length === 0 ? 1 : measuredTextPages(decodeTextBytes(bytes, document.fileFacts?.encoding ?? undefined), { markup: format === "html" });
-  if (!state.store?.setDocumentPageCount) throw new Error("text page count measured but the store cannot persist it");
-  await state.store.setDocumentPageCount(state.run.id, document.id, pages);
-  document.pageCount = pages;
-  document.pageCountSource = "counted";
-  state.run.pagesTotal = Math.max(0, (Number(state.run.pagesTotal) || 0) + pages - estimate);
   console.log(`[text-pages] document=${document.id} measured=${pages} estimate=${estimate} bytes=${bytes.length}`);
-  // Authorizing the pages above the estimate is separate (lib/measured-page-authorization.ts) and runs on every attempt.
+  // The page basis records the count (and authorizes a raise); format-detect authorizes it again on every attempt.
+  await state.pageBasis.record(document, { kind: "page-count", pages });
   return { pages, estimate };
 }

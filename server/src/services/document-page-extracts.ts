@@ -4,7 +4,7 @@
  * filtered by the caller's organization (and project, when known); a document of another scope, or a purged one, reads
  * as missing (null), exactly like one that does not exist. There is no unscoped read.
  *
- * The rows hold no page text. They do hold the model that served a pass (`model_uri`, `model_class`, migration 0190):
+ * The rows hold no page text. They do hold the model that served a pass (`model_uri`, `model_class`, migration 0191):
  * those two columns are operator-facing and are never selected here, so every query below names its columns and none
  * may become `select *`. A page the project's PII policy withheld
  * (document_page_states `blocked-pii`) carries the `pii-withheld` tag and no text size.
