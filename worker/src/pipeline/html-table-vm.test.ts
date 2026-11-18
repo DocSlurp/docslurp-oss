@@ -25,9 +25,9 @@ describe("production HTML table boundary", () => {
   vi.stubEnv("NODE_ENV", "production");
   const sources=Array.from({length:4},(_,i)=>`<table><tr><td>${"界".repeat(3_000_000)}${i}</td></tr></table>`);
   const run=vi.fn(async(plan)=>{const raw=await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1]);expect(raw.length).toBeLessThanOrEqual(32*1024*1024);const batch=JSON.parse(raw.toString());await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2],JSON.stringify(batch.map(()=>[])));return {stdout:"",stderr:""};});
-  // Each ~9 MiB table's output bound exceeds half the 16 MiB batch target, so each goes in a batch of its own.
+  // Each ~9 MiB table is over the 8 MiB per-table cap: each runs alone under that cap.
   await withPreparedHtmlTables(sources,{run},()=>{});expect(run).toHaveBeenCalledTimes(4);
-  for (const [plan] of run.mock.calls) expect((plan as { maxOutputFileBytes: number }).maxOutputFileBytes).toBeLessThanOrEqual(64*1024*1024);
+  for (const [plan] of run.mock.calls) expect((plan as { maxOutputBytes: number }).maxOutputBytes).toBeLessThanOrEqual(8*1024*1024);
  });
  it("applies the text budget across multiple batches", async () => {
   vi.stubEnv("NODE_ENV", "production");

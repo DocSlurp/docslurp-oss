@@ -17,6 +17,7 @@ import {
   tableCellsArtifactKey,
   tableCellsByteCap,
   tableCellsCacheActive,
+  tableCellsGeneration,
   tableCellsGuestVersion,
   writeTableCellsArtifact,
   type TableCellsStorage,
@@ -41,13 +42,19 @@ export interface StoreEmbedTableCellsStats {
 const diagnostic = (error: unknown) => (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 200);
 
 /**
- * The table sources embed will chunk, from the Markdown and canonical document a stage just wrote (in memory). Equal
- * to embed's own set (embedHtmlTableSources over extractTextForEmbedding of those artifacts): the text goes through
- * the same derivation, and canonical block text is NFC-normalized as readCanonicalDocumentArtifact does on read.
+ * What embed will derive from the Markdown and canonical document a stage just wrote (in memory): the document text
+ * (extractTextForEmbedding's derivation) and the canonical blocks NFC-normalized as readCanonicalDocumentArtifact does
+ * on read. Its table sources are embed's own set, and its generation is the one embed computes over what it reads.
  */
-export function writerTableSources(markdown: string, canonicalDocument: CanonicalDocument | undefined): string[] {
+export function writerEmbedInputs(markdown: string, canonicalDocument: CanonicalDocument | undefined): { sources: string[]; generation: string } {
   const canonical = canonicalDocument && { ...canonicalDocument, blocks: canonicalDocument.blocks.map((block) => ({ ...block, text: normalizeNfc(block.text) })) };
-  return embedHtmlTableSources({ text: embedTextFromMarkdown(markdown, canonical), canonicalDocument: canonical });
+  const extracted = { text: embedTextFromMarkdown(markdown, canonical), canonicalDocument: canonical };
+  return { sources: embedHtmlTableSources(extracted), generation: tableCellsGeneration(extracted) };
+}
+
+/** The table sources embed will chunk for this Markdown and canonical document (writerEmbedInputs). */
+export function writerTableSources(markdown: string, canonicalDocument: CanonicalDocument | undefined): string[] {
+  return writerEmbedInputs(markdown, canonicalDocument).sources;
 }
 
 /** Cheap in-memory check before any work: no `<table` anywhere means embed has no VM table work. */
@@ -63,8 +70,6 @@ export async function storeEmbedTableCells(args: {
   stage: string;
   /** The Markdown just written to the document's markdown slot, and its canonical document (in memory: no re-read). */
   markdown: string;
-  /** That markdown slot's URI: the artifact is bound to this generation, and embed refuses it for any other. */
-  markdownUri: string;
   canonicalDocument: CanonicalDocument | undefined;
   signal?: AbortSignal;
   deadlineMs?: number;
@@ -77,7 +82,7 @@ export async function storeEmbedTableCells(args: {
   if (args.document.runId !== args.run.id) return { status: "unavailable", error: "document belongs to another run" };
   if (!mayHaveHtmlTables(args.markdown, args.canonicalDocument?.blocks)) return { status: "no-tables" };
   // What embed will chunk: computed from the text this stage holds, exactly as embed derives it from the artifact.
-  const sources = writerTableSources(args.markdown, args.canonicalDocument);
+  const { sources, generation } = writerEmbedInputs(args.markdown, args.canonicalDocument);
   if (!hasVmHtmlTableWork(sources)) return { status: "no-tables" };
   const tables = vmTableSources(sources).length;
   if (tables > HTML_TABLE_DOCUMENT_LIMITS.tables) return { status: "too-large", tables };
@@ -92,7 +97,7 @@ export async function storeEmbedTableCells(args: {
     signal.throwIfAborted();
     const written = await writeTableCellsArtifact({
       storage: args.storage, key: tableCellsArtifactKey(args.run, args.document), runId: args.run.id, documentId: args.document.id,
-      markdownUri: args.markdownUri, guestVersion: guest.version, prepared, byteCap: tableCellsByteCap(sources), signal,
+      generation, guestVersion: guest.version, prepared, byteCap: tableCellsByteCap(sources), signal,
     });
     const stats: StoreEmbedTableCellsStats = { status: written.status, tables: written.tables, vmTables, vmCommands, bytes: written.bytes, ms: Date.now() - started };
     console.log(`[table-cells] stored stage=${args.stage} document=${args.document.id} status=${stats.status} tables=${stats.tables} vmTables=${vmTables} bytes=${written.bytes} ms=${stats.ms}`);

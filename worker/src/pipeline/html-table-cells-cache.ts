@@ -14,7 +14,8 @@
 import { createHash } from "node:crypto";
 import type { CanonicalDocument } from "@docslurp/shared";
 import { htmlTableSources } from "./chunking.js";
-import { assertHtmlTableCells, HTML_TABLE_DOCUMENT_LIMITS, HTML_TABLE_OUTPUT_CEILING, htmlTableCellTagCount, vmTableSources, type PreparedHtmlTableCells } from "./html-table-vm.js";
+import { assertHtmlTableCells, HTML_TABLE_DOCUMENT_LIMITS, htmlTableCellTagCount, htmlTableValueBound, tableParseMemoryBudget, vmTableSources, type PreparedHtmlTableCells } from "./html-table-vm.js";
+import { HTML_TABLE_MAX_CELLS, HTML_TABLE_MAX_SOURCE_CHARS } from "./html-table-limits.js";
 import { assertJsonShape } from "../lib/json-shape.js";
 import type { HtmlTableCell } from "./table-cells-guest.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
@@ -23,8 +24,8 @@ import { registeredParserSandbox, type InitializedParserSandbox } from "../sandb
 import type { ArtifactStore } from "../tools/storage.js";
 
 export const TABLE_CELLS_ARTIFACT_SCHEMA = "docslurp.html-table-cells.v3";
-/** Absolute ceiling on a stored artifact (the guest output ceiling); the per-document cap (tableCellsByteCap) is usually far lower. */
-export const TABLE_CELLS_ARTIFACT_MAX_BYTES = HTML_TABLE_OUTPUT_CEILING;
+/** Absolute ceiling on a stored artifact; the per-document cap (tableCellsByteCap, from the tables' structure) is usually far lower. */
+export const TABLE_CELLS_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const ROW_LABEL = /^row ([1-9][0-9]{0,3}) column ([1-9][0-9]{0,3}) rowspan ([1-9][0-9]{0,3}) colspan ([1-9][0-9]{0,3})$/;
 
@@ -75,14 +76,27 @@ export function embedHtmlTableSources(extracted: { text: string; canonicalDocume
 }
 
 /**
- * The writer's byte cap for a document's artifact, from the structure of its tables: each stored record costs at most
- * 40 bytes of position, flag and punctuation, its value at most 6 bytes per source byte (JSON escapes), each table 80
- * bytes; never above TABLE_CELLS_ARTIFACT_MAX_BYTES. The reader then reads exactly the length the header records.
+ * The byte cap of a document's artifact, from the structure of the tables being stored or looked up (never from an
+ * artifact): each table's encoded text (htmlTableValueBound), at most 40 bytes of position, flag and punctuation per
+ * record (one per cell tag) and 80 per table, plus the header; never above TABLE_CELLS_ARTIFACT_MAX_BYTES. The writer
+ * does not store above it; the reader refuses a longer artifact before reading its body.
  */
 export function tableCellsByteCap(sources: string[]): number {
   let bound = 1024;
-  for (const source of vmTableSources(sources)) bound += 6 * Buffer.byteLength(source, "utf8") + 40 * htmlTableCellTagCount(source) + 80;
+  for (const source of vmTableSources(sources)) bound += htmlTableValueBound(source) + 40 * htmlTableCellTagCount(source) + 80;
   return Math.min(TABLE_CELLS_ARTIFACT_MAX_BYTES, bound);
+}
+
+/**
+ * The generation an artifact belongs to: sha256 over the exact inputs embed derives its tables from, the document text
+ * and every canonical block's text (each JSON-encoded, so the hash is lossless and unambiguous). The writer hashes what
+ * it derived from the Markdown and canonical document it wrote; embed hashes what it read. Only an exact match is used,
+ * so a late write of an older generation (a retried stage's slower PUT) is never served for a newer one.
+ */
+export function tableCellsGeneration(extracted: { text: string; canonicalDocument?: CanonicalDocument }): string {
+  const hash = createHash("sha256").update(JSON.stringify(extracted.text), "utf8");
+  for (const block of extracted.canonicalDocument?.blocks ?? []) hash.update("\n").update(JSON.stringify(block.text), "utf8");
+  return hash.digest("hex");
 }
 
 export type TableCellsGuestVersion = { version: string; reason?: undefined } | { version: null; reason: string };
@@ -130,15 +144,27 @@ function encodeCells(cells: HtmlTableCell[] | null): EncodedCell[] | null {
 
 const smallInt = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 9999;
 
-function decodeCells(encoded: unknown): HtmlTableCell[] | null {
+/**
+ * Decode one table's stored records. Its record count and every value's length are checked before anything is built,
+ * and the document's running cell and text totals are charged as it goes (`budget`).
+ */
+function decodeCells(encoded: unknown, budget: { cells: number; textChars: number }): HtmlTableCell[] | null {
   if (encoded === null) return null;
   if (!Array.isArray(encoded)) throw new Error("cells not a list");
-  return encoded.map((entry: unknown) => {
-    if (!Array.isArray(entry)) throw new Error("invalid encoded cell");
-    const h = entry.length === 2 ? entry[0] : entry.length === 6 ? entry[4] : -1;
-    if (h !== 0 && h !== 1 && h !== 2) throw new Error("invalid encoded cell");
+  if (encoded.length > HTML_TABLE_MAX_CELLS) throw new Error("table record count exceeds limit");
+  budget.cells += encoded.length;
+  if (budget.cells > HTML_TABLE_DOCUMENT_LIMITS.cells) throw new Error("artifact exceeds the document budget");
+  for (const entry of encoded as unknown[]) {
+    if (!Array.isArray(entry) || (entry.length !== 2 && entry.length !== 6)) throw new Error("invalid encoded cell");
     const value = entry[entry.length - 1];
-    if (typeof value !== "string") throw new Error("invalid encoded cell");
+    if (typeof value !== "string" || value.length > HTML_TABLE_MAX_SOURCE_CHARS) throw new Error("invalid encoded cell");
+    budget.textChars += value.length;
+    if (budget.textChars > HTML_TABLE_DOCUMENT_LIMITS.textChars) throw new Error("artifact exceeds the document budget");
+  }
+  return (encoded as unknown[][]).map((entry) => {
+    const h = entry.length === 2 ? entry[0] : entry[4];
+    if (h !== 0 && h !== 1 && h !== 2) throw new Error("invalid encoded cell");
+    const value = entry[entry.length - 1] as string;
     const header = decodeHeader(h);
     let cell: HtmlTableCell;
     if (entry.length === 2) cell = { label: "caption", value };
@@ -152,13 +178,13 @@ function decodeCells(encoded: unknown): HtmlTableCell[] | null {
   });
 }
 
-/** What an artifact is bound to: this run, document, Markdown generation (the markdown slot it was written for) and guest. */
-export interface TableCellsScope { runId: string; documentId: string; markdownUri: string; guestVersion: string }
+/** What an artifact is bound to: this run, document, content generation (tableCellsGeneration) and guest. */
+export interface TableCellsScope { runId: string; documentId: string; generation: string; guestVersion: string }
 const LENGTH_DIGITS = 10;
 
 /** The header up to the length field; then `LENGTH_DIGITS` digits, then HEADER_TAIL. Fixed for a scope, so read first. */
 function headerHead(scope: TableCellsScope): string {
-  return `${JSON.stringify({ schema: TABLE_CELLS_ARTIFACT_SCHEMA, runId: scope.runId, documentId: scope.documentId, markdownUri: scope.markdownUri, guestVersion: scope.guestVersion }).slice(0, -1)},"bytes":"`;
+  return `${JSON.stringify({ schema: TABLE_CELLS_ARTIFACT_SCHEMA, runId: scope.runId, documentId: scope.documentId, generation: scope.generation, guestVersion: scope.guestVersion }).slice(0, -1)},"bytes":"`;
 }
 const HEADER_TAIL = `","tables":[`;
 const FOOTER = "]}";
@@ -186,14 +212,30 @@ export async function writeTableCellsArtifact(args: TableCellsScope & {
   const parts: Buffer[] = [];
   let bytes = head.length + LENGTH_DIGITS + tail.length + FOOTER.length;
   for (const [source, cells] of args.prepared) {
+    // Charged before this table is serialized, from its cells: each value's JSON-encoded size (UTF-8 bytes plus escape
+    // growth) and 40 bytes per record. Over the cap, nothing more is built.
+    let estimate = 80;
+    for (const cell of cells ?? []) estimate += 40 + jsonStringBound(cell.value);
+    if (bytes + estimate > cap) return { status: "too-large", tables, bytes: bytes + estimate };
     const part = Buffer.from(`${parts.length ? "," : ""}${JSON.stringify([tableSourceSha256(source), encodeCells(cells)])}`, "utf8");
     bytes += part.length;
-    if (bytes > cap) return { status: "too-large", tables, bytes };
     parts.push(part);
   }
   const length = Buffer.from(String(bytes).padStart(LENGTH_DIGITS, "0"), "utf8");
   await args.storage.putBytes(args.key, Buffer.concat([head, length, tail, ...parts, Buffer.from(FOOTER)], bytes), "application/json", { signal: args.signal });
   return { status: "written", tables, bytes };
+}
+
+/** Upper bound of a string's JSON encoding: UTF-8 bytes, +5 per control character, +1 per quote or backslash, +3 per lone surrogate. */
+function jsonStringBound(value: string): number {
+  let growth = 2;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c < 32 || c === 127) growth += 5;
+    else if (c === 34 || c === 92) growth += 1;
+    else if (c >= 0xd800 && c <= 0xdfff) growth += 3;
+  }
+  return Buffer.byteLength(value, "utf8") + growth;
 }
 
 export type TableCellsLookup =
@@ -211,13 +253,29 @@ function isStorageNotFound(error: unknown): boolean {
   return false;
 }
 
+/** The limits a stored artifact for these tables must fit, from their structure alone (never from the artifact). */
+interface ReadBudget { bytes: number; tables: number; containers: number; scalars: number; longestString: number }
+function readBudget(unique: string[]): ReadBudget {
+  const tags = unique.reduce((total, source) => total + htmlTableCellTagCount(source), 0);
+  return {
+    bytes: tableCellsByteCap(unique),
+    tables: unique.length,
+    // { tables [ [sha, [ [cell] ] ] ] }: the object, the tables list, a pair and a records list per table, one per record.
+    containers: 2 + 2 * unique.length + tags,
+    // 7 header keys and values, a hash (or null) per table, at most 6 per record.
+    scalars: 16 + 2 * unique.length + 6 * tags,
+    // A value is at most its table's encoded text; header strings (ids, hashes) are short.
+    longestString: Math.max(256, ...unique.map((source) => htmlTableValueBound(source) + 2)),
+  };
+}
+
 /**
- * Read the artifact header first and only then its body: the header (a fixed length for this scope) must match this
- * run, document, Markdown generation and guest exactly and record the artifact's total length, which bounds the rest
- * of the read (never above the ceiling). The transfer stops at the first byte past it, whether or not the store
- * reports a length.
+ * Read the artifact header first and only then its body. The header (a fixed length for this scope) must match this
+ * run, document, generation and guest exactly. Its recorded length, and any length the store reports, must fit the
+ * budget computed from the tables being looked up, or nothing past the header is read. The transfer stops at the
+ * first byte past the recorded length, whether or not the store reports one.
  */
-async function readArtifactBytes(storage: Pick<ArtifactStore, "openStream">, key: string, scope: TableCellsScope, signal?: AbortSignal): Promise<string> {
+async function readArtifactBytes(storage: Pick<ArtifactStore, "openStream">, key: string, scope: TableCellsScope, maxBytes: number, signal?: AbortSignal): Promise<string> {
   const head = Buffer.from(headerHead(scope), "utf8");
   const headerBytes = head.length + LENGTH_DIGITS + HEADER_TAIL.length;
   const { stream, size } = await storage.openStream(key, signal);
@@ -227,7 +285,7 @@ async function readArtifactBytes(storage: Pick<ArtifactStore, "openStream">, key
     (stream as { destroy?: () => void }).destroy?.();
     throw new TableCellsRefused(reason);
   };
-  if (size !== null && size > TABLE_CELLS_ARTIFACT_MAX_BYTES) return await stop("artifact exceeds size limit");
+  if (size !== null && size > maxBytes) return await stop("artifact exceeds the read budget for these tables");
   const chunks: Buffer[] = [];
   let received = 0;
   let total = Number.POSITIVE_INFINITY;
@@ -242,44 +300,40 @@ async function readArtifactBytes(storage: Pick<ArtifactStore, "openStream">, key
       const digits = header.subarray(head.length, head.length + LENGTH_DIGITS).toString("utf8");
       if (!/^[0-9]{10}$/.test(digits)) return await stop("invalid artifact length");
       total = Number(digits);
-      if (total < headerBytes + FOOTER.length || total > TABLE_CELLS_ARTIFACT_MAX_BYTES || (size !== null && size !== total)) return await stop("artifact length mismatch");
+      if (total > maxBytes) return await stop("artifact exceeds the read budget for these tables");
+      if (total < headerBytes + FOOTER.length || (size !== null && size !== total)) return await stop("artifact length mismatch");
     }
-    if (received > total || (total === Number.POSITIVE_INFINITY && received > headerBytes + 64 * 1024)) return await stop("artifact exceeds its recorded length");
+    if (received > total || (total === Number.POSITIVE_INFINITY && received > Math.max(headerBytes, 64 * 1024))) return await stop("artifact exceeds its recorded length");
   }
   if (received !== total) throw new TableCellsRefused("artifact truncated");
   return Buffer.concat(chunks, received).toString("utf8");
 }
 
 /**
- * Strict reader, after the header and length checks above. Before JSON.parse: nesting at most 5 deep and at most one
- * array or object per 6 bytes (the smallest stored record), so parsing cannot amplify the bounded body much. Then
- * exact top-level keys; entries are `[sha256, cells]` pairs with lowercase hex hashes, unique, at most 1,024; cells
- * decode to flat records that pass the VM-output check; and the artifact stays within the document's cell and text
- * budgets.
+ * Strict reader, after the header and length checks above. Before JSON.parse, the shape must fit the budget of the
+ * tables being looked up: nesting at most 5 deep, at most one array or object per table and per record, at most 6
+ * scalars per record, and no string longer than the longest table's encoded text. Then exact top-level keys; entries
+ * are `[sha256, cells]` pairs, lowercase hex, unique, no more than the tables looked up; each table's record count and
+ * value lengths are checked, and the document's cell and text budgets charged, before its records are decoded.
  */
-function parseArtifact(body: string, scope: TableCellsScope): Map<string, HtmlTableCell[] | null> {
+function parseArtifact(body: string, scope: TableCellsScope, budget: ReadBudget): Map<string, HtmlTableCell[] | null> {
   if (!body.endsWith(FOOTER)) throw new Error("artifact truncated");
-  assertJsonShape(body, { maxDepth: 5, maxContainers: Math.floor(body.length / 6) + 8 });
+  assertJsonShape(body, { maxDepth: 5, maxContainers: budget.containers, maxScalars: budget.scalars, maxStringLength: budget.longestString });
   const raw = JSON.parse(body) as unknown;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("not an object");
   const value = raw as Record<string, unknown>;
-  if (Object.keys(value).join(",") !== "schema,runId,documentId,markdownUri,guestVersion,bytes,tables") throw new Error("unexpected fields");
-  if (value.schema !== TABLE_CELLS_ARTIFACT_SCHEMA || value.runId !== scope.runId || value.documentId !== scope.documentId || value.markdownUri !== scope.markdownUri || value.guestVersion !== scope.guestVersion) throw new Error("artifact header mismatch");
-  if (!Array.isArray(value.tables) || value.tables.length > HTML_TABLE_DOCUMENT_LIMITS.tables) throw new Error("invalid tables");
+  if (Object.keys(value).join(",") !== "schema,runId,documentId,generation,guestVersion,bytes,tables") throw new Error("unexpected fields");
+  if (value.schema !== TABLE_CELLS_ARTIFACT_SCHEMA || value.runId !== scope.runId || value.documentId !== scope.documentId || value.generation !== scope.generation || value.guestVersion !== scope.guestVersion) throw new Error("artifact header mismatch");
+  if (!Array.isArray(value.tables) || value.tables.length > Math.min(budget.tables, HTML_TABLE_DOCUMENT_LIMITS.tables)) throw new Error("invalid tables");
   const bySha = new Map<string, HtmlTableCell[] | null>();
-  let cellCount = 0, textChars = 0;
+  const totals = { cells: 0, textChars: 0 };
   for (const entry of value.tables as unknown[]) {
     if (!Array.isArray(entry) || entry.length !== 2) throw new Error("invalid table entry");
     const [sha, encoded] = entry;
     if (typeof sha !== "string" || !SHA256_HEX.test(sha)) throw new Error("invalid table hash");
     if (bySha.has(sha)) throw new Error("duplicate table hash");
-    const cells = decodeCells(encoded);
+    const cells = decodeCells(encoded, totals);
     assertHtmlTableCells(cells);
-    if (cells) {
-      cellCount += cells.length;
-      for (const cell of cells) textChars += cell.value.length;
-      if (cellCount > HTML_TABLE_DOCUMENT_LIMITS.cells || textChars > HTML_TABLE_DOCUMENT_LIMITS.textChars) throw new Error("artifact exceeds the document budget");
-    }
     bySha.set(sha, cells);
   }
   return bySha;
@@ -287,15 +341,16 @@ function parseArtifact(body: string, scope: TableCellsScope): Map<string, HtmlTa
 
 /**
  * Cells for the document's VM table sources from the stored artifact, keyed by the exact source each was looked up
- * by. Every failure is a full miss (`missing`, `invalid`, `unavailable`): the caller sends every table to a VM.
+ * by. Every failure is a full miss (`missing`, `invalid`, `unavailable`): the caller sends every table to a VM. The
+ * read holds its byte budget from the worker-wide table-parse budget while it reads and decodes.
  */
 export async function readTableCellsArtifact(args: {
   storage: Pick<ArtifactStore, "openStream">;
   key: string;
   runId: string;
   documentId: string;
-  /** The document's current markdown slot: an artifact written for another generation is refused. */
-  markdownUri: string | undefined;
+  /** tableCellsGeneration of what the caller read: only an artifact of exactly that generation is used. */
+  generation: string;
   guestVersion: string | null;
   sources: string[];
   signal?: AbortSignal;
@@ -304,28 +359,34 @@ export async function readTableCellsArtifact(args: {
   const miss = (status: "missing" | "invalid" | "unavailable", reason: string): TableCellsLookup => ({ status, cached: new Map(), hits: 0, misses: unique.length, reason: reason.replace(/\s+/g, " ").slice(0, 200) });
   if (unique.length === 0) return { status: "unused", cached: new Map(), hits: 0, misses: 0 };
   if (!args.guestVersion) return miss("unavailable", "guest parser version unknown");
-  if (!args.markdownUri) return miss("unavailable", "no markdown slot");
-  const scope: TableCellsScope = { runId: args.runId, documentId: args.documentId, markdownUri: args.markdownUri, guestVersion: args.guestVersion };
-  let body: string;
+  if (unique.length > HTML_TABLE_DOCUMENT_LIMITS.tables) return miss("unavailable", "more tables than an artifact may hold");
+  const scope: TableCellsScope = { runId: args.runId, documentId: args.documentId, generation: args.generation, guestVersion: args.guestVersion };
+  const budget = readBudget(unique);
+  const release = await tableParseMemoryBudget().reserve(budget.bytes, args.signal);
   try {
-    body = await readArtifactBytes(args.storage, args.key, scope, args.signal);
-  } catch (error) {
-    if (args.signal?.aborted) throw error;
-    if (error instanceof TableCellsRefused) return miss("invalid", error.message);
-    if (isStorageNotFound(error)) return miss("missing", "no stored table cells");
-    return miss("invalid", `artifact unreadable: ${error instanceof Error ? error.message : String(error)}`);
+    let body: string;
+    try {
+      body = await readArtifactBytes(args.storage, args.key, scope, budget.bytes, args.signal);
+    } catch (error) {
+      if (args.signal?.aborted) throw error;
+      if (error instanceof TableCellsRefused) return miss("invalid", error.message);
+      if (isStorageNotFound(error)) return miss("missing", "no stored table cells");
+      return miss("invalid", `artifact unreadable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let bySha: Map<string, HtmlTableCell[] | null>;
+    try {
+      bySha = parseArtifact(body, scope, budget);
+    } catch (error) {
+      return miss("invalid", error instanceof Error ? error.message : String(error));
+    }
+    const cached = new Map<string, HtmlTableCell[] | null>();
+    for (const source of unique) {
+      const sha = tableSourceSha256(source);
+      if (bySha.has(sha)) cached.set(source, bySha.get(sha) ?? null);
+    }
+    const hits = cached.size;
+    return { status: hits === unique.length ? "hit" : "partial", cached, hits, misses: unique.length - hits };
+  } finally {
+    release();
   }
-  let bySha: Map<string, HtmlTableCell[] | null>;
-  try {
-    bySha = parseArtifact(body, scope);
-  } catch (error) {
-    return miss("invalid", error instanceof Error ? error.message : String(error));
-  }
-  const cached = new Map<string, HtmlTableCell[] | null>();
-  for (const source of unique) {
-    const sha = tableSourceSha256(source);
-    if (bySha.has(sha)) cached.set(source, bySha.get(sha) ?? null);
-  }
-  const hits = cached.size;
-  return { status: hits === unique.length ? "hit" : "partial", cached, hits, misses: unique.length - hits };
 }

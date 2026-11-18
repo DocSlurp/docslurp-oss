@@ -25,9 +25,16 @@ export function visionRunReadsPages(pipeline: VisionPipeline): boolean {
  * (vision's all-pages override) or extraction asked for vision and the document's playbook allows it. Errs towards
  * true: a document vision then leaves alone only loses stored table cells, never correctness.
  */
-export function visionMayReadDocumentPages(state: Pick<WorkflowState, "run" | "artifactLedger">, documentId: string, needsVision: boolean): boolean {
+export function visionMayReadDocumentPages(state: Pick<WorkflowState, "run" | "artifactLedger">, document: { id: string; mimeType: string }, needsVision: boolean): boolean {
   const pipeline = state.run.pipeline;
   if (!visionRunReadsPages(pipeline)) return false;
+  // vision-extract never reads a text-native source (it records `text-native-source` and stops), Good included.
+  if (visionSkipsTextNativeSource(document)) return false;
   if (qualityReadsEveryPage(pipeline.quality)) return true;
-  return needsVision && visionAllowedForDocument(pipeline, state.artifactLedger.readDocument(documentId, "parser-playbook"), { evidenceRouting: resolveRunRoutingV2(state as WorkflowState) });
+  return needsVision && visionAllowedForDocument(pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook"), { evidenceRouting: resolveRunRoutingV2(state as WorkflowState) });
+}
+
+/** A text-native source (`text/*`): vision-extract skips it whatever the quality. Shared with vision-extract. */
+export function visionSkipsTextNativeSource(document: { mimeType: string }): boolean {
+  return document.mimeType.startsWith("text/");
 }

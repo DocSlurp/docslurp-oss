@@ -214,6 +214,15 @@ export class PiiDetectStage implements Stage {
       const artifactSlot = `${document.id}:pii-detect`;
       const artifactKey = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.json`;
 
+      // Stored HTML table cells hold table text from before this stage. They are never written on a PII-policy run
+      // (tableCellsCacheActive); delete any that exist anyway on every redact or block run: unconditionally, before
+      // anything is read or redacted, and also when a completed checkpoint is replayed (one DeleteObject). Matches or
+      // not: a retry after a failed delete sees already-redacted text and finds nothing, so the delete must not depend
+      // on what an attempt finds. A failed delete fails the stage, which is retried; nothing is redacted before it.
+      if (policy.action === "redact_artifacts" || policy.action === "block_indexing") {
+        await this.storage.deleteKeys([tableCellsArtifactKey(state.run, document)]);
+      }
+
       await runDocumentStage(
         state,
         document,
@@ -245,13 +254,6 @@ export class PiiDetectStage implements Stage {
     signal?: AbortSignal,
   ) {
     const ledger = state.artifactLedger;
-    // Stored HTML table cells hold table text from before this stage. They are never written on a PII-policy run
-    // (tableCellsCacheActive); delete any that exist anyway on every redact or block run, unconditionally and before
-    // anything is read or redacted. Matches or not: a retry after a failed delete sees already-redacted text and finds
-    // nothing, so the delete must not depend on what this attempt finds. A failed delete fails the stage (retried).
-    if (policy.action === "redact_artifacts" || policy.action === "block_indexing") {
-      await this.storage.deleteKeys([tableCellsArtifactKey(state.run, document)]);
-    }
     let markdown: TextArtifact | null;
     let html: TextArtifact | null;
     let canonical: JsonArtifact | null;

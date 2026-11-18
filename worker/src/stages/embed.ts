@@ -1,5 +1,5 @@
 import { hasVmHtmlTableWork, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
-import { embedHtmlTableSources, readTableCellsArtifact, reportUnknownGuest, tableCellsArtifactKey, tableCellsCacheActive, tableCellsGuestVersion, type TableCellsLookup } from "../pipeline/html-table-cells-cache.js";
+import { embedHtmlTableSources, readTableCellsArtifact, reportUnknownGuest, tableCellsArtifactKey, tableCellsCacheActive, tableCellsGeneration, tableCellsGuestVersion, type TableCellsLookup } from "../pipeline/html-table-cells-cache.js";
 import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { createHash } from "node:crypto";
 
@@ -193,8 +193,8 @@ export class EmbedStage implements Stage {
               key: tableCellsArtifactKey(state.run, document),
               runId: state.run.id,
               documentId: document.id,
-              // Bound to the Markdown generation embed reads: an artifact written for an earlier one is refused.
-              markdownUri: state.artifactLedger.readDocument(document.id, "markdown"),
+              // Bound to exactly what embed read: an artifact written for other content (an older write landing late) is refused.
+              generation: tableCellsGeneration(extracted),
               guestVersion: guest.version,
               sources: tableSources,
               signal,

@@ -12,6 +12,7 @@ import {
   SandboxConfigError,
   SandboxInfrastructureError,
   SandboxOutputError,
+  SandboxOutputLimitError,
   SandboxPolicyError,
   SandboxRunError,
   type ParserSandboxProvider,
@@ -454,7 +455,7 @@ async function boundedJobOutput(stream: ReadableStream<Uint8Array | string>, lim
   try {
     return await boundedVmStream(stream, limit);
   } catch (error) {
-    if (error instanceof Error && error.message === "parser VM transfer exceeded byte limit") throw new SandboxOutputError(`${what} exceeds its limit`);
+    if (error instanceof Error && error.message === "parser VM transfer exceeded byte limit") throw new SandboxOutputLimitError(`${what} exceeds its limit`);
     throw error;
   }
 }
@@ -1590,7 +1591,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               markCleaned();
               // Only what this command created or changed comes back.
               if (closed || lane.dead) throw new Error("parser VM session closed before download");
-              await staging!.download(snapshot, { maxFileBytes: command.limits.maxOutputFileBytes });
+              await staging!.download(snapshot, { maxBytes: command.limits.maxOutputBytes });
               const usage = meterLane(lane);
               return { ...outcome.output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
             }
@@ -1614,7 +1615,11 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               await terminate().catch(() => {});
               // Only the job-tree probe blames the previous document (council X #1); it throws its own error, below.
               // After its command ran, or a size limit on its own files: this document's verdict, never retried (recheck Q #1).
-              if (ran || /exceeds (?:its )?limit/.test(error.message)) throw new SandboxOutputError(error.message, meterLane(lane), { cause: error });
+              if (ran || /exceeds (?:its )?limit/.test(error.message)) {
+                // Keep a size refusal recognisable (SandboxOutputLimitError): table parsing degrades it to null cells.
+                const Refusal = error instanceof SandboxOutputLimitError ? SandboxOutputLimitError : SandboxOutputError;
+                throw new Refusal(error.message, meterLane(lane), { cause: error });
+              }
               // Anything else this document's own staging hit (a cp or mkdir in its job tree that the VM refused, an
               // unreadable or unlistable output) is its strike: retried on a fresh VM, failed at the limit (council X #1).
               throw new SandboxInfrastructureError(`modal sandbox staging failed for this document: ${error.message}; VM terminated`, meterLane(lane), { cause: error, afterCommand: true });

@@ -456,6 +456,17 @@ describe("piiPolicy and stored HTML table cells", () => {
     expect(storage.objects.has(key)).toBe(false);
   });
 
+  it("also deletes them when a completed pii-detect checkpoint is replayed", async () => {
+    const { storage, state, stage, prefix, documentId } = setup("block_indexing");
+    await stage.run(state);
+    const key = `${prefix}/table-cells/${documentId}.json`;
+    storage.objects.set(key, "{}");
+    // The document's pii-detect checkpoint is complete: the stage skips its scan but still deletes the cells.
+    await stage.run(state);
+    expect(state.documentStage(documentId, "pii-detect")?.status).toBe("completed");
+    expect(storage.objects.has(key)).toBe(false);
+  });
+
   it("flag_for_review leaves them (nothing is redacted or withheld)", async () => {
     const { storage, state, stage, prefix, documentId } = setup("flag_for_review");
     const key = `${prefix}/table-cells/${documentId}.json`;

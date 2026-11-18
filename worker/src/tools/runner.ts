@@ -114,8 +114,8 @@ export interface CommandPlan {
    * writes only to the directories of its output arguments.
    */
   readOnlyInputs?: boolean;
-  /** Largest output file the command may hand back (SandboxLimits.maxOutputFileBytes): enforced in the transfer itself. */
-  maxOutputFileBytes?: number;
+  /** The most output bytes the command may hand back, per file and in total (SandboxLimits.maxOutputBytes). */
+  maxOutputBytes?: number;
 }
 
 /**
@@ -1929,7 +1929,7 @@ export class CommandRunner {
       limits: {
         timeoutMs: plan.timeoutMs ?? resolveCommandTimeoutMs(pages),
         ...(this.commandRssBudgetKb ? { rssBudgetMb: Math.round(this.commandRssBudgetKb / 1024) } : {}),
-        ...(plan.maxOutputFileBytes !== undefined ? { maxOutputFileBytes: plan.maxOutputFileBytes } : {}),
+        ...(plan.maxOutputBytes !== undefined ? { maxOutputBytes: plan.maxOutputBytes } : {}),
       },
     });
     const { session, release } = await this.acquireSession();

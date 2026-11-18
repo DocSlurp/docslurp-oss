@@ -1,6 +1,6 @@
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
-import { visionRunMayReadPages } from "../lib/vision-reads-pages.js";
+import { visionRunMayReadPages, visionSkipsTextNativeSource } from "../lib/vision-reads-pages.js";
 import { recordPageExtracts, visionPageRecords } from "../pipeline/page-extracts.js";
 import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { recordPageEscalation } from "../pipeline/run-milestones.js";
@@ -414,7 +414,7 @@ export class VisionExtractStage implements Stage {
           artifactSlot,
           "vision fallback manifest ready",
           async () => this.withChartExport(state, document, chartExport, signal, async () => {
-            if (document.mimeType.startsWith("text/")) {
+            if (visionSkipsTextNativeSource(document)) {
               await this.storage.putJson(key, {
                 documentId: document.id,
                 selection,
@@ -2538,11 +2538,11 @@ export class VisionExtractStage implements Stage {
     reconciliation: { changedPages: number[]; markdown?: string; markdownUri?: string; canonicalDocument?: CanonicalDocument },
     signal?: AbortSignal,
   ): Promise<StoreEmbedTableCellsStats | null> {
-    if (reconciliation.changedPages.length === 0 || reconciliation.markdown === undefined || reconciliation.markdownUri === undefined) return null;
+    if (reconciliation.changedPages.length === 0 || reconciliation.markdown === undefined) return null;
     if (!mayHaveHtmlTables(reconciliation.markdown, reconciliation.canonicalDocument?.blocks)) return { status: "no-tables" };
     return await storeEmbedTableCells({
       run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
-      markdown: reconciliation.markdown, markdownUri: reconciliation.markdownUri, canonicalDocument: reconciliation.canonicalDocument, signal,
+      markdown: reconciliation.markdown, canonicalDocument: reconciliation.canonicalDocument, signal,
     });
   }
 }
