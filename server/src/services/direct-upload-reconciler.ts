@@ -95,10 +95,19 @@ export async function reconcileDirectUploads(): Promise<void> {
   try {
     do {
       rerunRequested = false;
+      // Two index ranges, never a scan of every session: due sessions (upload_sessions_reconcile_idx) and abandoned
+      // initializing ones past their deadline (upload_sessions_initializing_expiry_idx, 0196).
       const sessions = await sql<DueSession[]>`
-        select id, user_id, status, expires_at < now() as expired, next_reconcile_at as due_at from upload_sessions
-        where (status in ('pending', 'uploading', 'ingesting') or (status = 'initializing' and expires_at < now())) and next_reconcile_at <= now()
-        order by next_reconcile_at limit ${RECONCILE_BATCH}`;
+        select * from (
+          (select id, user_id, status, expires_at < now() as expired, next_reconcile_at as due_at from upload_sessions
+            where status in ('pending', 'uploading', 'ingesting') and next_reconcile_at <= now()
+            order by next_reconcile_at limit ${RECONCILE_BATCH})
+          union all
+          (select id, user_id, status, true as expired, next_reconcile_at as due_at from upload_sessions
+            where status = 'initializing' and expires_at < now() and next_reconcile_at <= now()
+            order by expires_at limit ${RECONCILE_BATCH})
+        ) due
+        order by due_at limit ${RECONCILE_BATCH}`;
       let next = 0;
       // A fixed pool: each worker takes the next due session until none are left or shutdown begins. Per-session
       // advisory locks still serialize work on one session; the pool only overlaps different sessions.
