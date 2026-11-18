@@ -232,5 +232,27 @@ describe.skipIf(!url)("legacy URL adoption under concurrency (real PostgreSQL)",
       select version_number, previous_version_id from documents where project_id = ${s.project} and canonical_id = 'notes-key' order by created_at, id`;
     expect(chain.map((row) => row.version_number)).toEqual([1, 2, 3]);
   }, 30_000);
+
+  it("two first ingests of /manual and /manual/ under one caller key race: the chain lock lets exactly one in", async () => {
+    const s = await scenario();
+    const tag = randomUUID().slice(0, 8);
+    const [plain, slash] = [`https://example.com/${tag}/manual`, `https://example.com/${tag}/manual/`];
+    const key = canonicalIdForUrl(plain);
+    const urlIngest = (url: string) => runCreation.create({
+      userId: s.user, projectId: s.project, kind: "url-ingest", pipeline: defaultPipelineFeatures,
+      sources: { kind: "files", files: [{ filename: "example.com-0.html", mimeType: "text/html", sourceKey: `u/raw/${randomUUID()}`, fileSize: 1000, canonicalId: key, metadata: { sourceUrl: url } }] },
+    } as never).then(() => "created", (error: unknown) => error);
+    const { ReservedCanonicalIdError } = await import("../lib/canonical-id.js");
+    for (let round = 0; round < 3; round++) {
+      await pool`delete from documents where project_id = ${s.project} and canonical_id = ${key}`;
+      // Both pass the early (unlocked) check, since no chain exists yet; under the chain lock the second sees the first.
+      const outcomes = await Promise.all([urlIngest(plain), urlIngest(slash)]);
+      expect(outcomes.filter((outcome) => outcome === "created")).toHaveLength(1);
+      expect(outcomes.find((outcome) => outcome !== "created")).toBeInstanceOf(ReservedCanonicalIdError);
+      const urls = await pool<{ source_url: string }[]>`select metadata ->> 'sourceUrl' as source_url from documents
+        where project_id = ${s.project} and canonical_id = ${key}`;
+      expect(urls).toHaveLength(1);
+    }
+  }, 60_000);
 });
 

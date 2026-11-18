@@ -241,3 +241,31 @@ describe("a caller's own repeat URL ingest under its URL's key", () => {
     expect(await rows()).toHaveLength(2);
   });
 });
+
+describe("the repeat-ingest exemption compares the full URL, not the lossy legacy key", () => {
+  const [PLAIN, SLASH] = ["https://example.com/manual", "https://example.com/manual/"];
+  const KEY = canonicalIdForUrl(PLAIN);
+  const urlIngest = (url: string, canonicalId: string) => runCreation.create({
+    userId: "u", projectId: "w", kind: "url-ingest", pipeline: defaultPipelineFeatures,
+    sources: { kind: "files", files: [{ filename: "example.com-0.html", mimeType: "text/html", sourceKey: `u/raw/${Math.random()}`, fileSize: 1000, canonicalId, metadata: { sourceUrl: url } }] },
+  } as never);
+  const reserved = async () => (await import("../lib/canonical-id.js")).ReservedCanonicalIdError;
+
+  it("chains a repeat of /manual, and refuses /manual/ (same legacy key) against the /manual chain", async () => {
+    expect(canonicalIdForUrl(SLASH)).toBe(KEY);
+    await expect(urlIngest(PLAIN, KEY)).resolves.toBeTruthy();
+    await expect(urlIngest(PLAIN, KEY)).resolves.toBeTruthy();
+    await expect(urlIngest(SLASH, KEY)).rejects.toBeInstanceOf(await reserved());
+    const chain = await rows();
+    expect(chain.map((row) => [row.canonical_id, row.version_number])).toEqual([[KEY, 1], [KEY, 2]]);
+    expect(await sql`select count(*)::int as n from project_runs where kind = 'url-ingest'`).toEqual([{ n: 2 }]);
+  });
+
+  it("refuses a repeat when the chain is ambiguous (URL-intake rows of both URLs under the key)", async () => {
+    await legacyRun("url-run", "w", "o", "u", "url-ingest");
+    await legacyDoc("plain", { run: "url-run", canonical: KEY, sourceUrl: PLAIN, created: "2026-01-01" });
+    await legacyDoc("slash", { run: "url-run", canonical: KEY, sourceUrl: SLASH, created: "2026-01-02" });
+    for (const url of [PLAIN, SLASH]) await expect(urlIngest(url, KEY)).rejects.toBeInstanceOf(await reserved());
+    expect((await rows()).map((row) => row.id)).toEqual(["plain", "slash"]);
+  });
+});

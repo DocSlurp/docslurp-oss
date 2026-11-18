@@ -234,6 +234,12 @@ function withLockRetry<T>(transaction: () => Promise<T>): Promise<T> {
   return retryOnLockConflict(transaction, () => new RunCreationBusyError());
 }
 
+/** A URL ingest item's URL as fetched (identityUrl, exact path); null for every other item. */
+function urlIngestIdentity(input: { kind: string }, file: { metadata?: unknown }): string | null {
+  const sourceUrl = file.metadata && typeof file.metadata === "object" ? (file.metadata as Record<string, unknown>).sourceUrl : undefined;
+  return input.kind === "url-ingest" && typeof sourceUrl === "string" ? tryIdentityUrl(sourceUrl) : null;
+}
+
 /**
  * A URL-provenance document's identities: its source URL as fetched
  * (identityUrl, exact path), its opaque ID, and the legacy raw form legacy rows
@@ -355,27 +361,43 @@ export async function adoptLegacyUrlVersions(
 /**
  * A caller's canonicalId must not be the raw-URL key of a legacy URL-intake chain in the project: written as an
  * upload's key it would join that URL's history (and be adopted with it) before the URL's next ingest re-keys the
- * chain. Refused like the reserved shapes (ReservedCanonicalIdError, 400 canonical_id_reserved), before anything
- * is created. A chain counts when one of its rows came from a `url-ingest` run and its stored sourceUrl maps to
- * exactly that legacy key. One indexed read (documents_project_canonical_idx) for the request's caller keys; no
- * lock, because no new legacy chain is ever written (URL ingests write opaque keys) and adoption only re-keys one
- * away.
+ * chain. Refused like the reserved shapes (ReservedCanonicalIdError, 400 canonical_id_reserved). A chain counts when
+ * one of its rows came from a `url-ingest` run and its stored sourceUrl maps to exactly that legacy key.
+ *
+ * The one exemption is a URL ingest of that same URL continuing its chain (a repeat ingest under the caller's own
+ * key): `sourceIdentity`, the item's URL as fetched (identityUrl), must equal the stored sourceUrl of every URL-intake
+ * row of the chain, exactly. The legacy key is lossy (`/manual` and `/manual/` share one), so a near match, or a
+ * chain holding more than one URL, is refused too.
+ *
+ * Called twice: once before anything is created (unlocked, for an early answer), and inside each file's transaction
+ * under the chain's advisory lock (`documents_project_canonical_idx`, one indexed read), which is authoritative. No
+ * new legacy chain is ever written (URL ingests write opaque keys) and adoption only re-keys one away.
  */
 export async function assertCallerKeysAvoidLegacyUrlChains(
   client: SqlClient,
-  args: { projectId: string; orgId: string; canonicalIds: Array<string | null | undefined> },
+  args: { projectId: string; orgId: string; items: Array<{ canonicalId?: string | null; sourceIdentity?: string | null }> },
 ): Promise<void> {
-  const callerKeys = [...new Set(args.canonicalIds.flatMap((id) => (typeof id === "string" && id && !isCallerReservedCanonicalId(id) ? [id] : [])))];
-  if (!callerKeys.length) return;
+  const items = args.items.filter((item): item is { canonicalId: string; sourceIdentity?: string | null } =>
+    typeof item.canonicalId === "string" && item.canonicalId !== "" && !isCallerReservedCanonicalId(item.canonicalId));
+  if (!items.length) return;
   const rows = await client<{ canonical_id: string; source_url: string | null }[]>`
     select d.canonical_id, d.metadata ->> 'sourceUrl' as source_url
     from documents d
     join project_runs r on r.id = d.run_id and r.project_id = d.project_id and r.org_id = d.org_id
     where d.project_id = ${args.projectId} and d.org_id = ${args.orgId}
-      and d.canonical_id = any(${client.array(callerKeys)}) and r.kind = 'url-ingest'
+      and d.canonical_id = any(${client.array([...new Set(items.map((item) => item.canonicalId))])}) and r.kind = 'url-ingest'
   `;
-  if (rows.some((row) => row.source_url !== null && tryCanonicalIdForUrl(row.source_url) === row.canonical_id)) {
-    throw new ReservedCanonicalIdError(RESERVED_CANONICAL_ID_MESSAGE);
+  // The stored URLs (as fetched) of each key's legacy URL-intake chain.
+  const chains = new Map<string, Set<string | null>>();
+  for (const row of rows) {
+    if (row.source_url === null || tryCanonicalIdForUrl(row.source_url) !== row.canonical_id) continue;
+    chains.set(row.canonical_id, (chains.get(row.canonical_id) ?? new Set()).add(tryIdentityUrl(row.source_url)));
+  }
+  for (const item of items) {
+    const stored = chains.get(item.canonicalId);
+    if (!stored) continue;
+    const sameUrl = !!item.sourceIdentity && stored.size === 1 && stored.has(item.sourceIdentity);
+    if (!sameUrl) throw new ReservedCanonicalIdError(RESERVED_CANONICAL_ID_MESSAGE);
   }
 }
 
@@ -970,8 +992,14 @@ export function createRunCreation(deps: RunCreationDeps) {
             canonicalId: file.canonicalId,
           });
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
-        // A URL re-ingest also takes over the version chain of this URL's legacy rows (raw-URL canonical ID).
-        if (!input.extract) await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId, canonicalId, metadata: file.metadata });
+        if (!input.extract) {
+          // Under the chain lock: a caller key joins a legacy URL-intake chain only as a URL ingest of exactly its URL.
+          await assertCallerKeysAvoidLegacyUrlChains(client, {
+            projectId: input.projectId, orgId, items: [{ canonicalId: file.canonicalId, sourceIdentity: urlIngestIdentity(input, file) }],
+          });
+          // A URL re-ingest also takes over the version chain of this URL's legacy rows (raw-URL canonical ID).
+          await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId, canonicalId, metadata: file.metadata });
+        }
         // The latest version by creation (as the supersession trigger orders them), and the next number after the
         // chain's highest: adopted legacy rows can repeat numbers already used by opaque-keyed ones, so in an
         // adopted chain version_number and created_at can disagree (C-L3); creation order decides the lineage.
@@ -1337,15 +1365,12 @@ export function createRunCreation(deps: RunCreationDeps) {
     }
 
     // A caller key that is a legacy URL-intake chain's raw-URL key is refused before anything is created.
-    // A URL ingest whose own URL maps to its caller key is that URL's chain continuing (a repeat ingest), not a join.
+    // A caller key that is a legacy URL-intake chain's raw-URL key is refused before anything is created, unless the
+    // item is a URL ingest of exactly that chain's URL (checked again, authoritatively, under the chain lock).
     if (sources.kind === "files" && !input.extract) {
-      const ownUrlChain = (file: RunSourceFile) => {
-        const sourceUrl = (file.metadata as Record<string, unknown> | null | undefined)?.sourceUrl;
-        return input.kind === "url-ingest" && typeof sourceUrl === "string" && tryCanonicalIdForUrl(sourceUrl) === file.canonicalId;
-      };
       await assertCallerKeysAvoidLegacyUrlChains(sql, {
         projectId: input.projectId, orgId: access.orgId,
-        canonicalIds: sources.files.filter((file) => !ownUrlChain(file)).map((file) => file.canonicalId),
+        items: sources.files.map((file) => ({ canonicalId: file.canonicalId, sourceIdentity: urlIngestIdentity(input, file) })),
       });
     }
 
