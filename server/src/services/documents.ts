@@ -1382,20 +1382,20 @@ export class DocumentMutationForbiddenError extends EditorRequiredError {
  * answers 404 when nothing is left); any the caller can read but may not edit fail the whole request with
  * DocumentMutationForbiddenError, before anything changes.
  */
-async function editableDocumentsOrForbid(documentIds: string[], userId: string): Promise<Array<{ id: string; project_id: string }>> {
+async function editableDocumentsOrForbid(documentIds: string[], userId: string): Promise<Array<{ id: string; project_id: string; org_id: string }>> {
   const ids = [...new Set(documentIds)];
   if (ids.length === 0) return [];
   const readable = await listAccessibleProjectIds(userId);
   if (readable.length === 0) return [];
-  const rows = await sql<{ id: string; project_id: string }[]>`
-    select id, project_id from documents where id = any(${sql.array(ids)}) and project_id = any(${sql.array(readable)})`;
+  const rows = await sql<{ id: string; project_id: string; org_id: string }[]>`
+    select id, project_id, org_id from documents where id = any(${sql.array(ids)}) and project_id = any(${sql.array(readable)})`;
   if (rows.length === 0) return [];
   const editable = new Set(await listReprocessableProjectIds(userId));
   if (rows.some((row) => !editable.has(row.project_id))) throw new DocumentMutationForbiddenError();
   return rows;
 }
 
-export async function setDocumentTags(docId: string, userId: string, tags: string[]): Promise<string[] | null> {
+export async function setDocumentTags(docId: string, userId: string, tags: string[], audit?: InTransactionAudit<string[]>): Promise<string[] | null> {
   const document = await getDocumentRow(docId, userId);
   if (!document || (await editableDocumentsOrForbid([docId], userId)).length === 0) {
     return null;
@@ -1411,6 +1411,11 @@ export async function setDocumentTags(docId: string, userId: string, tags: strin
     }
     // Native search caches each document's tags with its eligibility.
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, [document.project_id]);
+    // The audit record commits with the replacement, scoped to the document's organization and project.
+    if (audit) {
+      await appendOrgScopedAudits(tx as unknown as typeof sql, [document], (row) => ({ orgId: row.org_id, projectId: row.project_id }),
+        () => audit(normalized));
+    }
   });
 
   return normalized;
@@ -1442,7 +1447,10 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
       on conflict (document_id, tag) do nothing
     `;
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
-    if (audit) await appendAuditLog(audit(scopedIds.map((row) => row.id)), tx as unknown as typeof sql);
+    if (audit) {
+      await appendOrgScopedAudits(tx as unknown as typeof sql, scopedIds, (row) => ({ orgId: row.org_id, projectId: row.project_id }),
+        (rows) => audit(rows.map((row) => row.id)));
+    }
   });
 
   return scopedIds.length;
@@ -1467,7 +1475,10 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
         and tag = any(${tx.array(normalized)})
     `;
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
-    if (audit) await appendAuditLog(audit(scopedIds.map((row) => row.id)), tx as unknown as typeof sql);
+    if (audit) {
+      await appendOrgScopedAudits(tx as unknown as typeof sql, scopedIds, (row) => ({ orgId: row.org_id, projectId: row.project_id }),
+        (rows) => audit(rows.map((row) => row.id)));
+    }
   });
 
   return scopedIds.length;
@@ -1483,6 +1494,29 @@ export interface DeletedDocumentResult {
 
 /** An audit record a bulk change writes inside its own transaction, built from what that transaction changed. */
 export type InTransactionAudit<T> = (changed: T) => Parameters<typeof appendAuditLog>[0];
+
+/**
+ * Writes a change's audit records inside its transaction (`client`), one per organization the changed rows belong
+ * to, each carrying only that organization's rows: the record's orgId (and projectId when the rows share one
+ * project) come from the rows themselves, never the caller, so org-scoped audit reads always find them. A request
+ * spans one organization in practice; the split guards the case that should not happen.
+ */
+export async function appendOrgScopedAudits<T>(
+  client: typeof sql,
+  items: readonly T[],
+  scope: (item: T) => { orgId: string; projectId: string },
+  audit: (items: T[]) => Parameters<typeof appendAuditLog>[0],
+): Promise<void> {
+  const byOrg = new Map<string, T[]>();
+  for (const item of items) {
+    const { orgId } = scope(item);
+    byOrg.set(orgId, [...(byOrg.get(orgId) ?? []), item]);
+  }
+  for (const [orgId, group] of byOrg) {
+    const projects = new Set(group.map((item) => scope(item).projectId));
+    await appendAuditLog({ ...audit(group), orgId, projectId: projects.size === 1 ? [...projects][0]! : null }, client);
+  }
+}
 
 /** A document's chain identity, enough to name the advisory keys its version chain is serialized under. */
 type ChainMember = { project_id: string; canonical_id: string | null; metadata: unknown };
@@ -1627,10 +1661,10 @@ async function deleteDocumentChunk(targetIds: string[], editableProjectIds: stri
       `;
     }
 
-    const deleted = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "canonical_id" | "mime_type" | "metadata">[]>`
+    const deleted = await transaction<Pick<DocumentRow, "id" | "org_id" | "project_id" | "filename" | "run_id" | "source_key" | "canonical_id" | "mime_type" | "metadata">[]>`
       delete from documents
       where id = any(${transaction.array(docs.map((doc) => doc.id))})
-      returning id, project_id, filename, run_id, source_key, canonical_id, mime_type, metadata
+      returning id, org_id, project_id, filename, run_id, source_key, canonical_id, mime_type, metadata
     `;
 
     // Deleting a current version leaves its archived predecessors to the retention sweep.
@@ -1653,7 +1687,11 @@ async function deleteDocumentChunk(targetIds: string[], editableProjectIds: stri
       };
     });
     // The chunk's audit record, from the rows this DELETE removed, in its transaction: no delete commits without it.
-    if (audit && results.length > 0) await appendAuditLog(audit(results), transaction);
+    // Scoped to each deleted row's organization (and project).
+    if (audit && results.length > 0) {
+      const orgOf = new Map(deleted.map((row) => [row.id, row.org_id]));
+      await appendOrgScopedAudits(transaction, results, (row) => ({ orgId: orgOf.get(row.documentId)!, projectId: row.projectId }), audit);
+    }
     return results;
   }), () => new DocumentDeletionBusyError());
 }
@@ -1815,7 +1853,9 @@ export async function bulkReprocessDocuments(
         // Each run's audit record commits with its publication.
         // (the documents asked to be reprocessed, with the run made from them).
         ...(options.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {
-          await appendAuditLog(options.audit!({ runId: run.runId, documentIds: group.map((doc) => doc.id) }), client);
+          // A group is one project (so one organization): the record is scoped to it and to the published run.
+          await appendOrgScopedAudits(client, group, (doc) => ({ orgId: doc.org_id, projectId: doc.project_id }),
+            (docs) => ({ ...options.audit!({ runId: run.runId, documentIds: docs.map((doc) => doc.id) }), runId: run.runId }));
         } } : {}),
       });
       result.runs.push(created.run);

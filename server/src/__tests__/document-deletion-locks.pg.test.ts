@@ -211,12 +211,13 @@ describe.skipIf(!url)("document deletion under concurrency (real PostgreSQL)", (
     expect(await response.json()).toMatchObject({ deleted: 500 });
     expect(await pool`select id from documents where id = any(${pool.array(ids)})`).toEqual([]);
     // Each committed chunk wrote exactly one audit record, in its transaction, listing the ids its DELETE removed.
-    const records = await pool<{ resource_id: string; ids: string[]; batch: string }[]>`
-      select resource_id, array(select jsonb_array_elements_text(metadata -> 'documentIds')) as ids, metadata ->> 'batchId' as batch
+    const records = await pool<{ resource_id: string; ids: string[]; batch: string; org_id: string; project_id: string }[]>`
+      select resource_id, array(select jsonb_array_elements_text(metadata -> 'documentIds')) as ids, metadata ->> 'batchId' as batch, org_id, project_id
       from audit_log where action = 'documents.deleted' and metadata -> 'documentIds' ?| ${pool.array(ids)}`;
     expect(records).toHaveLength(5);
     expect(new Set(records.map((record) => record.batch)).size).toBe(1);
     for (const record of records) {
+      expect(record).toMatchObject({ org_id: "del-o", project_id: project });
       expect(record.ids).toHaveLength(100);
       expect(record.resource_id.length).toBeLessThan(2_000);
     }

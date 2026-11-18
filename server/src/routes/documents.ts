@@ -15,7 +15,6 @@ import {
 } from "../lib/api-key-authorization.js";
 import { getRequestActor, isPlatformAdminActor, resolveActorProjectFilter } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
-import { appendAuditLog } from "../services/audit-log.js";
 import { requestDocumentFigureResume } from "../services/figure-resume.js";
 import {
   getCorrectionWorkbench,
@@ -446,12 +445,12 @@ export const documentsRoutes = new Hono()
     if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
     const deniedResume = await denyReprocessOfVisible(c, [owner]);
     if (deniedResume) return deniedResume;
-    const { status, reason, granted, grantsLeft } = await requestDocumentFigureResume({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId });
-    await appendAuditLog({
-      orgId: owner.orgId, userId, projectId: owner.projectId, documentId: docId, apiKeyId: apiKey?.keyId ?? null,
+    // The audit record is written by the service: with the grant, in its transaction, when the request queues.
+    const { status, reason, granted, grantsLeft } = await requestDocumentFigureResume({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId }, (result) => ({
+      userId, apiKeyId: apiKey?.keyId ?? null,
       action: "document.figures.resume_requested", resourceType: "document", resourceId: docId, ipAddress: requestIp(c),
-      metadata: { status, reason, granted, userAgent: requestUserAgent(c) },
-    });
+      metadata: { status: result.status, reason: result.reason, granted: result.granted, userAgent: requestUserAgent(c) },
+    }));
     return c.json({ documentId: docId, status, reason, granted, grantsLeft }, status === "queued" || status === "already-queued" ? 202 : 200);
   })
   .get("/:docId/structured", async (c) => {
@@ -532,7 +531,21 @@ export const documentsRoutes = new Hono()
         markdown: body.markdown,
         structuredData: body.structuredData,
         notes: body.notes,
-        tags: body.tags
+        tags: body.tags,
+        // The audit record commits with the save (the service scopes it to the document's org and project).
+        audit: () => ({
+          userId,
+          action: "document.correction.saved",
+          resourceType: "document",
+          resourceId: c.req.param("docId"),
+          ipAddress: requestIp(c),
+          metadata: {
+            hasMarkdown: typeof body.markdown === "string",
+            hasStructuredData: body.structuredData !== null && body.structuredData !== undefined,
+            tagCount: body.tags?.length ?? 0,
+            userAgent: requestUserAgent(c)
+          }
+        }),
       });
     } catch (error) {
       if (error instanceof CorrectionForbiddenError) return editorRequired(c);
@@ -543,23 +556,6 @@ export const documentsRoutes = new Hono()
       return apiStatusError(c, 404, "Document not found");
     }
 
-    await appendAuditLog({
-      userId,
-      documentId: c.req.param("docId"),
-      action: "document.correction.saved",
-      resourceType: "document",
-      resourceId: c.req.param("docId"),
-      ipAddress: requestIp(c),
-      metadata: {
-        hasMarkdown: typeof body.markdown === "string",
-        hasStructuredData: body.structuredData !== null && body.structuredData !== undefined,
-        profileKey: payload.profile.profileKey,
-        profileExampleCount: payload.profile.examples.length,
-        profileSignalCount: payload.profile.correctionPatterns.length,
-        tagCount: body.tags?.length ?? 0,
-        userAgent: requestUserAgent(c)
-      }
-    });
 
     return c.json(payload);
   })
@@ -572,7 +568,15 @@ export const documentsRoutes = new Hono()
     if (deniedReindex) return deniedReindex;
     let result: Awaited<ReturnType<typeof reindexDocumentCorrection>>;
     try {
-      result = await reindexDocumentCorrection({ docId: c.req.param("docId"), userId });
+      // The audit record commits with the reindex (the service scopes it to the document's org and project).
+      result = await reindexDocumentCorrection({ docId: c.req.param("docId"), userId, audit: (done) => ({
+        userId,
+        action: "document.correction.reindexed",
+        resourceType: "document",
+        resourceId: c.req.param("docId"),
+        ipAddress: requestIp(c),
+        metadata: { pageCount: done.pageCount, chunkCount: done.chunkCount, profileKey: done.profileKey, signalKeys: done.signalKeys, userAgent: requestUserAgent(c) }
+      }) });
     } catch (error) {
       if (error instanceof CorrectionForbiddenError) return editorRequired(c);
       throw error;
@@ -582,21 +586,6 @@ export const documentsRoutes = new Hono()
       return apiStatusError(c, 404, "Correction not found");
     }
 
-    await appendAuditLog({
-      userId,
-      documentId: c.req.param("docId"),
-      action: "document.correction.reindexed",
-      resourceType: "document",
-      resourceId: c.req.param("docId"),
-      ipAddress: requestIp(c),
-      metadata: {
-        pageCount: result.pageCount,
-        chunkCount: result.chunkCount,
-        profileKey: result.profileKey,
-        signalKeys: result.signalKeys,
-        userAgent: requestUserAgent(c)
-      }
-    });
 
     return c.json(result);
   })
@@ -607,7 +596,17 @@ export const documentsRoutes = new Hono()
     if (denied) return denied;
     let tags: Awaited<ReturnType<typeof setDocumentTags>>;
     try {
-      tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
+      // The audit record commits with the replacement (the service scopes it to the document's org and project).
+      tags = await setDocumentTags(c.req.param("docId"), userId, body.tags, (saved) => ({
+        userId,
+        apiKeyId: c.get("apiKey")?.keyId ?? null,
+        documentId: c.req.param("docId"),
+        action: "document.tags.updated",
+        resourceType: "document",
+        resourceId: c.req.param("docId"),
+        ipAddress: requestIp(c),
+        metadata: { tags: saved, userAgent: requestUserAgent(c) }
+      }));
     } catch (error) {
       if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
       throw error;
@@ -617,19 +616,6 @@ export const documentsRoutes = new Hono()
       return apiStatusError(c, 404, "Document not found");
     }
 
-    await appendAuditLog({
-      userId,
-      apiKeyId: c.get("apiKey")?.keyId ?? null,
-      documentId: c.req.param("docId"),
-      action: "document.tags.updated",
-      resourceType: "document",
-      resourceId: c.req.param("docId"),
-      ipAddress: requestIp(c),
-      metadata: {
-        tags,
-        userAgent: requestUserAgent(c)
-      }
-    });
 
     return c.json({ documentId: c.req.param("docId"), tags });
   })

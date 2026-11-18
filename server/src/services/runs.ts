@@ -35,6 +35,7 @@ import {
   type DocumentRow,
   type ProjectRunRow,
 } from "./run-records.js";
+import { appendAuditLog } from "./audit-log.js";
 import { sql } from "../db.js";
 import { loadManagedPipelineOverrides } from "./projects.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
@@ -374,7 +375,9 @@ function checkReusableSource(
 export async function reprocessRun(
   runId: string,
   userId: string,
-  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; quality?: QualityLevel; visuals?: VisualsLevel; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null },
+  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; quality?: QualityLevel; visuals?: VisualsLevel; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null;
+    /** The audit record, written in the transaction that publishes the new run (scoped to its org, project and run). */
+    audit?: (runId: string) => Parameters<typeof appendAuditLog>[0] },
 ): Promise<{ run: ProjectRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
@@ -445,6 +448,9 @@ export async function reprocessRun(
     chartExportReplay: { requested: requestedTier, quality: options?.quality ?? null },
     apiKeyId: options?.apiKeyId ?? null,
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
+    ...(options?.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {
+      await appendAuditLog({ ...options.audit!(run.runId), orgId: original.orgId, projectId: original.projectId, runId: run.runId }, client);
+    } } : {}),
   });
   return { run: created.run, deferredReason: created.deferredReason };
 }

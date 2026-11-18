@@ -95,7 +95,7 @@ export interface CreateRunInput {
    * Runs inside the transaction that publishes the Run (creation_ready_at), so what it writes commits exactly
    * when the Run does; a failure rolls the publication back and the Run is discarded (bulk reprocess's audit).
    */
-  onPublish?: (client: SqlClient, run: { runId: string; documentIds: string[] }) => Promise<void>;
+  onPublish?: (client: SqlClient, run: { runId: string }) => Promise<void>;
   /**
    * Re-validate the principal at billable admission: inside the admission transaction, after the organization's spend
    * lock is held, the requesting user's access and the API key (live, this organization, `scope`, project allowlist,
@@ -752,10 +752,7 @@ async function publishRunCreation(
           creation_ready_at = now(), creation_expires_at = null, creation_source_keys = '{}', updated_at = now()
       where id = ${runId}
     `;
-    if (onPublish) {
-      const documents = await client<{ id: string }[]>`select id from documents where run_id = ${runId} order by id`;
-      await onPublish(client, { runId, documentIds: documents.map((row) => row.id) });
-    }
+    if (onPublish) await onPublish(client, { runId });
     return { pagesTotal: manifest.pages };
   });
 }

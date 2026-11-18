@@ -12,6 +12,7 @@ import {
   type FigureResumeBlockReason,
 } from "@docslurp/shared";
 import { sql } from "../db.js";
+import { appendAuditLog } from "./audit-log.js";
 
 export type FigureResumeRequestStatus = "queued" | "already-queued" | "not-resumable" | "capped" | "off";
 
@@ -93,31 +94,43 @@ async function projectMode(scope: FigureResumeScope) {
  * most DOCSLURP_FIGURE_RESUME_MAX_GRANTS per run, so a request buys a bounded amount of VM time (H4); a reprocess (a new,
  * customer-paid run) starts every counter clean. Other blocks and the backoff are cleared without a grant.
  */
-export async function requestDocumentFigureResume(scope: FigureResumeScope & { documentId: string }): Promise<FigureResumeRequestResult> {
+export async function requestDocumentFigureResume(
+  scope: FigureResumeScope & { documentId: string },
+  /** The request's audit record (scoped to this org, project and document): in the grant's transaction when it queues. */
+  audit?: (result: FigureResumeRequestResult) => Parameters<typeof appendAuditLog>[0],
+): Promise<FigureResumeRequestResult> {
   assertScope(scope);
   const maxGrants = figureResumeBudgetConfig().maxGrants;
+  const record = (result: FigureResumeRequestResult, client: typeof sql = sql) => audit
+    ? appendAuditLog({ ...audit(result), orgId: scope.orgId, projectId: scope.projectId, documentId: scope.documentId }, client)
+    : Promise.resolve();
+  // An outcome that changes nothing is audited on its own; a grant commits with its record (below).
   const answer = (status: FigureResumeRequestStatus, reason: FigureResumeBlockReason | null = null, granted = false, grants = 0): FigureResumeRequestResult =>
     ({ status, reason, granted, grantsLeft: Math.max(0, maxGrants - grants) });
-  if (typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId)) return answer("not-resumable");
+  const finish = async (result: FigureResumeRequestResult) => { await record(result); return result; };
+  if (typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId)) return finish(answer("not-resumable"));
   const mode = await projectMode(scope);
-  if (!mode || mode === "off") return answer("off");
+  if (!mode || mode === "off") return finish(answer("off"));
   const [level] = await sql<{ queued: boolean; resumable: boolean; blocked: FigureResumeBlockReason | null; grants: number; status: string }[]>`
     select l.resume_after is not null and l.resume_blocked is null as queued, l.resume_blocked as blocked, l.resume_grants as grants,
       l.images_status as status,
       exists (select 1 from documents d where ${resumableWhere(scope, "grantable")}) as resumable
     from document_extraction_levels l
     where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}`;
-  if (!level) return answer("not-resumable");
+  if (!level) return finish(answer("not-resumable"));
   const budgetBlocked = isFigureResumeBudgetBlock(level.blocked);
   if (!level.resumable) {
     const capped = level.status === "resumable" && (level.blocked === "unscanned" || (budgetBlocked && level.grants >= maxGrants));
     const result = answer(capped ? "capped" : "not-resumable", level.blocked, false, level.grants);
     console.log(`[doppler-figures] resume requested doc=${scope.documentId} org=${scope.orgId} status=${result.status} reason=${level.blocked ?? "none"} grants=${level.grants}/${maxGrants}`);
-    return result;
+    return finish(result);
   }
-  if (level.queued) return answer("already-queued", null, false, level.grants);
-  // One statement: the grant only when the row is still budget-blocked with grants left (a concurrent request grants once).
-  const [updated] = await sql<{ grants: number; granted: boolean }[]>`
+  if (level.queued) return finish(answer("already-queued", null, false, level.grants));
+  // One statement: the grant only when the row is still budget-blocked with grants left (a concurrent request grants once);
+  // its audit record commits with it.
+  const { updated, result } = await sql.begin(async (tx) => {
+  const client = tx as unknown as typeof sql;
+  const [updated] = await client<{ grants: number; granted: boolean }[]>`
     update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null,
       resume_grants = l.resume_grants + case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 1 else 0 end,
       resume_stalls = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 0 else l.resume_stalls end,
@@ -127,6 +140,9 @@ export async function requestDocumentFigureResume(scope: FigureResumeScope & { d
       and l.resume_blocked is not distinct from ${level.blocked}::text
     returning l.resume_grants as grants, l.resume_grants > ${level.grants} as granted`;
   const result = updated ? answer("queued", level.blocked, updated.granted, updated.grants) : answer("not-resumable", level.blocked, false, level.grants);
+  await record(result, client);
+  return { updated, result };
+  });
   console.log(`[doppler-figures] resume requested doc=${scope.documentId} org=${scope.orgId} status=${result.status} reason=${level.blocked ?? "none"} granted=${result.granted} grants=${updated?.grants ?? level.grants}/${maxGrants}`);
   return result;
 }

@@ -10,6 +10,8 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let bulkReprocessDocuments: typeof import("../services/documents.js").bulkReprocessDocuments;
+let documents: typeof import("../services/documents.js");
+let listAuditLog: typeof import("../services/audit-log.js").listAuditLog;
 const startWorkflow = vi.fn(async (..._args: unknown[]) => {});
 const failingPipeline = { ...defaultPipelineFeatures, summarize: !defaultPipelineFeatures.summarize };
 let failAll = false;
@@ -37,11 +39,13 @@ beforeAll(async () => {
       },
     };
   });
-  ({ bulkReprocessDocuments } = await import("../services/documents.js"));
+  documents = await import("../services/documents.js");
+  ({ bulkReprocessDocuments } = documents);
+  ({ listAuditLog } = await import("../services/audit-log.js"));
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents) values ('o', 'O', 'o', 'u', 1000)`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner')`;
-  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'W'), ('w2', 'o', 'u', 'W2')`;
 }, 120_000);
 
 afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -53,14 +57,14 @@ beforeEach(async () => {
   await sql`delete from project_runs`;
 });
 
-async function seedDocument(id: string, pipeline: object) {
+async function seedDocument(id: string, pipeline: object, project = "w") {
   const runId = `run-${id}`;
   await sql`
     insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-    values (100, ${runId}, 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as postgres.JSONValue)}, 1, 2)`;
+    values (100, ${runId}, 'o', 'u', ${project}, 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as postgres.JSONValue)}, 1, 2)`;
   await sql`
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
-    values (${id}, 'o', 'u', 'w', ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`u/raw/${id}.pdf`}, 'completed', 1000, 2)`;
+    values (${id}, 'o', 'u', ${project}, ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`u/raw/${id}.pdf`}, 'completed', 1000, 2)`;
 }
 
 describe("bulkReprocessDocuments", () => {
@@ -218,5 +222,78 @@ describe("bulk reprocess never replays an old run snapshot's model values", () =
     } finally {
       await sql`update projects set managed_models = '{}'::jsonb where id = 'w'`;
     }
+  });
+});
+
+describe("document audit records: written in their change's transaction, scoped to the organization", () => {
+  /** A record a route would build; the service adds orgId, projectId (and runId) from the rows it changed. */
+  const record = (action: string, marker: string, ids: string[] = []) => ({ userId: "u", action, resourceType: "document-bulk", resourceId: ids.slice(0, 20).join(","), metadata: { marker, documentIds: ids } });
+  const failing = (marker: string) => () => ({ userId: "u", action: null as unknown as string, resourceType: "document-bulk", metadata: { marker } });
+  const byMarker = (marker: string) => sql<{ action: string; org_id: string | null; project_id: string | null; run_id: string | null; ids: string[] }[]>`
+    select action, org_id, project_id, run_id, array(select jsonb_array_elements_text(metadata -> 'documentIds')) as ids
+    from audit_log where metadata ->> 'marker' = ${marker} order by created_at, action`;
+
+  it("two reprocess groups make two runs and exactly two audit records, each with its org, project and run", async () => {
+    await seedDocument("g1", defaultPipelineFeatures, "w");
+    await seedDocument("g2", defaultPipelineFeatures, "w2");
+    const marker = `reprocess-${Math.random()}`;
+    const result = await bulkReprocessDocuments(["g1", "g2"], "u", { audit: (run) => record("documents.bulk_reprocessed", marker, run.documentIds) });
+    expect(result.runs).toHaveLength(2);
+    const rows = await byMarker(marker);
+    expect(rows).toHaveLength(2);
+    const runIds = new Set(result.runs.map((run) => run.id));
+    for (const row of rows) {
+      expect(row.org_id).toBe("o");
+      expect(runIds.has(row.run_id!)).toBe(true);
+      expect(row.ids).toEqual([row.project_id === "w" ? "g1" : "g2"]);
+    }
+    expect(new Set(rows.map((row) => row.project_id))).toEqual(new Set(["w", "w2"]));
+  });
+
+  it("an audit insert that fails inside the publish transaction leaves no run, no documents, no record and no workflow start", async () => {
+    await seedDocument("p1", defaultPipelineFeatures);
+    const before = (await sql<{ runs: number; docs: number }[]>`select (select count(*)::int from project_runs) as runs, (select count(*)::int from documents) as docs`)[0];
+    const marker = `publish-fail-${Math.random()}`;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(bulkReprocessDocuments(["p1"], "u", { audit: failing(marker) })).rejects.toBeTruthy();
+    } finally {
+      errors.mockRestore();
+    }
+    const after = (await sql<{ runs: number; docs: number }[]>`select (select count(*)::int from project_runs) as runs, (select count(*)::int from documents) as docs`)[0];
+    expect(after).toEqual(before);
+    expect(await byMarker(marker)).toEqual([]);
+    expect(startWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("a failed audit insert rolls back a single-document tag replacement", async () => {
+    await seedDocument("t1", defaultPipelineFeatures);
+    await sql`insert into document_tags (document_id, user_id, tag) values ('t1', 'u', 'kept')`;
+    const marker = `tags-fail-${Math.random()}`;
+    await expect(documents.setDocumentTags("t1", "u", ["replaced"], failing(marker))).rejects.toBeTruthy();
+    expect(await sql`select tag from document_tags where document_id = 't1' order by tag`).toEqual([{ tag: "kept" }]);
+    expect(await byMarker(marker)).toEqual([]);
+  });
+
+  it("single delete, bulk delete, tag changes and reprocess records all appear in the org-scoped audit query", async () => {
+    for (const id of ["s1", "b1", "b2", "t2", "r1"]) await seedDocument(id, defaultPipelineFeatures);
+    const marker = `scoped-${Math.random()}`;
+    await documents.setDocumentTags("t2", "u", ["one"], (tags) => record("document.tags.updated", marker, ["t2", ...tags]));
+    await documents.addDocumentTags(["t2", "r1"], "u", ["two"], (ids) => record("documents.tags.bulk_applied", marker, ids));
+    await documents.removeDocumentTags(["t2"], "u", ["two"], (ids) => record("documents.tags.bulk_removed", marker, ids));
+    await bulkReprocessDocuments(["r1"], "u", { audit: (run) => record("documents.bulk_reprocessed", marker, run.documentIds) });
+    await documents.deleteDocument("s1", "u", (row) => record("document.deleted", marker, [row.documentId]));
+    await documents.deleteDocuments(["b1", "b2"], "u", (rows) => record("documents.deleted", marker, rows.map((row) => row.documentId)));
+    const actions = ["document.tags.updated", "documents.tags.bulk_applied", "documents.tags.bulk_removed", "documents.bulk_reprocessed", "document.deleted", "documents.deleted"];
+    // Every record carries the organization and project of the rows it covers ...
+    const rows = await byMarker(marker);
+    expect(rows.map((row) => row.action).sort()).toEqual([...actions].sort());
+    for (const row of rows) expect(row).toMatchObject({ org_id: "o", project_id: "w" });
+    // ... so the org-scoped read (a member of the organization) returns them.
+    const visible = (await listAuditLog({ actorUserId: "u", limit: 200 })).filter((entry) => entry.metadata.marker === marker);
+    expect(visible.map((entry) => entry.action).sort()).toEqual([...actions].sort());
+    for (const entry of visible) expect(entry.orgId).toBe("o");
+    const byOrg = (await listAuditLog({ orgId: "o", limit: 200 })).filter((entry) => entry.metadata.marker === marker);
+    expect(byOrg).toHaveLength(actions.length);
   });
 });

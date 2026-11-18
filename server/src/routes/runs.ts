@@ -440,7 +440,16 @@ export const runsRoutes = new Hono()
     );
     let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
     try {
-      reprocessed = await reprocessRun(c.req.param("runId"), userId, { ...body, origin: runOriginOf(c), apiKeyId: c.get("apiKey")?.keyId ?? null });
+      // The audit record commits with the new run's publication (scoped to its org, project and run).
+      reprocessed = await reprocessRun(c.req.param("runId"), userId, { ...body, origin: runOriginOf(c), apiKeyId: c.get("apiKey")?.keyId ?? null, audit: (runId) => ({
+        userId,
+        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
+        action: "run.reprocessed",
+        resourceType: "run",
+        resourceId: runId,
+        ipAddress: requestIp(c),
+        metadata: { stages: body.stages ?? null, stageFrom: body.stageFrom ?? null, userAgent: requestUserAgent(c) }
+      }) });
     } catch (error) {
       if (isReprocessRejectedError(error)) {
         return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
@@ -462,22 +471,6 @@ export const runsRoutes = new Hono()
     await recordJobMeta([run.id], meta);
     const job = await jobStatusForMutation(meta, [run.id], userId);
 
-    await appendAuditLog({
-      orgId: run.orgId,
-      userId,
-      projectId: run.projectId,
-      runId: run.id,
-      apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
-      action: "run.reprocessed",
-      resourceType: "run",
-      resourceId: run.id,
-      ipAddress: requestIp(c),
-      metadata: {
-        stages: body.stages ?? null,
-        stageFrom: body.stageFrom ?? null,
-        userAgent: requestUserAgent(c)
-      }
-    });
 
     if (deferred) {
       c.header("X-Temporal-Deferred", "true");
