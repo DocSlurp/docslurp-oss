@@ -45,11 +45,14 @@ import {
   principalLockTenant,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
-import { canonicalIdForUrl } from "../lib/canonical-id.js";
+import { opaqueCanonicalIdForUrl, tryCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { sourceKeyWithName } from "../lib/url-document-identity.js";
+import { inferProjectTitleFromUrls } from "./project-naming.js";
 import { attachExtractRun, chargeExtractRetention, describeExtractById, loadIntakeExtract } from "./extracts.js";
-import { remoteUrlIntakeItems } from "./remote-ingest.js";
+import { extensionForMimeType, remoteUrlIntakeItems, urlDerivedFilename } from "./remote-ingest.js";
 import {
   intakeIntoProject,
+  REFERENCED_REFUSAL_MESSAGES,
   ProjectIntakeError,
   projectIntakePorts,
   type ProjectIntakeAudit,
@@ -179,9 +182,7 @@ function actionResult(
       documents: intake.documents,
       warnings: [
         ...(intake.deferredReason ? [intake.deferredReason] : []),
-        ...(intake.rejected.length > 0
-          ? [`${intake.rejected.length} of ${intake.rejected.length + intake.documents.length} files were not accepted: ${intake.rejected.map((file) => file.filename).join(", ")}.`]
-          : []),
+        ...(intake.rejected.length > 0 ? [notAcceptedWarning(intake.rejected, intake.documents.length)] : []),
       ],
       ...(intake.rejected.length > 0 ? { rejected: intake.rejected } : {}),
       ...(intake.extract ? { extract: intake.extract } : {}),
@@ -204,6 +205,109 @@ async function authorizeReceiptProject(projectId: string, userId: string, orgId?
       throw new ProjectIntakeError("API key no longer permits this upload", 403);
     }
   }
+}
+
+const URL_INTAKE_ROUTES = new Set(["uploads.url", "extracts.url"]);
+const NOT_ACCEPTED_WARNING = /files were not accepted:/;
+
+function notAcceptedWarning(rejected: ProjectIntakeResult["rejected"], documentCount: number): string {
+  return `${rejected.length} of ${rejected.length + documentCount} files were not accepted: ${rejected.map((file) => file.filename).join(", ")}.`;
+}
+
+/**
+ * Receipt format version. A current-version receipt was written by code that
+ * names every URL-derived field safely; an unversioned (legacy) receipt may hold
+ * a URL, its path segment or a raw reason in any name field.
+ */
+export const INTAKE_RECEIPT_VERSION = 2;
+
+/** The payload fields a URL intake response carries; nothing else is replayed. */
+const URL_RECEIPT_FIELDS = ["project", "run", "documents", "warnings", "rejected", "pipeline", "ingested", "extract"] as const;
+
+/** A current-version URL receipt replays only the fields the response defines. */
+export function projectCurrentUrlReceipt(payload: ProjectIntakePayload): ProjectIntakePayload {
+  const projected: Record<string, unknown> = {};
+  for (const field of URL_RECEIPT_FIELDS) if (payload[field] !== undefined) projected[field] = payload[field];
+  return projected as ProjectIntakePayload;
+}
+
+/**
+ * A legacy (unversioned) URL receipt as it may be replayed: every name field is
+ * re-derived, and anything not safely derivable gets the generic value.
+ * - project.name and run.projectName: the host-only title from the request's
+ *   URLs ("Import from example.com"), else "URL import"; project.slug: the project id.
+ * - documents and ingested: `url-<i><ext>` names, source keys renamed to match,
+ *   titles dropped. A canonical ID that is the server's legacy default for one of
+ *   the request's URLs is replayed as the opaque ID of the document's own stored
+ *   sourceUrl (`storedSourceUrls`, by document id), which tells `/manual` from
+ *   `/manual/` although both share one legacy key; without a stored row, as the
+ *   one request URL with that legacy key. When neither settles it (two request
+ *   URLs, no stored row) the ID is null rather than possibly another URL's. A
+ *   caller's own ID is kept. Never throws.
+ * - rejected: `urls[i]` with the per-code copy; the not-accepted warning rebuilt.
+ */
+export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: readonly string[], storedSourceUrls?: ReadonlyMap<string, string>): ProjectIntakePayload {
+  const title = urls?.length ? inferProjectTitleFromUrls([...urls]) : "URL import";
+  const genericName = (position: number, mimeType: string) => `url-${position}${extensionForMimeType(mimeType ?? "")}`;
+  // Server-derived legacy IDs: the legacy default of each request URL, with the full-URL hash of every request URL
+  // that has it (the ID adoption gives such a row). `/manual` and `/manual/` share one legacy key; unparseable URLs
+  // have none.
+  const serverDefaults = new Map<string, Set<string>>();
+  for (const url of urls ?? []) {
+    const legacy = tryCanonicalIdForUrl(url);
+    if (legacy !== null) serverDefaults.set(legacy, (serverDefaults.get(legacy) ?? new Set()).add(opaqueCanonicalIdForUrl(url)));
+  }
+  /** The opaque ID for a document under a server-default legacy key: from its own stored URL, else unambiguous, else null. */
+  const opaqueFor = (documentId: unknown, legacy: string): string | null => {
+    const stored = typeof documentId === "string" ? storedSourceUrls?.get(documentId) : undefined;
+    if (stored !== undefined && tryCanonicalIdForUrl(stored) === legacy) return opaqueCanonicalIdForUrl(stored);
+    const candidates = serverDefaults.get(legacy)!;
+    return candidates.size === 1 ? [...candidates][0]! : null;
+  };
+  const rejected = payload.rejected?.map((file, position) => {
+    const index = typeof file.index === "number" ? file.index : position;
+    return { index, filename: `urls[${index}]`, statusCode: file.statusCode, code: file.code, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
+  });
+  const documents = payload.documents.map((document, position) => {
+    const name = genericName(position, document.mimeType);
+    const { title: _title, ...rest } = document as typeof document & { title?: unknown };
+    return {
+      ...rest,
+      filename: name,
+      ...(typeof document.sourceKey === "string" ? { sourceKey: sourceKeyWithName(document.sourceKey, name) } : {}),
+      ...(typeof document.canonicalId === "string" && serverDefaults.has(document.canonicalId)
+        ? { canonicalId: opaqueFor(document.id, document.canonicalId) }
+        : {}),
+    };
+  });
+  return projectCurrentUrlReceipt({
+    ...payload,
+    project: { ...payload.project, name: title, slug: payload.project.id } as ProjectIntakePayload["project"],
+    run: { ...payload.run, projectName: title } as ProjectIntakePayload["run"],
+    documents: documents as ProjectIntakePayload["documents"],
+    ...(rejected ? { rejected } : {}),
+    ...(payload.ingested ? { ingested: payload.ingested.map((file, position) => ({ ...file, filename: genericName(position, file.mimeType) })) } : {}),
+    warnings: [
+      ...payload.warnings.filter((warning) => !NOT_ACCEPTED_WARNING.test(warning)),
+      ...(rejected?.length ? [notAcceptedWarning(rejected, documents.length)] : []),
+    ],
+  });
+}
+
+/** How a stored receipt is replayed: URL routes by version, every other route as stored. */
+export function replayedPayload(
+  routeKey: string,
+  stable: ProjectIntakeActionResult & { receiptVersion?: unknown },
+  urls?: readonly string[],
+  storedSourceUrls?: ReadonlyMap<string, string>,
+): ProjectIntakePayload {
+  if (!URL_INTAKE_ROUTES.has(routeKey)) return stable.payload;
+  return stable.receiptVersion === INTAKE_RECEIPT_VERSION ? projectCurrentUrlReceipt(stable.payload) : sanitizeLegacyUrlReceipt(stable.payload, urls, storedSourceUrls);
+}
+
+/** Whether a stored receipt replays through the legacy sanitizer (an unversioned URL receipt). */
+function isLegacyUrlReceipt(routeKey: string, stable: { receiptVersion?: unknown }): boolean {
+  return URL_INTAKE_ROUTES.has(routeKey) && stable.receiptVersion !== INTAKE_RECEIPT_VERSION;
 }
 
 /**
@@ -239,7 +343,7 @@ export async function liveDirectUploadAdmission(
 
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
-  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null },
+  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null; urls?: readonly string[] },
   run: () => Promise<ProjectIntakeActionResult>,
 ): Promise<ProjectIntakeActionResult> {
   if (!args.idempotencyKey) return await run();
@@ -292,7 +396,26 @@ async function idempotently(
           !stable.payload.run?.id || !Array.isArray(stable.payload.documents) || !Array.isArray(stable.payload.warnings)) {
         throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
       }
-      return { ...stable, idempotencyReplayed: true };
+      // A legacy URL receipt names each document's opaque ID from the document's own stored sourceUrl (scoped to the
+      // receipt's project and organization; a document deleted since has none).
+      let storedSourceUrls: Map<string, string> | undefined;
+      if (isLegacyUrlReceipt(args.routeKey, stable as ProjectIntakeActionResult & { receiptVersion?: unknown })) {
+        const ids = stable.payload.documents.flatMap((document) => (typeof document.id === "string" ? [document.id] : []));
+        const rows: Array<{ id: string; source_url: string | null }> = [];
+        if (ids.length) {
+          rows.push(...await sql<{ id: string; source_url: string | null }[]>`
+            select d.id, d.metadata ->> 'sourceUrl' as source_url from documents d
+            join projects p on p.id = d.project_id and p.org_id = d.org_id
+            where d.id = any(${sql.array(ids)}) and d.project_id = ${projectId}`);
+        }
+        storedSourceUrls = new Map(rows.flatMap((row) => (row.source_url ? [[row.id, row.source_url] as const] : [])));
+      }
+      return {
+        payload: replayedPayload(args.routeKey, stable, args.urls, storedSourceUrls),
+        status: stable.status,
+        temporalDeferred: stable.temporalDeferred,
+        idempotencyReplayed: true,
+      };
     }
 
     // Claim before work. Safe preparation can retry under this same lock; a crawl
@@ -300,7 +423,7 @@ async function idempotently(
     await sql`insert into intake_request_receipts (idempotency_key, route_key, request_hash, user_id, external_effect_started)
       values (${idempotencyKey}, ${args.routeKey}, ${args.requestHash}, ${args.userId}, false)`;
     const result = await intakeReceiptContext.run({ key: idempotencyKey, route: args.routeKey, hash: args.requestHash, userId: args.userId }, run);
-    const [saved] = await sql`update intake_request_receipts set stable_result = ${sql.json(JSON.parse(JSON.stringify(result)))}
+    const [saved] = await sql`update intake_request_receipts set stable_result = ${sql.json(JSON.parse(JSON.stringify({ ...result, receiptVersion: INTAKE_RECEIPT_VERSION })))}
       where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey}
         and request_hash = ${args.requestHash} and user_id = ${args.userId}
       returning run_id`;
@@ -561,6 +684,8 @@ export async function createRemoteUrlProjectIntake(
     {
       idempotencyKey,
       routeKey: target.extract ? "extracts.url" : "uploads.url",
+      // A legacy receipt's replay re-derives its title from these (host only).
+      urls: args.urls,
       requestHash: hashIdempotencyPayload({ ...hashedTarget, canonicalIds: canonicalIds ?? null, idempotencyKey }),
       userId: args.userId,
       orgId: args.orgId,
@@ -593,11 +718,16 @@ export async function createRemoteUrlProjectIntake(
   );
 }
 
-/** A crawled page becomes a Markdown document named after its URL path. */
-function webPageFilename(rawUrl: string): string {
-  const url = new URL(rawUrl);
-  const slug = `${url.hostname}${url.pathname}`.replace(/\/+$/, "").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return `${(slug || url.hostname).slice(0, 180)}.md`;
+/**
+ * A crawled page's document name: `<host>-<index>.md`, the rule every URL
+ * source follows (never its path or query). A URL the crawler returned that
+ * does not parse is named after the crawl's own host.
+ */
+function webPageFilename(rawUrl: string, index: number, startUrl: string): string {
+  for (const candidate of [rawUrl, startUrl]) {
+    try { return urlDerivedFilename(new URL(candidate), index, "text/markdown"); } catch { /* try the next */ }
+  }
+  return `page-${index}${extensionForMimeType("text/markdown")}`;
 }
 
 /**
@@ -656,12 +786,15 @@ export async function createWebsiteProjectIntake(
         {
           ...target,
           kind: "url-ingest",
-          items: pages.map((page) => {
+          items: pages.map((page, index) => {
             const body = page.title && !page.markdown!.trimStart().startsWith("#") ? `# ${page.title}\n\n${page.markdown}` : page.markdown!;
             return {
-              filename: webPageFilename(page.url),
+              filename: webPageFilename(page.url, index, startUrl),
               mimeType: "text/markdown",
-              canonicalId: canonicalIdForUrl(page.url),
+              // The same opaque ID /v1/uploads/url gives the same URL, so either path supersedes the other.
+              canonicalId: opaqueCanonicalIdForUrl(page.url),
+              // Refusals name the page by its position in the crawl, never its URL.
+              refusalRef: { name: `pages[${index}]`, index },
               metadata: { sourceUrl: page.url, source: "website-crawl", crawlStartUrl: startUrl },
               content: { bytes: Buffer.from(body, "utf8") },
             };

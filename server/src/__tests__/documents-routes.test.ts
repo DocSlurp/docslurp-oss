@@ -28,7 +28,10 @@ vi.mock("../services/documents.js", () => ({
   listDocumentOwners: listDocumentOwnersMock,
   removeDocumentTags: removeDocumentTagsMock,
   setDocumentTags: setDocumentTagsMock,
-  DocumentMutationForbiddenError: class DocumentMutationForbiddenError extends Error {}
+  DocumentMutationForbiddenError: class DocumentMutationForbiddenError extends Error {},
+  DocumentDeletionPartialError: class DocumentDeletionPartialError extends Error {
+    constructor(readonly deleted: Array<{ documentId: string }>, readonly remainingDocumentIds: string[], override readonly cause: unknown) { super("partial"); }
+  },
 }));
 
 vi.mock("../services/document-review.js", () => ({
@@ -87,6 +90,52 @@ describe("documentsRoutes bulk actions", () => {
     setDocumentTagsMock.mockReset();
   });
 
+  it("refuses an oversized or malformed document id with a 400 before any lookup or change", async () => {
+    listDocumentOwnersMock.mockClear();
+    for (const bad of ["x".repeat(65), "doc 1", "../doc", "", "doc-1\u0000"]) {
+      const response = await app.request("/documents/bulk", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", documentIds: ["doc-1", bad] }),
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json() as { error: { code: string } }).error.code).toBe("invalid_request");
+    }
+    expect(listDocumentOwnersMock).not.toHaveBeenCalled();
+    expect(deleteDocumentsMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses more than 500 documents with a 400 and public copy, before any lookup", async () => {
+    listDocumentOwnersMock.mockClear();
+    const documentIds = Array.from({ length: 501 }, (_, i) => `doc-${i}`);
+    const response = await app.request("/documents/bulk", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "apply-tags", documentIds, tags: ["t"] }),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: { code: string; message: string; details: Record<string, unknown> } };
+    expect(body.error).toMatchObject({ code: "invalid_request", details: { policy: "bulk_documents_limit", limit: 500 } });
+    expect(body.error.message).toContain("at most 500");
+    expect(listDocumentOwnersMock).not.toHaveBeenCalled();
+    expect(deleteDocumentsMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a delete that stopped part-way: what was deleted (audited) and what remains, retryable when busy", async () => {
+    const { DocumentDeletionPartialError } = await import("../services/documents.js");
+    const { HTTPException } = await import("hono/http-exception");
+    appendAuditLogMock.mockClear();
+    const busy = new HTTPException(503, { message: "busy" });
+    deleteDocumentsMock.mockRejectedValue(new DocumentDeletionPartialError([{ documentId: "doc-1", projectId: "ws-1", filename: "a.pdf", runId: null, sourceKey: "k/a.pdf" }], ["doc-2", "doc-3"], busy));
+    const response = await app.request("/documents/bulk", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "delete", documentIds: ["doc-1", "doc-2", "doc-3"] }),
+    });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("2");
+    const body = await response.json() as { error: { details: Record<string, unknown> } };
+    expect(body.error.details).toMatchObject({ policy: "bulk_delete_partial", deleted: 1, deletedDocumentIds: ["doc-1"], remainingDocumentIds: ["doc-2", "doc-3"] });
+    // Each committed chunk audited itself in its transaction (the service calls this builder there); the route adds none.
+    expect(appendAuditLogMock).not.toHaveBeenCalled();
+    const builder = deleteDocumentsMock.mock.calls.at(-1)?.[2] as (rows: Array<{ documentId: string }>) => Record<string, unknown>;
+    expect(builder([{ documentId: "doc-1" }])).toMatchObject({ action: "documents.deleted", resourceId: "doc-1", metadata: { count: 1, documentIds: ["doc-1"], batchId: expect.any(String) } });
+  });
+
   it("removes tags across the selected documents", async () => {
     removeDocumentTagsMock.mockResolvedValue(2);
 
@@ -107,7 +156,10 @@ describe("documentsRoutes bulk actions", () => {
       updated: 2,
       documentIds: ["doc-1", "doc-2"]
     });
-    expect(removeDocumentTagsMock).toHaveBeenCalledWith(["doc-1", "doc-2"], "user-1", ["legal", "invoice"]);
+    expect(removeDocumentTagsMock).toHaveBeenCalledWith(["doc-1", "doc-2"], "user-1", ["legal", "invoice"], expect.any(Function));
+    // The audit record is built for the service to write in its transaction, from the documents it changed.
+    const tagAudit = (removeDocumentTagsMock.mock.calls.at(-1)?.[3] as (ids: string[]) => Record<string, unknown>)(["doc-1", "doc-2"]);
+    expect(tagAudit).toMatchObject({ action: "documents.tags.bulk_removed", resourceId: "doc-1,doc-2", metadata: { documentIds: ["doc-1", "doc-2"], tags: ["legal", "invoice"] } });
   });
 
   it("preserves unexpected delete failures as server errors", async () => {
@@ -141,8 +193,8 @@ describe("documentsRoutes bulk actions", () => {
       runId: "run-1",
       sourceKey: "uploads/contract.pdf"
     });
-    expect(deleteDocumentMock).toHaveBeenCalledWith("doc-1", "user-1");
-    const audit = appendAuditLogMock.mock.calls.at(-1)?.[0];
+    expect(deleteDocumentMock).toHaveBeenCalledWith("doc-1", "user-1", expect.any(Function));
+    const audit = (deleteDocumentMock.mock.calls.at(-1)?.[2] as (row: unknown) => Record<string, unknown>)({ documentId: "doc-1", projectId: "ws-1", filename: "contract.pdf", runId: "run-1", sourceKey: "uploads/contract.pdf" });
     expect(audit.resourceId).toBe("doc-1");
     expect(audit.documentId).toBeUndefined();
   });
@@ -169,13 +221,18 @@ describe("documentsRoutes API key content updates", () => {
   it("lets an ingest server key delete, retag and bulk-update documents, attributed to the key", async () => {
     const app = buildApp({ scopes: ["ingest"] });
     expect((await app.request("/documents/doc-1", { method: "DELETE" })).status).toBe(200);
-    expect(appendAuditLogMock).toHaveBeenLastCalledWith(expect.objectContaining({ action: "document.deleted", apiKeyId: "key-1" }));
+    const single = deleteDocumentMock.mock.calls.at(-1)?.[2] as (row: unknown) => Record<string, unknown>;
+    expect(single({ documentId: "doc-1", projectId: "ws-1", filename: "a.md", runId: "run-1", sourceKey: "k" })).toMatchObject({ action: "document.deleted", apiKeyId: "key-1" });
     expect((await app.request("/documents/doc-1/tags", json("PUT", { tags: ["docs"] }))).status).toBe(200);
-    expect(setDocumentTagsMock).toHaveBeenCalledWith("doc-1", "user-1", ["docs"]);
+    expect(setDocumentTagsMock).toHaveBeenCalledWith("doc-1", "user-1", ["docs"], expect.any(Function));
+    // The record the service writes in the replacement's transaction (it adds the org and project).
+    const tagRecord = (setDocumentTagsMock.mock.calls.at(-1)?.[3] as (tags: string[]) => Record<string, unknown>)(["docs"]);
+    expect(tagRecord).toMatchObject({ action: "document.tags.updated", apiKeyId: "key-1", resourceId: "doc-1", metadata: { tags: ["docs"] } });
     const bulk = await app.request("/documents/bulk", json("POST", { action: "delete", documentIds: ["doc-1", "doc-2"] }));
     expect(bulk.status).toBe(200);
-    expect(deleteDocumentsMock).toHaveBeenCalledWith(["doc-1", "doc-2"], "user-1");
-    expect(appendAuditLogMock).toHaveBeenLastCalledWith(expect.objectContaining({ action: "documents.deleted", apiKeyId: "key-1" }));
+    expect(deleteDocumentsMock).toHaveBeenCalledWith(["doc-1", "doc-2"], "user-1", expect.any(Function));
+    const chunk = deleteDocumentsMock.mock.calls.at(-1)?.[2] as (rows: Array<{ documentId: string }>) => Record<string, unknown>;
+    expect(chunk([{ documentId: "doc-1" }, { documentId: "doc-2" }])).toMatchObject({ action: "documents.deleted", apiKeyId: "key-1", resourceId: "doc-1,doc-2" });
   });
 
   it.each([

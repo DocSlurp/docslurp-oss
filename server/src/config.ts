@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { resolveLanceDbConfig, resolveObjectStorageConfig } from "@docslurp/shared";
 
 import { storageAccessKeyIdProblem } from "./lib/storage-credentials.js";
+import { MAX_IN_MEMORY_BODY_BYTES } from "./lib/bounded-body-limit.js";
 import { assertEstimateSigningKeyConfigured } from "./lib/estimate-signing-key.js";
 import { WEAK_SECRET_VALUES } from "./lib/weak-secrets.js";
 import { readUploadTransferPolicy } from "./lib/upload-transfer-policy.js";
@@ -206,6 +207,18 @@ validateProductionSecrets();
 const storage = resolveObjectStorageConfig();
 const maxUploadBytes = readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024);
 
+/** MAX_MULTIPART_UPLOAD_BYTES, capped by MAX_UPLOAD_BYTES and the in-memory ceiling; warns once when clamped. */
+function clampedMultipartUploadBytes(): number {
+  const requested = Math.min(
+    readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),
+    readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
+  );
+  if (requested > MAX_IN_MEMORY_BODY_BYTES) {
+    console.warn(`[config] MAX_MULTIPART_UPLOAD_BYTES=${requested} is above the ${MAX_IN_MEMORY_BODY_BYTES}-byte in-memory ceiling; using ${MAX_IN_MEMORY_BODY_BYTES}. Larger files use direct upload sessions.`);
+  }
+  return Math.min(requested, MAX_IN_MEMORY_BODY_BYTES);
+}
+
 /** DOCSLURP_UPLOAD_LOCK_WAIT_MS: how long a session call waits out a held lock; default 10 s, clamped to 0–60 s. */
 export function uploadLockWaitMs(raw: string | undefined): number {
   return Math.min(60_000, Math.max(0, readNumber(raw, 10_000)));
@@ -287,11 +300,26 @@ export const env = {
    * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct
    * upload sessions (/v1/uploads/direct/sessions), which go straight to storage.
+   * Never above MAX_IN_MEMORY_BODY_BYTES (100 MiB), whatever the environment says.
    */
-  maxMultipartUploadBytes: Math.min(
-    readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),
-    readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
+  maxMultipartUploadBytes: clampedMultipartUploadBytes(),
+  /**
+   * Request-body bytes the API buffers at once across all requests (the bulk
+   * multipart and JSON body limits). Past it a request gets 503 + Retry-After.
+   */
+  maxBufferedRequestBytes: readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES, 256 * 1024 * 1024),
+  /** One org's share of it for large (over 64 KiB) bodies: a quarter by default, never below the multipart cap. */
+  maxBufferedRequestBytesPerOrg: readNumber(
+    process.env.MAX_BUFFERED_REQUEST_BYTES_PER_ORG,
+    Math.floor(readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES, 256 * 1024 * 1024) / 4),
   ),
+  /** A separate pool for unauthenticated bodies (SAML callback, webhooks): 1 MiB per client IP and per request. */
+  maxPublicBufferedRequestBytes: readNumber(process.env.MAX_PUBLIC_BUFFERED_REQUEST_BYTES, 8 * 1024 * 1024),
+  /**
+   * Slowest sustained upload rate a buffered request body may arrive at: its
+   * read deadline is 60 s plus its cap at this rate (25 MiB bulk: ~14 min).
+   */
+  bodyReadMinBytesPerSecond: readNumber(process.env.BODY_READ_MIN_BYTES_PER_SECOND, 32 * 1024),
   remoteIngestComplexFormatsEnabled: readBoolean(process.env.REMOTE_INGEST_COMPLEX_FORMATS_ENABLED, false),
   web: resolveWebConfig(),
   metricsSecret: process.env.METRICS_SECRET?.trim() || null,

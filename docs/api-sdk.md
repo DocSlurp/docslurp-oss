@@ -543,7 +543,16 @@ API, with a default 25 MB limit (`MAX_MULTIPART_UPLOAD_BYTES`). This is a separa
 transport from object-storage multipart. In the SDK, select it with
 `directUpload: false`. A larger request gets `413 payload_too_large` whose
 `details` carry `maxBytes` and `directUpload.maxFileBytes`, the per-file limit
-for direct sessions (`MAX_UPLOAD_BYTES`, default 500 MB).
+for direct sessions (`MAX_UPLOAD_BYTES`, default 500 MB). An upload that does
+not arrive in time (a pause over 45 s, or slower than the minimum rate) gets
+`408` pointing to direct upload sessions (the CLI retries 408s).
+
+Request bodies have one media type per endpoint: `/v1/uploads/bulk` (and the
+other bulk routes) take `multipart/form-data`, and every other JSON endpoint
+takes `application/json` (or `application/*+json`). A body of another type gets
+`415 unsupported_type` before any of it is read, with `details.policy` naming the
+expected type (for example `request_body:json`: "Send the request body as
+application/json."). A request with no body needs no `Content-Type`.
 
 Self-hosters: see [automatic completion and Tigris setup](self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
 for the reconciler, Token authentication, bucket filter and deployment order.
@@ -869,7 +878,7 @@ A server key with the `ingest` scope can keep the documents it uploads current w
 | Price it first | `POST /v1/runs/:runId/reprocess/estimate` | `reprocessEstimate` |
 | Delete a document | `DELETE /v1/documents/:docId` | `deleteDocument` |
 | Replace a document's tags | `PUT /v1/documents/:docId/tags` with `{ tags }` | `setDocumentTags` |
-| Reprocess, retag or delete many documents | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
+| Reprocess, retag or delete many documents (at most 500 per request; the SDK splits deletes and tag changes) | `POST /v1/documents/bulk` with `{ action, documentIds, tags? }` | `bulkDocuments` |
 | Act on an ingest report recommendation | `POST /v1/projects/:project/ingest-report/reprocess` (`ingest`) or `…/apply` (`projects:manage`) | `reprocessIngestRecommendation` / `applyIngestRecommendation` |
 
 - Browser keys never get these, whatever their scopes.
@@ -1493,6 +1502,33 @@ JSON upload and direct-session requests accept `tags: string[]`. Multipart `/v1/
 `GET /v1/projects/:project/tags` returns `{ "tags": [{ "tag": "finance", "documentCount": 2 }] }`, sorted by tag. Counts cover current, non-superseded documents, including pending uploads. The project accepts a UUID, slug, former slug, or `default`. Session callers need project access; API keys additionally need one of `search`, `ingest`, `artifacts`, or `projects:manage`, and stay within their organization and project restrictions. An empty project returns `{"tags":[]}`.
 
 Document listing and search accept comma-separated `tags`; matching any supplied tag is sufficient. Chat accepts an array in `filters.tags`. `PUT /v1/documents/:docId/tags` and `POST /v1/documents/bulk` (`apply-tags`/`remove-tags`) edit labels with project edit access, from a session or a server key with `ingest`. Tag changes take effect without re-ingestion.
+
+## Bulk document actions
+
+`POST /v1/documents/bulk` takes `{ action, documentIds, tags? }` for `reprocess`, `apply-tags`, `remove-tags`, `delete` or `export-artifacts`, and `POST /v1/projects/:project/documents/bulk/estimate` prices the same body. Both check the request before anything else:
+
+- **At most 500 documents per request.** More is a `400 invalid_request` with `details: { policy: "bulk_documents_limit", limit: 500 }`. Split larger batches.
+- **Document ids only.** Each `documentIds` entry must be a document id (at most 64 characters). Anything else is a `400 invalid_request`, and nothing is changed.
+
+A bulk delete runs in groups of up to 100 documents, each committed with its own audit record. If a later group fails after earlier ones committed, the response keeps the failure's status (`503` with `Retry-After` when the documents were busy) and reports both sides:
+
+```json
+{
+  "error": {
+    "code": "unavailable",
+    "details": {
+      "policy": "bulk_delete_partial",
+      "deleted": 200,
+      "deletedDocumentIds": ["…"],
+      "remainingDocumentIds": ["…"]
+    }
+  }
+}
+```
+
+Retry with `remainingDocumentIds` only. The deleted documents are gone, and naming them again returns `404 Document not found`.
+
+The SDK's `bulkDocuments` sends `delete`, `apply-tags` and `remove-tags` in requests of 500 and merges the results. If one fails part-way, it throws `DocSlurpBulkDocumentsPartialError`: `completed` is the merged result of what was done (a server-side partial delete counts the ids the server reports deleted), `remainingDocumentIds` is exactly what to retry, and `cause` is the failure. `reprocess` and `export-artifacts` with more than 500 documents throw `RangeError` before any request, because their results (runs, costs, artifacts) cannot be merged across requests.
 
 ## Export documents as a zip
 

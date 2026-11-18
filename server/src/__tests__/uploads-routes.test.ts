@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi, afterAll } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import { createUploadsRoutes } from "../routes/uploads.js";
+import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { publicApiErrorMessage } from "@docslurp/shared";
 import { RunCreationBlockedError } from "../services/runs.js";
 import { withTestSession } from "./helpers/session-app.js";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
@@ -176,7 +178,72 @@ describe("uploadsRoutes over Project Intake", () => {
     const { app } = setup();
     const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/report.docx"] }));
     expect(response.status).toBe(415);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("Upload the file directly instead.") } });
+    // The operator setting is named in the log only, never in client copy.
+    expect(JSON.stringify(body)).not.toContain("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED");
+  });
+
+  it("never returns a refused URL's grant anywhere in the response, even when it is submitted first", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => String(input).includes("GRANT")
+      ? new Response("gone", { status: 503 })
+      : new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })));
+    const { app } = setup([]);
+    const urls = [
+      "https://files.example.com/d/GRANTSECRET0123456789abcdefXYZ/report.pdf?X-Amz-Signature=SIGSECRET",
+      "https://docs.example.com/notes.txt?token=TOKSECRET",
+      "https://docs.example.com/s/QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ1Njc4OTA",
+    ];
+    const response = await app.request("/uploads/url", json({ newProject: true, urls }));
+    expect(response.status).toBe(201);
+    const text = await response.text();
+    expect(text).not.toMatch(/GRANTSECRET|SIGSECRET|TOKSECRET|QWxhZGRpbjpvcGVuIHNlc2FtZTEy/);
+    const body = JSON.parse(text);
+    expect(body.project.name).toBe("Import from files.example.com");
+    expect(body.rejected).toEqual([expect.objectContaining({ index: 0, filename: "urls[0]" })]);
+    expect(body.documents.map((document: { filename: string }) => document.filename)).toEqual(["docs.example.com-1.txt", "docs.example.com-2.txt"]);
+  });
+
+  it("never uses a grant-shaped path with an extension and separators as a name, source key or response text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("%PDF-1.7", { status: 200, headers: { "content-type": "text/plain" } })));
+    const { app, fakes } = setup();
+    const grant = "share-7f3k_Q9zx-GRANTPART.report.txt";
+    const response = await app.request("/uploads/url", json({ project: "ws-1", urls: [`https://files.example.com/d/${grant}`] }));
+    expect(response.status).toBe(201);
+    const text = await response.text();
+    expect(text).not.toContain("GRANTPART");
+    expect(fakes.runs[0].files.map((file) => file.filename)).toEqual(["files.example.com-0.txt"]);
+    expect(JSON.stringify(fakes.runs[0].files.map((file) => file.sourceKey))).not.toContain("GRANTPART");
+    expect(JSON.stringify([...fakes.objects.keys()])).not.toContain("GRANTPART");
+  });
+
+  it("refuses a caller canonical ID shaped like the server's URL identity, with reviewed copy", async () => {
+    const { app } = setup();
+    const url = await app.request("/uploads/url", json({ project: "ws-1", urls: [{ url: "https://example.com/a.txt", canonicalId: `url:${"0".repeat(64)}` }] }));
+    expect(url.status).toBe(400);
+    expect(await url.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
+    const form = new FormData();
+    form.append("files", new File(["hello"], "notes.txt", { type: "text/plain" }));
+    form.append("canonicalId", `URL:${"A".repeat(64)}`);
+    const bulk = await app.request("/uploads/bulk", { method: "POST", body: form });
+    expect(bulk.status).toBe(400);
+    expect(await bulk.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
+    expect(publicApiErrorMessage("invalid_request", { policy: "canonical_id_reserved" })).toContain("reserved for DocSlurp");
+    // Any other url: value stays the caller's.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })));
+    const mine = await app.request("/uploads/url", json({ project: "ws-1", urls: [{ url: "https://example.com/a.txt", canonicalId: "url:my-own-key" }] }));
+    expect(mine.status).toBe(201);
+  });
+
+  it("refuses a reserved canonical ID on a direct upload session", async () => {
+    const { app } = setup();
+    for (const canonicalId of ["docslurp:document:x", `url:${"f".repeat(64)}`]) {
+      const response = await app.request("/uploads/direct/sessions", json({
+        project: "ws-1", files: [{ filename: "a.pdf", sizeBytes: 1000, mimeType: "application/pdf", canonicalId }],
+      }));
+      expect({ canonicalId, status: response.status }).toEqual({ canonicalId, status: 400 });
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_request", details: { policy: "canonical_id_reserved" } } });
+    }
   });
 
   it("reports what URL ingest fetched", async () => {
@@ -184,7 +251,7 @@ describe("uploadsRoutes over Project Intake", () => {
     const { app } = setup();
     const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/contracts.txt?token=secret"] }));
     expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toMatchObject({ ingested: [{ filename: "contracts.txt", mimeType: "text/plain" }] });
+    await expect(response.json()).resolves.toMatchObject({ ingested: [{ filename: "example.com-0.txt", mimeType: "text/plain" }] });
   });
 
   it("defaults URL canonical IDs to the URL and accepts per-URL overrides", async () => {
@@ -195,7 +262,10 @@ describe("uploadsRoutes over Project Intake", () => {
       { url: "https://example.com/products.mdx", canonicalId: "/products" },
     ] }));
     expect(response.status).toBe(201);
-    expect(fakes.runs[0].files.map((file) => file.canonicalId)).toEqual(["https://example.com/products", "/products"]);
+    // Opaque and server-derived (a signed URL's query is a credential); the same URL always maps to the same ID.
+    // The URL as fetched: the fragment (never sent) dropped, the path exactly as given.
+    expect(fakes.runs[0].files.map((file) => file.canonicalId)).toEqual([opaqueCanonicalIdForUrl("https://example.com/products/"), "/products"]);
+    expect(fakes.runs[0].files[0].canonicalId).toMatch(/^url:[0-9a-f]{64}$/);
     expect(fakes.runs[0].files[0].metadata).toMatchObject({ sourceUrl: "https://example.com/products/#pricing" });
   });
 

@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { parseIp } from "@docslurp/shared/client-ip";
 import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
+import { boundedLookup, LOOKUP_STATEMENT_TIMEOUT_MS } from "../lib/bounded-lookup.js";
 import { isSearchScope, SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { effectiveMaxOutputTokens, ipAllowed, parseApiKeyRateLimits, parseKeyMaterializationPolicy, type ValidatedKey } from "./api-keys.js";
 /**
@@ -188,8 +189,21 @@ export async function issueTokens(db: PoolClient, grantId: string, audience: key
   return { access_token: access, refresh_token: refresh, token_type: "Bearer", expires_in: 900 };
 }
 
-export async function validateMcpToken(raw: string, resource: string, requestContext?: { ip?: string | null }): Promise<ValidatedKey | null> {
-  const { rows } = await appDbPool.query(`
+/**
+ * An access-token lookup, always on the dedicated credential-lookup pool
+ * (lib/bounded-lookup.ts), never Better Auth's, so a stalled lookup cannot take
+ * a connection sign-in needs: a connection within the acquisition bound, then one
+ * statement under the pool's startup statement_timeout, raced against a hard
+ * timer (LookupTimeoutError, 57014). There is no unbounded path.
+ */
+async function boundedTokenLookup(text: string, values: unknown[], timeoutMs: number | undefined): Promise<{ rows: any[] }> {
+  const rows = await boundedLookup((lookup) => lookup.unsafe(text, values as never[]), timeoutMs ?? LOOKUP_STATEMENT_TIMEOUT_MS);
+  return { rows: [...rows] };
+}
+
+export async function validateMcpToken(raw: string, resource: string, requestContext?: { ip?: string | null }, options: { timeoutMs?: number } = {}): Promise<ValidatedKey | null> {
+  // Always bounded (boundedTokenLookup), so a stalled database cannot hold the caller; `timeoutMs` sets the hard timer.
+  const { rows } = await boundedTokenLookup(`
     SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens, t.expires_at AS token_expires_at, c.name AS client_name,
            k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
            k.rate_limits AS key_rate_limits, k.project_ids AS key_project_ids FROM mcp_oauth_tokens t
@@ -201,7 +215,7 @@ export async function validateMcpToken(raw: string, resource: string, requestCon
       AND t.consumed_at IS NULL AND g.revoked_at IS NULL AND g.resource=$2
       AND k.revoked_at IS NULL AND k.key_type='server'
       AND (k.expires_at IS NULL OR k.expires_at > now())
-  `, [oauthHash(raw), resource]);
+  `, [oauthHash(raw), resource], options.timeoutMs);
   const row = rows[0];
   if (!row) return null;
   const allowlist: string[] = row.key_ip_allowlist ?? [];
@@ -228,10 +242,10 @@ export async function validateMcpToken(raw: string, resource: string, requestCon
  * must be live, and the token must be unexpired. Scopes are the mapped key
  * scopes, so every existing API-key scope check applies unchanged.
  */
-export async function validateOAuthApiToken(raw: string, requestContext?: { ip?: string | null }): Promise<ValidatedKey | null> {
+export async function validateOAuthApiToken(raw: string, requestContext?: { ip?: string | null }, options: { timeoutMs?: number } = {}): Promise<ValidatedKey | null> {
   if (!raw.startsWith(`${OAUTH_TOKEN_PREFIX.api}_`) || raw.length > 200) return null;
   const resource = apiResource("");
-  const { rows } = await appDbPool.query(`
+  const { rows } = await boundedTokenLookup(`
     SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens, t.expires_at AS token_expires_at, c.name AS client_name, c.first_party,
            k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,
            k.rate_limits AS key_rate_limits, k.project_ids AS key_project_ids
@@ -244,7 +258,7 @@ export async function validateOAuthApiToken(raw: string, requestContext?: { ip?:
       AND t.consumed_at IS NULL AND g.revoked_at IS NULL AND g.resource=$2
       AND k.revoked_at IS NULL AND k.key_type='server'
       AND (k.expires_at IS NULL OR k.expires_at > now())
-  `, [oauthHash(raw), resource]);
+  `, [oauthHash(raw), resource], options.timeoutMs);
   const row = rows[0];
   // Defense in depth: only a first-party client can hold the REST audience.
   if (!row || row.first_party !== true) return null;

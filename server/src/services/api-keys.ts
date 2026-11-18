@@ -9,6 +9,7 @@ import { sql } from "../db.js";
 import { ipInRange, parseCidr, parseIp } from "@docslurp/shared/client-ip";
 import { AllowedOriginError, normalizeAllowedOriginEntry, originMatchesAllowlist } from "../lib/allowed-origins.js";
 import { recordApiKeyRequest } from "./api-key-usage.js";
+import { boundedLookup, LOOKUP_STATEMENT_TIMEOUT_MS } from "../lib/bounded-lookup.js";
 import { resolveDefaultOrganization, getOrganization, OrganizationError, withOrganizationLock } from "./organizations.js";
 
 type ApiKeyRow = {
@@ -634,14 +635,9 @@ export interface ValidatedKey {
   };
 }
 
-export async function validateApiKey(
-  rawKey: string,
-  requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null }
-): Promise<ValidatedKey | null> {
-  const keyHash = hashKey(rawKey);
-
-  // An expired key (including the old key after a rotation overlap) never authenticates.
-  const [row] = await sql<ApiKeyRow[]>`
+/** The key row for a hash. An expired key (including the old key after a rotation overlap) never authenticates. */
+function selectKeyRow(client: typeof sql, keyHash: string) {
+  return client<ApiKeyRow[]>`
     select * from api_keys
     where key_hash = ${keyHash} and revoked_at is null
       and (expires_at is null or expires_at > now())
@@ -650,6 +646,34 @@ export async function validateApiKey(
         where om.org_id = api_keys.org_id and om.user_id = api_keys.user_id
       )
   `;
+}
+
+/**
+ * selectKeyRow on the dedicated credential-lookup pool (lib/bounded-lookup.ts):
+ * a connection within the acquisition bound, then one statement under the pool's
+ * startup statement_timeout and read-only default, raced against a hard timer.
+ * One round trip.
+ */
+function selectKeyRowBounded(keyHash: string, timeoutMs: number): Promise<ApiKeyRow[]> {
+  return boundedLookup((lookup) => selectKeyRow(lookup as unknown as typeof sql, keyHash), timeoutMs);
+}
+
+export async function validateApiKey(
+  rawKey: string,
+  requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
+  /**
+   * `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts).
+   * The lookup always runs on the dedicated pool (selectKeyRowBounded): connection acquisition and a database-side
+   * statement_timeout, each with its own bound; it then rejects with a LookupTimeoutError (57014). `timeoutMs`
+   * (at most the statement bound) sets the hard timer.
+   */
+  options: { recordUsage?: boolean; timeoutMs?: number } = {},
+): Promise<ValidatedKey | null> {
+  const keyHash = hashKey(rawKey);
+
+  // Every key lookup is bounded; there is no unbounded path (a stall must never hold the caller).
+  const rows = await selectKeyRowBounded(keyHash, options.timeoutMs ?? LOOKUP_STATEMENT_TIMEOUT_MS);
+  const [row] = rows;
 
   // api_keys.org_id is NOT NULL (0125); refusing a key without one anyway keeps this fail-closed if that ever changes.
   if (!row || !row.org_id) return null;
@@ -679,7 +703,7 @@ export async function validateApiKey(
 
   // Usage statistics are buffered; every limit, including the daily page cap,
   // is enforced by the rate-limit middleware.
-  recordApiKeyRequest(row.id, Date.now(), requestContext?.ip ?? null);
+  if (options.recordUsage !== false) recordApiKeyRequest(row.id, Date.now(), requestContext?.ip ?? null);
 
   return {
     keyId: row.id,

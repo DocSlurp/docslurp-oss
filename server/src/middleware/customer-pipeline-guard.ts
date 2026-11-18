@@ -1,6 +1,7 @@
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { customerPipelineView, MANAGED_PIPELINE_MODEL_PATHS } from "@docslurp/shared";
 import { getRequestActor, isPlatformAdminActor, type RequestActor } from "../lib/request-actor.js";
+import { preservingRequestRejection } from "../lib/error-context.js";
 
 /** Responses larger than this are passed through (search pages and exports carry no pipeline; parsing them costs). */
 const MAX_GUARDED_BYTES = 8 * 1024 * 1024;
@@ -36,6 +37,11 @@ export function withCustomerPipelines(value: unknown, depth = 0): unknown {
  */
 export const customerPipelineGuard: MiddlewareHandler = async (c, next) => {
   await next();
+  // Cloning or rewriting the body keeps the same response: its recorded rejection (if any) stays with it.
+  await preservingRequestRejection(c, () => guardCustomerPipelines(c));
+};
+
+async function guardCustomerPipelines(c: Context): Promise<void> {
   const response = c.res;
   const type = response.headers.get("content-type") ?? "";
   if (!/^application\/(?:[\w.+-]+\+)?json\b/i.test(type) || !response.body) return;
@@ -54,4 +60,4 @@ export const customerPipelineGuard: MiddlewareHandler = async (c, next) => {
   const headers = new Headers(response.headers);
   headers.delete("content-length");
   c.res = new Response(JSON.stringify(withCustomerPipelines(parsed)), { status: response.status, statusText: response.statusText, headers });
-};
+}

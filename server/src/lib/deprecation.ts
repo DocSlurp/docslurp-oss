@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { deprecatedExtractionFields, PAGE_IMAGES_FORCED_WARNING, smartestLocksPageImages, type DeprecatedFieldWarning } from "@docslurp/shared";
 import { recordDeprecatedRequestFields, takeDeprecatedRequestFields, type RequestFieldWarning } from "./request-context.js";
+import { preservingRequestRejection } from "./error-context.js";
 
 /**
  * Deprecated request fields (extraction-config.ts): a request that uses an old name still works during the window, and
@@ -37,6 +38,11 @@ export const deprecationWarnings: MiddlewareHandler = async (c, next) => {
   await next();
   const warnings = takeDeprecatedRequestFields();
   if (!warnings.length) return;
+  // Cloning or rewriting the body keeps the same response: its recorded rejection (if any) stays with it.
+  await preservingRequestRejection(c, () => addDeprecationWarnings(c, warnings));
+};
+
+async function addDeprecationWarnings(c: Context, warnings: ReturnType<typeof takeDeprecatedRequestFields>): Promise<void> {
   if (warnings.some((warning) => warning.code === "deprecated_field")) c.res.headers.set("Deprecation", "true");
   const type = c.res.headers.get("content-type") ?? "";
   if (!type.includes("application/json")) return;
@@ -53,4 +59,4 @@ export const deprecationWarnings: MiddlewareHandler = async (c, next) => {
   } catch {
     // A body that is not JSON keeps the header only.
   }
-};
+}

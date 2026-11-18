@@ -1,12 +1,7 @@
-import { requestIp } from "../lib/request-context.js";
 import type { Context, MiddlewareHandler } from "hono";
 
-import {
-  ApiKeyPolicyError,
-  resolveApiKeyActor,
-  resolveBetterAuthSessionActor,
-  setRequestActor
-} from "../lib/request-actor.js";
+import { resolveBetterAuthSessionActor, setRequestActor } from "../lib/request-actor.js";
+import { recordResolvedApiKeyUsage, resolveRequestApiKey } from "../lib/route-credentials.js";
 import { routeAuthMode } from "../lib/route-auth.js";
 import { middlewareErrorResponse } from "../lib/api-error.js";
 import { env } from "../config.js";
@@ -71,20 +66,22 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
 
   const authorization = c.req.header("Authorization");
   if (mode === "apiKey" && authorization?.startsWith("Bearer ")) {
-    let actor;
-    try {
-      actor = await resolveApiKeyActor(authorization, {
-        origin: c.req.header("origin"),
-        referer: c.req.header("referer") ?? c.req.header("referrer"),
-      ip: requestIp(c),
-      });
-    } catch (error) {
-      // A browser key on a website it doesn't allow, or a legacy one without projects: say how to fix it, never widen it.
-      if (!(error instanceof ApiKeyPolicyError)) throw error;
-      return middlewareErrorResponse(c, 403, error.code, error.message);
+    // The same bounded resolver as apiKeyAuth (lib/route-credentials.ts): API keys and REST-audience OAuth tokens
+    // (`dscli_`) are looked up on the dedicated credential-lookup pool under the shared admission limit, never on
+    // Better Auth's pool or the request pool, so a stall on the key or token tables cannot starve sign-in.
+    const resolution = await resolveRequestApiKey(c, authorization);
+    // Verification unavailable (busy, timed out or failed): fail closed, and say it is retryable.
+    if (resolution.unavailable) {
+      c.header("Retry-After", "2");
+      return middlewareErrorResponse(c, 503, "unavailable", "Credential verification is temporarily unavailable");
     }
-    if (actor) {
-      setRequestActor(c, actor);
+    // A browser key on a website it doesn't allow, or a legacy one without projects: say how to fix it, never widen it.
+    if (resolution.policyError) {
+      return middlewareErrorResponse(c, 403, resolution.policyError.code, resolution.policyError.message);
+    }
+    if (resolution.actor) {
+      setRequestActor(c, resolution.actor);
+      recordResolvedApiKeyUsage(c, resolution);
       await next();
       return;
     }

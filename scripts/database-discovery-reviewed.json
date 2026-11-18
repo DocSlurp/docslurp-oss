@@ -12,7 +12,7 @@
     "reason": "Reviewed dynamic environment setup/restore helper; does not select a database or Redis gate."
   },
   "server/src/__tests__/mcp-oauth-key-controls.db.test.ts": {
-    "sha256": "b50bc156ef59e16e63141a241a46d813b0c2a8740998767229c52f341903b62e",
+    "sha256": "4af6353eff3067676c1db17e57e21bf7e4c32db3d828023a02c31a67f186f214",
     "reason": "Reviewed dynamic environment setup/restore helper; does not select a database or Redis gate."
   },
   "server/src/__tests__/project-chat.test.ts": {

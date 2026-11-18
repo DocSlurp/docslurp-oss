@@ -5,6 +5,7 @@ import { chartExportDefaultsWarnings, chartExportSwitchWarning, resolveDeploymen
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
+import { closeAuthLookupPool } from "./lib/auth-lookup-pool.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
 import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
@@ -31,7 +32,17 @@ import { estimateSigningKeyLogLine } from "./lib/estimate-signing-key.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
-import { multipartBodyLimit } from "./lib/upload-policy.js";
+import { v1BodyLimit } from "./lib/v1-body-limit.js";
+import { bodyBudgetWarnings, configureBodyReads } from "./lib/bounded-body-limit.js";
+import { registerBodyBudgetCredentialResolver } from "./lib/body-budget-owner.js";
+import { verifyBodyBudgetCredential } from "./lib/body-budget-credentials.js";
+
+const bodyBudgetWarned = new Set<string>();
+function warnBodyBudgetOnce(warning: string): void {
+  if (bodyBudgetWarned.has(warning)) return;
+  bodyBudgetWarned.add(warning);
+  console.warn(warning);
+}
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { createBootWarmGate, warmRecentSearchIndexes } from "./search/boot-warm.js";
 import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
@@ -110,8 +121,6 @@ registerProviderPolicy();
 
 const execFileAsync = promisify(execFile);
 
-/** Largest declared JSON body accepted before validation on non-upload `/v1/*` routes. */
-const JSON_BODY_MAX_BYTES = 8 * 1024 * 1024;
 /**
  * The repository root is the nearest ancestor holding drizzle.config.ts, or a
  * core/ checkout of it (the private app repo pins this repository as a submodule
@@ -179,16 +188,18 @@ export function createApiApp(): Hono {
   app.use("/oauth/mcp/*", nativeBodyLimit(16 * 1024));
   // Bound actual bytes before NUL inspection or any route reader. Select the
   // smallest applicable cap first, so JSON uploads cannot buffer the file cap.
-  app.use("/v1/*", async (c, next) => {
-    if (c.req.path === "/v1/mcp") return next(); // protocol-specific cap above
-    const upload = /^\/v1\/(?:uploads|ingest|extracts)(?:\/|$)/.test(c.req.path);
-    const json = /\bjson\b/i.test(c.req.header("content-type") ?? "");
-    if (upload && !json) {
-      if (/\/bulk\/?$/.test(c.req.path)) return multipartBodyLimit(env.maxMultipartUploadBytes)(c, next);
-      return nativeBodyLimit(env.maxUploadBytes)(c, next);
-    }
-    return nativeBodyLimit(JSON_BODY_MAX_BYTES)(c, next);
+  configureBodyReads({
+    bufferBudgetBytes: env.maxBufferedRequestBytes,
+    perOwnerBytes: env.maxBufferedRequestBytesPerOrg,
+    publicBytes: env.maxPublicBufferedRequestBytes,
+    // One org's share is never below one upload of the bulk cap.
+    largestBodyBytes: env.maxMultipartUploadBytes,
+    minBytesPerSecond: env.bodyReadMinBytesPerSecond,
   });
+  for (const warning of bodyBudgetWarnings()) warnBodyBudgetOnce(warning);
+  // Routes that authenticate inside their handler (chat completions, MCP, compat) are charged by a verified key's org.
+  registerBodyBudgetCredentialResolver(verifyBodyBudgetCredential);
+  app.use("/v1/*", v1BodyLimit(env));
 
   app.use(
     "/webhooks/stripe",
@@ -302,6 +313,7 @@ async function stopApiBackgroundTasks(): Promise<void> {
   stopMaintenanceSweeper();
   await stopDirectUploadReconciler();
   await closeDirectUploadLockPool();
+  await closeAuthLookupPool();
   stopAlertEvaluator();
   stopCreditDebitFlusher();
   stopRunStartRecovery();

@@ -14,6 +14,7 @@ import { ingestRecordFields } from "@docslurp/shared";
 
 import type { RunUsageCostSummary } from "./usage-attribution.js";
 import { toPublicRunRowStage } from "../lib/public-run-stage.js";
+import { markRedactedFilename, publicDocumentIdentity } from "../lib/url-document-identity.js";
 
 // Row shapes and mappers for project_runs and documents. A leaf module: it
 // imports neither runs.ts nor run-creation.ts, which both depend on it.
@@ -76,6 +77,8 @@ export type DocumentRow = {
   version_number: number;
   previous_version_id: string | null;
   canonical_id?: string | null;
+  /** Selected with `*`; URL intake sets `sourceUrl`, which the public read boundary uses. */
+  metadata?: Record<string, unknown> | null;
   superseded_at?: string | Date | null;
   superseded_by_document_id?: string | null;
   indexing_mode?: string | null;
@@ -166,15 +169,17 @@ export function mapProjectRun(row: ProjectRunRow, cost?: Pick<RunUsageCostSummar
 }
 
 export function mapDocument(row: DocumentRow): DocumentRecord {
-  return documentSchema.parse({
+  // URL-origin documents: legacy canonical IDs, source keys and filenames are redacted at this read boundary.
+  const identity = publicDocumentIdentity(row);
+  return markRedactedFilename(documentSchema.parse({
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
     projectId: row.project_id,
     runId: row.run_id,
-    filename: row.filename,
+    filename: identity.filename,
     mimeType: row.mime_type,
-    sourceKey: row.source_key,
+    sourceKey: identity.sourceKey,
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
@@ -185,13 +190,13 @@ export function mapDocument(row: DocumentRow): DocumentRecord {
     dedupScope: row.dedup_scope ?? null,
     versionNumber: row.version_number ?? 1,
     previousVersionId: row.previous_version_id ?? null,
-    canonicalId: row.canonical_id ?? null,
+    canonicalId: identity.canonicalId,
     tags: row.tags ?? [],
     supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
     ...ingestRecordFields(row),
     createdAt: serializeTimestamp(row.created_at),
     updatedAt: serializeTimestamp(row.updated_at),
-  });
+  }), identity.filenameRedacted);
 }
 

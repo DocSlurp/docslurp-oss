@@ -20,7 +20,11 @@ Compose passes every variable in `.env.selfhost` to the server and workers (`env
 | `UPLOAD_PART_SIZE_MB` | `64` | Direct uploads: files up to this size go up as one signed PUT; larger files use multipart with parts of at least this size (5–2047). |
 | `UPLOAD_STREAM_PART_SIZE_MB` | `16` | Part size for unknown-size (streamed) direct uploads, which clients buffer in memory (5–2047; raised automatically so `MAX_UPLOAD_BYTES` fits in 10,000 parts). |
 | `UPLOAD_URL_TTL_SECONDS` | `10800` (3 h) | Lifetime of a signed upload URL, capped by its 24 h session (300–43200). Cleanup of abandoned uploads and deleted extracts waits the 12 h maximum, so lowering this never strands a write from an older URL. |
-| `MAX_MULTIPART_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest file on the buffered `POST /v1/uploads/bulk` path, which holds the body in memory; larger files must use direct upload sessions. Capped at `MAX_UPLOAD_BYTES`. |
+| `MAX_MULTIPART_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest file on the buffered `POST /v1/uploads/bulk` path, which holds the body in memory; larger files must use direct upload sessions. Capped at `MAX_UPLOAD_BYTES` and at 100 MiB, the ceiling for any request body held in memory. |
+| `MAX_BUFFERED_REQUEST_BYTES` | `268435456` (256 MiB) | Request-body bytes the API buffers at once across authenticated requests (bulk multipart and JSON bodies). A slice (16 MiB, at most a quarter) is kept for small bodies of 64 KiB or less. Past it a request gets `503` with `Retry-After`. |
+| `MAX_BUFFERED_REQUEST_BYTES_PER_ORG` | a quarter of `MAX_BUFFERED_REQUEST_BYTES` | One organization's share of that budget for bodies over 64 KiB, so one tenant's large uploads leave room for others. Never below `MAX_MULTIPART_UPLOAD_BYTES`, so one upload of the cap always fits. Keep `MAX_BUFFERED_REQUEST_BYTES` at least 4× the multipart cap (the server warns at startup otherwise): with a 100 MiB cap and the 256 MiB default, two uploads fit at once and a third gets `503` while the small-request reserve stays free. |
+| `MAX_PUBLIC_BUFFERED_REQUEST_BYTES` | `8388608` (8 MiB) | A separate budget for unauthenticated bodies (the SAML callback, webhooks), with at most a quarter of it (and 1 MiB) per client IP and 1 MiB per request. |
+| `BODY_READ_MIN_BYTES_PER_SECOND` | `32768` (32 KiB/s) | Slowest sustained rate a buffered request body may arrive at: its read deadline is 60 s plus its declared length (or its cap) at this rate, and it may pause at most 45 s between chunks. A bulk upload past either gets `408` pointing to direct upload sessions. |
 | `DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY` | `8` (1–32) | Files of one direct-upload session verified and sealed at once (a batched `files/complete`, the reconciler, a recovery read). |
 | `DOCSLURP_UPLOAD_LOCK_POOL_MAX` | `5` (also the minimum) | Direct database connections per API process for direct-upload session locks; count them per API machine, twice during a deploy's overlap. The pool is partitioned: 2 for short operations (part signing, abort, status), 1 for the reconciler, and the rest shared by file finalization, run starts and idempotent intakes, each capped below, so no class or organization can take them all. At 5: 2 short, 1 reconciler, 2 shared. With database connection headroom, `8` gives 5 shared (3 finalization, 2 run starts, 2 intakes at most). |
 | `DOCSLURP_UPLOAD_LOCK_START_MAX` | `1` (`2` with a pool of 8) | Concurrent run starts (a confirm, the reconciler's confirm, an idempotent bulk or URL upload) per API process. |
@@ -173,11 +177,17 @@ secret.
 The API process keeps one postgres.js pool for requests, plus one LISTEN
 connection and one probe connection that answers only health checks. The
 probe never queues behind requests, so search load cannot fail `/ready` or
-trip the watchdog.
+trip the watchdog. Route-auth credential lookups (API keys and OAuth tokens)
+use a small pool of their own, opened on first use, whose connections start
+with `statement_timeout=3s` and read-only transactions, so a stalled lookup
+can hold only those connections and never sign-in's or requests'. It needs a
+direct connection to Postgres, as the LISTEN connection does: a
+transaction-mode pooler rejects or drops startup parameters.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + 12` per process against Postgres `max_connections` (LISTEN, the probe and Better Auth's own pool of 10), and double it for deploys that overlap old and new machines. |
+| `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + AUTH_LOOKUP_POOL_MAX + DOCSLURP_UPLOAD_LOCK_POOL_MAX + 12` per process (41 with the defaults) against Postgres `max_connections` (the credential-lookup and upload-lock pools, LISTEN, the probe and Better Auth's own pool of 10), and double it for deploys that overlap old and new machines. |
+| `AUTH_LOOKUP_POOL_MAX` | `4` | Connections in the credential-lookup pool per API process (1 to 32). Each lookup is one short statement; at most 64 lookups are admitted at once and wait at most 5 s for a connection, then route auth answers 503 with `Retry-After`. |
 | `SEARCH_STATEMENT_TIMEOUT_MS` | `8000` | `SET LOCAL statement_timeout` for each search statement (lexical, page, community and graph branches). A timed-out branch contributes no results and the search continues with the others; `0` disables. Search SQL is also cancelled when the client disconnects. |
 | `SEARCH_STREAM_DETACHED_TIMEOUT_MS` | `120000` | Longest a streamed search (`/v1/search/stream`) may keep running after its client disconnected once passages had been sent, which makes the search billable. Then the search is aborted. Values above `600000` are clamped to it; values below `1000` or unparsable use the default. A client that leaves before any hits are sent aborts the search at once. |
 | `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Deadline for one search-agent chat turn, kept below the ~120 s edge proxy timeout. Near it, tools are disabled and the turn answers from the evidence it has (`stopReason: "deadline"`, HTTP 200); if a model/turn deadline expires it returns 424 `chat_deadline_exceeded`, even after partial text. All model, tool, search and SQL work of the turn is cancelled at it. |

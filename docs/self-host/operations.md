@@ -19,9 +19,9 @@ Unfinished transfers expire after 24 hours and become `aborted`; sessions alread
 starting ingestion continue recovery. It also verifies single-PUT objects,
 so self-hosted S3/MinIO installations do not require webhooks. Keep the API process
 running; a process that sleeps between requests cannot execute background sweeps.
-Allow up to two additional on-demand database connections per API process for
-upload advisory locks, beyond `DATABASE_POOL_MAX` and existing listener/probe
-connections. These locks use a separate pool so finalization cannot exhaust the
+Allow `DOCSLURP_UPLOAD_LOCK_POOL_MAX` (default 5) additional on-demand database
+connections per API process for upload advisory locks, beyond `DATABASE_POOL_MAX`
+and the other connections in the budget (docs/self-host/configuration.md). These locks use a separate pool so finalization cannot exhaust the
 query pool while waiting for its own queries.
 
 For a bucket-specific custom domain, set

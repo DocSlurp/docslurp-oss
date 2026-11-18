@@ -1,4 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
+import { algoliaAuthorization, algoliaManageAdmits, algoliaSearchAdmits } from "../lib/route-credentials.js";
 import { randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
@@ -287,8 +288,9 @@ async function loadScopedProject(indexName: string, apiKey: ValidatedKey) {
   return await loadApiKeyScopedProject(indexName, apiKey);
 }
 
+/** Shared with the request body budget's pre-check (lib/route-credentials.ts). */
 function requireSearchKey(apiKey: ValidatedKey): Response | null {
-  return apiKeyHasAnyScope(apiKey, [...SEARCH_SCOPES]) ? null : Response.json({ message: "search scope required" }, { status: 403 });
+  return algoliaSearchAdmits({ type: "apiKey", userId: apiKey.userId, apiKey }) ? null : Response.json({ message: "search scope required" }, { status: 403 });
 }
 
 /**
@@ -298,6 +300,9 @@ function requireSearchKey(apiKey: ValidatedKey): Response | null {
  * Security finding SEC-2026-10-01.
  */
 function requireServerManageKey(apiKey: ValidatedKey): Response | null {
+  // The decision is shared with the request body budget's pre-check (lib/route-credentials.ts); the branches
+  // below only pick the refusal message.
+  if (algoliaManageAdmits({ type: "apiKey", userId: apiKey.userId, apiKey })) return null;
   try {
     assertServerApiKey(apiKey);
   } catch (error) {
@@ -445,12 +450,9 @@ const searchBodyLimit = bodyLimit({
 
 export const algoliaCompatRoutes = new Hono()
   .use("*", async (c, next) => {
-    let header = c.req.header("Authorization");
-    const algoliaKey = c.req.header("X-Algolia-API-Key");
-    if (!header && algoliaKey) {
-      header = `Bearer ${algoliaKey}`;
-      c.req.raw.headers.set("Authorization", header);
-    }
+    // The same parse the request body budget uses (lib/route-credentials.ts).
+    const header = algoliaAuthorization(c);
+    if (header && !c.req.header("Authorization")) c.req.raw.headers.set("Authorization", header);
     await next();
   })
   .use("*", apiKeyAuth)

@@ -612,10 +612,17 @@ export type UploadFileInput = {
 };
 
 /** Structural Node ReadStream/async iterable support, without Node runtime imports. */
-/** `docslurp:` canonical IDs are minted by the server; the API refuses them from callers (400). */
+/**
+ * Canonical IDs the server mints, which the API refuses from callers (400): the
+ * `docslurp:` prefix and the server's URL identity shape, `url:` plus a 64-character hex hash.
+ */
 function assertClientCanonicalIds(ids: Array<string | null | undefined>): void {
   for (const id of ids) {
-    if (typeof id === "string" && /^docslurp:/i.test(id.trim())) throw new RangeError("canonicalId must not start with docslurp: (reserved for DocSlurp)");
+    if (typeof id !== "string") continue;
+    const trimmed = id.trim();
+    if (/^docslurp:/i.test(trimmed) || /^url:[0-9a-f]{64}$/i.test(trimmed)) {
+      throw new RangeError("canonicalId must not start with docslurp: or be a url:<sha256> URL identity (reserved for DocSlurp)");
+    }
   }
 }
 
@@ -799,7 +806,7 @@ export type UploadUrlsInput = {
   newProject?: boolean;
   orgId?: string;
   templateKey?: ProjectTemplateKey;
-  /** Each URL's canonical ID defaults to the URL; pass an object to map it elsewhere (e.g. "/products"). */
+  /** Each URL's canonical ID defaults to an opaque ID derived from the URL (`url:<sha256>`; the same URL always matches); pass an object to map it elsewhere (e.g. "/products"). */
   urls: Array<string | { url: string; canonicalId?: string }>;
   /** Project ID, slug or name. A name that matches no project creates one with that name. */
   project?: string;
@@ -1420,6 +1427,31 @@ function deadline(timeoutMs: number, external?: AbortSignal) {
  * top-up is off), `apiKeys` (a key's own limits) and `docs` for the limit.
  */
 export type DocSlurpErrorLinks = Partial<Record<"billing" | "buyCredits" | "autoTopUp" | "apiKeys" | "docs", string>>;
+
+/** The deleted and remaining ids of a bulk delete the server stopped part-way (`details.policy: "bulk_delete_partial"`). */
+function serverPartialDelete(error: unknown): { deletedDocumentIds: string[]; remainingDocumentIds: string[] } | null {
+  if (!(error instanceof DocSlurpApiError)) return null;
+  const details = (error.body as { error?: { details?: Record<string, unknown> } } | null)?.error?.details;
+  if (details?.policy !== "bulk_delete_partial") return null;
+  const ids = (value: unknown) => (Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : null);
+  const deletedDocumentIds = ids(details.deletedDocumentIds);
+  const remainingDocumentIds = ids(details.remainingDocumentIds);
+  return deletedDocumentIds && remainingDocumentIds ? { deletedDocumentIds, remainingDocumentIds } : null;
+}
+
+/** The most documents one `bulkDocuments` request may name (the server's limit). */
+export const BULK_DOCUMENTS_MAX = 500;
+
+/**
+ * A `bulkDocuments` call split into several requests stopped part-way: `completed` is the merged result of the
+ * requests that succeeded, `remainingDocumentIds` were not sent (or their request failed), `cause` the failure.
+ */
+export class DocSlurpBulkDocumentsPartialError extends Error {
+  constructor(readonly completed: BulkDocumentsResult, readonly remainingDocumentIds: string[], override readonly cause: unknown) {
+    super(`bulkDocuments stopped after ${completed.documentIds instanceof Array ? completed.documentIds.length : 0} documents`);
+    this.name = "DocSlurpBulkDocumentsPartialError";
+  }
+}
 
 export class DocSlurpApiError extends Error {
   readonly body: unknown;
@@ -3344,9 +3376,40 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /**
      * Reprocesses, retags, deletes or exports many documents at once. Server keys need `ingest` (`artifacts` for
      * `export-artifacts`), and every document must be in a project the key can use (404 before any change otherwise).
+     * The server takes at most BULK_DOCUMENTS_MAX (500) documents per request: `delete`, `apply-tags` and
+     * `remove-tags` are sent in requests of that size and their results merged. A failure part-way throws
+     * DocSlurpBulkDocumentsPartialError: `completed` holds what was done (a delete the server stopped part-way counts
+     * the ids it reports deleted) and `remainingDocumentIds` what to retry, nothing else. `reprocess` and
+     * `export-artifacts` over the limit throw RangeError before sending.
      */
-    bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
-      return request(`/v1/documents/bulk`, jsonRequest("POST", input), requestOptions);
+    async bulkDocuments(input: BulkDocumentsInput, requestOptions?: RequestOptions): Promise<BulkDocumentsResult> {
+      const send = (documentIds: string[]) => request<BulkDocumentsResult>(`/v1/documents/bulk`, jsonRequest("POST", { ...input, documentIds }), requestOptions);
+      if (input.documentIds.length <= BULK_DOCUMENTS_MAX) return send(input.documentIds);
+      if (input.action === "reprocess" || input.action === "export-artifacts") {
+        throw new RangeError(`${input.action} takes at most ${BULK_DOCUMENTS_MAX} documents per request; split the batch`);
+      }
+      const counted = input.action === "delete" ? "deleted" : "updated";
+      let total = 0;
+      const done: string[] = [];
+      for (let start = 0; start < input.documentIds.length; start += BULK_DOCUMENTS_MAX) {
+        const chunk = input.documentIds.slice(start, start + BULK_DOCUMENTS_MAX);
+        try {
+          const result = await send(chunk);
+          total += typeof result[counted] === "number" ? (result[counted] as number) : 0;
+          done.push(...chunk);
+        } catch (error) {
+          // The server deleted part of this request before it stopped (details.policy bulk_delete_partial): those ids
+          // are done, and only its remaining ones (and the requests not sent) are left.
+          const partial = serverPartialDelete(error);
+          if (partial) {
+            total += partial.deletedDocumentIds.length;
+            done.push(...partial.deletedDocumentIds);
+          }
+          const remaining = [...(partial ? partial.remainingDocumentIds : chunk), ...input.documentIds.slice(start + BULK_DOCUMENTS_MAX)];
+          throw new DocSlurpBulkDocumentsPartialError({ [counted]: total, documentIds: done }, remaining, error);
+        }
+      }
+      return { [counted]: total, documentIds: done };
     },
 
     uploadUrls,

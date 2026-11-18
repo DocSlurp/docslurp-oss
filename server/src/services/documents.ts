@@ -26,7 +26,10 @@ import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import { runCreation } from "./run-creation.js";
+import { runCreation, urlSourceIdentity } from "./run-creation.js";
+import { appendAuditLog } from "./audit-log.js";
+import { HTTPException } from "hono/http-exception";
+import { boundLockWaits, lockChainKeys, withLockRetry } from "../lib/lock-retry.js";
 import {
   documentUsageTotals,
   runUsageCostTotals,
@@ -35,6 +38,7 @@ import {
   type UsageAggregate,
 } from "./usage-attribution.js";
 import { extractNotReprocessable } from "./reprocess-errors.js";
+import { hasRedactedFilename, markRedactedFilename, publicDocumentIdentity, withUniqueRedactedFilenames } from "../lib/url-document-identity.js";
 
 type DocumentRow = {
   id: string;
@@ -663,16 +667,18 @@ function documentTitle(row: Pick<DocumentRow, "filename" | "metadata">): string 
 }
 
 function mapDocument(row: DocumentRow): DocumentRecord {
-  return documentSchema.parse({
+  // URL-origin documents: legacy canonical IDs, source keys and filenames are redacted at this read boundary.
+  const identity = publicDocumentIdentity(row);
+  return markRedactedFilename(documentSchema.parse({
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
     projectId: row.project_id,
     runId: row.run_id,
-    filename: row.filename,
+    filename: identity.filename,
     title: documentTitle(row),
     mimeType: row.mime_type,
-    sourceKey: row.source_key,
+    sourceKey: identity.sourceKey,
     status: row.status,
     statusReason: documentStatusReason(row),
     extractionMode: row.extraction_mode,
@@ -683,22 +689,23 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     tags: row.tags ?? [],
     versionNumber: row.version_number ?? 1,
     previousVersionId: row.previous_version_id ?? null,
-    canonicalId: row.canonical_id ?? null,
+    canonicalId: identity.canonicalId,
     supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
     ...ingestRecordFields(row),
     createdAt: serializeTimestamp(row.created_at),
     updatedAt: serializeTimestamp(row.updated_at)
-  });
+  }), identity.filenameRedacted);
 }
 
 function mapDocumentIndexEntry(row: DocumentIndexRow): DocumentIndexEntry {
-  return documentIndexEntrySchema.parse({
-    ...mapDocument(row),
+  const document = mapDocument(row);
+  return markRedactedFilename(documentIndexEntrySchema.parse({
+    ...document,
     projectName: row.project_name,
     orgName: row.org_name ?? null,
     summary: row.summary ?? null
-  });
+  }), hasRedactedFilename(document));
 }
 
 /** A session/key-bound file proxy URL; storage is never exposed (lib/file-urls.ts). */
@@ -880,7 +887,7 @@ export async function listDocumentsWithFilters(args: {
   const page = rows.slice(0, limit);
   const last = page.at(-1);
   return {
-    documents: page.map(mapDocument),
+    documents: withUniqueRedactedFilenames(page.map(mapDocument)),
     hasMore,
     nextCursor: hasMore && last ? encodeListCursor("documents", { createdAt: last.cursor_created_at, id: last.id }) : null,
   };
@@ -1005,7 +1012,7 @@ export async function listDocumentIndexEntries(args: {
 
   const totalCount = summaryRow?.total_count ?? 0;
   return {
-    documents: rows.map(mapDocumentIndexEntry),
+    documents: withUniqueRedactedFilenames(rows.map(mapDocumentIndexEntry)),
     totalCount,
     limit,
     truncated: totalCount > limit + Math.max(0, Math.min(args.offset ?? 0, 50_000))
@@ -1375,20 +1382,20 @@ export class DocumentMutationForbiddenError extends EditorRequiredError {
  * answers 404 when nothing is left); any the caller can read but may not edit fail the whole request with
  * DocumentMutationForbiddenError, before anything changes.
  */
-async function editableDocumentsOrForbid(documentIds: string[], userId: string): Promise<Array<{ id: string; project_id: string }>> {
+async function editableDocumentsOrForbid(documentIds: string[], userId: string): Promise<Array<{ id: string; project_id: string; org_id: string }>> {
   const ids = [...new Set(documentIds)];
   if (ids.length === 0) return [];
   const readable = await listAccessibleProjectIds(userId);
   if (readable.length === 0) return [];
-  const rows = await sql<{ id: string; project_id: string }[]>`
-    select id, project_id from documents where id = any(${sql.array(ids)}) and project_id = any(${sql.array(readable)})`;
+  const rows = await sql<{ id: string; project_id: string; org_id: string }[]>`
+    select id, project_id, org_id from documents where id = any(${sql.array(ids)}) and project_id = any(${sql.array(readable)})`;
   if (rows.length === 0) return [];
   const editable = new Set(await listReprocessableProjectIds(userId));
   if (rows.some((row) => !editable.has(row.project_id))) throw new DocumentMutationForbiddenError();
   return rows;
 }
 
-export async function setDocumentTags(docId: string, userId: string, tags: string[]): Promise<string[] | null> {
+export async function setDocumentTags(docId: string, userId: string, tags: string[], audit?: InTransactionAudit<string[]>): Promise<string[] | null> {
   const document = await getDocumentRow(docId, userId);
   if (!document || (await editableDocumentsOrForbid([docId], userId)).length === 0) {
     return null;
@@ -1404,12 +1411,17 @@ export async function setDocumentTags(docId: string, userId: string, tags: strin
     }
     // Native search caches each document's tags with its eligibility.
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, [document.project_id]);
+    // The audit record commits with the replacement, scoped to the document's organization and project.
+    if (audit) {
+      await appendOrgScopedAudits(tx as unknown as typeof sql, [document], (row) => ({ orgId: row.org_id, projectId: row.project_id }),
+        () => audit(normalized));
+    }
   });
 
   return normalized;
 }
 
-export async function addDocumentTags(documentIds: string[], userId: string, tags: string[]): Promise<number> {
+export async function addDocumentTags(documentIds: string[], userId: string, tags: string[], audit?: InTransactionAudit<string[]>): Promise<number> {
   const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
   if (documentIds.length === 0 || normalized.length === 0) {
     return 0;
@@ -1435,12 +1447,16 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
       on conflict (document_id, tag) do nothing
     `;
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
+    if (audit) {
+      await appendOrgScopedAudits(tx as unknown as typeof sql, scopedIds, (row) => ({ orgId: row.org_id, projectId: row.project_id }),
+        (rows) => audit(rows.map((row) => row.id)));
+    }
   });
 
   return scopedIds.length;
 }
 
-export async function removeDocumentTags(documentIds: string[], userId: string, tags: string[]): Promise<number> {
+export async function removeDocumentTags(documentIds: string[], userId: string, tags: string[], audit?: InTransactionAudit<string[]>): Promise<number> {
   const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
   if (documentIds.length === 0 || normalized.length === 0) {
     return 0;
@@ -1459,6 +1475,10 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
         and tag = any(${tx.array(normalized)})
     `;
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
+    if (audit) {
+      await appendOrgScopedAudits(tx as unknown as typeof sql, scopedIds, (row) => ({ orgId: row.org_id, projectId: row.project_id }),
+        (rows) => audit(rows.map((row) => row.id)));
+    }
   });
 
   return scopedIds.length;
@@ -1472,7 +1492,83 @@ export interface DeletedDocumentResult {
   sourceKey: string;
 }
 
-async function deleteDocumentRows(documentIds: string[], userId: string): Promise<DeletedDocumentResult[]> {
+/** An audit record a bulk change writes inside its own transaction, built from what that transaction changed. */
+export type InTransactionAudit<T> = (changed: T) => Parameters<typeof appendAuditLog>[0];
+
+/**
+ * Writes a change's audit records inside its transaction (`client`), one per organization the changed rows belong
+ * to, each carrying only that organization's rows: the record's orgId (and projectId when the rows share one
+ * project) come from the rows themselves, never the caller, so org-scoped audit reads always find them. A request
+ * spans one organization in practice; the split guards the case that should not happen.
+ */
+export async function appendOrgScopedAudits<T>(
+  client: typeof sql,
+  items: readonly T[],
+  scope: (item: T) => { orgId: string; projectId: string },
+  audit: (items: T[]) => Parameters<typeof appendAuditLog>[0],
+): Promise<void> {
+  const byOrg = new Map<string, T[]>();
+  for (const item of items) {
+    const { orgId } = scope(item);
+    byOrg.set(orgId, [...(byOrg.get(orgId) ?? []), item]);
+  }
+  for (const [orgId, group] of byOrg) {
+    const projects = new Set(group.map((item) => scope(item).projectId));
+    await appendAuditLog({ ...audit(group), orgId, projectId: projects.size === 1 ? [...projects][0]! : null }, client);
+  }
+}
+
+/** A document's chain identity, enough to name the advisory keys its version chain is serialized under. */
+type ChainMember = { project_id: string; canonical_id: string | null; metadata: unknown };
+
+/**
+ * The advisory keys (`<project>:<key>`) a document's version chain is serialized under: its canonical ID's, and
+ * for a URL-provenance document both its URL's opaque and legacy keys (adoption moves a chain between them under
+ * the opaque key). Rows without a version key share one per-project key.
+ */
+function chainKeys(row: ChainMember): string[] {
+  const keys = [`${row.project_id}:${row.canonical_id ?? "docslurp:unkeyed-chain"}`];
+  const identity = urlSourceIdentity(row.metadata);
+  if (identity) keys.push(`${row.project_id}:${identity.opaque}`, `${row.project_id}:${identity.legacy}`);
+  return keys;
+}
+
+/** The rows' chain keys changed between reading them and locking: retried like a lock conflict. */
+class ChainKeysChangedError extends Error {
+  readonly code = "55P03";
+  constructor() {
+    super("document chain keys changed while locking");
+    this.name = "ChainKeysChangedError";
+  }
+}
+
+/** Documents deleted per transaction (and so the most chain keys one transaction holds, three per URL document). */
+const DELETE_CHUNK = 100;
+
+/**
+ * A deletion stopped after some chunks committed: `deleted` are gone, `remainingDocumentIds` (the failed chunk's and
+ * every later one) are untouched. The route answers the cause's status with both lists, so a retry names only the rest.
+ */
+export class DocumentDeletionPartialError extends Error {
+  constructor(readonly deleted: DeletedDocumentResult[], readonly remainingDocumentIds: string[], override readonly cause: unknown) {
+    super(`deleted ${deleted.length} documents before a later chunk failed`);
+    this.name = "DocumentDeletionPartialError";
+  }
+}
+
+/** Deletion could not take its locks in time (a concurrent writer held them): retryable, 503 with Retry-After. */
+export class DocumentDeletionBusyError extends HTTPException {
+  readonly code = "unavailable";
+  constructor() {
+    super(503, {
+      message: "These documents are being updated by another request; retry shortly.",
+      res: new Response(null, { status: 503, headers: { "Retry-After": "2" } }),
+    });
+    this.name = "DocumentDeletionBusyError";
+  }
+}
+
+async function deleteDocumentRows(documentIds: string[], userId: string, audit?: InTransactionAudit<DeletedDocumentResult[]>): Promise<DeletedDocumentResult[]> {
   const normalizedIds = Array.from(new Set(documentIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) {
     return [];
@@ -1484,14 +1580,49 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   }
   const editableProjectIds = [...new Set(editable.map((row) => row.project_id))];
 
-  return await sql.begin(async (tx) => {
-    const transaction = tx as unknown as typeof sql;
+  const targetIds = editable.map((row) => row.id);
+  // Transactions of at most DELETE_CHUNK documents, each with its own chain keys and its own retry, and no lock held
+  // between them, so one request never holds more than a chunk's keys (a URL document has three) in the shared lock
+  // table. A chunk that fails after earlier ones committed reports both sides (DocumentDeletionPartialError).
+  const deleted: DeletedDocumentResult[] = [];
+  for (let start = 0; start < targetIds.length; start += DELETE_CHUNK) {
+    const chunk = targetIds.slice(start, start + DELETE_CHUNK);
+    try {
+      deleted.push(...await deleteDocumentChunk(chunk, editableProjectIds, audit));
+    } catch (error) {
+      if (start === 0) throw error;
+      throw new DocumentDeletionPartialError(deleted, targetIds.slice(start), error);
+    }
+  }
+  return deleted;
+}
 
-    const docs = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "previous_version_id">[]>`
-      select id, project_id, filename, run_id, source_key, previous_version_id
+/** One chunk of a deletion, in one transaction (see deleteDocumentRows). */
+async function deleteDocumentChunk(targetIds: string[], editableProjectIds: string[], audit?: InTransactionAudit<DeletedDocumentResult[]>): Promise<DeletedDocumentResult[]> {
+  return await withLockRetry(() => sql.begin(async (tx) => {
+    const transaction = tx as unknown as typeof sql;
+    // Lock order (lib/lock-retry.ts): the version chains' advisory keys first, the same keys run creation and the
+    // supersession trigger take, in sorted order; then rows, FOR UPDATE NOWAIT in id order. Deletions, run creation
+    // and a worker completing a version of the same chain serialize on the key, so each deletion reads and rewires
+    // the lineage as committed by the one before it (never from a snapshot that still shows a deleted link). A row
+    // lock is never waited for while others are held: a conflict (55P03, 40P01) retries the whole transaction,
+    // then answers DocumentDeletionBusyError (503, retryable). Lock waits, the keys' included, are bounded.
+    await boundLockWaits(transaction);
+    const members = await transaction<ChainMember[]>`
+      select id, project_id, canonical_id, metadata from documents
+      where project_id = any(${transaction.array(editableProjectIds)})
+        and (id = any(${transaction.array(targetIds)}) or previous_version_id = any(${transaction.array(targetIds)}))
+    `;
+    const locked = new Set(members.flatMap(chainKeys));
+    await lockChainKeys(transaction, locked);
+
+    const docs = await transaction<Array<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "previous_version_id"> & ChainMember>>`
+      select id, project_id, filename, run_id, source_key, previous_version_id, canonical_id, metadata
       from documents
-      where id = any(${transaction.array(editable.map((row) => row.id))})
+      where id = any(${transaction.array(targetIds)})
         and project_id = any(${transaction.array(editableProjectIds)})
+      order by id
+      for update nowait
     `;
 
     if (docs.length === 0) {
@@ -1503,27 +1634,37 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
     // nodes in document_cleanup_queue; the worker sweep then deletes them.
     // Raw sources still used by another document are kept.
     const docById = new Map(docs.map((doc) => [doc.id, doc]));
-    const resolveRetainedPreviousVersionId = (doc: Pick<DocumentRow, "previous_version_id">): string | null => {
-      let currentId = doc.previous_version_id;
+    const resolveRetainedPreviousVersionId = (previousId: string | null): string | null => {
+      let currentId = previousId;
       while (currentId && docById.has(currentId)) {
         currentId = docById.get(currentId)?.previous_version_id ?? null;
       }
       return currentId;
     };
 
-    for (const doc of docs) {
-      const replacementPreviousVersionId = resolveRetainedPreviousVersionId(doc);
+    // The surviving children of the deleted rows, locked the same way, re-pointed at their nearest kept ancestor.
+    const children = await transaction<Array<{ id: string; previous_version_id: string } & ChainMember>>`
+      select id, previous_version_id, project_id, canonical_id, metadata from documents
+      where project_id = any(${transaction.array(editableProjectIds)})
+        and previous_version_id = any(${transaction.array(docs.map((doc) => doc.id))})
+        and id <> all(${transaction.array(docs.map((doc) => doc.id))})
+      order by id
+      for update nowait
+    `;
+    // A row whose chain was re-keyed, or a child that appeared, after the keys were read is not covered by them:
+    // retry with the current keys.
+    if ([...docs, ...children].flatMap(chainKeys).some((key) => !locked.has(key))) throw new ChainKeysChangedError();
+    for (const child of children) {
       await transaction`
-        update documents
-        set previous_version_id = ${replacementPreviousVersionId}
-        where previous_version_id = ${doc.id}
+        update documents set previous_version_id = ${resolveRetainedPreviousVersionId(child.previous_version_id)}
+        where id = ${child.id}
       `;
     }
 
-    const deleted = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key">[]>`
+    const deleted = await transaction<Pick<DocumentRow, "id" | "org_id" | "project_id" | "filename" | "run_id" | "source_key" | "canonical_id" | "mime_type" | "metadata">[]>`
       delete from documents
       where id = any(${transaction.array(docs.map((doc) => doc.id))})
-      returning id, project_id, filename, run_id, source_key
+      returning id, org_id, project_id, filename, run_id, source_key, canonical_id, mime_type, metadata
     `;
 
     // Deleting a current version leaves its archived predecessors to the retention sweep.
@@ -1534,14 +1675,25 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
       await notifySearchEligibilityChanged(transaction, projectIds);
     }
 
-    return deleted.map((row) => ({
-      documentId: row.id,
-      projectId: row.project_id,
-      filename: row.filename,
-      runId: row.run_id,
-      sourceKey: row.source_key
-    }));
-  });
+    const results = deleted.map((row) => {
+      // The delete result is a public response too: the same read-boundary redaction.
+      const identity = publicDocumentIdentity(row);
+      return {
+        documentId: row.id,
+        projectId: row.project_id,
+        filename: identity.filename,
+        runId: row.run_id,
+        sourceKey: identity.sourceKey
+      };
+    });
+    // The chunk's audit record, from the rows this DELETE removed, in its transaction: no delete commits without it.
+    // Scoped to each deleted row's organization (and project).
+    if (audit && results.length > 0) {
+      const orgOf = new Map(deleted.map((row) => [row.id, row.org_id]));
+      await appendOrgScopedAudits(transaction, results, (row) => ({ orgId: orgOf.get(row.documentId)!, projectId: row.projectId }), audit);
+    }
+    return results;
+  }), () => new DocumentDeletionBusyError());
 }
 
 /** The project and organization of each listed document the user can read, so API key routes can check key scope. */
@@ -1557,13 +1709,13 @@ export async function listDocumentOwners(documentIds: string[], userId: string):
   return rows.map((row) => ({ id: row.id, projectId: row.project_id, orgId: row.org_id }));
 }
 
-export async function deleteDocument(docId: string, userId: string): Promise<DeletedDocumentResult | null> {
-  const [deleted] = await deleteDocumentRows([docId], userId);
+export async function deleteDocument(docId: string, userId: string, audit?: InTransactionAudit<DeletedDocumentResult>): Promise<DeletedDocumentResult | null> {
+  const [deleted] = await deleteDocumentRows([docId], userId, audit ? ([row]) => audit(row!) : undefined);
   return deleted ?? null;
 }
 
-export async function deleteDocuments(documentIds: string[], userId: string): Promise<number> {
-  return (await deleteDocumentRows(documentIds, userId)).length;
+export async function deleteDocuments(documentIds: string[], userId: string, audit?: InTransactionAudit<DeletedDocumentResult[]>): Promise<number> {
+  return (await deleteDocumentRows(documentIds, userId, audit)).length;
 }
 
 export async function exportDocumentArtifacts(documentIds: string[], userId: string): Promise<Record<string, DocumentArtifactEntry[]>> {
@@ -1624,7 +1776,7 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
 export async function bulkReprocessDocuments(
   documentIds: string[],
   userId: string,
-  options: { useProjectPipeline?: boolean; speedBoost?: boolean } = {},
+  options: { useProjectPipeline?: boolean; speedBoost?: boolean; audit?: InTransactionAudit<{ runId: string; documentIds: string[] }> } = {},
 ): Promise<BulkReprocessResult> {
   const result: BulkReprocessResult = { runs: [], failed: [], warnings: [] };
   if (documentIds.length === 0) {
@@ -1698,6 +1850,13 @@ export async function bulkReprocessDocuments(
         // A replay: the run's stamped chart tier, capped at what the project resolves to now (never a billed surprise).
         chartExportReplay: {},
         sources: { kind: "versionsOf", documentIds: group.map((doc) => doc.id) },
+        // Each run's audit record commits with its publication.
+        // (the documents asked to be reprocessed, with the run made from them).
+        ...(options.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {
+          // A group is one project (so one organization): the record is scoped to it and to the published run.
+          await appendOrgScopedAudits(client, group, (doc) => ({ orgId: doc.org_id, projectId: doc.project_id }),
+            (docs) => ({ ...options.audit!({ runId: run.runId, documentIds: docs.map((doc) => doc.id) }), runId: run.runId }));
+        } } : {}),
       });
       result.runs.push(created.run);
       if (created.deferredReason) result.warnings.push(created.deferredReason);

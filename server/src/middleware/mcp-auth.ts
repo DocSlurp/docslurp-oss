@@ -1,14 +1,10 @@
-import { requestIp } from "../lib/request-context.js";
 import type { MiddlewareHandler } from "hono";
-import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
-import { MCP_DEFAULT_SCOPES, mcpOrigin, mcpResource, validateMcpToken } from "../services/mcp-oauth.js";
+import { setRequestActor } from "../lib/request-actor.js";
+import { MCP_DEFAULT_SCOPES, mcpOrigin } from "../services/mcp-oauth.js";
+import { bearerToken, mcpAdmits, recordResolvedApiKeyUsage, resolveRequestMcpCredential } from "../lib/route-credentials.js";
 import { enforceAuthenticatedApiRateLimit } from "./rate-limit.js";
 
-/** RFC 6750 §2.1: the auth scheme is case-insensitive. */
-export function bearerToken(header: string | undefined): string {
-  const match = header?.match(/^Bearer[ ]+([^\s]+)\s*$/i);
-  return match?.[1] ?? "";
-}
+export { bearerToken };
 
 /**
  * RFC 6750 §3 / RFC 9728 §5.1 challenge. `invalid_token` tells a client that its
@@ -26,24 +22,28 @@ export function mcpBearerChallenge(requestUrl: string, presented: boolean): stri
 
 export const mcpAuth: MiddlewareHandler = async (c, next) => {
   const header = c.req.header("Authorization");
-  const token = bearerToken(header);
-  const key = token.startsWith("dsmcp_") ? await validateMcpToken(token, mcpResource(c.req.url), { ip: requestIp(c) }) : null;
-  let actor;
-  try {
-    actor = key ? { type: "apiKey" as const, userId: key.userId, apiKey: key } : token && !token.startsWith("dsmcp") ? await resolveApiKeyActor(`Bearer ${token}`, { origin: c.req.header("origin"), referer: c.req.header("referer"), ip: requestIp(c) }) : null;
-  } catch (error) {
+  // Shared with the request body budget (lib/route-credentials.ts): one lookup per request.
+  const resolution = await resolveRequestMcpCredential(c);
+  // Verification unavailable (the lookup failed or timed out): fail closed, and say it is retryable.
+  if (resolution.unavailable) {
+    c.header("Retry-After", "2");
+    return c.json({ error: "Credential verification is temporarily unavailable" }, 503);
+  }
+  if (resolution.policyError) {
     // Browser keys never reach MCP; a legacy one without projects is refused like any browser key.
-    if (!(error instanceof ApiKeyPolicyError)) throw error;
+    const error = resolution.policyError;
     if (error.code === "api_key_ip_not_allowed") return c.json({ error: error.message, code: error.code }, 403);
     return c.json({ error: "A server API key is required" }, 403);
   }
+  const actor = resolution.actor;
   if (!actor) {
     c.header("WWW-Authenticate", mcpBearerChallenge(c.req.url, Boolean(header)));
     return c.json({ error: "Unauthorized" }, 401);
   }
-  if (actor.apiKey.keyType !== "server")
+  if (!mcpAdmits(actor))
     return c.json({ error: "A server API key is required" }, 403);
   setRequestActor(c, actor);
+  recordResolvedApiKeyUsage(c, resolution);
   const limited = await enforceAuthenticatedApiRateLimit(c);
   if (limited)
     return limited;

@@ -1,6 +1,7 @@
 import { emitTelemetryLog } from "@docslurp/shared/observability";
 import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID } from "node:crypto";
+import { chatCompletionsAdmits } from "../lib/route-credentials.js";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
@@ -123,9 +124,14 @@ function sourceList(response: ProjectChatResponse): string {
   }).join("\n");
 }
 
-const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
+export const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
   const denied = await apiKeyAuth(c, async () => {});
   if (denied instanceof Response) {
+    // Key verification unavailable: an OpenAI-shaped retryable error, never "invalid key".
+    if (denied.status === 503) {
+      c.header("Retry-After", denied.headers.get("Retry-After") ?? "2");
+      return c.json(errorBody("API key verification is temporarily unavailable. Retry shortly.", "server_error", "service_unavailable"), 503);
+    }
     if (denied.status === 429) {
       const retryAfter = denied.headers.get("Retry-After");
       if (retryAfter) c.header("Retry-After", retryAfter);
@@ -141,7 +147,8 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
     return c.json(errorBody("A valid DocSlurp API key is required", "authentication_error", "invalid_api_key"), 401);
   }
   // Project models generate answers: the key needs `chat`, not just `search`.
-  if (!actorHasAnyApiKeyScope(getRequestActor(c), ["chat"])) {
+  // Shared with the request body budget's pre-check (lib/route-credentials.ts).
+  if (!chatCompletionsAdmits(getRequestActor(c))) {
     return c.json(errorBody("API key needs chat access", "permission_error", "insufficient_scope"), 403);
   }
   await next();

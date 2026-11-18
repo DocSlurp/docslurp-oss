@@ -55,7 +55,7 @@ describe("browser keys need a project allowlist", () => {
     const refused = await api.request("/compat/x", { headers: { Authorization: "Bearer dslp_priv_office", "x-forwarded-for": "198.51.100.1" } });
     expect(refused.status).toBe(403);
     expect(((await refused.json()) as { code: string }).code).toBe("api_key_ip_not_allowed");
-    expect(validateApiKey).toHaveBeenLastCalledWith("dslp_priv_office", expect.objectContaining({ ip: expect.any(String) }));
+    expect(validateApiKey).toHaveBeenLastCalledWith("dslp_priv_office", expect.objectContaining({ ip: expect.any(String) }), expect.objectContaining({ recordUsage: false }));
     validateApiKey.mockRejectedValueOnce(new ApiKeyIpNotAllowedError());
     const mcp = new Hono().use("*", mcpAuth).post("/v1/mcp", (c) => c.json({ ok: true }));
     const mcpRefused = await mcp.request("/v1/mcp", { method: "POST", headers: { Authorization: "Bearer dslp_priv_office" } });

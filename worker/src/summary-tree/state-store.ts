@@ -117,7 +117,10 @@ export class SummaryTreeBuildInProgress extends SummaryTreeStateRefused {
 }
 
 /** Serialize tree ownership and mutations with deletion and summary-row writes. Pass the
- * transaction client into work; never obtain another connection while holding this lock. */
+ * transaction client into work; never obtain another connection while holding this lock.
+ * FOR NO KEY UPDATE: it still excludes deletion (FOR UPDATE), the supersession trigger's update and other
+ * builders, but not the FOR KEY SHARE that run creation takes on a chain's latest version, so uploading a new
+ * version while this tree builds is not refused. */
 export async function withSummaryTreeDocumentLock<T>(sql: Client, scope: SummaryTreeScope, documentId: string, owner: string | undefined, work: (tx: Client) => Promise<T>): Promise<T> {
   assertScope(scope);
   const run = async (tx: Client): Promise<T> => {
@@ -130,7 +133,7 @@ export async function withSummaryTreeDocumentLock<T>(sql: Client, scope: Summary
           then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0
         and not exists (select 1 from pii_detections pd where pd.document_id = documents.id and pd.redacted)
         and not exists (select 1 from document_summary_trees t where t.document_id = documents.id and t.error = 'pii-withheld')
-        for update
+        for no key update
     `;
     if (!document) throw new SummaryTreeStateRefused("The document is not live in this project");
     if (owner !== undefined) {
@@ -303,7 +306,7 @@ export async function withdrawSummaryTreeForPii(sql: Client, documentId: string)
     return await sql.begin((tx) => withdrawSummaryTreeForPii(tx as unknown as Client, documentId)) as boolean;
   }
   const [document] = await sql<{ org_id: string | null; project_id: string | null }[]>`
-    select org_id, project_id from documents where id = ${documentId} for update
+    select org_id, project_id from documents where id = ${documentId} for no key update
   `;
   if (!document?.org_id || !document.project_id) return false;
   const scope = { orgId: document.org_id, projectId: document.project_id };

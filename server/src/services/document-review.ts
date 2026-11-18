@@ -1,3 +1,4 @@
+import { appendAuditLog } from "./audit-log.js";
 import { publishGeoCorrection } from "./geo-correction.js";
 import { randomUUID } from "node:crypto";
 import { splitTextIntoPages as splitDocumentPages } from "@docslurp/shared";
@@ -799,6 +800,8 @@ export async function saveDocumentCorrection(args: {
   structuredData?: Record<string, unknown> | null;
   notes?: string | null;
   tags?: string[];
+  /** The audit record, written in the save's transaction (scoped to the document's org and project). */
+  audit?: () => Parameters<typeof appendAuditLog>[0];
 }): Promise<CorrectionWorkbenchPayload | null> {
   const document = await getAccessibleDocument(args.docId, args.userId);
   if (!document) {
@@ -855,6 +858,7 @@ export async function saveDocumentCorrection(args: {
     if (args.structuredData !== undefined || corrected !== null) await publishGeoCorrection(transaction, {
       documentId: args.docId, projectId: document.project_id, orgId: document.org_id,
     }, corrected);
+    if (args.audit) await appendAuditLog({ ...args.audit(), orgId: document.org_id, projectId: document.project_id, documentId: args.docId }, transaction);
   });
 
   return await getCorrectionWorkbench(args.docId, args.userId);
@@ -863,6 +867,8 @@ export async function saveDocumentCorrection(args: {
 export async function reindexDocumentCorrection(args: {
   docId: string;
   userId: string;
+  /** The audit record, written in the reindex's transaction (scoped to the document's org and project). */
+  audit?: (result: { pageCount: number; chunkCount: number; profileKey: string; signalKeys: string[] }) => Parameters<typeof appendAuditLog>[0];
 }): Promise<{ documentId: string; pageCount: number; chunkCount: number; profileKey: string; signalKeys: string[] } | null> {
   const document = await getAccessibleDocument(args.docId, args.userId);
   if (!document || !document.run_id) {
@@ -1033,6 +1039,10 @@ export async function reindexDocumentCorrection(args: {
     // The document's LanceDB rows now carry stale text: native search drops
     // the cached eligibility (lanceStale) on commit and serves it from Postgres.
     await notifySearchEligibilityChanged(transaction, [document.project_id]);
+    if (args.audit) {
+      await appendAuditLog({ ...args.audit({ pageCount: pageRows.length, chunkCount: chunkRows.length, profileKey, signalKeys }),
+        orgId: document.org_id, projectId: document.project_id, documentId: args.docId }, transaction);
+    }
   });
 
   return {

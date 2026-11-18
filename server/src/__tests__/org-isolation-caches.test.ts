@@ -43,6 +43,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "packages/shared/src/openrouter-routing.ts#regionBlockedModels": { class: "operational", why: "model availability" },
   "server/src/lib/ai.ts#localEmbeddingPipelineCache": { class: "operational", why: "local model pipelines by model id" },
   "server/src/lib/billed-write-behind.ts#allowances": { class: "org", why: "keyed by org id" },
+  "server/src/lib/bounded-body-limit.ts#ownerInUse": { class: "tenant-id", why: "buffered request-body byte counters per org:/user:/ip: key; numbers only, read for admission and never returned" },
   "server/src/lib/capability-tokens.ts#derivedKeys": { class: "operational", why: "HKDF subkeys by fixed label" },
   "server/src/lib/provider-policy.ts#cache": { class: "tenant-id", why: "org:<id>, ws:<projectId>, user:<id> policy flags" },
   "server/src/middleware/chat-concurrency.ts#inFlight": { class: "tenant-id", why: "concurrency counters per actor" },

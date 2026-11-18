@@ -74,17 +74,20 @@ export function inferProjectTitleFromFilenames(filenames: string[]): string {
   );
 }
 
+/**
+ * The automatic title of a URL intake before its content names it: the host
+ * only ("Import from example.com"). Never the path or query, which can carry
+ * an access grant and which a refused URL would otherwise lend to the project
+ * name in the response. The content phases of auto-titling rename it later.
+ */
 export function inferProjectTitleFromUrls(urls: string[]): string {
-  try {
-    const firstUrl = new URL(urls[0] ?? "");
-    return formatAutoProjectTitle(
-      normalizeProjectSeed(path.basename(firstUrl.pathname)) ??
-        normalizeProjectSeed(firstUrl.hostname.replace(/^www\./, "")),
-      Math.max(0, urls.length - 1),
-    );
-  } catch {
-    return formatAutoProjectTitle(null, 0);
+  for (const raw of urls) {
+    try {
+      const host = new URL(raw).hostname.replace(/^www\./, "");
+      if (host) return `Import from ${host}`.slice(0, 120);
+    } catch { /* try the next URL */ }
   }
+  return formatAutoProjectTitle(null, 0);
 }
 
 export async function markProjectAutoNamed(projectId: string, userId: string, name: string, phase: "empty" | "upload" = "upload") {
@@ -151,6 +154,8 @@ export async function nameProjectFromUpload(args: { projectId: string; filenames
       select filename from documents
       where project_id = ${args.projectId} and superseded_at is null and purged_at is null and archived_at is null
         and status = 'completed'
+        -- A URL-origin document's filename never seeds a title (legacy ones carry the URL's path).
+        and (metadata ->> 'sourceUrl') is null
       order by created_at, id
     `;
     const filenames = [...new Set(documents.map((document) => document.filename))];

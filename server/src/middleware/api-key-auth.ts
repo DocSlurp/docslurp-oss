@@ -1,8 +1,8 @@
-import { requestIp } from "../lib/request-context.js";
 import type { MiddlewareHandler } from "hono";
 import { middlewareErrorResponse } from "../lib/api-error.js";
 
-import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
+import { type ApiKeyPolicyError, setRequestActor } from "../lib/request-actor.js";
+import { recordResolvedApiKeyUsage, resolveRequestApiKey } from "../lib/route-credentials.js";
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -26,18 +26,22 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     return middlewareErrorResponse(c, 401, "unauthorized", "Missing or invalid Authorization header");
   }
 
-  let actor;
-  try {
-    actor = await resolveApiKeyActor(header, {
-      origin: c.req.header("origin"),
-      referer: c.req.header("referer") ?? c.req.header("referrer"),
-      ip: requestIp(c),
-    });
-  } catch (error) {
-    if (!(error instanceof ApiKeyPolicyError)) throw error;
-    c.set("apiKeyPolicyRefusal", error);
-    return middlewareErrorResponse(c, 403, error.code, error.message);
+  // Shared with the request body budget (lib/route-credentials.ts): one lookup per request. The lookup is
+  // bounded (lib/bounded-lookup.ts): one round trip on the dedicated lookup pool (lib/auth-lookup-pool.ts),
+  // a connection within 5 s, the statement within 3 s by its startup statement_timeout, and at most 64
+  // lookups admitted at once. A full admission limit, an exhausted pool or a timed-out statement makes
+  // verification unavailable, answered below as 503 with Retry-After (retryable), never as an invalid key.
+  const resolution = await resolveRequestApiKey(c, header);
+  // Verification unavailable (the lookup failed or timed out): fail closed, and say it is retryable.
+  if (resolution.unavailable) {
+    c.header("Retry-After", "2");
+    return middlewareErrorResponse(c, 503, "unavailable", "API key verification is temporarily unavailable");
   }
+  if (resolution.policyError) {
+    c.set("apiKeyPolicyRefusal", resolution.policyError);
+    return middlewareErrorResponse(c, 403, resolution.policyError.code, resolution.policyError.message);
+  }
+  const actor = resolution.actor;
   if (!actor) {
     // Repeated refusals from one IP look like key guessing: the IP limiter jails it.
     c.set("apiKeyRejected", true);
@@ -52,6 +56,7 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
   }
 
   setRequestActor(c, actor);
+  recordResolvedApiKeyUsage(c, resolution);
   const limited = await enforceAuthenticatedApiRateLimit(c);
   if (limited) return limited;
   await next();

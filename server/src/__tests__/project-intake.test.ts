@@ -12,6 +12,8 @@ import {
   type ProjectIntakeRequest,
 } from "../services/project-intake.js";
 import { remoteUrlIntakeItems } from "../services/remote-ingest.js";
+import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { AllSourcesUnreadableError, UnreadableSourceError } from "../services/source-metadata.js";
 import { ProjectAccessError } from "../services/default-project.js";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
 import { configureApiExtractorIdAliases } from "../routes/extractors.js";
@@ -522,7 +524,9 @@ describe("Project Intake", () => {
     const fakes = createProjectIntakeFakes();
     const docx = bytesItem("report.docx", "PK", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     const blocked = await rejection(intakeIntoProject(request({ kind: "connector-sync", items: [docx] }), fakes.ports));
-    expect(blocked).toMatchObject({ statusCode: 415, message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") });
+    expect(blocked).toMatchObject({ statusCode: 415, message: expect.stringContaining("Upload the file directly instead.") });
+    // The operator setting is named in the log only, never in client copy.
+    expect((blocked as Error).message).not.toContain("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED");
 
     await expect(intakeIntoProject(request({ kind: "bulk-upload", items: [docx] }), fakes.ports)).resolves.not.toBeNull();
     (env as { remoteIngestComplexFormatsEnabled: boolean }).remoteIngestComplexFormatsEnabled = true;
@@ -546,7 +550,7 @@ describe("Project Intake from remote URLs", () => {
     expect(file.fileSize).toBe(Buffer.byteLength(decoded));
   });
 
-  it("streams fetched bodies into storage, titles from the URL, and audits only origins", async () => {
+  it("streams fetched bodies into storage, titles from the URL's host only, and audits only origins", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello from upstream", {
       status: 200,
       headers: { "content-type": "text/plain", "content-length": "19" },
@@ -557,9 +561,11 @@ describe("Project Intake from remote URLs", () => {
     await intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
 
     const [file] = fakes.runs[0].files;
-    expect(file).toMatchObject({ filename: "q1-pipeline.txt", mimeType: "text/plain" });
+    // Never a path segment: every remote URL's file is <host>-<index><ext>.
+    expect(file).toMatchObject({ filename: "docs.example.com-0.txt", mimeType: "text/plain" });
     expect(fakes.objects.get(file.sourceKey)).toMatchObject({ via: "stream", body: Buffer.from("hello from upstream") });
-    expect(fakes.createdProjects[0].name).toBe("Q1 pipeline");
+    // Never the path or query (a grant can live there): the content phases of auto-titling rename it later.
+    expect(fakes.createdProjects[0].name).toBe("Import from docs.example.com");
     expect(fakes.audit[0].metadata).toMatchObject({ mode: "url-ingest", urlCount: 1, urlOrigins: ["https://docs.example.com"] });
     expect(JSON.stringify(fakes.audit)).not.toContain("secret");
   });
@@ -596,10 +602,147 @@ describe("Project Intake from remote URLs", () => {
     const fakes = createProjectIntakeFakes();
     const urls = ["https://example.com/missing.txt", "https://example.com/found.txt"];
     const result = await intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
-    expect(result?.documents.map((document) => document.filename)).toEqual(["found.txt"]);
+    expect(result?.documents.map((document) => document.filename)).toEqual(["example.com-1.txt"]);
     expect(result?.rejected).toEqual([
-      expect.objectContaining({ filename: "https://example.com/missing.txt", statusCode: 400, message: expect.stringContaining("404") }),
+      expect.objectContaining({ filename: "urls[0]", statusCode: 400, message: expect.stringContaining("404") }),
     ]);
+  });
+
+  it("names a refused URL by its index and never echoes its access grant", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("unavailable", { status: 503 })));
+    const fakes = createProjectIntakeFakes();
+    const urls = ["https://example.com/ok.txt", "https://files.example.com/grant/GRANTSECRET0123456789/report.pdf?X-Amz-Signature=SIGSECRET&token=TOKSECRET"];
+    const error = await rejection(intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports));
+    expect(error).toMatchObject({ statusCode: 400, issues: [{ path: "urls[0]", index: 0 }, { path: "urls[1]", index: 1 }] });
+    expect(JSON.stringify({ message: (error as Error).message, issues: (error as { issues?: unknown }).issues })).not.toMatch(/GRANTSECRET|SIGSECRET|TOKSECRET|files\.example\.com/);
+  });
+
+  it("names URL-derived files urls[i] at every refusal stage, even after a successful fetch", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("fine")) return new Response("hello", { headers: { "content-type": "text/plain" } });
+      if (url.endsWith(".exe")) return new Response("MZ", { headers: { "content-type": "application/x-msdownload" } });
+      if (url.includes("GRANT2")) return new Response("broken", { headers: { "content-type": "text/plain" } });
+      if (url.includes("huge")) return new Response("x", { headers: { "content-type": "text/plain", "content-length": String(10 * 1024 * 1024 * 1024) } });
+      if (url.includes("slow")) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      return new Response("down", { status: 503 });
+    }));
+    const fakes = createProjectIntakeFakes();
+    // createRun finds this stored file unreadable (stage 3). Its grant-like path segment is never
+    // used as the stored filename: it is `<host>-<index><ext>`.
+    fakes.state.unreadable.add("example.com-2.txt");
+    const urls = [
+      "https://example.com/fine.txt",
+      "https://example.com/d/GRANT1SECRET0123456789abcdef.exe",
+      "https://example.com/d/GRANT2SECRETabcdef0123456789.txt",
+      "https://example.com/d/GRANT3SECRET-huge.txt",
+      "https://example.com/d/GRANT4SECRET-slow.txt",
+      "https://example.com/d/GRANT5SECRET.txt?X-Amz-Signature=SIGSECRET",
+    ];
+    try {
+      const result = await intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports);
+      expect(result?.documents.map((document) => document.filename)).toEqual(["example.com-0.txt"]);
+      expect(result?.rejected).toEqual(expect.arrayContaining([
+        { index: 1, filename: "urls[1]", statusCode: 415, code: "unsupported_type", message: "The URL's content is not a supported file type" },
+        { index: 3, filename: "urls[3]", statusCode: 413, code: "file_too_large", message: "The URL's content exceeds the upload size limit" },
+        { index: 4, filename: "urls[4]", statusCode: 400, code: "rejected", message: "The URL did not respond in time" },
+        { index: 5, filename: "urls[5]", statusCode: 400, code: "rejected", message: "The URL's server answered HTTP 503" },
+        { index: 2, filename: "urls[2]", statusCode: 422, code: "unreadable_source", message: "The URL's content could not be read" },
+      ]));
+      expect(result?.rejected).toHaveLength(5);
+      expect(JSON.stringify(result?.rejected)).not.toMatch(/SECRET/);
+      // Telemetry keeps the raw reason (owner decision 2026-11-18).
+      const logs = warn.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(logs).toMatch(/\[intake\] source_refused ref=urls\[1\] code=unsupported_type status=415 reason=/);
+      expect(logs).toMatch(/\[remote-ingest\] url_fetch_failed ref=urls\[4\] failure=timeout codes=TimeoutError/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("fails closed to urls[?] when a URL refusal's ref cannot be found", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { headers: { "content-type": "text/plain" } })));
+    try {
+      // Run creation reports an unreadable file under a name intake never stored (a lookup miss).
+      const fakes = createProjectIntakeFakes();
+      fakes.ports.records.createRun = vi.fn(async () => {
+        throw new AllSourcesUnreadableError([new UnreadableSourceError("GRANTSECRET0123456789abcdef.txt", "invalid GRANTSECRET0123456789abcdef.txt")]);
+      });
+      const urls = ["https://example.com/notes.txt"];
+      const error = await rejection(intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports));
+      expect(error).toMatchObject({ statusCode: 422, issues: [{ path: "urls[?]", code: "unreadable_source" }] });
+      expect(JSON.stringify({ message: error.message, issues: error.issues })).not.toContain("GRANTSECRET");
+
+      // A URL item that reaches storage without a ref is named urls[?] too, never by its filename.
+      const unreffed = await rejection(intakeIntoProject(request({
+        kind: "url-ingest",
+        items: [{ filename: "GRANTSECRET0123456789abcdef.exe", mimeType: "application/x-msdownload", content: { bytes: Buffer.from("MZ") } }],
+        urls: ["https://example.com/x.exe"],
+      }), createProjectIntakeFakes().ports));
+      expect(unreffed).toMatchObject({ issues: [{ path: "urls[?]", code: "unsupported_type" }] });
+      expect(JSON.stringify({ message: unreffed.message, issues: unreffed.issues })).not.toContain("GRANTSECRET");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("gives refused URLs only approved copy: structured reasons for known refs, per-code copy otherwise", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const rejectedItem = (index: number | null, message: string, urlRefusal?: { reason: "dns" }) => ({
+        filename: index === null ? "x" : `urls[${index}]`,
+        ...(index === null ? {} : { refusalRef: { name: `urls[${index}]`, index } }),
+        content: { rejected: new ProjectIntakeError(message, 400), ...(urlRefusal ? { urlRefusal } : {}) },
+      });
+      const error = await rejection(intakeIntoProject(request({
+        kind: "url-ingest",
+        items: [
+          // A known ref with an approved reason: that reason's copy, never the message text.
+          rejectedItem(0, "GRANTSECRET message one", { reason: "dns" }),
+          // A known ref without one: the per-code copy.
+          rejectedItem(1, "GRANTSECRET message two"),
+          // A missed ref (urls[?]): the per-code copy even with an approved reason.
+          rejectedItem(null, "GRANTSECRET message three", { reason: "dns" }),
+        ],
+        urls: ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+      }), createProjectIntakeFakes().ports));
+      expect(error.issues).toEqual([
+        expect.objectContaining({ path: "urls[0]", message: "The URL's host could not be resolved" }),
+        expect.objectContaining({ path: "urls[1]", message: "The URL's content could not be taken" }),
+        expect.objectContaining({ path: "urls[?]", message: "The URL's content could not be taken" }),
+      ]);
+      expect(JSON.stringify({ message: error.message, issues: error.issues })).not.toContain("GRANTSECRET");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("names crawled pages <host>-<index>.md with the same opaque canonical ID as /uploads/url, and indexes their refusals", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { createWebsiteProjectIntake } = await import("../services/project-intake-actions.js");
+      const fakes = createProjectIntakeFakes();
+      // The second page's stored file is unreadable at run creation.
+      fakes.state.unreadable.add("docs.example.com-1.md");
+      const pages = [
+        { url: "https://docs.example.com/guide/GRANTSECRET-a1b2.html?token=TOKSECRET", markdown: "# Guide" },
+        { url: "https://docs.example.com/s/GRANTSECRET-c3d4", markdown: "# Other" },
+      ];
+      const result = await createWebsiteProjectIntake({
+        userId: "user-1", orgId: "org-1", project: null, newProject: true,
+        startUrl: "https://docs.example.com/", crawlOptions: {}, crawl: async () => ({ pages, credits: 1 }),
+      }, fakes.ports);
+      const [file] = fakes.runs[0].files;
+      expect(file).toMatchObject({ filename: "docs.example.com-0.md", canonicalId: opaqueCanonicalIdForUrl(pages[0]!.url) });
+      // /v1/uploads/url derives the same ID for the same URL, so either path supersedes the other.
+      expect(file.canonicalId).toBe(opaqueCanonicalIdForUrl(new URL(pages[0]!.url).href));
+      expect(result.payload.rejected).toEqual([expect.objectContaining({ filename: "pages[1]", index: 1, code: "unreadable_source" })]);
+      expect(JSON.stringify(result.payload)).not.toMatch(/GRANTSECRET|TOKSECRET/);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("surfaces upstream stream failures as a 400 instead of hanging storage", async () => {
@@ -610,7 +753,8 @@ describe("Project Intake from remote URLs", () => {
     const fakes = createProjectIntakeFakes();
     const urls = ["https://example.com/file.txt"];
     const error = await rejection(intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports));
-    expect(error).toMatchObject({ statusCode: 400, message: "upstream failed" });
+    // A URL-derived file's refusal is fixed copy; the stream's own error goes to the logs.
+    expect(error).toMatchObject({ statusCode: 400, message: "The URL's content could not be taken", issues: [{ path: "urls[0]", index: 0 }] });
     expect(fakes.objects.size).toBe(0);
   });
 });

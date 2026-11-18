@@ -35,6 +35,7 @@ import {
   type DocumentRow,
   type ProjectRunRow,
 } from "./run-records.js";
+import { appendAuditLog } from "./audit-log.js";
 import { sql } from "../db.js";
 import { currentRequestApiKeyProjectIds } from "../lib/request-context.js";
 import { loadManagedPipelineOverrides } from "./projects.js";
@@ -69,6 +70,7 @@ import { processSingleton } from "../lib/process-singleton.js";
 import { toPublicRunStage } from "../lib/public-run-stage.js";
 import { extractNotReprocessable, ReprocessRejectedError } from "./reprocess-errors.js";
 import { loadProjectSummaryTree, withProjectSummaryTree } from "./run-summary-tree.js";
+import { withUniqueRedactedFilenames } from "../lib/url-document-identity.js";
 
 export { summarizeRunUsageCost };
 export { isRunCreationBlockedError, RunCreationBlockedError } from "./run-creation.js";
@@ -262,7 +264,7 @@ export async function listDocuments(userId: string): Promise<DocumentRecord[]> {
     limit 100
   `;
 
-  return rows.map(mapDocument);
+  return withUniqueRedactedFilenames(rows.map(mapDocument));
 }
 
 export async function getDocumentVersions(
@@ -381,7 +383,9 @@ function checkReusableSource(
 export async function reprocessRun(
   runId: string,
   userId: string,
-  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; quality?: QualityLevel; visuals?: VisualsLevel; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null },
+  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; quality?: QualityLevel; visuals?: VisualsLevel; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null;
+    /** The audit record, written in the transaction that publishes the new run (scoped to its org, project and run). */
+    audit?: (runId: string) => Parameters<typeof appendAuditLog>[0] },
 ): Promise<{ run: ProjectRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
@@ -452,6 +456,9 @@ export async function reprocessRun(
     chartExportReplay: { requested: requestedTier, quality: options?.quality ?? null },
     apiKeyId: options?.apiKeyId ?? null,
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
+    ...(options?.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {
+      await appendAuditLog({ ...options.audit!(run.runId), orgId: original.orgId, projectId: original.projectId, runId: run.runId }, client);
+    } } : {}),
   });
   return { run: created.run, deferredReason: created.deferredReason };
 }

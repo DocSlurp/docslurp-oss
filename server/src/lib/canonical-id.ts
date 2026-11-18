@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
 import { normalizeSourcePath } from "@docslurp/shared";
 
 export const MAX_CANONICAL_ID_LENGTH = 2048;
 
 export class InvalidCanonicalIdError extends Error {}
+
+/** A caller's canonical ID in a namespace the server reserves (`docslurp:`, `url:`). */
+export class ReservedCanonicalIdError extends InvalidCanonicalIdError {}
+
+export const RESERVED_CANONICAL_ID_MESSAGE = "canonicalId must not start with docslurp:, be a url:<sha256> URL identity, or be the version key of an earlier URL import in this project (reserved for the server)";
 
 /**
  * `docslurp:` canonical IDs are minted by the server (`docslurp:document:<id>`,
@@ -15,6 +21,18 @@ export function isReservedCanonicalId(value: string): boolean {
 }
 
 /**
+ * Canonical IDs a caller may never write: the `docslurp:` prefix (above) and
+ * the exact shape of the server's opaque ID for a fetched URL,
+ * `url:<64 hex>` (opaqueCanonicalIdForUrl), which could join, or be joined by,
+ * a URL's version chain. Other `url:` values stay the caller's. Mirrored in the
+ * SDK (assertClientCanonicalIds).
+ */
+export function isCallerReservedCanonicalId(value: string): boolean {
+  const trimmed = value.trim();
+  return /^docslurp:/i.test(trimmed) || /^url:[0-9a-f]{64}$/i.test(trimmed);
+}
+
+/**
  * Canonical IDs name the logical source a document represents, such as a URL,
  * a site path like `/products`, or any caller-chosen key. They are compared
  * exactly (after trimming) within a project.
@@ -24,21 +42,73 @@ export function normalizeCanonicalId(value: unknown): string | null {
   if (typeof value !== "string") throw new InvalidCanonicalIdError("canonicalId must be a string");
   const trimmed = value.trim();
   if (!trimmed) return null;
-  if (isReservedCanonicalId(trimmed)) throw new InvalidCanonicalIdError("canonicalId must not start with docslurp: (reserved)");
+  if (isCallerReservedCanonicalId(trimmed)) throw new ReservedCanonicalIdError(RESERVED_CANONICAL_ID_MESSAGE);
   if (trimmed.length > MAX_CANONICAL_ID_LENGTH) {
     throw new InvalidCanonicalIdError(`canonicalId must be at most ${MAX_CANONICAL_ID_LENGTH} characters`);
   }
   return trimmed;
 }
 
-/** Default identity for fetched URLs: the URL without its fragment or a trailing slash. */
-export function canonicalIdForUrl(rawUrl: string): string {
+/**
+ * Default identity for a URL-intake document: `url:` plus the sha256 hex of
+ * the URL as fetched (identityUrl: the fragment, which is never sent, dropped;
+ * the path exactly as given, trailing slash included; never truncated). So
+ * `/manual` and `/manual/`, or two long URLs that share a prefix, stay distinct.
+ * Opaque, because canonical IDs are returned in document responses and a
+ * signed URL's query is a credential; re-ingesting the same URL still matches.
+ */
+export function opaqueCanonicalIdForUrl(rawUrl: string): string {
+  // Never throws: a malformed legacy or caller value hashes as-is.
+  return `url:${createHash("sha256").update(tryIdentityUrl(rawUrl) ?? rawUrl).digest("hex")}`;
+}
+
+/** The URL as fetched, for identity and provenance: no fragment (never sent), the path exactly as given. */
+export function identityUrl(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  url.hash = "";
+  return url.toString();
+}
+
+/** identityUrl, or null for a value `new URL` rejects (never throws). */
+export function tryIdentityUrl(rawUrl: string): string | null {
+  try { return identityUrl(rawUrl); } catch { return null; }
+}
+
+/**
+ * The URL without its fragment or a trailing slash, in full: the legacy
+ * normalization (canonicalIdForUrl), used only to find legacy candidates.
+ */
+export function normalizedUrl(rawUrl: string): string {
   const url = new URL(rawUrl);
   url.hash = "";
   if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
     url.pathname = url.pathname.replace(/\/+$/, "");
   }
-  return url.toString().slice(0, MAX_CANONICAL_ID_LENGTH);
+  return url.toString();
+}
+
+/** normalizedUrl, or null for a value `new URL` rejects (never throws). */
+export function tryNormalizedUrl(rawUrl: string): string | null {
+  try { return normalizedUrl(rawUrl); } catch { return null; }
+}
+
+/** Whether a value is scheme-prefixed like a URL (`https://…`, `s3://…`). */
+export function isUrlShapedCanonicalId(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
+}
+
+/** canonicalIdForUrl, or null for a value `new URL` rejects (never throws). */
+export function tryCanonicalIdForUrl(rawUrl: string): string | null {
+  try { return canonicalIdForUrl(rawUrl); } catch { return null; }
+}
+
+/**
+ * The legacy canonical ID of a fetched URL (stored before IDs became opaque):
+ * normalizedUrl cut to MAX_CANONICAL_ID_LENGTH. Long URLs that share a prefix
+ * share it, so adoption compares full provenance too.
+ */
+export function canonicalIdForUrl(rawUrl: string): string {
+  return normalizedUrl(rawUrl).slice(0, MAX_CANONICAL_ID_LENGTH);
 }
 
 /**

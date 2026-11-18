@@ -1,16 +1,16 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { boundedBodyLimit } from "./bounded-body-limit.js";
+import { bodyBudgetOwner } from "./body-budget-owner.js";
 import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
 import { recordRequestRejection } from "./error-context.js";
 
-type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
+type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 408 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
-  recordRequestRejection(code, message);
-  return envelopeResponse(c, status, code, message, details);
+  return recordRequestRejection(envelopeResponse(c, status, code, message, details), code, message);
 }
 
 function envelopeResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
@@ -41,7 +41,24 @@ export function apiStatusError(c: Context, status: number, message: string, opti
 
 /** Request body cap that answers 413 in the native envelope (with the cap as `details.maxBytes`). */
 export function nativeBodyLimit(maxSize: number): MiddlewareHandler {
-  return boundedBodyLimit(maxSize, (c) => middlewareErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }));
+  return boundedBodyLimit(maxSize, (c) => middlewareErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }), {
+    onTimeout: bodyTimeoutResponse,
+    onBusy: bodyBudgetBusyResponse,
+    owner: bodyBudgetOwner,
+  });
+}
+
+/** The process-wide request-body buffer budget is spent: 503 with Retry-After, in the caller's error shape. */
+export function bodyBudgetBusyResponse(c: Context): Response {
+  c.header("Retry-After", "5");
+  c.header("Connection", "close");
+  return middlewareErrorResponse(c, 503, "unavailable", "Request body buffer budget exhausted; retry shortly");
+}
+
+/** A request body that stalled or trickled past its deadline: 408 in the caller's error shape. */
+export function bodyTimeoutResponse(c: Context): Response {
+  c.header("Connection", "close");
+  return middlewareErrorResponse(c, 408, "invalid_request", "Request body was not received in time");
 }
 
 /**
@@ -63,8 +80,7 @@ export function usesNativeErrorEnvelope(path: string): boolean {
  */
 export function middlewareErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
   if (usesNativeErrorEnvelope(c.req.path)) return apiErrorResponse(c, status, code, message, details);
-  recordRequestRejection(code, message);
-  return c.json({ error: message, code, ...linkedDetails(c, code, details) }, status);
+  return recordRequestRejection(c.json({ error: message, code, ...linkedDetails(c, code, details) }, status), code, message);
 }
 
 const thrownErrorDetails = new WeakMap<object, ApiErrorDetails>();
@@ -99,14 +115,13 @@ export function envelopeForError(c: Context, error: unknown, status: number, ori
   const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
   const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);
   // The client gets the code's reviewed copy; telemetry gets what actually went wrong.
-  recordRequestRejection(code, rawErrorReason(error));
   const response = envelopeResponse(c, status as ErrorStatus, code, publicApiErrorMessage(code, details), details);
   for (const source of [error instanceof HTTPException ? error.res?.headers : undefined, originalHeaders]) {
     source?.forEach((value, name) => {
       if (!DROPPED_HEADERS.has(name.toLowerCase())) response.headers.set(name, value);
     });
   }
-  return response;
+  return recordRequestRejection(response, code, rawErrorReason(error));
 }
 
 function rawErrorReason(error: unknown): string {
