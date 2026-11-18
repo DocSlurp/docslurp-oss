@@ -194,24 +194,52 @@ export function isRunCreationBlockedError(
  * URL documents ingested before canonical IDs became opaque store the URL
  * itself (canonicalIdForUrl) as their canonical ID; new ingests of the same URL
  * use `url:<sha256>`. When a URL document is ingested under the server-derived
- * opaque ID, this project's legacy rows of that URL (with `sourceUrl` metadata)
- * are re-keyed to it first, under the advisory lock of the legacy key, so the
- * version lookup and the supersession trigger (which match canonical_id
- * exactly) treat them as earlier versions. A caller's own canonical ID is never
- * touched. Lazy, per ingest; no migration.
+ * opaque ID, this project's legacy rows of that URL are re-keyed to it first,
+ * so the version lookup and the supersession trigger (which match canonical_id
+ * exactly) treat them as earlier versions. Lazy, per ingest; no migration.
+ *
+ * Only rows URL intake made are touched, all of these:
+ * - same project and organization;
+ * - created by a `url-ingest` run (URL intake and crawl; a server-only marker,
+ *   callers cannot set run kinds or `sourceUrl` metadata);
+ * - stored `sourceUrl` normalizing to the URL being ingested, and canonical_id
+ *   equal to that URL's legacy raw form. A caller-chosen ID, or a row whose
+ *   source URL differs or doesn't parse, is left as it is.
+ *
+ * No advisory lock on the legacy key: the caller holds the opaque key's lock
+ * (which serializes URL ingests of this URL), and the UPDATE's row locks cover
+ * the rest. Taking the legacy key here would cycle with a worker completing a
+ * legacy document, whose supersession trigger takes that key while holding the
+ * row (40P01).
+ *
+ * The UPDATE bumps projection_revision (migration 0109 bumps it on every
+ * documents UPDATE, routine status writes included), so a publication in
+ * flight for one of these rows fails its compare-and-set. That is intended:
+ * the row is a legacy version this ingest is about to supersede.
  */
 export async function adoptLegacyUrlVersions(
   client: SqlClient,
-  args: { projectId: string; canonicalId: string; metadata?: Record<string, unknown> | null },
+  args: { projectId: string; orgId: string; canonicalId: string; metadata?: Record<string, unknown> | null },
 ): Promise<number> {
   const sourceUrl = typeof args.metadata?.sourceUrl === "string" ? args.metadata.sourceUrl : null;
   if (!sourceUrl || args.canonicalId !== opaqueCanonicalIdForUrl(sourceUrl)) return 0;
   const legacy = tryCanonicalIdForUrl(sourceUrl);
   if (!legacy || legacy === args.canonicalId) return 0;
-  await client`select pg_advisory_xact_lock(hashtextextended(${`${args.projectId}:${legacy}`}, 0))`;
+  const candidates = await client<{ id: string; source_url: string | null }[]>`
+    select d.id, d.metadata ->> 'sourceUrl' as source_url
+    from documents d
+    join project_runs r on r.id = d.run_id and r.project_id = d.project_id
+    where d.project_id = ${args.projectId} and d.org_id = ${args.orgId}
+      and d.canonical_id = ${legacy} and r.kind = 'url-ingest'
+  `;
+  const ids = candidates
+    .filter((row) => row.source_url !== null && tryCanonicalIdForUrl(row.source_url) === legacy)
+    .map((row) => row.id);
+  if (!ids.length) return 0;
   const adopted = await client<{ id: string }[]>`
     update documents set canonical_id = ${args.canonicalId}, updated_at = now()
-    where project_id = ${args.projectId} and canonical_id = ${legacy} and (metadata ->> 'sourceUrl') is not null
+    where id = any(${client.array(ids)}) and project_id = ${args.projectId} and org_id = ${args.orgId}
+      and canonical_id = ${legacy}
     returning id
   `;
   return adopted.length;
@@ -752,11 +780,15 @@ export function createRunCreation(deps: RunCreationDeps) {
           });
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
         // A URL re-ingest also takes over the version chain of this URL's legacy rows (raw-URL canonical ID).
-        if (!input.extract) await adoptLegacyUrlVersions(client, { projectId: input.projectId, canonicalId, metadata: file.metadata });
-        const [existing] = input.extract ? [] : await client<{ id: string; version_number: number }[]>`
-          select id, version_number from documents
+        if (!input.extract) await adoptLegacyUrlVersions(client, { projectId: input.projectId, orgId, canonicalId, metadata: file.metadata });
+        // The latest version by creation (as the supersession trigger orders them), and the next number after the
+        // chain's highest: adopted legacy rows can repeat numbers already used by opaque-keyed ones.
+        const [existing] = input.extract ? [] : await client<{ id: string; next_version: number }[]>`
+          select id, (select max(version_number) from documents
+            where project_id = ${input.projectId} and canonical_id = ${canonicalId}) + 1 as next_version
+          from documents
           where project_id = ${input.projectId} and canonical_id = ${canonicalId}
-          order by version_number desc, created_at desc
+          order by created_at desc, id desc
           limit 1
         `;
 
@@ -797,7 +829,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             -- the owner's vectors while any copy still uses them.
             ${dedupCandidate?.vector_owner_id ?? null},
             ${dedupCandidate?.dedup_scope ?? null},
-            ${existing ? existing.version_number + 1 : 1},
+            ${existing ? Number(existing.next_version) : 1},
             ${existing?.id ?? null},
             ${canonicalId},
             ${sourcePath},
@@ -844,16 +876,27 @@ export function createRunCreation(deps: RunCreationDeps) {
   ) {
     const documents: DocumentRow[] = [];
     for (const source of sources) {
-      const canonicalId = await ensureCanonicalId(sql, source);
-      const row = await sql.begin(async (tx) => {
+      let canonicalId = await ensureCanonicalId(sql, source);
+      // A concurrent URL re-ingest can re-key the source's chain (adoptLegacyUrlVersions) between reading its
+      // canonical ID and taking the lock: re-read it under the lock and retry with the current key.
+      let row: (DocumentRow & { tags: string[] }) | null = null;
+      for (let attempt = 0; attempt < 3 && row === null; attempt++) row = await sql.begin(async (tx) => {
         const client = tx as unknown as SqlClient;
         await lockRunCreation(runId, client);
         await client`select pg_advisory_xact_lock(hashtextextended(${`${input.projectId}:${canonicalId}`}, 0))`;
-        // The new version follows the latest in the lineage, whichever version was selected.
-        const [latest] = await client<{ id: string; version_number: number }[]>`
-          select id, version_number from documents
+        const [current] = await client<{ canonical_id: string | null }[]>`select canonical_id from documents where id = ${source.id}`;
+        if (current?.canonical_id && current.canonical_id !== canonicalId) {
+          canonicalId = current.canonical_id;
+          return null;
+        }
+        // The new version follows the latest in the lineage (by creation, as the supersession trigger orders them),
+        // numbered after the chain's highest, whichever version was selected.
+        const [latest] = await client<{ id: string; next_version: number }[]>`
+          select id, (select max(version_number) from documents
+            where project_id = ${input.projectId} and canonical_id = ${canonicalId}) + 1 as next_version
+          from documents
           where project_id = ${input.projectId} and canonical_id = ${canonicalId}
-          order by version_number desc, created_at desc
+          order by created_at desc, id desc
           limit 1
         `;
         const [inserted] = await client<DocumentRow[]>`
@@ -884,7 +927,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${source.source_sha256 ?? null},
             ${source.file_facts ? sql.json(source.file_facts as never) : null},
             ${canonicalId},
-            ${(latest?.version_number ?? source.version_number ?? 1) + 1},
+            ${latest ? Number(latest.next_version) : (source.version_number ?? 1) + 1},
             ${latest?.id ?? source.id},
             ${reuse ? source.id : null},
             ${sql.json(sourceMetadata(source.metadata))},
@@ -899,6 +942,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         const tags = await client<{ tag: string }[]>`select tag from document_tags where document_id = ${inserted!.id} order by tag`;
         return { ...inserted!, tags: tags.map((row) => row.tag) };
       });
+      if (!row) throw new Error(`[run-creation] source ${source.id} kept changing its canonical ID; retry the reprocess`);
       documents.push(row);
     }
     return { documents, unreadable: [] as UnreadableSource[] };
