@@ -1026,7 +1026,8 @@ export type FigureResumeBlockReason = "attempts" | "vm-budget" | "no-progress" |
 /** One page extract record (GET /v1/documents/{id}/page-extracts). */
 export type PageExtractRecord = {
   pageNumber: number; runId: string;
-  pass: "extract" | "scan-ocr" | "critique" | "vision" | "human";
+  /** `video-frames` is a video's sampled-frame read: it contributes to the page's transcript and is never final. */
+  pass: "extract" | "scan-ocr" | "critique" | "vision" | "human" | "video-frames";
   method: "text-layer" | "ocr" | "ocr-second-read" | "vision" | "transcription" | "correction" | "kept-as-image" | "none";
   engine: string | null; billedClass: "fast" | "ocr" | "rich" | null; tags: string[];
   confidence: number | null; plausibility: number | null; textBytes: number | null; finishReason: string | null; durationMs: number | null;

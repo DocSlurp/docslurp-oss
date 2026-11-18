@@ -2258,9 +2258,9 @@ export const uploadSessions = pgTable(
     lastError: text("last_error"),
     reconcileAttempts: integer("reconcile_attempts").default(0).notNull(),
     nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
-    /** A client completing its own files holds the reconciler off the session until then (migration 0193). */
+    /** A client completing its own files holds the reconciler off the session until then (migration 0194). */
     clientFinalizingUntil: timestamp("client_finalizing_until", { withTimezone: true, mode: "string" }),
-    /** When the current run of client holds began; total hold time is capped from it (migration 0193). */
+    /** When the current run of client holds began; total hold time is capped from it (migration 0194). */
     clientFinalizingSince: timestamp("client_finalizing_since", { withTimezone: true, mode: "string" }),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
@@ -2327,7 +2327,7 @@ export const uploadSessionFiles = pgTable(
     status: text().default("pending").notNull(),
     etag: text(),
     completedParts: jsonb("completed_parts").default([]).notNull(),
-    /** Set once the provider multipart upload of an aborted or failed session was aborted (migration 0193). */
+    /** Set once the provider multipart upload of an aborted or failed session was aborted (migration 0194). */
     multipartAbortedAt: timestamp("multipart_aborted_at", { withTimezone: true, mode: "string" }),
     sha256: text(),
     contentIdentity: jsonb("content_identity").$type<{ algorithm: "sha256"; digest: string }>(),
@@ -2352,7 +2352,7 @@ export const uploadSessionFiles = pgTable(
       "btree",
       table.sourceKey.asc().nullsLast().op("text_ops"),
     ),
-    // Open multipart uploads still to abort (migration 0193).
+    // Open multipart uploads still to abort (migration 0194).
     index("upload_session_files_pending_multipart_abort_idx").using(
       "btree",
       table.sessionId.asc().nullsLast().op("text_ops"),
@@ -3713,6 +3713,7 @@ export const documentPageExtracts = pgTable("document_page_extracts", {
   projectId: text("project_id").notNull(),
   runId: text("run_id").notNull(),
   pageNumber: integer("page_number").notNull(),
+  // Migration 0193 adds the contributing pass `video-frames` (a video's sampled-frame read), which is never final.
   pass: text().notNull(),
   method: text().notNull(),
   engine: text(),
