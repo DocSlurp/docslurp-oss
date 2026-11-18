@@ -432,7 +432,8 @@ export class PdfRasterCache {
    * Sizes of `pages` of `source` (pdf-page-sizes.ts): this process's memo, then the run's stored sizes (pdfinfo's, plus page
    * facts' when enabled), then one sandboxed pdfinfo per aligned block of the pages still unknown. Everything reused is
    * bound to this run's document and the staged source's verified hash; without such a binding (or with reuse off) every
-   * page is measured, one pdfinfo per contiguous run, as before. Sizes pdfinfo measured are remembered and stored.
+   * page is measured, one pdfinfo per contiguous run, as before. Sizes pdfinfo measured are remembered at once and stored
+   * by `store`, which the caller runs after the pages' areas are recorded and authorized.
    */
   private async measurePageSizes(
     document: Document,
@@ -441,9 +442,10 @@ export class PdfRasterCache {
     pages: number[],
     lanes: number,
     signal: AbortSignal | undefined,
-  ): Promise<Map<number, PdfPageSize>> {
+  ): Promise<{ sizes: Map<number, PdfPageSize>; store: () => Promise<void> }> {
     const sizes = new Map<number, PdfPageSize>();
-    if (pages.length === 0) return sizes;
+    let store = async () => {};
+    if (pages.length === 0) return { sizes, store };
     const reuse = this.options.pageSizeReuse ?? readPageSizeReuse();
     const binding = reuse ? pageSizeBinding(document, runId, source.sha256) : null;
     const memo = this.options.pageSizeMemo ?? pdfPageSizeMemo();
@@ -481,7 +483,8 @@ export class PdfRasterCache {
       take(new Map(unmeasured.flatMap((page) => measured.has(page) ? [[page, measured.get(page)!] as const] : [])), "pdfinfo");
       if (binding && counts.calls > 0) {
         memo.set(binding, "pdfinfo", measured);
-        await this.writeStoredPageSizes(document, binding, memo.all(binding, "pdfinfo"));
+        // Stored once the caller has recorded and authorized the pages' areas, like the rasters themselves.
+        store = () => this.writeStoredPageSizes(document, binding, memo.all(binding, "pdfinfo"));
       }
     }
     console.log(
@@ -489,7 +492,7 @@ export class PdfRasterCache {
         `facts=${counts.facts} pdfinfo=${counts.pdfinfo} pdfinfo_calls=${counts.calls} reuse=${binding ? "on" : "off"}`,
     );
     pushPerfMetric({ metric: "raster-page-size-pdfinfo-calls", value: counts.calls, unit: "count", tags: ["raster", "page-sizes"] });
-    return sizes;
+    return { sizes, store };
   }
 
   /** The run's stored sizes from `sizeSource` for this exact source, or null (absent, unreadable or refused). */
@@ -629,13 +632,14 @@ export class PdfRasterCache {
         // call, a few at a time. Lanes share one abort signal: the first failure aborts every in-flight sibling
         // command, the lanes drain, and nothing is uploaded after it. Every command also takes a process-wide slot.
         const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
-        const sizes = await this.measurePageSizes(args.document, args.runId, source, pdftoppmPages, lanes, args.signal);
+        const { sizes, store: storePageSizes } = await this.measurePageSizes(args.document, args.runId, source, pdftoppmPages, lanes, args.signal);
         if (pdftoppmPages.some((pageNumber) => !sizes.has(pageNumber))) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
         // Each page's area from its size, measured and authorized before anything renders or is cached.
         await recordRenderedPageAreas(args.runId, args.document, pdftoppmPages.map((pageNumber) => {
           const size = sizes.get(pageNumber)!;
           return { pageNumber, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) };
         }));
+        await storePageSizes();
         await runLanes(pdftoppmPages, lanes, args.signal, async (selectedPage, signal) => {
           const size = sizes.get(selectedPage)!;
           const renderDpi = longEdgeCappedDpi(size.widthPt, size.heightPt, dpi, maxLongEdgePx);
