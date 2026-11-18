@@ -26,6 +26,10 @@ const RECOVERY_MESSAGES: Record<string, string> = {
   model_not_allowed: "DocSlurp manages chat models: pass --tier fastest, balanced or smart.",
   chat_capacity_unavailable: "Chat is temporarily unavailable. Wait a few seconds, then try again.",
   unavailable: "The service is temporarily unavailable. Try again later.",
+  // Upload codes the CLI branches on (a code missing here is dropped from CliApiError.failure).
+  upload_session_busy: "Another request is finishing this upload. Wait a few seconds, then try again.",
+  upload_object_missing: "No stored object was found for this file. Upload its bytes again, then complete it.",
+  upload_parts_incomplete: "Some of this file's parts are missing or have the wrong size. Upload them again, then complete it.",
 };
 
 export function safeHttpFailure(status: number, body: unknown): { code?: string; requestId?: string; message: string; retryAfterSeconds?: number } {

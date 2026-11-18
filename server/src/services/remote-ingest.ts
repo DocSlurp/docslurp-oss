@@ -101,20 +101,36 @@ function rejectedUrl(index: number, failure: UrlFetchFailure, refusal: UrlRefusa
  */
 export async function* remoteUrlIntakeItems(
   urls: string[],
-  options: { signal?: AbortSignal; canonicalIds?: Array<string | null | undefined> } = {},
+  options: {
+    signal?: AbortSignal;
+    canonicalIds?: Array<string | null | undefined>;
+    /**
+     * The caller's authorization, run after each URL's DNS validation as the last step before its request is sent
+     * (safeExternalFetch's beforeDispatch). A refusal ends the iteration: neither this URL nor any later one is fetched.
+     */
+    beforeFetch?: () => Promise<void>;
+  } = {},
 ): AsyncGenerator<ProjectIntakeItem> {
   for (const [index, url] of urls.entries()) {
     let response: Response;
     let safeUrl: string;
+    let refusal: { error: unknown } | null = null;
+    const beforeFetch = options.beforeFetch;
     try {
       safeUrl = await assertSafeExternalUrl(url);
       response = await safeExternalFetch(safeUrl, {
         redirect: "error",
         signal: options.signal ?? AbortSignal.timeout(15_000),
-      });
+      }, beforeFetch ? {
+        beforeDispatch: async () => {
+          try { await beforeFetch(); } catch (error) { refusal = { error }; throw error; }
+        },
+      } : {});
     } catch (error) {
-      const { failure, refusal, codes } = classifyUrlFetchFailure(error);
-      yield rejectedUrl(index, failure, refusal, codes);
+      // A refused credential stops the whole intake; only a URL's own failure is a rejected item.
+      if (refusal) throw (refusal as { error: unknown }).error;
+      const classified = classifyUrlFetchFailure(error);
+      yield rejectedUrl(index, classified.failure, classified.refusal, classified.codes);
       continue;
     }
 

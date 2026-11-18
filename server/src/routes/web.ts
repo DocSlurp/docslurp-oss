@@ -118,10 +118,16 @@ function createWebRoutes(surface: WebSurface) {
         tags: body.tags,
         startUrl: body.url,
         crawlOptions: { limit: body.limit, maxDepth: body.maxDepth, includePaths: body.includePaths ?? null, excludePaths: body.excludePaths ?? null },
-        crawl: async () => {
+        // The preflighted ingest target, which the crawl's credential checks cover: a found project, the default (or a
+        // restricted key's own) project, or null for a project the intake will create.
+        // What this route required of the key (apiKeyCanUseWebTools): `ingest`, plus `web` for a CLI OAuth token or a
+        // client key. Rechecked live before each provider attempt and each page write.
+        requiredScopes: actor.type === "apiKey" && (actor.apiKey.oauth?.audience === "api" || actor.apiKey.keyType === "client") ? ["ingest", "web"] : ["ingest"],
+        crawlProjectId: scopeRef ?? (lookup.ref.kind === "default" && (Boolean(body.project?.trim()) || !body.newProject) ? scope.id : null),
+        crawl: async (beforeProviderAttempt) => {
           const crawled = await runWebCapability("crawl", crawlInput({ ...body, maxCharacters: 100_000, project: undefined }), {
             userId: actor.userId, orgId: scope.orgId, projectId: scope.id, surface: surface === "api" ? "ingest" : surface, signal: c.req.raw.signal,
-          }, { deadlineMs: body.timeoutSeconds * 1000 });
+          }, { deadlineMs: body.timeoutSeconds * 1000, beforeProviderAttempt });
           return { pages: crawled.pages, credits: crawled.usage.credits };
         },
         idempotencyKey: c.req.header("Idempotency-Key")?.trim(),

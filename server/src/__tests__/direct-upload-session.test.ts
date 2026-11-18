@@ -12,9 +12,14 @@ const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
 const createMultipartUpload = vi.hoisted(() => vi.fn());
 const copyUploadedObject = vi.hoisted(() => vi.fn(async () => ({ etag: "sealed-etag" })));
-vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({ connection: lockMock, release: lockMock.release }) }));
+const reservations = vi.hoisted(() => [] as Array<{ lockClass?: string; tenant?: string; deadline?: number }>);
+vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async (options: { lockClass?: string; tenant?: string; deadline?: number } = {}) => {
+  reservations.push(options);
+  return { connection: lockMock, release: lockMock.release };
+} }));
 vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signMultipartUploadPart, signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
+vi.mock("../services/direct-session-idempotency.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/direct-session-idempotency.js")>(), assertSessionProjectStillContributable: async () => {} }));
 
 import {
   getDirectUploadSessionDescription,
@@ -23,6 +28,7 @@ import {
   createDirectUploadSession,
   validMultipartLayout,
   queueAbandonedDirectUploadCleanup,
+  abortAbandonedMultipartUploads,
   finalizeDirectUploadFile,
   withDirectUploadLock,
   describeDirectUploadSession,
@@ -183,16 +189,28 @@ describe("Direct Upload Session Module", () => {
     const fixture = directUploadSessionFixture();
     fixture.files[0].status = "pending";
     for (const actualSize of [null, 41, 42]) {
-      sqlMock.mockReset();
-      sqlMock.mockResolvedValueOnce([fixture.session]).mockResolvedValueOnce(fixture.files).mockResolvedValue([{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0]) }]);
+      sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("from upload_sessions") && !query.includes("update")) return [fixture.session];
+        if (query.includes("from upload_session_files") && !query.includes("exists")) return fixture.files;
+        if (query.includes("set status = 'completed'")) return [{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0], "etag") }];
+        if (query.includes("exists (select 1 from upload_session_files")) return [{ open: true }];
+        return [{ one: 1 }];
+      });
       getUploadedObjectMetadata.mockResolvedValue({ contentLength: actualSize, etag: "etag" });
       const completing = completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1" });
+      const queries = () => sqlMock.mock.calls.map(([strings]) => (strings as string[]).join("?"));
       if (actualSize === 42) {
-        await expect(completing).resolves.toBeUndefined();
-        expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
+        await expect(completing).resolves.toEqual({ sessionComplete: false });
+        expect(queries().some(query => query.includes("set status = 'completed'"))).toBe(true);
+        // New progress extends the hold, within the cap from when it began.
+        expect(queries().at(-1)).toContain("client_finalizing_since");
       } else {
         await expect(completing).rejects.toThrow();
-        expect(sqlMock).toHaveBeenCalledTimes(3);
+        // Nothing is completed, and with no new progress the hold opened before the lock is not extended.
+        expect(queries().some(query => query.includes("set status = 'completed'"))).toBe(false);
+        expect(queries().filter(query => query.includes("client_finalizing_until = least("))).toHaveLength(0);
+        expect(queries().some(query => query.includes("client_finalizing_since is null"))).toBe(true);
       }
     }
   });
@@ -201,17 +219,17 @@ describe("Direct Upload Session Module", () => {
   // (and later hashed) must not be the bytes a second PUT can replace.
   it("seals a completed single-part upload: ingests a server-owned copy of exactly the verified version", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
-    sqlMock.mockReset().mockResolvedValue([{ id: file.id, source_key: sealedSourceKey(file) }]);
+    sqlMock.mockReset().mockResolvedValue([{ id: file.id, source_key: sealedSourceKey(file, "\"verified\"") }]);
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "\"verified\"" });
     copyUploadedObject.mockClear();
     deleteUploadedObject.mockClear();
     await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
-    const sealed = sealedSourceKey(file);
+    const sealed = sealedSourceKey(file, "\"verified\"");
     expect(sealed).not.toBe(file.source_key);
     expect(sealed.startsWith(file.source_key.slice(0, file.source_key.lastIndexOf("/") + 1))).toBe(true);
     // The copy is conditional on the verified ETag, and the copy itself is size-checked.
     expect(copyUploadedObject).toHaveBeenCalledWith({ fromKey: file.source_key, toKey: sealed, ifMatch: "\"verified\"" });
-    expect(getUploadedObjectMetadata).toHaveBeenLastCalledWith(sealed);
+    expect(getUploadedObjectMetadata).toHaveBeenLastCalledWith(sealed, undefined);
     const completed = sqlMock.mock.calls.find(([strings]) => strings.join("?").includes("set status = 'completed'"));
     expect(completed).toContain(sealed);
     expect(completed?.[0].join("?")).toContain("insert into storage_cleanup_queue");
@@ -251,7 +269,8 @@ describe("Direct Upload Session Module", () => {
 
   it("does not copy a multipart upload: completion closed its part URLs and it has no PUT URL", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u1", part_size: 8, size_bytes: 20 };
-    sqlMock.mockReset().mockResolvedValue([]);
+    // The fenced publish matches the still-pending row.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("set status = 'completed'") ? [{ id: "file-1" }] : []);
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: 20, etag: "e" });
     copyUploadedObject.mockClear();
     await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
@@ -276,7 +295,8 @@ describe("Direct Upload Session Module", () => {
     const parts = [{partNumber:1,sizeBytes:8,etag:"a"},{partNumber:2,sizeBytes:8,etag:"b"},{partNumber:3,sizeBytes:4,etag:"c"}];
     getUploadedObjectMetadata.mockReset().mockRejectedValueOnce(Object.assign(new Error("NotFound"), { name: "NotFound" })).mockResolvedValueOnce({contentLength:20,etag:"e"});
     listMultipartUploadParts.mockResolvedValue(parts);
-    sqlMock.mockResolvedValue([]);
+    // The fenced publish matches the still-pending row.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("set status = 'completed'") ? [{ id: "file-1" }] : []);
     await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
     expect(completeMultipartUpload).toHaveBeenLastCalledWith({key:file.source_key,uploadId:"u1",parts});
   });
@@ -296,9 +316,76 @@ describe("Direct Upload Session Module", () => {
     lockMock.mockResolvedValueOnce([{acquired:false}]);
     const work = vi.fn();
     // Coded, so clients can tell a held lock (repeat shortly) from a real conflict.
-    await expect(withDirectUploadLock("session-1",work)).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { waitMs: 0, tenant: "org:org-1" })).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
     expect(work).not.toHaveBeenCalled();
     expect(lockMock.release).toHaveBeenCalled();
+  });
+
+  it("lets batch and short holders wait like confirm (DOCSLURP_UPLOAD_LOCK_WAIT_MS), and the reconciler not at all", async () => {
+    const { env, uploadLockWaitMs } = await import("../config.js");
+    expect(env.directUploadLockWaitMs).toBe(10_000);
+    // The setting defaults to 10 s and is clamped to 0–60 s.
+    expect([undefined, "2500", "600000", "-5"].map(uploadLockWaitMs)).toEqual([10_000, 2_500, 60_000, 0]);
+    lockMock.mockReset().mockResolvedValue([{ acquired: true }]);
+    for (const lockClass of ["batch", "short"] as const) {
+      reservations.length = 0;
+      const before = Date.now();
+      await withDirectUploadLock("session-1", async () => "ok", undefined, undefined, { lockClass, tenant: "org:org-1" });
+      expect(reservations[0]!.deadline! - before).toBeGreaterThanOrEqual(9_900);
+      expect(reservations[0]!.deadline! - before).toBeLessThanOrEqual(10_100);
+    }
+    reservations.length = 0;
+    await withDirectUploadLock("session-1", async () => "ok", undefined, undefined, { lockClass: "reconcile" });
+    expect(reservations[0]!.deadline).toBeUndefined();
+  });
+
+  it("waits out a held lock when asked, retrying on a released connection, then answers busy", async () => {
+    lockMock.mockClear(); lockMock.release.mockClear();
+    lockMock.mockResolvedValueOnce([{acquired:false}]).mockResolvedValueOnce([{acquired:false}]);
+    const work = vi.fn(async () => "done");
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { waitMs: 2_000, tenant: "org:org-1" })).resolves.toBe("done");
+    expect(work).toHaveBeenCalledOnce();
+    // Each failed try released its connection before waiting.
+    expect(lockMock.release).toHaveBeenCalledTimes(3);
+    lockMock.mockResolvedValue([{acquired:false}]);
+    const started = Date.now();
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { waitMs: 300, tenant: "org:org-1" })).rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    expect(work).toHaveBeenCalledOnce();
+    lockMock.mockReset().mockResolvedValue([{acquired:true}]);
+  });
+
+  it("verifies the assembled object when a retried multipart completion finds the upload closed", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u1", part_size: 8, size_bytes: 20 };
+    // The fenced publish matches the still-pending row.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("set status = 'completed'") ? [{ id: "file-1" }] : []);
+    const notFound = Object.assign(new Error("missing"), { name: "NotFound" });
+    // Absent before completion; present after the completion whose answer was lost.
+    getUploadedObjectMetadata.mockReset().mockRejectedValueOnce(notFound).mockResolvedValue({ contentLength: 20, etag: "e" });
+    listMultipartUploadParts.mockReset().mockResolvedValue([{ partNumber: 1, sizeBytes: 8, etag: "a" }, { partNumber: 2, sizeBytes: 8, etag: "b" }, { partNumber: 3, sizeBytes: 4, etag: "c" }]);
+    completeMultipartUpload.mockReset()
+      .mockRejectedValueOnce(Object.assign(new Error("reset"), { code: "ECONNRESET" }))
+      .mockRejectedValueOnce(Object.assign(new Error("closed"), { name: "NoSuchUpload", $metadata: { httpStatusCode: 404 } }));
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
+    expect(completeMultipartUpload).toHaveBeenCalledTimes(2);
+    expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
+    // A closed upload with no assembled object is still the client's 400.
+    getUploadedObjectMetadata.mockReset().mockRejectedValue(notFound);
+    completeMultipartUpload.mockReset().mockRejectedValue(Object.assign(new Error("closed"), { name: "NoSuchUpload", $metadata: { httpStatusCode: 404 } }));
+    await expect(finalizeDirectUploadFile(file)).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("no longer open") });
+    listMultipartUploadParts.mockReset(); completeMultipartUpload.mockReset();
+  });
+
+  it("turns a storage failure while finalizing into a retryable 503, never a client error", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
+    sqlMock.mockReset().mockResolvedValue([]);
+    getUploadedObjectMetadata.mockReset().mockRejectedValue(Object.assign(new Error("secret provider detail"), { name: "AccessDenied", $metadata: { httpStatusCode: 403 } }));
+    const failure = await finalizeDirectUploadFile(file).catch(error => error);
+    expect(failure).toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
+    expect(failure.message).not.toContain("secret");
+    // A definite answer is not retried.
+    expect(getUploadedObjectMetadata).toHaveBeenCalledOnce();
+    getUploadedObjectMetadata.mockReset();
   });
 
   it("returns the persisted intake payload without signing completed sessions", async () => {
@@ -309,12 +396,27 @@ describe("Direct Upload Session Module", () => {
     expect(signSingleUploadPut).not.toHaveBeenCalled();
   });
 
-  it("aborts known abandoned multiparts idempotently and waits out signed PUTs for object cleanup", async () => {
-    sqlMock.mockReset().mockResolvedValueOnce([{source_key:"raw/a",upload_id:"mpu-a"}]).mockResolvedValue([]);
-    abortMultipartUpload.mockRejectedValueOnce(Object.assign(new Error("gone"),{name:"NoSuchUpload"}));
+  it("records abandoned-session cleanup without provider calls, and aborts multiparts later, idempotently, marking each", async () => {
+    // Under the session lock: database only, waiting out signed PUTs before raw objects are deleted.
+    sqlMock.mockReset().mockResolvedValue([]);
+    abortMultipartUpload.mockClear();
     await expect(queueAbandonedDirectUploadCleanup("session-1")).resolves.toBeUndefined();
-    expect(abortMultipartUpload).toHaveBeenCalledWith({key:"raw/a",uploadId:"mpu-a"});
+    expect(abortMultipartUpload).not.toHaveBeenCalled();
     expect(sqlMock.mock.calls.some(([strings]) => strings.join("").includes("interval '16 minutes'"))).toBe(true);
+    // Outside any lock: each open multipart is aborted (NoSuchUpload counts as done) and marked; a failure stays unmarked.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("").includes("multipart_aborted_at is null")
+      ? [{ id: "f-a", source_key: "raw/a", upload_id: "mpu-a" }, { id: "f-b", source_key: "raw/b", upload_id: "mpu-b" }, { id: "f-c", source_key: "raw/c", upload_id: "mpu-c" }]
+      : []);
+    abortMultipartUpload.mockReset()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error("gone"), { name: "NoSuchUpload" }))
+      .mockRejectedValueOnce(Object.assign(new Error("down"), { name: "InternalError", $metadata: { httpStatusCode: 500 } }));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(abortAbandonedMultipartUploads({ sessionId: "session-1" })).resolves.toBe(2);
+    log.mockRestore();
+    expect(abortMultipartUpload).toHaveBeenCalledWith({ key: "raw/a", uploadId: "mpu-a" });
+    const marked = sqlMock.mock.calls.filter(([strings]) => strings.join("").includes("set multipart_aborted_at = now()")).map(call => call[1]);
+    expect(marked.sort()).toEqual(["f-a", "f-b"]);
   });
 
   it("computes multipart part counts at the protocol seam", () => {
@@ -386,8 +488,11 @@ describe("authoritative recovery evidence", () => {
   });
   it.each(["AccessDenied", "TimeoutError", "NoSuchUpload"])("never signs retry URLs when inventory fails: %s", async name => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u", part_size: 8 };
-    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("private provider detail"), { name }));
+    // Every attempt fails: a transient name is retried, then still refused.
+    const failure = Object.assign(new Error("private provider detail"), { name });
+    listMultipartUploadParts.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
     await expect(buildDirectUploadFileDescriptor(file)).rejects.toThrow();
+    listMultipartUploadParts.mockReset();
   });
   it("retries a wrong-sized part despite a stale completed receipt", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u", part_size: 42, completed_parts: [{ partNumber: 1, etag: "stale" }] };
@@ -407,9 +512,11 @@ describe("full recovery inspection", () => {
   function installSession() {
     const fixture = directUploadSessionFixture();
     fixture.files[0].status = "pending";
-    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => {
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
-      if (query.includes("update upload_session_files")) { fixture.files[0].status = "completed"; return [{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0]) }]; }
+      // The publish names the sealed key it derived from the verified version.
+      const sealed = values.find((value): value is string => typeof value === "string" && value.includes("/sealed-"));
+      if (query.includes("update upload_session_files")) { fixture.files[0].status = "completed"; return [{ id: fixture.files[0].id, source_key: sealed ?? fixture.files[0].source_key }]; }
       if (query.includes("from upload_sessions")) return [fixture.session];
       if (query.includes("from upload_session_files")) return fixture.files;
       return [{ one: 1 }];
@@ -430,7 +537,8 @@ describe("full recovery inspection", () => {
     const fixture = installSession();
     Object.assign(fixture.files[0], { upload_mode: "multipart", upload_id: "open", part_size: 42 });
     getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("missing"), { name: "NotFound" }));
-    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("secret provider detail"), { name }));
+    const providerFailure = Object.assign(new Error("secret provider detail"), { name });
+    listMultipartUploadParts.mockReset().mockRejectedValue(providerFailure);
     const failure = await getDirectUploadSessionDescription("session-1", "user-1").catch(error => error);
     expect(failure).toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
     expect(failure.message).not.toContain("secret provider detail");

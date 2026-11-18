@@ -73,6 +73,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "server/src/services/api-key-usage.ts#pagesToday": { class: "tenant-id", why: "per API key id" },
   "server/src/services/api-key-usage.ts#pendingIps": { class: "tenant-id", why: "per API key id" },
   "server/src/services/api-key-usage.ts#pendingRequests": { class: "tenant-id", why: "per API key id" },
+  "server/src/services/direct-upload-reconciler.ts#kicks": { class: "tenant-id", why: "in-flight reconcile kick per upload session id; values are void promises and carry no data" },
   "server/src/services/materialization-policy.ts#issuerCache": { class: "tenant-id", why: "live API key row by key id" },
   "server/src/services/project-summary-tree-jobs.ts#statusEstimates": { class: "tenant-id", why: "per project id" },
   "server/src/services/search.ts#nativeFallbackLogged": { class: "operational", why: "log throttle" },

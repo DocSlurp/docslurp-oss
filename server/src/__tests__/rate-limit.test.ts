@@ -116,6 +116,23 @@ describe("api rate limit middleware", () => {
     });
   });
 
+  // Policy: the limiter charges requests, not files. A batched files/complete naming 100 files costs one unit of the
+  // upload category, exactly like a single-file call.
+  it("charges a batched upload completion one request, however many files it names", async () => {
+    const app = new Hono();
+    app.use("*", createApiRateLimit({ windowMs: 60_000, maxRequests: 2, keyPrefix: "batch-complete", now: () => currentTime }));
+    app.post("/v1/uploads/direct/sessions/:id/files/complete", (c) => c.json({ ok: true }));
+    const files = Array.from({ length: 100 }, (_, i) => ({ fileId: `f${i}` }));
+    const send = () => app.request("/v1/uploads/direct/sessions/s/files/complete", {
+      method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.11" }, body: JSON.stringify({ files }),
+    });
+    const first = await send();
+    expect(first.status).toBe(200);
+    expect(first.headers.get("RateLimit-Policy")).toContain('"account-upload";q=2');
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(429);
+  });
+
   it("keeps Retry-After and rate-limit headers on the envelope 429", async () => {
     const app = buildIpLimitedApp(() => currentTime);
     const headers = { "x-forwarded-for": "203.0.113.20" };

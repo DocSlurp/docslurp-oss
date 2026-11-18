@@ -43,6 +43,38 @@ describe("WebRouter", () => {
     expect(jina.calls).toHaveBeenCalledTimes(2);
   });
 
+  it("rechecks the caller's authorization before every provider attempt: a revocation after one stops the failover", async () => {
+    const jina = adapter("jina", 0.001, async () => { throw new WebProviderError("rate_limited", "jina responded 429", 429, 5_000); });
+    const exa = adapter("exa", 0.004);
+    let checks = 0;
+    let revoked = false;
+    const refused = new Error("credential revoked");
+    const instance = new WebRouter({ adapters: [jina, exa], keys: { jina: "key", exa: "key" }, strategy: "cheapest",
+      order: ["jina", "firecrawl", "exa", "tavily"], maxAttempts: 3, now: () => 1_000_000 });
+    const beforeAttempt = async () => {
+      checks += 1;
+      if (revoked) throw refused;
+      // The credential is revoked while the first provider's request is in flight.
+      revoked = true;
+    };
+    await expect(instance.run("search", search, { signal: new AbortController().signal, deadlineAt: 1_030_000, beforeAttempt })).rejects.toBe(refused);
+    expect(checks).toBe(2);
+    expect(jina.calls).toHaveBeenCalledOnce();
+    // The failover target is never dispatched once the check refuses.
+    expect(exa.calls).not.toHaveBeenCalled();
+  });
+
+  it("rechecks authorization before a transient retry of the same option too", async () => {
+    let calls = 0;
+    const jina = adapter("jina", 0.001, async () => { calls += 1; throw new WebProviderError("unavailable", "jina responded 503", 503); });
+    const instance = new WebRouter({ adapters: [jina], keys: { jina: "key" }, strategy: "cheapest", order: ["jina"], maxAttempts: 3,
+      now: () => 1_000_000, retryDelayMs: () => 0 });
+    let checks = 0;
+    const beforeAttempt = async () => { checks += 1; if (checks > 1) throw new Error("credential revoked"); };
+    await expect(instance.run("search", search, { signal: new AbortController().signal, deadlineAt: 1_030_000, beforeAttempt })).rejects.toThrow("credential revoked");
+    expect(calls).toBe(1);
+  });
+
   it("does not pay a second provider for a request the first rejected as invalid", async () => {
     const jina = adapter("jina", 0.001, async () => { throw new WebProviderError("invalid_request", "jina responded 422", 422); });
     const exa = adapter("exa", 0.004);
