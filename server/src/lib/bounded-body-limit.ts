@@ -126,7 +126,7 @@ export type BoundedBodyLimitOptions = {
   /** Answer when a buffer budget is spent (503 with Retry-After). */
   onBusy: (c: Context) => Response;
   /** Who the body is charged to (default: an authenticated request of an unknown owner). */
-  owner?: (c: Context) => BodyBudgetOwner;
+  owner?: (c: Context) => BodyBudgetOwner | Promise<BodyBudgetOwner>;
   idleTimeoutMs?: number;
   deadlineMs?: number;
 };
@@ -146,7 +146,9 @@ export function boundedBodyLimit(requestedMaxSize: number, onError: (c: Context)
   const routeMaxSize = Math.min(requestedMaxSize, MAX_IN_MEMORY_BODY_BYTES);
   const idleTimeoutMs = options.idleTimeoutMs ?? BODY_IDLE_TIMEOUT_MS;
   return async (c, next) => {
-    const owner = options.owner?.(c) ?? { pool: "authenticated", key: "unknown" };
+    // A body-less request is charged nothing, so its owner is never resolved.
+    if (!c.req.raw.body) return next();
+    const owner = (await options.owner?.(c)) ?? { pool: "authenticated", key: "unknown" };
     // A public (unauthenticated) request is small whatever its route allows.
     const maxSize = owner.pool === "public" ? Math.min(routeMaxSize, bodyReads.publicRequestBytes) : routeMaxSize;
     const header = c.req.header("content-length");

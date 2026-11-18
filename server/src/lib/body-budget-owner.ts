@@ -4,15 +4,46 @@ import type { BodyBudgetOwner } from "./bounded-body-limit.js";
 import { clientIpFromHeaders, isInProcessEnv } from "./client-ip.js";
 
 /**
- * Who a buffered request body is charged to. Authentication runs before the
- * body limits, so an API key's request is its org's and a session's is its
- * user's (one organization per user); anything else is public, by client IP.
+ * Verifies a request's credential for budget accounting only, on routes that
+ * authenticate inside their handler (`/v1/chat/completions`, `/v1/mcp`,
+ * `/compat/*`, ...): the org of a verified key, or null. It never sets the
+ * request's actor or decides authorization; the route's own auth still runs.
+ * Registered by the server (body-budget-credentials.ts), so this module stays
+ * free of database imports.
  */
-export function bodyBudgetOwner(c: Context): BodyBudgetOwner {
+export type BodyBudgetCredentialResolver = (c: Context) => Promise<{ orgId: string | null; keyId: string } | null>;
+
+let credentialResolver: BodyBudgetCredentialResolver | null = null;
+
+/**
+ * Routes that authenticate a key or bearer inside their handler, after the body
+ * limit. Only these pre-verify a credential: every other route either set its
+ * actor already or must never look an API key up (the sensitive SSO start).
+ * The OAuth endpoints' callers are not yet authenticated, so they stay public.
+ */
+const SELF_AUTHENTICATING_BODY_ROUTES = /^\/(?:v1\/(?:chat\/completions|mcp)(?:\/|$)|compat\/)/;
+
+export function registerBodyBudgetCredentialResolver(resolver: BodyBudgetCredentialResolver | null): void {
+  credentialResolver = resolver;
+}
+
+function publicOwner(c: Context): BodyBudgetOwner {
+  const ip = clientIpFromHeaders((name) => c.req.header(name), { trustedInternal: isInProcessEnv(c.env) });
+  return { pool: "public", key: `ip:${ip ?? "unknown"}` };
+}
+
+/**
+ * Who a buffered request body is charged to: the actor authentication already
+ * set (an API key's org, a session's user, one organization per user), else a
+ * credential verified here for routes that authenticate later (its org), else
+ * the client IP in the public pool. A missing or invalid credential is public.
+ */
+export async function bodyBudgetOwner(c: Context): Promise<BodyBudgetOwner> {
   const apiKey = c.get("apiKey");
   if (apiKey) return { pool: "authenticated", key: apiKey.orgId ? `org:${apiKey.orgId}` : `key:${apiKey.keyId}` };
   const user = c.get("sessionUser");
   if (user?.id) return { pool: "authenticated", key: `user:${user.id}` };
-  const ip = clientIpFromHeaders((name) => c.req.header(name), { trustedInternal: isInProcessEnv(c.env) });
-  return { pool: "public", key: `ip:${ip ?? "unknown"}` };
+  const verified = credentialResolver && SELF_AUTHENTICATING_BODY_ROUTES.test(c.req.path) ? await credentialResolver(c).catch(() => null) : null;
+  if (verified) return { pool: "authenticated", key: verified.orgId ? `org:${verified.orgId}` : `key:${verified.keyId}` };
+  return publicOwner(c);
 }

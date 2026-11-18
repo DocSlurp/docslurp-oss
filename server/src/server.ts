@@ -32,6 +32,8 @@ import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { v1BodyLimit } from "./lib/v1-body-limit.js";
 import { bodyBudgetWarnings, configureBodyReads } from "./lib/bounded-body-limit.js";
+import { registerBodyBudgetCredentialResolver } from "./lib/body-budget-owner.js";
+import { verifyBodyBudgetCredential } from "./lib/body-budget-credentials.js";
 
 const bodyBudgetWarned = new Set<string>();
 function warnBodyBudgetOnce(warning: string): void {
@@ -193,6 +195,8 @@ export function createApiApp(): Hono {
     minBytesPerSecond: env.bodyReadMinBytesPerSecond,
   });
   for (const warning of bodyBudgetWarnings()) warnBodyBudgetOnce(warning);
+  // Routes that authenticate inside their handler (chat completions, MCP, compat) are charged by a verified key's org.
+  registerBodyBudgetCredentialResolver(verifyBodyBudgetCredential);
   app.use("/v1/*", v1BodyLimit(env));
 
   app.use(
