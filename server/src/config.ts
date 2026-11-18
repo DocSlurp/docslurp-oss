@@ -209,6 +209,11 @@ validateProductionSecrets();
 const storage = resolveObjectStorageConfig();
 const maxUploadBytes = readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024);
 
+/** DOCSLURP_UPLOAD_LOCK_WAIT_MS: how long a session call waits out a held lock; default 10 s, clamped to 0–60 s. */
+export function uploadLockWaitMs(raw: string | undefined): number {
+  return Math.min(60_000, Math.max(0, readNumber(raw, 10_000)));
+}
+
 export const env = {
   chatMcpEnabled: readBoolean(process.env.DOCSLURP_CHAT_MCP_ENABLED, true),
   /** Public chat APIs (/v1/chat, its stream, chat completions) may run the bounded search agent. */
@@ -241,6 +246,46 @@ export const env = {
   maxUploadBytes,
   /** Direct upload part sizes and signed-URL lifetime (UPLOAD_PART_SIZE_MB, UPLOAD_STREAM_PART_SIZE_MB, UPLOAD_URL_TTL_SECONDS). */
   uploadTransfer: readUploadTransferPolicy(process.env, maxUploadBytes),
+  /**
+   * How many files of one direct-upload session are verified and sealed at once (a batched `files/complete` call, the
+   * reconciler, a recovery read). Storage operations per file are independent; the session lock is held for the batch.
+   */
+  directUploadFinalizeConcurrency: Math.min(32, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY, 8)))),
+  /**
+   * Direct database connections (to DATABASE_URL, opened lazily as needed) that one API process may hold for
+   * upload-session advisory locks: default 5, which is also the minimum (smaller values are raised to 5), maximum 64.
+   * Two are kept for short operations; at 5 the rest are one slot each for batch, run-start and reconcile holders.
+   * 8 (3 batch, 2 run-start slots) suits deployments with connection headroom. See lib/direct-upload-locks.ts. Count
+   * them in the database's max_connections budget per API machine, twice during a deploy's overlap.
+   */
+  directUploadLockPoolMax: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX, 5),
+  /** Concurrent run starts (confirms, idempotent intakes) holding a lock connection per process (default 1 at pool 5, 2 at 8). */
+  directUploadLockStartMax: process.env.DOCSLURP_UPLOAD_LOCK_START_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_MAX, 2) : undefined,
+  /** Concurrent run starts per organization in one process (default 1). */
+  directUploadLockStartPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_PER_ORG, 1),
+  /** Short lock holders (part signing, abort) per organization in one process (default 1 of the 2 short connections). */
+  directUploadLockShortPerOrg: process.env.DOCSLURP_UPLOAD_LOCK_SHORT_PER_ORG ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_SHORT_PER_ORG, 1) : undefined,
+  /** Concurrent idempotent bulk, URL and website intakes holding their Idempotency-Key lock per process (default 1 at pool 5, 2 at 8). */
+  directUploadLockIntakeMax: process.env.DOCSLURP_UPLOAD_LOCK_INTAKE_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_INTAKE_MAX, 1) : undefined,
+  /** Of those, per organization in one process (default 1). */
+  directUploadLockIntakePerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_INTAKE_PER_ORG, 1),
+  /** Concurrent files/complete holders per process (default 1 at pool 5, 3 at 8). */
+  directUploadLockBatchMax: process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX, 3) : undefined,
+  /** Concurrent files/complete holders per organization in one process (default 2, at most the batch cap). */
+  directUploadLockBatchPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_PER_ORG, 2),
+  /**
+   * How long one lock hold keeps starting new files (default 5 s); files not started are answered retryable
+   * `upload_session_busy`. Work already started may run to the hard cap below.
+   */
+  directUploadLockHoldBudgetMs: Math.max(250, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_BUDGET_MS, 5_000)),
+  /**
+   * How long batch and short session-lock holders (files/complete, part signing, the session read, abort) wait for a
+   * slot, a connection and the session lock before answering 409 upload_session_busy (default 10 s, like confirm; at
+   * most 60 s). A waiter whose client disconnects stops waiting.
+   */
+  directUploadLockWaitMs: uploadLockWaitMs(process.env.DOCSLURP_UPLOAD_LOCK_WAIT_MS),
+  /** Hard cap on one lock hold's storage work: in-flight calls are cancelled after it (default 30 s). */
+  directUploadLockHoldMaxMs: Math.max(1_000, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS, 30_000)),
   /**
    * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct

@@ -364,8 +364,113 @@ For a custom HTTP client:
 4. Poll the session for `result`, then follow `result.run.id`.
 
 The server verifies the stored parts. It cannot infer EOF from an idle stream
-or from its current byte total. The `/confirm` endpoint remains available as an
-explicit fallback, but automatic ingestion does not require it.
+or from its current byte total.
+
+### Completing many files
+
+`/files/complete` also takes a batch: `{ "files": [{ "fileId": "A" }, { "fileId": "B", "sizeBytes": 12345 }] }`,
+up to 100 entries, each `fileId` once. A batch entry takes only `fileId`,
+`etag` and `sizeBytes` (no part manifest: the server reads the parts from
+storage), and a batch body is at most 32 KiB. The server finalizes the batch
+under one session lock, several files at a time, and answers per file:
+
+```json
+{ "ok": false, "completedCount": 1, "failedCount": 1, "sessionComplete": false,
+  "files": [{ "fileId": "A", "status": "completed" },
+            { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "upload_object_missing", "message": "...",
+              "retryable": false, "action": "reupload", "blocksSession": false } }] }
+```
+
+Two codes mean the file's bytes are not in storage yet, and only these mean
+"send the bytes again": `upload_object_missing` (no stored object: PUT the
+file to its `putUrl`) and `upload_parts_incomplete` (a multipart file's parts
+are missing or of the wrong size: upload the missing parts). Read the file's
+fresh targets with `?fileId=` (below), send the bytes, then complete it again.
+Any other `400` or `409` is not a reason to resend; in particular a coded
+`409` `upload_session_busy` is never a missing object.
+
+A file's failure carries the status the single-file call would have answered,
+and what to do about it: `retryable` (repeat the same request for this file as
+it is; `action: "retry"`), `action: "reupload"` (put the bytes again or finish
+the parts, then repeat), `action: "none"` (a repeat cannot fix it), and
+`blocksSession` (left as is, this file makes the whole session fail once you
+stop completing files). One call starts files for about five seconds; files it
+did not reach come back as retryable `upload_session_busy`. Only a session-level problem (not found, closed, no longer
+permitted, or `409` `upload_session_busy` while another request holds the
+session) fails the whole request. While a client is completing files, the
+background reconciler leaves the session alone for 30 seconds after each call
+that completes a file (at most 15 minutes in all).
+The call that completes the last file starts ingestion within a second or two;
+calling `/confirm` yourself is still fine and returns the same run. The SDK's
+`completeUploadFiles()` splits larger lists into batches.
+
+Retry rules for session calls (`/files/complete`, part signing, the session
+read, `/confirm`, `/abort`):
+
+- `503` `upload_storage_unavailable` (with `Retry-After`): storage was briefly
+  unavailable after the server's own retries. Repeat the same request, or the
+  files marked `retryable`, after `Retry-After`. Nothing was completed for those
+  files.
+- `409` `upload_session_busy` (with `Retry-After`): another request or the
+  reconciler holds the session. Each of these calls first waits up to 10
+  seconds for it, so this answer means a long hold: repeat the same request
+  after `Retry-After`. The SDK does this for you (`signUploadParts`,
+  `completeUploadFile(s)`, `getUploadSession`, `completeUploadSession`) within
+  the call's one deadline, and does not send a repeat with less than 250 ms
+  left. A known-size upload (SDK `upload()` or the CLI) that is still busy
+  after its waits keeps the session and names it in the error: the server's
+  reconciler finishes the files whose bytes arrived, so the session is not
+  aborted. A stream upload's final complete is waited out for about two
+  minutes; a stream declares no size, so if it is still busy after that the
+  session is aborted (the server cannot finish it) and the error names it.
+- `400`/`409` `upload_object_missing` or `upload_parts_incomplete`: the bytes
+  are not in storage; send them, then complete again.
+- Other `4xx`: the file or session needs attention; repeating will not help.
+
+Rate limits count requests, not files: a batch of 100 files costs one request
+in the upload category, the same as completing one file.
+
+The full session read (`GET /v1/uploads/direct/sessions/:sessionId`, without
+`statusOnly`) checks storage for each pending file before it signs fresh upload
+targets, a few seconds' worth per read. On a large session, files it did not
+get to come back still pending with `"inspected": false`: a single-part file
+with a fresh `putUrl`, a multipart file with no part list at all
+(`"transferState": "unknown"`, no `pendingParts`), since its parts were not
+read. Do not send bytes for an uninspected file straight away: complete the
+uninspected files first (a batch of up to 100 per call), and send bytes only
+for those answered `upload_object_missing` or `upload_parts_incomplete`. The
+SDK and CLI do this, with one batch complete and one `fileId` read per 100
+files. To resume particular files, name them: `?fileId=A&fileId=B` (up to
+1,000, each at most 64 characters) reads and inspects only those. `fileId`
+applies to the full read only: with `statusOnly=true` it is a `400`.
+
+One read signs at most 1,000 part URLs across its files. A multipart file past
+that budget lists its remaining `pendingParts` (number and size) without a
+`url` and is marked `"partUrlsOmitted": true`; sign those parts with
+`POST .../files/:fileId/parts/sign` (`{ "partNumbers": [...] }`, up to 100 per
+call). The SDK and CLI sign omitted parts for you.
+
+#### Revocation
+
+Authorization is checked immediately before each external step: before a
+session read or `parts/sign` signs upload targets (after any storage reads),
+before a session read seals an uploaded object, and, for bulk, URL and website
+intake, before each storage write, each URL fetch (after its DNS check) and
+each crawl provider request, failovers and retries included. The API key must
+still be live, keep `ingest`, belong to the session's or upload's organization,
+and its project allowlist must still cover the target project. A step already
+dispatched (one fetch, one write, one signing batch, or a provider request
+already accepted) may complete after a key is revoked; nothing new starts, and
+no run starts or bills (run admission checks again in its own transaction).
+Once refused, the request answers `403`.
+
+The `/confirm` endpoint remains available as an explicit fallback, but automatic
+ingestion does not require it. Confirm is idempotent: repeating it returns the
+same run, and a session that is already confirmed answers at once. While the
+server is starting the run (an earlier confirm, or its own reconciler, can take
+a while on a large session), confirm waits up to 10 seconds and then answers
+`409` `upload_session_busy` with `Retry-After`. Repeat the same request; it
+never starts a second run.
 
 ### Matching files, partial acceptance and idempotency
 
