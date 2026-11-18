@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { reportException } from "@docslurp/shared/error-reporting";
 import {
   embeddingModelBaseUri,
   embeddingModelCatalogByUri,
@@ -132,8 +133,14 @@ export async function pruneDrainedIndexConfigs(sql: SqlClient = defaultSql, limi
   `;
   let pruned = 0;
   for (const row of rows) {
-    const map = await pruneIndexConfigs(row.id, sql);
-    if (map && Object.keys(map).length <= 1) pruned += 1;
+    try {
+      const map = await pruneIndexConfigs(row.id, sql);
+      if (map && Object.keys(map).length <= 1) pruned += 1;
+    } catch (error) {
+      // One project that cannot be read must not stop the sweep for the others.
+      reportException(error, { surface: "index-config-prune", projectId: row.id });
+      console.error(`[index-serving] could not prune index configs of project ${row.id}: ${error instanceof Error ? error.name : "error"}`);
+    }
   }
   return pruned;
 }

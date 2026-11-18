@@ -406,6 +406,22 @@ describe("caps", () => {
     expect(h2.hosted.map((call) => call.page).sort()).toEqual([1, 2]);
   });
 
+  it("stops sending a document to the reader after a capacity give-way, releases its reservation, and sends the rest hosted", async () => {
+    const { provider } = reader(async () => { throw Object.assign(new Error("reader at capacity"), { reason: "capacity", pageReaderNoCompute: true }); },
+      { maxPagesPerJob: 2, estimateJobCostCents: () => 0.9 });
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    const outputs = await extract(h, state, document, [1, 2, 3, 4, 5, 6, 7, 8]);
+    // Two lanes may each have one job in flight when the first gives way; no later batch is sent.
+    expect(provider.read.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(readerOutputs(outputs)).toEqual([]);
+    expect(h.hosted).toHaveLength(8);
+    expect(h.rendered.filter((render) => render.maxLongEdgePx === 2048).length).toBeLessThanOrEqual(3);
+    expect(await state.pageReaderBudget!.committedCents("org-1")).toBe(0);
+  });
+
   it("sends nothing when the organization spend ledger is unavailable (fail closed to hosted)", async () => {
     const { provider } = reader(echo);
     register(provider);

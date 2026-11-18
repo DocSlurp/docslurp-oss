@@ -88,6 +88,64 @@ describe("listProjects", () => {
     });
   });
 
+  it("lists every readable project when one row's stored settings no longer validate", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const row = (id: string, pipeline: unknown) => ({
+      id, org_id: "org-1", user_id: "user-1", name: id, template_key: null, system_prompt: null, pipeline, monthly_budget_cents: null,
+      document_count: 0, total_page_count: 0, run_count: 0, latest_run_id: null, latest_run_status: null, archived_at: null,
+      slug: `slug-${id}`, last_activity_at: "2026-04-08T18:00:00.000Z", created_at: "2026-04-08T17:00:00.000Z", updated_at: "2026-04-08T18:00:00.000Z",
+    });
+    listAccessibleProjectIdsMock.mockResolvedValue(["good", "old-model", "bad-field", "unreadable"]);
+    sqlMock.mockResolvedValueOnce([
+      row("good", null),
+      // The production shape: a model named by catalog id that is refused today.
+      row("old-model", { vision: { model: "gpt-4.1-mini", prompt: "<OCR>", baseUrl: null, runtime: "remote-openai", benchmarkProfile: "difficult-pages", maxPagesPerDocument: 4, remoteFallbackModel: "gpt-4.1-mini" } }),
+      // A setting the schema rejects outright: listed with the default for that field.
+      row("bad-field", { quality: "no-such-quality", vision: { profile: "cheapest-hosted" } }),
+      // Not a project row at all: left out, the others still listed.
+      { ...row("unreadable", null), org_id: null, name: null },
+    ]);
+
+    const projects = await listProjects("user-1");
+
+    expect(projects.map((project) => project.id)).toEqual(["good", "old-model", "bad-field"]);
+    expect(JSON.stringify(projects)).not.toContain("gpt-4.1-mini");
+    expect(projects[2]!.pipeline.vision.profile).toBe("cheapest-hosted");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("project bad-field has stored settings that no longer validate"));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("project unreadable could not be read even with defaults; left out"));
+    error.mockRestore();
+  });
+
+  it("shows one project whose stored settings no longer validate, and refuses to start work or draft a save from it", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { getProject } = await import("../services/projects.js");
+    const { getProjectAccess } = await import("../services/organizations.js");
+    vi.mocked(getProjectAccess).mockResolvedValue({ orgId: "org-1" } as never);
+    const row = (pipeline: unknown) => [{
+      id: "ws-old", org_id: "org-1", user_id: "user-1", name: "Old", template_key: null, system_prompt: null, monthly_budget_cents: null, pipeline,
+      document_count: 0, total_page_count: 0, run_count: 0, latest_run_id: null, latest_run_status: null, archived_at: null,
+      slug: "old", last_activity_at: "2026-04-08T18:00:00.000Z", created_at: "2026-04-08T17:00:00.000Z", updated_at: "2026-04-08T18:00:00.000Z",
+    }];
+    const stale = { privacyMode: "local-only", quality: "no-such-quality", piiPolicy: { enabled: true, action: "block_indexing" }, webTools: false, embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } };
+
+    sqlMock.mockResolvedValueOnce(row(stale));
+    const shown = await getProject("ws-old", "user-1", undefined, { forDisplay: true });
+    expect(shown?.pipeline).toMatchObject({ privacyMode: "local-only", webTools: false, piiPolicy: { enabled: true, action: "block_indexing" }, embedding: { profile: "cheapest-local" } });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("project ws-old has stored settings that no longer validate"));
+
+    // Settings that restrict what happens to content are never shown weaker than stored: unreadable means strictest.
+    sqlMock.mockResolvedValueOnce(row({ privacyMode: "Local-Only", piiPolicy: { enabled: "true", action: "block" }, webTools: "off", quality: "no-such-quality" }));
+    const strictest = await getProject("ws-old", "user-1", undefined, { forDisplay: true });
+    expect(strictest?.pipeline.privacyMode).toBe("strict-privacy");
+    expect(strictest?.pipeline.piiPolicy).toMatchObject({ enabled: true, action: "block_indexing" });
+    expect(strictest?.pipeline.webTools).toBe(false);
+
+    // The same row read to start work or to draft a save still fails: nothing is guessed there.
+    sqlMock.mockResolvedValueOnce(row(stale));
+    await expect(getProject("ws-old", "user-1")).rejects.toThrow();
+    error.mockRestore();
+  });
+
   it("reads corpus totals from counters and in-flight work separately", async () => {
     listAccessibleProjectIdsMock.mockResolvedValue(["ws-1"]);
     sqlMock.mockResolvedValueOnce([

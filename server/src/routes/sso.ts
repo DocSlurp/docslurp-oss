@@ -587,6 +587,20 @@ async function consumeSsoRequest(state: string, provider: "oidc" | "saml"): Prom
 
 const SSO_STATE_COOKIE = "docslurp_sso_state";
 
+function ssoStateCookieIsSecure(c: Context): boolean {
+  return new URL(inferApiOrigin(c.req.raw)).protocol === "https:";
+}
+
+/**
+ * Over HTTPS the cookie is `__Host-` prefixed: a browser accepts that name only
+ * with Secure, Path=/ and no Domain, so a sibling host cannot plant the digest
+ * of its own flow's state and have the victim's browser finish that flow
+ * (login CSRF). The plain name is read only on plain HTTP.
+ */
+export function ssoStateCookieName(secure: boolean): string {
+  return secure ? `__Host-${SSO_STATE_COOKIE}` : SSO_STATE_COOKIE;
+}
+
 function ssoStateDigest(state: string): string {
   return createHash("sha256").update(state).digest("hex");
 }
@@ -597,8 +611,8 @@ function ssoStateDigest(state: string): string {
  * SameSite=None to survive it; Lax is the dev/http fallback.
  */
 function setSsoStateCookie(c: Context, state: string): void {
-  const secure = new URL(inferApiOrigin(c.req.raw)).protocol === "https:";
-  setCookie(c, SSO_STATE_COOKIE, ssoStateDigest(state), {
+  const secure = ssoStateCookieIsSecure(c);
+  setCookie(c, ssoStateCookieName(secure), ssoStateDigest(state), {
     httpOnly: true,
     sameSite: secure ? "None" : "Lax",
     secure,
@@ -609,13 +623,14 @@ function setSsoStateCookie(c: Context, state: string): void {
 
 /** True only when the callback returns to the browser that started the flow; consumes the cookie. */
 function ssoStateMatchesCookie(c: Context, state: string): boolean {
-  const cookie = getCookie(c, SSO_STATE_COOKIE);
+  const name = ssoStateCookieName(ssoStateCookieIsSecure(c));
+  const cookie = getCookie(c, name);
   if (!cookie) return false;
   const expected = ssoStateDigest(state);
   const provided = Buffer.from(cookie);
   const wanted = Buffer.from(expected);
   const ok = provided.length === wanted.length && timingSafeEqual(provided, wanted);
-  if (ok) deleteCookie(c, SSO_STATE_COOKIE, { path: "/" });
+  if (ok) deleteCookie(c, name, { path: "/", secure: name !== SSO_STATE_COOKIE });
   return ok;
 }
 

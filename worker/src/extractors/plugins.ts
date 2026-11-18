@@ -445,6 +445,10 @@ export interface PageImageReaderProvider {
    * Read the job's pages. Resolves with one result per page it answers (at most one per key) and the provider cost of
    * every VM or request it ran. A rejection that spent compute carries that cost as `pageReaderUsage` (PAGE_READER_USAGE_PROPERTY,
    * read with pageReaderUsageOf); set `ocrRefused: true` when the reader refused the job's input rather than failing to run.
+   * A rejection may carry a job-level `reason` from PAGE_IMAGE_READ_FAILURES: `capacity` (the reader is at its caps) makes
+   * the host send the document's remaining pages in this run to its fallback instead. Set `pageReaderNoCompute: true`
+   * (PAGE_READER_NO_COMPUTE_PROPERTY) only when the job gave way before any compute ran for it; the host then releases the
+   * job's reservation on the organization's daily reader budget.
    * Either way the host keeps the recogniser's text for the job's pages: a page reader never fails a page or document.
    */
   read(job: PageImageReadJob, signal?: AbortSignal): Promise<{ results: PageImageReadResult[]; usage: UsageEvent[] }>;
@@ -452,6 +456,36 @@ export interface PageImageReaderProvider {
 
 /** The property a page reader's rejection carries its incurred usage on (PageImageReaderProvider.read). */
 export const PAGE_READER_USAGE_PROPERTY = "pageReaderUsage";
+
+/**
+ * The property a page reader's rejection sets to `true` when the job gave way before any compute was attributable to it,
+ * across every attempt inside that `read()` call: no VM or server was created (or a create started), no standby was
+ * claimed, no running or booting VM was joined or bound, no hosted request was sent (even one answered 429 or 503), and no
+ * page was sent. Use it only with job-level `reason: "capacity"` and no usage, and never after the job's signal fired.
+ * The host then releases the job's reservation against the organization's daily reader budget instead of settling it,
+ * within a per-organization daily backstop. Set it only when that is certain. A rejection without it, or one that also
+ * carries usage, is charged at no less than its reservation (fail closed).
+ */
+export const PAGE_READER_NO_COMPUTE_PROPERTY = "pageReaderNoCompute";
+
+/**
+ * Whether a page reader rejection asserts that no compute ran for the job: the flag is exactly `true`, the error is not a
+ * refusal of the job's input, and it carries no usage. Anything less is treated as compute that may have run.
+ */
+export function pageReaderGaveWayBeforeCompute(error: unknown): boolean {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return false;
+  const record = error as Record<string, unknown>;
+  if (record[PAGE_READER_NO_COMPUTE_PROPERTY] !== true || record.ocrRefused === true) return false;
+  if (record[PAGE_READER_USAGE_PROPERTY] !== undefined && !(Array.isArray(record[PAGE_READER_USAGE_PROPERTY]) && (record[PAGE_READER_USAGE_PROPERTY] as unknown[]).length === 0)) return false;
+  return record.usage === undefined;
+}
+
+/** The job-level failure reason a page reader rejection carries (`reason`, one of PAGE_IMAGE_READ_FAILURES), or null. */
+export function pageReaderJobFailureOf(error: unknown): PageImageReadFailure | null {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return null;
+  const reason = (error as { reason?: unknown }).reason;
+  return typeof reason === "string" && (PAGE_IMAGE_READ_FAILURES as readonly string[]).includes(reason) ? (reason as PageImageReadFailure) : null;
+}
 
 /** The usage a page reader rejection carries (shape-checked; never throws). A single SandboxRunError `usage` counts too. */
 export function pageReaderUsageOf(error: unknown): UsageEvent[] {
@@ -473,7 +507,7 @@ export interface ExtractorPlugin {
   pageImageReader?: PageImageReaderProvider;
   /**
    * The capability pool members this plugin's services serve (@docslurp/shared capability-pools.ts): one per service that
-   * reads customer pages, its `backend` the service's provider `id`, with where it processes pages (stated US or EU
+   * reads customer pages, its `backend` the service's provider `id`, with where it processes pages (US, EU or an unpinned `global` region,
    * evidence), whether the pool fails over to it automatically, and its measured quality and pages per $1. A service
    * without a member refuses worker start (its region would be unknown). Several plugins may each register a sandboxed PDF
    * provider when every one is a `text` member: the text pool then runs them in pool order with automatic failover.

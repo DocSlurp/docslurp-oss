@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const query = vi.hoisted(() => vi.fn());
 const release = vi.hoisted(() => vi.fn());
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query, connect: async () => ({ query, release }) } }));
-vi.mock("../lib/request-actor.js", () => ({ resolveBetterAuthSessionActor: vi.fn(async () => null) }));
+vi.mock("../lib/request-actor.js", () => ({ resolveBetterAuthSessionActor: vi.fn(async () => null), hasBetterAuthSession: vi.fn(async () => false) }));
 import { mcpOAuthRoutes, mcpOAuthMetadataRoutes } from "../routes/mcp-oauth.js";
 import { parseScopes, pkceChallenge, redirectMatches, validRedirect, validateMcpToken } from "../services/mcp-oauth.js";
 import { bearerToken, mcpBearerChallenge } from "../middleware/mcp-auth.js";
@@ -81,8 +81,22 @@ describe("MCP OAuth", () => {
       expect(consent.status).toBe(303);
       expect(consent.headers.get("location")).toBe("/app/mcp/authorize?request=consent_1");
       expect((await post("/oauth/mcp/grants/grant/revoke", browser)).status).toBe(401);
+      // Signed out: sent to the app's sign-in page, which returns here afterwards.
       const device = await post("/oauth/mcp/device", browser);
-      expect(await device.text()).toContain("Sign in to connect a device");
+      expect(device.status).toBe(303);
+      expect(device.headers.get("location")).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
+      const page = await app.request(`${browser}/oauth/mcp/device`);
+      expect(page.status).toBe(302);
+      expect(page.headers.get("location")).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
+      expect(page.headers.get("cache-control")).toBe("no-store");
+      // A session the app accepts but this page refuses (second factor pending): a page, not a redirect, or the two
+      // would bounce the browser between them forever.
+      const { hasBetterAuthSession } = await import("../lib/request-actor.js");
+      vi.mocked(hasBetterAuthSession).mockResolvedValueOnce(true);
+      const pending = await app.request(`${browser}/oauth/mcp/device`);
+      expect(pending.status).toBe(200);
+      expect(pending.headers.get("location")).toBeNull();
+      expect(await pending.text()).toContain("Finish signing in first");
     });
     it("keeps the issuer and every discovery endpoint on the MCP origin", async () => {
       const metadata = await (await app.request(`${url}/.well-known/oauth-authorization-server`)).json() as Record<string, unknown>;
@@ -122,8 +136,9 @@ describe("MCP OAuth", () => {
       // On the browser origin, and on any other host, it is served (no loop, no redirect built from the request).
       for (const host of [browser, "http://evil.example", "http://localhost:9999"]) {
         const served = await app.request(`${host}/oauth/mcp/device`);
-        expect(served.status, host).toBe(403);
-        expect(served.headers.get("location"), host).toBeNull();
+        // Signed out: a same-host path to sign-in, never an absolute URL built from the request.
+        expect(served.status, host).toBe(302);
+        expect(served.headers.get("location"), host).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
         const page = await app.request(`${host}/oauth/mcp/authorize?client_id=unknown`);
         expect(page.status, host).toBe(400);
       }
@@ -134,7 +149,7 @@ describe("MCP OAuth", () => {
       expect((await post("/oauth/mcp/authorize", url)).status).toBe(303);
       expect((await post("/oauth/mcp/authorize", browser)).status).toBe(403);
       // And no page load is redirected.
-      expect((await app.request(`${url}/oauth/mcp/device`)).status).toBe(403);
+      expect((await app.request(`${url}/oauth/mcp/device`)).headers.get("location")).toBe("/app/mcp/authorize?authorize=%2Foauth%2Fmcp%2Fdevice");
       expect((await app.request(`${url}/oauth/mcp/authorize?client_id=unknown`)).status).toBe(400);
     });
   });
