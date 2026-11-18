@@ -22,51 +22,17 @@ vi.mock("../services/direct-upload-session.js", async original => ({
   loadDirectUploadSession: mocks.load, prepareDirectUploadProjectIntake: mocks.prepare,
   withDirectUploadLock: async (_id: string, run: () => Promise<unknown>) => run(),
 }));
-import { confirmDirectUploadProjectIntake } from "../services/project-intake-actions.js";
 import { createDirectUploadSession, directUploadSessionBelongsToOrganization } from "../services/direct-upload-session.js";
-import type { ProjectIntakePorts } from "../services/project-intake.js";
 const session = { id: "session", user_id: "user", org_id: "org", project_id: "project", expires_at: new Date(Date.now() + 3600_000), status: "ingesting", pipeline: {}, api_key_id: "key", allowed_project_ids: ["project"] };
 const loaded = { session, files: [{ status: "completed" }] };
 const payload = { project: { id: "project", orgId: "org" }, run: { id: "session" }, documents: [], warnings: [] };
-const ports = { records: {} } as ProjectIntakePorts;
 beforeEach(() => {
   vi.clearAllMocks(); mocks.sql.mockResolvedValue([]); mocks.load.mockResolvedValue(loaded);
   mocks.prepare.mockResolvedValue({ session, items: [] });
   mocks.intake.mockResolvedValue({ ...payload, pipeline: {}, deferredReason: null, rejected: [] });
   mocks.project.mockResolvedValue(payload.project);
 });
-describe("durable direct upload acceptance", () => {
-  it("replays a saved response without creating or loading another run", async () => {
-    const saved = { payload, status: 201, temporalDeferred: false };
-    mocks.load.mockResolvedValue({ ...loaded, session: { ...session, status: "confirmed", result: saved } });
-    expect(await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports)).toBe(saved);
-    expect(mocks.sql).not.toHaveBeenCalled(); expect(mocks.intake).not.toHaveBeenCalled();
-  });
-  it("refuses reconciliation after publication without the exact durable response", async () => {
-    const published = { id: "session", project_id: "project", creation_ready_at: "2026-10-23", pipeline: {} };
-    mocks.sql.mockImplementation(async (strings: TemplateStringsArray) => {
-      if (strings.join("").includes("from project_runs")) return [published];
-      if (strings.join("").includes("from documents")) return [{ id: "document", run_id: "session" }];
-      return [];
-    });
-    await expect(confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports)).rejects.toMatchObject({ statusCode: 409 });
-    expect(mocks.intake).not.toHaveBeenCalled(); expect(mocks.discard).not.toHaveBeenCalled();
-    expect(mocks.sql.mock.calls.some(([s]) => s.join("").includes("result ="))).toBe(false);
-  });
-  it("reuses durable identity and original key scope after incomplete run recovery", async () => {
-    mocks.sql.mockImplementation(async (s: TemplateStringsArray) => s.join("").includes("from project_runs") ? [{ id: "session", creation_ready_at: null }] : []);
-    await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports);
-    expect(mocks.discard).toHaveBeenCalledWith("session");
-    expect(mocks.intake).toHaveBeenCalledWith(expect.objectContaining({ runId: "session", apiKeyId: "key", allowedProjectIds: ["project"] }), expect.anything());
-  });
-  it("clears a newly created target if intake rolls the project back", async () => {
-    const discardProject = vi.fn(async () => {});
-    mocks.intake.mockImplementationOnce(async (_request, wrapped) => { await wrapped.records.discardProject("temporary"); throw new Error("Transient failure"); });
-    await expect(confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, { records: { discardProject } } as unknown as ProjectIntakePorts)).rejects.toThrow("Transient failure");
-    expect(discardProject).toHaveBeenCalledWith("temporary");
-    expect(mocks.sql.mock.calls.some(([s]) => s.join("").includes("project_id = null"))).toBe(true);
-  });
-});
+// Confirm, its crash recovery and replays are covered against real SQL in direct-upload-waves.db.test.ts.
 describe("session scope and initialization", () => {
   it("denies sessions outside the current key's organization or project scope", async () => {
     mocks.sql.mockImplementation(async (s: TemplateStringsArray) => s.join("").includes("from upload_sessions") ? [session] : []);

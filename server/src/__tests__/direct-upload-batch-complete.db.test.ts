@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   /** Remaining copy attempts per source key that fail with the provider's spurious "bucket does not exist". */
   copyOutages: new Map<string, number>(),
   heads: [] as string[],
-  confirm: vi.fn(),
+  advance: vi.fn(),
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -51,7 +51,8 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   deleteUploadedObject: async (key: string) => { mocks.objects.delete(key); },
   abortMultipartUpload: async () => {},
 }));
-vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
+// Waves have their own suite (direct-upload-waves.db.test.ts); here only whether the sweep asks for them.
+vi.mock("../services/direct-upload-waves.js", () => ({ advanceDirectUploadWaves: mocks.advance, WAVE_BLOCKED_RETRY_SECONDS: 60 }));
 
 const { completeDirectUploadFiles, completeDirectUploadFile, abortDirectUploadSession, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
 const { reconcileDirectUploads } = await import("../services/direct-upload-reconciler.js");
@@ -93,7 +94,7 @@ beforeEach(async () => {
   mocks.copies.length = 0;
   mocks.copyOutages.clear();
   mocks.heads.length = 0;
-  mocks.confirm.mockReset().mockResolvedValue({});
+  mocks.advance.mockReset().mockResolvedValue({ nextCheckMs: null });
   await db.exec(`delete from upload_session_files; delete from upload_sessions; delete from storage_cleanup_queue; delete from upload_cleanup_owners;
     insert into org_memberships (org_id,user_id,role) values ('o','u','owner') on conflict do nothing;`);
   await db.query(`insert into upload_sessions (id,user_id,org_id,status,next_reconcile_at) values ($1,'u','o','pending', now() + interval '1 hour')`, [SESSION]);
@@ -142,13 +143,12 @@ describe("batched files/complete", () => {
     expect(mocks.heads).toEqual([]);
   });
 
-  it("answers a held lock with a retryable busy error and touches nothing", async () => {
+  it("completes files while another holder (a wave, an abort) has the session lock: files have their own leases", async () => {
     await seedFile(SESSION, "good", { size: 10, etag: "\"a\"" });
     mocks.lockHeld = true;
-    mocks.query.mockClear();
-    await expect(completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "good" }] })).rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
-    expect(mocks.query).not.toHaveBeenCalledWith(expect.stringContaining("from upload_session_files"), expect.anything());
-    expect(mocks.heads).toEqual([]);
+    const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "good" }] });
+    expect(result).toMatchObject({ completedCount: 1, sessionComplete: true });
+    expect((await fileRow("good")).status).toBe("completed");
   });
 
   it("keeps the single-file body: the file's own error, nothing completed", async () => {
@@ -170,7 +170,7 @@ describe("batched files/complete", () => {
   });
 });
 
-describe("reconciler while a client completes files", () => {
+describe("fallback reconciler while a client completes files", () => {
   it("leaves a held session alone, then finishes it once the client stops", async () => {
     await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
     await seedFile(SESSION, "b", { size: 10, etag: "\"b\"" });
@@ -181,13 +181,12 @@ describe("reconciler while a client completes files", () => {
     await reconcileDirectUploads();
     expect(mocks.heads).toEqual([]);
     expect((await fileRow("b")).status).toBe("pending");
-    expect(mocks.confirm).not.toHaveBeenCalled();
 
-    // The client went away: the hold lapses and the reconciler finalizes the rest and confirms.
+    // The client went away: the hold lapses, the fallback finalizes the rest, and the session's waves are checked.
     await db.query(`update upload_sessions set client_finalizing_until = now() - interval '1 second', next_reconcile_at = now() - interval '1 second' where id = $1`, [SESSION]);
     await reconcileDirectUploads();
     expect((await fileRow("b")).status).toBe("completed");
-    expect(mocks.confirm).toHaveBeenCalledWith({ sessionId: SESSION, userId: "u" });
+    expect(mocks.advance).toHaveBeenCalledWith(SESSION, "u");
   });
 
   it("still aborts an expired session that a client was holding", async () => {
@@ -203,7 +202,7 @@ describe("reconciler while a client completes files", () => {
     await db.query("update upload_sessions set next_reconcile_at = now() - interval '1 second' where id = $1", [SESSION]);
     await reconcileDirectUploads();
     expect((await fileRow("a")).status).toBe("completed");
-    expect(mocks.confirm).toHaveBeenCalledOnce();
+    expect(mocks.advance).toHaveBeenCalledOnce();
   });
 
   it("holds for a bounded window only", () => {

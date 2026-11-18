@@ -261,7 +261,8 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
     result = actionResult(intake);
   } catch (error) {
     await releaseWave(session.id, wave, runId);
-    await handleWaveRefusal(session, files, error);
+    // Files refused one by one fail on their own; the session carries on with the rest.
+    if (await handleWaveRefusal(session, files, error)) return;
     throw error;
   }
   await sql`update upload_session_runs set status = 'started', started_at = now(), result = ${sql.json(JSON.parse(JSON.stringify(result)))}
@@ -273,17 +274,17 @@ async function startWave(session: UploadSessionRow, waiting: WaitingFile[], opti
 }
 
 /**
- * Classifies a refused wave (its files are already released):
+ * Classifies a refused wave (its files are already released). True: handled, the session carries on.
  * - billing or admission (402): the files wait, retried after a pause or at once by a confirm;
  * - every file of the wave rejected for its own reason: those files fail, the session carries on;
  * - a definite refusal of the session itself (access revoked, project gone): the session fails, started runs stay;
  * - anything else (storage, database, a busy lock): retried by the reconciler.
  */
-async function handleWaveRefusal(session: UploadSessionRow, files: WaitingFile[], error: unknown): Promise<void> {
+async function handleWaveRefusal(session: UploadSessionRow, files: WaitingFile[], error: unknown): Promise<boolean> {
   if (isRunCreationBlockedError(error)) {
     await sql`update upload_sessions set wave_blocked_until = now() + ${WAVE_BLOCKED_RETRY_SECONDS}::int * interval '1 second',
       last_error = ${`Ingestion is waiting: ${error.code}`}, updated_at = now() where id = ${session.id}`;
-    return;
+    return false;
   }
   if (isAllRejectedError(error)) {
     const byName = new Map((error.issues ?? []).map(issue => [issue.path, issue]));
@@ -293,11 +294,13 @@ async function handleWaveRefusal(session: UploadSessionRow, files: WaitingFile[]
       await sql`update upload_session_files set status = 'failed', finalize_error = ${sql.json(stored)}, updated_at = now()
         where id = ${file.id} and status = 'completed' and run_id is null`;
     }
-    return;
+    console.error(`[upload-waves] session=${session.id} files-rejected=${files.length}`);
+    return true;
   }
   if (error instanceof ProjectIntakeError && [400, 401, 403, 404, 413, 415, 422].includes(error.statusCode)) {
     await failSession(session.id, "Upload rejected: stored bytes or intake policy validation failed");
   }
+  return false;
 }
 
 /** Stops the session: no further waves. Runs already started keep running; files no run took are cleaned up. */

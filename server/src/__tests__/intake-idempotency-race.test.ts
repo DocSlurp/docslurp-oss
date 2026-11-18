@@ -138,16 +138,7 @@ it("retries the same key after a known pre-run fault", async () => {
   expect((await createBulkProjectIntake(args)).status).toBe(201);
   expect(state.executions).toBe(2);
 });
-it.each(["membership", "contribute", "revoked", "scope", "project"])("direct confirmation reauthorizes saved receipts: %s", async change => {
-  const { confirmDirectUploadProjectIntake } = await import("../services/project-intake-actions.js");
-  if (change === "membership") state.access = false;
-  if (change === "contribute") state.contribute = false;
-  if (change === "revoked") state.keyLive = false;
-  if (change === "scope") state.keyScopes = ["chat"];
-  if (change === "project") state.keyProjects = ["foreign"];
-  await expect(confirmDirectUploadProjectIntake({ sessionId: "s", userId: "u" })).rejects.toMatchObject({ statusCode: 403 });
-});
-
+// Direct-upload confirm replays re-authorize too: see direct-upload-waves.db.test.ts.
 it("does not repeat an ambiguous external effect after restart", async () => {
   state.preRunFault = true;
   await expect(createBulkProjectIntake(args)).rejects.toThrow();

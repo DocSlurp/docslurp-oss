@@ -298,7 +298,8 @@ describe("mcpRoutes", () => {
     expect((await request()).status).toBe(404);
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, project_id: "foreign" } });
     expect((await request()).status).toBe(404);
-    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, status: "confirmed" } });
+    // A confirmed session (the storage webhook finished it first) still answers its runs; a closed one does not.
+    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, status: "aborted" } });
     expect((await request()).status).toBe(409);
     loadDirectUploadSession.mockResolvedValue({ ...loaded, files: [...loaded.files, { id: "missing", upload_mode: "single" }] });
     expect((await request()).status).toBe(400);

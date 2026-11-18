@@ -2,8 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Request validation for POST /direct/sessions/:id/files/complete. The service is replaced: a refused body never reaches it.
-const mocks = vi.hoisted(() => ({ single: vi.fn(), batch: vi.fn(), row: vi.fn(), abort: vi.fn(), kick: vi.fn() }));
-vi.mock("../services/direct-upload-reconciler.js", () => ({ kickDirectUploadReconcile: mocks.kick }));
+const mocks = vi.hoisted(() => ({ single: vi.fn(), batch: vi.fn(), row: vi.fn(), abort: vi.fn() }));
 vi.mock("../services/direct-upload-session.js", () => ({
   completeDirectUploadFile: mocks.single, completeDirectUploadFiles: mocks.batch,
   loadDirectUploadSessionRow: mocks.row, loadDirectUploadSession: vi.fn(),
@@ -77,20 +76,6 @@ describe("files/complete request shapes", () => {
     const response = await complete({ files: [{ fileId: "f1" }] });
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: { code: "upload_session_busy" } });
-  });
-});
-
-describe("files/complete starts ingestion when the last file is in", () => {
-  it("kicks a reconcile only when the session became complete", async () => {
-    await complete({ files: [{ fileId: "f1" }] });
-    expect(mocks.kick).not.toHaveBeenCalled();
-    mocks.batch.mockResolvedValueOnce({ files: [{ fileId: "f2", status: "completed" }], completedCount: 1, failedCount: 0, sessionComplete: true });
-    await complete({ files: [{ fileId: "f2" }] });
-    expect(mocks.kick).toHaveBeenCalledWith(session);
-    mocks.kick.mockClear();
-    mocks.single.mockResolvedValueOnce({ sessionComplete: true });
-    await complete({ fileId: "f3" });
-    expect(mocks.kick).toHaveBeenCalledWith(session);
   });
 });
 
