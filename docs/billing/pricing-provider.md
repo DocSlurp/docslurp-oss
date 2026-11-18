@@ -123,7 +123,7 @@ Request (strict: unknown fields are refused):
 ```json
 {
   "files": [{ "name": "scan.pdf", "size": 812345, "type": "application/pdf", "profile": { "schema": 1, "...": "..." } }],
-  "settings": { "quality": "auto", "indexing": "full", "hostingMonths": 12, "searchesPerMonth": 0 }
+  "settings": { "quality": "fastest", "indexing": "full", "hostingMonths": 12, "searchesPerMonth": 0 }
 }
 ```
 

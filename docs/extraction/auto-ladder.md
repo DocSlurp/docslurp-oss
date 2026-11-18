@@ -32,7 +32,7 @@ the ladder says.
 
 | Setting | Values | Default | Meaning |
 | --- | --- | --- | --- |
-| `ladder.maxRung` | `fast`, `ocr`, `intelligent` | `intelligent` | Highest rung any page may be read on. |
+| `ladder.maxRung` | `fast`, `ocr`, `intelligent` | `ocr` (Fastest) | Highest rung any page may be read on; set by `quality` and `readScans`. |
 | `ladder.maxEscalationShare.aboveFast` | 0 to 1, or null | unset | Largest share of each document's pages read above `fast` (by OCR or a model). |
 | `ladder.maxEscalationShare.aboveOcr` | 0 to 1, or null | unset | Largest share of each document's pages read on the `intelligent` rung. |
 

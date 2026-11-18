@@ -23,6 +23,16 @@ Stored, a level is `quality: "auto"` plus the Auto ladder's highest rung (`pipel
 and visual indexing (`indexingMode: visual`) are vision reads, so they run on Smartest only. If vision cannot read a
 Smartest run (vision off, or refused by the privacy mode), OCR reads its scans instead, so no scan is left unread.
 
+Pages read at query time (on-demand indexing, `indexingMode: map`) follow the same rule: Fastest reads a page without a
+text layer with the OCR engine (one Scan page), Smartest with the vision model (a Vision page), and Fastest without Read
+scans leaves it as a page image.
+
+**Page images** (`pageImages`, default `true`) store the rendered page images used for thumbnails, the reader and
+cited-page previews. `false` (Fastest only) renders no new viewer image; images already stored are still served, and
+OCR still renders the pages it reads. **Smartest always keeps page images**: `pageImages: false` on a Smartest project or
+request is kept `true`, and a request that sends both gets a `warnings[]` entry `{ "code": "page_images_forced",
+"field": "pipeline.pageImages" }` (no `Deprecation` header).
+
 Office, HTML, EPUB, JSON and text files are read from their structure at every quality. Audio and video follow
 `mediaVideo`. Prices: [docslurp.io/pricing](https://docslurp.io/pricing); estimates quote them before you upload.
 

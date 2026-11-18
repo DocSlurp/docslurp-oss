@@ -175,7 +175,7 @@ const pipelineOverrides = {
   properties: {
     quality: { type: "string", enum: ["fastest", "smartest"], description: qualityDescription },
     readScans: { type: "boolean", description: "Fastest only: false keeps scanned pages and images as page images, not read (Text pages only)." },
-    pageImages: { type: "boolean", description: "Store page images for thumbnails, the reader and cited-page previews (default true)." },
+    pageImages: { type: "boolean", description: "Store page images for thumbnails, the reader and cited-page previews (default true). Smartest always keeps them; false applies to Fastest only." },
   },
 };
 
