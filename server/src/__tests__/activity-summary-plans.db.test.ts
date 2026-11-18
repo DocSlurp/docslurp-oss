@@ -102,7 +102,7 @@ describe("activity summary, upload progress and reconciler reads use indexes", (
     expect(orgPlan).not.toMatch(/Seq Scan on org_memberships/);
   }, 120_000);
 
-  it("upload-session progress reads its own run by primary key", async () => {
+  it("upload-session progress reads its own run by key", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const sessions = await import("../services/direct-upload-session.js");
     captured.length = 0;
@@ -112,7 +112,8 @@ describe("activity summary, upload progress and reconciler reads use indexes", (
     });
     expect(progress.run?.id).toBe("pl-sess-1");
     const progressPlan = await plan(statementsMatching("from project_runs r")[0]!);
-    expect(progressPlan).toMatch(/Index (Only )?Scan( Backward)? using project_runs_pkey/);
+    // The run id leads the primary key and the (id, org_id) tenant-scope index; either serves it.
+    expect(progressPlan).toMatch(/Index (Only )?Scan( Backward)? using project_runs_(pkey|tenant_scope)/);
     expect(progressPlan).not.toMatch(/Seq Scan/);
   }, 120_000);
 
