@@ -272,24 +272,30 @@ export interface DopplerRuleTable {
   style: (typeof RULE_TABLE_STYLES)[number];
 }
 
-/** The page's tagged structure (`structure`/`mathtables`, added within /1). Counts are lower bounds when `truncated`. */
+/**
+ * The page's tagged structure (`structure`/`mathtables`, added within /1). Counts are lower bounds when `truncated`.
+ *
+ * Released Doppler (d317bea, #51) writes only the marked-content ActualText counts: `{actualText, actualTextTexLike,
+ * truncated}`. Its per-page structure-tree walk was removed in review, so the tree counts (formulas, tables, MathML, Alt
+ * text...) are optional: absent means unknown, never 0. A page line with only the three released keys keeps the family.
+ */
 export interface DopplerStructureFacts {
-  formulas: number;
-  tables: number;
-  tableRows: number;
-  tableCells: number;
-  spannedCells: number;
-  mathml: number;
-  mathmlFiles: number;
-  altText: number;
-  altTextTexLike: number;
   actualText: number;
   actualTextTexLike: number;
-  markedActualText: number;
-  markedActualTextTexLike: number;
   truncated: boolean;
+  formulas?: number;
+  tables?: number;
+  tableRows?: number;
+  tableCells?: number;
+  spannedCells?: number;
+  mathml?: number;
+  mathmlFiles?: number;
+  altText?: number;
+  altTextTexLike?: number;
+  markedActualText?: number;
+  markedActualTextTexLike?: number;
   /** Part of the structure could not be read: the counts are not a definite 0. */
-  unknown: boolean;
+  unknown?: boolean;
 }
 
 /** A math region (`full` level): text (math-font words), outline (glyph outlines) or raster (formula strips). */
@@ -704,11 +710,22 @@ function layers(value: unknown): DopplerLayerFacts | undefined {
 }
 
 function structure(value: unknown): DopplerStructureFacts | undefined {
-  return family<DopplerStructureFacts>(value, {
+  // Required: what released Doppler writes. Optional: the structure-tree counts an earlier build wrote (absent is unknown).
+  const facts = family<DopplerStructureFacts>(value, { actualText: count, actualTextTexLike: count, truncated: bool }, {
     formulas: count, tables: count, tableRows: count, tableCells: count, spannedCells: count, mathml: count, mathmlFiles: count,
-    altText: count, altTextTexLike: count, actualText: count, actualTextTexLike: count, markedActualText: count,
-    markedActualTextTexLike: count, truncated: bool, unknown: bool,
+    altText: count, altTextTexLike: count, markedActualText: count, markedActualTextTexLike: count, unknown: bool,
   });
+  if (!facts) return undefined;
+  // A TeX-like count is a subset of its total: more TeX-like spans than spans is not a fact. The released pair failing
+  // drops the family (unknown); an optional pair that fails is left out, the rest kept.
+  if (facts.actualTextTexLike > facts.actualText) return undefined;
+  for (const [total, texLike] of [["altText", "altTextTexLike"], ["markedActualText", "markedActualTextTexLike"]] as const) {
+    if (facts[texLike] !== undefined && (facts[total] === undefined || facts[texLike]! > facts[total]!)) {
+      delete facts[total];
+      delete facts[texLike];
+    }
+  }
+  return facts;
 }
 
 const PAGE_FAMILIES = { geometry, text, fonts, images, vectors, forms, annots, layers, structure } as const;

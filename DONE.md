@@ -23,6 +23,10 @@ Owner: "We should not reject saving settings just 'cause an invalid field is the
 - `getProject`, the lists and the realtime view read through it for every project-record caller (display, uploads, run starts, save drafts); the project record carries an optional `settingsRepairs`. A save writes the cleaned row back (summary tree and indexing mode included), so it repairs the row; a caller's own invalid value is still a 400. Run creation reads the project's ceilings (ladder, chart tier, quality and visuals) from the cleaned row when the stored one does not validate. Project version snapshots read through the same reader, so an old version can still be rolled back to.
 
 
+## Doppler pinned to the #51 release (2026-11-18)
+
+- `worker/doppler.json` points at `docslurp-e1200cb` (Doppler #51, math and table encoding page facts, plus #52, a GCC 13 build fix): commit, source url, sha256 and prefix, the worker image labels and corresponding-source lines, and the notices. Output is byte-identical to `docslurp-d317bea` (#51's merge commit). The recorded fixtures regenerate from the release, and a `--html` fixture for `routing-table-large-coverage` was added. Encoding routing stays off in production until the durable read cap (#496) lands.
+
 ## Page evidence: one module owns what is known about a page (2026-11-17)
 
 - `worker/src/lib/page-evidence.ts` owns, per page, each quantity known or unknown (words, text layer, images and furniture, grids, rule score, math glyphs, garbling, page size), the whole-page states (failed, low confidence, locked) and the routing decisions: the table decision (unknown grids take the table path; encodings only add), the router's table rule score, text-layer trust rules, the one math-glyph gate with its three purposes, readable image boxes and the page cost route. Adapters for Doppler facts (`lib/page-evidence-doppler.ts`, replacing `doppler-page-facts-layout.ts` and `routing/probe/doppler-facts.ts`), walker layout pages and native probe rows.

@@ -73,9 +73,14 @@ describe("firstPassBatchOptions", () => {
   const withoutMath = { documentExtraction: { options: { "vm-pdf": { math: false } } } } as never;
   const silent = { documentExtraction: {} } as never;
   it("reads math by default unless the project opts out, only where the deploy flag allows it (default off)", () => {
-    // The deploy gate (DOCSLURP_FIRST_PASS_MATH, pending the math reader's council follow-up) holds whatever the project says.
+    // The deploy gate (DOCSLURP_FIRST_PASS_MATH, default off) holds whatever the project says. It stays off until `--math`
+    // keeps an invoice's header row in the table and leaves `$` in cells as written (the invoice case in
+    // doppler-encoding-facts.integration.test.ts): a missing or unknown value never reads math.
     expect(firstPassBatchOptions(withMath, {}).math).toBe(false);
     expect(firstPassBatchOptions(silent, {}).math).toBe(false);
+    for (const value of ["", "1", "true", "yes", "ON "]) {
+      expect(firstPassBatchOptions(withMath, { DOCSLURP_FIRST_PASS_MATH: value }).math, value).toBe(value.trim().toLowerCase() === "on");
+    }
     expect(firstPassBatchOptions(withMath, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(true);
     // DOCSLURP_DOPPLER_MATH_DEFAULT (default on): a project that says nothing reads math; `math: false` opts out.
     expect(firstPassBatchOptions(silent, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(true);
