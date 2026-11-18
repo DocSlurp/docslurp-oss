@@ -365,7 +365,7 @@ describe("re-check fixes", () => {
       records: { ...intake.postgresIntakeRecords, async findProject() { return project; } },
     } as unknown as import("../services/project-intake.js").ProjectIntakePorts;
     const request = (pipeline: Record<string, unknown>) => ({
-      userId: "ua", orgId: "org-a", project: "proj-a", kind: "upload" as const, pipeline: pipeline as never,
+      userId: "ua", orgId: "org-a", project: "proj-a", kind: "bulk-upload" as const, pipeline: pipeline as never,
       items: [{ filename: "a.txt", mimeType: "text/plain", content: { bytes: Buffer.from("hello") } }, { filename: "b.txt", mimeType: "text/plain", content: { bytes: Buffer.from("again") } }],
     });
     for (const pipeline of [{ embedding: { profile: "fastest-local" } }, { chunkOverlap: true }, { vectorBackends: ["lancedb", "orama"] }]) {

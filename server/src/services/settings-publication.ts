@@ -2,7 +2,7 @@ import { prepareModeSwitchJobs, commitIndexJobs } from "./project-indexing-mode.
 import { resolveMaterializationPolicy } from "./materialization-policy.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { createHash } from "node:crypto";
-import { publishProjectSettingsSchema, indexConfigHash, indexConfigOf, privacyModeAllowsHosted, projectSettingsProjection, managedPipelineModelPaths, type ProjectRecord, type ProjectSearchSettings } from "@docslurp/shared";
+import { publishProjectSettingsSchema, applyPrivateModelMode, indexConfigHash, indexConfigOf, privacyModeAllowsHosted, privateServiceModelFor, projectSettingsProjection, managedPipelineModelPaths, type ProjectRecord, type ProjectSearchSettings } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { searchModeOfScopes } from "../lib/search-tiers.js";
 import { env } from "../config.js";
@@ -64,7 +64,7 @@ async function loadSettingsSnapshot(actor: RequestActor, projectId: string, clie
     const legacy = await client<{ id: string }[]>`select d.id from documents d join projects p on p.id=d.project_id
       where d.project_id=${projectId} and d.org_id=${project.orgId} and d.status='completed' and d.superseded_at is null and d.purged_at is null and d.archived_at is null
       and exists(select 1 from vector_indexes v where v.document_id=d.id)
-      and d.index_config_hash is distinct from ${indexConfigHash(indexConfigOf(project.pipeline))}
+      and d.index_config_hash is distinct from ${indexConfigHash(indexConfigOf(applyPrivateModelMode(project.pipeline)))}
       and (d.index_config_hash is null or jsonb_typeof(p.index_configs -> d.index_config_hash -> 'normalize') is distinct from 'boolean')
       order by d.id limit 101`;
     return { project, settings, revision, explanations: projectSettingsProjection({ project, settings, searchStored: revision.search !== "absent", organizationMonthlyBudgetCents: org?.monthly_budget_cents ?? null, ...(actor.type === "apiKey" ? { keyCeiling: { searchMode: searchModeOfScopes(actor.apiKey.scopes), maxOutputTokens: actor.apiKey.maxOutputTokens ?? null } } : {}), capabilities: { webEnabled: env.web.enabled && Object.values(env.web.keys).some(Boolean), webChatEnabled: env.web.chatEnabled, organizationAllowsChina: org?.allow_china_providers !== false } }), legacyIndexes: { documents: legacy.length, documentIds: legacy.slice(0,100).map(d => d.id) } };
@@ -118,7 +118,7 @@ export async function publishSettings(args: { actor: RequestActor; projectId: st
         const before = await getProjectSearchSettings(args.projectId, args.actor.userId, client);
         const settings = mergeProjectSearchSettings(before, input.search);
         if (settings.retrievalDefaults.candidateDepth !== undefined && settings.retrievalDefaults.candidateDepth < settings.retrievalDefaults.resultCount) throw new SettingsPublicationError(400, "unsupported_search_settings", "Candidate depth must cover the requested result count.");
-        if (!privacyModeAllowsHosted(plan.nextPipeline.privacyMode) && settings.retrievalDefaults.rerankProvider === "deepinfra") throw new SettingsPublicationError(400, "privacy_mode_violation", "Hosted model reranking is unavailable under this project's privacy policy.");
+        if (!privacyModeAllowsHosted(plan.nextPipeline.privacyMode) && !privateServiceModelFor("rerank", plan.nextPipeline.privacyMode) && settings.retrievalDefaults.rerankProvider === "deepinfra") throw new SettingsPublicationError(400, "privacy_mode_violation", "Hosted model reranking is unavailable under this project's privacy policy.");
         await upsertProjectSearchSettings(settings, client);
         result = { requestId: input.requestId, snapshot: await loadSettingsSnapshot(args.actor, args.projectId, client) };
         await appendAuditLog({ orgId: result.snapshot.project.orgId, userId: args.actor.userId, projectId: args.projectId,

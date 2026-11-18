@@ -6,6 +6,7 @@
  * customers.
  */
 import {
+  applyPrivateModelMode,
   indexConfigHash,
   indexConfigOf,
   automaticModelCallProblem,
@@ -162,7 +163,7 @@ export async function setProjectManagedModels(
     // Any override change that moves the index identity (setting, replacing or dropping an embedding model) would leave
     // existing vectors in another space: refused while the project has documents, whichever field caused it.
     const previous = resolveManagedPipeline(row.pipeline, beforeOverrides, `project ${projectId}`);
-    if (indexConfigHash(indexConfigOf(previous.pipeline)) !== indexConfigHash(indexConfigOf(resolved.pipeline))) {
+    if (indexConfigHash(indexConfigOf(applyPrivateModelMode(previous.pipeline))) !== indexConfigHash(indexConfigOf(applyPrivateModelMode(resolved.pipeline)))) {
       const [{ count }] = await tx<Array<{ count: number }>>`select count(*)::int as count from documents where project_id = ${projectId}`;
       if (count > 0) throw new ManagedModelError("pipeline.embedding: the project has documents and this changes its index; change the embedding profile and re-index instead");
     }

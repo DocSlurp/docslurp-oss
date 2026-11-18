@@ -20,6 +20,7 @@ import { Transform, type Readable } from "node:stream";
 import {
   applyProjectPipelineOverrides,
   changedIndexIdentitySettings,
+  applyPrivateModelMode,
   VM_PDF_MAX_SOURCE_BYTES,
   sandboxedPdfConfigured,
   defaultPipelineFeatures,
@@ -612,7 +613,7 @@ export async function assertUploadKeepsIndexIdentity(
 ): Promise<void> {
   if (!overrides) return;
   const base = project.pipeline ?? defaultPipelineFeatures;
-  const changed = changedIndexIdentitySettings(base, applyProjectPipelineOverrides(base, overrides, project.templateKey));
+  const changed = changedIndexIdentitySettings(applyPrivateModelMode(base), applyPrivateModelMode(applyProjectPipelineOverrides(base, overrides, project.templateKey)));
   if (changed.length === 0 || !(await records.hasIndexStakes?.(project.id))) return;
   throw new ProjectIntakeError(
     `This project already has indexed documents, so an upload cannot change its index settings (${changed.join(", ")}). Upload without them, or change the project with POST /v1/projects/${project.id}/reindex first.`,

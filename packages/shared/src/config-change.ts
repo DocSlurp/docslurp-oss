@@ -83,6 +83,8 @@ export function indexConfigOf(features: PipelineFeatures): IndexConfig {
   const modelUri = embedding.modelUri ?? embeddingProfileCatalog[embedding.profile].config.modelUri;
   return {
     embeddingModel: modelUri,
+    // A private route (llm://private/...) has no catalog size and records null, as before private model mode: its full
+    // URI already keeps its identity apart from every hosted model.
     dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? null,
     normalize: embedding.normalize ?? embeddingProfileCatalog[embedding.profile].config.normalize,
     chunking: {

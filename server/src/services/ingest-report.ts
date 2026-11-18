@@ -1,4 +1,4 @@
-import { assertIndexIdentityUnchanged, visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
+import { assertIndexIdentityUnchanged, privacyModeAllowsHosted, visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   buildByteHistogram,
   classifyIngestFailure,
@@ -779,7 +779,7 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
       note: `Lowered by ${[...new Set(observed.capsApplied.map((cap) => reasons[cap.reason] ?? cap.reason))].join(" and ")}; the stored project settings are unchanged.`,
     });
   }
-  if (pipeline.privacyMode !== "standard") {
+  if (!privacyModeAllowsHosted(pipeline.privacyMode)) {
     items.push({ key: "privacyMode", label: "Privacy mode", value: pipeline.privacyMode, note: "Hosted vision models are skipped unless a private route is configured." });
   }
   return items;
@@ -875,7 +875,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   const recordedPages = observed.textPages;
 
   // Never suggest a rung the project's constraints rule out (design 5): smart needs a reader the privacy mode allows.
-  const smartAllowed = pipeline.privacyMode === "standard" || visionReaderIsLocal(pipeline.vision);
+  const smartAllowed = privacyModeAllowsHosted(pipeline.privacyMode) || visionReaderIsLocal(pipeline.vision);
   const patchForAffected = { visionFallback: true, quality: "good" as const };
   if (affected.length > 0 && (smartAllowed || patchHolds(pipeline, patchForAffected))) {
     const patch = patchForAffected;

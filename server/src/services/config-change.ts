@@ -20,6 +20,7 @@ import {
   deferredProfilesEnabled,
   effectiveIndexingMode,
   estimatePipelineWork,
+  applyPrivateModelMode,
   indexConfigHash,
   indexConfigOf,
   isBillingEnforced,
@@ -470,7 +471,8 @@ export async function planProjectChange(args: {
   // The deployment kill switch: chart export cannot be turned on while it is off (a stored "on" stays inert).
   assertChartExportChangeAllowed(project.pipeline, nextPipeline, args.env ?? process.env);
   let base = analyzePipelineChange(project.pipeline, nextPipeline, { documents: 0, pages: 0, origin, env });
-  const identityChanges = changedIndexIdentitySettings(project.pipeline, nextPipeline);
+  // The effective identity (#493: the operator's private model where hosted ones are not allowed), as documents are stamped.
+  const identityChanges = changedIndexIdentitySettings(applyPrivateModelMode(project.pipeline), applyPrivateModelMode(nextPipeline));
   if (rebuildIndex && identityChanges.length === 0) {
     // A plain rebuild: the change does not touch the index, so add the stages that rebuild it.
     const rebuild = indexRebuildStages(nextPipeline);
@@ -486,8 +488,10 @@ export async function planProjectChange(args: {
   const reindex: ReindexMode | null =
     base.kind === "reindex-required" ? "required" : base.kind === "reindex-recommended" ? "recommended" : null;
 
-  const beforeConfig = indexConfigOf(project.pipeline);
-  const afterConfig = indexConfigOf(nextPipeline);
+  // Index identity is the effective one (the operator's private model where hosted ones are not allowed), as the worker
+  // stamps it on documents and search serves it.
+  const beforeConfig = indexConfigOf(applyPrivateModelMode(project.pipeline));
+  const afterConfig = indexConfigOf(applyPrivateModelMode(nextPipeline));
   const hashChanged = indexConfigHash(beforeConfig) !== indexConfigHash(afterConfig);
   let targets: ReindexTarget[] = [];
   if (reindex) {
