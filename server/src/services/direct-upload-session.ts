@@ -889,6 +889,20 @@ export const CLIENT_FINALIZING_MAX_HOLD_SECONDS = 15 * 60;
 export const PARTS_INCOMPLETE_MESSAGE = "Upload parts are incomplete or have incorrect sizes";
 
 /**
+ * Why a file could not be finalized yet. Only missing bytes carry the codes a client acts on by sending bytes again
+ * (`upload_object_missing`: PUT the file; `upload_parts_incomplete`: upload the missing parts); a closed file or a
+ * missing size is not answered that way.
+ */
+function notFinalizedError(file: UploadSessionFileRow, entry: CompleteDirectUploadFileEntry): ProjectIntakeError {
+  if (file.status !== "pending") return new ProjectIntakeError(`${file.filename} is ${file.status}`, 409);
+  if (file.unknown_size && entry.sizeBytes === undefined) return new ProjectIntakeError(`Complete ${file.filename} with its final sizeBytes`, 400);
+  if (file.upload_mode === "single") {
+    return new ProjectIntakeError(`No object found in storage for ${file.filename}: PUT its bytes to the file's putUrl, then complete it again`, 409, undefined, "upload_object_missing");
+  }
+  return new ProjectIntakeError(PARTS_INCOMPLETE_MESSAGE, 409, undefined, "upload_parts_incomplete");
+}
+
+/**
  * What a client does about a failed file:
  * - `retryable` (with `action: "retry"`): repeat the same request for this file as it is (storage briefly unavailable,
  *   the session busy, or this call's time budget spent).
@@ -962,7 +976,7 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
     const settled = await settleBounded(entries, env.directUploadFinalizeConcurrency, async entry => {
       const file = byId.get(entry.fileId);
       if (!file) throw new ProjectIntakeError("Upload file not found", 404);
-      if (!await finalizeDirectUploadFile(file, entry.sizeBytes, { signal: budget.signal })) throw new ProjectIntakeError(PARTS_INCOMPLETE_MESSAGE, 409, undefined, "upload_parts_incomplete");
+      if (!await finalizeDirectUploadFile(file, entry.sizeBytes, { signal: budget.signal })) throw notFinalizedError(file, entry);
     }, { shouldStart: budget.shouldStart });
     const outcomes = settled.map((result, i): FinalizeOutcome => result.status === "fulfilled"
       ? { fileId: entries[i]!.fileId, completed: true }

@@ -310,7 +310,13 @@ const abortLockWaitMs = () => env.directUploadLockWaitMs;
  * retryable 503 (`upload_storage_unavailable`, Retry-After), never a client error; anything else is a 500. Either way
  * the raw error goes to the log only.
  */
+/** Answered (unread) when the client disconnected before its request finished. */
+const CLIENT_CLOSED_REQUEST = 499;
+
 export function uploadServerErrorResponse(c: Context, error: unknown): Response {
+  // The client went away (it disconnected while waiting for the session lock, or mid-request): nobody reads the
+  // answer, and nothing failed on our side. End quietly, without an error report.
+  if (c.req.raw.signal.aborted) return new Response(null, { status: CLIENT_CLOSED_REQUEST });
   if (isTransientStorageError(error)) {
     reportPublicError(error);
     c.header("Retry-After", String(UPLOAD_STORAGE_RETRY_AFTER_SECONDS));
@@ -457,13 +463,13 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       return apiStatusError(c, 404, "Upload session not found");
     }
     return c.json(await withPayloadCanEdit(c, session));
-    } catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
+    } catch (error) { return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error); }
   })
   .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
     async c => {
       try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers, c.get("apiKey")?.keyId ?? null, c.req.raw.signal)); }
-      catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
+      catch (error) { return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error); }
     })
   .post(
     "/direct/sessions/:sessionId/files/complete",

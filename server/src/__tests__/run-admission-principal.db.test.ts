@@ -335,13 +335,24 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
       }, ports), () => gates.putStalled, () => { gates.stallPuts = false; gates.releasePut?.(); });
     }, 30_000);
 
-    it("admits server keys only: a client key's bulk upload starts no run (fail closed)", async () => {
+    it("refuses a client key's bulk upload before any write, and starts no run (fail closed)", async () => {
       await sql`update api_keys set key_type = 'client' where id = 'adm-oi'`;
       const before = await runCount();
       const error = await actions.createBulkProjectIntake({ ...target, files: [new File(["Results beat expectations."], "r.txt", { type: "text/plain" })] }, ports)
         .then(() => null, (failure: unknown) => failure);
       expect(error).toMatchObject({ statusCode: 403 });
+      expect(gates.puts).toBe(0);
       expect(await runCount()).toBe(before);
+    }, 30_000);
+
+    it("run admission itself admits server keys only (keyTypes), whatever checks ran before it", async () => {
+      await sql`update api_keys set key_type = 'client' where id = 'adm-oi'`;
+      const admit = (keyTypes?: readonly string[]) => sql.begin(tx => runCreation.assertPrincipalAtAdmission(tx, {
+        orgId: "adm-o", projectId: P2, userId: "adm-u", apiKeyId: "adm-oi", scope: "ingest", ...(keyTypes ? { keyTypes } : {}),
+      })).then(() => null, (failure: unknown) => failure);
+      expect(await admit(["server"])).toBeInstanceOf(runCreation.RunAdmissionRefusedError);
+      await sql`update api_keys set key_type = 'server' where id = 'adm-oi'`;
+      expect(await admit(["server"])).toBeNull();
     }, 30_000);
 
     const midLoopChanges: Array<[string, string]> = [

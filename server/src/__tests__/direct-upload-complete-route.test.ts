@@ -155,3 +155,23 @@ describe("files/complete and abort never answer a server failure as a client err
     expect((await abort()).status).toBe(200);
   });
 });
+
+describe("a client that disconnects while its request waits for the session lock", () => {
+  it.each([
+    ["the session read", (signal: AbortSignal) => app.request(`/uploads/direct/sessions/${session}`, { signal })],
+    ["part signing", (signal: AbortSignal) => app.request(`/uploads/direct/sessions/${session}/files/f1/parts/sign`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ partNumbers: [1] }), signal })],
+  ])("ends %s quietly: no 500, no error report", async (_label, send) => {
+    const service = await import("../services/direct-upload-session.js");
+    const aborted = () => Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+    vi.mocked(service.getDirectUploadSessionDescription).mockImplementation(aborted);
+    vi.mocked(service.signDirectUploadParts).mockImplementation(aborted);
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = new AbortController();
+    client.abort();
+    const response = await send(client.signal);
+    expect(response.status).toBe(499);
+    expect(report).not.toHaveBeenCalled();
+    report.mockRestore();
+  });
+});

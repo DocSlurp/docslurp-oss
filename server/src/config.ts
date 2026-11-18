@@ -207,6 +207,11 @@ validateProductionSecrets();
 
 const storage = resolveObjectStorageConfig();
 
+/** DOCSLURP_UPLOAD_LOCK_WAIT_MS: how long a session call waits out a held lock; default 10 s, clamped to 0–60 s. */
+export function uploadLockWaitMs(raw: string | undefined): number {
+  return Math.min(60_000, Math.max(0, readNumber(raw, 10_000)));
+}
+
 export const env = {
   chatMcpEnabled: readBoolean(process.env.DOCSLURP_CHAT_MCP_ENABLED, true),
   /** Public chat APIs (/v1/chat, its stream, chat completions) may run the bounded search agent. */
@@ -274,7 +279,7 @@ export const env = {
    * slot, a connection and the session lock before answering 409 upload_session_busy (default 10 s, like confirm; at
    * most 60 s). A waiter whose client disconnects stops waiting.
    */
-  directUploadLockWaitMs: Math.min(60_000, Math.max(0, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_WAIT_MS, 10_000))),
+  directUploadLockWaitMs: uploadLockWaitMs(process.env.DOCSLURP_UPLOAD_LOCK_WAIT_MS),
   /** Hard cap on one lock hold's storage work: in-flight calls are cancelled after it (default 30 s). */
   directUploadLockHoldMaxMs: Math.max(1_000, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS, 30_000)),
   /**

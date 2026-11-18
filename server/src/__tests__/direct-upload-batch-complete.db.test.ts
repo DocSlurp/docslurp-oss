@@ -206,6 +206,18 @@ describe("batched files/complete", () => {
   });
 });
 
+describe("missing bytes have explicit codes", () => {
+  it("answers upload_object_missing for a file without a stored object, and upload_parts_incomplete for an unassembled multipart file", async () => {
+    await seedFile(SESSION, "gone", null);
+    await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+      values ('mp', $1, 'big.pdf', 'application/pdf', $2, $3, 'multipart', 'up-1', $4, 'pending')`, [SESSION, 20 * 1024 * 1024, `u/${SESSION}/raw/big.pdf`, 8 * 1024 * 1024]);
+    const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "gone" }, { fileId: "mp" }] });
+    const byId = Object.fromEntries(result.files.map(file => [file.fileId, file]));
+    expect(byId.gone).toMatchObject({ status: "failed", error: { statusCode: 409, code: "upload_object_missing", retryable: false, action: "reupload", blocksSession: false } });
+    expect(byId.mp).toMatchObject({ status: "failed", error: { statusCode: 409, code: "upload_parts_incomplete", retryable: false, action: "reupload" } });
+  });
+});
+
 describe("reconciler while a client completes files", () => {
   it("leaves a held session alone, then finishes it once the client stops", async () => {
     await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
