@@ -319,10 +319,9 @@ export function convertExtractionConfigInput<T>(source: T, options: { preferNew?
     const sourceLadder = isRecord(source.ladder) ? source.ladder : {};
     // Without a level, readScans sets Fastest's rung unless the input already holds Smartest (an `intelligent` rung).
     const target: QualityLevel = level ?? (sourceLadder.maxRung === "intelligent" && readScans !== false ? "smartest" : "fastest");
+    // The level wins over a `ladder.maxRung` sent beside it (a whole pipeline read back carries its stored rung); the
+    // ladder's share caps are kept.
     const fields = pipelineFieldsForQuality(target, { readScans: readScans ?? true, ladder: sourceLadder });
-    if (!options.preferNew && level && sourceLadder.maxRung !== undefined && sourceLadder.maxRung !== fields.ladder.maxRung) {
-      throw new ExtractionConfigConflictError("quality", `quality '${level}' conflicts with ladder.maxRung=${String(sourceLadder.maxRung)}; send one of them`);
-    }
     next.quality = fields.quality;
     next.ladder = fields.ladder;
     if (fields.visionFallback) next.visionFallback = true;

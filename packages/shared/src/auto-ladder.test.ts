@@ -10,6 +10,8 @@ import {
   pageReadingQuality,
   clampRunLadder,
   ladderAllowsOffPlanReads,
+  ladderForbidsVision,
+  ladderSkipsOcr,
   pipelineLadderSchema,
   planLadder,
   tighterLadder,
@@ -24,9 +26,22 @@ const need = (pageNumber: number, kind: LadderPageNeed["need"], extra: Partial<L
   ({ pageNumber, need: kind, reason: kind === "intelligent" ? "figure:chart-or-figure" : "no-native-text", lacksText: false, confidence: 0.5, ...extra });
 
 describe("pipeline.ladder settings", () => {
-  it("defaults to the intelligent rung with no share cap", () => {
-    expect(normalizePipelineFeatures(null).ladder).toEqual({ maxRung: "intelligent" });
-    expect(defaultPipelineFeatures.ladder).toEqual({ maxRung: "intelligent" });
+  it("defaults to the ocr rung (Fastest) with no share cap", () => {
+    expect(normalizePipelineFeatures(null).ladder).toEqual({ maxRung: "ocr" });
+    expect(defaultPipelineFeatures.ladder).toEqual({ maxRung: "ocr" });
+  });
+
+  it("Smartest skips OCR and Fastest forbids vision", () => {
+    expect(ladderSkipsOcr({ quality: "auto", ladder: { maxRung: "intelligent" } })).toBe(true);
+    expect(ladderSkipsOcr({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveOcr: 0.2 } } })).toBe(true);
+    expect(ladderSkipsOcr({ quality: "auto", ladder: { maxRung: "ocr" } })).toBe(false);
+    expect(ladderSkipsOcr({ quality: "auto", ladder: null })).toBe(false);
+    expect(ladderForbidsVision({ quality: "auto", ladder: { maxRung: "ocr" } })).toBe(true);
+    expect(ladderForbidsVision({ quality: "auto", ladder: { maxRung: "fast" } })).toBe(true);
+    expect(ladderForbidsVision({ quality: "fast", ladder: { maxRung: "intelligent" } })).toBe(true);
+    expect(ladderForbidsVision({ quality: "auto", ladder: { maxRung: "intelligent" } })).toBe(false);
+    // A zero above-ocr share lowers Smartest to the ocr rung: no vision.
+    expect(ladderForbidsVision({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveOcr: 0 } } })).toBe(true);
   });
 
   it("accepts valid limits and rejects nonsense", () => {
@@ -59,11 +74,10 @@ describe("pipeline.ladder settings", () => {
 
   it("fails closed on a stored rung that is not one", () => {
     expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "vision" as never } }).maxRung).toBe("fast");
-    expect(effectiveLadder({ quality: "auto", ladder: {} }).maxRung).toBe("intelligent");
+    expect(effectiveLadder({ quality: "auto", ladder: {} }).maxRung).toBe("ocr");
   });
 
   it("applies to auto only, and normalizes zero shares into rung limits", () => {
-    expect(effectiveLadder({ quality: "good", ladder: { maxRung: "fast" } }).active).toBe(false);
     expect(effectiveLadder({ quality: "fast", ladder: { maxRung: "ocr" } }).active).toBe(false);
     expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "intelligent" } })).toEqual({ active: false, maxRung: "intelligent" });
     expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0 } } }).maxRung).toBe("fast");
@@ -71,7 +85,6 @@ describe("pipeline.ladder settings", () => {
     expect(effectiveLadder({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 1, aboveOcr: 1 } } }).active).toBe(false);
     expect(pageReadingQuality({ quality: "auto", ladder: { maxRung: "fast" } })).toBe("fast");
     expect(pageReadingQuality({ quality: "auto", ladder: { maxRung: "ocr" } })).toBe("auto");
-    expect(pageReadingQuality({ quality: "good", ladder: { maxRung: "fast" } })).toBe("good");
   });
 
   it("drops chart export's model tier below the intelligent rung", () => {
@@ -81,8 +94,11 @@ describe("pipeline.ladder settings", () => {
     // A share cap keeps chart export free too: its candidates are read outside the page plan.
     expect(applyLadderLimits({ ...pipeline, ladder: { maxRung: "intelligent" as const, maxEscalationShare: { aboveOcr: 0.1 } } }).chartExport.tier).toBe("free");
     expect(applyLadderLimits({ ...pipeline, ladder: { maxRung: "fast" as const } }).quality).toBe("fast");
-    // No limits: the very same object (defaults change nothing).
-    expect(applyLadderLimits(pipeline)).toBe(pipeline);
+    // Smartest without a share cap: the very same object.
+    const smartest = { ...pipeline, ladder: { maxRung: "intelligent" as const } };
+    expect(applyLadderLimits(smartest)).toBe(smartest);
+    // Fastest (the default rung) keeps chart export free: it never reads with a vision model.
+    expect(applyLadderLimits(pipeline).chartExport.tier).toBe("free");
   });
 
   it("recommends a reindex only when a limit is raised", () => {
@@ -103,7 +119,7 @@ describe("tighterLadder (run overrides from non-editors)", () => {
     expect(tighterLadder({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2 } }, { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.9, aboveOcr: 0.5 } }))
       .toEqual({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.2 } });
     expect(tighterLadder(null, { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } })).toEqual({ maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } });
-    expect(tighterLadder(null, null)).toEqual({ maxRung: "intelligent" });
+    expect(tighterLadder(null, null)).toEqual({ maxRung: "ocr" });
     // A stored rung that is not one fails closed.
     expect(tighterLadder({ maxRung: "vision" as never }, { maxRung: "intelligent" })).toEqual({ maxRung: "fast" });
   });
@@ -112,13 +128,15 @@ describe("tighterLadder (run overrides from non-editors)", () => {
 describe("clampRunLadder (per-upload overrides)", () => {
   const project = { quality: "auto" as const, ladder: { maxRung: "ocr" as const, maxEscalationShare: { aboveFast: 0.2 } } };
   it("holds a non-editor's run to the project's limits and quality, and leaves editors alone", () => {
-    const loose = { quality: "good" as const, ladder: { maxRung: "intelligent" as const, maxEscalationShare: null } };
+    const loose = { quality: "auto" as const, ladder: { maxRung: "intelligent" as const, maxEscalationShare: null } };
     expect(clampRunLadder(loose, project, false)).toEqual({ quality: "auto", ladder: { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.2 } } });
     expect(clampRunLadder(loose, project, true)).toBe(loose);
     const tighter = { quality: "auto" as const, ladder: { maxRung: "fast" as const } };
     expect(clampRunLadder(tighter, project, false)).toEqual({ quality: "auto", ladder: { maxRung: "fast", maxEscalationShare: { aboveFast: 0.2 } } });
-    // A project without a limit keeps today's rule: quality overrides are the caller's choice.
-    expect(clampRunLadder({ quality: "good" as const, ladder: null }, { quality: "auto", ladder: { maxRung: "intelligent" } }, false).quality).toBe("good");
+    // A non-editor cannot raise a Fastest project to Smartest through the ladder.
+    expect(clampRunLadder({ quality: "auto" as const, ladder: { maxRung: "intelligent" as const } }, { quality: "auto", ladder: { maxRung: "ocr" } }, false).ladder?.maxRung).toBe("ocr");
+    // A Smartest project with no share cap keeps a Smartest run.
+    expect(clampRunLadder({ quality: "auto" as const, ladder: { maxRung: "intelligent" as const } }, { quality: "auto", ladder: { maxRung: "intelligent" } }, false).ladder?.maxRung).toBe("intelligent");
   });
 });
 
@@ -129,8 +147,9 @@ describe("reads outside the plan", () => {
     expect(ladderAllowsOffPlanReads({ quality: "auto", ladder: { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.5 } } })).toEqual({ pageReads: false, pageEmbeddings: false });
   });
 
-  it("keeps the default ladder out of the pipeline version hash, and a limit in it", () => {
-    expect("ladder" in pipelineVersionFeatures(normalizePipelineFeatures(null))).toBe(false);
+  it("keeps an unlimited Smartest ladder out of the pipeline version hash, and any limit (Fastest included) in it", () => {
+    expect("ladder" in pipelineVersionFeatures(normalizePipelineFeatures({ ladder: { maxRung: "intelligent" } }))).toBe(false);
+    expect(pipelineVersionFeatures(normalizePipelineFeatures(null))).toHaveProperty("ladder");
     expect(pipelineVersionFeatures(normalizePipelineFeatures({ ladder: { maxRung: "ocr" } }))).toHaveProperty("ladder");
   });
 });
@@ -138,13 +157,24 @@ describe("reads outside the plan", () => {
 describe("planLadder", () => {
   const policy = (pages: number, ladder: object) => documentLadderPolicy({ quality: "auto", ladder: ladder as never }, pages);
 
-  it("keeps every selected page on the rung it needs when no limit is set (default equivalence)", () => {
+  it("Smartest reads every selected page on the intelligent rung: no OCR step", () => {
     const needs = [need(2, "ocr"), need(5, "intelligent"), need(7, "ocr", { lacksText: true })];
     const plan = planLadder({ pageCount: 10, needs, policy: policy(10, { maxRung: "intelligent" }) });
     expect(plan.escalated).toEqual([2, 5, 7]);
-    expect(plan.intelligent).toEqual([5]);
+    expect(plan.intelligent).toEqual([2, 5, 7]);
     expect(plan.capped).toEqual([]);
-    expect(plan.counts).toEqual({ fast: 7, ocr: 2, intelligent: 1 });
+    expect(plan.counts).toEqual({ fast: 7, ocr: 0, intelligent: 3 });
+    expect(plan.decisions.find((decision) => decision.pageNumber === 2)).toMatchObject({ need: "intelligent", rung: "intelligent", reason: "smartest:no-native-text" });
+    // A page extraction already read with OCR stays on the ocr rung.
+    const already = planLadder({ pageCount: 10, needs, policy: policy(10, { maxRung: "intelligent" }), alreadyEscalated: [2] });
+    expect(already.decisions.find((decision) => decision.pageNumber === 2)).toMatchObject({ rung: "ocr" });
+  });
+
+  it("Fastest (the default rung) reads every selected page on the ocr rung", () => {
+    const needs = [need(2, "ocr"), need(5, "intelligent")];
+    const plan = planLadder({ pageCount: 10, needs, policy: policy(10, {}) });
+    expect(plan.intelligent).toEqual([]);
+    expect(plan.escalated).toEqual([2, 5]);
   });
 
   it("maxRung ocr lowers figure pages to the ocr rung; maxRung fast keeps every page fast", () => {
@@ -172,12 +202,12 @@ describe("planLadder", () => {
     expect(plan.capped).toEqual([1, 5]);
     expect(plan.decisions.find((decision) => decision.pageNumber === 5)).toMatchObject({ rung: "fast", cappedBy: "share-above-fast" });
     // Deterministic: the same inputs in another order give the same plan.
-    expect(planLadder({ pageCount: 10, needs: [...needs].reverse(), policy: policy(10, { maxEscalationShare: { aboveFast: 0.3 } }) })).toEqual(plan);
+    expect(planLadder({ pageCount: 10, needs: [...needs].reverse(), policy: policy(10, { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.3 } }) })).toEqual(plan);
   });
 
   it("the above-ocr share keeps the highest-priority figure pages intelligent and transcribes the rest", () => {
     const needs = [need(1, "intelligent", { confidence: 0.4 }), need(2, "intelligent", { confidence: 0.8 }), need(3, "intelligent", { confidence: 0.8 })];
-    const plan = planLadder({ pageCount: 10, needs, policy: policy(10, { maxEscalationShare: { aboveOcr: 0.1 } }) });
+    const plan = planLadder({ pageCount: 10, needs, policy: policy(10, { maxRung: "intelligent", maxEscalationShare: { aboveOcr: 0.1 } }) });
     expect(plan.intelligent).toEqual([2]);
     expect(plan.escalated).toEqual([1, 2, 3]);
     expect(plan.decisions.filter((decision) => decision.cappedBy === "share-above-ocr").map((decision) => decision.pageNumber)).toEqual([1, 3]);
@@ -194,7 +224,7 @@ describe("planLadder", () => {
   it("holds the share on a 20,000-page document and floors small ones", () => {
     const pages = 20_000;
     const needs = Array.from({ length: pages }, (_, index) => need(index + 1, index % 7 === 0 ? "intelligent" : "ocr", { lacksText: index % 2 === 0 }));
-    const plan = planLadder({ pageCount: pages, needs, policy: policy(pages, { maxEscalationShare: { aboveFast: 0.1, aboveOcr: 0.01 } }) });
+    const plan = planLadder({ pageCount: pages, needs, policy: policy(pages, { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.1, aboveOcr: 0.01 } }) });
     expect(plan.escalated).toHaveLength(2_000);
     expect(plan.intelligent).toHaveLength(200);
     expect(plan.counts.fast).toBe(18_000);
