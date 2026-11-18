@@ -33,13 +33,18 @@ export function isTransientStorageError(error: unknown): boolean {
 /** Delays before the 2nd and 3rd attempts. Short: the session lock is held while files finalize. */
 export const STORAGE_RETRY_DELAYS_MS: readonly number[] = [100, 400];
 
-export async function withStorageRetry<T>(operation: () => Promise<T>, delaysMs: readonly number[] = STORAGE_RETRY_DELAYS_MS): Promise<T> {
+export async function withStorageRetry<T>(operation: () => Promise<T>, delaysMs: readonly number[] = STORAGE_RETRY_DELAYS_MS, signal?: AbortSignal): Promise<T> {
   for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
     try {
       return await operation();
     } catch (error) {
-      if (attempt >= delaysMs.length || !isTransientStorageError(error)) throw error;
-      await new Promise(resolve => setTimeout(resolve, delaysMs[attempt]));
+      if (attempt >= delaysMs.length || !isTransientStorageError(error) || signal?.aborted) throw error;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, delaysMs[attempt]);
+        const onAbort = () => { clearTimeout(timer); reject(signal!.reason); };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
   }
 }

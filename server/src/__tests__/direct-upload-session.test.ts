@@ -37,11 +37,6 @@ import {
 import { intakeIntoProject, ProjectIntakeError } from "../services/project-intake.js";
 import { createProjectIntakeFakes } from "./helpers/project-intake-fakes.js";
 
-/** The fenced completion write matches this file (its lease is still held). */
-function fencedWrites(fileId: string) {
-  sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("returning id") ? [{ id: fileId }] : []);
-}
-
 function directUploadSessionFixture(
   overrides: {
     session?: Partial<LoadedDirectUploadSession["session"]>;
@@ -194,7 +189,7 @@ describe("Direct Upload Session Module", () => {
         // The file's finalize lease, then the fenced completion write.
         if (query.includes("set finalize_lease_until = now()")) return [{ ...fixture.files[0] }];
         if (query.includes("select status, coalesce(finalize_lease_until")) return [{ status: "pending", leased: false }];
-        return [{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0]) }];
+        return [{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0], "etag") }];
       });
       getUploadedObjectMetadata.mockResolvedValue({ contentLength: actualSize, etag: "etag" });
       const completing = completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1" });
@@ -216,17 +211,17 @@ describe("Direct Upload Session Module", () => {
   // (and later hashed) must not be the bytes a second PUT can replace.
   it("seals a completed single-part upload: ingests a server-owned copy of exactly the verified version", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
-    sqlMock.mockReset().mockResolvedValue([{ id: file.id, source_key: sealedSourceKey(file) }]);
+    sqlMock.mockReset().mockResolvedValue([{ id: file.id, source_key: sealedSourceKey(file, "\"verified\"") }]);
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "\"verified\"" });
     copyUploadedObject.mockClear();
     deleteUploadedObject.mockClear();
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).resolves.toBe(true);
-    const sealed = sealedSourceKey(file);
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
+    const sealed = sealedSourceKey(file, "\"verified\"");
     expect(sealed).not.toBe(file.source_key);
     expect(sealed.startsWith(file.source_key.slice(0, file.source_key.lastIndexOf("/") + 1))).toBe(true);
     // The copy is conditional on the verified ETag, and the copy itself is size-checked.
     expect(copyUploadedObject).toHaveBeenCalledWith({ fromKey: file.source_key, toKey: sealed, ifMatch: "\"verified\"" });
-    expect(getUploadedObjectMetadata).toHaveBeenLastCalledWith(sealed);
+    expect(getUploadedObjectMetadata).toHaveBeenLastCalledWith(sealed, undefined);
     const completed = sqlMock.mock.calls.find(([strings]) => strings.join("?").includes("set status = 'completed'"));
     expect(completed).toContain(sealed);
     expect(completed?.[0].join("?")).toContain("insert into storage_cleanup_queue");
@@ -246,7 +241,7 @@ describe("Direct Upload Session Module", () => {
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "verified" });
     copyUploadedObject.mockReset().mockResolvedValue({ etag: "sealed" });
     deleteUploadedObject.mockClear();
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).rejects.toMatchObject({statusCode: 409});
+    await expect(finalizeDirectUploadFile(file)).rejects.toMatchObject({statusCode: 409});
     expect(deleteUploadedObject).not.toHaveBeenCalled();
   });
 
@@ -255,22 +250,23 @@ describe("Direct Upload Session Module", () => {
     sqlMock.mockReset().mockResolvedValue([]);
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: "\"verified\"" });
     copyUploadedObject.mockReset().mockRejectedValueOnce(Object.assign(new Error("At least one of the pre-conditions you specified did not hold"), { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } }));
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining("changed while its upload was being completed") });
+    await expect(finalizeDirectUploadFile(file)).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining("changed while its upload was being completed") });
     expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(false);
     // Without an ETag there is no version to pin: refuse rather than copy whatever is there.
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: file.size_bytes, etag: null });
     copyUploadedObject.mockClear();
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).rejects.toThrow(/Unable to verify the uploaded version/);
+    await expect(finalizeDirectUploadFile(file)).rejects.toThrow(/Unable to verify the uploaded version/);
     expect(copyUploadedObject).not.toHaveBeenCalled();
     copyUploadedObject.mockReset().mockResolvedValue({ etag: "sealed-etag" });
   });
 
   it("does not copy a multipart upload: completion closed its part URLs and it has no PUT URL", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u1", part_size: 8, size_bytes: 20 };
-    fencedWrites(file.id);
+    // The fenced publish matches the still-pending row.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("set status = 'completed'") ? [{ id: "file-1" }] : []);
     getUploadedObjectMetadata.mockReset().mockResolvedValue({ contentLength: 20, etag: "e" });
     copyUploadedObject.mockClear();
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).resolves.toBe(true);
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
     expect(copyUploadedObject).not.toHaveBeenCalled();
     const completed = sqlMock.mock.calls.find(([strings]) => strings.join("?").includes("set status = 'completed'"));
     expect(completed).toContain(file.source_key);
@@ -282,7 +278,7 @@ describe("Direct Upload Session Module", () => {
     completeMultipartUpload.mockClear();
     for (const parts of [[], [{partNumber:1,sizeBytes:8,etag:"a"}], [{partNumber:1,sizeBytes:8,etag:"a"},{partNumber:2,sizeBytes:7,etag:"b"},{partNumber:3,sizeBytes:5,etag:"c"}]]) {
       listMultipartUploadParts.mockResolvedValue(parts);
-      await expect(finalizeDirectUploadFile(file, undefined, "lease")).resolves.toBe(false);
+      await expect(finalizeDirectUploadFile(file)).resolves.toBe(false);
     }
     expect(completeMultipartUpload).not.toHaveBeenCalled();
   });
@@ -292,14 +288,15 @@ describe("Direct Upload Session Module", () => {
     const parts = [{partNumber:1,sizeBytes:8,etag:"a"},{partNumber:2,sizeBytes:8,etag:"b"},{partNumber:3,sizeBytes:4,etag:"c"}];
     getUploadedObjectMetadata.mockReset().mockRejectedValueOnce(Object.assign(new Error("NotFound"), { name: "NotFound" })).mockResolvedValueOnce({contentLength:20,etag:"e"});
     listMultipartUploadParts.mockResolvedValue(parts);
-    fencedWrites(file.id);
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).resolves.toBe(true);
+    // The fenced publish matches the still-pending row.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("set status = 'completed'") ? [{ id: "file-1" }] : []);
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
     expect(completeMultipartUpload).toHaveBeenLastCalledWith({key:file.source_key,uploadId:"u1",parts});
   });
 
   it("never finalizes an unknown stream before EOS", async () => {
     getUploadedObjectMetadata.mockClear();
-    await expect(finalizeDirectUploadFile({ ...directUploadSessionFixture().files[0], status:"pending", unknown_size:true }, undefined, "lease")).resolves.toBe(false);
+    await expect(finalizeDirectUploadFile({ ...directUploadSessionFixture().files[0], status:"pending", unknown_size:true })).resolves.toBe(false);
     expect(getUploadedObjectMetadata).not.toHaveBeenCalled();
   });
 
@@ -335,7 +332,8 @@ describe("Direct Upload Session Module", () => {
 
   it("verifies the assembled object when a retried multipart completion finds the upload closed", async () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u1", part_size: 8, size_bytes: 20 };
-    fencedWrites(file.id);
+    // The fenced publish matches the still-pending row.
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("set status = 'completed'") ? [{ id: "file-1" }] : []);
     const notFound = Object.assign(new Error("missing"), { name: "NotFound" });
     // Absent before completion; present after the completion whose answer was lost.
     getUploadedObjectMetadata.mockReset().mockRejectedValueOnce(notFound).mockResolvedValue({ contentLength: 20, etag: "e" });
@@ -343,13 +341,13 @@ describe("Direct Upload Session Module", () => {
     completeMultipartUpload.mockReset()
       .mockRejectedValueOnce(Object.assign(new Error("reset"), { code: "ECONNRESET" }))
       .mockRejectedValueOnce(Object.assign(new Error("closed"), { name: "NoSuchUpload", $metadata: { httpStatusCode: 404 } }));
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).resolves.toBe(true);
+    await expect(finalizeDirectUploadFile(file)).resolves.toBe(true);
     expect(completeMultipartUpload).toHaveBeenCalledTimes(2);
     expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
     // A closed upload with no assembled object is still the client's 400.
     getUploadedObjectMetadata.mockReset().mockRejectedValue(notFound);
     completeMultipartUpload.mockReset().mockRejectedValue(Object.assign(new Error("closed"), { name: "NoSuchUpload", $metadata: { httpStatusCode: 404 } }));
-    await expect(finalizeDirectUploadFile(file, undefined, "lease")).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("no longer open") });
+    await expect(finalizeDirectUploadFile(file)).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("no longer open") });
     listMultipartUploadParts.mockReset(); completeMultipartUpload.mockReset();
   });
 
@@ -357,7 +355,7 @@ describe("Direct Upload Session Module", () => {
     const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "single" };
     sqlMock.mockReset().mockResolvedValue([]);
     getUploadedObjectMetadata.mockReset().mockRejectedValue(Object.assign(new Error("secret provider detail"), { name: "AccessDenied", $metadata: { httpStatusCode: 403 } }));
-    const failure = await finalizeDirectUploadFile(file, undefined, "lease").catch(error => error);
+    const failure = await finalizeDirectUploadFile(file).catch(error => error);
     expect(failure).toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
     expect(failure.message).not.toContain("secret");
     // A definite answer is not retried.
@@ -474,10 +472,12 @@ describe("full recovery inspection", () => {
   function installSession() {
     const fixture = directUploadSessionFixture();
     fixture.files[0].status = "pending";
-    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => {
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
+      // The publish names the sealed key it derived from the verified version.
+      const sealed = values.find((value): value is string => typeof value === "string" && value.includes("/sealed-"));
       if (query.includes("set finalize_lease_until = now()")) return fixture.files[0].status === "pending" ? [{ ...fixture.files[0] }] : [];
-      if (query.includes("set status = 'completed'")) { fixture.files[0].status = "completed"; return [{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0]) }]; }
+      if (query.includes("set status = 'completed'")) { fixture.files[0].status = "completed"; return [{ id: fixture.files[0].id, source_key: sealed ?? fixture.files[0].source_key }]; }
       if (query.includes("update upload_session_files")) return [{ id: fixture.files[0].id }];
       if (query.includes("from upload_session_runs")) return [];
       if (query.includes("from upload_sessions")) return [fixture.session];

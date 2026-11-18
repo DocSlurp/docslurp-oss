@@ -4,6 +4,9 @@
 -- fallback reconciler never finalize the same file at once and no session-wide lock is needed; the run (wave) that took
 -- the file; when it was finalized (the wave timer starts from the first waiting file); the fallback reconciler's own
 -- schedule; and a definite rejection found in the background, shown to the client.
+-- ADD COLUMN takes a brief ACCESS EXCLUSIVE lock: give up rather than queue (and block every upload query) behind a
+-- long transaction; the migration is safe to rerun.
+SET LOCAL lock_timeout = '5s';
 ALTER TABLE upload_session_files ADD COLUMN IF NOT EXISTS run_id text;
 ALTER TABLE upload_session_files ADD COLUMN IF NOT EXISTS finalized_at timestamptz;
 ALTER TABLE upload_session_files ADD COLUMN IF NOT EXISTS finalize_lease_until timestamptz;

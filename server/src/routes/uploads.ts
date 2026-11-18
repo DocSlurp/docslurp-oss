@@ -161,22 +161,59 @@ const completeDirectFileSchema = z.object({
 });
 
 /**
- * `files/complete` takes one file (`{ fileId, ... }`, answered `{ ok: true }` or the file's error) or a batch
- * (`{ files: [{ fileId, ... }] }`, up to 100, answered per file). A body naming both is refused.
+ * One batch entry: only what completion uses. Storage's own part list is authoritative, so a batch carries no part
+ * manifest; unknown fields are refused rather than walked.
  */
-export const completeDirectFilesSchema = z.union([
-  z.object({
-    files: z.array(completeDirectFileSchema).min(1).max(MAX_DIRECT_UPLOAD_COMPLETE_BATCH),
-  }).strict().superRefine((body, ctx) => {
-    if (new Set(body.files.map(file => file.fileId)).size !== body.files.length) {
-      ctx.addIssue({ code: "custom", path: ["files"], message: "Each fileId may appear once per request" });
-    }
-  }),
-  completeDirectFileSchema.extend({ files: z.undefined().optional() }),
-]);
+const completeBatchEntrySchema = z.object({
+  fileId: z.string().min(1).max(64),
+  etag: z.string().max(128).optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+}).strict();
 
-/** A full single-file manifest is about 0.6 MB; a batch whose entries carry manifests stays well below this. */
-const COMPLETE_BODY_LIMIT_BYTES = 8 * 1024 * 1024;
+/** `{ files: [...] }`: up to 100 entries, each fileId once. */
+export const completeDirectFilesBatchSchema = z.object({
+  files: z.array(completeBatchEntrySchema).min(1).max(MAX_DIRECT_UPLOAD_COMPLETE_BATCH),
+}).strict().superRefine((body, ctx) => {
+  if (new Set(body.files.map(file => file.fileId)).size !== body.files.length) {
+    ctx.addIssue({ code: "custom", path: ["files"], message: "Each fileId may appear once per request" });
+  }
+});
+
+/** The legacy single-file body, a 10,000-part manifest included: about 0.7 MB at most. */
+const COMPLETE_SINGLE_BODY_MAX_BYTES = 1024 * 1024;
+/** 100 entries of the largest allowed shape (about 250 bytes each) fit in 32 KiB. */
+export const COMPLETE_BATCH_BODY_MAX_BYTES = 32 * 1024;
+
+type CompleteBody =
+  | { kind: "batch"; files: z.infer<typeof completeBatchEntrySchema>[] }
+  | { kind: "single"; body: z.infer<typeof completeDirectFileSchema> };
+
+/**
+ * Parses `files/complete` (one file, or `{ files }`) with cheap structural checks first, so an oversized or deeply
+ * nested payload is refused before schema validation walks it. A body naming both shapes is refused.
+ */
+async function parseCompleteBody(c: Context): Promise<CompleteBody | Response> {
+  const text = await c.req.text();
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { return apiStatusError(c, 400, "Invalid JSON body"); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return apiStatusError(c, 400, "Invalid request");
+  const record = body as Record<string, unknown>;
+  if ("files" in record) {
+    if (Buffer.byteLength(text) > COMPLETE_BATCH_BODY_MAX_BYTES) {
+      return apiErrorResponse(c, 413, "payload_too_large", `A completion batch body may not exceed ${COMPLETE_BATCH_BODY_MAX_BYTES} bytes`, { maxBytes: COMPLETE_BATCH_BODY_MAX_BYTES });
+    }
+    if (!Array.isArray(record.files) || record.files.length < 1 || record.files.length > MAX_DIRECT_UPLOAD_COMPLETE_BATCH) {
+      return apiStatusError(c, 400, `files must list between 1 and ${MAX_DIRECT_UPLOAD_COMPLETE_BATCH} entries`);
+    }
+    const parsed = completeDirectFilesBatchSchema.safeParse(record);
+    if (!parsed.success) return validationErrorResponse(c, parsed.error, "Invalid request", 400);
+    return { kind: "batch", files: parsed.data.files };
+  }
+  if (Array.isArray(record.parts) && record.parts.length > 10_000) return apiStatusError(c, 400, "parts may list at most 10000 entries");
+  const parsed = completeDirectFileSchema.safeParse(record);
+  if (!parsed.success) return validationErrorResponse(c, parsed.error, "Invalid request", 400);
+  return { kind: "single", body: parsed.data };
+}
 
 export const uploadValidationHook = (
   result: { success: boolean; error?: ValidationErrorSource },
@@ -418,13 +455,14 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     })
   .post(
     "/direct/sessions/:sessionId/files/complete",
-    nativeBodyLimit(COMPLETE_BODY_LIMIT_BYTES),
-    zValidator("json", completeDirectFilesSchema, validationHook),
+    nativeBodyLimit(COMPLETE_SINGLE_BODY_MAX_BYTES),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const sessionId = c.req.param("sessionId");
-      const body = c.req.valid("json");
-      if ("files" in body && body.files) {
+      const parsedBody = await parseCompleteBody(c);
+      if (parsedBody instanceof Response) return parsedBody;
+      if (parsedBody.kind === "batch") {
+        const body = parsedBody;
         // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
         try {
           // Finalized files start runs (waves) on their own; the service schedules them.
@@ -434,6 +472,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
         }
       }
+      const body = parsedBody.body;
       try {
         await completeDirectUploadFile({
           sessionId,
