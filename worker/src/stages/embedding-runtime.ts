@@ -156,6 +156,19 @@ export async function extractTextForEmbedding(
   return { ...extracted, text: normalizeNfc(extracted.text) };
 }
 
+/**
+ * The text extractTextForEmbedding returns for a Markdown artifact holding `markdown`, computed from memory (no storage
+ * reads). Stages that just wrote the artifact use it to find the HTML tables embed will chunk; a difference is only a
+ * stored-table-cells miss, never a different chunk.
+ */
+export function embedTextFromMarkdown(markdown: string, canonicalDocument?: CanonicalDocument): string {
+  const markdownText = imageAnchorsToAltText(normalizeNfc(markdown));
+  const referencePages = canonicalDocument ? pageImageReferencePages(canonicalDocument.blocks) : new Set<number>();
+  const artifactText = blankPages(markdownText, referencePages);
+  if (artifactText.trim() || artifactText !== markdownText) return normalizeNfc(artifactText);
+  return canonicalDocument ? normalizeNfc(canonicalDocumentToText(canonicalDocument)) : "";
+}
+
 async function extractTextForEmbeddingRaw(
   document: Document,
   runner: CommandRunner,

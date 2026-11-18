@@ -1,5 +1,5 @@
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { mayHaveHtmlTables, storeEmbedTableCells } from "./embed-table-cells.js";
+import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
 import { recordPageExtracts, visionPageRecords } from "../pipeline/page-extracts.js";
 import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { recordPageEscalation } from "../pipeline/run-milestones.js";
@@ -86,7 +86,7 @@ import {
   loadRuntimePolicyPack,
   type RoutedExecution,
 } from "../routing/runtime.js";
-import type { PlanValidation, RoutePlan } from "@docslurp/shared";
+import type { CanonicalDocument, PlanValidation, RoutePlan } from "@docslurp/shared";
 import { MIXED_SCAN_IMAGE_SIGNAL, tableLeakPageCap } from "@docslurp/shared";
 import { buildVisionPageFacts, recordPageFacts, type VisionPageOutcome } from "../pipeline/page-facts.js";
 import { VISUAL_CANDIDATE_STATS_KEY, type BBox } from "@docslurp/shared";
@@ -692,16 +692,7 @@ export class VisionExtractStage implements Stage {
               outputs, skips: failedPages, reconciliation, ocrPageClass: runUsesOcrPageClass(state.artifactLedger),
             }));
 
-            // Pages vision rewrote with HTML tables: parse their cells in this activity's warm VM lane and add them to the
-            // document's stored table cells, so embed reuses them (DOCSLURP_TABLE_CELLS_CACHE). Best effort, never fails the stage.
-            const tableCells = reconciliation.changedPages.length > 0 && outputs.some((page) => mayHaveHtmlTables(page.text))
-              ? await storeEmbedTableCells({
-                  run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
-                  markdownUri: state.artifactLedger.readDocument(document.id, "markdown"),
-                  canonicalUri: state.artifactLedger.readDocument(document.id, "canonical-document"),
-                  signal,
-                })
-              : null;
+            const tableCells = await this.storeTableCellsForEmbed(state, document, reconciliation, signal);
 
             console.log(
               `[extract-debug] document=${document.id} visionCompleted ` +
@@ -2400,6 +2391,9 @@ export class VisionExtractStage implements Stage {
   ): Promise<{
     changedPages: number[];
     decisions: CanonicalReconciliationDecision[];
+    /** The reconciled Markdown and canonical document now in the document's slots (absent when nothing was reconciled). */
+    markdown?: string;
+    canonicalDocument?: CanonicalDocument;
   }> {
     const contractUri = state.artifactLedger.readDocument(document.id, "extraction-contract");
     const canonicalUri = state.artifactLedger.readDocument(document.id, "canonical-document");
@@ -2527,7 +2521,28 @@ export class VisionExtractStage implements Stage {
     return {
       changedPages: reconciled.changedPages,
       decisions: reconciled.decisions,
+      markdown: reconciled.markdown,
+      canonicalDocument: reconciled.canonicalDocument,
     };
+  }
+
+  /**
+   * vision-extract is the last stage that writes the document's tables before pii-detect: when it re-read pages, store
+   * the cells of every HTML table of the reconciled document (extract-markdown left them to it) from this activity's VM
+   * lane, warm from rebuilding the pages' tables, so embed reuses them (DOCSLURP_TABLE_CELLS_CACHE). Best effort.
+   */
+  async storeTableCellsForEmbed(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    reconciliation: { changedPages: number[]; markdown?: string; canonicalDocument?: CanonicalDocument },
+    signal?: AbortSignal,
+  ): Promise<StoreEmbedTableCellsStats | null> {
+    if (reconciliation.changedPages.length === 0 || reconciliation.markdown === undefined) return null;
+    if (!mayHaveHtmlTables(reconciliation.markdown, reconciliation.canonicalDocument?.blocks)) return { status: "no-tables" };
+    return await storeEmbedTableCells({
+      run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
+      markdown: reconciliation.markdown, canonicalDocument: reconciliation.canonicalDocument, signal,
+    });
   }
 }
 

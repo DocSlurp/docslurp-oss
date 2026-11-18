@@ -13,6 +13,7 @@ import { isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { tableCellsArtifactKey } from "../pipeline/html-table-cells-cache.js";
 import {
   PII_BLOCKED_DOCUMENT_STATUS,
   type PiiMatch,
@@ -387,6 +388,11 @@ export class PiiDetectStage implements Stage {
       });
       if (evidence !== "absent") redactedArtifacts.push("summary-evidence");
     }
+
+    // Stored HTML table cells hold table text from before this stage. They are never written on a PII-policy run
+    // (tableCellsCacheActive), but delete any that exist for a redacted or blocked document anyway, so unredacted
+    // cells never stay in storage or reach embed. A failed delete fails this stage (retried), never passes silently.
+    if (blocked || redacted) await this.storage.deleteKeys([tableCellsArtifactKey(state.run, document)]);
 
     // Under redact_artifacts the scanned sources are now clean (redacted or
     // matchless) and stay servable; under block_indexing nothing written

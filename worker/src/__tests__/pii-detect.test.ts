@@ -417,3 +417,24 @@ describe("piiPolicy detections carry honest offsets", () => {
     expect(piiArtifact(storage, prefix, documentId).matches[0]).toMatchObject({ byteOffset: match?.byteOffset, charOffset: match?.charOffset });
   });
 });
+
+describe("piiPolicy and stored HTML table cells", () => {
+  // Stored cells are never written on a PII-policy run; one left behind (an older worker, a toggled flag) must not
+  // outlive the redaction or block of its document.
+  it.each(["redact_artifacts", "block_indexing"] as const)("%s deletes the document's stored table cells", async (action) => {
+    const { storage, state, stage, prefix, documentId } = setup(action);
+    const key = `${prefix}/table-cells/${documentId}.json`;
+    storage.objects.set(key, JSON.stringify({ schema: "docslurp.html-table-cells.v2", tables: [["0".repeat(64), [[1, 1, 1, 1, 0, SSN]]]] }));
+    await stage.run(state);
+    expect(storage.objects.has(key)).toBe(false);
+    if (action === "redact_artifacts") expect([...storage.objects.values()].join("\n")).not.toContain(SSN);
+  });
+
+  it("flag_for_review leaves them (nothing is redacted or withheld)", async () => {
+    const { storage, state, stage, prefix, documentId } = setup("flag_for_review");
+    const key = `${prefix}/table-cells/${documentId}.json`;
+    storage.objects.set(key, "{}");
+    await stage.run(state);
+    expect(storage.objects.has(key)).toBe(true);
+  });
+});

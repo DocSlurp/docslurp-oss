@@ -1,5 +1,5 @@
 import { hasVmHtmlTableWork, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
-import { embedHtmlTableSources, readTableCellsArtifact, tableCellsArtifactKey, tableCellsCacheActive, tableCellsGuestVersion, type TableCellsLookup } from "../pipeline/html-table-cells-cache.js";
+import { embedHtmlTableSources, readTableCellsArtifact, reportUnknownGuest, tableCellsArtifactKey, tableCellsCacheActive, tableCellsGuestVersion, type TableCellsLookup } from "../pipeline/html-table-cells-cache.js";
 import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { createHash } from "node:crypto";
 
@@ -183,18 +183,22 @@ export class EmbedStage implements Stage {
           // order when there is nothing to wait on.
           const tableSources = embedHtmlTableSources(extracted);
           let tableCells: TableCellsLookup | undefined;
-          if (hasVmHtmlTableWork(tableSources) && tableCellsCacheActive()) {
+          // Never on a PII-policy run (tableCellsCacheActive): stored cells predate pii-detect's redaction or block.
+          if (hasVmHtmlTableWork(tableSources) && tableCellsCacheActive(state.run.pipeline) && document.runId === state.run.id) {
             const lookupStarted = Date.now();
+            const guest = tableCellsGuestVersion();
+            if (guest.version === null) reportUnknownGuest(guest.reason);
             tableCells = await readTableCellsArtifact({
               storage: this.storage,
               key: tableCellsArtifactKey(state.run, document),
               runId: state.run.id,
               documentId: document.id,
-              guestVersion: await tableCellsGuestVersion(),
+              guestVersion: guest.version,
               sources: tableSources,
+              signal,
             });
             const reason = "reason" in tableCells ? tableCells.reason : null;
-            (tableCells.status === "invalid" ? console.warn : console.log)(
+            (tableCells.status === "invalid" || tableCells.status === "unavailable" ? console.warn : console.log)(
               `[table-cells] embed document=${document.id} status=${tableCells.status} hits=${tableCells.hits} ` +
                 `misses=${tableCells.misses}${reason ? ` reason=${reason}` : ""} ms=${Date.now() - lookupStarted}`,
             );
