@@ -2257,6 +2257,8 @@ export const uploadSessions = pgTable(
     nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
     /** A client completing its own files holds the reconciler off the session until then (migration 0190). */
     clientFinalizingUntil: timestamp("client_finalizing_until", { withTimezone: true, mode: "string" }),
+    /** When the current run of client holds began; total hold time is capped from it (migration 0190). */
+    clientFinalizingSince: timestamp("client_finalizing_since", { withTimezone: true, mode: "string" }),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
     id: text().primaryKey().notNull(),

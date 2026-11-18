@@ -2910,7 +2910,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         const chunk = files.slice(start, start + UPLOAD_COMPLETE_BATCH_SIZE);
         if (batched) {
           try {
-            const answer = await request<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: chunk }), options);
+            // A batch entry carries only what the server uses: storage's own part list is authoritative.
+            const entries = chunk.map(({ fileId, etag, sizeBytes }) => ({ fileId, ...(etag !== undefined ? { etag } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) }));
+            const answer = await request<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
             if (Array.isArray(answer.files)) {
               results.push(...answer.files);
               sessionComplete = Boolean(answer.sessionComplete);

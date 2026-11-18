@@ -66,10 +66,32 @@ describe("files/complete request shapes", () => {
     expect(mocks.single).not.toHaveBeenCalled();
   });
 
-  it("refuses a body above the completion limit", async () => {
-    const response = await complete(JSON.stringify({ files: [{ fileId: "f1", etag: "x".repeat(9 * 1024 * 1024) }] }));
+  it("refuses a body above the single-file limit", async () => {
+    const response = await complete(JSON.stringify({ fileId: "f1", etag: "x".repeat(2 * 1024 * 1024) }));
     expect(response.status).toBe(413);
+    expect(mocks.single).not.toHaveBeenCalled();
+  });
+
+  it("caps a batch body at a few KiB and refuses nested part manifests in batch entries", async () => {
+    // Within the old 8 MiB cap this carried hundreds of thousands of nested entries; now it is refused by size first.
+    const nested = { files: [{ fileId: "f1", parts: Array.from({ length: 50_000 }, () => ({ partNumber: "x", etag: 1 })) }] };
+    const huge = await complete(nested);
+    expect(huge.status).toBe(413);
+    // Small enough to pass the size cap, but batch entries take no parts at all.
+    const withParts = await complete({ files: [{ fileId: "f1", parts: [{ partNumber: 1, etag: "e" }] }] });
+    expect(withParts.status).toBe(400);
+    // Too many entries is refused before schema validation walks them.
+    const many = await complete(JSON.stringify({ files: Array.from({ length: 5_000 }, () => 0) }));
+    expect(many.status).toBe(400);
     expect(mocks.batch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the legacy single body with its part manifest, bounded at 10,000 parts", async () => {
+    const parts = Array.from({ length: 3 }, (_, i) => ({ partNumber: i + 1, etag: `e${i}` }));
+    expect((await complete({ fileId: "f1", sizeBytes: 3, parts })).status).toBe(200);
+    expect(mocks.single).toHaveBeenCalledWith(expect.objectContaining({ fileId: "f1", parts }));
+    const tooMany = await complete({ fileId: "f1", parts: Array.from({ length: 10_001 }, (_, i) => ({ partNumber: i + 1, etag: "e" })) });
+    expect(tooMany.status).toBe(400);
   });
 
   it("fails the whole batch for a session-level problem, keeping its code", async () => {
