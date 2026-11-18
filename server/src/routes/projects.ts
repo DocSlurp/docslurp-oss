@@ -816,7 +816,7 @@ export const projectsRoutes = new Hono()
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    const project = await getProject(c.req.param("projectId"), actor.userId);
+    const project = await getProject(c.req.param("projectId"), actor.userId, undefined, { forDisplay: true });
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
@@ -827,7 +827,7 @@ export const projectsRoutes = new Hono()
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    const project = await getProject(c.req.param("projectId"), actor.userId);
+    const project = await getProject(c.req.param("projectId"), actor.userId, undefined, { forDisplay: true });
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
@@ -964,7 +964,7 @@ export const projectsRoutes = new Hono()
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    const project = await getProject(c.req.param("projectId"), userId);
+    const project = await getProject(c.req.param("projectId"), userId, undefined, { forDisplay: true });
 
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
