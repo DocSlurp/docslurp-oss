@@ -66,7 +66,6 @@ describe("healthRoutes /metrics", () => {
           processing_runs: 3,
           stale_leases: 1,
           worker_active: 1,
-          pages_processed_total: 42,
           oldest_queued_run_age_seconds: 300,
           oldest_queued_run_created_at_seconds: 1741478400
         }
@@ -97,7 +96,7 @@ describe("healthRoutes /metrics", () => {
 
     const body = await response.text();
     expect(body).toContain('docslurp_runs_total{status="completed"} 4');
-    expect(body).toContain("docslurp_pages_processed_total 42");
+    expect(body).not.toContain("docslurp_pages_processed_total");
     expect(body).toContain("docslurp_queue_depth 2");
     expect(body).toContain("docslurp_queued_documents 0");
     expect(body).toContain("docslurp_queued_pages 137");
@@ -123,7 +122,6 @@ describe("healthRoutes /metrics", () => {
         processing_runs: 1,
         stale_leases: 0,
         worker_active: 1,
-        pages_processed_total: 42,
         oldest_queued_run_age_seconds: 120,
         oldest_queued_run_created_at_seconds: 1741478400,
         org_demand: [{ org_key: "org-a", slots: 20, demand: 9 }]
@@ -189,7 +187,6 @@ describe("healthRoutes /metrics", () => {
         processing_runs: 0,
         stale_leases: 0,
         worker_active: 0,
-        pages_processed_total: 42,
         oldest_queued_run_age_seconds: null,
         oldest_queued_run_created_at_seconds: null
       }
@@ -211,7 +208,6 @@ describe("healthRoutes /metrics", () => {
         processing_runs: 3,
         stale_leases: 3,
         worker_active: 0,
-        pages_processed_total: 42,
         oldest_queued_run_age_seconds: null,
         oldest_queued_run_created_at_seconds: null
       }
@@ -243,7 +239,6 @@ describe("healthRoutes /metrics", () => {
           processing_runs: 0,
           stale_leases: 0,
           worker_active: 0,
-          pages_processed_total: 42,
           oldest_queued_run_age_seconds: null,
           oldest_queued_run_created_at_seconds: null
         }
@@ -266,7 +261,6 @@ describe("healthRoutes /metrics", () => {
         processing_runs: 0,
         stale_leases: 0,
         worker_active: 0,
-        pages_processed_total: 42,
         oldest_queued_run_age_seconds: 7_119_565,
         oldest_queued_run_created_at_seconds: 1775420378.14763,
         org_demand: [{ org_key: "org-a", slots: 20, demand: 5 }]
@@ -307,7 +301,6 @@ describe("healthRoutes /metrics", () => {
           processing_runs: 0,
           stale_leases: 0,
           worker_active: 0,
-          pages_processed_total: 42,
           oldest_queued_run_age_seconds: 900,
           oldest_queued_run_created_at_seconds: 1741478400,
           org_demand: [{ org_key: "org-a", slots: 2, demand: 1 }]
@@ -357,7 +350,6 @@ describe("healthRoutes /metrics", () => {
           processing_runs: 0,
           stale_leases: 0,
           worker_active: 0,
-          pages_processed_total: 42,
           oldest_queued_run_age_seconds: null,
           oldest_queued_run_created_at_seconds: null
         }
