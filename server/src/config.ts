@@ -7,6 +7,7 @@ import { resolveLanceDbConfig, resolveObjectStorageConfig } from "@docslurp/shar
 
 import { storageAccessKeyIdProblem } from "./lib/storage-credentials.js";
 import { assertEstimateSigningKeyConfigured } from "./lib/estimate-signing-key.js";
+import { WEAK_SECRET_VALUES } from "./lib/weak-secrets.js";
 
 const defaultDatabaseUrl = "postgres://docslurp:docslurp@localhost:5432/docslurp";
 
@@ -143,16 +144,7 @@ function readOrigins(value: string | undefined, fallback: string[]): string[] {
   });
 }
 
-const weakSecretValues = new Set([
-  "docslurp",
-  "minioadmin",
-  "metrics-secret",
-  "dev-secret-change-me",
-  "dev-oauth-key-change-me",
-  "testtest",
-  "password",
-  "changeme",
-]);
+const weakSecretValues = WEAK_SECRET_VALUES;
 
 function assertProductionSecret(
   name: string,
@@ -204,6 +196,7 @@ function validateProductionSecrets(): void {
   });
   // Estimate signatures (confirmEstimate) must verify on every API and chat-executor process: a too-short dedicated
   // secret refuses everywhere, and production refuses to start with no stable key (never a per-process random one).
+  assertProductionSecret("DOCSLURP_ESTIMATE_SIGNING_SECRET", process.env.DOCSLURP_ESTIMATE_SIGNING_SECRET, { required: false, minLength: 32 });
   assertEstimateSigningKeyConfigured(process.env);
 }
 

@@ -1,9 +1,11 @@
 import "../src/env.js";
+// Before config.js loads (db.js imports it): refuses to start without a usable estimate signing key, and logs its
+// source and fingerprint for comparison with the API.
+import "./estimate-signing-guard.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { startAutomaticCallPriceRefresh } from "@docslurp/shared";
 
 import { sql } from "../src/db.js";
-import { assertEstimateSigningKeyConfigured } from "../src/lib/estimate-signing-key.js";
 import { PROJECT_CHAT_FAILOVER_MODELS } from "../src/services/project-chat.js";
 import { NATIVE_CHAT_TEARDOWN_MS, nativeChatDrainMs, runNativeChatWorker } from "../src/agent-runtime/runtime.js";
 const shutdown = new AbortController();
@@ -21,15 +23,6 @@ const stop = () => {
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
-// Chat proposals plan project changes and sign their estimates here, and the API verifies them: both must share one key.
-// Production without DOCSLURP_ESTIMATE_SIGNING_SECRET (or a fallback secret) refuses to start; never a per-process key.
-try {
-  console.log(`[native-chat] estimate signing key source=${assertEstimateSigningKeyConfigured(process.env)}`);
-} catch (error) {
-  console.error("[native-chat] startup_refused estimate signing:", error instanceof Error ? error.message : String(error));
-  await sql.end({ timeout: 1 }).catch(() => undefined);
-  process.exit(1);
-}
 // Chat answers are priced and charged here: load the deployment's pricing provider (with its durable state) before
 // claiming any operation. DOCSLURP_PRICING_REQUIRED=1 (fly.chat-executor.toml) without a provider refuses to start, so
 // the executor never prices an answer with the open default (or at 0).

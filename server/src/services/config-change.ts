@@ -2,7 +2,7 @@ import { lockProjectConfigurationWrite } from "./project-write-lock.js";
 import { isPolicyTightening } from "./policy-transition.js";
 import { withRunEffective } from "./extraction-settings.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { estimateSigningKey } from "../lib/estimate-signing-key.js";
 
 import {
@@ -199,7 +199,11 @@ export function assertReindexConfirmed(plan: ProjectChangePlan): void {
 
 /** Refuses a confirmation that priced different work (`confirmEstimate` vs the plan's signature). */
 export function assertEstimateCurrent(plan: ProjectChangePlan, confirmEstimate: string | undefined): void {
-  if (confirmEstimate !== undefined && confirmEstimate !== plan.signature) throw new EstimateStaleError();
+  if (confirmEstimate === undefined) return;
+  const given = Buffer.from(confirmEstimate, "utf8");
+  const expected = Buffer.from(plan.signature, "utf8");
+  // Constant-time: a caller learns nothing about the expected signature from how fast a guess is refused.
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new EstimateStaleError();
 }
 
 /**
@@ -212,7 +216,7 @@ function planSignatureKey(): Buffer {
 }
 
 /** Stable signature of a plan's work: the resulting pipeline, stages, target documents and the price. */
-function planSignature(args: { projectId: string; nextPipeline: PipelineFeatures; stages: readonly string[]; lockedSettings: readonly string[]; targets: readonly ReindexTarget[]; estimate: CostEstimate | null; willReindex: boolean }): string {
+function planSignature(args: { projectId: string; nextPipeline: PipelineFeatures; stages: readonly string[]; lockedSettings: readonly string[]; targets: readonly ReindexTarget[]; estimate: CostEstimate | null; willReindex: boolean; speedBoost: boolean; billing: "enforced" | "disabled" }): string {
   return createHmac("sha256", planSignatureKey()).update(JSON.stringify({
     project: args.projectId,
     pipeline: indexConfigHash(indexConfigOf(args.nextPipeline)),
@@ -223,6 +227,9 @@ function planSignature(args: { projectId: string; nextPipeline: PipelineFeatures
     reindex: args.willReindex,
     credits: args.estimate?.credits ?? null,
     pages: args.estimate?.pages ?? 0,
+    // Bound explicitly: speed boost changes what the runs cost, and the billing state whether they are charged at all.
+    speedBoost: args.speedBoost,
+    billing: args.billing,
   })).digest("hex");
 }
 
@@ -546,7 +553,7 @@ export async function planProjectChange(args: {
     willReindex: queues,
     hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion, origin,
     identityChanges, reenabledVectors, lockedSettings, rebuildIndex,
-    signature: planSignature({ projectId: project.id, nextPipeline, stages: impact.stages, lockedSettings, targets, estimate, willReindex: queues }),
+    signature: planSignature({ projectId: project.id, nextPipeline, stages: impact.stages, lockedSettings, targets, estimate, willReindex: queues, speedBoost: input.speedBoost === true, billing: billingState(args.env) }),
   };
 }
 

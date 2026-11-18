@@ -10,7 +10,7 @@ interface Capability {
   category: string;
   inputSchema: Record<string, unknown>;
   /** Agent-safety hints from the capability manifest. Absent → treated as fully unknown (not read-only). */
-  annotations?: { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean };
+  annotations?: { readOnly: boolean; destructive: boolean; idempotent: boolean; openWorld: boolean; consequential?: boolean };
 }
 
 export interface McpManifest {

@@ -219,7 +219,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "Parse and index every remaining page of a deferred (map/visual) project, or of the listed documents, in the background. Spends credits and is refused unless the key or capability policy allows full-index requests.",
       inputSchema: toolInputJsonSchema(fullIndexInput) }] : []),
     { id: "reindex", title: "Reindex project", scopes: ["ingest"],
-      // Exactly the reindex route's (and reindexEstimate's) callers: a server key or grant with projects:manage.
+      // Exactly the reindex route's (and reindexEstimate's) callers: a server API key with projects:manage (never OAuth).
       keyAccess: (key) => apiKeyMayUseEstimateTool("reindexEstimate", key),
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: REINDEX_TOOL_DESCRIPTION,

@@ -56,6 +56,8 @@ beforeAll(async () => {
     if (auth?.startsWith("Bearer ")) {
       const key = await keys.validateApiKey(auth.slice(7), { origin: c.req.header("origin") ?? null });
       if (!key) return c.json({ error: "invalid key" }, 401);
+      // Test hook: present the key as a delegated OAuth token (the route must refuse it whatever its scopes).
+      if (c.req.header("x-test-oauth")) Object.assign(key, { oauth: { audience: "api", grantId: "g", clientId: "c", clientName: "CLI", resource: "r", grantedScopes: [] } });
       c.set("apiKey", key);
       c.set("sessionUser", syntheticApiKeySessionUser(key));
       context.setCurrentRequestUserId(key.userId);
@@ -254,6 +256,24 @@ describe("POST /v1/projects/:id/reindex", () => {
     expect(await reindexRuns("proj-b")).toBe(0);
     expect((await stored("proj-a")).pipeline.embedding.profile).toBe(defaultPipelineFeatures.embedding.profile);
     expect((await stored("proj-b")).pipeline.embedding.profile).toBe(defaultPipelineFeatures.embedding.profile);
+  });
+
+  it("refuses a delegated OAuth token even with projects:manage; nothing is queued", async () => {
+    const { rawKey } = await keys.createApiKey("ua", `oauth-${randomUUID()}`, { orgId: "org-a", scopes: ["projects:manage"] });
+    for (const path of ["/v1/projects/proj-a/reindex", "/v1/projects/proj-a/reindex/estimate"]) {
+      expect((await send("POST", path, { ...asKey(rawKey), "x-test-oauth": "1" }, {})).status).toBe(403);
+    }
+    expect(await reindexRuns("proj-a")).toBe(0);
+  });
+
+  it("binds speedBoost into the signature: a confirmation priced without it is stale with it", async () => {
+    const plain = await (await send("POST", "/v1/projects/proj-a/reindex/estimate", asUser("ua"), {})).json() as { signature: string };
+    const boosted = await (await send("POST", "/v1/projects/proj-a/reindex/estimate", asUser("ua"), { speedBoost: true })).json() as { signature: string };
+    expect(boosted.signature).not.toBe(plain.signature);
+    const response = await send("POST", "/v1/projects/proj-a/reindex", asUser("ua"), { speedBoost: true, confirmEstimate: plain.signature });
+    expect(response.status).toBe(409);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe("estimate_stale");
+    expect(await reindexRuns("proj-a")).toBe(0);
   });
 
   it("a server key with projects:manage whose user may edit can re-index", async () => {

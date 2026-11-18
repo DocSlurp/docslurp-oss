@@ -102,7 +102,13 @@ Scanner sessions follow these rules:
 | `CREDENTIALS_ENCRYPTION_KEY` | Connector credentials. |
 | `SECRETS_ENCRYPTION_KEY` | Project secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |
 | `METRICS_SECRET` | Access to the metrics endpoint. |
-| `DOCSLURP_ESTIMATE_SIGNING_SECRET` (optional) | Signs cost estimates (the `signature` a reindex or project-change estimate returns, sent back as `confirmEstimate`), so a paid change runs only at the price that was shown. At least 32 characters; every API and chat-executor process needs the same value. Unset, it falls back to `SECRETS_ENCRYPTION_KEY`, then `BETTER_AUTH_SECRET`, then `FILE_TOKEN_SECRET`; production refuses to start when none is set. Rotating it invalidates outstanding estimates only (clients re-estimate). |
+| `DOCSLURP_ESTIMATE_SIGNING_SECRET` (preferred) | Signs cost estimates (the `signature` a reindex or project-change estimate returns, sent back as `confirmEstimate`), so a paid change runs only at the price that was shown. At least 32 characters, not a default value, and the same on every API and chat-executor process. Unset, the key comes from `SECRETS_ENCRYPTION_KEY` (which production already requires), then `BETTER_AUTH_SECRET`, then `FILE_TOKEN_SECRET`. Rotating it invalidates outstanding estimates only (clients re-estimate). The worker never needs it. |
+
+### Estimate signing key rollout
+
+Every process that signs or verifies estimates (the API and, when you run one, the chat executor) must resolve the same key. Each logs `estimate signing key source=<variable> fingerprint=<12 hex>` at startup (the fingerprint is an HMAC under the key and reveals nothing about it), and the API serves the same `{ source, fingerprint }` at `GET /ops/estimate-signing` behind the `METRICS_SECRET` bearer. On another machine, `tsx server/scripts/estimate-signing-fingerprint.ts` prints it for that environment. The fingerprints must match.
+
+To introduce `DOCSLURP_ESTIMATE_SIGNING_SECRET` (or rotate it), set the same value on **every** such process in one rollout, then compare fingerprints. Until all of them have it, processes with and without it use different keys and refuse each other's signatures as `estimate_stale`; outstanding estimates from before the change are refused once (clients re-estimate).
 
 ### Rotate AES-GCM at-rest keys
 

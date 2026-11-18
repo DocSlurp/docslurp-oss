@@ -411,8 +411,8 @@ const mcpAdapterRoutes = new Hono()
 
     if (toolId === "reindex") {
       // Paid: refused without the signature reindexEstimate returned (schema), before any project lookup or forward.
-      // The route re-checks every gate (editor; a server key or grant with projects:manage bound to the org and
-      // project) and refuses a stale signature before anything is saved or queued.
+      // The route re-checks every gate (editor; a server API key with projects:manage bound to the org and project,
+      // never a delegated OAuth token) and refuses a stale signature before anything is saved or queued.
       if (apiKey && !apiKeyMayUseEstimateTool("reindexEstimate", apiKey)) return adapterError(c, 403, "Forbidden");
       const parsed = reindexToolInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);

@@ -39,7 +39,7 @@ export type EstimateToolName = (typeof ESTIMATE_TOOL_NAMES)[number];
  * Who may use each estimate tool: exactly the callers that may perform the mutation it prices. Session-only
  * means the mutation (and its estimate route) accepts no API key, so key-authenticated MCP never offers the tool.
  */
-type EstimateAccess = { sessionOnly: true } | { scopes: readonly string[]; server?: boolean };
+type EstimateAccess = { sessionOnly: true } | { scopes: readonly string[]; server?: boolean; noOAuth?: boolean };
 export const ESTIMATE_TOOL_ACCESS: Record<EstimateToolName, EstimateAccess> = {
   "updateEstimate": { scopes: ["projects:manage"], server: true },
   "searchSettingsEstimate": { scopes: ["projects:manage"], server: true },
@@ -47,16 +47,17 @@ export const ESTIMATE_TOOL_ACCESS: Record<EstimateToolName, EstimateAccess> = {
   "fullIndexEstimate": { scopes: ["ingest"] },
   "indexingModeEstimate": { scopes: ["projects:manage"], server: true },
   "graphRebuildEstimate": { scopes: ["projects:manage"], server: true },
-  // The reindex command's own gate (PATCH's): a server key or grant with projects:manage.
-  "reindexEstimate": { scopes: ["projects:manage"], server: true },
+  // The reindex command's own gate: a server API key with projects:manage, never a delegated OAuth token.
+  "reindexEstimate": { scopes: ["projects:manage"], server: true, noOAuth: true },
   "uploadEstimate": { scopes: ["ingest"] },
 };
 
 /** Whether an API key (scopes and type) may use the estimate tool. */
-export function apiKeyMayUseEstimateTool(name: EstimateToolName, key: { scopes: readonly string[]; keyType?: string }): boolean {
+export function apiKeyMayUseEstimateTool(name: EstimateToolName, key: { scopes: readonly string[]; keyType?: string; oauth?: unknown }): boolean {
   const access = ESTIMATE_TOOL_ACCESS[name];
   if ("sessionOnly" in access) return false;
   if (access.server && key.keyType !== "server") return false;
+  if (access.noOAuth && key.oauth) return false;
   return access.scopes.some((scope) => key.scopes.includes(scope));
 }
 

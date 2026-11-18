@@ -27,7 +27,7 @@ import { Hono } from "hono";
 import { EditorRequiredError } from "./lib/editor-required.js";
 
 import { env } from "./config.js";
-import { assertEstimateSigningKeyConfigured } from "./lib/estimate-signing-key.js";
+import { estimateSigningKeyLogLine } from "./lib/estimate-signing-key.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
@@ -326,7 +326,7 @@ export function ensureApiStartup(): Promise<void> {
       assertMcpBrowserOrigin();
       // Environment only: estimate signatures need one key shared by every API and chat-executor process. Production
       // refuses to start without one (config.ts also checks at import); the log names the variable, never the value.
-      console.log(`[estimate-signing] key source=${assertEstimateSigningKeyConfigured(process.env)}`);
+      console.log(estimateSigningKeyLogLine("estimate-signing"));
       // The deployment posture (DOCSLURP_PROFILE, DOCSLURP_DISABLE): refuses an unknown switch, an unknown or conflicting
       // profile, dev outside development and service without NODE_ENV=production. Release R0 warns (R1 refuses) when
       // the API runs outside development with no profile; the worker, which reads customer bytes, always refuses.

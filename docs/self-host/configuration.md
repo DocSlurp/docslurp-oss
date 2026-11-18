@@ -47,12 +47,13 @@ Postgres credentials are initialized only when the volume is new; editing the
 environment file does not rotate the password inside an existing database.
 
 Cost-estimate signatures (`confirmEstimate` on reindexes and locked project
-changes) are keyed by `DOCSLURP_ESTIMATE_SIGNING_SECRET` (at least 32
-characters) or, when it is unset, by `SECRETS_ENCRYPTION_KEY`, then
-`BETTER_AUTH_SECRET`, then `FILE_TOKEN_SECRET`. Every API and chat-executor
-process must resolve the same key; set the dedicated variable when those
-processes do not share the fallback secrets. Production refuses to start
-without one. See [Security](security.md).
+changes) are keyed by `DOCSLURP_ESTIMATE_SIGNING_SECRET` (preferred; at least
+32 characters) or, when it is unset, by `SECRETS_ENCRYPTION_KEY` (which
+production already requires), then `BETTER_AUTH_SECRET`, then
+`FILE_TOKEN_SECRET`. Every API and chat-executor process must resolve the same
+key: set the dedicated variable to one value on all of them, and compare the
+`fingerprint=` each logs at startup. See
+[Security](security.md#estimate-signing-key-rollout).
 
 ## Storage configuration
 

@@ -543,7 +543,10 @@ export function createChatMcpTools(args: {
     && (id !== "proposeFigureResume" || figureResumeChatEnabled())
     && (args.settingsTools === true || !CHAT_SETTINGS_TOOLS.has(id))
     && (args.publicClient !== true || !CHAT_PUBLIC_CLIENT_EXCLUDED_TOOLS.has(id)) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
-  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id))) {
+  // Beyond the denylist: a tool the catalog marks as writing or spending (not read-only, or consequential) is never
+  // offered, so a new paid tool stays out of chat even if nobody adds it to CHAT_EXCLUDED_TOOLS.
+  const writesOrSpends = (item: McpManifest["capabilities"][number]) => item.annotations?.readOnly === false || item.annotations?.consequential === true;
+  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id) && !writesOrSpends(item))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");

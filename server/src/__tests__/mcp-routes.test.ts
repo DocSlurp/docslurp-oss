@@ -561,6 +561,8 @@ describe("mcpRoutes", () => {
           { scopes: ["search:deep", "ingest"] },
           // A browser (client) key, even with projects:manage.
           { keyType: "client" as const, scopes: ["search:deep", "projects:manage"] },
+          // A delegated OAuth token, even one that somehow carried projects:manage.
+          { scopes: ["search:deep", "projects:manage"], oauth: { audience: "mcp" as const, grantId: "g", clientId: "c", clientName: "Client", resource: "r", grantedScopes: ["search:deep"] } },
         ]) {
           for (const [tool, input] of [["reindex", { project: "ws-1", confirmEstimate: SIGNATURE }], ["reindexEstimate", { project: "ws-1" }]] as const) {
             validateApiKey.mockResolvedValueOnce({ ...validatedKey, ...key });

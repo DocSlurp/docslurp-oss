@@ -5,8 +5,8 @@ import { embeddingProfileKeySchema, reindexEstimateSignatureSchema, vectorBacken
  * The MCP reindex pair: `reindexEstimate` (read-only, an estimate tool forwarding to `POST /v1/projects/:id/reindex/estimate`)
  * and `reindex` (forwards to `POST /v1/projects/:id/reindex`). Both take the same flat inputs, mapped to the route body;
  * `reindex` also requires `confirmEstimate`, the `signature` `reindexEstimate` returned, so an agent cannot spend credits
- * without first fetching (and showing) an estimate. The route's own gates decide access (editor; a server key or grant
- * with projects:manage bound to the organization and project) and refuse a stale signature before anything is saved.
+ * without first fetching (and showing) an estimate. The route's own gates decide access (editor; a server API key with
+ * projects:manage bound to the organization and project, never a delegated OAuth token) and refuse a stale signature before anything is saved.
  */
 
 export const reindexEstimateToolInput = z.object({
@@ -82,5 +82,5 @@ export function shapeReindexResult(body: Record<string, unknown>): Record<string
   };
 }
 
-export const REINDEX_TOOL_DESCRIPTION = "Apply index settings (embedding profile, late chunking, chunk overlap, contextual chunk preambles, vector backends, the embed/indexVectors switches) and re-index the project's existing documents, or rebuild the index as is when no setting is given. Spends credits. Requires confirmEstimate: call reindexEstimate with the same inputs first, show the user the documents, pages and credits, and pass its signature only after they approve. A changed estimate is refused (estimate_stale) and nothing is saved or queued. Needs project edit access (keys: a server key with projects:manage). Returns outcome (queued, blocked, saved, unchanged), changedSettings, runIds and job; poll with getJob.";
+export const REINDEX_TOOL_DESCRIPTION = "Apply index settings (embedding profile, late chunking, chunk overlap, contextual chunk preambles, vector backends, the embed/indexVectors switches) and re-index the project's existing documents, or rebuild the index as is when no setting is given. Spends credits. Requires confirmEstimate: call reindexEstimate with the same inputs first, show the user the documents, pages and credits, and pass its signature only after they approve. A changed estimate is refused (estimate_stale) and nothing is saved or queued. Needs project edit access (keys: a server API key with projects:manage; OAuth tokens cannot). Returns outcome (queued, blocked, saved, unchanged), changedSettings, runIds and job; poll with getJob.";
 export const REINDEX_ESTIMATE_TOOL_DESCRIPTION = "Price a re-index before starting it: the index settings it changes (lockedSettings), documents, pages, credits and the signature reindex needs as confirmEstimate. Takes the same inputs as reindex; omit every setting to price a plain rebuild. Read-only; nothing is saved or queued.";

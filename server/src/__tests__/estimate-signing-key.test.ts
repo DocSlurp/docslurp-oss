@@ -4,9 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertEstimateSigningKeyConfigured,
   estimateSigningKey,
+  estimateSigningKeyFingerprint,
+  estimateSigningKeyLogLine,
   estimateSigningKeySource,
   resetEstimateSigningKeyForTests,
 } from "../lib/estimate-signing-key.js";
+import { WEAK_SECRET_VALUES } from "../lib/weak-secrets.js";
 
 const DEDICATED = "d".repeat(40);
 const SECRETS = "s".repeat(40);
@@ -42,6 +45,31 @@ describe("estimate signing key", () => {
         expect(String((error as Error).message)).not.toContain(short);
       }
     }
+  });
+
+  it("refuses a known default value as the dedicated secret in production", () => {
+    // The same list config.ts refuses for every production secret (lib/weak-secrets.ts).
+    for (const value of WEAK_SECRET_VALUES) {
+      expect(() => assertEstimateSigningKeyConfigured({ NODE_ENV: "production", DOCSLURP_ESTIMATE_SIGNING_SECRET: value })).toThrow(/DOCSLURP_ESTIMATE_SIGNING_SECRET must/);
+    }
+  });
+
+  it("derives the key from the env it is given on every call (no cache across envs)", () => {
+    const a = estimateSigningKey({ DOCSLURP_ESTIMATE_SIGNING_SECRET: DEDICATED });
+    const b = estimateSigningKey({ DOCSLURP_ESTIMATE_SIGNING_SECRET: "e".repeat(40) });
+    expect(a.equals(b)).toBe(false);
+    expect(estimateSigningKey({ DOCSLURP_ESTIMATE_SIGNING_SECRET: DEDICATED }).equals(a)).toBe(true);
+  });
+
+  it("logs the source and a 12-hex fingerprint that matches across processes and never reveals the secret", async () => {
+    const env = { DOCSLURP_ESTIMATE_SIGNING_SECRET: DEDICATED };
+    const line = estimateSigningKeyLogLine("estimate-signing", env);
+    expect(line).toMatch(/^\[estimate-signing\] estimate signing key source=DOCSLURP_ESTIMATE_SIGNING_SECRET fingerprint=[0-9a-f]{12}$/);
+    expect(line).not.toContain(DEDICATED);
+    vi.resetModules();
+    const fresh = await import("../lib/estimate-signing-key.js");
+    expect(fresh.estimateSigningKeyFingerprint(env)).toBe(estimateSigningKeyFingerprint(env));
+    expect(estimateSigningKeyFingerprint({ SECRETS_ENCRYPTION_KEY: SECRETS })).not.toBe(estimateSigningKeyFingerprint(env));
   });
 
   it("refuses to start in production with no stable key, and never hands out a random one there", () => {
