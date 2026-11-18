@@ -140,12 +140,12 @@ export async function loadSpendStatus(
   }[]>`
     select s.org_id, s.funded, s.available, s.reserved, s.project_in_org,
       s.project_budget_paused or case when p.monthly_budget_cents is not null then
-        case when ${Boolean(options.reusingRunId)} then (select coalesce(sum(au.cost_cents), 0) from ${projectAttributedUsage(client`p.id`, "month", client)} au
-          where au.org_id = s.org_id) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id and project_id=p.id) > p.monthly_budget_cents else (select coalesce(sum(au.cost_cents), 0) from ${projectAttributedUsage(client`p.id`, "month", client)} au
+        case when ${Boolean(options.reusingRunId)} then (select coalesce(sum(au.cost_cents), 0) from ${projectAttributedUsage({ column: "p.id" }, "month", client)} au
+          where au.org_id = s.org_id) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id and project_id=p.id) > p.monthly_budget_cents else (select coalesce(sum(au.cost_cents), 0) from ${projectAttributedUsage({ column: "p.id" }, "month", client)} au
           where au.org_id = s.org_id) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id and project_id=p.id) >= p.monthly_budget_cents end
         else false end as project_budget_paused,
       s.org_budget_paused or case when o.monthly_budget_cents is not null then
-        case when ${Boolean(options.reusingRunId)} then (select coalesce(sum(au.cost_cents), 0) from ${orgAttributedUsage(client`s.org_id`, "month", client)} au) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id) > o.monthly_budget_cents else (select coalesce(sum(au.cost_cents), 0) from ${orgAttributedUsage(client`s.org_id`, "month", client)} au) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id) >= o.monthly_budget_cents end
+        case when ${Boolean(options.reusingRunId)} then (select coalesce(sum(au.cost_cents), 0) from ${orgAttributedUsage({ column: "s.org_id" }, "month", client)} au) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id) > o.monthly_budget_cents else (select coalesce(sum(au.cost_cents), 0) from ${orgAttributedUsage({ column: "s.org_id" }, "month", client)} au) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id) >= o.monthly_budget_cents end
         else false end as org_budget_paused,
       org_has_credit_grants(s.org_id) as has_credit_grants,
       (select o.auto_recharge_enabled from organizations o where o.id = s.org_id) as auto_top_up_on

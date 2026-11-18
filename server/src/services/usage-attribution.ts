@@ -77,6 +77,17 @@ export function attributedUsage(
   )`;
 }
 
+/** A column of the enclosing query (for example `{ column: "p.id" }`), for correlated scope filters. */
+export interface OuterColumn {
+  column: string;
+}
+
+function scopeRef(scope: string | OuterColumn, client: SqlClient): string | SqlFragment {
+  if (typeof scope === "string") return scope;
+  if (!/^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/.test(scope.column)) throw new Error(`Invalid outer column: ${scope.column}`);
+  return client.unsafe(scope.column) as unknown as SqlFragment;
+}
+
 /**
  * `attributedUsage` limited to one organization's rows. The view's `org_id` is derived (it cannot use an index), so the
  * fragment also filters on the event's stamped columns (migration 0187), which the planner pushes down to
@@ -85,10 +96,11 @@ export function attributedUsage(
  * always attributes to its stamped org. The derived `org_id` then decides, as in `attributedUsage`.
  */
 export function orgAttributedUsage(
-  orgId: string | SqlFragment,
+  org: string | OuterColumn,
   window: UsageWindow,
   client: SqlClient = sql,
 ): SqlFragment {
+  const orgId = scopeRef(org, client);
   return client`(
     select au.* from usage_attribution au
     where ${windowPredicate(client, window)}
@@ -103,13 +115,14 @@ export function orgAttributedUsage(
  * index), so the fragment first filters on the stamped project column, which the planner pushes down to
  * `usage_events_project_created_idx` and `usage_events_split_created_idx`. That filter is an exact superset: a row
  * attributes to a project only through its stamped project_id, or, with none stamped, through `metadata.projectIds`.
- * `projectId` may be a SQL expression of the enclosing query (a correlated budget read).
+ * `project` may name a column of the enclosing query (a correlated budget read).
  */
 export function projectAttributedUsage(
-  projectId: string | SqlFragment,
+  project: string | OuterColumn,
   window: UsageWindow,
   client: SqlClient = sql,
 ): SqlFragment {
+  const projectId = scopeRef(project, client);
   return client`(
     select au.* from usage_attribution au
     where ${windowPredicate(client, window)}

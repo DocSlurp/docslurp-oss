@@ -1780,7 +1780,7 @@ export async function getProjectCockpit(
       coalesce(w.budget_paused, false) as budget_paused,
       coalesce((
         select sum(au.cost_cents)::double precision
-        from ${projectAttributedUsage(sql`w.id`, "month")} au
+        from ${projectAttributedUsage({ column: "w.id" }, "month")} au
       ), 0)::double precision as month_spend_cents
     from projects w
     where w.id = ${projectId}
