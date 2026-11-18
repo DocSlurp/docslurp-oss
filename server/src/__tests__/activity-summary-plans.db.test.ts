@@ -85,12 +85,12 @@ describe("activity summary, upload progress and reconciler reads use indexes", (
     expect(result.queued.runs).toBe(1);
 
     const active = await plan(statementsMatching("status in ('queued', 'processing')")[0]!);
-    expect(active).toMatch(/Index (Only )?Scan using project_runs_org_active_idx/);
+    expect(active).toMatch(/Index (Only )?Scan( Backward)? using project_runs_org_active_idx/);
     expect(active).not.toMatch(/Seq Scan/);
 
     // Bounded by organization, project and a one-day creation window; any of those indexes serves it.
     const recent = await plan(statementsMatching("status = 'completed'")[0]!);
-    expect(recent).toMatch(/Index (Only )?Scan (using|on) \w*runs_\w+/);
+    expect(recent).toMatch(/Index (Only )?Scan( Backward)? (using|on) \w*runs_\w+/);
     expect(recent).not.toMatch(/Seq Scan on project_runs/);
 
     const history = await plan(statementsMatching("from project_corpus_stats")[0]!);
@@ -112,7 +112,7 @@ describe("activity summary, upload progress and reconciler reads use indexes", (
     });
     expect(progress.run?.id).toBe("pl-sess-1");
     const progressPlan = await plan(statementsMatching("from project_runs r")[0]!);
-    expect(progressPlan).toMatch(/Index (Only )?Scan using project_runs_pkey/);
+    expect(progressPlan).toMatch(/Index (Only )?Scan( Backward)? using project_runs_pkey/);
     expect(progressPlan).not.toMatch(/Seq Scan/);
   }, 120_000);
 
