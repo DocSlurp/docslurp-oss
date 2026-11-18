@@ -19,6 +19,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 import { MAX_COUNTED_PAGES, csvCellText, extraCreditsForMeasuredPages, measureExtractedPages, recordMeasuredPageCount, sheetCellTexts } from "../lib/office-page-count.js";
+import { memoryPageBasis } from "../pipeline/page-basis-memory.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ToCanonicalStage } from "../stages/to-canonical.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -141,34 +142,35 @@ describe("measureExtractedPages: counts from the extractor's own output", () => 
 describe("recordMeasuredPageCount", () => {
   it("records a 300-page DOCX's count as billing pages and leaves the page basis at the text's one page", async () => {
     const doc = document("contract.docx", DOCX);
-    const setDocumentBillingPages = vi.fn(async () => true);
-    const result = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, doc, "office-word", { extractor: "pandoc", markdown: markdownOfPages(300) });
+    const { pageBasis, ledger } = memoryPageBasis({ id: "run-1" }, [doc]);
+    const result = await recordMeasuredPageCount({ pageBasis }, doc, "office-word", { extractor: "pandoc", markdown: markdownOfPages(300) });
     expect(result.method).toBe("text-rule");
     expect(result.pages).toBeGreaterThanOrEqual(300);
-    expect(setDocumentBillingPages).toHaveBeenCalledWith("run-1", "doc-1", result.pages, "text-rule");
+    expect(ledger.documents.get("doc-1")).toMatchObject({ billingPages: result.pages, billingPagesMethod: "text-rule", pageCount: 1 });
     expect(doc.billingPages).toBe(result.pages);
     expect(doc.pageCount).toBe(1); // the page basis: the extractor's text has no form feeds, so a 300-page basis would drop every page
   });
 
   it("records a count passed through unchanged (a deduplicated copy reuses its original's)", async () => {
     const doc = document("deck.pptx", PPTX);
-    const setDocumentBillingPages = vi.fn(async () => true);
-    expect(await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, doc, "office-pptx", { pages: 40, method: "slides" }))
+    const { pageBasis, ledger } = memoryPageBasis({ id: "run-1" }, [doc]);
+    expect(await recordMeasuredPageCount({ pageBasis }, doc, "office-pptx", { pages: 40, method: "slides" }))
       .toEqual({ pages: 40, method: "slides", intakePages: 1 });
-    expect(setDocumentBillingPages).toHaveBeenCalledWith("run-1", "doc-1", 40, "slides");
+    expect(ledger.documents.get("doc-1")).toMatchObject({ billingPages: 40, billingPagesMethod: "slides" });
   });
 
   it("records an empty extraction as 0 measured pages, and nothing for formats measured elsewhere", async () => {
-    const setDocumentBillingPages = vi.fn(async () => true);
-    const state = { run: { id: "run-1" }, store: { setDocumentBillingPages } };
-    expect(await recordMeasuredPageCount(state, document("empty.odt", "application/vnd.oasis.opendocument.text"), "office-other", { extractor: "pandoc", markdown: "" }))
+    const empty = document("empty.odt", "application/vnd.oasis.opendocument.text");
+    const { pageBasis, ledger } = memoryPageBasis({ id: "run-1" }, [empty]);
+    const state = { pageBasis };
+    expect(await recordMeasuredPageCount(state, empty, "office-other", { extractor: "pandoc", markdown: "" }))
       .toEqual({ pages: 0, method: "empty", intakePages: 1 });
-    expect(setDocumentBillingPages).toHaveBeenCalledExactlyOnceWith("run-1", "doc-1", 0, "empty");
-    setDocumentBillingPages.mockClear();
+    expect(ledger.documents.get("doc-1")).toMatchObject({ billingPages: 0, billingPagesMethod: "empty" });
+    ledger.documents.get("doc-1")!.billingPages = null;
     expect(await recordMeasuredPageCount(state, document("a.pdf", "application/pdf", 12), "pdf", { extractor: "poppler-text", markdown: markdownOfPages(3) }))
       .toMatchObject({ pages: null });
     expect(await recordMeasuredPageCount(state, document("b.docx", DOCX), "office-word", null)).toMatchObject({ pages: null });
-    expect(setDocumentBillingPages).not.toHaveBeenCalled();
+    expect(ledger.documents.get("doc-1")!.billingPages).toBeNull();
   });
 
   it("prices a measured sheet's extra pages and features", () => {
@@ -244,9 +246,8 @@ describe("no host parser runs to count Office, RTF, EPUB or PPTX pages", () => {
       expect(calls).not.toContain("run");
       expect(downloads).not.toHaveBeenCalled();
 
-      const setDocumentBillingPages = vi.fn(async () => true);
       const markdown = entry.extractor === "pptx" ? ["## One", "## Two", "## Three"].join("\n\f\n") : entry.extractor === "xlsx" ? sheet("S", [["a", "1"], ["b", "2"]]) : markdownOfPages(7);
-      const counted = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, doc, entry.format, { extractor: entry.extractor, markdown });
+      const counted = await recordMeasuredPageCount({ pageBasis: memoryPageBasis({ id: "run-1" }, [doc]).pageBasis }, doc, entry.format, { extractor: entry.extractor, markdown });
       expect(counted.pages).toBeGreaterThanOrEqual(1);
       expect(reads.filter((target) => String(target).includes(entry.filename))).toEqual([]);
       vi.unstubAllEnvs();

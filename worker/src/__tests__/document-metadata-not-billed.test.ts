@@ -2,9 +2,10 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { measureExtractedPages, recordMeasuredPageCount } from "../lib/office-page-count.js";
+import { memoryPageBasis } from "../pipeline/page-basis-memory.js";
 import type { Document } from "../models.js";
 
 /**
@@ -33,9 +34,9 @@ describe("an Office file's declared counts never bill", () => {
     const measured = measureExtractedPages("office-word", "pandoc", markdown)!;
     expect(measured.method).toBe("text-rule");
     expect(measured.pages).toBeGreaterThan(250);
-    const setDocumentBillingPages = vi.fn(async () => true);
     const document = { id: "doc-1", runId: "run-1", pageCount: 1, pageCountSource: "assumed", mimeType: DOCX } as Document;
-    expect((await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, document, "office-word", { extractor: "pandoc", markdown })).pages).toBe(measured.pages);
+    const { pageBasis } = memoryPageBasis({ id: "run-1" }, [document]);
+    expect((await recordMeasuredPageCount({ pageBasis }, document, "office-word", { extractor: "pandoc", markdown })).pages).toBe(measured.pages);
   });
 });
 

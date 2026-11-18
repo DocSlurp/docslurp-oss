@@ -72,7 +72,7 @@ async function documentRun(pages: number, mime = "application/pdf", facts: objec
       values ('${documentId}', '${org.org}', 'u1', '${org.project}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}', 1, '${STAGED_SHA}');`);
   const document = (await store.loadDocument(documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
-  state.store = store;
+  state.bindStore(store);
   return { state, document, runId, documentId };
 }
 async function billedFastPages(runId: string, documentId: string): Promise<number> {
@@ -172,7 +172,7 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
 
   it("a 200-inch page bills its rendered area, capped per page, through the raster cache's sink", async () => {
     const { runId, documentId } = await documentRun(2);
-    configurePageAreaSink(createPageAreaSink(sql(), store));
+    configurePageAreaSink(createPageAreaSink(store));
     const document = (await store.loadDocument(documentId))!;
     await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: pageAreaEquivalentsPt(14_400, 14_400) }, { pageNumber: 2, area: pageAreaEquivalentsPt(612, 792) }]);
     expect(document.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
@@ -322,7 +322,7 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "A short caption on a tabloid page."))!;
     expect(measured).toMatchObject({ equivalents: 1, billed: 1 });
     // Its area arrives when the page is rendered (the raster cache's sink), under the same allowance.
-    configurePageAreaSink(createPageAreaSink(sql(), store));
+    configurePageAreaSink(createPageAreaSink(store));
     await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: pageAreaEquivalentsPt(792, 1_224) }]);
     expect((await store.loadDocument(documentId))!.billingPages).toBe(2);
     expect(await billedFastPages(runId, documentId)).toBe(2);
@@ -459,7 +459,7 @@ describe("rendered-area equivalents are authorized like every measured page (cou
 
   it("an area-only increase on an unfunded run pauses it before anything renders, caches or charges", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
-    configurePageAreaSink(createPageAreaSink(sql(), store));
+    configurePageAreaSink(createPageAreaSink(store));
     const { document, runId, documentId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     const before = await balance("o3");
     const { calls, artifacts, cache } = rasterHarness();
@@ -475,17 +475,14 @@ describe("rendered-area equivalents are authorized like every measured page (cou
   });
 
   it("a retry after a failed authorization authorizes again, though the count is already stored", async () => {
-    const authorize = vi.fn();
-    const real = createPageAreaSink(sql(), store);
+    // Each authorization reads the run's measured pages first; the first read fails, as a dropped connection would.
+    const readMeasured = store.pageBasisLedger.runMeasurements.bind(store.pageBasisLedger);
     let failNext = true;
-    configurePageAreaSink({
-      record: real.record,
-      authorize: async (runId: string, document: Document) => {
-        authorize(document.billingPages);
-        if (failNext) { failNext = false; throw new Error("spend check unavailable"); }
-        await real.authorize(runId, document);
-      },
+    const authorize = vi.spyOn(store.pageBasisLedger, "runMeasurements").mockImplementation(async (...args) => {
+      if (failNext) { failNext = false; throw new Error("spend check unavailable"); }
+      return await readMeasured(...args);
     });
+    configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
     const { calls, artifacts, cache } = rasterHarness();
     await expect(cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("spend check unavailable");
@@ -496,14 +493,14 @@ describe("rendered-area equivalents are authorized like every measured page (cou
     expect(retried.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     const pages = await cache.renderSelectedPages({ document: retried, runId, pageNumbers: [1, 2] });
     expect(authorize).toHaveBeenCalledTimes(2);
+    authorize.mockRestore();
     expect(pages.map((page) => page.cacheHit)).toEqual([false, false]);
     expect(artifacts.size).toBe(2);
   });
 
   it("a cached render was authorized when it was cached: a hit measures and authorizes nothing again", async () => {
-    const authorize = vi.fn();
-    const real = createPageAreaSink(sql(), store);
-    configurePageAreaSink({ record: real.record, authorize: async (runId: string, document: Document) => { authorize(); await real.authorize(runId, document); } });
+    const authorize = vi.spyOn(store.pageBasisLedger, "runMeasurements");
+    configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
     const { calls, cache } = rasterHarness();
     await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
@@ -511,28 +508,31 @@ describe("rendered-area equivalents are authorized like every measured page (cou
     const again = await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
     expect(again.every((page) => page.cacheHit)).toBe(true);
     expect(authorize).toHaveBeenCalledTimes(1);
+    authorize.mockRestore();
     expect(calls).toEqual({ pdfinfo: 1, pdftoppm: 2 });
     expect(await billedFastPages(runId, documentId)).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
   it("a page area that cannot be recorded leaves nothing cached, so the retry measures it", async () => {
-    const real = createPageAreaSink(sql(), store);
+    const recordEquivalents = store.pageBasisLedger.recordPageEquivalents.bind(store.pageBasisLedger);
     let failNext = true;
-    configurePageAreaSink({
-      record: async (args) => { if (failNext) { failNext = false; throw new Error("database unavailable"); } return await real.record(args); },
-      authorize: real.authorize,
+    const record = vi.spyOn(store.pageBasisLedger, "recordPageEquivalents").mockImplementation(async (...args) => {
+      if (failNext) { failNext = false; throw new Error("database unavailable"); }
+      return await recordEquivalents(...args);
     });
+    configurePageAreaSink(createPageAreaSink(store));
     const { runId, documentId } = await documentRun(2);
     const { artifacts, cache } = rasterHarness();
     await expect(cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("database unavailable");
     expect(artifacts.size).toBe(0);
     await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
+    record.mockRestore();
     expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
   it("the native engine's renders are authorized the same way: an unfunded run caches nothing", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
-    configurePageAreaSink(createPageAreaSink(sql(), store));
+    configurePageAreaSink(createPageAreaSink(store));
     const { document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     const png = (width: number, height: number) => {
       const buf = Buffer.alloc(33);

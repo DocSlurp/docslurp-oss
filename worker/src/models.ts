@@ -82,7 +82,7 @@ export interface Document {
   pageCountSource?: "counted" | "assumed" | null;
   /**
    * The page count admission priced (documents.intake_page_count, migration 0130): set at insert, never rewritten. Measured
-   * pages above it are authorized against the balance on every attempt (lib/measured-page-authorization.ts). Null on rows
+   * pages above it are authorized against the balance on every attempt (pipeline/page-basis.ts PageBasis.authorize). Null on rows
    * from before 0130, read as pageCount.
    */
   intakePageCount?: number | null;

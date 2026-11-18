@@ -9,7 +9,8 @@ import { defaultPipelineFeatures, normalizeStoredPipelineFeatures } from "@docsl
 import { acceptSandboxedPdfResult, type SandboxedPdfJob } from "../extractors/plugins.js";
 import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
 import type { Document, ProjectRun } from "../models.js";
-import { WorkflowState } from "../pipeline/pipeline.js";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
+import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { PRODUCER_MARKER, docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
@@ -93,15 +94,17 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", "pdf");
   const upsertPageFacts = vi.fn(async (_rows: unknown) => undefined);
   // A store that accepts every write, so page facts would be recorded if the stage probed for them.
-  (state as { store?: unknown }).store = new Proxy({ upsertPageFacts, getCompletedPages: async () => new Set<number>() } as Record<string, unknown>, {
+  // Its page basis is an in-memory ledger over the run's documents (a funded run).
+  const ledger = new MemoryPageBasisLedger().seed([document]);
+  state.bindStore(new Proxy({ upsertPageFacts, getCompletedPages: async () => new Set<number>(), pageBasisLedger: ledger } as Record<string, unknown>, {
     get: (object, key) => (typeof key !== "string" || key === "then" ? undefined : object[key] ?? (async () => undefined)),
-  });
+  }) as unknown as CheckpointStore);
   const richIds = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr").map((event) => event.id);
   const hostPdf = () => [
     ...calls.filter((name) => /^pdf|pageText|extractText|ocrPdf|images|info|render|rasteri[sz]e/i.test(name)),
     ...commands.filter((command) => !command.sandboxedPdf).map((command) => command.binary),
   ];
-  return { stage, state, calls, commands, json, bytes, failBytes: () => { failPutBytes = true; }, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
+  return { stage, state, ledger, calls, commands, json, bytes, failBytes: () => { failPutBytes = true; }, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
 }
 
 describe("the sandboxed PDF route on the worker host", () => {
@@ -340,8 +343,7 @@ describe("the sandboxed PDF route on the worker host", () => {
     for (const [provider, billed] of [[{ pageFacts }, false], [{ pageFacts, layoutFacts: walker }, true]] as const) {
       const h = await harness({ markdown: "OneTwoThree", ...provider });
       h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
-      const recordPageEquivalents = vi.fn(async () => 3);
-      (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+      const recordPageEquivalents = vi.spyOn(h.ledger, "recordPageEquivalents");
       try {
         await h.stage.run(h.state);
         expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
@@ -366,8 +368,7 @@ describe("the sandboxed PDF route on the worker host", () => {
     const pageFacts = jsonl([docLine(), page(1), page(2), page(3), runLine()]);
     const h = await harness({ markdown: "OneTwoThree", pageFacts });
     h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
-    const recordPageEquivalents = vi.fn(async () => 3);
-    (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+    const recordPageEquivalents = vi.spyOn(h.ledger, "recordPageEquivalents");
     try {
       await h.stage.run(h.state);
       expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
@@ -396,8 +397,7 @@ describe("the sandboxed PDF route on the worker host", () => {
     const pageFacts = jsonl([docLine(), page(1), page(2), page(3), runLine()]);
     const h = await harness({ markdown: "OneTwoThree", pageFacts });
     h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
-    const recordPageEquivalents = vi.fn(async () => 3);
-    (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+    const recordPageEquivalents = vi.spyOn(h.ledger, "recordPageEquivalents");
     try {
       await h.stage.run(h.state);
       expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
@@ -549,8 +549,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     const outcomes: Array<{ rich: unknown[]; equivalents: unknown[] }> = [];
     for (const provider of [{}, { pageFacts: facts }]) {
       const h = await pinned({ markdown: "Born digital text\f\fA figure", ocrPages: [2], ...provider });
-      const recordPageEquivalents = vi.fn(async () => 3);
-      (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+      const recordPageEquivalents = vi.spyOn(h.ledger, "recordPageEquivalents");
       try {
         await h.stage.run(h.state);
         expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
