@@ -1,4 +1,4 @@
-import { embeddingRouteSpaceUri, normalizeStoredPipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
+import { embeddingRouteSpaceUri, parseStoredPipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { warmLanceDbSearch } from "./lancedb.js";
 
@@ -74,7 +74,7 @@ export async function recentSearchTargets(limit: number): Promise<BootWarmTarget
       if (!orgId || (perOrg.get(orgId) ?? 0) >= MAX_PROJECTS_PER_ORG) continue;
       let embedding: { provider: string; model: string; dimensions: number; modelUri?: string | null };
       try {
-        embedding = resolveEmbeddingRoute(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`).embedding);
+        embedding = resolveEmbeddingRoute(parseStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`).embedding);
       } catch {
         continue; // A stored pipeline this build cannot read: that project is simply not warmed.
       }
