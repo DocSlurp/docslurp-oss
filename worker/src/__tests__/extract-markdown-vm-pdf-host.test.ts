@@ -257,6 +257,32 @@ describe("the sandboxed PDF route on the worker host", () => {
     }
   });
 
+  it("stores page-facts raster sizes bound to the staged source only with DOCSLURP_PAGE_FACTS_RASTER_SIZES=on", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "store");
+    const a4 = { geometry: { widthPt: 595.28, heightPt: 841.89, rotation: 0, userUnit: 1 } };
+    // Page 3 is US Letter: on a billing boundary, so it is left to pdfinfo.
+    const raw = jsonl([docLine(), textPage(1, a4), textPage(2, a4), textPage(3), runLine()]);
+    const sha = "e".repeat(64);
+    const key = `user-1/run-1/page-sizes/doc-1/page-facts-${sha}.json`;
+    for (const flag of ["on", "off"]) {
+      vi.stubEnv("DOCSLURP_PAGE_FACTS_RASTER_SIZES", flag);
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: Buffer.from(raw) });
+      const staged = (h.stage as any).sources;
+      (h.stage as any).sources = { get: async (document: Document) => ({ ...(await staged.get(document)), sha256: sha }) };
+      try {
+        await h.stage.run(h.state);
+        if (flag === "on") {
+          const stored = JSON.parse(h.bytes.get(key)!.toString("utf8"));
+          expect(stored).toMatchObject({ source: "page-facts", runId: "run-1", userId: "user-1", documentId: "doc-1", sourceSha256: sha, pageCount: 3 });
+          expect(stored.pages).toEqual([[1, 595.28, 841.89], [2, 595.28, 841.89]]);
+        } else {
+          expect([...h.bytes.keys()].filter((name) => name.includes("/page-sizes/"))).toEqual([]);
+        }
+      } finally { await h.cleanup(); }
+    }
+  });
+
   it("writes the page-facts file with figures off, before extract-markdown commits its checkpoint (what route-pages reads, #367)", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "0");
