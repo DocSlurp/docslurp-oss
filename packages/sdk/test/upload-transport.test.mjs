@@ -108,8 +108,8 @@ test("a failed part resumes from the server's pendingParts instead of re-sending
       return json({ sessionId: "s1", files: [{ index: 0, clientId: "0", id: "f0", filename: "ten.txt", mimeType: "text/plain", sizeBytes: 10, mode: "multipart", partSize: 4, pendingParts: [
         { partNumber: 1, sizeBytes: 4, url: "https://storage.invalid/a/1" }, { partNumber: 2, sizeBytes: 4, url: "https://storage.invalid/a/2" }, { partNumber: 3, sizeBytes: 2, url: "https://storage.invalid/a/3" }] }] }, 201);
     }
-    if (href.endsWith("/v1/uploads/direct/sessions/s1")) {
-      // Storage holds part 1; parts 2 and 3 come back with fresh URLs.
+    if (href.endsWith("/v1/uploads/direct/sessions/s1?fileId=f0")) {
+      // The resume reads only the file it wants. Storage holds part 1; parts 2 and 3 come back with fresh URLs.
       return json({ sessionId: "s1", status: "pending", files: [{ index: 0, clientId: "0", id: "f0", filename: "ten.txt", mimeType: "text/plain", sizeBytes: 10, mode: "multipart", partSize: 4, status: "pending", pendingParts: [
         { partNumber: 2, sizeBytes: 4, url: "https://storage.invalid/b/2" }, { partNumber: 3, sizeBytes: 2, url: "https://storage.invalid/b/3" }] }] });
     }
@@ -160,4 +160,52 @@ test("an in-flight 409 that outlasts the request timeout is reported, and other 
     await assert.rejects(client.upload(new Blob(["x"]), { filename: "a.txt" }), (error) => error instanceof DocSlurpApiError && error.code === code);
     assert.equal(attempts, 1, `${code} must not be retried`);
   }
+});
+
+test("session calls wait out a busy session or a rate limit, honouring Retry-After", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const answers = { sign: [409, 429], complete: [409], batch: [409], read: [409] };
+  const seen = [];
+  const busy = (status) => new Response(JSON.stringify({ error: status === 409
+    ? { code: "upload_session_busy", message: "Upload session is being finalized; retry shortly" }
+    : { code: "rate_limited", message: "Too many requests" } }), { status, headers: { "content-type": "application/json", "retry-after": "0" } });
+  const fetch = async (url, init = {}) => {
+    const href = String(url);
+    const kind = href.includes("/parts/sign") ? "sign" : href.endsWith("/files/complete") ? (String(init.body).includes('"files"') ? "batch" : "complete") : "read";
+    seen.push(kind);
+    const next = answers[kind].shift();
+    if (next) return busy(next);
+    if (kind === "sign") return new Response(JSON.stringify({ parts: [{ partNumber: 1, url: "https://storage.invalid/p1" }] }), { headers: { "content-type": "application/json" } });
+    if (kind === "batch") return new Response(JSON.stringify({ ok: true, completedCount: 1, failedCount: 0, sessionComplete: true, files: [{ fileId: "f1", status: "completed" }] }), { headers: { "content-type": "application/json" } });
+    if (kind === "complete") return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ sessionId: "s1", status: "pending", files: [] }), { headers: { "content-type": "application/json" } });
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  assert.deepEqual((await client.signUploadParts("s1", "f1", [1])).parts.map(part => part.partNumber), [1]);
+  assert.deepEqual(await client.completeUploadFile("s1", { fileId: "f1" }), { ok: true });
+  assert.equal((await client.completeUploadFiles("s1", [{ fileId: "f1" }])).completedCount, 1);
+  assert.equal((await client.getUploadSession("s1")).sessionId, "s1");
+  assert.deepEqual(seen, ["sign", "sign", "sign", "complete", "complete", "batch", "batch", "read", "read"]);
+});
+
+test("a stream upload never aborts its session when the session stays busy", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const calls = [];
+  const fetch = async (url, init = {}) => {
+    const href = String(url);
+    calls.push(`${init.method ?? "GET"} ${href}`);
+    if (href.endsWith("/direct/sessions") && init.method === "POST") {
+      return new Response(JSON.stringify({ sessionId: "s1", files: [{ id: "f1", filename: "stream.bin", mimeType: "application/octet-stream", mode: "multipart", partSize: 4 }] }), { status: 201, headers: { "content-type": "application/json" } });
+    }
+    if (href.includes("/parts/sign")) return new Response(JSON.stringify({ parts: [{ partNumber: 1, url: "https://storage.invalid/p1" }] }), { headers: { "content-type": "application/json" } });
+    if (href.startsWith("https://storage.invalid/")) return new Response(null, { status: 200, headers: { etag: '"e1"' } });
+    // Every complete finds the session busy.
+    if (href.endsWith("/files/complete")) return new Response(JSON.stringify({ error: { code: "upload_session_busy", message: "busy" } }), { status: 409, headers: { "content-type": "application/json", "retry-after": "0" } });
+    return new Response(JSON.stringify({ error: "unexpected" }), { status: 500, headers: { "content-type": "application/json" } });
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  async function* chunks() { yield new TextEncoder().encode("abc"); }
+  await assert.rejects(client.upload(chunks(), { filename: "stream.bin", timeoutMs: 60_000 }), (error) => error.status === 409);
+  assert.ok(calls.filter(call => call.endsWith("/files/complete")).length > 1, "the busy complete was retried");
+  assert.equal(calls.some(call => call.endsWith("/abort")), false, "a busy session is never aborted");
 });

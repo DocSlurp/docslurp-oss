@@ -392,19 +392,31 @@ The call that completes the last file starts ingestion within a second or two;
 calling `/confirm` yourself is still fine and returns the same run. The SDK's
 `completeUploadFiles()` splits larger lists into batches.
 
-Retry rules for session calls (`/files/complete`, `/confirm`, `/abort`):
+Retry rules for session calls (`/files/complete`, part signing, the session
+read, `/confirm`, `/abort`):
 
 - `503` `upload_storage_unavailable` (with `Retry-After`): storage was briefly
   unavailable after the server's own retries. Repeat the same request, or the
   files marked `retryable`, after `Retry-After`. Nothing was completed for those
   files.
 - `409` `upload_session_busy` (with `Retry-After`): another request or the
-  reconciler holds the session. Repeat the same request shortly. `/confirm` and
-  `/abort` wait a few seconds for the session before answering this.
+  reconciler holds the session. Each of these calls first waits up to 10
+  seconds for it, so this answer means a long hold: repeat the same request
+  after `Retry-After`. The SDK does this for you (`signUploadParts`,
+  `completeUploadFile(s)`, `getUploadSession`, `completeUploadSession`), and a
+  stream upload never aborts its session over it.
 - Other `4xx`: the file or session needs attention; repeating will not help.
 
 Rate limits count requests, not files: a batch of 100 files costs one request
 in the upload category, the same as completing one file.
+
+The full session read (`GET /v1/uploads/direct/sessions/:sessionId`, without
+`statusOnly`) checks storage for each pending file before it signs fresh upload
+targets, a few seconds' worth per read. On a large session, files it did not
+get to come back still pending with fresh targets and `"inspected": false`;
+`/files/complete` verifies the stored bytes either way. To resume particular
+files, name them: `?fileId=A&fileId=B` (up to 1,000) reads and inspects only
+those.
 
 The `/confirm` endpoint remains available as an explicit fallback, but automatic
 ingestion does not require it. Confirm is idempotent: repeating it returns the

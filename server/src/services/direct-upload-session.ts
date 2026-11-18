@@ -212,12 +212,15 @@ async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: n
     && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
 }
 
-export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow, ttl = SIGNED_UPLOAD_TTL_SECONDS, expiresAt?: Date | string) {
+export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow, ttl = SIGNED_UPLOAD_TTL_SECONDS, expiresAt?: Date | string, options: { uninspected?: boolean } = {}) {
+  // Not inspected by this read: no provider call (every part is offered again), and the client is told so.
+  const inspection = options.uninspected ? { inspected: false as const } : {};
   const remainingTtl = () => expiresAt ? assertUploadSessionActive({ status: "pending", expires_at: expiresAt } as UploadSessionRow) : ttl;
   if (file.status === "completed" || file.status === "aborted") return { transferState: file.status === "completed" ? "complete" as const : "unavailable" as const, verifiedBytes: file.status === "completed" ? file.size_bytes : null, ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
   if (file.upload_mode === "single") {
     return {
       ...fileRef(file),
+      ...inspection,
       id: file.id,
       filename: file.filename,
       mimeType: file.mime_type,
@@ -244,7 +247,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   }
   // Storage is authoritative for which parts arrived: a client that lost a connection resumes from these pendingParts
   // instead of re-sending the whole file. A part counts only at its exact expected size.
-  const stored = file.unknown_size ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
+  const stored = file.unknown_size || options.uninspected ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
   const completed = new Set(stored.map((part) => part.partNumber));
   const pendingParts: Array<{
     partNumber: number;
@@ -273,6 +276,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
 
   return {
     ...fileRef(file),
+    ...inspection,
     id: file.id,
     filename: file.filename,
     mimeType: file.mime_type,
@@ -435,10 +439,12 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
 export async function describeDirectUploadSession(
   loaded: LoadedDirectUploadSession,
   statusOnly = false,
+  /** Files this read did not inspect: described without provider calls, marked `inspected: false`. */
+  options: { uninspected?: ReadonlySet<string> } = {},
 ) {
   const ttl = statusOnly || ["confirmed", "failed", "aborted", "expired"].includes(loaded.session.status) ? SIGNED_UPLOAD_TTL_SECONDS : assertUploadSessionActive(loaded.session);
   const files = await Promise.all(
-    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file, ttl, loaded.session.expires_at)),
+    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file, ttl, loaded.session.expires_at, { uninspected: options.uninspected?.has(file.id) === true })),
   );
   return {
     expiresAt: loaded.session.expires_at ? new Date(loaded.session.expires_at).toISOString() : null,
@@ -456,11 +462,16 @@ export async function directUploadSessionBelongsToOrganization(sessionId: string
   return Boolean(apiKeyId) && session?.org_id === orgId && session.api_key_id === apiKeyId && (!allowedProjectIds?.length || Boolean(session.project_id && allowedProjectIds.includes(session.project_id)));
 }
 
+/** The most files one full session read may name with `fileId`. */
+export const MAX_DESCRIBE_FILE_IDS = 1_000;
+
 export async function getDirectUploadSessionDescription(
   sessionId: string,
   userId: string,
   statusOnly = false,
   signal?: AbortSignal,
+  /** Describe (and inspect) only these files of the session; omitted: all of them. */
+  fileIds?: readonly string[],
 ) {
   if (statusOnly) {
     const loaded = await loadDirectUploadSession(sessionId, userId);
@@ -468,14 +479,21 @@ export async function getDirectUploadSessionDescription(
   }
   const owned = await loadDirectUploadSessionRow(sessionId, userId);
   if (!owned) return null;
+  const load = async () => {
+    const session = await loadDirectUploadSessionRow(sessionId, userId);
+    return session ? { session, files: await loadDirectUploadSessionFiles(sessionId, fileIds) } : null;
+  };
   return withDirectUploadLock(sessionId, async () => {
-    let loaded = await loadDirectUploadSession(sessionId, userId);
+    let loaded = await load();
     if (!loaded) return null;
     if (loaded.session.status === "confirmed") return describeDirectUploadSession(loaded, true);
     assertUploadSessionActive(loaded.session);
     const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
     await assertSessionProjectStillContributable(loaded.session, userId);
-    // Inspect all final objects before authorizing any retry. An outage is not absence.
+    // Inspect final objects before signing new upload targets: an outage is not absence. A file this read's budget
+    // did not reach is described as still pending (fresh targets, `inspected: false`): files/complete verifies the
+    // stored object anyway, so a large session's read always answers and a retry or a `fileId` filter goes further.
+    const uninspected = new Set<string>();
     try {
       const open = loaded.files.filter(file => file.status === "pending" && !file.unknown_size);
       const budget = lockHoldBudget(signal);
@@ -485,18 +503,19 @@ export async function getDirectUploadSessionDescription(
         catch (error) { if (!isStorageNotFound(error)) throw error; }
         if (exists) await finalizeDirectUploadFile(file, undefined, { signal: budget.signal });
       }, { shouldStart: budget.shouldStart });
-      // Every file is inspected before any failure is reported; the first failure (in file order) decides the answer.
-      // A file this hold did not reach was not inspected: no URL is signed for it, so the answer is "retry later" (the
-      // files that were reached keep their progress).
-      const failure = inspected.find(result => result.status === "rejected");
-      if (failure) throw failure.reason;
-      loaded = (await loadDirectUploadSession(sessionId, userId))!;
-      return await describeDirectUploadSession(loaded);
+      for (const [i, result] of inspected.entries()) {
+        if (result.status === "rejected" && result.reason === NOT_STARTED) uninspected.add(open[i]!.id);
+      }
+      // A storage failure on a file that was inspected decides the answer: no target is signed on missing evidence.
+      const failure = inspected.find(result => result.status === "rejected" && result.reason !== NOT_STARTED);
+      if (failure) throw (failure as PromiseRejectedResult).reason;
+      loaded = (await load())!;
+      return await describeDirectUploadSession(loaded, false, { uninspected });
     } catch (error) {
       if (error instanceof ProjectIntakeError && error.code === "intake_reconciliation_required") throw error;
       throw new ProjectIntakeError("Upload storage evidence is unavailable; retry status later", 503, undefined, "upload_storage_unavailable");
     }
-  }, undefined, undefined, { lockClass: "batch", tenant: lockTenant(owned.org_id, userId) });
+  }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id) });
 }
 
 /** Confirmed results remain readable after the transfer deadline. */
@@ -543,7 +562,9 @@ export async function principalLockTenant(userId: string, apiKeyId?: string | nu
 export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage: string | undefined, busyCode: ProjectIntakeErrorCode | undefined, options: DirectUploadLockOptions): Promise<T> {
   busyMessage ??= "Upload session is being finalized; retry shortly";
   busyCode ??= "upload_session_busy";
-  const waitMs = Math.max(0, options.waitMs ?? 0);
+  // Batch and short holders wait like confirm does: a held slot (a 100-file complete holds the one batch slot for a
+  // few seconds) is waited out, not refused after 2 s. Waiting costs only memory; throughput is unchanged.
+  const waitMs = Math.max(0, options.waitMs ?? (options.lockClass === "batch" || (options.lockClass ?? "short") === "short" ? env.directUploadLockWaitMs : 0));
   // A caller that states its wait gets exactly that deadline, for the slot, the connection and every retry; one that
   // does not waits the lock library's short default for a slot and a connection, then answers busy.
   const deadline = Date.now() + waitMs;
@@ -877,7 +898,7 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
         where id = ${sessionId} and status in ('pending', 'uploading')`;
     }
     return { outcomes, sessionComplete };
-  }, undefined, undefined, { lockClass: "batch", tenant: lockTenant(owned.org_id, userId) });
+  }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id) });
 }
 
 /** The single-file `files/complete` body: throws the file's own error, exactly as before batching existed. */
@@ -940,7 +961,7 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
     if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
     return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(session) }) };
   })) };
-  }, undefined, undefined, { tenant: lockTenant(owned.org_id, userId) });
+  }, undefined, undefined, { tenant: await principalLockTenant(userId, owned.api_key_id) });
 }
 
 async function abortDirectUploadSessionUnlocked(
@@ -987,7 +1008,7 @@ export async function abortDirectUploadSession(sessionId: string, userId: string
   const owned = await loadDirectUploadSessionRow(sessionId, userId);
   if (!owned) return false;
   const aborted = await withDirectUploadLock(sessionId, () => abortDirectUploadSessionUnlocked(sessionId, userId), undefined, undefined,
-    { waitMs: lockWaitMs, tenant: lockTenant(owned.org_id, userId) });
+    { waitMs: lockWaitMs, tenant: await principalLockTenant(userId, owned.api_key_id) });
   if (aborted) {
     void abortAbandonedMultipartUploads({ sessionId }).catch(error =>
       console.error(`[upload-cleanup] multipart aborts deferred to the sweep session=${sessionId}`, error instanceof Error ? error.name : "unknown"));

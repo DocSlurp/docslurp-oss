@@ -424,7 +424,7 @@ export async function confirmDirectUploadProjectIntake(
     const result = actionResult(intake);
     await persistDirectUploadResult(args.sessionId, result);
     return result;
-  }, undefined, undefined, { waitMs: args.lockWaitMs ?? 0, lockClass: "start", tenant: lockTenant(owned.org_id, args.userId) });
+  }, undefined, undefined, { waitMs: args.lockWaitMs ?? 0, lockClass: "start", tenant: await principalLockTenant(args.userId, owned.api_key_id) });
 }
 
 async function persistDirectUploadResult(sessionId: string, result: ProjectIntakeActionResult) {

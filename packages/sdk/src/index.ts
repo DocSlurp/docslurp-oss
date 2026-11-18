@@ -1179,6 +1179,15 @@ function positiveDuration(value: number, name: string): number {
   return value;
 }
 
+/** Repeats of a session call refused as busy or rate limited. */
+const SESSION_BUSY_ATTEMPTS = 8;
+const SESSION_BUSY_MAX_DELAY_MS = 5_000;
+
+/** The session is held by another request (or the server's reconciler), or the caller is rate limited: wait, repeat. */
+export function isSessionBusyError(error: unknown): error is DocSlurpApiError {
+  return error instanceof DocSlurpApiError && (error.status === 429 || (error.status === 409 && error.code === "upload_session_busy"));
+}
+
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
@@ -1629,6 +1638,25 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     } finally {
       if (onAbort) bound.signal.removeEventListener("abort", onAbort);
       bound.dispose();
+    }
+  }
+
+  /**
+   * A call that takes an upload session's lock (part signing, file completion, the session read, confirm): a busy
+   * session (409 `upload_session_busy`) or a rate limit (429) is waited out with backoff that honours Retry-After,
+   * within the call's own deadline. These calls are idempotent, so repeating them is safe.
+   */
+  async function requestSessionCall<T>(path: string, init: RequestInit, requestOptions: RequestOptions = {}, retryable = false): Promise<T> {
+    const giveUpAt = Date.now() + positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs");
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request<T>(path, init, requestOptions, retryable);
+      } catch (error) {
+        if (!isSessionBusyError(error) || attempt >= SESSION_BUSY_ATTEMPTS) throw error;
+        const delayMs = Math.min(SESSION_BUSY_MAX_DELAY_MS, Math.max((error.retryAfterSeconds ?? 0) * 1000, 250 * 2 ** attempt));
+        if (Date.now() + delayMs >= giveUpAt) throw error;
+        await sleep(delayMs, requestOptions.signal ?? new AbortController().signal);
+      }
     }
   }
 
@@ -2373,7 +2401,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         signal.throwIfAborted();
         const number = ++partNumber;
         if (number > 10_000) throw new RangeError("Stream exceeds the multipart upload part limit");
-        const signed = await request<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
+        const signed = await requestSessionCall<{ parts: Array<{ partNumber: number; url: string }> }>(`${sessionPath}/files/${encodeURIComponent(descriptor.id)}/parts/sign`, jsonRequest("POST", { partNumbers: [number] }), transferOptions);
         const url = signed.parts.find((part) => part.partNumber === number)?.url;
         if (!url) throw new Error(`No upload URL for part ${number}`);
         const task = putToStorage(url, new Blob([bytes as Uint8Array<ArrayBuffer>]), undefined, transferOptions).then((etag) => {
@@ -2406,14 +2434,16 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       await Promise.all(active);
       if (failure) throw failure;
       parts.sort((a, b) => a.partNumber - b.partNumber);
-      await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
+      await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
       transferCompleted = true;
       return await waitUploadSession(sessionPath, transferOptions);
     } catch (error) {
       stopped.abort(error);
       close();
       await Promise.all(active);
-      if (sessionPath && !transferCompleted) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      // A session that is only busy is not abandoned: its transferred bytes are kept for a later complete (or for the
+      // server's reconciler), never aborted.
+      if (sessionPath && !transferCompleted && !isSessionBusyError(error)) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
     } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
@@ -2512,7 +2542,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         let refreshed: DirectUploadDescriptor | undefined;
         try {
           await sleep(250 * 2 ** round, options.signal ?? new AbortController().signal);
-          const session = await request<UploadSession>(sessionPath, {}, options, true);
+          // Only this file: a large session's full read inspects far fewer objects.
+          const session = await requestSessionCall<UploadSession>(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, {}, options, true);
           refreshed = session.files.find((file) => file.id === descriptor.id);
         } catch { throw error; }
         if (!refreshed) throw error;
@@ -2578,7 +2609,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         await transferFile(sessionPath, descriptor, match.source.blob, options);
       }
     } catch (error) {
-      await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      // A busy session is not abandoned: the reconciler finalizes what was transferred.
+      if (!isSessionBusyError(error)) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
     }
     // Once bytes have arrived, a status failure must not cancel accepted ingestion.
@@ -2924,10 +2956,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return postUploadSession<UploadSession>("/v1/uploads/direct/sessions", { ...input, ...intakeTarget(input) }, options ?? {}, options?.idempotencyKey ?? newIdempotencyKey());
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
     },
     completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
     },
     /**
      * Completes many files of one session in batches of up to 100, one server call per batch. Good files complete and each
@@ -2946,7 +2978,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
             try {
               // A batch entry carries only what the server uses: storage's own part list is authoritative.
               const entries = chunk.map(({ fileId, etag, sizeBytes }) => ({ fileId, ...(etag !== undefined ? { etag } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) }));
-              const answer = await request<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
+              const answer = await requestSessionCall<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
               if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
               results.push(...answer.files);
               sessionComplete = Boolean(answer.sessionComplete);
@@ -2959,7 +2991,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           }
           for (const file of chunk) {
             try {
-              await request(path, jsonRequest("POST", file), options);
+              await requestSessionCall(path, jsonRequest("POST", file), options);
               results.push({ fileId: file.fileId, status: "completed" });
             } catch (error) {
               // A busy, closed or unavailable session is the caller's to retry or abandon, not a per-file answer.
@@ -2976,10 +3008,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return completionResult(results, sessionComplete);
     },
     signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);
     },
     completeUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadResponse> {
-      return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
+      return requestSessionCall(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/confirm`, { method: "POST" }, options);
     },
     abortUploadSession(sessionId: string, options?: RequestOptions): Promise<{ ok: boolean }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/abort`, { method: "POST" }, options);

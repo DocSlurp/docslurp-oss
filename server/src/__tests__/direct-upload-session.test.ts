@@ -12,7 +12,11 @@ const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
 const createMultipartUpload = vi.hoisted(() => vi.fn());
 const copyUploadedObject = vi.hoisted(() => vi.fn(async () => ({ etag: "sealed-etag" })));
-vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({ connection: lockMock, release: lockMock.release }) }));
+const reservations = vi.hoisted(() => [] as Array<{ lockClass?: string; tenant?: string; deadline?: number }>);
+vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async (options: { lockClass?: string; tenant?: string; deadline?: number } = {}) => {
+  reservations.push(options);
+  return { connection: lockMock, release: lockMock.release };
+} }));
 vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signMultipartUploadPart, signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
 
@@ -311,9 +315,25 @@ describe("Direct Upload Session Module", () => {
     lockMock.mockResolvedValueOnce([{acquired:false}]);
     const work = vi.fn();
     // Coded, so clients can tell a held lock (repeat shortly) from a real conflict.
-    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { tenant: "org:org-1" })).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
+    await expect(withDirectUploadLock("session-1", work, undefined, undefined, { waitMs: 0, tenant: "org:org-1" })).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
     expect(work).not.toHaveBeenCalled();
     expect(lockMock.release).toHaveBeenCalled();
+  });
+
+  it("lets batch and short holders wait like confirm (DOCSLURP_UPLOAD_LOCK_WAIT_MS), and the reconciler not at all", async () => {
+    const { env } = await import("../config.js");
+    expect(env.directUploadLockWaitMs).toBe(10_000);
+    lockMock.mockReset().mockResolvedValue([{ acquired: true }]);
+    for (const lockClass of ["batch", "short"] as const) {
+      reservations.length = 0;
+      const before = Date.now();
+      await withDirectUploadLock("session-1", async () => "ok", undefined, undefined, { lockClass, tenant: "org:org-1" });
+      expect(reservations[0]!.deadline! - before).toBeGreaterThanOrEqual(9_900);
+      expect(reservations[0]!.deadline! - before).toBeLessThanOrEqual(10_100);
+    }
+    reservations.length = 0;
+    await withDirectUploadLock("session-1", async () => "ok", undefined, undefined, { lockClass: "reconcile" });
+    expect(reservations[0]!.deadline).toBeUndefined();
   });
 
   it("waits out a held lock when asked, retrying on a released connection, then answers busy", async () => {

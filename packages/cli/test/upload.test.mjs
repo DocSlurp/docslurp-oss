@@ -427,3 +427,22 @@ test("any other 409 on session create is reported at once, without a retry", asy
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("resuming a file after an expired storage URL reads only that file from the session", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    // A large first file makes this a direct upload session (small ones alone go up buffered).
+    const files = await directFiles(dir, 2);
+    const { respond } = directSessionServer({ onComplete: () => ({ body: { ok: true } }) });
+    let expired = 1;
+    const result = await invoke(["upload", ...files], (request, count, base) => {
+      // The first PUT of the second file finds its signed URL expired (403): the CLI resumes from the session's view.
+      if (request.url === "/storage/1" && expired-- > 0) return { status: 403, body: {} };
+      return respond(request, count, base);
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const reads = result.requests.filter((request) => request.method === "GET" && request.url.startsWith("/v1/uploads/direct/sessions/s1") && !request.url.includes("statusOnly"));
+    assert.ok(reads.length > 0, "the CLI re-read the session to resume");
+    for (const read of reads) assert.match(read.url, /[?&]fileId=f1(&|$)/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

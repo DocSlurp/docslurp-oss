@@ -187,7 +187,7 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     expect(await sql`select id, source_key from upload_session_files where session_id = ${id} order by id`).toEqual(keys);
   }, 20_000);
 
-  it("with the batch slot held, another organization's batch is refused on schedule while short work still runs", async () => {
+  it("with the batch slot held, another organization's batch waits for it and is served, while short work runs at once", async () => {
     // One slow batch fills the process's only batch slot at the default pool.
     const holder = await seedSession(30);
     const refusedSession = await seedSession(2, "upl-v", "upl-o2");
@@ -196,15 +196,16 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     const headsBefore = store.heads;
     const holding = tracked(post(`${holder.id}/files/complete`, { files: holder.fileIds.map(fileId => ({ fileId })) }));
     await vi.waitFor(() => expect(store.heads).toBeGreaterThan(headsBefore));
-    // Refused (on its deadline) while the holder still holds the slot.
-    const refused = await post(`${refusedSession.id}/files/complete`, { files: refusedSession.fileIds.map(fileId => ({ fileId })) }, "upl-v");
-    expect(refused.status).toBe(409);
-    expect(await refused.json()).toMatchObject({ error: { code: "upload_session_busy" } });
-    expect(holding.settled).toBe(false);
+    // Waits for the slot (up to DOCSLURP_UPLOAD_LOCK_WAIT_MS) instead of being refused, and is served once it frees.
+    const waiting = tracked(post(`${refusedSession.id}/files/complete`, { files: refusedSession.fileIds.map(fileId => ({ fileId })) }, "upl-v"));
     // A short operation (abort) gets one of the reserved connections while the holder still works.
     expect((await post(`${abortable.id}/abort`, undefined, "upl-w")).status).toBe(200);
     expect(holding.settled).toBe(false);
+    expect(waiting.settled).toBe(false);
     expect((await holding.promise).status).toBe(200);
+    const served = await waiting.promise;
+    expect(served.status).toBe(200);
+    expect(await served.json()).toMatchObject({ ok: true, completedCount: 2 });
   }, 30_000);
 
   it("many concurrent run starts from one organization never block another organization's abort or part signing", async () => {

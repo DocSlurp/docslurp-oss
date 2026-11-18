@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   /** Runs at each HEAD, after an optional delay. */
   onHead: null as null | ((key: string) => Promise<void>),
   headDelayMs: 0,
+  /** Every lock reservation: `class:tenant`. */
+  tenants: [] as string[],
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -30,7 +32,7 @@ vi.mock("../db.js", () => ({ sql: Object.assign(
     return { then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
       mocks.query(text, values).then((result: { rows: unknown[] }) => result.rows).then(resolve, reject) };
   }, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) }));
-vi.mock("../lib/direct-upload-locks.js", () => ({ DirectUploadLockUnavailable: class extends Error {}, reserveDirectUploadLockConnection: async () => ({
+vi.mock("../lib/direct-upload-locks.js", () => ({ DirectUploadLockUnavailable: class extends Error {}, reserveDirectUploadLockConnection: async (options: { lockClass?: string; tenant?: string } = {}) => (mocks.tenants.push(`${options.lockClass ?? "short"}:${options.tenant ?? ""}`), {
   connection: async (strings: TemplateStringsArray) => {
     if (!strings.join("").includes("pg_try_advisory_lock")) return [];
     if (mocks.onLock) { const hook = mocks.onLock; mocks.onLock = null; await hook(); }
@@ -65,10 +67,13 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   },
   deleteUploadedObject: async (key: string) => { mocks.objects.delete(key); },
   abortMultipartUpload: async () => {},
+  signSingleUploadPut: async ({ key }: { key: string }) => `https://storage.example/${key}`,
+  signMultipartUploadPart: async () => "https://storage.example/part",
+  listMultipartUploadParts: async () => [],
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
 
-const { completeDirectUploadFiles, completeDirectUploadFile, abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, sealedSourceKey, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
+const { completeDirectUploadFiles, completeDirectUploadFile, abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, sealedSourceKey, getDirectUploadSessionDescription, signDirectUploadParts, CLIENT_FINALIZING_HOLD_SECONDS } = await import("../services/direct-upload-session.js");
 const { reconcileDirectUploads } = await import("../services/direct-upload-reconciler.js");
 
 const SESSION = "11111111-1111-4111-8111-111111111111";
@@ -111,6 +116,9 @@ beforeEach(async () => {
   mocks.onLock = null;
   mocks.onHead = null;
   mocks.headDelayMs = 0;
+  mocks.tenants.length = 0;
+  // A held lock is answered at once here (production waits DOCSLURP_UPLOAD_LOCK_WAIT_MS first).
+  (await import("../config.js")).env.directUploadLockWaitMs = 0;
   mocks.heads.length = 0;
   mocks.confirm.mockReset().mockResolvedValue({});
   await db.exec(`delete from upload_session_files; delete from upload_sessions; delete from storage_cleanup_queue; delete from upload_cleanup_owners;
@@ -488,5 +496,51 @@ describe("the client hold (M2) and guarded reconciler transitions (M1)", () => {
       for (const file of skipped) expect(file).toMatchObject({ error: { statusCode: 409, code: "upload_session_busy", retryable: true, action: "retry" } });
       for (const file of skipped) expect((await fileRow(file.fileId)).status).toBe("pending");
     } finally { env.directUploadLockHoldBudgetMs = budget; }
+  });
+});
+
+describe("the full session read on a large session (C-H1)", () => {
+  it("answers when its budget cannot inspect every file: unreached files stay pending, with targets, uninspected", async () => {
+    const { env } = await import("../config.js");
+    const budget = env.directUploadLockHoldBudgetMs;
+    env.directUploadLockHoldBudgetMs = 30;
+    try {
+      // 40 files whose bytes never arrived: no read makes progress on them, so a read that needed all of them inspected
+      // would fail the same way forever.
+      for (let i = 0; i < 40; i++) await seedFile(SESSION, `m${i}`, null);
+      mocks.headDelayMs = 20;
+      const described = await getDirectUploadSessionDescription(SESSION, "u");
+      expect(described!.files).toHaveLength(40);
+      const files = described!.files as Array<{ id: string; status: string; inspected?: boolean; putUrl?: string }>;
+      for (const file of files) expect(file).toMatchObject({ status: "pending", putUrl: expect.any(String) });
+      const uninspected = files.filter(file => file.inspected === false);
+      expect(uninspected.length).toBeGreaterThan(0);
+      expect(uninspected.length).toBeLessThan(40);
+      expect(mocks.heads.length).toBeLessThan(40);
+    } finally { env.directUploadLockHoldBudgetMs = budget; }
+  });
+
+  it("describes and inspects only the files named with fileId", async () => {
+    for (let i = 0; i < 10; i++) await seedFile(SESSION, `n${i}`, null);
+    const described = await getDirectUploadSessionDescription(SESSION, "u", false, undefined, ["n3", "n7"]);
+    expect((described!.files as Array<{ id: string }>).map(file => file.id).sort()).toEqual(["n3", "n7"]);
+    expect(mocks.heads.sort()).toEqual([`u/${SESSION}/raw/n3-doc.pdf`, `u/${SESSION}/raw/n7-doc.pdf`]);
+  });
+});
+
+describe("lock accounting uses the principal's organization, never a stored or requested one (M2)", () => {
+  it("bills a spoofed session organization's calls to the caller's own organization", async () => {
+    // A browser session created naming another organization ('o2', the victim): its stored org is the request's.
+    await db.query("update upload_sessions set org_id = 'o2' where id = $1", [SESSION]);
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+      values ('mp', $1, 'big.pdf', 'application/pdf', $2, $3, 'multipart', 'up-1', $4, 'pending')`, [SESSION, 20 * 1024 * 1024, `u/${SESSION}/raw/big.pdf`, 8 * 1024 * 1024]);
+    await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "a" }] }).catch(() => null);
+    await signDirectUploadParts(SESSION, "u", "mp", [1]).catch(() => null);
+    await getDirectUploadSessionDescription(SESSION, "u").catch(() => null);
+    await abortDirectUploadSession(SESSION, "u").catch(() => null);
+    expect(mocks.tenants.length).toBeGreaterThanOrEqual(4);
+    // Every reservation counted against u's own organization ('o', its membership), none against the victim's.
+    for (const tenant of mocks.tenants) expect(tenant.endsWith(":org:o")).toBe(true);
   });
 });

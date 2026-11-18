@@ -269,6 +269,11 @@ export const env = {
    * `upload_session_busy`. Work already started may run to the hard cap below.
    */
   directUploadLockHoldBudgetMs: Math.max(250, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_BUDGET_MS, 5_000)),
+  /**
+   * How long batch and short session-lock holders (files/complete, part signing, the session read, abort) wait for a
+   * slot, a connection and the session lock before answering 409 upload_session_busy (default 10 s, like confirm).
+   */
+  directUploadLockWaitMs: Math.max(0, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_WAIT_MS, 10_000)),
   /** Hard cap on one lock hold's storage work: in-flight calls are cancelled after it (default 30 s). */
   directUploadLockHoldMaxMs: Math.max(1_000, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS, 30_000)),
   /**

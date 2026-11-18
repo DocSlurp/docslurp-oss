@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { json: (v: unknown) => v, array: (v: unknown) => v }),
   load: vi.fn(), prepare: vi.fn(), intake: vi.fn(), discard: vi.fn(), project: vi.fn(), multipart: vi.fn(),
-  lock: vi.fn(async (_id: string, run: () => Promise<unknown>) => run()),
+  lock: vi.fn(async (_id: string, run: () => Promise<unknown>, ..._rest: unknown[]) => run()),
 }));
 vi.mock("../services/organizations.js", () => ({ getProjectAccess: async () => ({ orgId: "org" }), canContributeToProject: () => true }));
 vi.mock("../services/api-keys.js", () => ({ getLiveApiKeyById: async () => ({ orgId: "org", keyType: "server", scopes: ["ingest"], projectIds: ["project"] }) }));
@@ -22,7 +22,7 @@ vi.mock("../services/direct-upload-session.js", async original => ({
   ...await original<typeof import("../services/direct-upload-session.js")>(),
   loadDirectUploadSession: mocks.load, prepareDirectUploadProjectIntake: mocks.prepare,
   loadDirectUploadSessionRow: async (...args: [string, string]) => (await mocks.load(...args))?.session ?? null,
-  withDirectUploadLock: (id: string, run: () => Promise<unknown>) => mocks.lock(id, run),
+  withDirectUploadLock: (id: string, run: () => Promise<unknown>, ...rest: unknown[]) => mocks.lock(id, run, ...rest),
 }));
 import { confirmDirectUploadProjectIntake } from "../services/project-intake-actions.js";
 import { createDirectUploadSession, directUploadSessionBelongsToOrganization } from "../services/direct-upload-session.js";
@@ -57,6 +57,14 @@ describe("durable direct upload acceptance", () => {
     expect(mocks.intake).not.toHaveBeenCalled(); expect(mocks.discard).not.toHaveBeenCalled();
     expect(mocks.sql.mock.calls.some(([s]) => s.join("").includes("result ="))).toBe(false);
   });
+  it("counts a run start against the principal's stored organization, never the session row's", async () => {
+    await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports);
+    // The session row says org "org"; the principal's own rows (its key here, unknown to this fake) decide instead.
+    const options = mocks.lock.mock.calls.at(-1)?.[4] as { lockClass?: string; tenant?: string };
+    expect(options).toMatchObject({ lockClass: "start" });
+    expect(options.tenant).not.toBe("org:org");
+  });
+
   it("reuses durable identity and original key scope after incomplete run recovery", async () => {
     mocks.sql.mockImplementation(async (s: TemplateStringsArray) => s.join("").includes("from project_runs") ? [{ id: "session", creation_ready_at: null }] : []);
     await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports);

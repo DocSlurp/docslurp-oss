@@ -842,7 +842,8 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           // Resume from what storage holds: the session lists the parts still missing, with fresh signed URLs.
           await sleepMs(250 * 2 ** round);
           // The full read signs fresh URLs under the session lock: wait out a busy lock or a rate limit.
-          const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(sessionPath, flags, {}), flags, async () => "retry");
+          // Only this file: on a large session the full read inspects far fewer stored objects (server `fileId` filter).
+          const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, flags, {}), flags, async () => "retry");
           if (!refreshed.ok) throw error;
           const next = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
           if (!next) throw error;

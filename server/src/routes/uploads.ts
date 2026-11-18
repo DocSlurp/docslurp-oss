@@ -39,6 +39,7 @@ import {
   completeDirectUploadFiles,
   createDirectUploadSession,
   getDirectUploadSessionDescription,
+  MAX_DESCRIBE_FILE_IDS,
   loadDirectUploadSession,
   loadDirectUploadSessionRow,
   directUploadSessionBelongsToOrganization,
@@ -66,6 +67,7 @@ import {
 } from "../services/project-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
+import { env } from "../config.js";
 import { isTransientStorageError } from "../lib/storage-retry.js";
 import { kickDirectUploadReconcile } from "../services/direct-upload-reconciler.js";
 import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
@@ -300,7 +302,8 @@ export function projectIntakeErrorResponse(
 const UPLOAD_STORAGE_RETRY_AFTER_SECONDS = 5;
 /** How long confirm and abort wait out another holder of the session lock before answering 409 upload_session_busy. */
 const CONFIRM_LOCK_WAIT_MS = 10_000;
-const ABORT_LOCK_WAIT_MS = 5_000;
+/** Abort waits like the other short session calls (DOCSLURP_UPLOAD_LOCK_WAIT_MS). */
+const abortLockWaitMs = () => env.directUploadLockWaitMs;
 
 /**
  * The answer for an unexpected failure on an upload-session route. A storage provider or network failure is a
@@ -442,7 +445,12 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
     try {
-    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true", c.req.raw.signal);
+    // `fileId` (repeatable) narrows a full read to the files a resuming client wants.
+    const fileIds = c.req.queries("fileId");
+    if (fileIds && (fileIds.length > MAX_DESCRIBE_FILE_IDS || fileIds.some(id => !id || id.length > 64))) {
+      return apiStatusError(c, 400, `fileId may be given at most ${MAX_DESCRIBE_FILE_IDS} times, each a file id`);
+    }
+    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true", c.req.raw.signal, fileIds?.length ? [...new Set(fileIds)] : undefined);
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
@@ -501,7 +509,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     const sessionId = c.req.param("sessionId");
     let aborted: boolean;
     try {
-      aborted = await abortDirectUploadSession(sessionId, userId, ABORT_LOCK_WAIT_MS);
+      aborted = await abortDirectUploadSession(sessionId, userId, abortLockWaitMs());
     } catch (error) {
       // A held lock (the reconciler or another request) is a retryable 409 upload_session_busy; an ingested session 409.
       return projectIntakeErrorResponse(c, error) ?? uploadServerErrorResponse(c, error);
