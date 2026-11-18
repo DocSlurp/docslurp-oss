@@ -2621,6 +2621,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           method: "PUT",
           body,
           credentials: "omit",
+          // A presigned target is final: a redirect would re-send the bytes somewhere else.
+          redirect: "error",
           headers: contentType ? { "Content-Type": contentType } : undefined,
           signal: bound.signal,
         }); } catch (error) {

@@ -550,3 +550,21 @@ test("a resume refuses foreign ids: extra completion results, extra descriptors 
     assert.deepEqual(puts, [], `${label}: no bytes sent`);
   }
 });
+
+test("storage PUTs never follow a redirect (the bytes would be re-sent elsewhere)", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const puts = [];
+  const fetch = async (url, init = {}) => {
+    const href = String(url);
+    if (href.endsWith("/direct/sessions") && init.method === "POST") {
+      return json({ sessionId: "s1", files: [{ index: 0, clientId: "0", id: "a", filename: "f0.txt", mimeType: "text/plain", sizeBytes: 3, mode: "single", putUrl: "https://storage.invalid/0" }] });
+    }
+    if (init.method === "PUT") { puts.push(init.redirect); return new Response(null, { status: 200 }); }
+    if (href.endsWith("?statusOnly=true")) return json({ status: "completed", result: { run: { id: "r1" }, project: { id: "p1" }, documents: [] } });
+    return json({ error: "unexpected" }, 500);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  await client.upload([new Blob(["abc"])], { directUpload: true, filenames: ["f0.txt"] });
+  assert.deepEqual(puts, ["error"]);
+});

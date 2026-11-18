@@ -665,3 +665,20 @@ test("a resume refuses foreign ids: extra completion results, extra descriptors 
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
 });
+
+test("a storage PUT answered with a redirect is not followed: the bytes never reach the redirect target", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 1);
+    const result = await invoke(["upload", ...files], (request, _count, base) => {
+      if (request.url === "/v1/uploads/direct/sessions") {
+        return { status: 201, body: { sessionId: "s1", files: [{ index: 0, clientId: "0", id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "single", putUrl: `${base}/storage/0` }] } };
+      }
+      if (request.url === "/storage/0") return { status: 307, headers: { location: `${base}/storage/elsewhere` }, body: {} };
+      if (request.url.endsWith("/abort")) return { body: { ok: true } };
+      return { status: 404, body: {} };
+    });
+    assert.notEqual(result.code, 0);
+    assert.equal(result.requests.filter((request) => request.url === "/storage/elsewhere").length, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

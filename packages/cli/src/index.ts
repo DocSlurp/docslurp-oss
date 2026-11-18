@@ -624,7 +624,8 @@ async function putToStorage(url: string, body: Blob, contentType?: string): Prom
   for (let attempt = 0; ; attempt++) {
     try {
       const response = await storageSlot(() => fetch(url, {
-        method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined,
+        // A presigned target is final: a redirect would re-send the bytes somewhere else.
+        method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined, redirect: "error",
         signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 100_000) * 1000))),
       }));
       if (response.ok) return response.headers.get("etag");

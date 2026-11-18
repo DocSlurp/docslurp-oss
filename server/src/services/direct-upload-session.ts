@@ -545,19 +545,8 @@ function assertMaySignNow(signal: AbortSignal, requestSignal?: AbortSignal): voi
   }
 }
 
-/**
- * One authorization check shared by up to `size` dispatches (a wave of concurrent seals): the first dispatch of each
- * wave runs a fresh check, the rest of that wave reuse its answer (a refusal refuses them all).
- */
-function perWave(check: () => Promise<void>, size: number): () => Promise<void> {
-  let current: Promise<void> | null = null;
-  let uses = 0;
-  return () => {
-    if (!current || uses >= Math.max(1, size)) { current = check(); uses = 0; }
-    uses += 1;
-    return current;
-  };
-}
+/** Files one wave of the session read inspects and seals after one authorization check. */
+const READ_SEAL_WAVE = 8;
 
 /** The most files one full session read may name with `fileId`. */
 export const MAX_DESCRIBE_FILE_IDS = 1_000;
@@ -597,16 +586,26 @@ export async function getDirectUploadSessionDescription(
       const open = loaded.files.filter(file => file.status === "pending" && !file.unknown_size);
       const budget = lockHoldBudget(signal);
       const sessionRow = loaded.session;
-      const sealAuthorization = perWave(() => assertMayMintTargets(sessionRow, userId, credentialKeyId), env.directUploadFinalizeConcurrency);
-      const inspected = await settleBounded(open, env.directUploadFinalizeConcurrency, async file => {
-        let exists = false;
-        try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, budget.signal), undefined, budget.signal); exists = true; }
-        catch (error) { if (!isStorageNotFound(error)) throw error; }
-        if (!exists) return;
-        // Sealing an uploaded object is an external dispatch, authorized right before its writes: once per wave of
-        // concurrent seals (per-file checks would spend the hold budget on queries and leave more files uninspected).
-        await finalizeDirectUploadFile(file, undefined, { signal: budget.signal, authorize: sealAuthorization });
-      }, { shouldStart: budget.shouldStart });
+      // Files are inspected (and, when stored, sealed) in waves of at most READ_SEAL_WAVE: the caller's authorization
+      // is checked before each wave is dispatched, and the next wave starts only after this one has settled. A denial
+      // refuses the read (403): no later wave's storage call starts. One check per wave, not per file, so the checks
+      // do not spend the hold budget (which would leave more files uninspected).
+      const lanes = Math.max(1, Math.min(READ_SEAL_WAVE, env.directUploadFinalizeConcurrency));
+      const inspected: PromiseSettledResult<void>[] = [];
+      for (let start = 0; start < open.length; start += lanes) {
+        const wave = open.slice(start, start + lanes);
+        if (!budget.shouldStart()) {
+          inspected.push(...wave.map((): PromiseSettledResult<void> => ({ status: "rejected", reason: NOT_STARTED })));
+          continue;
+        }
+        await assertMayMintTargets(sessionRow, userId, credentialKeyId);
+        inspected.push(...await settleBounded(wave, lanes, async file => {
+          let exists = false;
+          try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, budget.signal), undefined, budget.signal); exists = true; }
+          catch (error) { if (!isStorageNotFound(error)) throw error; }
+          if (exists) await finalizeDirectUploadFile(file, undefined, { signal: budget.signal });
+        }, { shouldStart: budget.shouldStart }));
+      }
       for (const [i, result] of inspected.entries()) {
         if (result.status === "rejected" && result.reason === NOT_STARTED) uninspected.add(open[i]!.id);
       }

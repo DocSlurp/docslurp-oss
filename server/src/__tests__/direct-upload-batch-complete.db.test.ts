@@ -258,6 +258,49 @@ describe("non-resend failures", () => {
   });
 });
 
+describe("the session read inspects and seals in authorized waves", () => {
+  beforeEach(async () => {
+    await db.query("delete from api_keys where id = 'k-u'");
+    await db.query(`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes, allowed_domains, project_ids)
+      values ('k-u', 'u', 'o', 'hash-k-u', 'Ingest', 'server', '{ingest}', '{}', '{}')`);
+    await db.query("update upload_sessions set api_key_id = 'k-u' where id = $1", [SESSION]);
+  });
+
+  it("a key revoked during wave 1 refuses the read: no wave-2 storage call starts, even at a concurrency of 32", async () => {
+    const { env } = await import("../config.js");
+    const concurrency = env.directUploadFinalizeConcurrency;
+    env.directUploadFinalizeConcurrency = 32;
+    try {
+      for (let i = 0; i < 20; i++) await seedFile(SESSION, `v${String(i).padStart(2, "0")}`, { size: 10, etag: `"v${i}"` });
+      // The key is revoked while wave 1's objects are read.
+      mocks.onHead = async () => { if (mocks.heads.length === 1) await db.query("update api_keys set revoked_at = now() where id = 'k-u'"); };
+      await expect(getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u")).rejects.toMatchObject({ statusCode: 403 });
+      // Wave 1 (8 files, checked before it started) ran; nothing of wave 2 did, and nothing was signed.
+      // Each wave-1 file is read twice (inspection, then the finalize's verification); its sealed copy once more.
+      const objectHeads = new Set(mocks.heads.filter(key => !key.includes("/sealed-")));
+      expect(objectHeads.size).toBe(8);
+      expect([...objectHeads].every(key => /\/v0[0-7]-doc\.pdf$/.test(key))).toBe(true);
+      expect(mocks.copies.length).toBeLessThanOrEqual(8);
+      expect(mocks.putSignatures + mocks.partSignatures).toBe(0);
+    } finally { env.directUploadFinalizeConcurrency = concurrency; }
+  });
+
+  it("dispatches at most 8 files per wave whatever the configured concurrency", async () => {
+    const { env } = await import("../config.js");
+    const concurrency = env.directUploadFinalizeConcurrency;
+    env.directUploadFinalizeConcurrency = 32;
+    let inFlight = 0;
+    let peak = 0;
+    try {
+      for (let i = 0; i < 20; i++) await seedFile(SESSION, `p${String(i).padStart(2, "0")}`, null);
+      mocks.onHead = async () => { inFlight += 1; peak = Math.max(peak, inFlight); await new Promise(resolve => setTimeout(resolve, 5)); inFlight -= 1; };
+      await getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u");
+      expect(peak).toBeLessThanOrEqual(8);
+      expect(mocks.heads).toHaveLength(20);
+    } finally { env.directUploadFinalizeConcurrency = concurrency; }
+  });
+});
+
 describe("the session read authorizes its seals once per wave (M1)", () => {
   it("checks the key once per wave of concurrent seals, not once per file, and still refuses a revoked key", async () => {
     await db.query("delete from api_keys where id = 'k-u'");
@@ -689,13 +732,22 @@ describe("minting targets re-checks the caller under the lock (H2)", () => {
     expect(mocks.partSignatures).toBe(0);
   });
 
-  it("seals no uploaded object when the key is revoked after the read's HEAD (checked before each seal)", async () => {
+  it("seals nothing and reads no object when the key is revoked before the read's first wave", async () => {
     await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
-    mocks.onHead = async () => { await db.query("update api_keys set revoked_at = now() where id = 'k-u'"); };
+    await db.query("update api_keys set revoked_at = now() where id = 'k-u'");
     await expect(getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u")).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.heads).toHaveLength(0);
     expect(mocks.copies).toHaveLength(0);
     expect((await fileRow("a")).status).toBe("pending");
     expect(mocks.putSignatures).toBe(0);
+  });
+
+  it("a key revoked after a wave's check lets that wave's seals finish (the accepted window), and signs nothing", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    mocks.onHead = async () => { await db.query("update api_keys set revoked_at = now() where id = 'k-u'"); };
+    await expect(getDirectUploadSessionDescription(SESSION, "u", false, undefined, undefined, "k-u")).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.copies.length).toBeLessThanOrEqual(1);
+    expect(mocks.putSignatures + mocks.partSignatures).toBe(0);
   });
 
   it("signs no targets in a fresh create whose key was revoked after provider setup, and aborts that session", async () => {
