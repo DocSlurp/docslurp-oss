@@ -76,7 +76,11 @@ export function chartCallCostCents(response: Pick<ChartModelResponse, "model" | 
 
 export function buildChartExportUsage(
   response: ChartModelResponse,
-  context: { documentId: string; candidate: VisualCandidate; source: VisualSource; purpose: ChartModelPurpose; format: ChartExportFormat | null; ok: boolean; modelUri?: string | null },
+  context: {
+    documentId: string; candidate: VisualCandidate; source: VisualSource; purpose: ChartModelPurpose; format: ChartExportFormat | null; ok: boolean; modelUri?: string | null;
+    /** The request's output cap and the chart export tier that admitted the call, for `modelConfig` / `modelClass`. */
+    maxOutputTokens?: number; tier?: string | null;
+  },
 ): WorkerAiUsageInput {
   return {
     provider: response.provider,
@@ -101,6 +105,8 @@ export function buildChartExportUsage(
       ...(response.finishReason ? { finishReason: response.finishReason } : {}),
       ...(response.cachedInputTokens ? { cachedInputTokens: response.cachedInputTokens } : {}),
       ...(response.cacheWriteInputTokens ? { cacheWriteInputTokens: response.cacheWriteInputTokens } : {}),
+      modelConfig: { operation: "chart-export", purpose: context.purpose, format: context.format ?? undefined, maxOutputTokens: context.maxOutputTokens, input: context.source },
+      ...(context.tier ? { modelClass: { chartExportTier: context.tier } } : {}),
     },
   };
 }
@@ -237,6 +243,7 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
   const source: VisualSource = digest ? "svg-assisted" : "vision";
   let kind: VisualKind | null = args.candidate.kind ?? det?.partial.kind ?? null;
   let servedModel: string | null = null;
+  const requestedCaps = new WeakMap<ChartModelResponse, number>();
 
   const call = async (
     purpose: ChartModelPurpose,
@@ -250,6 +257,7 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
         modelUri, prompt, image, pageNumber: args.candidate.pageNumber, purpose, maxOutputTokens, ...(format ? { format } : {}), ...(args.signal ? { signal: args.signal } : {}),
       });
       servedModel = response.model;
+      requestedCaps.set(response, maxOutputTokens);
       calls.push({
         visualId: args.candidate.id, responded: true, purpose, format, model: response.model,
         inputTokens: response.inputTokens, outputTokens: response.outputTokens, costCents: chartCallCostCents(response, modelUri), latencyMs: response.latencyMs, ok: true,
@@ -263,7 +271,10 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
     }
   };
   const record = (response: ChartModelResponse, purpose: ChartModelPurpose, format: ChartExportFormat | null, ok: boolean) => {
-    args.recordUsage(buildChartExportUsage(response, { documentId: args.documentId, candidate: args.candidate, source, purpose, format, ok, modelUri }));
+    args.recordUsage(buildChartExportUsage(response, {
+      documentId: args.documentId, candidate: args.candidate, source, purpose, format, ok, modelUri,
+      maxOutputTokens: requestedCaps.get(response), tier: args.config.tier,
+    }));
     if (!ok) calls[calls.length - 1]!.ok = false;
   };
 

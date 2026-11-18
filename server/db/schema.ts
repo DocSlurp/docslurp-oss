@@ -273,6 +273,9 @@ export const vectorIndexes = pgTable(
     path: text().notNull(),
     embeddingModel: text("embedding_model").notNull(),
     dimension: integer().notNull(),
+    /** The exact embedding space as an `llm://` URI and the profile that chose it (migration 0192). Operator-facing. */
+    embeddingModelUri: text("embedding_model_uri"),
+    embeddingModelClass: text("embedding_model_class"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -2255,9 +2258,9 @@ export const uploadSessions = pgTable(
     lastError: text("last_error"),
     reconcileAttempts: integer("reconcile_attempts").default(0).notNull(),
     nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
-    /** A client completing its own files holds the reconciler off the session until then (migration 0192). */
+    /** A client completing its own files holds the reconciler off the session until then (migration 0193). */
     clientFinalizingUntil: timestamp("client_finalizing_until", { withTimezone: true, mode: "string" }),
-    /** When the current run of client holds began; total hold time is capped from it (migration 0192). */
+    /** When the current run of client holds began; total hold time is capped from it (migration 0193). */
     clientFinalizingSince: timestamp("client_finalizing_since", { withTimezone: true, mode: "string" }),
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).default(sql`now() + interval '24 hours'`).notNull(),
     tags: text().array().default([]).notNull(),
@@ -2324,7 +2327,7 @@ export const uploadSessionFiles = pgTable(
     status: text().default("pending").notNull(),
     etag: text(),
     completedParts: jsonb("completed_parts").default([]).notNull(),
-    /** Set once the provider multipart upload of an aborted or failed session was aborted (migration 0192). */
+    /** Set once the provider multipart upload of an aborted or failed session was aborted (migration 0193). */
     multipartAbortedAt: timestamp("multipart_aborted_at", { withTimezone: true, mode: "string" }),
     sha256: text(),
     contentIdentity: jsonb("content_identity").$type<{ algorithm: "sha256"; digest: string }>(),
@@ -2383,6 +2386,8 @@ export const projectRuns = pgTable(
      */
     spentCents: numeric("spent_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     pipeline: jsonb().default({}).notNull(),
+    /** Models that served the run per service, as resolved at its first pickup (migration 0192). Operator-facing. */
+    resolvedModels: jsonb("resolved_models"),
     /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
     origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
@@ -3593,6 +3598,8 @@ export const documentPageStates = pgTable(
     mapped: boolean().default(false).notNull(),
     embeddedAt: timestamp("embedded_at", { withTimezone: true, mode: "string" }),
     embeddingModel: text("embedding_model"),
+    /** The exact embedding space as an `llm://` URI (migration 0192). Operator-facing. */
+    embeddingModelUri: text("embedding_model_uri"),
     state: text().default("unseen").notNull(),
     claimedByRun: text("claimed_by_run"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true, mode: "string" }),
@@ -4020,6 +4027,8 @@ export const documentPageVectors = pgTable(
     documentId: text("document_id").notNull(),
     pageNumber: integer("page_number").notNull(),
     model: text().notNull(),
+    /** The exact embedding space as an `llm://` URI (migration 0192). Operator-facing. */
+    modelUri: text("model_uri"),
     dims: integer().notNull(),
     bits: bytea().notNull(),
     int8: bytea().notNull(),

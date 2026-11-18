@@ -105,7 +105,13 @@ export async function rerankHosted(args: {
               metric: HOSTED_RERANK_USAGE_METRIC, inputTokens: data.input_tokens!, logOutputTokens: false,
               costCents: data.input_tokens! * inputUsdPerMillion / 1e6 * 100,
               metadata: { usageSource: "provider", candidateCount: batch.length, offset,
-                verifiedInputUsdPerMTok: inputUsdPerMillion } });
+                verifiedInputUsdPerMTok: inputUsdPerMillion,
+                // The request settings (shared model-provenance.ts): candidates in the call and in this batch, the batch
+                // cap, the per-request timeout and the parallel requests. The reranker keeps every candidate (no top-n
+                // or score threshold is sent); the search applies its own limit after it.
+                modelConfig: { operation: "rerank", candidates: args.chunks.length, batchCandidates: batch.length, batchSize: 25,
+                  maxCandidates: HOSTED_RERANK_MAX_CANDIDATES, timeoutMs: limits.timeoutMs, concurrency: limits.concurrency },
+                modelClass: { rerank: "hosted" } } });
           } catch (error) { meteringFailed = true; meteringError ??= error; throw error; }
           unreceiptedRequests--;
           inputTokens += data.input_tokens!;

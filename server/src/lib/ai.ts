@@ -190,7 +190,7 @@ export async function generateOpenRouterText(args: {
   // `llm://private/<alias>/<model>` routes go to the operator-registered endpoint.
   if (isPrivateModelUri(args.model)) {
     const generated = await generatePrivateEndpointText({ ...args, operation: args.operation ?? "api.text.private", modelUri: args.model });
-    return { text: generated.text, usage: generated.usage };
+    return { text: generated.text, usage: withCallConfig(generated.usage, { operation: args.operation ?? "api.text.private", maxOutputTokens: args.maxOutputTokens }) };
   }
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: args.operation ?? "api.text.openrouter", target: "hosted" });
   args = { ...args, model: resolveSupportedModelIdWithWarning(args.model ?? SEARCH_OPENROUTER_MODEL) };
@@ -237,10 +237,24 @@ export async function generateOpenRouterText(args: {
 
       return {
         text: result.text,
-        usage: await servedOpenRouterUsage(),
+        usage: withCallConfig(await servedOpenRouterUsage(), {
+          operation: args.operation ?? "api.text.openrouter", maxOutputTokens: args.maxOutputTokens, reasoningEffort: "none",
+          providerPinning: args.providerPreferences ? "restricted" : undefined,
+        }),
       };
     },
   );
+}
+
+/**
+ * The settings a text call ran with, on its usage metadata as `modelConfig` (shared model-provenance.ts), so every
+ * caller that records `...result.usage` (search helpers, planners, chat helpers) carries them. A caller's own
+ * `modelConfig` keys win.
+ */
+export function withCallConfig(usage: TextGenerationUsage, config: Record<string, string | number | boolean | undefined>): TextGenerationUsage {
+  const own = (usage.metadata as { modelConfig?: unknown } | undefined)?.modelConfig;
+  const merged = { ...config, ...(own && typeof own === "object" && !Array.isArray(own) ? own as Record<string, unknown> : {}) };
+  return { ...usage, metadata: { ...usage.metadata, modelConfig: merged } };
 }
 
 /**

@@ -469,7 +469,9 @@ async function seedDeduplicatedDocument(
       bucket,
       path,
       embedding_model,
-      dimension
+      dimension,
+      embedding_model_uri,
+      embedding_model_class
     )
     select
       gen_random_uuid()::text,
@@ -478,7 +480,9 @@ async function seedDeduplicatedDocument(
       bucket,
       path,
       embedding_model,
-      dimension
+      dimension,
+      embedding_model_uri,
+      embedding_model_class
     from vector_indexes
     where document_id = ${args.sourceDocumentId}
       and ${args.sharesOwnerVectors}::boolean

@@ -67,11 +67,12 @@ function remember(key: string, matrix: Matrix): void {
 
 type VectorRow = { document_id: string; page_number: number; dims: number; bits: Uint8Array; int8: Uint8Array; scale: number };
 
-async function loadMatrix(projectId: string, model: string, stamp: string): Promise<Matrix | null> {
+async function loadMatrix(projectId: string, model: string, modelUri: string | null, stamp: string): Promise<Matrix | null> {
+  // The exact space when both the row and the query know it; rows from before migration 0192 match on the bare id.
   const rows = await sql<VectorRow[]>`
     select document_id, page_number, dims, bits, int8, scale
     from document_page_vectors
-    where project_id = ${projectId} and model = ${model}
+    where project_id = ${projectId} and model = ${model} and coalesce(model_uri = ${modelUri}::text, true)
     order by document_id, page_number
   `;
   const dims = rows[0]?.dims;
@@ -107,8 +108,8 @@ async function loadMatrix(projectId: string, model: string, stamp: string): Prom
 
 const inflight = new Map<string, Promise<Matrix | null>>();
 
-async function matrixFor(projectId: string, model: string): Promise<Matrix | null> {
-  const key = `${projectId}\u0000${model}`;
+async function matrixFor(projectId: string, model: string, modelUri: string | null): Promise<Matrix | null> {
+  const key = `${projectId}\u0000${model}\u0000${modelUri ?? ""}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.checkedAt < ttlMs()) {
     cache.delete(key);
@@ -118,7 +119,7 @@ async function matrixFor(projectId: string, model: string): Promise<Matrix | nul
   const [stampRow] = await sql<{ stamp: string | null }[]>`
     select (max(created_at)::text || ':' || count(*)::text) as stamp
     from document_page_vectors
-    where project_id = ${projectId} and model = ${model}
+    where project_id = ${projectId} and model = ${model} and coalesce(model_uri = ${modelUri}::text, true)
   `;
   const stamp = stampRow?.stamp ?? "";
   if (!stamp) {
@@ -135,7 +136,7 @@ async function matrixFor(projectId: string, model: string): Promise<Matrix | nul
   const flightKey = `${key}\u0000${stamp}`;
   let flight = inflight.get(flightKey);
   if (!flight) {
-    flight = loadMatrix(projectId, model, stamp)
+    flight = loadMatrix(projectId, model, modelUri, stamp)
       .then((matrix) => {
         // A matrix bigger than the whole budget would evict everything: serve it uncached.
         if (matrix && matrix.bytes <= maxCacheBytes()) remember(key, matrix);
@@ -164,10 +165,12 @@ export async function locatePageImageCandidates(args: {
   projectId: string;
   documentIds: string[];
   model: string;
+  /** The query's exact space (`pageQuerySpaceUri`); null or absent matches on the bare model id alone. */
+  modelUri?: string | null;
   queryVector: Float32Array;
   k: number;
 }): Promise<Array<{ documentId: string; page: number; score: number }>> {
-  const matrix = await matrixFor(args.projectId, args.model);
+  const matrix = await matrixFor(args.projectId, args.model, args.modelUri ?? null);
   if (!matrix || args.queryVector.length !== matrix.dims || args.k <= 0) return [];
   const query = packSignBits(args.queryVector);
 

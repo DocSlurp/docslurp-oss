@@ -1294,7 +1294,14 @@
       "idx": 184,
       "version": "7",
       "when": 1798800000012,
-      "tag": "0192_upload_client_finalizing",
+      "tag": "0192_embedding_space_uri",
+      "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1798800000013,
+      "tag": "0193_upload_client_finalizing",
       "breakpoints": true
     }
   ]
