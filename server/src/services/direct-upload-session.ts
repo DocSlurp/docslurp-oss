@@ -476,7 +476,7 @@ export function assertUploadSessionActive(session: UploadSessionRow): number {
 }
 
 /** Cross-process serialization: the dedicated connection owns the lock until release. */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode?: ProjectIntakeErrorCode): Promise<T> {
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy"): Promise<T> {
   const { connection, release } = await reserveDirectUploadLockConnection();
   try {
     const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
