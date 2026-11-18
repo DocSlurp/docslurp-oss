@@ -161,11 +161,28 @@ export interface ProjectFigureResumeResult {
  * Queue up to `limit` (at most 100) of a project's resumable documents, oldest first. Never grants: a budget-blocked
  * document is left blocked and counted in `blocked` (one document's request can grant).
  */
-export async function requestProjectFigureResumes(scope: FigureResumeScope & { limit?: number }): Promise<ProjectFigureResumeResult> {
+export async function requestProjectFigureResumes(
+  scope: FigureResumeScope & { limit?: number },
+  /**
+   * The request's audit record (scoped to this org and project, with the queued document ids in metadata): written in
+   * the transaction that queues them, so a failed record leaves nothing queued; an outcome that queues nothing is
+   * audited on its own.
+   */
+  audit?: (result: ProjectFigureResumeResult, queuedDocumentIds: string[]) => Parameters<typeof appendAuditLog>[0],
+): Promise<ProjectFigureResumeResult> {
   assertScope(scope);
   const limit = Math.min(Math.max(Math.floor(scope.limit ?? FIGURE_RESUME_LIMITS.bulkMax) || 1, 1), FIGURE_RESUME_LIMITS.bulkMax);
+  const record = async (result: ProjectFigureResumeResult, ids: string[], client: typeof sql = sql) => {
+    if (!audit) return;
+    const built = audit(result, ids);
+    await appendAuditLog({ ...built, orgId: scope.orgId, projectId: scope.projectId, metadata: { ...(built.metadata ?? {}), queuedDocumentIds: ids } }, client);
+  };
   const mode = await projectMode(scope);
-  if (!mode || mode === "off") return { status: "off", queued: 0, alreadyQueued: 0, capped: false, blocked: {} };
+  if (!mode || mode === "off") {
+    const off: ProjectFigureResumeResult = { status: "off", queued: 0, alreadyQueued: 0, capped: false, blocked: {} };
+    await record(off, []);
+    return off;
+  }
   const blockedRows = await sql<{ reason: FigureResumeBlockReason; n: number }[]>`
     select l.resume_blocked as reason, count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id
     where ${resumableWhere(scope, "blocked")} group by l.resume_blocked order by l.resume_blocked`;
@@ -181,15 +198,22 @@ export async function requestProjectFigureResumes(scope: FigureResumeScope & { l
     limit ${limit + 1}`;
   const capped = picked.length > limit;
   const ids = picked.slice(0, limit).map((row) => row.document_id);
-  const queued = ids.length === 0 ? [] : await sql<{ document_id: string }[]>`
-    update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null
-    from documents d
-    where l.document_id = any(${sql.array(ids)}::text[]) and ${resumableWhere(scope)} and l.resume_after is null
-    returning l.document_id`;
-  const count = Math.min(queued.length, limit);
+  // The queueing UPDATE and its audit record commit together; the record names the rows the UPDATE actually queued.
+  const result = await sql.begin(async (tx) => {
+    const client = tx as unknown as typeof sql;
+    const queued = ids.length === 0 ? [] : await client<{ document_id: string }[]>`
+      update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null
+      from documents d
+      where l.document_id = any(${client.array(ids)}::text[]) and ${resumableWhere(scope)} and l.resume_after is null
+      returning l.document_id`;
+    const count = Math.min(queued.length, limit);
+    const outcome: ProjectFigureResumeResult = { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped, blocked };
+    await record(outcome, queued.map((row) => row.document_id), client);
+    return outcome;
+  });
   const skipped = blockedRows.map((row) => `${row.reason}:${row.n}`).join(",") || "none";
-  console.log(`[doppler-figures] resume requested project=${scope.projectId} org=${scope.orgId} queued=${count} already=${already?.n ?? 0} capped=${capped} blocked=${skipped}`);
-  return { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped, blocked };
+  console.log(`[doppler-figures] resume requested project=${scope.projectId} org=${scope.orgId} queued=${result.queued} already=${already?.n ?? 0} capped=${capped} blocked=${skipped}`);
+  return result;
 }
 
 /** A document's figure resume state for its detail and asset-ledger reads (fixed reason codes, no internals). */

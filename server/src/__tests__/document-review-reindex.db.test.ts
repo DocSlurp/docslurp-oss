@@ -16,7 +16,10 @@ beforeAll(async () => {
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
-  vi.doMock("../services/documents.js", () => ({ getDocumentViewerPayload: vi.fn(async () => null) }));
+  vi.doMock("../services/documents.js", async (importOriginal) => ({
+    getDocumentViewerPayload: vi.fn(async () => null),
+    replaceDocumentTagsIn: (await importOriginal<typeof import("../services/documents.js")>()).replaceDocumentTagsIn,
+  }));
   vi.doMock("../search/eligibility-hint.js", () => ({ notifySearchEligibilityChanged: vi.fn(async () => {}) }));
   ({ reindexDocumentCorrection } = await import("../services/document-review.js"));
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
@@ -118,4 +121,23 @@ describe("human-correction reindex", () => {
     expect(correction.corrected_structured_data).toBeNull();
   });
 
+
+  it("#512: a correction save replaces its tags in the save's transaction; a failed audit insert rolls back both", async () => {
+    const { saveDocumentCorrection } = await import("../services/document-review.js");
+    await sql`delete from document_tags where document_id = 'd'`;
+    await sql`insert into document_tags (document_id, user_id, tag) values ('d', 'u', 'old')`;
+    const [{ corrected_markdown: before }] = await sql`select corrected_markdown from document_corrections where document_id = 'd'`;
+    const marker = `correction-${Math.random()}`;
+    await expect(saveDocumentCorrection({ docId: "d", userId: "u", markdown: "Never saved.", tags: ["new"],
+      audit: () => ({ userId: "u", action: null as unknown as string, resourceType: "document", metadata: { marker } }) })).rejects.toBeTruthy();
+    expect(await sql`select tag from document_tags where document_id = 'd' order by tag`).toEqual([{ tag: "old" }]);
+    expect(await sql`select corrected_markdown from document_corrections where document_id = 'd'`).toEqual([{ corrected_markdown: before }]);
+    expect(await sql`select id from audit_log where metadata ->> 'marker' = ${marker}`).toEqual([]);
+    // A record that can be written commits with the correction and its tags, scoped to the document.
+    await saveDocumentCorrection({ docId: "d", userId: "u", markdown: before, tags: ["new"],
+      audit: () => ({ userId: "u", action: "document.correction.saved", resourceType: "document", resourceId: "d", metadata: { marker } }) });
+    expect(await sql`select tag from document_tags where document_id = 'd' order by tag`).toEqual([{ tag: "new" }]);
+    expect(await sql`select org_id, project_id, document_id from audit_log where metadata ->> 'marker' = ${marker}`)
+      .toEqual([{ org_id: "o", project_id: "w", document_id: "d" }]);
+  });
 });

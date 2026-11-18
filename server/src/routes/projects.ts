@@ -51,7 +51,7 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isProjectChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
 import { validationHook } from "../lib/validation.js";
-import { bulkDocumentIdsSchema, bulkDocumentsLimitResponse } from "../lib/bulk-documents.js";
+import { bulkAuditResourceId, bulkDocumentIdsSchema, bulkDocumentsLimitResponse } from "../lib/bulk-documents.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   archiveProject,
@@ -998,12 +998,12 @@ export const projectsRoutes = new Hono()
     const raw = c.req.query("limit");
     const limit = raw === undefined ? undefined : /^[1-9][0-9]{0,3}$/.test(raw) ? Number(raw) : null;
     if (limit === null) return apiStatusError(c, 400, "Invalid limit");
-    const result = await requestProjectFigureResumes({ orgId: project.orgId, projectId: project.id, ...(limit ? { limit } : {}) });
-    await appendAuditLog({
-      orgId: project.orgId, userId, projectId: project.id, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
+    // The audit record is written in the transaction that queues (the service scopes it to this org and project).
+    const result = await requestProjectFigureResumes({ orgId: project.orgId, projectId: project.id, ...(limit ? { limit } : {}) }, (outcome) => ({
+      userId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
       action: "project.figures.resume_requested", resourceType: "project", resourceId: project.id, ipAddress: requestIp(c),
-      metadata: { ...result, userAgent: requestUserAgent(c) },
-    });
+      metadata: { ...outcome, userAgent: requestUserAgent(c) },
+    }));
     return c.json({ projectId: project.id, ...result }, result.queued > 0 ? 202 : 200);
   })
   .post("/:projectId/ingest-report/reprocess", zValidator("json", reprocessIngestRecommendationSchema, validationHook), async (c) => {
@@ -1014,24 +1014,26 @@ export const projectsRoutes = new Hono()
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     const body = c.req.valid("json");
     try {
-      const result = await reprocessIngestRecommendation({ project, userId, speedBoost: body.speedBoost === true, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null });
-      await appendAuditLog({
-        orgId: project.orgId,
-        userId,
-        projectId: project.id,
-        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
-        action: "documents.bulk_reprocessed",
-        resourceType: "document-bulk",
-        resourceId: result.documentIds.join(","),
-        ipAddress: requestIp(c),
-        metadata: {
-          source: "ingest-report",
-          recommendationId: body.recommendationId,
-          count: result.documentIds.length,
-          runs: result.runs.map((run) => run.id),
-          estimatedCents: result.estimatedCents,
-          userAgent: requestUserAgent(c),
-        },
+      // Each published run's audit record commits with its publication (the service scopes it to the run's org,
+      // project and run, from the run's documents).
+      const result = await reprocessIngestRecommendation({
+        project, userId, speedBoost: body.speedBoost === true, recommendationId: body.recommendationId, runId: body.runId ?? null, documentIds: body.documentIds ?? null,
+        audit: (run) => ({
+          userId,
+          apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
+          action: "documents.bulk_reprocessed",
+          resourceType: "document-bulk",
+          resourceId: bulkAuditResourceId(run.documentIds),
+          ipAddress: requestIp(c),
+          metadata: {
+            source: "ingest-report",
+            recommendationId: body.recommendationId,
+            documentIds: run.documentIds,
+            count: run.documentIds.length,
+            runs: [run.runId],
+            userAgent: requestUserAgent(c),
+          },
+        }),
       });
       return c.json(result, 201);
     } catch (error) {

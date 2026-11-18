@@ -8,7 +8,7 @@ import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
 import { canEditProject, getProjectAccess, listAccessibleProjectIds } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
+import { getDocumentViewerPayload, replaceDocumentTagsIn } from "./documents.js";
 import { withdrawSummaryTreeForCorrection } from "./summary-tree-withdrawal.js";
 
 type ReviewDocumentRow = {
@@ -810,13 +810,12 @@ export async function saveDocumentCorrection(args: {
   // Corrected text is published to search (and a re-index re-embeds it): editors only (council L3 M2).
   await assertCanEditCorrection(document.project_id, document.org_id, args.userId);
 
-  if (args.tags) {
-    await setDocumentTags(args.docId, args.userId, args.tags);
-  }
-
   await sql.begin(async tx => {
     const transaction = tx as unknown as typeof sql;
     await transaction`select id from projects where id=${document.project_id} and org_id=${document.org_id} for share`;
+    // The tags are part of the save: replaced in its transaction, so they commit (or roll back) with the correction
+    // and its audit record. Editing was checked above (assertCanEditCorrection).
+    if (args.tags) await replaceDocumentTagsIn(transaction, { docId: args.docId, userId: args.userId, projectId: document.project_id, tags: args.tags });
   const [savedCorrection] = await transaction`
     insert into document_corrections (
       id,

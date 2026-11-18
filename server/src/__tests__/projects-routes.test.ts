@@ -313,7 +313,9 @@ describe("projectsRoutes validation", () => {
     expect(applyIngestRecommendationMock).not.toHaveBeenCalled();
 
     expect((await post({ orgId: "org-1", scopes: ["ingest"], keyId: "key-1" }, "reprocess")).status).toBe(201);
-    expect(appendAuditLogMock).toHaveBeenLastCalledWith(expect.objectContaining({ action: "documents.bulk_reprocessed", apiKeyId: "key-1" }));
+    // Each run's record is written by the service in its publish transaction, from the builder the route passes.
+    const keyed = reprocessIngestRecommendationMock.mock.calls.at(-1)?.[0] as { audit: (run: { runId: string; documentIds: string[] }) => Record<string, unknown> };
+    expect(keyed.audit({ runId: "run-9", documentIds: ["d1"] })).toMatchObject({ action: "documents.bulk_reprocessed", apiKeyId: "key-1" });
     expect((await post({ orgId: "org-1", scopes: ["projects:manage"], keyId: "key-2" }, "apply")).status).toBe(200);
     expect(appendAuditLogMock).toHaveBeenLastCalledWith(expect.objectContaining({ action: "project.updated", apiKeyId: "key-2" }));
   });
@@ -325,9 +327,13 @@ describe("projectsRoutes validation", () => {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ recommendationId: "vision-all-pages" }),
     });
     expect(response.status).toBe(201);
-    expect(appendAuditLogMock).toHaveBeenCalledWith(expect.objectContaining({
-      action: "documents.bulk_reprocessed", metadata: expect.objectContaining({ source: "ingest-report", runs: ["run-2"], estimatedCents: 1.5 }),
-    }));
+    // The route writes no record after the fact: each published run's record commits with it (the service adds its
+    // org, project and run), built by this builder.
+    expect(appendAuditLogMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "documents.bulk_reprocessed" }));
+    const input = reprocessIngestRecommendationMock.mock.calls.at(-1)?.[0] as { audit: (run: { runId: string; documentIds: string[] }) => Record<string, unknown> };
+    expect(input.audit({ runId: "run-2", documentIds: ["d1"] })).toMatchObject({
+      action: "documents.bulk_reprocessed", resourceId: "d1", metadata: expect.objectContaining({ source: "ingest-report", runs: ["run-2"], documentIds: ["d1"] }),
+    });
   });
 
   it("returns 400 for unsupported embedding models on project create", async () => {
