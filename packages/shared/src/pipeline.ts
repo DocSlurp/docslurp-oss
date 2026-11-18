@@ -1220,7 +1220,12 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
     const vision = { ...next.vision } as Record<string, unknown>;
     // A URI that names its own endpoint (a `baseUrl`, or an operator's private route) was a deliberate destination: it
     // is never swapped for the default hosted model. Such a row keeps failing, as before.
-    const pinsEndpoint = (value: string) => /[?&]baseUrl=/i.test(value) || /^llm:\/\/private\//i.test(value.trim());
+    const pinsEndpoint = (value: string) => {
+      // Judged on the decoded text as well, so a percent-encoded key or separator is not a way around it.
+      let decoded = value;
+      try { decoded = decodeURIComponent(value); } catch { /* keep the raw text */ }
+      return [value, decoded].some((text) => /baseurl\s*=/i.test(text) || /^\s*llm:\/\/private\//i.test(text));
+    };
     const unusableUri = (value: unknown) => typeof value === "string" && !pinsEndpoint(value)
       && (!llmModelUriSchema.safeParse(value).success || visionModelUriProblem(value) !== null);
     const unusableId = (value: unknown) => typeof value === "string" && (visionModelRefusal(value) !== null || !visionModelCatalog.some((spec) => spec.id === value));
@@ -1846,8 +1851,8 @@ function guardedStoredSettings(stored: unknown): Record<string, unknown> {
   if (stored.piiPolicy !== undefined) {
     let valid = isPlainRecord(stored.piiPolicy);
     if (valid) try { normalizePipelineFeatures({ piiPolicy: stored.piiPolicy } as PipelineFeatureOverrides); } catch { valid = false; }
-    // Unreadable: detection on, and pages with a match kept out of the index.
-    guarded.piiPolicy = valid ? stored.piiPolicy : { enabled: true, action: "block_indexing" };
+    // Unreadable: every detector on, and pages with a match kept out of the index.
+    guarded.piiPolicy = valid ? stored.piiPolicy : { enabled: true, action: "block_indexing", patterns: [...piiPatternTypeSchema.options] };
   }
   if (stored.webTools !== undefined) guarded.webTools = typeof stored.webTools === "boolean" ? stored.webTools : false;
   return guarded;

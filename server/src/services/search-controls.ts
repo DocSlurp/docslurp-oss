@@ -286,10 +286,21 @@ export function readProjectUiSettings(metadata: Record<string, unknown>, source 
 
   const uiRecord = projectUi as Record<string, unknown>;
   return {
-    retrievalDefaults: readStoredSection("retrievalDefaults", projectSearchSettingsSchema.shape.retrievalDefaults, uiRecord.retrievalDefaults, source),
-    // `enabled` is the owner's off switch: a stored value that is not readable never turns chat on.
-    chat: readStoredSection("chat", projectSearchSettingsSchema.shape.chat, uiRecord.chat, source, { enabled: false })
+    // An unreadable rerank switch never turns hosted reranking back on.
+    retrievalDefaults: readStoredSection("retrievalDefaults", projectSearchSettingsSchema.shape.retrievalDefaults, uiRecord.retrievalDefaults, source, { useRerank: false }),
+    chat: readStoredChat(uiRecord.chat, source)
   };
+}
+
+/**
+ * `enabled` is the owner's off switch and `searchInstructions` the owner's scope for answers: a stored value of either
+ * that is not readable never leaves chat answering without it. Chat reads as off until the owner saves settings again.
+ */
+function readStoredChat(stored: unknown, source: string) {
+  const chat = readStoredSection("chat", projectSearchSettingsSchema.shape.chat, stored, source, { enabled: false });
+  const instructions = stored !== null && typeof stored === "object" && !Array.isArray(stored) ? (stored as Record<string, unknown>).searchInstructions : undefined;
+  const lost = instructions !== undefined && instructions !== null && chat.searchInstructions !== instructions;
+  return lost ? { ...chat, enabled: false } : chat;
 }
 
 const reportedStoredSections = new Set<string>();

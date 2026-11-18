@@ -107,6 +107,7 @@ describe("a stored vision model that is no longer admitted", () => {
       [{ piiPolicy: { enabled: true, action: "block" } }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
       [{ piiPolicy: { enabled: "true" } }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
       [{ piiPolicy: "on" }, { piiPolicy: { enabled: true, action: "block_indexing" } }],
+      [{ piiPolicy: { enabled: true, patterns: ["email"], allowlistPatterns: 7 } }, { piiPolicy: { enabled: true, action: "block_indexing", patterns: expect.arrayContaining(["email", "ssn"]) } }],
       [{ webTools: "off" }, { webTools: false }],
     ] as const) {
       expect(parseStoredPipelineFeatures({ ...stored, quality: "retired-level" }, "project p13"), JSON.stringify(stored)).toMatchObject(expected);
@@ -124,6 +125,9 @@ describe("a stored vision model that is no longer admitted", () => {
     const remote = "llm://vllm/Qwen/Qwen2-VL-2B-Instruct?baseUrl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1";
     expect(sanitizeStoredPipeline({ vision: { modelUri: remote } }, "run r10")).toEqual({ vision: { modelUri: remote } });
     expect(() => normalizeStoredPipelineFeatures({ vision: { modelUri: remote } } as never, "run r10")).toThrow();
+    for (const encoded of ["llm://vllm/Qwen/Qwen2-VL-2B-Instruct?base%55rl=http%3A%2F%2F10.0.0.5%3A8000%2Fv1", "llm://openrouter/openai/gpt-4.1-mini?%62aseUrl=https%3A%2F%2Feu.example.com", "llm://private%2Falias/model"]) {
+      expect(sanitizeStoredPipeline({ vision: { remoteFallbackModelUri: encoded } }, "run r12"), encoded).toEqual({ vision: { remoteFallbackModelUri: encoded } });
+    }
     const privateRoute = "llm://private/not-registered/model";
     expect(sanitizeStoredPipeline({ vision: { modelUri: privateRoute } }, "run r11")).toEqual({ vision: { modelUri: privateRoute } });
   });

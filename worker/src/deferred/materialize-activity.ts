@@ -1,7 +1,7 @@
 import { QUALITY_RANK, runLegacyQualitySql } from "@docslurp/shared";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
@@ -91,9 +91,7 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
   // configuration: they are dropped, and only the project's explicit admin overrides and current defaults apply.
   const label = `document ${documentId} source pipeline`;
   const managed = resolveManagedPipeline(
-    // The raw stored snapshot: the resolver strips its model fields before validating, so a model that is history
-    // cannot fail the read.
-    source.pipeline,
+    normalizeStoredPipelineFeatures(source.pipeline as never, label),
     parseManagedPipelineOverrides(source.managed, `project of document ${documentId}`),
     label,
   );

@@ -188,6 +188,12 @@ describe("stored project search settings", () => {
     expect(readProjectUiSettings({ projectUi: { chat: "garbage" } }, "project chat-garbage").chat.enabled).toBe(false);
     expect(readProjectUiSettings({ projectUi: { chat: { enabled: false } } }).chat.enabled).toBe(false);
     expect(readProjectUiSettings({ projectUi: { chat: { enabled: true } } }).chat.enabled).toBe(true);
+    // The owner's scope instructions that can no longer be read: chat is off, not answering without them.
+    expect(readProjectUiSettings({ projectUi: { chat: { enabled: true, searchInstructions: 42 } } }, "project chat-scope").chat.enabled).toBe(false);
+    expect(readProjectUiSettings({ projectUi: { chat: { enabled: true, searchInstructions: "Only answer about contracts." } } }).chat).toMatchObject({ enabled: true, searchInstructions: "Only answer about contracts." });
+    // An unreadable rerank switch stays off; a valid one is kept.
+    expect(readProjectUiSettings({ projectUi: { retrievalDefaults: { useRerank: "false" } } }, "project rerank").retrievalDefaults.useRerank).toBe(false);
+    expect(readProjectUiSettings({ projectUi: { retrievalDefaults: { useRerank: true, summaryTree: "no-such-mode" } } }, "project rerank-2").retrievalDefaults.useRerank).toBe(true);
     // The log names the project, once.
     expect(error).toHaveBeenCalledWith(expect.stringContaining("stored chat of project chat-false"));
     error.mockRestore();
