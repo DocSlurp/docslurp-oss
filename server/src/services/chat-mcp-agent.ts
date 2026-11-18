@@ -1,3 +1,4 @@
+import { chatTierLabel } from "@docslurp/shared/project-chat-models";
 import { env } from "../config.js";
 import { allowHostedCallForProject, loadProjectPrivacyMode, openRouterCall } from "../lib/privacy.js";
 import { resolveProjectRef } from "./projects.js";
@@ -400,7 +401,7 @@ export async function runChatMcpAgent(args: {
   const turnReasoning = args.reasoning ?? DEFAULT_CHAT_REASONING;
   // The level that chose the model and the settings every step ran with, on each step's usage row (model-provenance.ts).
   const callRecord = {
-    modelClass: { tier: args.requestedModel ?? undefined, answer: "tool-agent" },
+    modelClass: { tier: chatTierLabel(args.requestedModel), answer: "tool-agent" },
     modelConfig: { operation: "chat-tool-agent", reasoning: turnReasoning, maxOutputTokens, maxSteps: limits.maxSteps, maxToolCalls: limits.maxToolCalls },
   };
   agentSpan.set({ "docslurp.chat.mode.web": modes.web, "docslurp.chat.mode.suggestions": modes.suggestions, "docslurp.chat.reasoning": turnReasoning });

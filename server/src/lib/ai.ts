@@ -239,7 +239,7 @@ export async function generateOpenRouterText(args: {
         text: result.text,
         usage: withCallConfig(await servedOpenRouterUsage(), {
           operation: args.operation ?? "api.text.openrouter", maxOutputTokens: args.maxOutputTokens, reasoningEffort: "none",
-          hostPreference: args.providerPreferences ? "restricted" : undefined,
+          providerPinning: args.providerPreferences ? "restricted" : undefined,
         }),
       };
     },

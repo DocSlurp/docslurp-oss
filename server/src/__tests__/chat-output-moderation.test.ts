@@ -67,8 +67,15 @@ describe("output moderation", () => {
       scope: { orgId: "org-1", projectId: "ws-1", sessionId: "chat-1" },
       usage: expect.objectContaining({ metric: "chat-output-moderation", model: LLAMA_GUARD_MODEL, inputTokens: 800, outputTokens: 5,
         metadata: expect.objectContaining({ modelClass: expect.objectContaining({ role: "output-moderation" }),
-          modelConfig: { operation: "chat-output-moderation", maxOutputTokens: 16, temperature: 0, hostPreference: "pinned" } }) }),
+          modelConfig: { operation: "chat-output-moderation", maxOutputTokens: 16, temperature: 0, providerPinning: "pinned" } }) }),
     }));
+    // What the recorder persists (it applies withModelProvenance): every setting survives the sanitizer.
+    const { withModelProvenance } = await import("@docslurp/shared");
+    const usage = (mocks.recordUsageEvent.mock.calls.at(-1) as unknown as [{ usage: Parameters<typeof withModelProvenance>[0] }])[0].usage;
+    expect(withModelProvenance(usage).metadata).toMatchObject({
+      modelConfig: { operation: "chat-output-moderation", maxOutputTokens: 16, temperature: 0, providerPinning: "pinned" },
+      modelClass: { role: "output-moderation" },
+    });
   });
 
   it("preserves private callers and withholds public answers when checks cannot run", async () => {

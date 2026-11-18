@@ -23,11 +23,14 @@ export interface PageQueryEmbedderDeps {
 
 /**
  * The space a query vector from `embedPageQuery` is in, as the worker's page embedders record it on
- * `document_page_vectors.model_uri`: a private route by its own URI, the hosted Gemini model under `google`.
+ * `document_page_vectors.model_uri`: the hosted Gemini model under `google`, any other (a private route's model id,
+ * or its own `llm://private/...` URI) under `private`.
  */
 export function pageQuerySpaceUri(model: string, dimensions: number): string | null {
-  if (isPrivateModelUri(model)) return embeddingSpaceUri({ provider: "private", model, dimensions });
-  return String(model).includes("gemini-embedding-2") ? embeddingSpaceUri({ provider: "google", model, dimensions }) : null;
+  // The Gemini embedder records `google`; the private one records `private` with the route's model id (or a URI).
+  return String(model).includes("gemini-embedding-2")
+    ? embeddingSpaceUri({ provider: "google", model, dimensions })
+    : embeddingSpaceUri({ provider: "private", model, dimensions });
 }
 
 /**

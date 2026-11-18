@@ -170,7 +170,7 @@ export async function moderateChatAnswer(response: ProjectChatResponse, args: {
         metadata: { ...verdict.usage.metadata, moderator: moderator.name, flagged: verdict.flagged,
           // The level (the configured moderator, a deployment choice) and its fixed request settings (model-provenance.ts).
           modelClass: { moderator: moderator.name, role: "output-moderation" },
-          modelConfig: { operation: "chat-output-moderation", maxOutputTokens: 16, temperature: 0, hostPreference: "pinned" } } },
+          modelConfig: { operation: "chat-output-moderation", maxOutputTokens: 16, temperature: 0, providerPinning: "pinned" } } },
     });
   }
   if (verdict.unavailable) return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };

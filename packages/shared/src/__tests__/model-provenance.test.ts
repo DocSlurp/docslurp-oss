@@ -131,3 +131,33 @@ describe("embedding spaces", () => {
     expect(JSON.stringify(stamped)).not.toContain("127.0.0.1");
   });
 });
+
+describe("recorded setting names", () => {
+  it("none of the names the call paths record is withheld by the sanitizer", () => {
+    // Every modelConfig / modelClass key written by a call path (worker and server). A name the sanitizer withholds
+    // (it contains url, host, key, token, ...) would silently vanish from the persisted record.
+    const names = [
+      "operation", "maxOutputTokens", "reasoningEffort", "reasoning", "profile", "providerPinning", "temperature",
+      "task", "inputType", "normalize", "pooling", "dimensions", "requestedDimensions", "batchSize", "lateChunking", "truncateAtTokens",
+      "renderDpi", "windows", "windowChars", "paragraphBatchChars", "format", "sampleRateHz", "wordTimestamps", "chunkSeconds",
+      "purpose", "input", "route", "role", "questions", "images", "pages", "candidates", "batchCandidates", "maxCandidates",
+      "timeoutMs", "concurrency", "queryPrefix", "maxSteps", "maxToolCalls", "responseFormat",
+      "embeddingProfile", "visualPagesRoute", "chartExportTier", "moderator", "rerank", "tier", "answer",
+    ];
+    const record = Object.fromEntries(names.map((name) => [name, 1]));
+    const stamped = withModelProvenance({ provider: "openrouter", model: "vendor/m", metadata: { modelConfig: record, modelClass: record } });
+    expect(Object.keys(stamped.metadata?.modelConfig as object).sort()).toEqual([...names].sort());
+    expect(Object.keys(stamped.metadata?.modelClass as object).sort()).toEqual([...names].sort());
+  });
+});
+
+describe("chatTierLabel", () => {
+  it("keeps only the tier vocabulary", async () => {
+    const { chatTierLabel } = await import("../project-chat-models.js");
+    expect(chatTierLabel("smart")).toBe("smart");
+    expect(chatTierLabel("balanced")).toBe("balanced");
+    expect(chatTierLabel("vendor/some-model")).toBeUndefined();
+    expect(chatTierLabel("smart; drop table")).toBeUndefined();
+    expect(chatTierLabel(null)).toBeUndefined();
+  });
+});
