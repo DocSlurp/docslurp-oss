@@ -1,7 +1,7 @@
 import { bareMimeType, isSupportedFileType, resolveSupportedMimeType, SUPPORTED_UPLOAD_MIME_TYPES } from "@docslurp/shared";
 
 import { env } from "../config.js";
-import { apiErrorResponse } from "./api-error.js";
+import { apiErrorResponse, bodyTimeoutResponse } from "./api-error.js";
 import { boundedBodyLimit } from "./bounded-body-limit.js";
 
 /** Intake accepts exactly the formats in the shared table the worker, the quote and the estimator card read. */
@@ -67,7 +67,7 @@ export function multipartBodyLimit(maxBytes: number) {
   return boundedBodyLimit(maxBytes, (c) => {
     const { message, details } = multipartTooLarge(maxBytes);
     return apiErrorResponse(c, 413, "payload_too_large", message, details);
-  });
+  }, { onTimeout: bodyTimeoutResponse });
 }
 
 export function listSupportedUploadMimeTypes(): string[] {

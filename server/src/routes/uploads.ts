@@ -436,6 +436,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     return c.json(await withPayloadCanEdit(c, result.payload), result.status);
   })
   .post("/bulk", async (c) => {
+    // Hono's parseBody classifies the media type exactly as lib/media-type.ts does (media-type.test.ts).
     const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
     const body = await c.req.parseBody({ all: true });
     const userId = c.get("sessionUser").id;

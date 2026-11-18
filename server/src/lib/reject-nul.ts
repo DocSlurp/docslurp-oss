@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { middlewareErrorResponse } from "./api-error.js";
+import { bodyMediaKind } from "./media-type.js";
 
 /** JSON bodies larger than this are not scanned (uploads and streams do not go through here). */
 const MAX_SCANNED_BODY_BYTES = 2 * 1024 * 1024;
@@ -21,7 +22,7 @@ export const rejectNulBytes: MiddlewareHandler = async (c, next) => {
 
   const contentType = c.req.header("content-type") ?? "";
   const length = Number(c.req.header("content-length") ?? "0");
-  if (/\bjson\b/i.test(contentType) && length <= MAX_SCANNED_BODY_BYTES && ["POST", "PUT", "PATCH"].includes(c.req.method)) {
+  if (bodyMediaKind(contentType) === "json" && length <= MAX_SCANNED_BODY_BYTES && ["POST", "PUT", "PATCH"].includes(c.req.method)) {
     // Inspect a clone: Hono caches c.req.text(), but raw Request consumers
     // (MCP transport and body-limit middleware) cannot use that cache.
     const reader = c.req.raw.clone().body?.getReader();

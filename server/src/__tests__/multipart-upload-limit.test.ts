@@ -6,6 +6,7 @@ vi.mock("../config.js", () => ({ env: { maxUploadBytes: 500 * 1024 * 1024 } }));
 const { multipartBodyLimit, multipartTooLarge } = await import("../lib/upload-policy.js");
 const { v1BodyLimit } = await import("../lib/v1-body-limit.js");
 const { rejectLegacyProjectSelection } = await import("../lib/reject-legacy-project-selection.js");
+const { BODY_IDLE_TIMEOUT_MS } = await import("../lib/bounded-body-limit.js");
 
 function app(maxBytes: number) {
   const reached = vi.fn();
@@ -135,5 +136,58 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
     const empty = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", { method: "POST", body: streamOf(0), duplex: "half" } as RequestInit));
     expect(empty.status).toBe(200);
     expect(await empty.json()).toEqual({ files: null });
+  });
+
+  it("refuses a declared non-form body before reading any of it", async () => {
+    const { hono, reached } = v1App(64 * 1024);
+    // Reading this stream would hang the test.
+    const stalled = new ReadableStream({ pull: () => new Promise(() => {}) });
+    for (const headers of [{ "content-type": "text/plain", "content-length": "5" }, { "transfer-encoding": "chunked" }] as Array<Record<string, string>>) {
+      const response = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", { method: "POST", headers, body: stalled, duplex: "half" } as RequestInit));
+      expect(response.status).toBe(400);
+    }
+    expect(reached).not.toHaveBeenCalled();
+  });
+
+  it("applies the multipart cap to the bulk route whatever the content-type parameters say", async () => {
+    const { hono } = v1App(64 * 1024);
+    for (const type of ["application/json", "multipart/form-data; x=json", "Multipart/Form-Data; boundary=x"]) {
+      const response = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", {
+        method: "POST", headers: { "content-type": type }, body: streamOf(65 * 1024), duplex: "half",
+      } as RequestInit));
+      expect({ type, status: response.status }).toEqual({ type, status: 413 });
+    }
+  });
+
+  it("decides emptiness from the bytes counted, not a lying Content-Length", async () => {
+    const { hono, reached } = v1App(64 * 1024);
+    const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("x")); controller.close(); } });
+    const response = await hono.fetch(new Request("http://localhost/v1/uploads/direct/sessions", {
+      method: "POST", headers: { "content-type": "text/plain", "content-length": "0" }, body, duplex: "half",
+    } as RequestInit));
+    expect(response.status).toBe(400);
+    expect(reached).not.toHaveBeenCalled();
+  });
+
+  it("answers 408 when a bulk body stalls", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const { hono, reached } = v1App(64 * 1024);
+      let sent = false;
+      const stalling = new ReadableStream<Uint8Array>({ pull(controller) {
+        if (!sent) { sent = true; controller.enqueue(new Uint8Array(10)); return; }
+        return new Promise(() => {});
+      } });
+      const pending = hono.fetch(new Request("http://localhost/v1/uploads/bulk", {
+        method: "POST", headers: { "content-type": "multipart/form-data; boundary=x" }, body: stalling, duplex: "half",
+      } as RequestInit));
+      await vi.advanceTimersByTimeAsync(BODY_IDLE_TIMEOUT_MS);
+      const response = await pending;
+      expect(response.status).toBe(408);
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+      expect(reached).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

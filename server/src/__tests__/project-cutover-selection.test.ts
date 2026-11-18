@@ -1,6 +1,6 @@
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
-import { rejectLegacyProjectSelection } from "../lib/reject-legacy-project-selection.js";
+import { describe, expect, it, vi } from "vitest";
+import { BODY_PEEK_TIMEOUT_MS, rejectLegacyProjectSelection } from "../lib/reject-legacy-project-selection.js";
 
 function app() {
   return new Hono().use("*", rejectLegacyProjectSelection)
@@ -49,20 +49,29 @@ describe("project cutover rejects stale scope instead of selecting default", () 
     const route = new Hono().use("*", rejectLegacyProjectSelection).post("/", c => c.json({ ok: true }));
     const post = (headers: Record<string, string>, body: ReadableStream) =>
       route.request(new Request("http://localhost/", { method: "POST", headers, body, duplex: "half" } as RequestInit));
+    // A stream that never delivers: any read of it would hang the test.
     const stalled = () => new ReadableStream({ pull: () => new Promise(() => {}) });
-    // A declared body that never arrives is refused at once, not waited on.
-    let started = Date.now();
+    // A declared body that never arrives is refused from the headers alone, without reading.
     expect((await post({ "content-type": "text/plain", "content-length": "5" }, stalled())).status).toBe(400);
     expect((await post({ "content-type": "text/plain", "transfer-encoding": "chunked" }, stalled())).status).toBe(400);
-    expect(Date.now() - started).toBeLessThan(200);
     expect((await post({ "content-length": "0" }, stalled())).status).toBe(200);
-    // Neither header (in-process): a silent stream is refused after a bounded wait.
-    started = Date.now();
-    expect((await post({}, stalled())).status).toBe(400);
-    expect(Date.now() - started).toBeLessThan(2_000);
     // A zero-length first chunk followed by data is content.
     const late = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(0)); controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } });
     expect((await post({ "content-type": "text/plain" }, late)).status).toBe(400);
+  });
+
+  it("refuses a silent header-less body once the peek bound passes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const route = new Hono().use("*", rejectLegacyProjectSelection).post("/", c => c.json({ ok: true }));
+      const pending = route.request(new Request("http://localhost/", {
+        method: "POST", body: new ReadableStream({ pull: () => new Promise(() => {}) }), duplex: "half",
+      } as RequestInit));
+      await vi.advanceTimersByTimeAsync(BODY_PEEK_TIMEOUT_MS);
+      expect((await pending).status).toBe(400);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("cannot hide stale selection behind a non-JSON Content-Type", async () => {

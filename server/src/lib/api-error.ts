@@ -5,7 +5,7 @@ import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, p
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
 import { recordRequestRejection } from "./error-context.js";
 
-type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
+type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 408 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
@@ -41,7 +41,15 @@ export function apiStatusError(c: Context, status: number, message: string, opti
 
 /** Request body cap that answers 413 in the native envelope (with the cap as `details.maxBytes`). */
 export function nativeBodyLimit(maxSize: number): MiddlewareHandler {
-  return boundedBodyLimit(maxSize, (c) => middlewareErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }));
+  return boundedBodyLimit(maxSize, (c) => middlewareErrorResponse(c, 413, "payload_too_large", `Request body exceeds ${maxSize} bytes`, { maxBytes: maxSize }), {
+    onTimeout: bodyTimeoutResponse,
+  });
+}
+
+/** A request body that stalled or trickled past its deadline: 408 in the caller's error shape. */
+export function bodyTimeoutResponse(c: Context): Response {
+  c.header("Connection", "close");
+  return middlewareErrorResponse(c, 408, "invalid_request", "Request body was not received in time");
 }
 
 /**
