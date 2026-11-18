@@ -177,7 +177,10 @@ describe("uploadsRoutes over Project Intake", () => {
     const { app } = setup();
     const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/report.docx"] }));
     expect(response.status).toBe(415);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("Upload the file directly instead.") } });
+    // The operator setting is named in the log only, never in client copy.
+    expect(JSON.stringify(body)).not.toContain("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED");
   });
 
   it("never returns a refused URL's grant anywhere in the response, even when it is submitted first", async () => {

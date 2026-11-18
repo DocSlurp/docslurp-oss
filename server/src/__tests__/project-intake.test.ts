@@ -12,6 +12,7 @@ import {
   type ProjectIntakeRequest,
 } from "../services/project-intake.js";
 import { remoteUrlIntakeItems } from "../services/remote-ingest.js";
+import { AllSourcesUnreadableError, UnreadableSourceError } from "../services/source-metadata.js";
 import { ProjectAccessError } from "../services/default-project.js";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
 import { configureApiExtractorIdAliases } from "../routes/extractors.js";
@@ -522,7 +523,9 @@ describe("Project Intake", () => {
     const fakes = createProjectIntakeFakes();
     const docx = bytesItem("report.docx", "PK", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     const blocked = await rejection(intakeIntoProject(request({ kind: "connector-sync", items: [docx] }), fakes.ports));
-    expect(blocked).toMatchObject({ statusCode: 415, message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") });
+    expect(blocked).toMatchObject({ statusCode: 415, message: expect.stringContaining("Upload the file directly instead.") });
+    // The operator setting is named in the log only, never in client copy.
+    expect((blocked as Error).message).not.toContain("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED");
 
     await expect(intakeIntoProject(request({ kind: "bulk-upload", items: [docx] }), fakes.ports)).resolves.not.toBeNull();
     (env as { remoteIngestComplexFormatsEnabled: boolean }).remoteIngestComplexFormatsEnabled = true;
@@ -651,6 +654,33 @@ describe("Project Intake from remote URLs", () => {
       const logs = warn.mock.calls.map((call) => String(call[0])).join("\n");
       expect(logs).toMatch(/\[intake\] source_refused ref=urls\[1\] code=unsupported_type status=415 reason=/);
       expect(logs).toMatch(/\[remote-ingest\] url_fetch_failed ref=urls\[4\] failure=timeout codes=TimeoutError/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("fails closed to urls[?] when a URL refusal's ref cannot be found", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { headers: { "content-type": "text/plain" } })));
+    try {
+      // Run creation reports an unreadable file under a name intake never stored (a lookup miss).
+      const fakes = createProjectIntakeFakes();
+      fakes.ports.records.createRun = vi.fn(async () => {
+        throw new AllSourcesUnreadableError([new UnreadableSourceError("GRANTSECRET0123456789abcdef.txt", "invalid GRANTSECRET0123456789abcdef.txt")]);
+      });
+      const urls = ["https://example.com/notes.txt"];
+      const error = await rejection(intakeIntoProject(request({ kind: "url-ingest", items: remoteUrlIntakeItems(urls), urls }), fakes.ports));
+      expect(error).toMatchObject({ statusCode: 422, issues: [{ path: "urls[?]", code: "unreadable_source" }] });
+      expect(JSON.stringify({ message: error.message, issues: error.issues })).not.toContain("GRANTSECRET");
+
+      // A URL item that reaches storage without a ref is named urls[?] too, never by its filename.
+      const unreffed = await rejection(intakeIntoProject(request({
+        kind: "url-ingest",
+        items: [{ filename: "GRANTSECRET0123456789abcdef.exe", mimeType: "application/x-msdownload", content: { bytes: Buffer.from("MZ") } }],
+        urls: ["https://example.com/x.exe"],
+      }), createProjectIntakeFakes().ports));
+      expect(unreffed).toMatchObject({ issues: [{ path: "urls[?]", code: "unsupported_type" }] });
+      expect(JSON.stringify({ message: unreffed.message, issues: unreffed.issues })).not.toContain("GRANTSECRET");
     } finally {
       warn.mockRestore();
     }

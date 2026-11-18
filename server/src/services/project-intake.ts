@@ -113,11 +113,17 @@ export interface ProjectIntakeItem {
   refusalRef?: IntakeRefusalRef;
 }
 
-/** A server-made name (`urls[2]`) and the source's position in the request. */
+/** A server-made name (`urls[2]`) and the source's position in the request (unknown for `urls[?]`). */
 export interface IntakeRefusalRef {
   name: string;
-  index: number;
+  index?: number;
 }
+
+/**
+ * A URL intake refusal whose ref could not be found (a run-creation lookup
+ * miss): fail closed with a name that carries nothing from the URL.
+ */
+const UNKNOWN_URL_REF: IntakeRefusalRef = { name: "urls[?]" };
 
 export type ProjectIntakeAudit = {
   ipAddress?: string | null;
@@ -221,7 +227,8 @@ export interface RejectedIntakeFile {
 /** What a client is told about a refused source named by an IntakeRefusalRef: fixed text per code. */
 export const REFERENCED_REFUSAL_MESSAGES: Record<RejectedIntakeFile["code"], string> = {
   unsupported_type: "The URL's content is not a supported file type",
-  remote_format_disabled: "The URL's content requires the full parser surface. Remote ingest is lean-only by default; direct upload the file or set REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true to opt into complex remote formats.",
+  // The operator setting that enables these formats is named in the log line only.
+  remote_format_disabled: "This file format can't be ingested from a URL on this deployment. Upload the file directly instead.",
   file_too_large: "The URL's content exceeds the upload size limit",
   unreadable_source: "The URL's content could not be read",
   rejected: "The URL's content could not be taken",
@@ -237,7 +244,7 @@ function referencedRefusal(
 ): RejectedIntakeFile {
   console.warn(`[intake] source_refused ref=${ref.name} code=${refusal.code} status=${refusal.statusCode} reason=${JSON.stringify(refusal.rawMessage)}`);
   return {
-    index: ref.index,
+    ...(ref.index === undefined ? {} : { index: ref.index }),
     filename: ref.name,
     statusCode: refusal.statusCode,
     code: refusal.code,
@@ -435,12 +442,14 @@ export function screenIntakeFile(
     !env.remoteIngestComplexFormatsEnabled &&
     isComplexRemoteIngestFormat(declared, filename)
   ) {
+    // The operator setting that enables these formats is named in the log only; clients get generic copy.
+    console.warn(`[intake] remote_format_disabled ${explainRemoteIngestBlock({ kind: remoteSourceLabels[kind], filename, mimeType: declared })}`);
     return {
       ok: false,
       filename,
       reason: "parser-surface",
       statusCode: 415,
-      message: explainRemoteIngestBlock({ kind: remoteSourceLabels[kind], filename, mimeType: declared }),
+      message: `${filename} needs complex-format parsing, which this deployment does not enable for ${remoteSourceLabels[kind]} sources. Upload the file directly instead.`,
     };
   }
   if (!isSupportedUploadMimeType(declared, filename)) {
@@ -680,8 +689,9 @@ export async function intakeIntoProject(
       } catch (error) {
         // One bad file never fails the request: take the rest and report this one.
         if (!(error instanceof ProjectIntakeError)) throw error;
-        if (item.refusalRef) {
-          rejected.push(referencedRefusal(item.refusalRef, {
+        const ref = item.refusalRef ?? (request.kind === "url-ingest" ? UNKNOWN_URL_REF : undefined);
+        if (ref) {
+          rejected.push(referencedRefusal(ref, {
             statusCode: error.statusCode,
             code: rejectionCode(error),
             rawMessage: error.message,
@@ -694,10 +704,13 @@ export async function intakeIntoProject(
         rejected.push({ filename, statusCode: error.statusCode, code: rejectionCode(error), message: error.message });
       }
     }
-    const unreadableRefusal = (filename: string, rawMessage: string, ref: IntakeRefusalRef | undefined): RejectedIntakeFile =>
-      ref
+    // A URL intake never falls back to the stored (URL-derived) filename and raw reason: a missed ref is urls[?].
+    const unreadableRefusal = (filename: string, rawMessage: string, found: IntakeRefusalRef | undefined): RejectedIntakeFile => {
+      const ref = found ?? (request.kind === "url-ingest" ? UNKNOWN_URL_REF : undefined);
+      return ref
         ? referencedRefusal(ref, { statusCode: 422, code: "unreadable_source", rawMessage })
         : { filename, statusCode: 422, code: "unreadable_source", message: rawMessage };
+    };
     if (files.length === 0) {
       if (request.mayBeEmpty) return null;
       if (rejected.length > 0) throw allRejectedError(rejected);
