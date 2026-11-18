@@ -193,7 +193,9 @@ export function clampRunLadder<T extends { quality: QualityMode; ladder?: Partia
   if (mayLoosen) return run;
   const ladder = tighterLadder(project?.ladder ?? null, run.ladder ?? null);
   const projectQuality = project?.quality ?? "auto";
-  const projectLimited = effectiveLadder({ quality: projectQuality, ladder: project?.ladder ?? null }).active;
+  // A project stored as `fast` (text only, Read scans off) limits too: its ladder is inactive, but a run on `auto` would
+  // turn on paid OCR reads the caller may not choose.
+  const projectLimited = projectQuality === "fast" || effectiveLadder({ quality: projectQuality, ladder: project?.ladder ?? null }).active;
   const rank: Record<QualityMode, number> = { fast: 0, auto: 1 };
   const quality = projectLimited && rank[run.quality] > rank[projectQuality] ? projectQuality : run.quality;
   return { ...run, quality, ladder };

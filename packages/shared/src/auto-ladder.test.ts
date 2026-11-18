@@ -135,6 +135,12 @@ describe("clampRunLadder (per-upload overrides)", () => {
     expect(clampRunLadder(tighter, project, false)).toEqual({ quality: "auto", ladder: { maxRung: "fast", maxEscalationShare: { aboveFast: 0.2 } } });
     // A non-editor cannot raise a Fastest project to Smartest through the ladder.
     expect(clampRunLadder({ quality: "auto" as const, ladder: { maxRung: "intelligent" as const } }, { quality: "auto", ladder: { maxRung: "ocr" } }, false).ladder?.maxRung).toBe("ocr");
+    // A non-editor cannot turn on Read scans (paid OCR) for a project stored as text only (`fast`); an editor can.
+    const scans = { quality: "auto" as const, ladder: { maxRung: "ocr" as const } };
+    expect(clampRunLadder(scans, { quality: "fast" }, false).quality).toBe("fast");
+    expect(clampRunLadder(scans, { quality: "fast" }, true)).toBe(scans);
+    // Read scans off through the ladder (maxRung fast) holds the same way: the run never reads above the fast rung.
+    expect(clampRunLadder(scans, { quality: "auto", ladder: { maxRung: "fast" } }, false).ladder?.maxRung).toBe("fast");
     // A Smartest project with no share cap keeps a Smartest run.
     expect(clampRunLadder({ quality: "auto" as const, ladder: { maxRung: "intelligent" as const } }, { quality: "auto", ladder: { maxRung: "intelligent" } }, false).ladder?.maxRung).toBe("intelligent");
   });
