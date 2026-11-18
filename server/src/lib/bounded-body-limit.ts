@@ -161,7 +161,7 @@ export function boundedBodyLimit(requestedMaxSize: number, onError: (c: Context)
     let size = 0;
     let reserved = 0;
     let released = false;
-    // Idempotent: on the request's end, or as soon as the client aborts.
+    // Idempotent: when the downstream handler completes or throws, or when the client aborts mid-read.
     const release = () => {
       if (released) return;
       released = true;
@@ -173,7 +173,8 @@ export function boundedBodyLimit(requestedMaxSize: number, onError: (c: Context)
       timedOut = true;
       void reader.cancel().catch(() => {});
     };
-    // A client that goes away cancels the pending read and frees its reservation at once.
+    // A client that goes away while the body is still being read cancels the read and frees its
+    // reservation at once. Removed at handoff: from then on the handler holds the chunks.
     const onAbort = () => {
       aborted = true;
       void reader.cancel().catch(() => {});
@@ -207,6 +208,9 @@ export function boundedBodyLimit(requestedMaxSize: number, onError: (c: Context)
         clearTimeout(idle);
         clearTimeout(deadline);
         reader.releaseLock();
+        // Handoff (or a refusal): an abort no longer refunds. The handler may still be holding the
+        // buffered chunks (awaiting storage, say), so the charge stays until it completes or throws.
+        request.signal.removeEventListener("abort", onAbort);
       }
       if (size === 0) {
         c.req.raw = withoutBody(request);
@@ -225,7 +229,7 @@ export function boundedBodyLimit(requestedMaxSize: number, onError: (c: Context)
       observedBytes.set(c.req.raw, size);
       await next();
     } finally {
-      request.signal.removeEventListener("abort", onAbort);
+      // The handler completed (or threw, or the request was refused): refund exactly what was charged.
       release();
     }
   };

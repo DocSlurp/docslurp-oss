@@ -160,6 +160,37 @@ describe("request body buffer budgets", () => {
     expect(bodyBudgetWarnings()).toEqual([]);
   });
 
+  it("keeps the charge after handoff until the handler finishes, even if the client aborts", async () => {
+    const app = new Hono();
+    app.use("*", nativeBodyLimit(8 * 1024 * 1024));
+    let finishStorage!: () => void;
+    const storage = new Promise<void>(resolve => { finishStorage = resolve; });
+    let handed!: () => void;
+    const handedOff = new Promise<void>(resolve => { handed = resolve; });
+    // The handler holds the buffered body while it awaits a slow storage call.
+    app.post("/v1/x", async c => { const body = await c.req.raw.arrayBuffer(); handed(); await storage; return c.text(String(body.byteLength)); });
+    const client = new AbortController();
+    const pending = app.request(new Request("http://localhost/v1/x", {
+      method: "POST", headers: { "content-type": "application/json" }, body: new Uint8Array(50 * 1024), signal: client.signal,
+    }));
+    await handedOff;
+    client.abort();
+    await settle();
+    expect(bufferedBodyBytes()).toBe(50 * 1024);
+    finishStorage();
+    await Promise.resolve(pending).catch(() => undefined);
+    expect(bufferedBodyBytes()).toBe(0);
+  });
+
+  it("refunds when the handler throws", async () => {
+    const app = new Hono();
+    app.use("*", nativeBodyLimit(8 * 1024 * 1024));
+    app.post("/v1/x", async c => { await c.req.raw.arrayBuffer(); throw new Error("handler crashed"); });
+    const response = await app.request("/v1/x", { method: "POST", headers: { "content-type": "application/json" }, body: new Uint8Array(50 * 1024) });
+    expect(response.status).toBe(500);
+    expect(bufferedBodyBytes()).toBe(0);
+  });
+
   it("releases an aborted request's reservation and cancels its pending read", async () => {
     const app = new Hono();
     app.use("*", nativeBodyLimit(8 * 1024 * 1024));
