@@ -24,6 +24,11 @@ export const mcpAuth: MiddlewareHandler = async (c, next) => {
   const header = c.req.header("Authorization");
   // Shared with the request body budget (lib/route-credentials.ts): one lookup per request.
   const resolution = await resolveRequestMcpCredential(c);
+  // Verification unavailable (the lookup failed or timed out): fail closed, and say it is retryable.
+  if (resolution.unavailable) {
+    c.header("Retry-After", "2");
+    return c.json({ error: "Credential verification is temporarily unavailable" }, 503);
+  }
   if (resolution.policyError) {
     // Browser keys never reach MCP; a legacy one without projects is refused like any browser key.
     const error = resolution.policyError;

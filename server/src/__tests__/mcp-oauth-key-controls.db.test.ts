@@ -22,7 +22,10 @@ beforeAll(async () => {
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../lib/auth.js", () => ({ auth: { api: { getSession: async () => null } }, appDbPool: {
-    query: async (query: string, parameters: string[]) => ({ rows: await sql.unsafe(query, parameters) }),
+    // pg's two call forms: (text, values) and a query config ({ text, values, query_timeout }).
+    query: async (query: string | { text: string; values?: string[] }, parameters?: string[]) => typeof query === "string"
+      ? ({ rows: await sql.unsafe(query, parameters) })
+      : ({ rows: await sql.unsafe(query.text, query.values ?? []) }),
   } }));
   oauth = await import("../services/mcp-oauth.js");
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'oauth-controls@example.test')`;

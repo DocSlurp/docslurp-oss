@@ -124,9 +124,14 @@ function sourceList(response: ProjectChatResponse): string {
   }).join("\n");
 }
 
-const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
+export const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
   const denied = await apiKeyAuth(c, async () => {});
   if (denied instanceof Response) {
+    // Key verification unavailable: an OpenAI-shaped retryable error, never "invalid key".
+    if (denied.status === 503) {
+      c.header("Retry-After", denied.headers.get("Retry-After") ?? "2");
+      return c.json(errorBody("API key verification is temporarily unavailable. Retry shortly.", "server_error", "service_unavailable"), 503);
+    }
     if (denied.status === 429) {
       const retryAfter = denied.headers.get("Retry-After");
       if (retryAfter) c.header("Retry-After", retryAfter);

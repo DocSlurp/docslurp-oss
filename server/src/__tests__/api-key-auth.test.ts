@@ -108,7 +108,7 @@ describe("apiKeyAuth middleware", () => {
     expect(validateApiKey).toHaveBeenCalledWith("my-secret-key", expect.objectContaining({
       origin: undefined,
       referer: undefined,
-    }), { recordUsage: false });
+    }), expect.objectContaining({ recordUsage: false }));
   });
 
   it("calls validateApiKey exactly once per request", async () => {
@@ -141,7 +141,7 @@ describe("apiKeyAuth middleware", () => {
     expect(validateApiKey).toHaveBeenCalledWith("dslp_client_key", expect.objectContaining({
       origin: "https://app.docslurp.dev",
       referer: "https://app.docslurp.dev/widget",
-    }), { recordUsage: false });
+    }), expect.objectContaining({ recordUsage: false }));
     expect(vi.mocked(validateApiKey).mock.calls.at(-1)![1]).toHaveProperty("ip");
   });
 });

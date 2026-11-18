@@ -3,6 +3,9 @@ import { ApiKeyPolicyError, actorHasAnyApiKeyScope, resolveApiKeyActor, type Api
 import { requestIp } from "./request-context.js";
 import { mcpResource, validateMcpToken } from "../services/mcp-oauth.js";
 import { recordApiKeyRequest } from "../services/api-key-usage.js";
+import { reportException } from "@docslurp/shared/error-reporting";
+import { apiKeyHasAnyScope } from "./api-key-authorization.js";
+import { SEARCH_SCOPES } from "./search-tiers.js";
 
 /**
  * Credential parsing and route admission for routes that authenticate a key
@@ -22,7 +25,18 @@ export type CredentialResolution = {
   policyError: ApiKeyPolicyError | null;
   /** The bearer the request presented ("" when none). */
   token: string;
+  /** The lookup failed or timed out: the credential could not be verified either way (fail closed, retryable). */
+  unavailable?: boolean;
 };
+
+/** The database lookup behind one credential check is cancelled after this long. */
+export const CREDENTIAL_LOOKUP_TIMEOUT_MS = 3_000;
+
+function unavailable(error: unknown, token: string, surface: string): CredentialResolution {
+  // The raw cause goes to telemetry; callers answer 503 (route auth) or fall back to public (body budget).
+  reportException(error, { surface: `credential-lookup:${surface}` });
+  return { actor: null, policyError: null, token, unavailable: true };
+}
 
 const resolutions = new WeakMap<Context, Map<string, Promise<CredentialResolution>>>();
 const usageRecorded = new WeakSet<Context>();
@@ -50,11 +64,11 @@ export function resolveRequestApiKey(c: Context, authorization: string | undefin
         origin: c.req.header("origin"),
         referer: c.req.header("referer") ?? c.req.header("referrer"),
         ip: requestIp(c),
-      }, { recordUsage: false });
+      }, { recordUsage: false, timeoutMs: CREDENTIAL_LOOKUP_TIMEOUT_MS });
       return { actor, policyError: null, token };
     } catch (error) {
       if (error instanceof ApiKeyPolicyError) return { actor: null, policyError: error, token };
-      throw error;
+      return unavailable(error, token, "api-key");
     }
   });
 }
@@ -64,8 +78,12 @@ export function resolveRequestMcpCredential(c: Context): Promise<CredentialResol
   const token = bearerToken(c.req.header("Authorization"));
   return memoized(c, `mcp:${token}`, async () => {
     if (token.startsWith("dsmcp_")) {
-      const key = await validateMcpToken(token, mcpResource(c.req.url), { ip: requestIp(c) });
-      return { actor: key ? { type: "apiKey", userId: key.userId, apiKey: key } : null, policyError: null, token };
+      try {
+        const key = await validateMcpToken(token, mcpResource(c.req.url), { ip: requestIp(c) }, { timeoutMs: CREDENTIAL_LOOKUP_TIMEOUT_MS });
+        return { actor: key ? { type: "apiKey", userId: key.userId, apiKey: key } : null, policyError: null, token };
+      } catch (error) {
+        return unavailable(error, token, "mcp-token");
+      }
     }
     if (!token || token.startsWith("dsmcp")) return { actor: null, policyError: null, token };
     return resolveRequestApiKey(c, `Bearer ${token}`);
@@ -97,7 +115,20 @@ export function mcpAdmits(actor: ApiKeyRequestActor | null): actor is ApiKeyRequ
   return actor !== null && actor.apiKey.keyType === "server";
 }
 
-/** The Algolia shim admits any key apiKeyAuth admits; its search scope is checked per index in the handler. */
-export function algoliaAdmits(actor: ApiKeyRequestActor | null): actor is ApiKeyRequestActor {
-  return actor !== null;
+/**
+ * Algolia search routes (query, queries, facet query, click and conversion
+ * events) admit a key with a search scope, browser keys included; the handler
+ * applies the same rule (requireSearchKey) and then the per-index scope.
+ */
+export function algoliaSearchAdmits(actor: ApiKeyRequestActor | null): actor is ApiKeyRequestActor {
+  return actor !== null && apiKeyHasAnyScope(actor.apiKey, [...SEARCH_SCOPES]);
+}
+
+/**
+ * Algolia admin routes (settings, synonyms and rules writes, import) admit only
+ * a server key with `projects:manage`; the handler applies the same rule
+ * (requireServerManageKey) and then project edit access.
+ */
+export function algoliaManageAdmits(actor: ApiKeyRequestActor | null): actor is ApiKeyRequestActor {
+  return actor !== null && actor.apiKey.keyType === "server" && apiKeyHasAnyScope(actor.apiKey, ["projects:manage"]);
 }

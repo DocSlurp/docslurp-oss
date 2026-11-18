@@ -637,13 +637,16 @@ export interface ValidatedKey {
 export async function validateApiKey(
   rawKey: string,
   requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
-  /** `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts). */
-  options: { recordUsage?: boolean } = {},
+  /**
+   * `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts).
+   * `timeoutMs` cancels the lookup on the server after that long (it then rejects with 57014).
+   */
+  options: { recordUsage?: boolean; timeoutMs?: number } = {},
 ): Promise<ValidatedKey | null> {
   const keyHash = hashKey(rawKey);
 
   // An expired key (including the old key after a rotation overlap) never authenticates.
-  const [row] = await sql<ApiKeyRow[]>`
+  const query = sql<ApiKeyRow[]>`
     select * from api_keys
     where key_hash = ${keyHash} and revoked_at is null
       and (expires_at is null or expires_at > now())
@@ -652,6 +655,14 @@ export async function validateApiKey(
         where om.org_id = api_keys.org_id and om.user_id = api_keys.user_id
       )
   `;
+  const cancel = options.timeoutMs ? setTimeout(() => { void query.cancel(); }, options.timeoutMs) : undefined;
+  let rows: ApiKeyRow[];
+  try {
+    rows = await query;
+  } finally {
+    clearTimeout(cancel);
+  }
+  const [row] = rows;
 
   // api_keys.org_id is NOT NULL (0125); refusing a key without one anyway keeps this fail-closed if that ever changes.
   if (!row || !row.org_id) return null;

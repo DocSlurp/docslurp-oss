@@ -28,6 +28,11 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
 
   // Shared with the request body budget (lib/route-credentials.ts): one lookup per request.
   const resolution = await resolveRequestApiKey(c, header);
+  // Verification unavailable (the lookup failed or timed out): fail closed, and say it is retryable.
+  if (resolution.unavailable) {
+    c.header("Retry-After", "2");
+    return middlewareErrorResponse(c, 503, "unavailable", "API key verification is temporarily unavailable");
+  }
   if (resolution.policyError) {
     c.set("apiKeyPolicyRefusal", resolution.policyError);
     return middlewareErrorResponse(c, 403, resolution.policyError.code, resolution.policyError.message);

@@ -70,7 +70,7 @@ export function syntheticApiKeySessionUser(apiKey: ValidatedKey): SessionUser {
 export async function resolveApiKeyActor(
   authorization: string | undefined,
   requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
-  options: { recordUsage?: boolean } = {},
+  options: { recordUsage?: boolean; timeoutMs?: number } = {},
 ): Promise<ApiKeyRequestActor | null> {
   if (!authorization?.startsWith("Bearer ")) {
     return null;
@@ -83,7 +83,7 @@ export async function resolveApiKeyActor(
   // refused here (RFC 8707).
   if (raw.startsWith("dsmcp")) return null;
   if (raw.startsWith("dscli")) {
-    const oauthKey = await validateOAuthApiToken(raw, requestContext);
+    const oauthKey = await validateOAuthApiToken(raw, requestContext, { timeoutMs: options.timeoutMs });
     return oauthKey ? { type: "apiKey", userId: oauthKey.userId, apiKey: oauthKey } : null;
   }
   const apiKey = await validateApiKey(raw, requestContext, options);

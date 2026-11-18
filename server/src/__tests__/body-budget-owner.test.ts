@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { validateMcpToken, validateApiKey, recordApiKeyRequest } = vi.hoisted(() => ({ validateMcpToken: vi.fn(), validateApiKey: vi.fn(), recordApiKeyRequest: vi.fn() }));
+const { validateMcpToken, validateApiKey, validateOAuthApiToken, recordApiKeyRequest } = vi.hoisted(() => ({ validateMcpToken: vi.fn(), validateApiKey: vi.fn(), validateOAuthApiToken: vi.fn(async () => null), recordApiKeyRequest: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: Object.assign(vi.fn(), { json: (value: unknown) => value, array: (value: unknown) => value }) }));
 // The real request-actor and route-credentials code; only the key stores are faked.
-vi.mock("../services/mcp-oauth.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/mcp-oauth.js")>(), validateMcpToken, validateOAuthApiToken: vi.fn(async () => null) }));
+vi.mock("../services/mcp-oauth.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/mcp-oauth.js")>(), validateMcpToken, validateOAuthApiToken }));
 vi.mock("../services/api-keys.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/api-keys.js")>(), validateApiKey }));
 vi.mock("../services/api-key-usage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../services/api-key-usage.js")>(), recordApiKeyRequest }));
 
@@ -15,6 +15,11 @@ const { registerBodyBudgetCredentialResolver } = await import("../lib/body-budge
 const { PREVERIFY_TIMEOUT_MS, verifyBodyBudgetCredential } = await import("../lib/body-budget-credentials.js");
 const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const { mcpResource } = await import("../services/mcp-oauth.js");
+const { mcpAuth } = await import("../middleware/mcp-auth.js");
+const { compatibleChatAuth } = await import("../routes/chat-completions.js");
+const { algoliaCompatRoutes } = await import("../routes/algolia-compat.js");
+const { PREVERIFY_MAX_CONCURRENT, bodyBudgetFallbackCounts, bodyBudgetPreverifyInFlight } = await import("../lib/body-budget-credentials.js");
+const { requestContextMiddleware } = await import("../lib/request-context.js");
 
 let saved: ReturnType<typeof bodyReadSettings>;
 beforeEach(() => {
@@ -95,13 +100,13 @@ describe("the production credential check: the route's own verifier and admissio
     return { req: { url: request.url, path, method, header: (name: string) => request.headers.get(name) ?? undefined }, env: {} } as never;
   };
   const key = (overrides: Record<string, unknown>) => ({
-    keyId: "k", userId: "u", orgId: "org-k", keyType: "server", allowedDomains: [], scopes: ["search", "chat"], rateLimits: [], projectIds: [], ...overrides,
+    keyId: "k", userId: "u", orgId: "org-k", keyType: "server", allowedDomains: [], scopes: ["search:deep", "chat"], rateLimits: [], projectIds: [], ...overrides,
   });
 
   it("charges public a search-only browser key on chat, a browser key on MCP and an MCP token on chat", async () => {
-    validateApiKey.mockResolvedValue(key({ keyType: "client", scopes: ["search"] }));
+    validateApiKey.mockResolvedValue(key({ keyType: "client", scopes: ["search:deep"] }));
     expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer dslp_pub_search" }))).toBeNull();
-    validateApiKey.mockResolvedValue(key({ keyType: "client", scopes: ["search", "chat"] }));
+    validateApiKey.mockResolvedValue(key({ keyType: "client", scopes: ["search:deep", "chat"] }));
     expect(await verifyBodyBudgetCredential(context("POST", "/v1/mcp", { Authorization: "Bearer dslp_pub_browser" }))).toBeNull();
     validateMcpToken.mockResolvedValue(key({}));
     expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer dsmcp_token" }))).toBeNull();
@@ -113,7 +118,7 @@ describe("the production credential check: the route's own verifier and admissio
     validateMcpToken.mockResolvedValue(key({ orgId: "org-m", keyId: "k-m" }));
     expect(await verifyBodyBudgetCredential(context("POST", "/v1/mcp", { Authorization: "Bearer dsmcp_token" }))).toEqual({ orgId: "org-m", keyId: "k-m" });
     // Validated against the MCP resource, exactly as mcp-auth validates it.
-    expect(validateMcpToken).toHaveBeenCalledWith("dsmcp_token", mcpResource("http://localhost/v1/mcp"), expect.anything());
+    expect(validateMcpToken).toHaveBeenCalledWith("dsmcp_token", mcpResource("http://localhost/v1/mcp"), expect.anything(), { timeoutMs: expect.any(Number) });
     expect(await verifyBodyBudgetCredential(context("POST", "/compat/algolia/1/indexes/docs/query", { "X-Algolia-API-Key": "dslp_priv_algolia" }))).toEqual({ orgId: "org-k", keyId: "k" });
   });
 
@@ -134,17 +139,21 @@ describe("the production credential check: the route's own verifier and admissio
     expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer unknown" }))).toBeNull();
     validateApiKey.mockRejectedValue(Object.assign(new Error("ip"), { code: "api_key_ip_not_allowed" }));
     expect(await verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer refused" }))).toBeNull();
-    for (const call of validateApiKey.mock.calls) expect(call[2]).toEqual({ recordUsage: false });
+    for (const call of validateApiKey.mock.calls) expect(call[2]).toMatchObject({ recordUsage: false, timeoutMs: expect.any(Number) });
     expect(recordApiKeyRequest).not.toHaveBeenCalled();
   });
 
   it("gives up after its wait bound (public), without failing the request", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      validateApiKey.mockReturnValue(new Promise(() => {}));
+      let settle!: () => void;
+      validateApiKey.mockReturnValue(new Promise((resolve) => { settle = () => resolve(null); }));
       const pending = verifyBodyBudgetCredential(context("POST", "/v1/chat/completions", { Authorization: "Bearer slow" }));
       await vi.advanceTimersByTimeAsync(PREVERIFY_TIMEOUT_MS);
       expect(await pending).toBeNull();
+      // Let the lookup settle, releasing its slot for later tests.
+      settle();
+      await vi.advanceTimersByTimeAsync(0);
     } finally {
       vi.useRealTimers();
     }
@@ -175,3 +184,110 @@ describe("the production credential check: the route's own verifier and admissio
     expect(validateApiKey).not.toHaveBeenCalled();
   });
 });
+
+describe("route auth end to end: one lookup, one usage record (none for OAuth tokens)", () => {
+  const key = (overrides: Record<string, unknown> = {}) => ({
+    keyId: "k", userId: "u", orgId: "org-k", keyType: "server", allowedDomains: [], scopes: ["chat", "search:deep"], rateLimits: [], projectIds: [], ...overrides,
+  });
+  /** The production order: the request context, the route's body limit, then the route's own auth. */
+  function routeApp(path: string, auth: Parameters<Hono["use"]>[1], limit: "v1" | "mcp" | "none" | "after-auth" = "v1") {
+    registerBodyBudgetCredentialResolver(verifyBodyBudgetCredential);
+    const hono = new Hono();
+    hono.use("*", requestContextMiddleware);
+    const limiter = limit === "mcp" ? nativeBodyLimit(1024 * 1024) : v1BodyLimit({ maxMultipartUploadBytes: 25 * 1024 * 1024 });
+    if (limit !== "none" && limit !== "after-auth") hono.use(path, limiter);
+    hono.use(path, auth);
+    if (limit === "after-auth") hono.use(path, limiter);
+    hono.post(path, c => c.text("ok"));
+    return (headers: Record<string, string>) => hono.request(path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: "{}" });
+  }
+
+  it("mcpAuth: an MCP token (no usage record) and a server key (one record), one lookup each", async () => {
+    const send = routeApp("/v1/mcp", mcpAuth, "mcp");
+    validateMcpToken.mockResolvedValue(key());
+    expect((await send({ Authorization: "Bearer dsmcp_token" })).status).toBe(200);
+    expect(validateMcpToken).toHaveBeenCalledTimes(1);
+    expect(recordApiKeyRequest).not.toHaveBeenCalled();
+    validateApiKey.mockResolvedValue(key());
+    expect((await send({ Authorization: "Bearer dslp_priv_server" })).status).toBe(200);
+    expect(validateApiKey).toHaveBeenCalledTimes(1);
+    expect(recordApiKeyRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("compatibleChatAuth: a CLI token (no usage record) and an API key (one record), one lookup each", async () => {
+    const send = routeApp("/v1/chat/completions", compatibleChatAuth);
+    validateOAuthApiToken.mockResolvedValue(key() as never);
+    expect((await send({ Authorization: "Bearer dscli_token" })).status).toBe(200);
+    expect(validateOAuthApiToken).toHaveBeenCalledTimes(1);
+    expect(recordApiKeyRequest).not.toHaveBeenCalled();
+    validateApiKey.mockResolvedValue(key());
+    expect((await send({ Authorization: "Bearer dslp_priv_chat" })).status).toBe(200);
+    expect(validateApiKey).toHaveBeenCalledTimes(1);
+    expect(recordApiKeyRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Algolia shim: X-Algolia-API-Key, one lookup and one record, refused without a search scope", async () => {
+    registerBodyBudgetCredentialResolver(verifyBodyBudgetCredential);
+    const hono = new Hono();
+    hono.use("*", requestContextMiddleware);
+    hono.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
+    hono.route("/compat/algolia", algoliaCompatRoutes);
+    validateApiKey.mockResolvedValue(key({ scopes: ["chat"] }));
+    const response = await hono.request("/compat/algolia/1/indexes/w/query", { method: "POST", headers: { "content-type": "application/json", "X-Algolia-API-Key": "dslp_priv_chat" }, body: JSON.stringify({ query: "a" }) });
+    expect(response.status).toBe(403);
+    expect(validateApiKey).toHaveBeenCalledTimes(1);
+    expect(recordApiKeyRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("memoizes when the limiter is absent or runs after auth: still one lookup and one record", async () => {
+    validateApiKey.mockResolvedValue(key());
+    for (const limit of ["none", "after-auth"] as const) {
+      validateApiKey.mockClear(); recordApiKeyRequest.mockClear();
+      expect((await routeApp("/v1/chat/completions", compatibleChatAuth, limit)({ Authorization: "Bearer dslp_priv_chat" })).status).toBe(200);
+      expect({ limit, lookups: validateApiKey.mock.calls.length, records: recordApiKeyRequest.mock.calls.length }).toEqual({ limit, lookups: 1, records: 1 });
+    }
+  });
+
+  it("fails closed with a retryable 503 when verification is unavailable, and the budget falls back to public", async () => {
+    validateApiKey.mockRejectedValue(Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }));
+    const before = bodyBudgetFallbackCounts().unavailable;
+    const chat = await routeApp("/v1/chat/completions", compatibleChatAuth)({ Authorization: "Bearer dslp_priv_chat" });
+    expect(chat.status).toBe(503);
+    expect(chat.headers.get("Retry-After")).toBeTruthy();
+    expect(await chat.json()).toMatchObject({ error: { code: "service_unavailable" } });
+    expect(bodyBudgetFallbackCounts().unavailable).toBe(before + 1);
+    const mcp = await routeApp("/v1/mcp", mcpAuth, "mcp")({ Authorization: "Bearer dslp_priv_server" });
+    expect(mcp.status).toBe(503);
+    expect(recordApiKeyRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("pre-check concurrency", () => {
+  it("allows 64 lookups at once, holds each slot until its lookup settles, and counts busy fallbacks", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let release!: () => void;
+      const stalled = new Promise<null>((resolve) => { release = () => resolve(null); });
+      validateApiKey.mockReturnValue(stalled);
+      const context = (i: number) => {
+        const request = new Request("http://localhost/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer dslp_priv_${i}` } });
+        return { req: { url: request.url, path: "/v1/chat/completions", method: "POST", header: (name: string) => request.headers.get(name) ?? undefined }, env: {} } as never;
+      };
+      const waiting = Array.from({ length: PREVERIFY_MAX_CONCURRENT }, (_, i) => verifyBodyBudgetCredential(context(i)));
+      expect(bodyBudgetPreverifyInFlight()).toBe(PREVERIFY_MAX_CONCURRENT);
+      const busyBefore = bodyBudgetFallbackCounts().busy;
+      expect(await verifyBodyBudgetCredential(context(99))).toBeNull();
+      expect(bodyBudgetFallbackCounts().busy).toBe(busyBefore + 1);
+      // The callers stop waiting after the bound, but the slots stay held while the lookups run.
+      await vi.advanceTimersByTimeAsync(PREVERIFY_TIMEOUT_MS);
+      for (const outcome of await Promise.all(waiting)) expect(outcome).toBeNull();
+      expect(bodyBudgetPreverifyInFlight()).toBe(PREVERIFY_MAX_CONCURRENT);
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bodyBudgetPreverifyInFlight()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
