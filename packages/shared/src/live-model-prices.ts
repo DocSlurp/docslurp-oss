@@ -257,6 +257,10 @@ let timer: ReturnType<typeof setInterval> | null = null;
 
 /** LIVE_MODEL_PRICES=off: price receipt-less usage from the hardcoded tables only. */
 export function liveModelPricesDisabled(env: Record<string, string | undefined> = process.env): boolean {
+  // Private model mode (DOCSLURP_MODEL_MODE, private-model-mode.ts: any value but unset or `hosted` reads as private)
+  // calls no hosted provider, so nothing fetches their price lists either.
+  const mode = env.DOCSLURP_MODEL_MODE?.trim().toLowerCase();
+  if (mode && mode !== "hosted") return true;
   return ["0", "false", "off", "no"].includes(env.LIVE_MODEL_PRICES?.trim().toLowerCase() ?? "");
 }
 
