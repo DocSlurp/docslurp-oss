@@ -1547,6 +1547,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         bound.signal.throwIfAborted();
         const response = await fetchImpl(`${apiUrl}${path}`, {
           ...init,
+          // A body-less POST goes out with Content-Length: 0; without it (fetch's default for no body) the API answers 400.
+          body: init.body ?? (/^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") ? "" : undefined),
           credentials: init.credentials ?? (hasBearer ? "omit" : "include"),
           headers,
           signal: bound.signal,

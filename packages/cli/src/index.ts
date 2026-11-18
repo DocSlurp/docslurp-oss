@@ -418,7 +418,9 @@ async function apiFetch(
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${await auth.token({ forceRefresh })}`);
     headers.set("X-DocSlurp-Client", cliClientTag);
-    return fetch(`${apiUrl}${pathname}`, { ...init, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
+    // A body-less POST goes out with Content-Length: 0. Without it (fetch's default for no body) the production API answers 400.
+    const body = init.body ?? (/^(POST|PUT|PATCH)$/i.test(init.method ?? "GET") ? "" : undefined);
+    return fetch(`${apiUrl}${pathname}`, { ...init, body, headers, signal: AbortSignal.timeout(Math.max(1, Math.ceil(requestTimeoutMs))) });
   };
   const response = await send(false);
   // A stored login refreshes once if the server refused its access token (for example after a clock skew).
