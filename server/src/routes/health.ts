@@ -1,5 +1,4 @@
 import { realtimeMetricLines } from "../realtime/metrics.js";
-import { runReadsPagesSql } from "@docslurp/shared";
 import { Hono } from "hono";
 import { timingSafeEqual } from "node:crypto";
 
@@ -35,9 +34,6 @@ type CostMetricRow = {
   total_cost_cents: number;
 };
 
-type QueueMetricRow = WorkerScalerSnapshot;
-
-type QueueMetrics = QueueMetricRow;
 
 const SCALER = resolveWorkerScalerConfig();
 const SCALER_QUERY = resolveWorkerScalerQueryParams();
@@ -79,7 +75,7 @@ export function arrivedThroughPublicEdge(header: (name: string) => string | unde
   return Boolean(process.env.FLY_APP_NAME) && Boolean(header("fly-client-ip")?.trim());
 }
 
-function appendQueueMetricLines(lines: string[], queue: QueueMetrics): void {
+function appendQueueMetricLines(lines: string[], queue: WorkerScalerSnapshot): void {
   lines.push(...formatWorkerScalerMetricLines(queue, SCALER, SCALER_QUERY));
 }
 
@@ -97,86 +93,15 @@ function wait(ms: number): Promise<void> {
 }
 
 async function buildPrometheusPayload(): Promise<string> {
-  const [runsByStatus, queueRows, stageRows, costRows] = await Promise.all([
+  const [runsByStatus, queue, stageRows, costRows] = await Promise.all([
     sql<RunMetricRow[]>`
       select status, count(*)::int as count
       from project_runs
       group by status
       order by status
     `,
-    sql<QueueMetricRow[]>`
-      select
-        count(*) filter (
-          where status = 'queued'
-            and coalesce(control_state, '') not in ('paused', 'cancelled')
-        )::int as queue_depth,
-        coalesce(sum(total_documents) filter (
-          where status = 'queued'
-            and coalesce(control_state, '') not in ('paused', 'cancelled')
-        ), 0)::int as queued_documents,
-        coalesce(sum(pages_total) filter (
-          where status = 'queued'
-            and coalesce(control_state, '') not in ('paused', 'cancelled')
-        ), 0)::int as queued_pages,
-        (select count(*)::int from page_work_tasks p join project_runs r on r.id=p.run_id
-          where p.status in ('queued','processing') and r.status='processing'
-          and coalesce(r.control_state,'') not in ('paused','cancel_requested','cancelled')) as pending_page_tasks,
-        (select coalesce(json_agg(d), '[]'::json) from (
-          select org_key, max(slots)::int as slots, sum(greatest(1, least(fanout_cap, page_demand)))::int as demand
-          from (
-            select coalesce(r.org_id, 'project:' || r.project_id) as org_key,
-              coalesce(o.worker_slots, ${SCALER_QUERY.defaultOrgSlots}) as slots,
-              least(${SCALER_QUERY.pageFanout}, coalesce(o.worker_slots, ${SCALER_QUERY.defaultOrgSlots}), 128) as fanout_cap,
-              greatest(
-                (select count(*) from page_work_tasks p where p.run_id = r.id and p.status in ('queued','processing')),
-                case when ${sql.unsafe(runReadsPagesSql("r"))}
-                  and coalesce((r.pipeline->>'maxCostCents')::numeric,0)=0
-                  and not exists(select 1 from project_run_stage_states s where s.run_id=r.id and s.stage_name='vision-extract' and s.status='completed')
-                then r.pages_total else 0 end
-              ) as page_demand
-            from project_runs r
-            left join organizations o on o.id = r.org_id
-            where (r.status = 'queued' and coalesce(r.control_state,'') not in ('paused','cancelled'))
-              or (r.status = 'processing' and coalesce(r.control_state,'') not in ('paused','cancel_requested','cancelled')
-                and coalesce(r.lease_expires_at, now()) >= now())
-          ) runs
-          group by org_key
-        ) d) as org_demand,
-        count(*) filter (
-          where status = 'processing'
-        )::int as processing_runs,
-        coalesce(sum(total_documents) filter (
-          where status = 'processing'
-            and coalesce(control_state, '') not in ('paused', 'cancel_requested', 'cancelled')
-            and coalesce(lease_expires_at, now()) >= now()
-        ), 0)::int as processing_documents,
-        coalesce(sum(pages_total) filter (
-          where status = 'processing'
-            and coalesce(control_state, '') not in ('paused', 'cancel_requested', 'cancelled')
-            and coalesce(lease_expires_at, now()) >= now()
-        ), 0)::int as processing_pages,
-        count(*) filter (
-          where status = 'processing'
-            and coalesce(lease_expires_at, to_timestamp(0)) < now()
-        )::int as stale_leases,
-        count(*) filter (
-          where status = 'processing'
-            and coalesce(control_state, '') not in ('paused', 'cancel_requested', 'cancelled')
-            and coalesce(lease_expires_at, now()) >= now()
-        )::int as worker_active,
-        coalesce(sum(pages_processed), 0)::int as pages_processed_total,
-        extract(epoch from (
-          now() - min(created_at) filter (
-            where status = 'queued'
-              and coalesce(control_state, '') not in ('paused', 'cancelled')
-          )
-        )) as oldest_queued_run_age_seconds,
-        extract(epoch from min(created_at) filter (
-          where status = 'queued'
-            and coalesce(control_state, '') not in ('paused', 'cancelled')
-        )) as oldest_queued_run_created_at_seconds
-      from project_runs
-    `,
+    // The scaler endpoint's snapshot, so both report one queue view and one target.
+    queryWorkerScalerSnapshot(sql, SCALER_QUERY),
     sql<StageMetricRow[]>`
       select
         stage_name,
@@ -190,27 +115,10 @@ async function buildPrometheusPayload(): Promise<string> {
     spendByProviderModel() as Promise<CostMetricRow[]>
   ]);
 
-  const queue = queueRows[0] ?? {
-    queue_depth: 0,
-    queued_documents: 0,
-    queued_pages: 0,
-    processing_runs: 0,
-    processing_documents: 0,
-    processing_pages: 0,
-    stale_leases: 0,
-    worker_active: 0,
-    pages_processed_total: 0,
-    oldest_queued_run_age_seconds: null,
-    oldest_queued_run_created_at_seconds: null
-  };
-
   const lines = [
     "# HELP docslurp_runs_total Total runs by status.",
     "# TYPE docslurp_runs_total gauge",
     ...(runsByStatus ?? []).map((row) => metricLine("docslurp_runs_total", Number(row.count ?? 0), { status: row.status })),
-    "# HELP docslurp_pages_processed_total Total processed pages across all runs.",
-    "# TYPE docslurp_pages_processed_total counter",
-    metricLine("docslurp_pages_processed_total", Number(queue.pages_processed_total ?? 0)),
     "# HELP docslurp_stage_duration_seconds_p50 P50 stage duration in seconds.",
     "# TYPE docslurp_stage_duration_seconds_p50 gauge",
     ...(stageRows ?? []).map((row) =>

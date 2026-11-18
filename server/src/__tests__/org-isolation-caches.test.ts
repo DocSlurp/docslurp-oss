@@ -82,6 +82,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "server/src/services/web/service.ts#cache": { class: "org", why: "orgScopedCacheKey(org, project, user, input); org-less calls skip it" },
   "server/src/services/web/service.ts#orgCalls": { class: "org", why: "rate counters per org" },
   "worker/src/db/superseded-purge.ts#pendingHistoryPrunes": { class: "tenant-id", why: "per table URI" },
+  "worker/src/extractors/plugins.ts#runBacklogCache": { class: "org", why: "orgScopedCacheKey(org, run); a count of the run's own queued page tasks, no content" },
   "worker/src/graph/legacy-keys.ts#healed": { class: "tenant-id", why: "once-per-project migration guard" },
   "worker/src/lib/unicode-text.ts#segmenters": { class: "operational", why: "Intl.Segmenter per locale" },
   "worker/src/lib/vision-attempt-guard.ts#pendingOverruns": { class: "per-job", why: "overrun requests per run id" },

@@ -27,7 +27,8 @@ import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security
 import { fromEnv } from "../config.js";
 import { Store } from "../db/store.js";
 import { Maintenance } from "../db/maintenance.js";
-import { authorizeComputeCohort, computeAllocationAdmission, loadComputeObservations } from "../db/compute-fleet-store.js";
+import { authorizeComputeCohort, computeAllocationAdmission, computeSpendCents, loadComputeObservations } from "../db/compute-fleet-store.js";
+import { queuedRunPageTasks } from "../db/page-task-store.js";
 import { computeJobAdmission } from "../db/compute-job-store.js";
 import { flushPendingCreditDebits } from "../db/usage-event-store.js";
 import { tryMaintenanceLease } from "../db/worker-slot-store.js";
@@ -46,7 +47,7 @@ import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { assertWorkerOperatorConfig } from "../lib/operator-config.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
 import { initializeCapabilityPools } from "../lib/capability-pools.js";
-import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer, setExtractorComputeAllocationAdmission, setExtractorComputeJobAdmission } from "../extractors/plugins.js";
+import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer, setExtractorComputeAllocationAdmission, setExtractorComputeJobAdmission, setExtractorComputeSpend, setExtractorRunBacklog } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
 import { assertOcrConfiguration } from "../ocr/mode.js";
@@ -177,6 +178,8 @@ async function main(): Promise<void> {
   setExtractorComputeCohortAuthorizer((scope) => authorizeComputeCohort(store.stageSql, scope));
   setExtractorComputeAllocationAdmission(computeAllocationAdmission(store.stageSql));
   setExtractorComputeJobAdmission(computeJobAdmission(store.stageSql));
+  setExtractorComputeSpend((query) => computeSpendCents(store.stageSql, query));
+  setExtractorRunBacklog((scope) => queuedRunPageTasks(store.stageSql, scope));
   await loadExtractorPlugins(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
