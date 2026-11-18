@@ -360,7 +360,27 @@ For a custom HTTP client:
 4. Poll the session for `result`, then follow `result.run.id`.
 
 The server verifies the stored parts. It cannot infer EOF from an idle stream
-or from its current byte total. The `/confirm` endpoint remains available as an
+or from its current byte total.
+
+### Completing many files
+
+`/files/complete` also takes a batch: `{ "files": [{ "fileId": "A" }, { "fileId": "B", "sizeBytes": 12345 }] }`,
+up to 100 entries, each `fileId` once. The server finalizes the batch under one
+session lock, several files at a time, and answers per file:
+
+```json
+{ "ok": false, "completedCount": 1, "failedCount": 1, "sessionComplete": false,
+  "files": [{ "fileId": "A", "status": "completed" },
+            { "fileId": "B", "status": "failed", "error": { "statusCode": 409, "code": "rejected", "message": "..." } }] }
+```
+
+A file's failure carries the status the single-file call would have answered;
+only a session-level problem (not found, closed, no longer permitted, or `409`
+`upload_session_busy` while another request holds the session) fails the whole
+request. Repeat a busy request shortly. While a client is completing files, the
+background reconciler leaves the session alone for 30 seconds after each call;
+the call that completes the last file makes the session ready at once. The SDK's
+`completeUploadFiles()` splits larger lists into batches. The `/confirm` endpoint remains available as an
 explicit fallback, but automatic ingestion does not require it.
 
 ### Matching files, partial acceptance and idempotency

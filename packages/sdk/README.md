@@ -456,6 +456,7 @@ Environment variables are read once, when the client is created, and only on the
 | `getUploadSession(id, options?)` | Session status, accepted `result` and refreshed transfer URLs | `ingest` |
 | `signUploadParts(id, fileId, partNumbers, options?)` | Signed URLs for requested multipart parts | `ingest` |
 | `completeUploadFile(id, input, options?)` | Stored-file verification; required at EOF for custom unknown-size transfers | `ingest` |
+| `completeUploadFiles(id, files, options?)` | Completes many files in batches of 100 with per-file results; falls back to one call per file on older servers | `ingest` |
 | `completeUploadSession(id, options?)` | Explicit fallback for ingestion acceptance; normal uploads finalize automatically | `ingest` |
 | `abortUploadSession(id, options?)` | Cleanup confirmation | `ingest` |
 | `getRun(runId, request?)` | Run record (not the progress envelope) | `ingest`, `artifacts` or any search scope |

@@ -58,6 +58,31 @@ describe("automatic upload reconciler", () => {
     expect(mocks.cleanup).toHaveBeenCalledWith("session-1");
     log.mockRestore();
   });
+  it("skips sessions a client is completing, except expired ones", async () => {
+    await reconcileDirectUploads();
+    const [selection] = mocks.sql.mock.calls.find(([strings]) => strings.join("").includes("select id, user_id, status"))!;
+    expect(selection.join("")).toContain("(client_finalizing_until is null or client_finalizing_until <= now() or expires_at < now())");
+  });
+  it("finalizes a session's files a few at a time, attempting every file before acting on a failure", async () => {
+    const log = vi.spyOn(console,"error").mockImplementation(() => {});
+    const files = Array.from({ length: 20 }, (_, i) => ({ id: `file-${i}` }));
+    mocks.load.mockResolvedValue({ session:{status:"pending"}, files });
+    let inFlight = 0, peak = 0;
+    mocks.finalize.mockImplementation(async (file: { id: string }) => {
+      inFlight++; peak = Math.max(peak, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      inFlight--;
+      if (file.id === "file-3") throw new ProjectIntakeError("size mismatch", 400);
+      return true;
+    });
+    await reconcileDirectUploads();
+    expect(mocks.finalize).toHaveBeenCalledTimes(20);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+    expect(queryValues("set status = 'failed'")).toHaveLength(1);
+    expect(mocks.confirm).not.toHaveBeenCalled();
+    log.mockRestore();
+  });
   it("does not overlap sweeps while a provider operation is pending", async () => {
     let resume!: () => void;
     mocks.finalize.mockReturnValueOnce(new Promise(resolve => { resume = () => resolve(true); }));

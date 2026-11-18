@@ -1329,6 +1329,13 @@ export type UploadSession = {
   rejected?: RejectedUpload[];
 };
 export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
+/** One file's answer from a batched completion: completed, or failed with the status the single-file call would have answered. */
+export type UploadFileCompletion =
+  | { fileId: string; status: "completed" }
+  | { fileId: string; status: "failed"; error: { statusCode: number; code: string; message: string } };
+export type CompleteUploadFilesResult = { ok: boolean; files: UploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean };
+/** The most files the server finalizes in one `files/complete` call; `completeUploadFiles` splits larger lists. */
+export const UPLOAD_COMPLETE_BATCH_SIZE = 100;
 
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
@@ -2887,6 +2894,46 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
     completeUploadFile(sessionId: string, input: CompleteUploadFileInput, options?: RequestOptions): Promise<{ ok: boolean }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`, jsonRequest("POST", input), options);
+    },
+    /**
+     * Completes many files of one session in batches of up to 100, one server call per batch. Good files complete and each
+     * bad one is reported in `files` (never thrown); a session-level failure (not found, closed, busy) throws. Against a
+     * server without batch support, falls back to one `completeUploadFile` call per file.
+     */
+    async completeUploadFiles(sessionId: string, files: CompleteUploadFileInput[], options?: RequestOptions): Promise<CompleteUploadFilesResult> {
+      const path = `/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/complete`;
+      const results: UploadFileCompletion[] = [];
+      let sessionComplete = false;
+      let batched = true;
+      for (let start = 0; start < files.length; start += UPLOAD_COMPLETE_BATCH_SIZE) {
+        const chunk = files.slice(start, start + UPLOAD_COMPLETE_BATCH_SIZE);
+        if (batched) {
+          try {
+            const answer = await request<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: chunk }), options);
+            if (Array.isArray(answer.files)) {
+              results.push(...answer.files);
+              sessionComplete = Boolean(answer.sessionComplete);
+              continue;
+            }
+          } catch (error) {
+            // An older server validates only the single-file body and refuses `{ files }` with 400.
+            if (!(error instanceof DocSlurpApiError && error.status === 400 && start === 0)) throw error;
+          }
+          batched = false;
+        }
+        for (const file of chunk) {
+          try {
+            await request(path, jsonRequest("POST", file), options);
+            results.push({ fileId: file.fileId, status: "completed" });
+          } catch (error) {
+            // A busy or closed session is the caller's to retry or abandon, not a per-file answer.
+            if (!(error instanceof DocSlurpApiError) || ![400, 404, 409, 413, 415].includes(error.status) || error.code === "upload_session_busy") throw error;
+            results.push({ fileId: file.fileId, status: "failed", error: { statusCode: error.status, code: error.code ?? "rejected", message: error.message } });
+          }
+        }
+      }
+      const completedCount = results.filter(result => result.status === "completed").length;
+      return { ok: completedCount === results.length, files: results, completedCount, failedCount: results.length - completedCount, sessionComplete };
     },
     signUploadParts(sessionId: string, fileId: string, partNumbers: number[], options?: RequestOptions): Promise<{ parts: Array<{ partNumber: number; url: string }> }> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}/parts/sign`, jsonRequest("POST", { partNumbers }), options);

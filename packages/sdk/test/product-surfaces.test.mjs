@@ -46,3 +46,37 @@ test("explicit session lifecycle preserves file metadata and separates completio
   ]);
   assert.deepEqual(calls[2].body, { fileId: "file-1", etag: "etag" });
 });
+
+test("completeUploadFiles sends batches of 100 and returns per-file answers", async () => {
+  const bodies = [];
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async (url, init) => {
+    assert.ok(url.endsWith("/v1/uploads/direct/sessions/s1/files/complete"));
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    return json({ ok: true, completedCount: body.files.length, failedCount: 0, sessionComplete: bodies.length === 3,
+      files: body.files.map(file => file.fileId === "f7" ? { fileId: file.fileId, status: "failed", error: { statusCode: 409, code: "rejected", message: "changed" } } : { fileId: file.fileId, status: "completed" }) });
+  } });
+  const files = Array.from({ length: 250 }, (_, i) => ({ fileId: `f${i}` }));
+  const result = await client.completeUploadFiles("s1", files);
+  assert.deepEqual(bodies.map(body => body.files.length), [100, 100, 50]);
+  assert.equal(result.files.length, 250);
+  assert.equal(result.failedCount, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.sessionComplete, true);
+  assert.deepEqual(result.files[7], { fileId: "f7", status: "failed", error: { statusCode: 409, code: "rejected", message: "changed" } });
+});
+
+test("completeUploadFiles falls back to one call per file on a server without batches", async () => {
+  const bodies = [];
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if (body.files) return new Response(JSON.stringify({ error: { code: "validation_failed", message: "Invalid input" } }), { status: 400, headers: { "Content-Type": "application/json" } });
+    if (body.fileId === "bad") return new Response(JSON.stringify({ error: { message: "Upload parts are incomplete or have incorrect sizes" } }), { status: 409, headers: { "Content-Type": "application/json" } });
+    return json({ ok: true });
+  } });
+  const result = await client.completeUploadFiles("s1", [{ fileId: "a" }, { fileId: "bad" }, { fileId: "c", sizeBytes: 3 }]);
+  assert.deepEqual(bodies.slice(1), [{ fileId: "a" }, { fileId: "bad" }, { fileId: "c", sizeBytes: 3 }]);
+  assert.deepEqual(result.files.map(file => [file.fileId, file.status]), [["a", "completed"], ["bad", "failed"], ["c", "completed"]]);
+  assert.equal(result.files[1].error.statusCode, 409);
+});
