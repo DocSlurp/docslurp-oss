@@ -18,6 +18,7 @@ import {
   resolveManagedPipeline,
   storedManagedPipeline,
   visionModelCatalogByUri,
+  visionModelRefusal,
   type ManagedPipelineOverrides,
   type ProjectChatResponse,
 } from "@docslurp/shared";
@@ -76,7 +77,11 @@ export function managedPipelineModelProblem(path: string, model: string): string
   if (policy) return policy;
   if (isProhibitedRoutingModelId(model)) return "prohibited model";
   if (PRIVATE_ROUTE.test(model.trim())) return null;
-  if (path.startsWith("vision.")) return visionModelCatalogByUri[model.trim()] ? null : "not a reviewed vision model";
+  if (path.startsWith("vision.")) {
+    if (!visionModelCatalogByUri[model.trim()]) return "not a reviewed vision model";
+    const refusal = visionModelRefusal(model.trim());
+    return refusal ? `not admitted: ${refusal}` : null;
+  }
   if (path.startsWith("embedding.")) return embeddingModelCatalogByUri[model.trim()] ? null : "not a reviewed embedding model";
   if (path.startsWith("pageRouter.")) {
     // Router decision models have their own reviewed catalog and per-call prices (not OpenRouter chat prices):

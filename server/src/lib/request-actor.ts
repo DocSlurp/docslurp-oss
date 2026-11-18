@@ -464,3 +464,14 @@ export async function resolveActorProjectFilter(
   if (!ref) return undefined;
   return (await requireActorProject(actor, ref, orgId)).id;
 }
+
+/**
+ * Whether the request carries any live Better Auth session, including one that
+ * `resolveBetterAuthSessionActor` refuses (second factor not passed, or an
+ * organization MFA policy not yet met). For telling "signed out" from "signed
+ * in but not usable yet"; it authorizes nothing.
+ */
+export async function hasBetterAuthSession(headers: Headers): Promise<boolean> {
+  const session = await auth.api.getSession({ headers }) as { user?: unknown } | null;
+  return Boolean(session?.user);
+}

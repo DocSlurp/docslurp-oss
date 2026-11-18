@@ -2,7 +2,7 @@ import { lockProjectConfigurationWrite } from "./project-write-lock.js";
 import { assertPolicyTransitionAllowed } from "./policy-transition.js";
 import { HTTPException } from "hono/http-exception";
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
-import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, stripLegacyVisionModel, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, effectiveLadder, extractionPolicyFromEnv, pageReadingQuality, projectExtractionView, projectTemplateLockedPaths, upgradeStoredPipelineChartExport, visualsDefaults } from "@docslurp/shared";
 import {
   defaultSummaryTreePipelineConfig, SUMMARY_TREE_REQUIRES_VECTORS_CODE, SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SummaryTreeConfigError,
@@ -39,8 +39,10 @@ import {
   type ProjectTemplateKey,
   type ProjectRecord,
   UNTITLED_PROJECT_NAME,
-  DEFAULT_INDEXING_MODE
+  DEFAULT_INDEXING_MODE,
+  parseStoredPipelineFeatures
 } from "@docslurp/shared";
+import { reportException } from "@docslurp/shared/error-reporting";
 
 import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
@@ -303,9 +305,9 @@ export async function loadManagedPipelineOverrides(projectId: string, client: Pr
   return parseManagedPipelineOverrides(row?.managed, `project ${projectId}`);
 }
 
-function mapProject(row: ProjectRow): ProjectRecord {
+function mapProject(row: ProjectRow, readPipeline?: PipelineFeatures): ProjectRecord {
   // Stored model values are never trusted: only the explicit admin overrides apply (managed-pipeline-models.ts).
-  const pipeline = resolveManagedPipeline(
+  const pipeline = readPipeline ?? resolveManagedPipeline(
     row.pipeline ?? defaultPipelineFeatures,
     parseManagedPipelineOverrides(row.managed_models?.pipeline, `project ${row.id}`),
     `project ${row.id}`,
@@ -357,7 +359,62 @@ function mapProject(row: ProjectRow): ProjectRecord {
   });
 }
 
-function mapProjectRun(row: ProjectRunRow): ProjectRun {
+/**
+ * A list never fails because one row's stored settings no longer validate. The row is first read with defaults in place
+ * of the fields the schema rejects (parseStoredPipelineFeatures); if it still cannot be read it is left out. Both are
+ * reported with the row's id. Reads that start work or draft a save stay strict (readProject); display reads of one
+ * row use the same tolerance (getProjectForDisplay).
+ */
+export function mapRowsForList<Row extends { id: string }, Result>(kind: "project" | "run", rows: readonly Row[], strict: (row: Row) => Result, tolerant: (row: Row) => Result, surface = `${kind}-list`): Result[] {
+  const out: Result[] = [];
+  for (const row of rows) {
+    try {
+      out.push(strict(row));
+      continue;
+    } catch (error) {
+      reportStoredRowOnce(error, surface, kind, row.id, "read-with-defaults");
+    }
+    try {
+      out.push(tolerant(row));
+    } catch (error) {
+      reportStoredRowOnce(error, surface, kind, row.id, "left-out");
+    }
+  }
+  return out;
+}
+
+/** One report per row and outcome per process: a degraded project is read on most requests, the log should not be. */
+const reportedStoredRows = new Set<string>();
+function reportStoredRowOnce(error: unknown, surface: string, kind: string, rowId: string, outcome: "read-with-defaults" | "left-out"): void {
+  const key = `${kind}:${rowId}:${outcome}`;
+  if (reportedStoredRows.has(key)) return;
+  if (reportedStoredRows.size > 5_000) reportedStoredRows.clear();
+  reportedStoredRows.add(key);
+  reportException(error, { surface, rowId, outcome });
+  console.error(outcome === "read-with-defaults"
+    ? `[projects] ${kind} ${rowId} has stored settings that no longer validate; shown with defaults for the invalid fields (surface=${surface})`
+    : `[projects] ${kind} ${rowId} could not be read even with defaults; left out (surface=${surface})`);
+}
+
+const tolerantProjectPipeline = (row: ProjectRow) => parseStoredPipelineFeatures(
+  stripLegacyVisionModel((stripManagedPipelineFields(row.pipeline ?? null) ?? {}) as Record<string, unknown>, `project ${row.id}`), `project ${row.id}`);
+export const mapProjectsForList = (rows: readonly ProjectRow[], surface = "project-list") => mapRowsForList("project", rows, (row) => mapProject(row),
+  (row) => mapProject(row, tolerantProjectPipeline(row)), surface);
+/**
+ * One project or run read for DISPLAY: the lists' tolerance, so a page never fails on stored settings. Never use the
+ * result to start work or as the draft of a save: those read strictly (readProject), so a setting that restricts what
+ * happens to content is never guessed.
+ */
+function mapProjectForDisplay(row: ProjectRow): ProjectRecord {
+  const [read] = mapProjectsForList([row], "project-read");
+  if (read) return read;
+  return mapProject(row);
+}
+const mapProjectRunForRead = (row: ProjectRunRow): ProjectRun => mapProjectRunsForList([row], "run-read")[0] ?? mapProjectRun(row);
+const mapProjectRunsForList = (rows: readonly ProjectRunRow[], surface = "run-list") => mapRowsForList("run", rows, (row) => mapProjectRun(row),
+  (row) => mapProjectRun(row, parseStoredPipelineFeatures(row.pipeline ?? null, `run ${row.id}`)), surface);
+
+function mapProjectRun(row: ProjectRunRow, readPipeline?: PipelineFeatures): ProjectRun {
   return projectRunSchema.parse({
     id: row.id,
     userId: row.user_id,
@@ -371,7 +428,7 @@ function mapProjectRun(row: ProjectRunRow): ProjectRun {
     processedDocuments: row.processed_documents,
     pagesTotal: row.pages_total,
     pagesProcessed: row.pages_processed,
-    pipeline: normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`),
+    pipeline: readPipeline ?? normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
     error: publicDocumentError(row.error),
@@ -686,14 +743,21 @@ export async function ensurePersonalDefaultProject(userId: string): Promise<void
   await insertDefaultProject(sql, { orgId: organization.id, userId });
 }
 
-/** Read-only: automatic titles advance after ingest (project-naming.ts sweepProjectAutoTitles), never on a read. */
-export async function getProject(projectId: string, userId: string, client: typeof sql = sql): Promise<ProjectRecord | null> {
+/**
+ * Read-only: automatic titles advance after ingest (project-naming.ts sweepProjectAutoTitles), never on a read.
+ *
+ * `forDisplay` is for a page or API response that only SHOWS the project: a row whose stored settings no longer
+ * validate is shown with defaults for those fields instead of failing (settings that restrict what happens to content
+ * fall to the strictest value, never a weaker one). Without it the read is strict: never start work from a display
+ * read, and never use one as the draft of a save.
+ */
+export async function getProject(projectId: string, userId: string, client: typeof sql = sql, options: { forDisplay?: boolean } = {}): Promise<ProjectRecord | null> {
   const access = await getProjectAccess(projectId, userId, client);
   if (!access) {
     return null;
   }
 
-  return await readProject(projectId, access.orgId, client);
+  return await readProject(projectId, access.orgId, client, options);
 }
 
 /**
@@ -702,10 +766,11 @@ export async function getProject(projectId: string, userId: string, client: type
  * statement, pinned to the organization, no access lookup and no name refinement.
  */
 export async function getAuthorizedProjectRecord(projectId: string, orgId: string): Promise<ProjectRecord | null> {
-  return await readProject(projectId, orgId);
+  // The realtime resource is a view of the project, never the input of a run or a save.
+  return await readProject(projectId, orgId, sql, { forDisplay: true });
 }
 
-async function readProject(projectId: string, orgId: string, client: typeof sql = sql): Promise<ProjectRecord | null> {
+async function readProject(projectId: string, orgId: string, client: typeof sql = sql, options: { forDisplay?: boolean } = {}): Promise<ProjectRecord | null> {
   const [row] = await client<ProjectRow[]>`
     select
       w.id,
@@ -804,7 +869,7 @@ async function readProject(projectId: string, orgId: string, client: typeof sql 
     where w.id = ${projectId} and w.org_id = ${orgId}
   `;
 
-  return row ? mapProject(row) : null;
+  return row ? (options.forDisplay ? mapProjectForDisplay(row) : mapProject(row)) : null;
 }
 
 /** Read-only, like getProject. */
@@ -928,7 +993,7 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
     ) desc
   `;
 
-  return rows.map(mapProject);
+  return mapProjectsForList(rows);
 }
 
 export async function listProjectBoardRecords(userId: string): Promise<ProjectBoardRecord[]> {
@@ -994,7 +1059,7 @@ export async function listProjectBoardRecords(userId: string): Promise<ProjectBo
     `,
   ]);
 
-  const runs = await withRunCosts(runRows.map(mapProjectRun));
+  const runs = await withRunCosts(mapProjectRunsForList(runRows));
   const runsByProject = new Map(runs.map((run) => [run.projectId, run]));
   const liveRuns = runs.filter((run) => run.status === "queued" || run.status === "processing");
   const snapshots = await Promise.all(
@@ -1678,8 +1743,8 @@ export async function getProjectCockpit(
       searchSessions: Number(telemetryRow?.search_sessions ?? 0),
       chatSessions: Number(telemetryRow?.chat_sessions ?? 0),
     },
-    activeRun: activeRunRow ? (await withRunCosts([mapProjectRun(activeRunRow)]))[0]! : null,
-    recentRuns: await withRunCosts(recentRunsRows.map(mapProjectRun)),
+    activeRun: activeRunRow ? (await withRunCosts([mapProjectRunForRead(activeRunRow)]))[0]! : null,
+    recentRuns: await withRunCosts(mapProjectRunsForList(recentRunsRows)),
     stageHotspots: stageRows.map((row) => ({
       stage: row.stage_name,
       totalStates: row.total_states,

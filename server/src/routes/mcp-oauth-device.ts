@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 
 import { appDbPool } from "../lib/auth.js";
-import { resolveBetterAuthSessionActor, type SessionRequestActor } from "../lib/request-actor.js";
+import { hasBetterAuthSession, resolveBetterAuthSessionActor, type SessionRequestActor } from "../lib/request-actor.js";
 import { requestIp } from "../lib/request-context.js";
 import {
   apiResource,
@@ -25,8 +25,8 @@ import {
 /**
  * Device verification page (RFC 8628 §3.3) at /oauth/mcp/device.
  *
- * - Requires a signed-in Better Auth session. A signed-out visitor gets a
- *   sign-in link that returns here; nothing about a code is looked up.
+ * - Requires a signed-in Better Auth session. A signed-out visitor is sent to
+ *   the app's sign-in page, which returns here; nothing about a code is looked up.
  * - There is no prefilled-code link (no verification_uri_complete): the user
  *   types the code their own terminal shows, so a phisher cannot hand a
  *   victim a one-click approval link (RFC 8628 §5.4).
@@ -92,9 +92,17 @@ async function sessionOrSignIn(c: Context): Promise<SessionRequestActor | Respon
   if (actor) return actor;
   // The app's sign-in page resumes /oauth/mcp/device after login (app lib/mcp-login-return.ts).
   const signIn = `/app/mcp/authorize?authorize=${encodeURIComponent("/oauth/mcp/device")}`;
-  return page(c, "Sign in", `<h1>Sign in to connect a device</h1>
-<p>Sign in to DocSlurp in this browser. You will come back here to enter the code shown in your terminal.</p>
-<div class="row"><a href="${escapeHtml(signIn)}"><button class="primary" type="button">Sign in</button></a></div>`, 403);
+  // A session exists but is not usable yet (second factor pending, or the organization requires two-factor setup).
+  // The app treats that visitor as signed in and would send them straight back here, so a redirect would loop.
+  if (await hasBetterAuthSession(c.req.raw.headers)) {
+    return page(c, "Finish signing in", `<h1>Finish signing in first</h1>
+<p>Your sign-in is not complete: two-factor authentication still has to be set up or confirmed. Finish that in DocSlurp, then reload this page to enter the code shown in your terminal.</p>
+<div class="row"><a href="/app"><button class="primary" type="button">Open DocSlurp</button></a></div>`);
+  }
+  // A redirect, not a 403 page: the public error filter replaces every 4xx body with a JSON envelope, which showed a
+  // signed-out visitor a raw error instead of a way to sign in. 303 after a form post, so the browser GETs the page.
+  c.header("Cache-Control", "no-store");
+  return c.redirect(signIn, c.req.method === "GET" ? 302 : 303);
 }
 
 function codeForm(message = "") {
