@@ -1,4 +1,5 @@
 import {
+  applyPrivateModelMode,
   embeddingProfileCatalog,
   indexConfigHash,
   indexConfigOf,
@@ -96,7 +97,7 @@ export async function backfillProjectLegacyNormalization(projectId: string, sql:
   const configs = isRecord(project.index_configs) ? project.index_configs : {};
   let currentHash: string | null = null;
   try {
-    currentHash = indexConfigHash(indexConfigOf(normalizeStoredPipelineFeatures((project.pipeline ?? null) as never, `project ${projectId}`)));
+    currentHash = indexConfigHash(indexConfigOf(applyPrivateModelMode(normalizeStoredPipelineFeatures((project.pipeline ?? null) as never, `project ${projectId}`))));
   } catch {
     currentHash = null;
   }

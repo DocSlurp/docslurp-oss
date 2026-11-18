@@ -1296,6 +1296,13 @@
       "when": 1798800000012,
       "tag": "0192_embedding_space_uri",
       "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1798800000013,
+      "tag": "0193_page_extract_contributing_pass",
+      "breakpoints": true
     }
   ]
 }

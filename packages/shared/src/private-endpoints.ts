@@ -244,6 +244,11 @@ export function setPrivateModelEndpointRegistryForTests(registry: PrivateModelEn
     : registry as PrivateModelEndpointRegistry;
 }
 
+/** The registry for an environment: the test override when one is set, else the environment's variable. Throws when invalid. */
+export function privateModelEndpointRegistryFor(env: EnvLike): PrivateModelEndpointRegistry {
+  return overrideRegistry ?? parsePrivateModelEndpointRegistry(env[PRIVATE_MODEL_ENDPOINTS_ENV]);
+}
+
 /**
  * Startup validation: parses the registry, warns about unset token variables,
  * and returns a one-line summary per endpoint. Throws on invalid config.

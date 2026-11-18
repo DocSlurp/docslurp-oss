@@ -13,6 +13,7 @@ import { OCR_BOUNDARY_FAILED } from "../routing/executors/run.js";
 import { imageOrientationEnabled, normalizeImageOrientation, withOrientationAdmission, reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { rm } from "node:fs/promises";
 import {
+  privacyModeAllowsHosted,
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
   documentLadderPolicy,
@@ -248,7 +249,7 @@ export class VisionExtractStage implements Stage {
       checkpoint();
       if (routed) {
         // Non-standard privacy modes gate every group's model per call; keep that on the sequential path.
-        if (state.run.pipeline.privacyMode !== "standard") continue;
+        if (!privacyModeAllowsHosted(state.run.pipeline.privacyMode)) continue;
         const groupsByPage = new Map<number, typeof routed.execution.groups>();
         for (const group of routed.execution.groups) {
           for (const page of group.pages) groupsByPage.set(page, [...(groupsByPage.get(page) ?? []), group]);

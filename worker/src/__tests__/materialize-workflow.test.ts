@@ -910,6 +910,8 @@ describe("runMaterializeRange activity", () => {
         const m1Rich = [{ run_id: "m1", metric: "ingest-page-rich", page: 3, amount: 1 }];
 
         it("Good m1 reads, embedding fails: one Rich charge; Auto m2 indexes the kept read with no Fast charge", async () => {
+          // Page extract rows outlive earlier tests' runs of m1 and m2 (they are keyed by run and pass): start this page clean.
+          await db.exec(`delete from document_page_extracts where document_id = 'd1' and page_number = 3`);
           const t = tracked();
           const first = await runMaterializeRange(withOps("m1", t, embedDown), input("m1", [3]));
           expect(first.failed).toEqual([{ page: 3, reason: "embedding provider down" }]);
@@ -921,6 +923,10 @@ describe("runMaterializeRange activity", () => {
           expect(await charges()).toEqual(m1Rich);
           expect(await credits()).toBeCloseTo(pageCredits("rich", 1), 9);
           expect(await readState()).toMatchObject({ state: "indexed", fee_billed_run: "m2", read_billed_run: "m1", kept: false });
+          // m2's record of the kept read names the model that made it (m1's usage row), not nothing.
+          expect((await db.query<{ pass: string; method: string; model_uri: string | null }>(
+            `select pass, method, model_uri from document_page_extracts where document_id = 'd1' and page_number = 3 and run_id = 'm2'`)).rows)
+            .toEqual([{ pass: "vision", method: "vision", model_uri: "llm://test/vision-x" }]);
         });
 
         it("a Good retry (the same run, or another) reuses the kept read: no model call, no second Rich", async () => {

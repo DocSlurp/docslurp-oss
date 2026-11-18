@@ -1,7 +1,7 @@
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { defaultPipelineFeatures, indexConfigHash, indexConfigOf, type PipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, indexConfigHash, indexConfigOf, normalizePipelineFeatures, PrivacyModeViolationError, setPrivateModelEndpointRegistryForTests, type PipelineFeatures } from "@docslurp/shared";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
@@ -69,6 +69,52 @@ async function seed(docHashes: Array<string | null>, configs: Record<string, unk
 
 const chunk = (id: string, score = 0.9) => ({ id, score });
 type Serve = { embedding: { modelUri?: string }; hash: { op: string; value: string } | null } | null;
+
+describe("servedVectorSearch after a switch to private model mode", () => {
+  const registry = [{
+    alias: "gpu", baseUrl: "https://gpu-mode.example.com/v1", auth: { tokenEnv: "TEST_MODE_INDEX_TOKEN" },
+    models: [{ id: "acme/embed", capability: "embedding", dimensions: 768 }],
+    attestation: { tenancy: "single-tenant", hostProvider: "self", region: "us-east" },
+  }];
+  const hosted = normalizePipelineFeatures({ privacyMode: "standard" });
+  afterEach(() => { setPrivateModelEndpointRegistryForTests(undefined); vi.unstubAllEnvs(); });
+
+  it("skips documents built with the refused hosted model instead of refusing the search (index_configs null)", async () => {
+    setPrivateModelEndpointRegistryForTests(registry);
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    vi.stubEnv("DOCSLURP_PRIVATE_EMBEDDING_MODEL", "llm://private/gpu/acme/embed");
+    await seed([hash(hosted), hash(hosted)], null, hosted);
+    const loaded = await setup.loadProjectIndexing("w");
+    expect(loaded.pipeline.embedding.modelUri).toBe("llm://private/gpu/acme/embed");
+    expect(Object.keys(loaded.indexConfigs)).toEqual([hash(hosted)]);
+    const search = vi.fn(async () => [chunk("private-doc")]);
+    const embed = vi.fn(async () => { throw new PrivacyModeViolationError("standard", { provider: "openrouter", model: "m", operation: "t" }); });
+    const diagnostic = vi.fn();
+    const result = await serving.servedVectorSearch({ projectId: "w", ...loaded, queryVector: [0], query: "q", deps: { search, embed, diagnostic } });
+    expect(result).toEqual([chunk("private-doc")]);
+    expect(diagnostic).toHaveBeenCalledWith("indexConfigUnavailable", expect.objectContaining({ hash: hash(hosted), reason: "privacy-mode", documents: 2 }));
+    // Only the current (private) config's vectors are searched: never the hosted documents with the private query vector.
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(search).toHaveBeenCalledWith([0], expect.objectContaining({ hash: { op: "eq", value: hash(loaded.pipeline) } }));
+  });
+
+  it("a non-privacy embed failure still fails the search", async () => {
+    setPrivateModelEndpointRegistryForTests(registry);
+    vi.stubEnv("DOCSLURP_MODEL_MODE", "private");
+    vi.stubEnv("DOCSLURP_PRIVATE_EMBEDDING_MODEL", "llm://private/gpu/acme/embed");
+    await seed([hash(hosted)], null, hosted);
+    const loaded = await setup.loadProjectIndexing("w");
+    await expect(serving.servedVectorSearch({ projectId: "w", ...loaded, queryVector: [0], query: "q",
+      deps: { search: vi.fn(async () => []), embed: vi.fn(async () => { throw new Error("network"); }) } })).rejects.toThrow("network");
+  });
+
+  it("hosted mode leaves the stored config alone", async () => {
+    await seed([hash(hosted)], null, hosted);
+    const loaded = await setup.loadProjectIndexing("w");
+    expect(loaded.indexConfigs).toEqual({});
+    expect(hash(loaded.pipeline)).toBe(hash(hosted));
+  });
+});
 
 describe("servedVectorSearch", () => {
   it("uses the stored generation normalization rather than the latest preference", () => {

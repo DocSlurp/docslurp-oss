@@ -1,3 +1,17 @@
+## Private model mode: one env map from each service to a private endpoint (2026-11-18)
+
+- `DOCSLURP_MODEL_MODE=hosted|private` (default `hosted`) and one variable per service, `DOCSLURP_PRIVATE_{TEXT,VISION,EMBEDDING,RERANK,ROUTER,STT}_MODEL`, each an `llm://private/<alias>/<model>` registered with the service's capability (`packages/shared/src/private-model-mode.ts`). The API and the worker refuse to start on an invalid mode or mapping and, in private mode, on a hosted model-provider key; unmapped services are listed at startup.
+- In private mode no project reaches a hosted model: the privacy guard treats every project as restricted, and an unmapped service is refused, never sent to a hosted model. In hosted mode the map serves `local-only`/`strict-privacy` projects (text, vision, embedding, rerank and STT; chat and voice used only text and STT before).
+- Runs and searches read their pipeline through `applyPrivateModelMode`; projects keep only their level, and a project row's private `textGeneration.model` no longer selects chat's model. Resolves the TODO that `DOCSLURP_VISION_MODEL_URI` could not name a private endpoint (`DOCSLURP_PRIVATE_VISION_MODEL`).
+- Private reranking (`POST <base>/rerank`); private embedding index identity takes the registry's dimensions, and search skips an older index whose model is now refused.
+
+## Video frame reads get their own page extract record; kept reads name their model (2026-11-18)
+
+- Migration 0193: `document_page_extracts.pass` accepts `video-frames`, a contributing pass: the vision model's read of a video's sampled frames. The wider check is added NOT VALID in a catalog-guarded block and the old inline check dropped; superseded_by_pass keeps its check (it only names a final pass).
+- The media pipeline records one `video-frames` row on the video's page (method `vision`, engine `media-video-frames`, the frame batches' summed text size and request time) named by the vision model (`model_uri`, `model_class`), beside the transcript's `extract` row. Finalization ranks only `PAGE_EXTRACT_FINAL_PASSES`, so the row is adopted, names `extract` as the page's final pass and is never final: the ingest report and `final=true` reads still show the transcript. The API serves the pass name, never the model.
+- Rollback: release N-1's finalization gives the new pass a null rank and would write `is_final = NULL`; a BEFORE UPDATE trigger (fires only on NULL) keeps it false.
+- A query-time publication of a page another claim read and kept (`read_text`) records the model that read it, from the reading run's usage row (`metadata.modelUri`).
+
 ## Exact model records: embedding spaces, request settings, run models (2026-11-18)
 
 - Migration 0192: nullable `embedding_model_uri` (and `embedding_model_class`, the embedding profile) on `vector_indexes`, `embedding_model_uri` on `document_page_states`, `model_uri` on `document_page_vectors`, and `project_runs.resolved_models`. No default, rewrite or backfill.
@@ -5,6 +19,7 @@
 - `modelConfig` (request settings, no prompt text, addresses or keys) on embeddings (task, normalize, pooling, dimensions, batch size, late chunking, truncation), query and page-image embeddings, the hosted reranker, page router decisions, structured extraction, transcription, proposition generation and its embeddings, chart-export vision calls, failed-but-billed vision attempts and every server text call (search helpers included). The chat tool agent, output moderation and voice calls carry a `modelClass`; events adopted by a server usage ledger are stamped.
 - The worker records the models that serve a run per service (text, structured extraction, vision, embedding) in `project_runs.resolved_models` at first pickup; query-time page reads record their model on the page extract record.
 - Page-image search on a private page embedder: the worker stores the served model id on `document_page_vectors.model` (`jinaai/...`), but the query embedder only ran for an `llm://private/...` URI, so it embedded nothing and visual pages were never found by vector. `privatePageQueryModel` resolves a bare id to the registered endpoint that serves it as an embedding model (any private page embedder, not only Jina; the `Query: ` prefix stays Jina-only).
+
 
 ## Stored settings that stop validating: drop the field, never the project (2026-11-18)
 
@@ -14,6 +29,7 @@ Owner: "We should not reject saving settings just 'cause an invalid field is the
 - Fallbacks never weaken privacy, egress or spend: `privacyMode` strict-privacy; `piiPolicy` every detector with `block_indexing`; `webTools` off; `webhooks` off; `maxCostCents` a cap (a positive value floored, else 1 cent: 0 and null mean no cap to the worker); `ladder` lowest rung; `visionFallback` off; `mediaVideo` off; `pageRouter` the default (no decision-model spend); local vision and embedding profiles under a restricted privacy mode. A pipeline stored as a non-object reads as defaults with all of these strictest.
 - Council (#494) follow-ups: `quality` falls to `fast` (`auto` in visual mode), `contextualChunkPreambles` and `figures` to off; embeddings off with graph features on turns the graph features off (a stored `false` is never deleted to settle a conflict); an enabled PII policy left with no known detector, or with a non-name entry, is the strictest policy; a legacy vision model the migration cannot place goes and the section reads local; a Nitro model without Speed boost loses only the model; the reader never logs (callers log once per row). Settings written by a newer version (`configVersion`) list and open with the strictest settings, `settingsUnreadable: true`, and saves answer 409 `project_settings_unreadable` instead of overwriting them. `privacyModeOf` reads a non-object pipeline as `strict-privacy`. Search session setup, boot warm, the worker graph rebuild and summary-tree backfill read through `parseStoredPipelineFeatures`.
 - `getProject`, the lists and the realtime view read through it for every project-record caller (display, uploads, run starts, save drafts); the project record carries an optional `settingsRepairs`. A save writes the cleaned row back (summary tree and indexing mode included), so it repairs the row; a caller's own invalid value is still a 400. Run creation reads the project's ceilings (ladder, chart tier, quality and visuals) from the cleaned row when the stored one does not validate. Project version snapshots read through the same reader, so an old version can still be rolled back to.
+
 
 ## Doppler pinned to the #51 release (2026-11-18)
 

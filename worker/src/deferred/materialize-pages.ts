@@ -363,14 +363,24 @@ export async function materializePageRange(
   // 0. Pages an earlier run read (one Rich charge, committed) and then failed after the read: index the kept read,
   // with no model call and no new charge (billLockedMaterializedPages stamps them without one). Retention purge,
   // a PII block and a human correction clear read_text; a purged run's documents never reuse one either way.
-  const storedReads = new Map((await deps.sql<{ page_number: number; read_text: string }[]>`
-    select s.page_number, s.read_text from document_page_states s
+  // The model that made a kept read is the one its reading run's usage row names (`metadata.modelUri`, stamped on every
+  // model call): it goes on this publication's page extract record. Only kept reads look it up (by run id, indexed).
+  const storedRows = await deps.sql<{ page_number: number; read_text: string; read_model_uri: string | null }[]>`
+    select s.page_number, s.read_text, (
+      select au.metadata ->> 'modelUri' from usage_attribution au
+      where au.run_id = s.read_billed_run and au.metadata ->> 'documentId' = s.document_id
+        and au.metadata ->> 'pageNumber' = s.page_number::text and au.metadata ? 'modelUri'
+      order by au.created_at desc limit 1
+    ) as read_model_uri
+    from document_page_states s
     join documents d on d.id = s.document_id
     join project_runs r on r.id = d.run_id
     where s.document_id = ${documentId} and s.page_number = any(${pages}::int[])
       and s.read_billed_run is not null and s.read_text is not null and s.state <> 'blocked-pii'
       and r.artifacts_purged_at is null
-  `).map((row) => [row.page_number, row.read_text]));
+  `;
+  const storedReads = new Map(storedRows.map((row) => [row.page_number, row.read_text]));
+  const storedModelUris = new Map(storedRows.flatMap((row) => row.read_model_uri ? [[row.page_number, row.read_model_uri] as const] : []));
 
   // 1. Text layer per contiguous range, then OCR only pages without one.
   const texts = new Map<number, string>();
@@ -721,8 +731,8 @@ export async function materializePageRange(
           published: owned, modelRead: (page) => modelReads.has(page) || storedReads.has(page),
           blocked: ownedBlocked, failed: [...failed].filter(([page]) => held.has(page) && !released.includes(page)),
           keptAsImageReason: KEPT_AS_IMAGE_REASON,
-          // A kept read from an earlier claim has no model in hand here: its own run's usage row names it.
-          readModelUri: (page) => readModelUris.get(page),
+          // A kept read from an earlier claim is named by its reading run's usage row (looked up with the kept text).
+          readModelUri: (page) => readModelUris.get(page) ?? storedModelUris.get(page),
         }));
         if (extracts.pendingPageExtracts.length > 0) {
           for (const statement of pageExtractStatements(client as unknown as Sql<Record<string, unknown>>, extracts.pendingPageExtracts, [])) await statement;
