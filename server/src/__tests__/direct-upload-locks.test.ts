@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../config.js", () => ({ env: { databaseUrl: "postgres://lock-test" } }));
 vi.mock("../lib/api-pool.js", () => ({ createApiPool: mocks.create }));
-import { closeDirectUploadLockPool, reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
+import { closeDirectUploadLockPool, inBackgroundUploadLane, reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
 afterEach(async () => { await closeDirectUploadLockPool(); vi.clearAllMocks(); });
 function setup() {
   mocks.reserve.mockResolvedValue({release:mocks.release});
@@ -31,5 +31,16 @@ describe("separate direct upload lock connections", () => {
     const next = await reserveDirectUploadLockConnection();
     expect(mocks.create).toHaveBeenCalledTimes(2);
     next.release();
+  });
+  it("gives background upload work its own pool so it never queues a client's lock behind it", async () => {
+    setup();
+    const background = await inBackgroundUploadLane(() => reserveDirectUploadLockConnection());
+    const request = await reserveDirectUploadLockConnection();
+    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:8,applicationName:"docslurp-upload-locks-background"});
+    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:2,applicationName:"docslurp-upload-locks"});
+    expect(mocks.create).toHaveBeenCalledTimes(2);
+    background.release(); request.release();
+    await closeDirectUploadLockPool();
+    expect(mocks.end).toHaveBeenCalledTimes(2);
   });
 });

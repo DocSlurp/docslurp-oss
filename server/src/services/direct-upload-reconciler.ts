@@ -3,10 +3,17 @@ import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { sql } from "../db.js";
 import { abortDirectUploadSession, finalizeDirectUploadFile, loadDirectUploadSession, queueAbandonedDirectUploadCleanup, withDirectUploadLock } from "./direct-upload-session.js";
 import { ProjectIntakeError, type ProjectIntakeAudit, type ProjectIntakePorts } from "./project-intake.js";
-import { confirmDirectUploadProjectIntake } from "./project-intake-actions.js";
+import { inBackgroundUploadLane } from "../lib/direct-upload-locks.js";
+import { confirmDirectUploadProjectIntake, isReplayedDirectUploadConfirm } from "./project-intake-actions.js";
 
-/** Sessions finalized side by side in one sweep: one large session no longer holds up every other organization's. */
+/**
+ * Sessions finalized side by side in one sweep: one large session no longer holds up every other organization's.
+ * Matches the background lock lane (DIRECT_UPLOAD_LOCK_CONNECTIONS.background): each worker holds at most one lock
+ * connection at a time, and client requests lock on their own lane.
+ */
 export const RECONCILE_CONCURRENCY = 8;
+/** Immediate confirms in flight per process; past it a completed session is left to the sweep (it is already due). */
+export const IMMEDIATE_CONFIRM_MAX = 4;
 const RECONCILE_BATCH = 25;
 
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -48,8 +55,9 @@ async function reconcileSession(session: DueSession): Promise<void> {
       return ready;
     });
     if (ready && !stopped) {
-      await confirmDirectUploadProjectIntake({ sessionId: session.id, userId: session.user_id });
-      recordReconcileLag(session.id, "sweep", session.due_at ? new Date(session.due_at).getTime() : Date.now());
+      const result = await confirmDirectUploadProjectIntake({ sessionId: session.id, userId: session.user_id });
+      // Another path (an immediate confirm, the client) already started the run: its lag is already recorded.
+      if (!isReplayedDirectUploadConfirm(result)) recordReconcileLag(session.id, "sweep", session.due_at ? new Date(session.due_at).getTime() : Date.now());
     }
   } catch (error) {
     // Another process (an immediate confirm, a client's confirm, another sweep) holds the session: not a failure.
@@ -88,7 +96,7 @@ export async function reconcileDirectUploads(): Promise<void> {
       await Promise.all(Array.from({ length: Math.min(RECONCILE_CONCURRENCY, sessions.length) }, async () => {
         while (!stopped && next < sessions.length) {
           const session = sessions[next++]!;
-          await reconcileSession(session).catch(error => {
+          await inBackgroundUploadLane(() => reconcileSession(session)).catch(error => {
             console.error(`[upload-reconcile] session=${session.id} bookkeeping failed`, error instanceof Error ? error.name : "unknown");
           });
         }
@@ -121,16 +129,23 @@ export function confirmCompletedDirectUploadSoon(args: {
   ports?: ProjectIntakePorts;
 }): void {
   if (stopped) return;
+  // Bounded: a burst of completed sessions cannot queue unbounded intake work in one process; the rest wait for the
+  // sweep, which runs them with bounded concurrency too.
+  if (immediateConfirms.size >= IMMEDIATE_CONFIRM_MAX) {
+    console.log(`[upload-reconcile] session=${args.sessionId} immediate confirm skipped (busy); the sweep will confirm it`);
+    requestDirectUploadSweep();
+    return;
+  }
   const dueAt = Date.now();
-  const task = (async () => {
+  const task = inBackgroundUploadLane(async () => {
     try {
-      await confirmDirectUploadProjectIntake({ sessionId: args.sessionId, userId: args.userId, ...(args.audit ? { audit: args.audit } : {}) }, ...(args.ports ? [args.ports] : []));
-      recordReconcileLag(args.sessionId, "immediate", dueAt);
+      const result = await confirmDirectUploadProjectIntake({ sessionId: args.sessionId, userId: args.userId, ...(args.audit ? { audit: args.audit } : {}) }, ...(args.ports ? [args.ports] : []));
+      if (!isReplayedDirectUploadConfirm(result)) recordReconcileLag(args.sessionId, "immediate", dueAt);
     } catch (error) {
       if (isSessionBusy(error)) return;
       console.warn(`[upload-reconcile] session=${args.sessionId} immediate confirm deferred to sweep`, error instanceof Error ? error.name : "unknown");
     }
-  })();
+  });
   immediateConfirms.add(task);
   void task.finally(() => immediateConfirms.delete(task));
 }

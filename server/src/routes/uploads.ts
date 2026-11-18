@@ -244,6 +244,23 @@ export function apiKeyMayCreateProject(c: Context): boolean {
   return !apiKey || (apiKey.projectIds ?? []).length === 0;
 }
 
+/** How long `/confirm` waits for another holder of the session's lock (an immediate confirm, the sweep) to finish. */
+export const CONFIRM_BUSY_WAIT_MS = 15_000;
+
+/** Retries a session-locked call while the session is busy, up to `waitMs`; then the busy 409 stands. */
+export async function whenUploadSessionFree<T>(run: () => Promise<T>, waitMs = CONFIRM_BUSY_WAIT_MS): Promise<T> {
+  const deadline = Date.now() + waitMs;
+  for (let delay = 100; ; delay = Math.min(1_000, delay * 2)) {
+    try {
+      return await run();
+    } catch (error) {
+      const busy = error instanceof ProjectIntakeError && error.code === "upload_session_busy";
+      if (!busy || Date.now() + delay > deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
 export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePorts) => acceptApiKeys(new Hono()
   .use("*", async (c, next) => {
@@ -421,7 +438,9 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     const sessionId = c.req.param("sessionId");
     let result;
     try {
-      result = await confirmDirectUploadProjectIntake({
+      // The last files/complete starts intake itself; a confirm sent right after it waits for that (bounded) and
+      // answers with the same run instead of a 409.
+      result = await whenUploadSessionFree(() => confirmDirectUploadProjectIntake({
         sessionId,
         userId,
         audit: {
@@ -429,7 +448,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           userAgent: requestUserAgent(c),
           metadata: { sessionId },
         },
-      }, ports);
+      }, ports));
     } catch (error) {
       return (
         projectIntakeErrorResponse(c, error) ??

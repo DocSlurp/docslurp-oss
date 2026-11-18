@@ -8,7 +8,8 @@ vi.mock("../services/direct-upload-session.js", () => ({
   abortDirectUploadSession: mocks.abort, queueAbandonedDirectUploadCleanup: mocks.cleanup,
   withDirectUploadLock: async (_id: string, work: () => Promise<unknown>) => work(),
 }));
-vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
+vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm, isReplayedDirectUploadConfirm: (result: { replayed?: boolean }) => result?.replayed === true }));
+vi.mock("../lib/direct-upload-locks.js", () => ({ inBackgroundUploadLane: (run: () => Promise<unknown>) => run() }));
 vi.mock("../services/project-intake.js", () => ({ ProjectIntakeError: class extends Error { constructor(message: string, public statusCode: number) { super(message); } } }));
 import { reconcileDirectUploads, stopDirectUploadReconciler } from "../services/direct-upload-reconciler.js";
 import { ProjectIntakeError } from "../services/project-intake.js";

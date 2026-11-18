@@ -270,7 +270,7 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | Wait for successful run | Poll `GET /v1/runs/:runId/progress` | `waitForRun` | `status --watch` |
 | List runs (paged: `limit` 1-100, `cursor`; returns `hasMore`, `nextCursor`) | `GET /v1/runs` | `listRunsPage`, `iterateRuns`, `listRuns` (all pages) | `runs` |
 | Account activity (SSE) | `GET /v1/runs/activity/stream` | `streamActivity` | Use SDK/HTTP |
-| Organization activity summary (queued, in progress, recently completed; pages per minute; ETA bucket) | `GET /v1/runs?activity=true` (`summary`); the stream's `activity` and `activity-summary` events | `getActivitySummary` | Use SDK/HTTP |
+| Organization activity summary (queued, in progress, recently completed; pages per minute; ETA bucket) | `GET /v1/runs/activity/summary`; also `summary` on `GET /v1/runs?activity=true` and the stream's `activity` and `activity-summary` events | `getActivitySummary` | Use SDK/HTTP |
 | Project state | `GET /v1/projects/:project/state` | `getProjectState` | Use SDK/HTTP |
 | Ingest report | `GET /v1/projects/:project/ingest-report` (also MCP `getUploadStatus`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
 | List projects | `GET /v1/projects` | `listProjects()` | Use HTTP |

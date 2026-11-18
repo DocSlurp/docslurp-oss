@@ -16,11 +16,13 @@ const listenForRunEventsMock = vi.fn();
 const listRunEventsMock = vi.fn();
 const isApiKeyLiveMock = vi.fn(async () => true);
 const summaryFor = (orgId: string) => ({ orgId, queued: { runs: 0, documents: 0, pages: 0 } });
-const getOrgActivitySummaryMock = vi.fn(async (orgId: string) => summaryFor(orgId));
-const activitySummaryOrgIdForUserMock = vi.fn(async (_userId: string): Promise<string | null> => "org-session");
+type Scope = { orgId: string; projectIds: readonly string[] };
+const getOrgActivitySummaryMock = vi.fn(async (scope: Scope) => summaryFor(scope.orgId));
+// The real scope: the key's org (else the user's), over the projects the caller may read (services/run-activity-summary.ts).
+const activitySummaryScopeForMock = vi.fn(async (_userId: string, apiKeyOrgId: string | null): Promise<Scope | null> => ({ orgId: apiKeyOrgId ?? "org-session", projectIds: ["ws-visible"] }));
 vi.mock("../services/run-activity-summary.js", () => ({
   getOrgActivitySummary: getOrgActivitySummaryMock,
-  activitySummaryOrgIdForUser: activitySummaryOrgIdForUserMock,
+  activitySummaryScopeFor: activitySummaryScopeForMock,
 }));
 vi.mock("../services/api-key-liveness.js", () => ({ isApiKeyLive: isApiKeyLiveMock }));
 // Who may reprocess is decided against the database (reprocess-editors-only.db.test.ts); these route tests stub it.
@@ -339,13 +341,21 @@ describe("API-key run reads", () => {
     const response = await keyApp().request("/runs?activity=true");
     expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }], hasMore: false, nextCursor: null, summary: summaryFor("org-1") });
   });
+  it("serves the summary alone for the key's own organization", async () => {
+    getOrgActivitySummaryMock.mockClear();
+    const response = await keyApp().request("/runs/activity/summary?orgId=org-2");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ summary: summaryFor("org-1") });
+    expect(getOrgActivitySummaryMock.mock.calls.map(([scope]) => scope.orgId)).toEqual(["org-1"]);
+    expect(listRunsMock).not.toHaveBeenCalledWith("user-1", true);
+  });
   it("summarizes only the key's own organization, never one named in the request", async () => {
     getOrgActivitySummaryMock.mockClear();
     listRunsMock.mockResolvedValue([]);
     const response = await keyApp().request("/runs?activity=true&orgId=org-2");
     expect((await response.json()).summary).toEqual(summaryFor("org-1"));
-    expect(getOrgActivitySummaryMock.mock.calls.map(([orgId]) => orgId)).toEqual(["org-1"]);
-    expect(activitySummaryOrgIdForUserMock).not.toHaveBeenCalled();
+    expect(getOrgActivitySummaryMock.mock.calls.map(([scope]) => scope.orgId)).toEqual(["org-1"]);
+    expect(activitySummaryScopeForMock).toHaveBeenLastCalledWith("user-1", "org-1");
   });
   it("keeps the activity feed up when the summary cannot be read", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -361,6 +371,8 @@ describe("API-key run reads", () => {
     getOrgActivitySummaryMock.mockClear();
     expect((await keyApp(["search"], "client").request("/runs?activity=true")).status).toBe(403);
     expect((await keyApp([]).request("/runs?activity=true")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/activity/summary")).status).toBe(403);
+    expect((await keyApp([]).request("/runs/activity/summary")).status).toBe(403);
     expect(getOrgActivitySummaryMock).not.toHaveBeenCalled();
   });
   it("ends the activity stream for a key revoked while it is open", async () => {
@@ -510,7 +522,7 @@ describe("API-key run reads", () => {
     listenForRunEventsMock.mockResolvedValue({ close: vi.fn().mockResolvedValue(undefined) });
     listRunsMock.mockResolvedValue([]);
     let pages = 1;
-    getOrgActivitySummaryMock.mockImplementation(async (orgId: string) => ({ ...summaryFor(orgId), queued: { runs: 1, documents: 1, pages } }));
+    getOrgActivitySummaryMock.mockImplementation(async (scope: Scope) => ({ ...summaryFor(scope.orgId), queued: { runs: 1, documents: 1, pages } }));
     const response = await keyApp().request("/runs/activity/stream");
     const reader = response.body!.getReader();
     const chunks: string[] = [];
@@ -524,12 +536,12 @@ describe("API-key run reads", () => {
       const updates = chunks.filter(chunk => chunk.includes("event: activity-summary"));
       expect(updates).toHaveLength(1);
       expect(updates[0]).toContain('"pages":7');
-      expect(getOrgActivitySummaryMock.mock.calls.every(([orgId]) => orgId === "org-1")).toBe(true);
+      expect(getOrgActivitySummaryMock.mock.calls.every(([scope]) => scope.orgId === "org-1")).toBe(true);
     } finally {
       await reader.cancel();
       await drain;
       vi.useRealTimers();
-      getOrgActivitySummaryMock.mockImplementation(async (orgId: string) => summaryFor(orgId));
+      getOrgActivitySummaryMock.mockImplementation(async (scope: Scope) => summaryFor(scope.orgId));
     }
   });
 
@@ -611,12 +623,13 @@ describe("runsRoutes operator redaction", () => {
   });
 
   it("summarizes a session user's own organization", async () => {
-    activitySummaryOrgIdForUserMock.mockClear();
+    activitySummaryScopeForMock.mockClear();
     getOrgActivitySummaryMock.mockClear();
     const body = await (await sessionApp(false).request("/runs?activity=true")).json();
-    expect(activitySummaryOrgIdForUserMock).toHaveBeenCalledWith("user-1");
+    expect(activitySummaryScopeForMock).toHaveBeenCalledWith("user-1", null);
     expect(body.summary).toEqual(summaryFor("org-session"));
-    activitySummaryOrgIdForUserMock.mockResolvedValueOnce(null);
+    expect(getOrgActivitySummaryMock).toHaveBeenCalledWith({ orgId: "org-session", projectIds: ["ws-visible"] });
+    activitySummaryScopeForMock.mockResolvedValueOnce(null);
     expect((await (await sessionApp(false).request("/runs?activity=true")).json()).summary).toBeNull();
   });
   it.each(["/runs", "/runs?activity=true"])("strips worker diagnostics from %s for a non-operator, keeps the customer's numbers", async (path) => {

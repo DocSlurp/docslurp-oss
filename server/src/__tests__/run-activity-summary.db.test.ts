@@ -12,6 +12,9 @@ let stop: () => Promise<void>;
 let summary: typeof import("../services/run-activity-summary.js");
 let sessions: typeof import("../services/direct-upload-session.js");
 
+// Each caller's scope: its organization and the projects there it may read. scopeA naming p-b proves the org filter.
+const scopeA = { orgId: "org-a", projectIds: ["p-a", "p-a-private", "p-b"] };
+const scopeB = { orgId: "org-b", projectIds: ["p-b"] };
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 
 async function addRun(id: string, args: { org: string; project: string; user: string; status: string; docs?: number; docsDone?: number;
@@ -34,7 +37,7 @@ beforeAll(async () => {
   await sql`insert into organizations (id, name, slug, created_by_user_id, personal_owner_user_id) values
     ('org-a', 'A', 'summary-a', 'u-a', 'u-a'), ('org-b', 'B', 'summary-b', 'u-b', 'u-b')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('org-a', 'u-a', 'owner'), ('org-b', 'u-b', 'owner')`;
-  await sql`insert into projects (id, org_id, user_id, name) values ('p-a', 'org-a', 'u-a', 'A'), ('p-b', 'org-b', 'u-b', 'B')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('p-a', 'org-a', 'u-a', 'A'), ('p-a-private', 'org-a', 'u-a', 'A private'), ('p-b', 'org-b', 'u-b', 'B')`;
   summary = await import("../services/run-activity-summary.js");
   sessions = await import("../services/direct-upload-session.js");
 }, 120_000);
@@ -63,7 +66,7 @@ describe("organization activity summary", () => {
     await addRun("b-queue", { org: "org-b", project: "p-b", user: "u-b", status: "queued", docs: 77, pages: 7_000 });
     await addRun("b-done", { org: "org-b", project: "p-b", user: "u-b", status: "completed", docs: 55, docsDone: 55, pages: 5_000, pagesDone: 5_000, createdMinutesAgo: 10, updatedMinutesAgo: 1 });
 
-    const a = await summary.computeOrgActivitySummary("org-a");
+    const a = await summary.computeOrgActivitySummary(scopeA);
     expect(a.queued).toEqual({ runs: 1, documents: 5, pages: 50 });
     expect(a.inProgress).toEqual({ runs: 1, documents: 3, pages: 300, pagesProcessed: 100, pagesTotal: 400 });
     expect(a.recentlyCompleted).toEqual({ runs: 1, documents: 2, pages: 40 });
@@ -72,7 +75,7 @@ describe("organization activity summary", () => {
     expect(a.eta).toMatchObject({ bucket: "15-60m", estimate: true });
     expect(a.truncated).toBe(false);
 
-    const b = await summary.computeOrgActivitySummary("org-b");
+    const b = await summary.computeOrgActivitySummary(scopeB);
     expect(b.queued).toEqual({ runs: 1, documents: 77, pages: 7_000 });
     expect(b.recentlyCompleted).toEqual({ runs: 1, documents: 55, pages: 5_000 });
     // B's ETA comes from B's own history (5,000 pages in 9 minutes): 7,000 queued pages is about 12.6 minutes.
@@ -81,21 +84,45 @@ describe("organization activity summary", () => {
 
   it("has no ETA (estimating) while a queued run has no basis", async () => {
     await addRun("a-queue", { org: "org-a", project: "p-a", user: "u-a", status: "queued", docs: 1, pages: 50 });
-    expect((await summary.computeOrgActivitySummary("org-a")).eta).toBeNull();
+    expect((await summary.computeOrgActivitySummary(scopeA)).eta).toBeNull();
+  });
+
+  it("counts only the projects the caller may read, and caches each project set apart", async () => {
+    await addRun("a-public", { org: "org-a", project: "p-a", user: "u-a", status: "queued", docs: 1, pages: 10 });
+    await addRun("a-private", { org: "org-a", project: "p-a-private", user: "u-a", status: "queued", docs: 4, pages: 400 });
+    const restricted = { orgId: "org-a", projectIds: ["p-a"] };
+    // A plain member (or an allowlisted key) that cannot read p-a-private never sees its work, even through the cache
+    // an owner of the same organization just filled.
+    expect((await summary.getOrgActivitySummary(scopeA)).queued).toEqual({ runs: 2, documents: 5, pages: 410 });
+    expect((await summary.getOrgActivitySummary(restricted)).queued).toEqual({ runs: 1, documents: 1, pages: 10 });
+    expect((await summary.getOrgActivitySummary({ orgId: "org-a", projectIds: [] })).queued).toEqual({ runs: 0, documents: 0, pages: 0 });
+  });
+
+  it("scopes a session user's summary to the projects they can access", async () => {
+    await sql`insert into "user" (id, name, email) values ('u-member', 'M', 'm@summary.test') on conflict do nothing`;
+    await sql`insert into org_memberships (org_id, user_id, role) values ('org-a', 'u-member', 'member') on conflict do nothing`;
+    const scope = await summary.activitySummaryScopeFor("u-member", null);
+    expect(scope?.orgId).toBe("org-a");
+    expect(scope?.projectIds).not.toContain("p-b");
+    const owner = await summary.activitySummaryScopeFor("u-a", null);
+    expect(owner?.projectIds).toEqual(expect.arrayContaining(["p-a", "p-a-private"]));
+    expect(owner?.projectIds).not.toContain("p-b");
+    // A key's organization is the key's, whoever the user is.
+    expect((await summary.activitySummaryScopeFor("u-a", "org-b"))?.orgId).toBe("org-b");
   });
 
   it("returns an empty summary for an organization with nothing running, not another organization's", async () => {
     await addRun("b-run", { org: "org-b", project: "p-b", user: "u-b", status: "processing", pages: 10, pagesDone: 5, startedMinutesAgo: 1 });
-    const empty = await summary.computeOrgActivitySummary("org-a");
+    const empty = await summary.computeOrgActivitySummary(scopeA);
     expect(empty).toMatchObject({ queued: { runs: 0 }, inProgress: { runs: 0 }, recentlyCompleted: { runs: 0 }, pagesPerMinute: null, eta: null, truncated: false });
-    expect(await summary.computeOrgActivitySummary("org-unknown")).toMatchObject({ inProgress: { runs: 0 } });
+    expect(await summary.computeOrgActivitySummary({ orgId: "org-unknown", projectIds: ["p-a", "p-b"] })).toMatchObject({ inProgress: { runs: 0 } });
   });
 
   it("reads at most 200 active runs and says the summary is truncated instead of failing", async () => {
     await sql`insert into project_runs (id, user_id, project_id, org_id, kind, status, stage, total_documents, pages_total, created_at, monthly_reservation_cents)
       select 'bulk-' || g, 'u-a', 'p-a', 'org-a', 'direct-upload', 'queued', 'extract-markdown', 1, 2, now() - g * interval '1 second', 1
       from generate_series(1, 205) g`;
-    const truncated = await summary.computeOrgActivitySummary("org-a");
+    const truncated = await summary.computeOrgActivitySummary(scopeA);
     expect(truncated.truncated).toBe(true);
     expect(truncated.queued.runs).toBe(summary.ACTIVITY_SUMMARY_MAX_ACTIVE_RUNS);
     expect(truncated.eta).toBeNull();
@@ -105,17 +132,17 @@ describe("organization activity summary", () => {
     let now = 1_000_000;
     await addRun("a-queue", { org: "org-a", project: "p-a", user: "u-a", status: "queued", docs: 1, pages: 10 });
     await addRun("b-queue", { org: "org-b", project: "p-b", user: "u-b", status: "queued", docs: 2, pages: 20 });
-    const a1 = await summary.getOrgActivitySummary("org-a", () => now);
-    const b1 = await summary.getOrgActivitySummary("org-b", () => now);
+    const a1 = await summary.getOrgActivitySummary(scopeA, () => now);
+    const b1 = await summary.getOrgActivitySummary(scopeB, () => now);
     expect(a1.queued.pages).toBe(10);
     expect(b1.queued.pages).toBe(20);
     // Within the TTL the cached value is reused...
     await addRun("a-queue-2", { org: "org-a", project: "p-a", user: "u-a", status: "queued", docs: 1, pages: 5 });
-    expect((await summary.getOrgActivitySummary("org-a", () => now)).queued.pages).toBe(10);
+    expect((await summary.getOrgActivitySummary(scopeA, () => now)).queued.pages).toBe(10);
     // ... and after it, recomputed.
     now += summary.ACTIVITY_SUMMARY_TTL_MS + 1;
-    expect((await summary.getOrgActivitySummary("org-a", () => now)).queued.pages).toBe(15);
-    expect((await summary.getOrgActivitySummary("org-b", () => now)).queued.pages).toBe(20);
+    expect((await summary.getOrgActivitySummary(scopeA, () => now)).queued.pages).toBe(15);
+    expect((await summary.getOrgActivitySummary(scopeB, () => now)).queued.pages).toBe(20);
   });
 
   it("resolves a session user's own organization and none for a user without one", async () => {

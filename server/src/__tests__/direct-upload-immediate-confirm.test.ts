@@ -5,7 +5,8 @@ vi.mock("../services/direct-upload-session.js", () => ({
   loadDirectUploadSession: vi.fn(), finalizeDirectUploadFile: vi.fn(), abortDirectUploadSession: vi.fn(),
   queueAbandonedDirectUploadCleanup: vi.fn(), withDirectUploadLock: async (_id: string, work: () => Promise<unknown>) => work(),
 }));
-vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
+vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm, isReplayedDirectUploadConfirm: (result: { replayed?: boolean }) => result?.replayed === true }));
+vi.mock("../lib/direct-upload-locks.js", () => ({ inBackgroundUploadLane: (run: () => Promise<unknown>) => run() }));
 vi.mock("../services/project-intake.js", () => ({
   ProjectIntakeError: class extends Error { constructor(message: string, public statusCode: number, public issues?: unknown, public code?: string) { super(message); } },
 }));
@@ -45,5 +46,26 @@ describe("immediate confirm when the last file completes", () => {
     // The sweep owns failing a rejected session: the immediate path writes nothing.
     expect(mocks.sql).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("records no lag when the confirm replayed a run another path already started", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    mocks.confirm.mockResolvedValue({ replayed: true });
+    confirmCompletedDirectUploadSoon({ sessionId: "s-4", userId: "u-1" });
+    await settleImmediateConfirms();
+    expect(log.mock.calls.some(([line]) => String(line).includes("confirmed session=s-4"))).toBe(false);
+    log.mockRestore();
+  });
+
+  it("runs at most four at once per process and leaves the rest to the sweep", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const resumes: Array<() => void> = [];
+    mocks.confirm.mockImplementation(() => new Promise(resolve => { resumes.push(() => resolve({})); }));
+    for (let index = 0; index < 6; index += 1) confirmCompletedDirectUploadSoon({ sessionId: `burst-${index}`, userId: "u-1" });
+    await vi.waitFor(() => expect(mocks.confirm).toHaveBeenCalledTimes(4));
+    expect(log.mock.calls.filter(([line]) => String(line).includes("immediate confirm skipped"))).toHaveLength(2);
+    resumes.forEach(resume => resume());
+    await settleImmediateConfirms();
+    log.mockRestore();
   });
 });

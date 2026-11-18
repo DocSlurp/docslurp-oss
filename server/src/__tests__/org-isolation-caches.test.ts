@@ -47,6 +47,7 @@ const REGISTRY: Record<string, { class: CacheClass; why: string }> = {
   "server/src/lib/provider-policy.ts#cache": { class: "tenant-id", why: "org:<id>, ws:<projectId>, user:<id> policy flags" },
   "server/src/middleware/chat-concurrency.ts#inFlight": { class: "tenant-id", why: "concurrency counters per actor" },
   "server/src/middleware/rate-limit.ts#spendCache": { class: "tenant-id", why: "keyed by API key id" },
+  "server/src/services/run-activity-summary.ts#cache": { class: "org", why: "orgScopedCacheKey(org id, caller's visible project ids): one org and project set per entry; aggregates only" },
   "server/src/search/deferred/page-vector-locator.ts#cache": { class: "tenant-id", why: "projectId+model; read only by an access-checked project search" },
   "server/src/search/deferred/page-vector-locator.ts#inflight": { class: "tenant-id", why: "projectId+model+stamp" },
   "server/src/search/deferred/request-policy.ts#keyCache": { class: "tenant-id", why: "live API key row by key id" },

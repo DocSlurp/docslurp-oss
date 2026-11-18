@@ -22,6 +22,8 @@ const uploadRequest = vi.fn();
 const loadDirectUploadSession = vi.fn();
 const describeDirectUploadSession = vi.fn();
 vi.mock("../services/direct-upload-session.js", () => ({ loadDirectUploadSession, describeDirectUploadSession }));
+const assertSessionProjectStillReadable = vi.fn(async (..._args: unknown[]) => {});
+vi.mock("../services/direct-session-idempotency.js", async (importOriginal) => ({ ...await importOriginal<object>(), assertSessionProjectStillReadable }));
 
 const loadMediaEvidence = vi.fn();
 vi.mock("../services/media-evidence.js", () => ({ loadMediaEvidence }));
@@ -321,6 +323,11 @@ describe("mcpRoutes", () => {
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, org_id: "foreign" } });
     expect((await request()).status).toBe(404);
     // A foreign session's progress is never computed, let alone returned.
+    expect(describeDirectUploadSession).not.toHaveBeenCalled();
+    // A user who lost the session's project since reads nothing either.
+    loadDirectUploadSession.mockResolvedValue(loaded);
+    assertSessionProjectStillReadable.mockRejectedValueOnce(new Error("no longer readable"));
+    expect((await request()).status).toBe(404);
     expect(describeDirectUploadSession).not.toHaveBeenCalled();
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, project_id: "foreign" } });
     expect((await request()).status).toBe(404);

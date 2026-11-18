@@ -1112,7 +1112,7 @@ export type EtaBucket = "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-3h" | ">3h";
 /** An ETA: `estimate` is true when it comes from project history rather than the run's own progress. */
 export type RunEta = { seconds: number; bucket: EtaBucket; basis: "observed" | "historical"; estimate: boolean; pagesPerMinute: number };
 type ActivityCounts = { runs: number; documents: number; pages: number };
-/** Your organization's ingestion at a glance (`GET /v1/runs?activity=true`, and the stream's `activity-summary` event). */
+/** Your organization's ingestion at a glance (`GET /v1/runs/activity/summary`, `GET /v1/runs?activity=true`, and the stream's `activity-summary` event). */
 export type ActivitySummary = {
   queued: ActivityCounts;
   inProgress: ActivityCounts & { pagesProcessed: number; pagesTotal: number };
@@ -2594,7 +2594,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /** Your organization's queued, in-progress and recently completed work, pages per minute and ETA bucket; null when unavailable. */
     async getActivitySummary(options?: RequestOptions): Promise<ActivitySummary | null> {
-      return (await request<{ summary?: ActivitySummary | null }>("/v1/runs?activity=true", {}, options, true)).summary ?? null;
+      return (await request<{ summary?: ActivitySummary | null }>("/v1/runs/activity/summary", {}, options, true)).summary ?? null;
     },
 
     /** One page of run history (highest priority, then newest first). Follow `nextCursor` for the rest. */

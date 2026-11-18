@@ -450,10 +450,10 @@ export async function directUploadSessionProgress(loaded: LoadedDirectUploadSess
   try {
     const [run] = await sql<Array<{
       id: string; status: string; total_documents: number | string; processed_documents: number | string;
-      pages_total: number | string; pages_processed: number | string; worker_started_at: string | Date | null;
+      pages_total: number | string; pages_processed: number | string; worker_started_at: string | Date | null; created_at: string | Date;
       history_pages: number | string | null; history_runtime_ms: number | string | null;
     }>>`
-      select r.id, r.status, r.total_documents, r.processed_documents, r.pages_total, r.pages_processed, r.worker_started_at,
+      select r.id, r.status, r.total_documents, r.processed_documents, r.pages_total, r.pages_processed, r.worker_started_at, r.created_at,
         cs.completed_run_pages_processed as history_pages, cs.completed_run_runtime_ms as history_runtime_ms
       from project_runs r
       left join project_corpus_stats cs on cs.project_id = r.project_id
@@ -464,7 +464,7 @@ export async function directUploadSessionProgress(loaded: LoadedDirectUploadSess
     const pagesProcessed = Math.min(pagesTotal, Math.max(0, Number(run.pages_processed) || 0));
     const history = run.history_pages === null ? null : { pages: Number(run.history_pages), runtimeMs: Number(run.history_runtime_ms) };
     const eta = estimateRunEta({ status: run.status, pagesTotal, pagesProcessed, startedAt: run.worker_started_at, history, now });
-    if (eta) notePrediction(run.id, session.org_id, eta);
+    if (eta) notePrediction(run.id, session.org_id, eta, (now - new Date(run.created_at).getTime()) / 1000);
     const observed = run.status === "processing" ? observedPagesPerMinute({ pagesProcessed, startedAt: run.worker_started_at, now }) : null;
     progress.run = {
       id: run.id,

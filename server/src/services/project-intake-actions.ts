@@ -273,6 +273,12 @@ export function parseFormProjectIntakePipeline(raw: unknown): PipelineFeatureOve
   }
 }
 
+const replayedConfirms = new WeakSet<object>();
+/** True when a confirm returned the session's stored result (another caller started its run) rather than running intake. */
+export function isReplayedDirectUploadConfirm(result: unknown): boolean {
+  return typeof result === "object" && result !== null && replayedConfirms.has(result);
+}
+
 export async function confirmDirectUploadProjectIntake(
   args: { sessionId: string; userId: string; audit?: ProjectIntakeAudit },
   ports: ProjectIntakePorts = projectIntakePorts,
@@ -284,6 +290,7 @@ export async function confirmDirectUploadProjectIntake(
     if (loaded.session.result) {
       const result = loaded.session.result as ProjectIntakeActionResult;
       await authorizeReceiptProject(result.payload.project.id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
+      replayedConfirms.add(result);
       return result;
     }
     if (!loaded.files.every(file => file.status === "completed")) throw new ProjectIntakeError("Upload session still has incomplete files", 409);

@@ -8,6 +8,7 @@ export async function isApiKeyLive(key: ValidatedKey, scopes: string[]): Promise
     from api_keys
     where id = ${key.keyId} and user_id = ${key.userId}
       and org_id = ${key.orgId} and revoked_at is null
+      and (expires_at is null or expires_at > now())
       and key_type = ${key.keyType}
       and exists (select 1 from org_memberships om
         where om.org_id = api_keys.org_id and om.user_id = api_keys.user_id)

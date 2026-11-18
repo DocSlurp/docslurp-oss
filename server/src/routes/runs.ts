@@ -41,32 +41,33 @@ import {
   retryRun
 } from "../services/runs.js";
 import { redactOperatorEvent, redactOperatorRun } from "../services/progress-snapshot.js";
-import { activitySummaryOrgIdForUser, getOrgActivitySummary } from "../services/run-activity-summary.js";
+import { activitySummaryScopeFor, getOrgActivitySummary, type ActivitySummaryScope } from "../services/run-activity-summary.js";
 import type { ActivitySummary } from "@docslurp/shared";
 
 /**
- * The caller's organization summary for the activity feed: an API key's organization, else the session user's
- * default one. Never fails the feed: a summary that cannot be read is null and the error goes to telemetry.
+ * The caller's activity summary: an API key's organization, else the session user's default one, over the projects
+ * there the caller may read (project access and the key's allowlist, as the run list applies them). Never fails the
+ * feed: a summary that cannot be read is null and the error goes to telemetry by name only.
  */
-async function activitySummaryOrgId(actor: RequestActor): Promise<string | null> {
+async function activitySummaryScope(actor: RequestActor): Promise<ActivitySummaryScope | null> {
   try {
-    return actor.type === "apiKey" ? actor.apiKey.orgId : await activitySummaryOrgIdForUser(actor.userId);
+    return await activitySummaryScopeFor(actor.userId, actor.type === "apiKey" ? actor.apiKey.orgId : null);
   } catch (error) {
-    console.error("[run-activity] summary organization unavailable", error instanceof Error ? error.name : "unknown");
+    console.error("[run-activity] summary scope unavailable", error instanceof Error ? error.name : "unknown");
     return null;
   }
 }
-async function activitySummaryForOrg(orgId: string | null): Promise<ActivitySummary | null> {
-  if (!orgId) return null;
+async function activitySummaryIn(scope: ActivitySummaryScope | null): Promise<ActivitySummary | null> {
+  if (!scope) return null;
   try {
-    return await getOrgActivitySummary(orgId);
+    return await getOrgActivitySummary(scope);
   } catch (error) {
     console.error("[run-activity] summary unavailable", error instanceof Error ? error.name : "unknown");
     return null;
   }
 }
 async function activitySummaryFor(actor: RequestActor): Promise<ActivitySummary | null> {
-  return activitySummaryForOrg(await activitySummaryOrgId(actor));
+  return activitySummaryIn(await activitySummaryScope(actor));
 }
 
 /** A run as the caller may read it: platform operators see everything; customers never see backend models or machines. */
@@ -175,6 +176,15 @@ export const runsRoutes = new Hono()
     const page = await listRunsPage(userId, { orgId, limit: parseListLimit(c.req.query("limit"), 50, 100), cursor: c.req.query("cursor") || undefined });
     return c.json({ ...page, runs: page.runs.map(visible) });
   })
+  // The organization summary alone: a cheap poll for clients that already hold the run inventory elsewhere.
+  .get("/activity/summary", async (c) => {
+    const actor = getRequestActor(c);
+    if (!apiKeyMayReadRuns(actor)) {
+      return apiStatusError(c, 403, "Forbidden");
+    }
+    c.header("Cache-Control", "no-store");
+    return c.json({ summary: await activitySummaryFor(actor) });
+  })
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
@@ -206,28 +216,28 @@ export const runsRoutes = new Hono()
       // The summary is cached per organization (about 5 s), so sending it each heartbeat when it changed costs at most
       // one read per organization per cache period however many streams are open.
       let sentSummary: string | null = null;
-      // Re-resolved with each inventory, so a member removed from the organization stops receiving its summary.
-      let summaryOrgId: string | null = null;
+      // Re-resolved with each inventory, so a member who loses the organization or a project stops seeing it.
+      let summaryScope: ActivitySummaryScope | null = null;
       const summaryKey = (summary: ActivitySummary) => JSON.stringify({ ...summary, generatedAt: null });
       try {
         let reconciledAt = Number.NEGATIVE_INFINITY;
         while (!aborted) {
+          // A key revoked, expired or stripped of its scopes while the stream is open stops receiving the feed.
+          if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", ...SEARCH_SCOPES, "artifacts"])) {
+            await stream.writeSSE({ event: "activity-error", data: "{}" });
+            break;
+          }
           // Event snapshots carry live changes; inventory reconciles membership,
           // access revocation and missed notifications at a bounded cadence.
           if (Date.now() - reconciledAt >= STREAM_RECONCILE_MS) {
-            // A key revoked (or stripped of its scopes) while the stream is open stops receiving the feed.
-            if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", ...SEARCH_SCOPES, "artifacts"])) {
-              await stream.writeSSE({ event: "activity-error", data: "{}" });
-              break;
-            }
-            summaryOrgId = await activitySummaryOrgId(actor);
-            const [runs, summary] = await Promise.all([inventory(), activitySummaryForOrg(summaryOrgId)]);
+            summaryScope = await activitySummaryScope(actor);
+            const [runs, summary] = await Promise.all([inventory(), activitySummaryIn(summaryScope)]);
             if (aborted) break;
             await stream.writeSSE({ event: "activity", data: JSON.stringify({ runs, summary }) });
             if (summary) sentSummary = summaryKey(summary);
             reconciledAt = Date.now();
           } else {
-            const summary = await activitySummaryForOrg(summaryOrgId);
+            const summary = await activitySummaryIn(summaryScope);
             if (aborted) break;
             // generatedAt alone changing is not news.
             if (summary && summaryKey(summary) !== sentSummary) {
@@ -551,6 +561,7 @@ acceptApiKeys(runsRoutes, [
   "POST /:runId/reprocess/estimate",
   "GET /",
   "GET /activity/stream",
+  "GET /activity/summary",
   "GET /:runId/progress",
   "GET /:runId/progress/stream",
   "GET /:runId/events",
