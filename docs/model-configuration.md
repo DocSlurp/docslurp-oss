@@ -365,9 +365,10 @@ summaries and propositions, because those stages need a hosted text model.
 
 ## Private model endpoints
 
-Private endpoints let `local-only` and `strict-privacy` projects use
-open-weight models that the operator runs on single-tenant hardware, such as
-vLLM on a rented GPU. Only operators can declare them, through deployment
+Private endpoints let `local-only` and `strict-privacy` projects (or, in
+[private model mode](#private-model-mode-and-the-service-map), every project)
+use open-weight models that the operator runs on single-tenant hardware, such
+as vLLM on a rented GPU. Only operators can declare them, through deployment
 config. Projects and API callers can only name a registered alias. The
 registry lives in `packages/shared/src/private-endpoints.ts`.
 
@@ -492,13 +493,117 @@ propositions can then be turned back on.
 | Worker text stages (summary, propositions, structured extraction, graph, community summaries, chunk preambles) | `/chat/completions` | Structured extraction also sends `response_format: json_schema` built from the project schema, to private endpoints only. |
 | Worker page vision and self-critique | `/chat/completions` with an image | |
 | Worker and API embeddings (including query embeddings) | `/embeddings` | Dimensions come from the registry. |
-| API grounded chat answers | `/chat/completions` (streamed) | Used when hosted chat is blocked. The project's `textGeneration.model` is tried first, then `DOCSLURP_PRIVATE_TEXT_MODEL`. |
-| API voice input | `/audio/transcriptions` (multipart) | Used outside `standard` when `DOCSLURP_PRIVATE_STT_MODEL` names a registered `stt` model. |
+| API grounded chat answers | `/chat/completions` (streamed) | `DOCSLURP_PRIVATE_TEXT_MODEL`, where hosted chat is not allowed. A model stored on the project is ignored. |
+| API voice input | `/audio/transcriptions` (multipart) | `DOCSLURP_PRIVATE_STT_MODEL`, where hosted speech-to-text is not allowed. |
+| API search reranking (`reranker: model`) | `/rerank` (`{model, query, documents}` → `results[].relevance_score`) | `DOCSLURP_PRIVATE_RERANK_MODEL`, where the hosted reranker is not allowed. Any failure falls back to keyword ranking. |
 
-Not routed yet: the API's optional search strategies, the chat MCP agent, and
-reranking. They behave as they did before private routes existed (see TODO.md).
-Standard projects keep their hosted routes, but they can also name a private
-route explicitly.
+Not routed yet: the API's optional search strategies and the chat MCP agent.
+Where hosted models are not allowed they are skipped, as before private routes
+existed (see TODO.md).
+
+### Private model mode and the service map
+
+The operator maps each model service to one registered private model, with one
+variable per service. Projects never choose these: they keep a level (quality,
+profile, tier), and the base URL, credentials and model come only from the
+operator's environment. Set the same values on the worker and the app.
+
+| Variable | Service | Registry capability |
+| --- | --- | --- |
+| `DOCSLURP_PRIVATE_TEXT_MODEL` | Worker text stages, structured extraction, API chat answers | `text` |
+| `DOCSLURP_PRIVATE_VISION_MODEL` | Worker page vision (replaces a vision route that would be hosted) | `vision` |
+| `DOCSLURP_PRIVATE_EMBEDDING_MODEL` | Worker and query embeddings (replaces an embedding route that would be hosted) | `embedding` |
+| `DOCSLURP_PRIVATE_RERANK_MODEL` | API search reranking | `rerank` |
+| `DOCSLURP_PRIVATE_ROUTER_MODEL` | Reserved: page-router decisions (validated, not used yet; see below) | `text` or `vision` |
+| `DOCSLURP_PRIVATE_STT_MODEL` | API voice input | `stt` |
+
+Each value is an `llm://private/<alias>/<model-id>` that must resolve in
+`DOCSLURP_PRIVATE_MODEL_ENDPOINTS` with that capability; the embedding model
+must declare `dimensions`. In private mode an unknown alias, an unlisted model,
+a wrong capability or any other URI stops the worker and the app at startup. In
+hosted mode the same mistake logs a warning and the service counts as
+unmapped, so a deployment that never used the map keeps starting. Both
+processes log `[private-model-mode] mode=… map_digest=… mapped=…` at startup:
+the API and the worker must show the same digest.
+
+`DOCSLURP_MODEL_MODE` sets where model calls may go for the whole deployment:
+
+- `hosted` (default): `standard` projects use the hosted providers. Projects
+  whose privacy mode forbids hosted models (`local-only`, `strict-privacy`) use
+  the mapped private model for each service.
+- `private`: every project, whatever its level or privacy mode, uses the mapped
+  private model for each service, and no hosted model provider is ever called.
+  The privacy guard treats every project as one that forbids hosted models, so
+  each hosted call is refused before it leaves the process
+  (`PrivacyModeViolationError`, logged as `[privacy] blocked ...`). A service
+  with no mapping is unavailable: optional features skip, required work fails,
+  and nothing falls back to a hosted model. Startup logs one warning that lists
+  the unmapped services. Steps that call no remote model stay allowed: local
+  embeddings, the heuristic and baseline page routers, local OCR. Startup also
+  refuses hosted credentials (below), so no hosted call could authenticate even
+  where a code path missed the guard, and live price-list fetches from hosted
+  providers are off. Any other value of `DOCSLURP_MODEL_MODE` stops startup.
+
+Runs created in private mode are stamped `modelMode: "private"` in their
+pipeline snapshot (`project_runs.pipeline`). A worker treats a stamped run as
+private even if its own `DOCSLURP_MODEL_MODE` says hosted: the run's `standard`
+privacy mode reads as `local-only`, so every hosted call is refused.
+
+A stored private route (an admin model override, an old run snapshot) is used
+only when it is the service's mapped URI. Any other alias is dropped with a
+warning: replaced by the mapping, or, with the service unmapped, back to the
+level's own route, which the guard refuses.
+
+In private mode startup refuses these variables when set, and a registered
+endpoint may not use one of their names as its `auth.tokenEnv`:
+
+| Variable | What uses it in hosted mode |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Text, chat, vision, embeddings, voice input, moderation, decision models, live prices |
+| `OPENAI_API_KEY` | OpenAI embeddings and vision |
+| `ANTHROPIC_API_KEY` | Anthropic text stages |
+| `DEEPINFRA_API_KEY`, `DEEPINFRA_TOKEN` | Hosted reranker, embeddings, media transcription and vision, GPU capacity provider, balance alerts |
+| `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY` | Page-image query embeddings, balance alerts |
+| `JINA_API_KEY` | Jina web reader |
+| `PERPLEXITYAI_API_KEY`, `PERPLEXITY_API_KEY`, `LIQUID_API_KEY` | Page-router decision models |
+| `MISTRAL_API_KEY`, `COHERE_API_KEY`, `VOYAGE_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, `GROQ_API_KEY` | Hosted providers (refused so none is added unnoticed) |
+| `HF_TOKEN`, `HUGGINGFACE_API_KEY` | Hugging Face downloads and inference |
+| `TAVILY_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY` | Web search and crawl tools |
+
+To keep one for a use that sends no project content to a model (for example
+the DeepInfra GPU capacity provider, or balance alerts), name it in
+`DOCSLURP_PRIVATE_MODE_ALLOW_KEYS` (comma-separated). Startup then logs a
+warning instead of refusing; the privacy guard still refuses every hosted model
+call.
+
+The map applies where a run or search reads its pipeline, never to what a
+project stores. Local routes are kept: a `local-only` project on local
+embeddings stays on them, because switching to a remote endpoint would send
+content somewhere it did not go before. `DOCSLURP_VISION_MODEL_URI` (a hosted
+default) does not apply in private mode.
+
+Embedding size comes from the mapped model's registered `dimensions`; the
+hosted profile's settings do not carry over (vectors are normalized, no late
+chunking). The index identity of a document (`documents.index_config_hash`)
+names the full model URI, so vectors from the private model are never mixed
+with those of a hosted model, even one serving the same model id. Settings
+changes, re-index planning and the legacy-index count all use this effective
+identity. Existing documents keep the index they were built with. After
+switching a deployment to private mode, those built with a hosted model are
+skipped by search (diagnostic `indexConfigUnavailable`) until they are
+re-indexed; the search itself still answers. With the embedding service
+unmapped, the vector leg skips (diagnostic `embeddingUnmapped`) and the lexical
+legs answer.
+
+`DOCSLURP_PRIVATE_ROUTER_MODEL` is reserved. Page-router decision models
+speak a decisions protocol that private endpoints do not serve yet, so in
+private mode the router uses its heuristic or baseline plan, and startup says
+so. The variable is validated now so a mapping is ready when a private decision
+adapter exists (TODO.md).
+
+Usage events of private calls record `provider = private` and
+`model = <alias>/<model-id>`; their `metadata.modelUri` is
+`llm://private/<alias>/<model-id>`, never the base URL or the token.
 
 ### Privacy and audit
 
