@@ -153,11 +153,17 @@ secret.
 The API process keeps one postgres.js pool for requests, plus one LISTEN
 connection and one probe connection that answers only health checks. The
 probe never queues behind requests, so search load cannot fail `/ready` or
-trip the watchdog.
+trip the watchdog. Route-auth credential lookups (API keys and OAuth tokens)
+use a small pool of their own, opened on first use, whose connections start
+with `statement_timeout=3s` and read-only transactions, so a stalled lookup
+can hold only those connections and never sign-in's or requests'. It needs a
+direct connection to Postgres, as the LISTEN connection does: a
+transaction-mode pooler rejects or drops startup parameters.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + 12` per process against Postgres `max_connections` (LISTEN, the probe and Better Auth's own pool of 10), and double it for deploys that overlap old and new machines. |
+| `DATABASE_POOL_MAX` | `20` | Request pool connections per API process. Budget `DATABASE_POOL_MAX + AUTH_LOOKUP_POOL_MAX + 12` per process (36 with the defaults) against Postgres `max_connections` (LISTEN, the probe, the credential-lookup pool and Better Auth's own pool of 10), and double it for deploys that overlap old and new machines. |
+| `AUTH_LOOKUP_POOL_MAX` | `4` | Connections in the credential-lookup pool per API process (1 to 32). Each lookup is one short statement; at most 64 lookups are admitted at once and wait at most 5 s for a connection, then route auth answers 503 with `Retry-After`. |
 | `SEARCH_STATEMENT_TIMEOUT_MS` | `8000` | `SET LOCAL statement_timeout` for each search statement (lexical, page, community and graph branches). A timed-out branch contributes no results and the search continues with the others; `0` disables. Search SQL is also cancelled when the client disconnects. |
 | `SEARCH_STREAM_DETACHED_TIMEOUT_MS` | `120000` | Longest a streamed search (`/v1/search/stream`) may keep running after its client disconnected once passages had been sent, which makes the search billable. Then the search is aborted. Values above `600000` are clamped to it; values below `1000` or unparsable use the default. A client that leaves before any hits are sent aborts the search at once. |
 | `CHAT_AGENT_TURN_DEADLINE_MS` | `100000` | Deadline for one search-agent chat turn, kept below the ~120 s edge proxy timeout. Near it, tools are disabled and the turn answers from the evidence it has (`stopReason: "deadline"`, HTTP 200); if a model/turn deadline expires it returns 424 `chat_deadline_exceeded`, even after partial text. All model, tool, search and SQL work of the turn is cancelled at it. |

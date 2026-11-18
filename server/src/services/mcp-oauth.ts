@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { parseIp } from "@docslurp/shared/client-ip";
-import type { PoolClient, QueryConfig } from "pg";
+import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
-import { LOOKUP_ACQUIRE_TIMEOUT_MS, withDeadline } from "../lib/bounded-lookup.js";
+import { boundedLookup } from "../lib/bounded-lookup.js";
 import { isSearchScope, SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { effectiveMaxOutputTokens, ipAllowed, parseApiKeyRateLimits, parseKeyMaterializationPolicy, type ValidatedKey } from "./api-keys.js";
 /**
@@ -190,72 +190,21 @@ export async function issueTokens(db: PoolClient, grantId: string, audience: key
 }
 
 /**
- * Credential lookups may hold at most half of the shared auth pool's
- * connections (Better Auth's; at least one), so a stall in lookups never takes
- * every connection sign-in needs. A lookup waits for a slot and a connection
- * together within the acquisition bound.
+ * A token lookup. With `timeoutMs` (route auth), it runs on the dedicated
+ * credential-lookup pool (lib/bounded-lookup.ts), never Better Auth's, so a
+ * stalled lookup cannot take a connection sign-in needs: a connection within the
+ * acquisition bound, then one statement under the pool's startup
+ * statement_timeout, raced against a hard timer (LookupTimeoutError, 57014).
+ * Without `timeoutMs`, the plain call on the auth pool.
  */
-let lookupSlotsInUse = 0;
-const lookupSlotWaiters: Array<(release: () => void) => void> = [];
-
-function lookupSlotLimit(): number {
-  const max = (appDbPool as { options?: { max?: number } }).options?.max ?? 10;
-  return Math.max(1, Math.floor(max / 2));
-}
-
-function takeLookupSlot(): Promise<() => void> {
-  const release = () => {
-    const next = lookupSlotWaiters.shift();
-    if (next) next(release);
-    else lookupSlotsInUse--;
-  };
-  if (lookupSlotsInUse < lookupSlotLimit()) {
-    lookupSlotsInUse++;
-    return Promise.resolve(release);
-  }
-  return new Promise((resolve) => { lookupSlotWaiters.push(resolve); });
-}
-
-/**
- * A query on the shared auth pool, bounded when `timeoutMs` is given, with the
- * two bounds kept apart: a lookup slot and a pooled client within
- * LOOKUP_ACQUIRE_TIMEOUT_MS (late ones are released), then the statement in a
- * short read-only transaction under `SET LOCAL statement_timeout`, which
- * Postgres enforces. A hard timer also rejects the caller (LookupTimeoutError).
- * Without `timeoutMs`, the plain call.
- */
-async function queryWithTimeout(text: string, values: unknown[], timeoutMs: number | undefined) {
+async function queryWithTimeout(text: string, values: unknown[], timeoutMs: number | undefined): Promise<{ rows: any[] }> {
   if (!timeoutMs) return appDbPool.query(text, values);
-  const acquired = takeLookupSlot().then(async (releaseSlot) => {
-    try {
-      return { releaseSlot, client: await appDbPool.connect() };
-    } catch (error) {
-      releaseSlot();
-      throw error;
-    }
-  });
-  const { releaseSlot, client } = await withDeadline(acquired, LOOKUP_ACQUIRE_TIMEOUT_MS, "acquire", {
-    onLate: (late) => { late.client.release(); late.releaseSlot(); },
-  });
-  const run = (async () => {
-    await client.query("BEGIN READ ONLY");
-    await client.query("SELECT set_config('statement_timeout', $1, true)", [String(Math.max(1, Math.floor(timeoutMs)))]);
-    const result = await client.query({ text, values } as QueryConfig);
-    await client.query("COMMIT");
-    return result;
-  })();
-  // Return the client (and the slot) only after its transaction ended; a client whose rollback fails is discarded.
-  run.then(
-    () => { client.release(); releaseSlot(); },
-    () => {
-      client.query("ROLLBACK").then(() => client.release(), (error: Error) => client.release(error)).finally(releaseSlot);
-    },
-  );
-  return await withDeadline(run, timeoutMs + 500, "execute");
+  const rows = await boundedLookup((lookup) => lookup.unsafe(text, values as never[]), timeoutMs);
+  return { rows: [...rows] };
 }
 
 export async function validateMcpToken(raw: string, resource: string, requestContext?: { ip?: string | null }, options: { timeoutMs?: number } = {}): Promise<ValidatedKey | null> {
-  // `timeoutMs` bounds the lookup (pg query_timeout), so a stalled database cannot hold the caller.
+  // `timeoutMs` bounds the lookup (queryWithTimeout), so a stalled database cannot hold the caller.
   const { rows } = await queryWithTimeout(`
     SELECT g.*, k.ip_allowlist AS key_ip_allowlist, k.max_output_tokens AS key_max_output_tokens, t.expires_at AS token_expires_at, c.name AS client_name,
            k.materialization_policy AS key_materialization_policy, k.scopes AS key_scopes, k.rate_limit_rpm AS key_rpm, k.rate_limit_ppd AS key_ppd,

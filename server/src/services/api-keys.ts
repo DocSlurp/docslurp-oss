@@ -9,7 +9,7 @@ import { sql } from "../db.js";
 import { ipInRange, parseCidr, parseIp } from "@docslurp/shared/client-ip";
 import { AllowedOriginError, normalizeAllowedOriginEntry, originMatchesAllowlist } from "../lib/allowed-origins.js";
 import { recordApiKeyRequest } from "./api-key-usage.js";
-import { LOOKUP_ACQUIRE_TIMEOUT_MS, withDeadline } from "../lib/bounded-lookup.js";
+import { boundedLookup } from "../lib/bounded-lookup.js";
 import { resolveDefaultOrganization, getOrganization, OrganizationError, withOrganizationLock } from "./organizations.js";
 
 type ApiKeyRow = {
@@ -649,32 +649,13 @@ function selectKeyRow(client: typeof sql, keyHash: string) {
 }
 
 /**
- * selectKeyRow with its two bounds kept apart: a reserved connection within
- * LOOKUP_ACQUIRE_TIMEOUT_MS (a late one is released), then the select in a
- * short read-only transaction under `SET LOCAL statement_timeout`, so Postgres
- * itself cancels a stalled statement. A hard timer rejects the caller on its
- * own a little after the statement bound (a best-effort cancel, whose failure
- * is caught); the connection is rolled back if needed and returned to the pool
- * only once its transaction has ended, so it never leaks mid-transaction.
+ * selectKeyRow on the dedicated credential-lookup pool (lib/bounded-lookup.ts):
+ * a connection within the acquisition bound, then one statement under the pool's
+ * startup statement_timeout and read-only default, raced against a hard timer.
+ * One round trip.
  */
-async function selectKeyRowBounded(keyHash: string, timeoutMs: number): Promise<ApiKeyRow[]> {
-  const reserved = await withDeadline(sql.reserve(), LOOKUP_ACQUIRE_TIMEOUT_MS, "acquire", { onLate: (late) => late.release() });
-  let pending: { cancel: () => unknown } | null = null;
-  const run = (async () => {
-    await reserved`begin read only`;
-    await reserved`select set_config('statement_timeout', ${String(Math.max(1, Math.floor(timeoutMs)))}, true)`;
-    const query = selectKeyRow(reserved as unknown as typeof sql, keyHash);
-    pending = query;
-    const rows = await query;
-    await reserved`commit`;
-    return rows;
-  })();
-  // Return the connection only after its transaction ended (committed, or rolled back after a failure).
-  run.then(
-    () => reserved.release(),
-    () => { reserved`rollback`.catch(() => {}).finally(() => reserved.release()); },
-  );
-  return await withDeadline(run, timeoutMs + 500, "execute", { onTimeout: () => pending?.cancel() });
+function selectKeyRowBounded(keyHash: string, timeoutMs: number): Promise<ApiKeyRow[]> {
+  return boundedLookup((lookup) => selectKeyRow(lookup as unknown as typeof sql, keyHash), timeoutMs);
 }
 
 export async function validateApiKey(
@@ -682,8 +663,8 @@ export async function validateApiKey(
   requestContext?: { origin?: string | null; referer?: string | null; ip?: string | null },
   /**
    * `recordUsage: false` validates without recording a request (the caller records it once, lib/route-credentials.ts).
-   * `timeoutMs` bounds the lookup (selectKeyRowBounded): connection acquisition and a database-side
-   * statement_timeout, each with its own bound; it then rejects with a LookupTimeoutError (57014).
+   * `timeoutMs` runs the lookup on the dedicated pool (selectKeyRowBounded): connection acquisition and a
+   * database-side statement_timeout, each with its own bound; it then rejects with a LookupTimeoutError (57014).
    */
   options: { recordUsage?: boolean; timeoutMs?: number } = {},
 ): Promise<ValidatedKey | null> {

@@ -5,6 +5,7 @@ import { chartExportDefaultsWarnings, chartExportSwitchWarning, resolveDeploymen
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
+import { closeAuthLookupPool } from "./lib/auth-lookup-pool.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
 import { apiPublicErrorMiddleware } from "./lib/public-errors.js";
@@ -311,6 +312,7 @@ async function stopApiBackgroundTasks(): Promise<void> {
   stopMaintenanceSweeper();
   await stopDirectUploadReconciler();
   await closeDirectUploadLockPool();
+  await closeAuthLookupPool();
   stopAlertEvaluator();
   stopCreditDebitFlusher();
   stopRunStartRecovery();

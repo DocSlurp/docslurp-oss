@@ -2,61 +2,75 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Credential lookups are bounded whatever the database or the cancel path do:
- * a reserved connection within the acquisition bound, the statement within its
- * own bound, and a hard timer that rejects on its own.
+ * a connection of the dedicated lookup pool within the acquisition bound, one
+ * statement (the pool's startup statement_timeout bounds it in Postgres), and a
+ * hard timer that rejects on its own.
  */
 const { fake } = vi.hoisted(() => ({
-  fake: { reserve: (): Promise<unknown> => Promise.resolve(null), cancel: (): unknown => undefined, selectSettles: false },
+  fake: { statements: [] as string[], cancel: (): unknown => undefined, max: 2, stalled: [] as Array<() => void> },
 }));
-vi.mock("../db.js", () => ({ sql: Object.assign(vi.fn(), { reserve: () => fake.reserve(), json: (v: unknown) => v, array: (v: unknown) => v }) }));
+/** A statement that runs until the test ends it (as Postgres would at statement_timeout). */
+function stalledStatement(text: string) {
+  fake.statements.push(text);
+  return Object.assign(new Promise<unknown[]>((resolve) => { fake.stalled.push(() => resolve([])); }), { cancel: () => fake.cancel() });
+}
+const lookupSql = Object.assign((strings: TemplateStringsArray) => stalledStatement(strings.join("?")), { unsafe: stalledStatement });
+vi.mock("../lib/auth-lookup-pool.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/auth-lookup-pool.js")>(),
+  authLookupSql: () => lookupSql,
+  authLookupPoolMax: () => fake.max,
+}));
+vi.mock("../db.js", () => ({ sql: Object.assign(vi.fn(), { json: (v: unknown) => v, array: (v: unknown) => v }) }));
 
 const { validateApiKey } = await import("../services/api-keys.js");
-const { LOOKUP_ACQUIRE_TIMEOUT_MS, LookupTimeoutError, withDeadline } = await import("../lib/bounded-lookup.js");
+const { LOOKUP_ACQUIRE_TIMEOUT_MS, LookupTimeoutError, boundedLookup, lookupSlotsInUse, withDeadline } = await import("../lib/bounded-lookup.js");
+const { authLookupPoolOptions, resolveAuthLookupPoolMax, DEFAULT_AUTH_LOOKUP_POOL_MAX } = await import("../lib/auth-lookup-pool.js");
 
-/** A reserved connection whose api_keys select never settles; other statements succeed. */
-function stalledConnection() {
-  const release = vi.fn();
-  const statements: string[] = [];
-  const connection = Object.assign((strings: TemplateStringsArray) => {
-    const text = strings.join("?");
-    statements.push(text);
-    if (text.includes("from api_keys")) return Object.assign(new Promise(() => {}), { cancel: () => fake.cancel() });
-    return Promise.resolve([]);
-  }, { release });
-  return { connection, release, statements };
-}
-
-afterEach(() => vi.useRealTimers());
+afterEach(async () => {
+  for (const end of fake.stalled.splice(0)) end();
+  await new Promise((resolve) => setImmediate(resolve));
+  vi.useRealTimers();
+  fake.statements = [];
+  fake.cancel = () => undefined;
+  fake.max = 2;
+  expect(lookupSlotsInUse()).toBe(0);
+});
 
 describe("bounded API-key lookup", () => {
-  it("rejects at its deadline when cancel rejects (no unhandled rejection) and when cancel never settles", async () => {
+  it("is one statement, and rejects at its deadline when cancel rejects (no unhandled rejection) or never settles", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     for (const cancel of [() => Promise.reject(new Error("connect ECONNREFUSED 127.0.0.1:5432")), () => new Promise(() => {})]) {
-      const { connection, statements } = stalledConnection();
-      fake.reserve = () => Promise.resolve(connection);
+      fake.statements = [];
       fake.cancel = cancel;
-      const lookup = validateApiKey("dslp_priv_x", undefined, { recordUsage: false, timeoutMs: 3_000 });
-      const settled = lookup.then(() => "resolved", (error) => error);
+      const settled = validateApiKey("dslp_priv_x", undefined, { recordUsage: false, timeoutMs: 3_000 }).then(() => "resolved", (error) => error);
       await vi.advanceTimersByTimeAsync(3_500);
       const outcome = await settled;
       expect(outcome).toBeInstanceOf(LookupTimeoutError);
       expect(outcome).toMatchObject({ code: "57014", phase: "execute" });
-      // The statement ran under a database-side statement_timeout in a read-only transaction.
-      expect(statements.slice(0, 2).join(" | ")).toMatch(/begin read only.*statement_timeout/s);
+      // One round trip: the select alone, with no BEGIN, SET or COMMIT around it.
+      expect(fake.statements).toHaveLength(1);
+      expect(fake.statements[0]).toMatch(/from api_keys/);
     }
   });
 
-  it("bounds connection acquisition separately, and releases a connection that arrives late", async () => {
+  it("bounds acquisition when every lookup connection is busy, and frees a slot only when its statement ends", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const { connection, release } = stalledConnection();
-    let deliver!: (value: unknown) => void;
-    fake.reserve = () => new Promise((resolve) => { deliver = resolve; });
-    const settled = validateApiKey("dslp_priv_x", undefined, { recordUsage: false, timeoutMs: 3_000 }).then(() => "resolved", (error) => error);
-    await vi.advanceTimersByTimeAsync(LOOKUP_ACQUIRE_TIMEOUT_MS);
-    expect(await settled).toMatchObject({ code: "57014", phase: "acquire" });
-    deliver(connection);
+    fake.max = 1;
+    // The only connection runs a stalled statement: its caller gets up after 3.5 s, but the slot stays
+    // held until the statement ends (as Postgres ends it at statement_timeout).
+    const first = boundedLookup((lookup) => lookup.unsafe("select 1", [])).then((rows) => rows, (error) => error);
+    const second = boundedLookup(() => Promise.resolve(["second"])).then((rows) => rows, (error) => error);
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(await first).toMatchObject({ code: "57014", phase: "execute" });
+    expect(lookupSlotsInUse()).toBe(1);
+    // The waiting lookup is bounded by acquisition.
+    await vi.advanceTimersByTimeAsync(LOOKUP_ACQUIRE_TIMEOUT_MS - 3_500);
+    expect(await second).toMatchObject({ code: "57014", phase: "acquire" });
+    // The statement ends: its slot comes back, and the next lookup runs at once.
+    for (const end of fake.stalled.splice(0)) end();
     await vi.advanceTimersByTimeAsync(0);
-    expect(release).toHaveBeenCalledTimes(1);
+    expect(lookupSlotsInUse()).toBe(0);
+    expect(await boundedLookup(() => Promise.resolve(["third"]))).toEqual(["third"]);
   });
 
   it("withDeadline never lets a failing or hanging cancel hook escape", async () => {
@@ -66,5 +80,16 @@ describe("bounded API-key lookup", () => {
       await vi.advanceTimersByTimeAsync(100);
       expect(await settled).toBeInstanceOf(LookupTimeoutError);
     }
+  });
+});
+
+describe("the dedicated lookup pool", () => {
+  it("sets the statement bound and read-only as startup parameters, and is small", () => {
+    const options = authLookupPoolOptions(DEFAULT_AUTH_LOOKUP_POOL_MAX);
+    expect(options).toMatchObject({ max: 4, prepare: false, connection: { statement_timeout: 3_000, default_transaction_read_only: true, application_name: "docslurp-auth-lookup" } });
+    expect(resolveAuthLookupPoolMax({})).toBe(4);
+    expect(resolveAuthLookupPoolMax({ AUTH_LOOKUP_POOL_MAX: "8" })).toBe(8);
+    expect(resolveAuthLookupPoolMax({ AUTH_LOOKUP_POOL_MAX: "0" })).toBe(1);
+    expect(resolveAuthLookupPoolMax({ AUTH_LOOKUP_POOL_MAX: "x" })).toBe(4);
   });
 });

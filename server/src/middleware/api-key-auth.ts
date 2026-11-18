@@ -27,8 +27,9 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
   }
 
   // Shared with the request body budget (lib/route-credentials.ts): one lookup per request. The lookup is
-  // bounded (lib/bounded-lookup.ts): a connection within 5 s, the statement within 3 s by statement_timeout,
-  // and at most 64 lookups at once. A full admission limit, an exhausted pool or a timed-out statement makes
+  // bounded (lib/bounded-lookup.ts): one round trip on the dedicated lookup pool (lib/auth-lookup-pool.ts),
+  // a connection within 5 s, the statement within 3 s by its startup statement_timeout, and at most 64
+  // lookups admitted at once. A full admission limit, an exhausted pool or a timed-out statement makes
   // verification unavailable, answered below as 503 with Retry-After (retryable), never as an invalid key.
   const resolution = await resolveRequestApiKey(c, header);
   // Verification unavailable (the lookup failed or timed out): fail closed, and say it is retryable.
