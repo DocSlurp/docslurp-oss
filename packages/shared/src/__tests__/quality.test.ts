@@ -28,6 +28,7 @@ import {
   qualityAllowsPageReading,
   qualityModePriceRange,
   qualityLevelOfPipeline,
+  smartestLocksPageImages,
 } from "../index.js";
 
 describe("pipeline.quality", () => {
@@ -442,4 +443,30 @@ it("accepts bounded VM PDF image options and rejects executable or out-of-range 
   for(const bad of [{binary:"custom"},{images:{enabled:true,minWidth:0}},{images:{minHeight:4097}},{pdf:{passwords:["secret"]}}]) {
     expect(()=>parseExtractorOptions("vm-pdf",bad)).toThrow();
   }
+});
+
+describe("Smartest locks page images on", () => {
+  it("keeps pageImages true on a Smartest pipeline and leaves Fastest's choice alone", () => {
+    expect(normalizePipelineFeatures({ quality: "smartest", pageImages: false } as never).pageImages).toBe(true);
+    expect(normalizePipelineFeatures({ quality: "fastest", pageImages: false } as never).pageImages).toBe(false);
+    expect(normalizePipelineFeatures({ quality: "auto", ladder: { maxRung: "intelligent" }, pageImages: false } as never).pageImages).toBe(true);
+  });
+
+  it("an override turning page images off on a Smartest project keeps them on", () => {
+    const base = normalizePipelineFeatures({ quality: "smartest" } as never);
+    expect(mergePipelineFeatures(base, { pageImages: false }).pageImages).toBe(true);
+    const fastest = normalizePipelineFeatures({ quality: "fastest" } as never);
+    expect(mergePipelineFeatures(fastest, { pageImages: false }).pageImages).toBe(false);
+  });
+
+  it("smartestLocksPageImages names only the forced combination", () => {
+    expect(smartestLocksPageImages({ quality: "auto", ladder: { maxRung: "intelligent" }, pageImages: false })).toBe(true);
+    expect(smartestLocksPageImages({ quality: "auto", ladder: { maxRung: "intelligent" }, pageImages: true })).toBe(false);
+    expect(smartestLocksPageImages({ quality: "auto", ladder: { maxRung: "ocr" }, pageImages: false })).toBe(false);
+  });
+
+  it("Read scans defaults on for Fastest", () => {
+    expect(qualityLevelOfPipeline(normalizePipelineFeatures({ quality: "fastest" } as never))).toEqual({ quality: "fastest", readScans: true });
+    expect(qualityLevelOfPipeline(defaultPipelineFeatures)).toEqual({ quality: "fastest", readScans: true });
+  });
 });

@@ -937,7 +937,9 @@ export class VisionExtractStage implements Stage {
     // a share cap lowered from intelligent are read on the OCR rung, by the OCR engine, the page reader or transcription.
     const forbidsVision = ladderForbidsVision(state.run.pipeline);
     const lowered = decisions.filter((decision) => decision.rung === "ocr" && (forbidsVision || decision.need === "intelligent")).map((decision) => decision.pageNumber);
-    const vmOcr = resolveOcrMode() === "vm" && document.mimeType === "application/pdf";
+    // Fastest has no other reader, so its pages also go to the local OCR sandbox when no VM provider is configured.
+    const ocrMode = resolveOcrMode();
+    const vmOcr = (ocrMode === "vm" || (forbidsVision && ocrMode === "local")) && document.mimeType === "application/pdf";
     const vision = state.run.pipeline.vision;
     const reader = !forbidsVision && !vmOcr && document.mimeType === "application/pdf" && hints.triaged ? visionPageReaderFor(state, vision) : null;
     const transcription = !forbidsVision && isPageTranscription({ vision, outputSchema: state.run.pipeline.outputSchema ?? null });
@@ -1448,7 +1450,9 @@ export class VisionExtractStage implements Stage {
     }
     // Scans beside native text go to the OCR engine in its VM (as scanned pages do in extract-markdown), not to the host
     // raster and a hosted vision model. Escalation follows the OCR boundary's own rules.
-    const vmOcr = resolveOcrMode() === "vm" && document.mimeType === "application/pdf" ? missing.filter((page) => hints.vmOcrPages?.has(page)) : [];
+    const engineMode = resolveOcrMode();
+    const engineReads = engineMode === "vm" || (engineMode === "local" && ladderForbidsVision(state.run.pipeline));
+    const vmOcr = engineReads && document.mimeType === "application/pdf" ? missing.filter((page) => hints.vmOcrPages?.has(page)) : [];
     if (vmOcr.length > 0) {
       completed.push(...await this.readPagesWithVmOcr(state, document, vmOcr, skip, signal));
       const rest = missing.filter((page) => !vmOcr.includes(page));

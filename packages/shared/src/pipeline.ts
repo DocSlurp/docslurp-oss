@@ -1171,8 +1171,25 @@ export function normalizePipelineFeatures(
     // Smartest reads every page the text layer cannot carry with the vision model and skips OCR, so it turns vision on:
     // with vision off its scans would be read by nothing. A run cost cap (maxCostCents) can still stop vision early.
     ...(source && qualityLevelOfPipeline(source).quality === "smartest" ? { visionFallback: true } : {}),
+    // Smartest always keeps page images: the reader and cited-page previews show what the vision model read.
+    ...(source && smartestLocksPageImages(source) ? { pageImages: true } : {}),
   });
 }
+
+/**
+ * True when Smartest overrides `pageImages: false` (Smartest always stores page images). Callers that accept a request
+ * report it as a warning (`pageImagesForcedWarning`); normalizePipelineFeatures applies it.
+ */
+export function smartestLocksPageImages(source: { quality?: unknown; ladder?: unknown; pageImages?: unknown } | null | undefined): boolean {
+  return !!source && source.pageImages === false && qualityLevelOfPipeline(source).quality === "smartest";
+}
+
+/** The response warning for a request whose `pageImages: false` Smartest kept on. */
+export const PAGE_IMAGES_FORCED_WARNING = {
+  code: "page_images_forced",
+  field: "pageImages",
+  message: "Smartest always stores page images; pageImages stays true.",
+} as const;
 
 /** `value` with its `documentExtraction` extractor ids aliased to their canonical ids (extractor-aliases.ts). */
 function withCanonicalExtractorIds<T>(value: T): T {

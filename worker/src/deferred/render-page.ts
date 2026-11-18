@@ -32,7 +32,9 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; page_images: boolean; low: string | null; high: string | null }[]>`
     select d.org_id, d.project_id,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
-      coalesce((p.pipeline->>'pageImages')::boolean, true) as page_images,
+      (coalesce((p.pipeline->>'pageImages')::boolean, true)
+        or (coalesce(p.pipeline->>'quality', 'auto') = 'auto' and p.pipeline->'ladder'->>'maxRung' = 'intelligent')
+        or p.pipeline->>'quality' = 'good') as page_images,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 250)} as high
     from documents d join project_runs r on r.id=d.run_id left join projects p on p.id=d.project_id

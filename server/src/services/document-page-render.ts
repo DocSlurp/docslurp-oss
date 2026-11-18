@@ -34,8 +34,12 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   if (unavailable || !doc.runId) return { status: "unavailable" as const, reason: unavailable ?? "processing", document: doc };
   const runId = doc.runId;
   // Page images off (pipeline.pageImages: false): images already stored are served above; no new one is rendered.
+  // Smartest always keeps page images, whatever a stored row says.
   const [project] = await sql<{ page_images: boolean }[]>`
-    select coalesce((pipeline->>'pageImages')::boolean, true) as page_images from projects where id = ${doc.projectId}`;
+    select coalesce((pipeline->>'pageImages')::boolean, true)
+      or (coalesce(pipeline->>'quality', 'auto') = 'auto' and pipeline->'ladder'->>'maxRung' = 'intelligent')
+      or pipeline->>'quality' = 'good' as page_images
+    from projects where id = ${doc.projectId}`;
   if (project && !project.page_images) return { status: "unavailable" as const, reason: "disabled" as const, document: doc };
   // Scan what we parse (PR #339): the worker refuses to render a document without a parse decision from the current scan
   // (one quarantined before it). Say so, stably, instead of queueing a render that can only fail and polling "pending".
