@@ -642,8 +642,8 @@ test("a resume refuses foreign ids: extra completion results, extra descriptors 
   const big = (extra) => ({ id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "single", putUrl: "/storage/0", ...extra });
   const cases = [
     ["an extra completion result", big({ index: 0, clientId: "0", inspected: false }), () => ({ body: { files: [missing("f0"), { fileId: "other", status: "completed" }] } }), null],
-    ["an extra descriptor in the filtered read", big({ index: 0, clientId: "0", inspected: false }), () => ({ body: { files: [missing("f0")] } }),
-      () => [big({ index: 0, clientId: "0", putUrl: "/storage/a" }), big({ id: "other", index: 1, clientId: "1", putUrl: "/storage/other" })]],
+    ["the requested file twice in the filtered read", big({ index: 0, clientId: "0", inspected: false }), () => ({ body: { files: [missing("f0")] } }),
+      () => [big({ index: 0, clientId: "0", putUrl: "/storage/a" }), big({ index: 0, clientId: "0", putUrl: "/storage/other" })]],
     ["a renamed legacy match", big({ inspected: false }), () => ({ body: { files: [missing("f0")] } }),
       () => [big({ filename: "other.pdf", putUrl: "/storage/renamed" })]],
   ];
@@ -660,7 +660,7 @@ test("a resume refuses foreign ids: extra completion results, extra descriptors 
         return { status: 404, body: {} };
       });
       assert.notEqual(result.code, 0, label);
-      assert.match(result.stderr, /did not send|not asked for|differently/, label);
+      assert.match(result.stderr, /did not send|more than once|differently/, label);
       assert.equal(result.requests.filter((request) => request.url.startsWith("/storage/")).length, 0, `${label}: no bytes sent`);
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
@@ -681,4 +681,43 @@ test("a storage PUT answered with a redirect is not followed: the bytes never re
     assert.notEqual(result.code, 0);
     assert.equal(result.requests.filter((request) => request.url === "/storage/elsewhere").length, 0);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an older server that ignores the fileId filter (describes every file) still resumes: other files are ignored", async () => {
+  for (const label of ["uninspected", "transient"]) {
+    const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+    try {
+      const files = await directFiles(dir, 2);
+      let failedOnce = false;
+      const result = await invoke(["upload", ...files], (request, _count, base) => {
+        const big = (extra = {}) => ({ index: 0, clientId: "0", id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "single", putUrl: `${base}/storage/0`, ...extra });
+        const small = (extra = {}) => ({ index: 1, clientId: "1", id: "f1", filename: "f1.pdf", mimeType: "application/pdf", sizeBytes: 7, mode: "single", putUrl: `${base}/storage/1`, ...extra });
+        if (request.url === "/v1/uploads/direct/sessions") {
+          return { status: 201, body: { sessionId: "s1", files: label === "uninspected" ? [big({ inspected: false }), small()] : [big(), small()] } };
+        }
+        if (request.url.endsWith("/files/complete")) {
+          const sent = JSON.parse(request.body.toString());
+          const ids = sent.files ? sent.files.map((file) => file.fileId) : [sent.fileId];
+          // The settle round reports f0 missing; completes after the bytes arrive succeed.
+          if (sent.files && label === "uninspected" && !failedOnce) {
+            failedOnce = true;
+            return { body: { files: ids.map((fileId) => ({ fileId, status: "failed", error: { statusCode: 409, code: "upload_object_missing", message: "missing", retryable: false } })) } };
+          }
+          return { body: sent.files ? { files: ids.map((fileId) => ({ fileId, status: "completed" })), sessionComplete: true } : { ok: true } };
+        }
+        // The filter is ignored: every file comes back, with fresh URLs.
+        if (request.method === "GET" && request.url.includes("?fileId=")) {
+          return { body: { sessionId: "s1", status: "pending", files: [big({ putUrl: `${base}/storage/0-fresh` }), small({ putUrl: `${base}/storage/1-fresh` })] } };
+        }
+        if (request.url === "/storage/0" && label === "transient" && !failedOnce) { failedOnce = true; return { status: 403, body: {} }; }
+        if (request.url.startsWith("/storage/")) return { headers: { etag: '"e"' }, body: {} };
+        if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
+        return { status: 404, body: {} };
+      });
+      assert.equal(result.code, 0, `${label}: ${result.stderr}`);
+      const stored = result.requests.filter((request) => request.url.startsWith("/storage/")).map((request) => request.url).sort();
+      // Each file's bytes went only to its own target; the other file's fresh URL was ignored.
+      assert.deepEqual(stored, label === "uninspected" ? ["/storage/0-fresh", "/storage/1"] : ["/storage/0", "/storage/0-fresh", "/storage/1"], label);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
 });

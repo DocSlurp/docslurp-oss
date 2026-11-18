@@ -528,8 +528,8 @@ test("a resume refuses foreign ids: extra completion results, extra descriptors 
   const single = (extra) => ({ id: "a", filename: "f0.txt", mimeType: "text/plain", sizeBytes: 3, mode: "single", putUrl: "https://storage.invalid/0", ...extra });
   const cases = [
     ["an extra completion result", single({ index: 0, clientId: "0", inspected: false }), () => json({ files: [missing("a"), { fileId: "other", status: "completed" }] }), null],
-    ["an extra descriptor in the filtered read", single({ index: 0, clientId: "0", inspected: false }), () => json({ files: [missing("a")] }),
-      () => json({ sessionId: "s1", status: "pending", files: [single({ index: 0, clientId: "0", putUrl: "https://storage.invalid/a" }), single({ id: "other", index: 1, clientId: "1", putUrl: "https://storage.invalid/other" })] })],
+    ["the requested file twice in the filtered read", single({ index: 0, clientId: "0", inspected: false }), () => json({ files: [missing("a")] }),
+      () => json({ sessionId: "s1", status: "pending", files: [single({ index: 0, clientId: "0", putUrl: "https://storage.invalid/a" }), single({ index: 0, clientId: "0", putUrl: "https://storage.invalid/other" })] })],
     // An older server's file, matched by name and size: a refresh that renames it is another file.
     ["a renamed legacy match", single({ inspected: false }), () => json({ files: [missing("a")] }),
       () => json({ sessionId: "s1", status: "pending", files: [single({ filename: "other.txt", putUrl: "https://storage.invalid/renamed" })] })],
@@ -546,7 +546,7 @@ test("a resume refuses foreign ids: extra completion results, extra descriptors 
       return json({ error: "unexpected" }, 500);
     };
     const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
-    await assert.rejects(client.upload([new Blob(["abc"])], { directUpload: true, filenames: ["f0.txt"] }), /did not send|not asked for|differently/, label);
+    await assert.rejects(client.upload([new Blob(["abc"])], { directUpload: true, filenames: ["f0.txt"] }), /did not send|more than once|differently/, label);
     assert.deepEqual(puts, [], `${label}: no bytes sent`);
   }
 });
@@ -567,4 +567,44 @@ test("storage PUTs never follow a redirect (the bytes would be re-sent elsewhere
   const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
   await client.upload([new Blob(["abc"])], { directUpload: true, filenames: ["f0.txt"] });
   assert.deepEqual(puts, ["error"]);
+});
+
+test("an older server that ignores the fileId filter (describes every file) still resumes: other files are ignored", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const single = (index, id, extra = {}) => ({ index, clientId: String(index), id, filename: `f${index}.txt`, mimeType: "text/plain", sizeBytes: 3, mode: "single", putUrl: `https://storage.invalid/${id}`, ...extra });
+  // Resume after a missing object (uninspected), and after a transient PUT failure (an expired URL).
+  for (const label of ["uninspected", "transient"]) {
+    const puts = [];
+    let failedOnce = false;
+    const fetch = async (url, init = {}) => {
+      const href = String(url);
+      if (href.endsWith("/direct/sessions") && init.method === "POST") {
+        return json({ sessionId: "s1", files: label === "uninspected"
+          ? [single(0, "a", { inspected: false }), single(1, "b")]
+          : [single(0, "a"), single(1, "b")] });
+      }
+      if (href.endsWith("/files/complete")) {
+        const { files } = JSON.parse(String(init.body));
+        return json({ files: files.map(({ fileId }) => ({ fileId, status: "failed", error: { statusCode: 409, code: "upload_object_missing", message: "missing", retryable: false } })) });
+      }
+      // The filter is ignored: every file comes back, with fresh URLs.
+      if (href.includes("?fileId=")) {
+        return json({ sessionId: "s1", status: "pending", files: [single(0, "a", { putUrl: "https://storage.invalid/a-fresh" }), single(1, "b", { putUrl: "https://storage.invalid/b-fresh" })] });
+      }
+      if (init.method === "PUT") {
+        puts.push(href);
+        if (label === "transient" && href.endsWith("/a") && !failedOnce) { failedOnce = true; return new Response(null, { status: 403 }); }
+        return new Response(null, { status: 200 });
+      }
+      if (href.endsWith("?statusOnly=true")) return json({ status: "completed", result: { run: { id: "r1" }, project: { id: "p1" }, documents: [] } });
+      return json({ error: "unexpected" }, 500);
+    };
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+    await client.upload([new Blob(["abc"]), new Blob(["xyz"])], { directUpload: true, filenames: ["f0.txt", "f1.txt"] });
+    // Each file's bytes went only to its own (fresh) target.
+    assert.deepEqual(puts.sort(), label === "uninspected"
+      ? ["https://storage.invalid/a-fresh", "https://storage.invalid/b"]
+      : ["https://storage.invalid/a", "https://storage.invalid/a-fresh", "https://storage.invalid/b"], label);
+  }
 });

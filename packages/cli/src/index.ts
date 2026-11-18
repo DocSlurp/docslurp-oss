@@ -781,11 +781,11 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
     if (!refreshed.ok) throw await responseFailure(refreshed);
     const state = await refreshed.json() as DirectSession;
     if (["failed", "aborted", "expired"].includes(String(state.status ?? ""))) throw new Error(`Upload session ${String(state.status)}`);
-    assertFilteredRead(state.files, missing);
+    const described = askedDescriptors(state.files, missing);
     for (const id of missing) {
       const original = chunk.find((file) => file.id === id)!;
       const name = original.filename;
-      const fresh = refreshedDescriptor(state.files, original);
+      const fresh = refreshedDescriptor(described, original);
       if (!fresh) throw new Error(`Upload session no longer has ${name}`);
       if (fresh.status === "completed") continue;
       if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
@@ -795,11 +795,15 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
   return resend;
 }
 
-/** A `fileId`-filtered read describes only the files asked for, each once: an extra descriptor is refused. */
-function assertFilteredRead(files: readonly DirectUploadDescriptor[], asked: readonly string[]): void {
+/**
+ * The descriptors of a `fileId`-filtered read for the files asked for. Every id in the read must be unique; files not
+ * asked for are ignored (an older server ignores the filter and describes every file), never used: bytes only go to
+ * the descriptor that `refreshedDescriptor` matches to the requested file.
+ */
+function askedDescriptors(files: readonly DirectUploadDescriptor[], asked: readonly string[]): DirectUploadDescriptor[] {
   assertUniqueRemoteIds(files.map((file) => file.id), "session read");
   const wanted = new Set(asked);
-  if (files.some((file) => !wanted.has(file.id))) throw new Error("Upload session read describes a file it was not asked for");
+  return files.filter((file) => wanted.has(file.id));
 }
 
 /** Extra completion rounds for uninspected files answered retryable, and the first wait between them (doubling). */
@@ -989,8 +993,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           if (!refreshed.ok) throw error;
           // The refreshed targets must belong to the same file the local bytes were matched to.
           const refreshedFiles = ((await refreshed.json()) as DirectSession).files;
-          assertFilteredRead(refreshedFiles, [descriptor.id]);
-          const next = refreshedDescriptor(refreshedFiles, descriptor);
+          const next = refreshedDescriptor(askedDescriptors(refreshedFiles, [descriptor.id]), descriptor);
           if (!next) throw error;
           if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
           if (next.status === "failed" || next.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${next.status}`);
