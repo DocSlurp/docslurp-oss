@@ -26,7 +26,9 @@ import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import { runCreation } from "./run-creation.js";
+import { runCreation, urlSourceIdentity } from "./run-creation.js";
+import { HTTPException } from "hono/http-exception";
+import { boundLockWaits, lockChainKeys, withLockRetry } from "../lib/lock-retry.js";
 import {
   documentUsageTotals,
   runUsageCostTotals,
@@ -1476,6 +1478,42 @@ export interface DeletedDocumentResult {
   sourceKey: string;
 }
 
+/** A document's chain identity, enough to name the advisory keys its version chain is serialized under. */
+type ChainMember = { project_id: string; canonical_id: string | null; metadata: unknown };
+
+/**
+ * The advisory keys (`<project>:<key>`) a document's version chain is serialized under: its canonical ID's, and
+ * for a URL-provenance document both its URL's opaque and legacy keys (adoption moves a chain between them under
+ * the opaque key). Rows without a version key share one per-project key.
+ */
+function chainKeys(row: ChainMember): string[] {
+  const keys = [`${row.project_id}:${row.canonical_id ?? "docslurp:unkeyed-chain"}`];
+  const identity = urlSourceIdentity(row.metadata);
+  if (identity) keys.push(`${row.project_id}:${identity.opaque}`, `${row.project_id}:${identity.legacy}`);
+  return keys;
+}
+
+/** The rows' chain keys changed between reading them and locking: retried like a lock conflict. */
+class ChainKeysChangedError extends Error {
+  readonly code = "55P03";
+  constructor() {
+    super("document chain keys changed while locking");
+    this.name = "ChainKeysChangedError";
+  }
+}
+
+/** Deletion could not take its locks in time (a concurrent writer held them): retryable, 503 with Retry-After. */
+export class DocumentDeletionBusyError extends HTTPException {
+  readonly code = "unavailable";
+  constructor() {
+    super(503, {
+      message: "These documents are being updated by another request; retry shortly.",
+      res: new Response(null, { status: 503, headers: { "Retry-After": "2" } }),
+    });
+    this.name = "DocumentDeletionBusyError";
+  }
+}
+
 async function deleteDocumentRows(documentIds: string[], userId: string): Promise<DeletedDocumentResult[]> {
   const normalizedIds = Array.from(new Set(documentIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) {
@@ -1488,21 +1526,31 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   }
   const editableProjectIds = [...new Set(editable.map((row) => row.project_id))];
 
-  return await sql.begin(async (tx) => {
+  const targetIds = editable.map((row) => row.id);
+  return await withLockRetry(() => sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
+    // Lock order (lib/lock-retry.ts): the version chains' advisory keys first, the same keys run creation and the
+    // supersession trigger take, in sorted order; then rows, FOR UPDATE NOWAIT in id order. Deletions, run creation
+    // and a worker completing a version of the same chain serialize on the key, so each deletion reads and rewires
+    // the lineage as committed by the one before it (never from a snapshot that still shows a deleted link). A row
+    // lock is never waited for while others are held: a conflict (55P03, 40P01) retries the whole transaction,
+    // then answers DocumentDeletionBusyError (503, retryable). Lock waits, the keys' included, are bounded.
+    await boundLockWaits(transaction);
+    const members = await transaction<ChainMember[]>`
+      select id, project_id, canonical_id, metadata from documents
+      where project_id = any(${transaction.array(editableProjectIds)})
+        and (id = any(${transaction.array(targetIds)}) or previous_version_id = any(${transaction.array(targetIds)}))
+    `;
+    const locked = new Set(members.flatMap(chainKeys));
+    await lockChainKeys(transaction, locked);
 
-    // The rows are locked first (FOR UPDATE, in id order, so concurrent deletions queue rather than cycle), before
-    // their children are enumerated and rewired. A reprocess of one of them holds it FOR SHARE through its insert:
-    // the deletion waits for that version, which the rewiring below then sees (each statement reads the committed
-    // state), or it has already removed the source and the reprocess fails closed (404). Run creation takes every
-    // row lock NOWAIT, so it never waits here while holding one this deletion needs.
-    const docs = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "previous_version_id">[]>`
-      select id, project_id, filename, run_id, source_key, previous_version_id
+    const docs = await transaction<Array<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "previous_version_id"> & ChainMember>>`
+      select id, project_id, filename, run_id, source_key, previous_version_id, canonical_id, metadata
       from documents
-      where id = any(${transaction.array(editable.map((row) => row.id))})
+      where id = any(${transaction.array(targetIds)})
         and project_id = any(${transaction.array(editableProjectIds)})
       order by id
-      for update
+      for update nowait
     `;
 
     if (docs.length === 0) {
@@ -1514,20 +1562,30 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
     // nodes in document_cleanup_queue; the worker sweep then deletes them.
     // Raw sources still used by another document are kept.
     const docById = new Map(docs.map((doc) => [doc.id, doc]));
-    const resolveRetainedPreviousVersionId = (doc: Pick<DocumentRow, "previous_version_id">): string | null => {
-      let currentId = doc.previous_version_id;
+    const resolveRetainedPreviousVersionId = (previousId: string | null): string | null => {
+      let currentId = previousId;
       while (currentId && docById.has(currentId)) {
         currentId = docById.get(currentId)?.previous_version_id ?? null;
       }
       return currentId;
     };
 
-    for (const doc of docs) {
-      const replacementPreviousVersionId = resolveRetainedPreviousVersionId(doc);
+    // The surviving children of the deleted rows, locked the same way, re-pointed at their nearest kept ancestor.
+    const children = await transaction<Array<{ id: string; previous_version_id: string } & ChainMember>>`
+      select id, previous_version_id, project_id, canonical_id, metadata from documents
+      where project_id = any(${transaction.array(editableProjectIds)})
+        and previous_version_id = any(${transaction.array(docs.map((doc) => doc.id))})
+        and id <> all(${transaction.array(docs.map((doc) => doc.id))})
+      order by id
+      for update nowait
+    `;
+    // A row whose chain was re-keyed, or a child that appeared, after the keys were read is not covered by them:
+    // retry with the current keys.
+    if ([...docs, ...children].flatMap(chainKeys).some((key) => !locked.has(key))) throw new ChainKeysChangedError();
+    for (const child of children) {
       await transaction`
-        update documents
-        set previous_version_id = ${replacementPreviousVersionId}
-        where previous_version_id = ${doc.id}
+        update documents set previous_version_id = ${resolveRetainedPreviousVersionId(child.previous_version_id)}
+        where id = ${child.id}
       `;
     }
 
@@ -1556,7 +1614,7 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
         sourceKey: identity.sourceKey
       };
     });
-  });
+  }), () => new DocumentDeletionBusyError());
 }
 
 /** The project and organization of each listed document the user can read, so API key routes can check key scope. */

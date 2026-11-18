@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { boundLockWaits, withLockRetry as retryOnLockConflict } from "../lib/lock-retry.js";
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
@@ -205,15 +206,7 @@ export function isRunCreationBlockedError(
   return error instanceof SpendBlockedError;
 }
 
-/**
- * Lock waits in a version transaction (the advisory key included) are bounded
- * by LOCK_TIMEOUT; row locks are taken NOWAIT, so the transaction never waits
- * on a row while holding others. On a lock conflict (55P03) or deadlock (40P01)
- * the whole transaction rolls back, releasing every lock, and is retried after
- * a short backoff, LOCK_ATTEMPTS times in all; then RunCreationBusyError (503).
- */
-const LOCK_TIMEOUT = "2s";
-const LOCK_ATTEMPTS = 6;
+// Lock waits, NOWAIT row locks and whole-transaction retry: lib/lock-retry.ts.
 
 /**
  * Run creation could not take its locks in time (a concurrent writer held them):
@@ -236,28 +229,9 @@ export class RunSourceGoneError extends HTTPException {
   }
 }
 
-function isLockConflict(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  return code === "55P03" || code === "40P01";
-}
-
-/** Runs one version transaction, retrying the whole of it on lock conflicts (see LOCK_TIMEOUT). */
-async function withLockRetry<T>(transaction: () => Promise<T>): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await transaction();
-    } catch (error) {
-      if (!isLockConflict(error)) throw error;
-      if (attempt >= LOCK_ATTEMPTS) throw new RunCreationBusyError();
-      // 50 ms doubling to 800 ms (about 1.5 s in all): long enough to outlast a worker finishing a row.
-      await new Promise((resolve) => setTimeout(resolve, Math.min(800, 25 * 2 ** attempt) + Math.random() * 25));
-    }
-  }
-}
-
-/** Bounds every lock wait in this transaction, the advisory key's included. */
-async function boundLockWaits(client: SqlClient): Promise<void> {
-  await client`select set_config('lock_timeout', ${LOCK_TIMEOUT}, true)`;
+/** Runs one version transaction, retrying the whole of it on lock conflicts (lib/lock-retry.ts). */
+function withLockRetry<T>(transaction: () => Promise<T>): Promise<T> {
+  return retryOnLockConflict(transaction, () => new RunCreationBusyError());
 }
 
 /**
