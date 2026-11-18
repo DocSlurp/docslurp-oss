@@ -39,6 +39,11 @@ beforeAll(async () => {
       now() - ((${RUNS} - g) * 20 || ' seconds')::interval
     FROM generate_series(1, ${RUNS}) g;
     SET session_replication_role = origin;
+    SET session_replication_role = replica;
+    INSERT INTO project_runs (id, org_id, user_id, project_id, kind, status, stage, created_at, updated_at)
+    SELECT 'af-blocked' || g, 'af-org', 'af-user', 'af-big', 'bulk-upload', 'blocked', 'quarantine',
+      now() - (g || ' hours')::interval, now() - (g || ' hours')::interval FROM generate_series(1, 2000) g;
+    SET session_replication_role = origin;
     INSERT INTO project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, created_at) VALUES
       (100, 'af-live', 'af-org', 'af-user', 'af-big', 'bulk-upload', 'processing', 'extract', now() - interval '2 minutes'),
       (100, 'af-queued', 'af-org', 'af-user', 'af-big', 'bulk-upload', 'queued', 'quarantine', now() - interval '1 minute');
@@ -81,6 +86,7 @@ describe("activity feed plans (0199)", () => {
     // Either finished index (by project or by organization) bounds the five-minute window; either active index the rest.
     expect(activity?.plan).toMatch(/project_runs_(project|org)_finished_idx/);
     expect(activity?.plan).toMatch(/project_runs_(project|org)_active_idx/);
+    expect(activity?.plan).toMatch(/project_runs_org_blocked_idx/);
     expectNoBigSeqScan(plans);
   }, 180_000);
 
@@ -106,6 +112,12 @@ describe("activity feed plans (0199)", () => {
         VALUES (100, 'af-foreign-run', 'af-org2', 'af-other', 'af-foreign', 'bulk-upload', 'processing', 'extract') ON CONFLICT DO NOTHING;
     `);
     expect(await getRun("af-foreign-run", "af-user", { cost: false })).toBeNull();
+    // A member removed from the organization reads nothing.
+    await sql`insert into "user" (id,name,email) values ('af-gone','G','af-gone@example.test') on conflict do nothing`;
+    await sql`insert into org_memberships (org_id,user_id,role) values ('af-org2','af-gone','admin') on conflict do nothing`;
+    expect((await getRun("af-foreign-run", "af-gone", { cost: false }))?.id).toBe("af-foreign-run");
+    await sql`delete from org_memberships where org_id = 'af-org2' and user_id = 'af-gone'`;
+    expect(await getRun("af-foreign-run", "af-gone", { cost: false })).toBeNull();
     expect((await getRun("af-foreign-run", "af-other", { cost: false }))?.id).toBe("af-foreign-run");
     const app = new Hono()
       .use("*", requestContextMiddleware)
@@ -121,11 +133,13 @@ describe("activity feed plans (0199)", () => {
     let result: { runs: Array<{ id: string }>; truncated: boolean } | undefined;
     const plans = await plansOf(async () => { result = await realtimeBackend.project("af-user", { kind: "activity", orgId: "af-org" }) as typeof result; });
     expect(result?.runs[0]?.id).toMatch(/^af-(live|queued)$/);
-    expect(result?.runs[2]?.id).toBe(`af-r${RUNS}`);
+    // Active runs, then blocked ones (newest first), then the most recently finished.
+    expect(result?.runs[2]?.id).toBe("af-blocked1");
     expect(result?.truncated).toBe(true);
     const activity = plans.find(({ text }) => /finished_at is not null/.test(text));
     expect(activity?.plan).toMatch(/project_runs_org_finished_idx/);
     expect(activity?.plan).toMatch(/project_runs_org_active_idx/);
+    expect(activity?.plan).toMatch(/project_runs_org_blocked_idx/);
     expectNoBigSeqScan(plans);
   }, 180_000);
 

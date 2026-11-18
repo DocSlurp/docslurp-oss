@@ -4,8 +4,11 @@
 -- sorted a project's or organization's whole run history. finished_at is written only when a run reaches a terminal
 -- status (and cleared if it is resumed), so its indexes change once per run, not per heartbeat.
 --
--- Locking: ADD COLUMN takes a brief ACCESS EXCLUSIVE lock and each index build holds SHARE for one pass (as 0195 and
--- 0198); each waits at most 5 s for its lock and fails the release rather than queueing writers. Idempotent.
+-- Locking: the migrator applies pending migrations in one transaction, so the ACCESS EXCLUSIVE lock ADD COLUMN takes
+-- is held until commit, through the small backfill and the index builds: every read and write of project_runs waits
+-- for this migration (about as long as the index builds, a few seconds on today's table; schedule the release off
+-- peak once it grows). Each statement waits at most 5 s to acquire its lock and fails the release rather than queueing
+-- behind a long-open transaction. Idempotent.
 SET LOCAL lock_timeout = '5s';
 --> statement-breakpoint
 ALTER TABLE project_runs ADD COLUMN IF NOT EXISTS finished_at timestamptz;
@@ -36,3 +39,8 @@ CREATE INDEX IF NOT EXISTS project_runs_project_finished_idx ON project_runs (pr
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS project_runs_org_finished_idx ON project_runs (org_id, finished_at DESC)
   WHERE finished_at IS NOT NULL;
+--> statement-breakpoint
+-- Blocked runs (saved, not admitted for spend) appear in the feeds beside active ones. They take no heartbeats, so
+-- updated_at here changes rarely, and the set is small.
+CREATE INDEX IF NOT EXISTS project_runs_org_blocked_idx ON project_runs (org_id, updated_at DESC)
+  WHERE status = 'blocked';
