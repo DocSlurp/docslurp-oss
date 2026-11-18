@@ -314,6 +314,77 @@ Turning on `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` before a large wave keeps each
 scan short. Users can also reprocess a single document from the reader when it
 shows the rescan message.
 
+### Model URI backfill (migrations 0191-0192)
+
+Rows written before migrations 0191 and 0192 have no exact model record. A
+vector row with a null space URI still matches any embedding space that shares
+its bare model id and dimension. A one-off backfill fills what it can prove and
+leaves everything else null:
+
+| Target | What it fills | Left null |
+|---|---|---|
+| `vector-indexes` | `embedding_model_uri`: the space URI search computes for the document (its `index_config_hash` resolved the way search resolves it, through the project's `index_configs` and the current pipeline, private model mode included). It is written only when the route's model id and dimensions equal the row's. `embedding_model_class`: the profile of the document's run, when that run's route names the same space. | Documents without an `index_config_hash`, hashes the project does not record, recorded configs with unknown normalization, and model id or dimension mismatches. |
+| `page-states` | The same derivation for `document_page_states.embedding_model_uri`. | Same as above. |
+| `page-vectors` | `document_page_vectors.model_uri`: the URI the page-vector locator queries with for the row's model and dimensions. | Nothing derivable. |
+| `usage-events` | `metadata.modelUri` (the URI `withModelProvenance` derives from the row) and `metadata.modelUriBackfilled: true`. No other key changes. | Rows that are not a model call (compute, fees, price cards, unit charges) and rows that already have a URI. |
+| `runs` | `project_runs.resolved_models`, where null, from the run's usage. `text` comes from summaries, chunk preambles, graph extraction and community summaries; `structuredExtraction` from schema extraction; `vision` from page reads, with the run's vision profile and quality as `class`. `embedding` is the single vector space the run's documents were indexed into, when its model is the one the run's embedding usage names. A service with several models takes the one with the most input tokens. Every entry carries `backfilled: true`, plus `otherModels: <n>` when other models were seen. | Runs with no usage that names a model, and the page router (the worker's map has no key for it). |
+| `page-extracts` | `model_uri` and `model_class` on vision-model reads (`pass = vision`, engine `vision-model`), when the run's page reads of that document name exactly one model. | Text layers, OCR engines, corrections, and reads whose document saw several models. |
+
+`runs` and `page-extracts` only touch runs in a terminal status (`completed`,
+`failed`, `cancelled`, `pii_blocked`). A queued or running run may still record
+usage, and the worker sets its own map when it picks the run up.
+
+The expected vector space depends on the environment as well as the database:
+the model mode, the private endpoint registry and the service map. Run the
+backfill on an API machine with the API's environment (on Fly, `fly ssh console`
+on the API app), not on a workstation. Before it does anything else, the script
+prints an `environment` summary: the effective model mode, sha256 prefixes of
+`DOCSLURP_PRIVATE_MODEL_ENDPOINTS` and of the service map, the mapped services,
+and each distinct project embedding route as search resolves it (model URI,
+provider, model, dimensions, normalization, space URI, project count). It prints
+no address or credential. If the summary differs from what the API runs with,
+stop.
+
+Procedure:
+
+1. Dry run, and read the environment summary and the per-target counts
+   (would update, unmatched by reason, skipped). Nothing is written.
+   ```sh
+   pnpm -C server exec tsx scripts/backfill-model-uris.ts
+   ```
+2. Vector targets, with the read-only vector-ready check. `--verify` counts the
+   vector-ready documents per project and served space before and after (the
+   eligibility query's `vector_ready` rule), reports `verify.decreased` and exits
+   1 if any count fell. A correct backfill leaves every count equal.
+   ```sh
+   pnpm -C server exec tsx scripts/backfill-model-uris.ts --write --verify \
+     --target=vector-indexes --target=page-states --target=page-vectors
+   ```
+3. Off-peak, usage rows and run maps (after the vector targets: run maps take
+   their embedding space from the backfilled vector rows), then page extracts.
+   ```sh
+   pnpm -C server exec tsx scripts/backfill-model-uris.ts --write --target=usage-events --target=runs --target=page-extracts
+   ```
+4. Rerun the dry run: every target reports `updated: 0`, and only the unmatched
+   and skipped rows remain.
+
+Other options are `--batch-size=<n>`, which overrides every target's default
+(`runs` 200, `usage-events` and `page-states` 500, the others 2000), plus
+`--statement-timeout-ms` (default 30000) and `--lock-timeout-ms` (default 5000).
+
+Every target reads by primary key in batches and writes each batch in its own
+transaction, with a statement and lock timeout. A batch that hits a lock
+timeout, deadlock or statement timeout (`55P03`, `40P01`, `57014`) is rolled back
+and retried up to three times with backoff; any other error stops the run. Only
+null fields are filled, so an interrupted run resumes when rerun.
+
+Updates of `usage_events`, `project_runs` and `document_page_states` fire those
+tables' row-level realtime triggers. Every batch bumps one realtime revision per
+affected organization, project and run scope, and open dashboards refetch those
+collections. Run the large targets off-peak. The column-scoped triggers on
+`project_runs` (status, stats, admission) and the insert-only spend triggers on
+`usage_events` do not fire, and `updated_at` is not changed.
+
 ## Monitoring
 
 - `GET /health` returns `{"ok":true,...}` while the server process is up. The

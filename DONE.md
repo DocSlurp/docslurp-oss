@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ## Hot-path queries read through indexes (2026-11-18)
 
 Owner: "make sure our queries rely on indexes where it should". Audit of periodic loops, scrapes, claim/lease paths, per-request auth, polling, search metadata and spend checks against a seeded Postgres (1M runs, 2M documents, 4M usage events, 4M page tasks and run events).
@@ -8,6 +9,14 @@ Owner: "make sure our queries rely on indexes where it should". Audit of periodi
 - `/metrics`: `docslurp_runs_total` counts only queued and processing runs; stage percentiles cover the last 24 hours; `docslurp_cost_cents_total` (lifetime, a full `usage_events` scan per scrape) became `docslurp_cost_cents_24h`. The alert evaluator's queue snapshot reads only active runs.
 - Per-config document counts on the vector search path are cached per project for one eligibility TTL and dropped by the same hints.
 - DB test `hot-query-plans.db.test.ts` EXPLAINs the real statements of `/metrics`, the alert snapshot and a budgeted spend check, plus the run- and document-keyed reads, and asserts no sequential scan of the large tables.
+=======
+## Model URI backfill for rows written before migrations 0191-0192 (2026-11-18)
+
+- `server/scripts/backfill-model-uris.ts` (`services/model-uri-backfill.ts`): a one-off, idempotent, batched backfill. Dry run by default; `--write` applies it; `--target`, `--batch-size` and per-batch statement and lock timeouts are options. Each batch runs in its own transaction and only null fields are filled. Runbook: docs/self-host/operations.md.
+- Vector rows get the space URI search computes for their document, through the same shared code (`effectiveProjectIndexing`, `embeddingConfigFor`, `resolveEmbeddingRoute`, `embeddingRouteSpaceUri`). It is written only when the route's bare id and dimensions equal the row's, so the URI always equals the one readers expect and search serves the same vectors as before. A DB test checks eligibility before and after. Rows it cannot prove stay null and are counted by reason.
+- Usage rows get `withModelProvenance`'s `modelUri` plus `modelUriBackfilled: true`. Runs get `resolved_models` derived from their usage in the worker's shape, with `backfilled: true` on each entry. Vision page reads get `model_uri` and `model_class` when their document and run saw exactly one model.
+- `runModelClass` moved to `@docslurp/shared` (the worker re-exports it), so the backfill labels page extracts the way the worker does.
+>>>>>>> origin/main
 
 ## Autoscaler snapshot reads active runs only (2026-11-18)
 
