@@ -1,4 +1,4 @@
-import { upgradeStoredPipelineChartExport } from "@docslurp/shared";
+import { readStoredPipelineSettings, stripLegacyVisionModel, stripManagedPipelineFields } from "@docslurp/shared";
 import { projectSchema, type SearchResult, type ProjectRecord } from "@docslurp/shared";
 
 export interface ProjectVersionSnapshot {
@@ -43,14 +43,31 @@ export function readProjectVersionSnapshot(
     return null;
   }
 
-  // Snapshots saved before migration 0151 carry chartExport.enabled/generatorModel; the audit log is never rewritten,
-  // so they are mapped on read (`enabled: true` -> tier `models`).
+  // The stored-row reader (readStoredPipelineSettings): a snapshot field that no longer validates (a model since
+  // refused, a retired level) is reset as on a project read, so an old version can still be listed and rolled back to.
+  // Model values in a snapshot are history, never configuration; chart export keys from before migration 0151 are
+  // mapped by the reader. Rolling back writes through the strict save path.
+  // A snapshot without settings is not a rollback target (it would restore plain defaults).
+  const raw: unknown = candidate.pipeline;
+  if (raw === null || raw === undefined) return null;
+  let pipeline: ProjectRecord["pipeline"];
+  try {
+    pipeline = readStoredPipelineSettings(
+      typeof raw === "object" && !Array.isArray(raw)
+        ? stripLegacyVisionModel(stripManagedPipelineFields(raw as Record<string, unknown>), "project version snapshot")
+        : raw,
+      "project version snapshot",
+    ).features;
+  } catch {
+    // Written by a newer version (an unknown configVersion): not readable here, so not offered.
+    return null;
+  }
   const parsed = projectSchema.pick({
     name: true,
     templateKey: true,
     systemPrompt: true,
     pipeline: true,
-  }).safeParse({ ...candidate, pipeline: upgradeStoredPipelineChartExport(candidate.pipeline) });
+  }).safeParse({ ...candidate, pipeline });
 
   if (!parsed.success) {
     return null;
