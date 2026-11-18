@@ -3,7 +3,7 @@ import { resolveGeoDocumentScope } from "./geo-scope.js";
 import {
   defaultProjectSearchSettings,
   normalizePipelineFeatures,
-  normalizeStoredPipelineFeatures,
+  parseStoredPipelineFeatures,
   privacyModeAllowsHosted,
   summaryTreeSearchModeSchema,
   type PrivacyMode,
@@ -318,7 +318,7 @@ async function readSearchProjectContext(projectId: string, userId: string, acces
   }
   let indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   try {
-    indexing = effectiveProjectIndexing(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`), parseIndexConfigs(row.index_configs));
+    indexing = effectiveProjectIndexing(parseStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`), parseIndexConfigs(row.index_configs));
   } catch {
     // Fail closed, as loadProjectIndexing does.
     indexing = { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
@@ -539,7 +539,7 @@ export async function loadProjectIndexing(
       limit 1
     `;
     // Queries embed with the model new documents index with: the operator's private model where hosted ones are not allowed.
-    return effectiveProjectIndexing(normalizeStoredPipelineFeatures(row?.pipeline ?? null, `project ${projectId}`), parseIndexConfigs(row?.index_configs));
+    return effectiveProjectIndexing(parseStoredPipelineFeatures(row?.pipeline ?? null, `project ${projectId}`), parseIndexConfigs(row?.index_configs));
   } catch {
     // Fail closed: an unreadable or invalid pipeline must not fall back to the
     // standard (hosted-allowed) default and leak a private project's queries.

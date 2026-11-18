@@ -4,7 +4,7 @@ import {
   calculateAiUsageCostCents,
   graphConfigSchema,
   applyPrivateModelMode,
-  normalizeStoredPipelineFeatures,
+  parseStoredPipelineFeatures,
   resolveAllowedPipelineTextModel,
   type GraphConfig,
   type PipelineFeatures,
@@ -129,7 +129,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
   `;
   if (!project) throw new Error("Project no longer exists");
   // The operator's private models where hosted ones are not allowed (private-model-pipeline.ts), as ingest uses.
-  const pipeline = applyPrivateModelMode(normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`));
+  const pipeline = applyPrivateModelMode(parseStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`));
   const graphConfig: GraphConfig = graphConfigSchema.parse(job.config);
   const scope = graphConfig.domain ?? `Project "${project.name}"`;
   const concurrency = Math.max(1, options.concurrency ?? 4);

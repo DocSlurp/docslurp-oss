@@ -1,4 +1,4 @@
-import { applyPrivateModelMode, normalizeStoredPipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
+import { applyPrivateModelMode, parseStoredPipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { warmLanceDbSearch } from "./lancedb.js";
 
@@ -74,7 +74,7 @@ export async function recentSearchTargets(limit: number): Promise<BootWarmTarget
       if (!orgId || (perOrg.get(orgId) ?? 0) >= MAX_PROJECTS_PER_ORG) continue;
       let embedding: { model: string; dimensions: number };
       try {
-        embedding = resolveEmbeddingRoute(applyPrivateModelMode(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`)).embedding);
+        embedding = resolveEmbeddingRoute(applyPrivateModelMode(parseStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`)).embedding);
       } catch {
         continue; // A stored pipeline this build cannot read: that project is simply not warmed.
       }

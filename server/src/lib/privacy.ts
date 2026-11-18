@@ -32,11 +32,16 @@ const strictness: Record<PrivacyMode, number> = {
   "strict-privacy": 2,
 };
 
-/** Reads `privacyMode` from a stored or normalized pipeline. Unknown values fail closed. */
+/**
+ * Reads `privacyMode` from a stored or normalized pipeline, as the stored-row reader does (readStoredPipelineSettings):
+ * absent is "standard"; an unknown value, or a pipeline that is not an object at all, fails closed to "strict-privacy".
+ * Only this one field is read, so a hot path does not parse the whole pipeline.
+ */
 export function privacyModeOf(pipeline: unknown): PrivacyMode {
-  if (!pipeline || typeof pipeline !== "object") return "standard";
+  if (pipeline === null || pipeline === undefined) return "standard";
+  if (typeof pipeline !== "object" || Array.isArray(pipeline)) return "strict-privacy";
   const raw = (pipeline as { privacyMode?: unknown }).privacyMode;
-  if (raw === undefined || raw === null) return "standard";
+  if (raw === undefined) return "standard";
   const parsed = privacyModeSchema.safeParse(raw);
   return parsed.success ? parsed.data : "strict-privacy";
 }
