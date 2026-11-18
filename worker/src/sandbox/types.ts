@@ -37,6 +37,12 @@ export interface SandboxLimits {
   timeoutMs: number;
   rssBudgetMb?: number;
   cpu?: number;
+  /**
+   * Largest output file this command may hand back, in bytes. A remote provider checks every changed file's size
+   * before reading it and stops a transfer at this many bytes, so an oversized result is never buffered on the host.
+   * Unset: the provider's general per-file limit.
+   */
+  maxOutputFileBytes?: number;
 }
 
 export interface SandboxCommand {

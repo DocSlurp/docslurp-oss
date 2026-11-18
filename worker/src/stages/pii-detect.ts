@@ -245,6 +245,13 @@ export class PiiDetectStage implements Stage {
     signal?: AbortSignal,
   ) {
     const ledger = state.artifactLedger;
+    // Stored HTML table cells hold table text from before this stage. They are never written on a PII-policy run
+    // (tableCellsCacheActive); delete any that exist anyway on every redact or block run, unconditionally and before
+    // anything is read or redacted. Matches or not: a retry after a failed delete sees already-redacted text and finds
+    // nothing, so the delete must not depend on what this attempt finds. A failed delete fails the stage (retried).
+    if (policy.action === "redact_artifacts" || policy.action === "block_indexing") {
+      await this.storage.deleteKeys([tableCellsArtifactKey(state.run, document)]);
+    }
     let markdown: TextArtifact | null;
     let html: TextArtifact | null;
     let canonical: JsonArtifact | null;
@@ -388,11 +395,6 @@ export class PiiDetectStage implements Stage {
       });
       if (evidence !== "absent") redactedArtifacts.push("summary-evidence");
     }
-
-    // Stored HTML table cells hold table text from before this stage. They are never written on a PII-policy run
-    // (tableCellsCacheActive), but delete any that exist for a redacted or blocked document anyway, so unredacted
-    // cells never stay in storage or reach embed. A failed delete fails this stage (retried), never passes silently.
-    if (blocked || redacted) await this.storage.deleteKeys([tableCellsArtifactKey(state.run, document)]);
 
     // Under redact_artifacts the scanned sources are now clean (redacted or
     // matchless) and stay servable; under block_indexing nothing written

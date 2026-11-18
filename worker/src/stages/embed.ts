@@ -193,6 +193,8 @@ export class EmbedStage implements Stage {
               key: tableCellsArtifactKey(state.run, document),
               runId: state.run.id,
               documentId: document.id,
+              // Bound to the Markdown generation embed reads: an artifact written for an earlier one is refused.
+              markdownUri: state.artifactLedger.readDocument(document.id, "markdown"),
               guestVersion: guest.version,
               sources: tableSources,
               signal,

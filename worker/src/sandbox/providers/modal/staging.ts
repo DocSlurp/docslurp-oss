@@ -18,7 +18,8 @@ export interface RemoteFs {
   /** The entry at `p`, or null when nothing exists there. */
   stat(p: string): Promise<RemoteEntry | null>;
   writeFile(p: string, data: Uint8Array): Promise<void>;
-  readFile(p: string): Promise<Uint8Array>;
+  /** Read a file, failing (without buffering past it) once it exceeds `limit` bytes. */
+  readFile(p: string, limit?: number): Promise<Uint8Array>;
   /** Direct children of a directory, symlinks excluded. */
   list(p: string): Promise<RemoteEntry[]>;
   mkdir(p: string): Promise<void>;
@@ -85,12 +86,14 @@ export class SessionStaging {
    * files, and new directories. Inputs uploaded for another command meanwhile are not copied
    * back. A root the command never created is skipped silently.
    */
-  async download(snapshot: RemoteSnapshot): Promise<void> {
+  async download(snapshot: RemoteSnapshot, options: { maxFileBytes?: number } = {}): Promise<void> {
     const changed = this.changes(snapshot, await this.walk(snapshot.roots));
+    // A command-specific cap (SandboxLimits.maxOutputFileBytes) only ever lowers the general one.
+    const fileLimit = Math.min(128 * 1024 * 1024, options.maxFileBytes ?? Number.POSITIVE_INFINITY);
     let totalBytes = 0;
     for (const entry of changed) {
       if (!entry.isDir) {
-        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 128 * 1024 * 1024) throw new SandboxOutputError("parser VM output file exceeds limit");
+        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > fileLimit) throw new SandboxOutputError("parser VM output file exceeds limit");
         totalBytes += entry.size;
         if (totalBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM aggregate output exceeds limit");
       }
@@ -102,9 +105,9 @@ export class SessionStaging {
       if (entry.isDir) await mkdir(entry.path, { recursive: true });
       else {
         await mkdir(path.dirname(entry.path), { recursive: true });
-        const data = await this.remote.readFile(entry.path);
+        const data = await this.remote.readFile(entry.path, fileLimit);
         downloadedBytes += data.byteLength;
-        if (data.byteLength > 128 * 1024 * 1024 || downloadedBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual output exceeds limit");
+        if (data.byteLength > fileLimit || downloadedBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual output exceeds limit");
         await writeFile(entry.path, data);
       }
       this.claim(entry.path, "download");

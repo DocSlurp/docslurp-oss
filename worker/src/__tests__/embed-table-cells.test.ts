@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import v8 from "node:v8";
+import { runInNewContext } from "node:vm";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,13 +31,17 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import { readTableCells } from "../pipeline/table-cells-guest.js";
 import {
-  readTableCellsArtifact, tableCellsArtifactKey, tableCellsByteCap, tableCellsCacheEnabled, tableCellsGuestVersion, tableSourceSha256,
+  embedHtmlTableSources, readTableCellsArtifact, tableCellsArtifactKey, tableCellsByteCap, tableCellsCacheEnabled, tableCellsGuestVersion, tableSourceSha256,
   TABLE_CELLS_ARTIFACT_SCHEMA, writeTableCellsArtifact,
 } from "../pipeline/html-table-cells-cache.js";
-import { prepareHtmlTableCells, vmTableSources } from "../pipeline/html-table-vm.js";
+import { HTML_TABLE_BATCH_OUTPUT_TARGET, htmlTableCellsOutputBound, prepareHtmlTableCells, vmTableSources } from "../pipeline/html-table-vm.js";
+import { assertJsonShape } from "../lib/json-shape.js";
+import { visionMayReadDocumentPages } from "../lib/vision-reads-pages.js";
+import { SessionStaging } from "../sandbox/providers/modal/staging.js";
+import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
 import { EmbedStage } from "../stages/embed.js";
 import { htmlTableSources } from "../pipeline/chunking.js";
-import { mayHaveHtmlTables, storeEmbedTableCells } from "../stages/embed-table-cells.js";
+import { mayHaveHtmlTables, storeEmbedTableCells, writerTableSources } from "../stages/embed-table-cells.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
 import { setDefaultParserSandbox, type InitializedParserSandbox } from "../sandbox/startup.js";
@@ -54,6 +61,9 @@ class MemoryStorage {
   /** Bytes the reader actually pulled off the stream, per key. */
   readonly pulled = new Map<string, number>();
   failPut: Error | null = null;
+  /** Hold every upload until its signal aborts (an upload in flight when a deadline passes). */
+  holdPut = false;
+  readonly abortedPuts: string[] = [];
   uri(key: string) { return `s3://t/${key}`; }
   private get(key: string): Buffer {
     const value = this.objects.get(key);
@@ -63,8 +73,11 @@ class MemoryStorage {
   async getBytes(key: string) { this.reads.push(key); return this.get(key); }
   async getJson<T>(key: string): Promise<T> { this.reads.push(key); return JSON.parse(this.get(key).toString("utf8")) as T; }
   async putJson(key: string, value: unknown) { this.writes.push(key); this.objects.set(key, Buffer.from(JSON.stringify(value))); }
-  async putBytes(key: string, data: Uint8Array) {
+  async putBytes(key: string, data: Uint8Array, _contentType?: string, options?: { signal?: AbortSignal }) {
     if (this.failPut) throw this.failPut;
+    if (this.holdPut) {
+      await new Promise<void>((_, reject) => options?.signal?.addEventListener("abort", () => { this.abortedPuts.push(key); reject(options.signal!.reason); }, { once: true }));
+    }
     this.writes.push(key); this.objects.set(key, Buffer.from(data));
   }
   async deleteKeys(keys: string[]) { for (const key of keys) { this.deletes.push(key); this.objects.delete(key); } }
@@ -152,8 +165,9 @@ async function seed(storage: MemoryStorage, id: string, text: string, run: Scope
   return { markdownUri: storage.uri(markdownKey), canonicalUri: storage.uri(canonicalKey), canonical };
 }
 
+const markdownUriOf = (storage: MemoryStorage, id: string, run: Scope = scope()) => storage.uri(`${root(run)}/markdown/${id}.md`);
 const storeArgs = (storage: MemoryStorage, id: string, text: string, canonical: CanonicalDocument, runner: Pick<CommandRunner, "run">, run: Scope = scope(), stage = "extract-markdown") =>
-  ({ run, document: document(id, text, run), runner, storage: storage as unknown as ArtifactStore, stage, markdown: text, canonicalDocument: canonical });
+  ({ run, document: document(id, text, run), runner, storage: storage as unknown as ArtifactStore, stage, markdown: text, markdownUri: markdownUriOf(storage, id, run), canonicalDocument: canonical });
 
 async function embed(storage: MemoryStorage, id: string, text: string, slots: { markdownUri: string; canonicalUri: string }, runner: Pick<CommandRunner, "run">, run: Scope = scope()) {
   const projectRun = {
@@ -197,6 +211,11 @@ async function newPath(id: string, text: string, tamper?: (key: string, storage:
 }
 
 const stable = (artifact: Record<string, unknown>) => JSON.stringify(artifact);
+/** Serialize an artifact object with its `bytes` field set to its own length (the writer's header layout). */
+function withLength(artifact: Record<string, unknown>): string {
+  const draft = JSON.stringify({ ...artifact, bytes: "0".repeat(10) });
+  return JSON.stringify({ ...artifact, bytes: String(Buffer.byteLength(draft)).padStart(10, "0") });
+}
 
 beforeEach(() => {
   vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
@@ -264,24 +283,38 @@ describe("stored HTML table cells: identity with the VM path", () => {
     expect(stable(result.artifact)).toBe(stable(before.artifact));
   });
 
-  it("a later writer (vision-extract) adds new tables and keeps the parsed ones without re-parsing them", async () => {
+  it("a later writer (vision-extract) writes a fresh artifact for its generation; nothing is carried over", async () => {
     const early = (await fixtureDocuments())["routing-table-clean-financial.pdf.md grown"]!;
     const later = `${early}\n\n${header}\n`;
     const storage = new MemoryStorage();
-    await storeEmbedTableCells(storeArgs(storage, "merge", early, (await seed(storage, "merge", early)).canonical, vmRunner()));
+    await storeEmbedTableCells(storeArgs(storage, "fresh", early, (await seed(storage, "fresh", early)).canonical, vmRunner()));
+    // vision-extract reconciles into a new markdown slot (a new generation) and stores every table of it, re-parsed.
+    const visionRun = scope();
+    const reconciledKey = `${root(visionRun)}/markdown-reconciled/fresh.md`;
+    const slots = await seed(storage, "fresh", later);
+    storage.setText(reconciledKey, later);
     const visionVm = vmRunner();
-    const slots = await seed(storage, "merge", later);
-    const stored = await storeEmbedTableCells(storeArgs(storage, "merge", later, slots.canonical, visionVm, scope(), "vision-extract"));
-    expect(stored).toMatchObject({ status: "written", reusedTables: 1, vmTables: 1 });
-    expect(visionVm.batches.flat()).toEqual([header]);
+    const stored = await storeEmbedTableCells({ ...storeArgs(storage, "fresh", later, slots.canonical, visionVm, visionRun, "vision-extract"), markdownUri: storage.uri(reconciledKey) });
+    expect(stored).toMatchObject({ status: "written", vmTables: 2 });
+    expect(visionVm.batches.flat().sort()).toEqual(vmTableSources(htmlTableSources(later)).sort());
     const embedVm = vmRunner();
-    await embed(storage, "merge", later, slots, embedVm);
+    const reused = await embed(storage, "fresh", later, { ...slots, markdownUri: storage.uri(reconciledKey) }, embedVm);
     expect(embedVm.run).not.toHaveBeenCalled();
-    const again = vmRunner();
-    storage.writes.length = 0;
-    expect(await storeEmbedTableCells(storeArgs(storage, "merge", later, slots.canonical, again, scope(), "vision-extract"))).toMatchObject({ status: "current" });
-    expect(again.run).not.toHaveBeenCalled();
-    expect(storage.writes).toEqual([]);
+    expect(reused.reuse?.metadata).toMatchObject({ status: "hit" });
+  });
+
+  it("an artifact written for an earlier generation of the markdown slot is refused", async () => {
+    const text = (await fixtureDocuments())["routing-table-clean-financial.pdf.md grown"]!;
+    const storage = new MemoryStorage();
+    const slots = await seed(storage, "stale", text);
+    await storeEmbedTableCells(storeArgs(storage, "stale", text, slots.canonical, vmRunner()));
+    // The slot moved on (a later stage rewrote the Markdown) without a new artifact: same tables, other generation.
+    const movedKey = `${root(scope())}/markdown-reconciled/stale.md`;
+    storage.setText(movedKey, text);
+    const embedVm = vmRunner();
+    const result = await embed(storage, "stale", text, { ...slots, markdownUri: storage.uri(movedKey) }, embedVm);
+    expect(result.reuse?.metadata).toMatchObject({ status: "invalid", reason: expect.stringContaining("header mismatch") });
+    expect(embedVm.run).toHaveBeenCalled();
   });
 });
 
@@ -308,7 +341,7 @@ describe("stored HTML table cells: PII policy (H1)", () => {
     const sources = vmTableSources([text]);
     const prepared = new Map(sources.map((source) => [source, (readTableCells(source) ?? []).map((cell) => ({ ...cell, value: secret }))]));
     const key = tableCellsArtifactKey(pii, document("pii", text, pii));
-    await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key, runId: "run", documentId: "pii", guestVersion: tableCellsGuestVersion().version!, prepared, byteCap: 64 * 1024 * 1024 });
+    await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key, runId: "run", documentId: "pii", markdownUri: slots.markdownUri, guestVersion: tableCellsGuestVersion().version!, prepared, byteCap: 64 * 1024 * 1024 });
     storage.reads.length = 0;
     const vm = vmRunner();
     const result = await embed(storage, "pii", text, slots, vm, pii);
@@ -327,7 +360,8 @@ describe("stored HTML table cells: tenant scope (M6)", () => {
     const a = await newPath("shared-doc-id", text, undefined, runA);
     expect(a.key).toBe("orgs/org-a/projects/p1/runs/run-a/table-cells/shared-doc-id.json");
     expect(a.storage.writes.filter((key) => key.includes("/table-cells/"))).toEqual([a.key]);
-    expect(a.storage.reads.filter((key) => key.includes("/table-cells/"))).toEqual([a.key, a.key]);
+    // The writer never reads (each write is fresh); embed reads its own key once.
+    expect(a.storage.reads.filter((key) => key.includes("/table-cells/"))).toEqual([a.key]);
     // Organization B's same document id, in the same store: it never reads A's key, and A's artifact is not reused.
     const storage = a.storage;
     const slotsB = await seed(storage, "shared-doc-id", text, runB);
@@ -444,73 +478,304 @@ describe("stored HTML table cells: the writer never fails its stage", () => {
     await expect(storeEmbedTableCells({ ...storeArgs(storage, "abort", text, slots.canonical, { run } as never), signal: controller.signal })).rejects.toThrow("activity cancelled");
   });
 
-  it("too large for the document's byte cap: not stored", async () => {
-    // Many empty cells: the encoding outgrows twice the source.
-    const tiny = `<table>${Array.from({ length: 3000 }, () => "<tr><td><td><td><td>").join("")}</table>`;
-    const text = `# Sparse\n\n${tiny}\n`;
+  it("the structural byte cap admits the worst legitimate table (every cell empty)", async () => {
+    const sparse = `<table>${Array.from({ length: 3000 }, () => "<tr><td><td><td><td>").join("")}</table>`;
+    const text = `# Sparse\n\n${sparse}\n`;
     const storage = new MemoryStorage();
     const slots = await seed(storage, "sparse", text);
     const stored = await storeEmbedTableCells(storeArgs(storage, "sparse", text, slots.canonical, vmRunner()));
-    expect(stored.status).toBe("too-large");
-    expect(stored.bytes).toBeGreaterThan(tableCellsByteCap([tiny]));
-    expect(storage.writes).toEqual([]);
+    expect(stored.status).toBe("written");
+    expect(stored.bytes).toBeLessThanOrEqual(tableCellsByteCap([sparse]));
   });
 
   it("more than 1,024 tables: not stored", async () => {
     const prepared = new Map(Array.from({ length: 1025 }, (_, i) => [`<table><tr><td>${i}</td></tr></table>`, null] as const));
     const storage = new MemoryStorage();
-    expect(await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "r", documentId: "d", guestVersion: "g", prepared, byteCap: 64 * 1024 * 1024 })).toMatchObject({ status: "too-large", tables: 1025 });
+    expect(await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "r", documentId: "d", markdownUri: "s3://t/m", guestVersion: "g", prepared, byteCap: 64 * 1024 * 1024 })).toMatchObject({ status: "too-large", tables: 1025, bytes: 0 });
     expect(storage.writes).toEqual([]);
   });
 });
 
 describe("stored HTML table cells: stage wiring", () => {
   const extract = (runner: Pick<CommandRunner, "run">, storage: MemoryStorage) => ({ runner, storage, name: "extract-markdown" });
-  const state = (run: Scope, visionFallback: boolean) => ({ run: { ...run, pipeline: { ...run.pipeline, visionFallback } } }) as unknown as WorkflowState;
-
-  it("extract-markdown stores cells, skips when vision will re-read pages (H3b) and when there are no tables", async () => {
+  /** A real WorkflowState over a normalized pipeline: what visionMayReadDocumentPages reads (quality, privacy, playbook, routing pin). */
+  const runState = (id: string, text: string, pipeline: Record<string, unknown>, playbook?: string) => {
+    const projectRun = {
+      id: "run", userId: "u1", orgId: "o1", projectId: "w1", stage: "extract-markdown", status: "processing", stats: {}, artifacts: {}, spentCents: 0,
+      pipeline: { ...normalizePipelineFeatures({}), ...pipeline },
+    } as unknown as ProjectRun;
+    const state = WorkflowState.create(projectRun, [document(id, text)]);
+    if (playbook) state.artifactLedger.recordDocument(id, "parser-playbook", playbook);
+    return state;
+  };
+  const wired = async (state: WorkflowState, needsVision: boolean, vm = vmRunner()) => {
     const text = (await fixtureDocuments())["routing-table-clean-financial.pdf.md grown"]!;
     const storage = new MemoryStorage();
     const slots = await seed(storage, "wired", text);
-    const call = (needsVision: boolean, visionFallback: boolean, markdown = text, vm = vmRunner()) =>
-      ExtractMarkdownStage.prototype.storeTableCellsForEmbed.call(extract(vm, storage) as never, state(scope(), visionFallback), document("wired", text), { markdown, canonicalDocument: markdown === text ? slots.canonical : buildCanonicalDocumentFromMarkdown({ documentId: "wired", text: markdown, pageCount: 1, extractor: "t" }), needsVision });
-    expect(await call(true, true)).toEqual({ status: "vision-pending" });
-    expect(storage.writes).toEqual([]);
-    expect(await call(false, true, "# no tables\n")).toEqual({ status: "no-tables" });
-    expect((await call(true, false)).status).toBe("written");
+    const stats = await ExtractMarkdownStage.prototype.storeTableCellsForEmbed.call(extract(vm, storage) as never, state, document("wired", text),
+      { markdown: text, markdownUri: slots.markdownUri, canonicalDocument: slots.canonical, needsVision });
+    return { stats, storage, vm };
+  };
+
+  it.each([
+    // [case, pipeline, needsVision, expected]: extract-markdown writes unless vision will actually read the pages.
+    ["Fast quality (vision never reads a page), extraction asked for vision", { quality: "fast", visionFallback: true }, true, "written"],
+    ["privacy mode blocks the hosted vision route, extraction asked for vision", { quality: "auto", visionFallback: true, privacyMode: "local-only" }, true, "written"],
+    ["vision fallback off, extraction asked for vision", { quality: "auto", visionFallback: false }, true, "written"],
+    ["auto quality, extraction asked for vision", { quality: "auto", visionFallback: true }, true, "vision-pending"],
+    ["auto quality, no vision needed", { quality: "auto", visionFallback: true }, false, "written"],
+    ["good quality reads every page (vision's override) though extraction did not ask", { quality: "good", visionFallback: true }, false, "vision-pending"],
+  ] as const)("extract-markdown: %s → %s", async (_, pipeline, needsVision, expected) => {
+    const { stats, storage } = await wired(runState("wired", "", pipeline), needsVision);
+    expect(stats.status).toBe(expected);
+    expect(storage.writes.some((key) => key.includes("/table-cells/"))).toBe(expected === "written");
+  });
+
+  it("extract-markdown writes when the document's playbook keeps vision off (no evidence routing)", async () => {
+    const { stats } = await wired(runState("wired", "", { quality: "auto", visionFallback: true }, "plain-text"), true);
+    expect(stats.status).toBe(visionMayReadDocumentPages(runState("wired", "", { quality: "auto", visionFallback: true }, "plain-text"), "wired", true) ? "vision-pending" : "written");
   });
 
   it("extract-markdown swallows a writer failure but not the stage's abort", async () => {
+    const state = runState("wired", "", { quality: "fast" });
+    expect((await wired(state, false, { run: vi.fn().mockRejectedValue(new Error("vm gone")) } as never)).stats).toMatchObject({ status: "failed", error: "vm gone" });
+    const controller = new AbortController();
     const text = (await fixtureDocuments())["routing-table-clean-financial.pdf.md grown"]!;
     const storage = new MemoryStorage();
     const slots = await seed(storage, "wired", text);
-    const failing = { run: vi.fn().mockRejectedValue(new Error("vm gone")) };
-    expect(await ExtractMarkdownStage.prototype.storeTableCellsForEmbed.call(extract(failing, storage) as never, state(scope(), false), document("wired", text), { markdown: text, canonicalDocument: slots.canonical, needsVision: false }, undefined)).toMatchObject({ status: "failed" });
-    const controller = new AbortController();
     const aborting = { run: vi.fn(async () => { controller.abort(new Error("cancelled")); throw new Error("aborted"); }) };
-    await expect(ExtractMarkdownStage.prototype.storeTableCellsForEmbed.call(extract(aborting, storage) as never, state(scope(), false), document("wired", text), { markdown: text, canonicalDocument: slots.canonical, needsVision: false }, controller.signal)).rejects.toThrow("cancelled");
+    await expect(ExtractMarkdownStage.prototype.storeTableCellsForEmbed.call(extract(aborting, storage) as never, state, document("wired", text),
+      { markdown: text, markdownUri: slots.markdownUri, canonicalDocument: slots.canonical, needsVision: false }, controller.signal)).rejects.toThrow("cancelled");
   });
 
-  it("vision-extract stores the reconciled document's cells only when it re-read pages", async () => {
+  it("the real extract-markdown stage stores cells for the Markdown slot it records, and reports them in its stats (F5)", async () => {
+    const text = (await fixtureDocuments())["routing-table-clean-financial.pdf.md grown"]!;
+    const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-table-cells-stage-"));
+    try {
+      const storage = new MemoryStorage();
+      const vm = vmRunner();
+      const runner = {
+        run: vm.run,
+        officeMarkdown: async () => ({ binary: "python3", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
+        extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
+        extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+      } as unknown as CommandRunner;
+      const stage = new ExtractMarkdownStage(runner, storage as never, {} as never);
+      const internals = stage as any;
+      const sourcePath = path.join(scratch, "tables.html");
+      await writeFile(sourcePath, "<html><body>tables</body></html>");
+      internals.sources = { get: async () => ({ path: sourcePath, sha256: "sha-tables" }) };
+      internals.recordSourcePageFacts = async () => undefined;
+      internals.buildParserArtifacts = async () => [];
+      internals.enrichOfficeStructure = async ({ document }: { document: unknown }) => document;
+      internals.extractCandidate = async (extractor: { label: string; plan?: unknown }, textKey: string) => {
+        const tempTextPath = path.join(scratch, `${extractor.label}.md`);
+        await writeFile(tempTextPath, text);
+        storage.setText(textKey, text);
+        return { label: extractor.label, plan: extractor.plan, textKey, textUri: storage.uri(textKey), tempTextPath };
+      };
+      const spy = vi.spyOn(internals, "storeTableCellsForEmbed");
+      const state = runState("doc-1", text, { quality: "auto", visionFallback: true, markdownExtraction: true });
+      state.artifactLedger.recordDocument("doc-1", "normalizedFormat", "html");
+      state.bindStore(memoryCheckpointStore());
+      await stage.run(state);
+      const markdownUri = state.artifactLedger.readDocument("doc-1", "markdown")!;
+      expect(spy).toHaveBeenCalledTimes(1);
+      const [, , extracted] = spy.mock.calls[0] as [unknown, unknown, { markdown: string; markdownUri: string; needsVision: boolean }];
+      expect(extracted.markdownUri).toBe(markdownUri);
+      expect(typeof extracted.needsVision).toBe("boolean");
+      expect(extracted.needsVision).toBe((state.documentStage("doc-1", "extract-markdown")?.stats as { needsVision?: boolean }).needsVision);
+      const stats = state.documentStage("doc-1", "extract-markdown")?.stats as { tableCells?: { status: string } };
+      // This extraction did not ask for vision, so extract-markdown is the last table writer and stores the cells.
+      expect(extracted.needsVision).toBe(false);
+      expect(stats.tableCells).toMatchObject({ status: "written", vmCommands: 1 });
+      // Embed, reading the slots extract-markdown recorded, reuses every table with no VM call.
+      const embedVm = vmRunner();
+      const canonicalUri = state.artifactLedger.readDocument("doc-1", "canonical-document")!;
+      const reuse = await embed(storage, "doc-1", text, { markdownUri, canonicalUri }, embedVm);
+      expect(reuse.reuse?.metadata).toMatchObject({ status: "hit", misses: 0 });
+      expect(embedVm.run).not.toHaveBeenCalled();
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("vision-extract stores the reconciled document's cells, for the reconciled slot, only when it re-read pages", async () => {
     const text = (await fixtureDocuments())["routing-table-clean-financial.pdf.md grown"]!;
     const storage = new MemoryStorage();
     const slots = await seed(storage, "vision", text);
     const vm = vmRunner();
     const self = { runner: vm, storage, name: "vision-extract" };
-    expect(await VisionExtractStage.prototype.storeTableCellsForEmbed.call(self as never, state(scope(), true), document("vision", text), { changedPages: [], markdown: text, canonicalDocument: slots.canonical })).toBeNull();
-    expect(await VisionExtractStage.prototype.storeTableCellsForEmbed.call(self as never, state(scope(), true), document("vision", text), { changedPages: [1], markdown: "# none\n", canonicalDocument: undefined })).toEqual({ status: "no-tables" });
+    const state = runState("vision", text, { quality: "auto", visionFallback: true });
+    const call = (reconciliation: Record<string, unknown>) => VisionExtractStage.prototype.storeTableCellsForEmbed.call(self as never, state, document("vision", text), reconciliation as never);
+    expect(await call({ changedPages: [], markdown: text, markdownUri: slots.markdownUri, canonicalDocument: slots.canonical })).toBeNull();
+    expect(await call({ changedPages: [1], markdown: "# none\n", markdownUri: slots.markdownUri, canonicalDocument: undefined })).toEqual({ status: "no-tables" });
     expect(vm.run).not.toHaveBeenCalled();
-    expect((await VisionExtractStage.prototype.storeTableCellsForEmbed.call(self as never, state(scope(), true), document("vision", text), { changedPages: [1], markdown: text, canonicalDocument: slots.canonical }))?.status).toBe("written");
+    expect((await call({ changedPages: [1], markdown: text, markdownUri: slots.markdownUri, canonicalDocument: slots.canonical }))?.status).toBe("written");
+  });
+
+  it("in-memory Markdown and the slot it was written to give embed's exact source set (F5), decomposed characters included (F2)", async () => {
+    const decomposed = "Café München";
+    const docs = await fixtureDocuments();
+    const cases = [
+      docs["all fixtures in one document"]!,
+      `# ${decomposed}\n\n<table><tr><td>${decomposed.repeat(200)}</td></tr></table>\n`,
+      `![chart](image://page-1/img-1)\n\n${docs["spans, caption and inline markup"]!}`,
+    ];
+    for (const markdown of cases) {
+      const storage = new MemoryStorage();
+      const slots = await seed(storage, "same", markdown);
+      // Canonical block text as a non-NFC parser left it: used as stored by both sides, as the chunker reads it.
+      const canonical = structuredClone(slots.canonical);
+      for (const block of canonical.blocks) block.text = block.text.normalize("NFD");
+      await storage.putJson(slots.canonicalUri.replace("s3://t/", ""), canonical);
+      const fromSlots = embedHtmlTableSources(await extractTextForEmbedding(document("same", markdown), {} as CommandRunner, storage as unknown as ArtifactStore, slots.markdownUri, undefined, slots.canonicalUri));
+      expect(new Set(vmTableSources(writerTableSources(markdown.normalize("NFD"), canonical)))).toEqual(new Set(vmTableSources(fromSlots)));
+    }
+  });
+});
+
+describe("the parser VM transfer and parse bounds (H2)", () => {
+  it("each batch's output cap comes from its tables' structure and is passed to the transfer", async () => {
+    const small = Array.from({ length: 3 }, (_, i) => `<table><tr><td>${i}</td><td>x</td></tr></table>`);
+    const plans: Array<{ maxOutputFileBytes?: number }> = [];
+    const vm = vmRunner();
+    const run = vi.fn(async (plan: { maxOutputFileBytes?: number; binary: string; args: string[] }, signal?: AbortSignal) => { plans.push(plan); return vm.run(plan, signal); });
+    await prepareHtmlTableCells(small, { run } as never);
+    expect(plans).toHaveLength(1);
+    expect(plans[0]!.maxOutputFileBytes).toBe(htmlTableCellsOutputBound(small));
+    expect(plans[0]!.maxOutputFileBytes).toBeLessThan(2048);
+  });
+
+  it("splits tables into batches whose output bound stays under the batch target; a big table gets a batch of its own", async () => {
+    // ~6 MB of UTF-8 each: two share a batch (12 MB), a third would cross the 16 MiB target.
+    const big = (i: number) => `<table><tr><td>${i}${"界".repeat(2_000_000)}</td></tr></table>`;
+    const sources = [big(1), big(2), big(3), "<table><tr><td>tiny</td></tr></table>"];
+    const vm = vmRunner();
+    const plans: Array<{ maxOutputFileBytes?: number }> = [];
+    await prepareHtmlTableCells(sources, { run: vi.fn(async (plan: never, signal?: AbortSignal) => { plans.push(plan); return vm.run(plan, signal); }) } as never);
+    expect(vm.batches.map((batch) => batch.length)).toEqual([2, 2]);
+    for (const plan of plans) expect(plan.maxOutputFileBytes!).toBeLessThanOrEqual(HTML_TABLE_BATCH_OUTPUT_TARGET);
+  });
+
+  it("the Modal transfer refuses an output file over the command's cap before reading it, and bounds the read itself", async () => {
+    const reads: Array<{ path: string; limit?: number }> = [];
+    const out = await mkdtemp(path.join(tmpdir(), "docslurp-staging-cap-"));
+    const file = path.join(out, "cells.json");
+    const remote = {
+      stat: async (p: string) => p === out ? { path: p, isDir: true, size: 0, mtime: 0 } : p === file ? { path: p, isDir: false, size: 5000, mtime: 2 } : null,
+      list: async (p: string) => p === out ? [{ path: file, isDir: false, size: 5000, mtime: 2 }] : [],
+      readFile: async (p: string, limit?: number) => { reads.push({ path: p, limit }); return new Uint8Array(5000); },
+      writeFile: async () => undefined, mkdir: async () => undefined, remove: async () => undefined,
+    };
+    const staging = new SessionStaging(remote);
+    const snapshot = { roots: [out], entries: new Map(), seq: 0 };
+    try {
+      await expect(staging.download(snapshot, { maxFileBytes: 4096 })).rejects.toThrow(/exceeds limit/);
+      expect(reads).toEqual([]);
+      await expect(staging.download(snapshot, { maxFileBytes: 8192 })).resolves.toBeUndefined();
+      expect(reads).toEqual([{ path: file, limit: 8192 }]);
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["deep nesting", () => `${"[".repeat(60)}${"]".repeat(60)}`],
+    ["a flood of empty records", () => `[[${Array(20).fill("{}").join(",")}]]`],
+  ])("rejects guest output with %s before JSON.parse", async (_, payload) => {
+    const table = "<table><tr><td>x</td></tr></table>";
+    const vm = { run: vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args.slice(GUEST_NODE_FLAGS.length)[2]!, payload()); return { exitCode: 0, stdout: "", stderr: "" }; }) };
+    const parse = vi.spyOn(JSON, "parse");
+    await expect(prepareHtmlTableCells([table], vm as never)).rejects.toThrow(/JSON (nesting|container count) exceeds limit/);
+    expect(parse.mock.calls.filter(([text]) => typeof text === "string" && text.startsWith("[["))).toEqual([]);
+  });
+
+  it("worst-case heap for a hostile payload at the cap is bounded (measured, H2c)", async () => {
+    // Shapes JSON.parse amplifies most, each filling a 4 MiB cap. Each must either be refused by the pre-scan or, if
+    // allowed, cost at most 12 bytes of heap per input byte (measured ~6 for real cell records).
+    v8.setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    const cap = 4 * 1024 * 1024;
+    const fill = (unit: string, open: string, close: string) => `${open}${Array(Math.floor((cap - open.length - close.length) / (unit.length + 1))).fill(unit).join(",")}${close}`;
+    const stored = { maxDepth: 5, maxContainers: Math.floor(cap / 6) + 8 };
+    const payloads: Array<[string, () => string, { maxDepth: number; maxContainers: number }]> = [
+      ["deep nesting", () => `${"[".repeat(cap / 2 - 1)}${"]".repeat(cap / 2 - 1)}`, stored],
+      ["empty arrays", () => fill("[]", "[", "]"), stored],
+      ["empty objects", () => fill("{}", "[", "]"), stored],
+      ["minimal stored cells", () => fill("[1,1,1,1,0,\"\"]", "[", "]"), stored],
+      ["minimal captions", () => fill("[0,\"\"]", "[", "]"), stored],
+      // Guest output: one container per cell tag, so a hostile guest can return at most one record per tag.
+      ["guest records at the tag limit", () => fill("{\"label\":\"caption\",\"value\":\"\"}", "[[", "]]"), { maxDepth: 3, maxContainers: Math.floor(cap / 31) + 2 }],
+    ];
+    const measured: Record<string, number | "refused"> = {};
+    for (const [name, build, limits] of payloads) {
+      let text: string | null = build();
+      try { assertJsonShape(text, limits); } catch { measured[name] = "refused"; text = null; continue; }
+      const length = text.length;
+      gc(); gc(); const before = process.memoryUsage().heapUsed;
+      let value: unknown = JSON.parse(text);
+      gc(); gc(); const after = process.memoryUsage().heapUsed;
+      expect(value).toBeTruthy();
+      value = null; text = null;
+      measured[name] = Math.round(((after - before) / length) * 10) / 10;
+    }
+    console.log(`[table-cells heap] bytes of heap per input byte at a 4 MiB cap: ${JSON.stringify(measured)}`);
+    expect(measured["deep nesting"]).toBe("refused");
+    for (const [name, ratio] of Object.entries(measured)) if (ratio !== "refused") expect(ratio, name).toBeLessThanOrEqual(12);
+  });
+});
+
+describe("stored HTML table cells: keys and limits", () => {
+  it("hashes the exact parser input: sources differing only by an unpaired surrogate do not collide", () => {
+    const lone = "<table><tr><td>\uD800</td></tr></table>", replaced = "<table><tr><td>�</td></tr></table>";
+    expect(createHash("sha256").update(lone, "utf8").digest("hex")).toBe(createHash("sha256").update(replaced, "utf8").digest("hex"));
+    expect(tableSourceSha256(lone)).not.toBe(tableSourceSha256(replaced));
+  });
+
+  it("more than 1,024 tables: nothing parsed, nothing built (F4)", async () => {
+    const markdown = Array.from({ length: 1025 }, (_, i) => `<table><tr><td>${i}</td></tr></table>`).join("\n\n");
+    const storage = new MemoryStorage();
+    const slots = await seed(storage, "many", markdown);
+    const vm = vmRunner();
+    expect(await storeEmbedTableCells(storeArgs(storage, "many", markdown, slots.canonical, vm))).toEqual({ status: "too-large", tables: 1025 });
+    expect(vm.run).not.toHaveBeenCalled();
+    expect(storage.writes).toEqual([]);
+  });
+
+  it("the writer stops at the cap while serializing, before building the artifact (H2d)", async () => {
+    const tables = Array.from({ length: 50 }, (_, i) => `<table><tr><td>${String(i).repeat(1000)}</td></tr></table>`);
+    const prepared = new Map(tables.map((t) => [t, readTableCells(t)]));
+    const concat = vi.spyOn(Buffer, "concat");
+    const storage = new MemoryStorage();
+    const result = await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "r", documentId: "d", markdownUri: "s3://t/m", guestVersion: "g", prepared, byteCap: 5000 });
+    expect(result.status).toBe("too-large");
+    expect(result.bytes).toBeLessThan(5000 + 2000);
+    expect(concat).not.toHaveBeenCalled();
+    expect(storage.writes).toEqual([]);
+  });
+
+  it("the writer's deadline covers the upload: a PUT in flight is cancelled (M5)", async () => {
+    const text = (await fixtureDocuments())["routing-table-clean-financial.pdf.md grown"]!;
+    const storage = new MemoryStorage();
+    const slots = await seed(storage, "slow-put", text);
+    storage.holdPut = true;
+    const stored = await storeEmbedTableCells({ ...storeArgs(storage, "slow-put", text, slots.canonical, vmRunner()), deadlineMs: 300 });
+    expect(stored).toMatchObject({ status: "failed", error: "deadline of 300 ms exceeded" });
+    expect(storage.abortedPuts).toEqual([tableCellsArtifactKey(scope(), document("slow-put", text))]);
+    expect(storage.objects.has(tableCellsArtifactKey(scope(), document("slow-put", text)))).toBe(false);
   });
 });
 
 describe("stored HTML table cells: fail closed to the VM path", () => {
   const text = () => fixtureDocuments().then((docs) => docs["all fixtures in one document"]!);
-  type Artifact = { schema: string; runId: string; documentId: string; guestVersion: string; tables: Array<[string, unknown]> };
+  type Artifact = { schema: string; runId: string; documentId: string; markdownUri: string; guestVersion: string; bytes: string; tables: Array<[string, unknown]> };
+  // Edits keep the recorded length right, so each case reaches the check it is about.
   const edit = (change: (artifact: Artifact) => void) => (key: string, storage: MemoryStorage) => {
     const artifact = JSON.parse(storage.text(key)!) as Artifact;
     change(artifact);
-    storage.setText(key, JSON.stringify(artifact));
+    storage.setText(key, withLength(artifact));
   };
   const firstCells = (artifact: Artifact) => artifact.tables.find(([, cells]) => Array.isArray(cells) && cells.length > 0)![1] as unknown[][];
 
@@ -571,21 +836,38 @@ describe("stored HTML table cells: fail closed to the VM path", () => {
   });
 
   it("a foreign header is refused before the body is parsed", async () => {
-    const parse = vi.spyOn(JSON, "parse");
     const storage = new MemoryStorage();
-    storage.setText("k", `{"schema":"${TABLE_CELLS_ARTIFACT_SCHEMA}","runId":"other","documentId":"d","guestVersion":"g","tables":[]}`);
-    const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "r", documentId: "d", guestVersion: "g", sources: ["<table><tr><td>x</td></tr></table>"] });
+    const a = "<table><tr><td>x</td></tr></table>";
+    await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "other-run", documentId: "d", markdownUri: "s3://t/m", guestVersion: "g", prepared: new Map([[a, readTableCells(a)]]), byteCap: 1 << 20 });
+    const parse = vi.spyOn(JSON, "parse");
+    const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "r", documentId: "d", markdownUri: "s3://t/m", guestVersion: "g", sources: [a] });
     expect(lookup).toMatchObject({ status: "invalid", reason: expect.stringContaining("header mismatch") });
     expect(parse).not.toHaveBeenCalled();
   });
 
-  it("an artifact over the document's cell budget is refused as a whole (M2)", async () => {
-    // Three large sources raise the byte cap; 270,000 empty cells across them exceed the 256,000-cell document budget.
-    const sources = [0, 1, 2].map((i) => `<table><tr><td>${String(i).repeat(1_500_000)}</td></tr></table>`);
-    const tables = sources.map((source) => JSON.stringify([tableSourceSha256(source), Array.from({ length: 90_000 }, () => [1, 1, 1, 1, 0, ""])]));
+  it("reads exactly the recorded length, sized from the header rather than the remaining sources (F3)", async () => {
+    const tables = Array.from({ length: 4 }, (_, i) => `<table><tr><td>${String(i).repeat(5000)}</td></tr></table>`);
     const storage = new MemoryStorage();
-    storage.setText("k", `{"schema":"${TABLE_CELLS_ARTIFACT_SCHEMA}","runId":"r","documentId":"d","guestVersion":"g","tables":[${tables.join(",")}]}`);
-    const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "r", documentId: "d", guestVersion: "g", sources });
+    const scopeArgs = { runId: "r", documentId: "d", markdownUri: "s3://t/m", guestVersion: "g" };
+    await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, prepared: new Map(tables.map((t) => [t, readTableCells(t)])), byteCap: tableCellsByteCap(tables) });
+    // A later stage dropped three tables (page images): the read is bounded by the recorded length, not the sources left.
+    const shrunk = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, sources: tables.slice(0, 1) });
+    expect(shrunk).toMatchObject({ status: "hit", hits: 1 });
+    // Bytes past the recorded length stop the transfer there.
+    storage.hideLength = true;
+    storage.setText("k", `${storage.text("k")}${" ".repeat(1 << 20)}`);
+    const longer = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, sources: tables });
+    expect(longer).toMatchObject({ status: "invalid", reason: "artifact exceeds its recorded length" });
+    expect(storage.pulled.get("k")!).toBeLessThan(storage.objects.get("k")!.length);
+  });
+
+  it("an artifact over the document's cell budget is refused as a whole (M2)", async () => {
+    // 270,000 empty cells across three tables exceed the 256,000-cell document budget.
+    const sources = [0, 1, 2].map((i) => `<table><tr><td>${String(i).repeat(1_500_000)}</td></tr></table>`);
+    const storage = new MemoryStorage();
+    const scopeArgs = { runId: "r", documentId: "d", markdownUri: "s3://t/m", guestVersion: "g" };
+    storage.setText("k", withLength({ schema: TABLE_CELLS_ARTIFACT_SCHEMA, ...scopeArgs, bytes: "", tables: sources.map((source) => [tableSourceSha256(source), Array.from({ length: 90_000 }, () => [1, 1, 1, 1, 0, ""])]) }));
+    const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, sources });
     expect(lookup).toMatchObject({ status: "invalid", reason: "artifact exceeds the document budget" });
   });
 
@@ -604,8 +886,8 @@ describe("stored HTML table cells: fail closed to the VM path", () => {
   it("looks a table up only under the sha256 of the exact source chunking asks for", async () => {
     const storage = new MemoryStorage();
     const a = "<table><tr><td>A</td></tr></table>", b = "<table><tr><td>B</td></tr></table>";
-    await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "run", documentId: "doc", guestVersion: "g", prepared: new Map([[a, readTableCells(a)]]), byteCap: 1 << 20 });
-    const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "run", documentId: "doc", guestVersion: "g", sources: [` ${a} `, b] });
+    await writeTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "run", documentId: "doc", markdownUri: "s3://t/m", guestVersion: "g", prepared: new Map([[a, readTableCells(a)]]), byteCap: 1 << 20 });
+    const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", runId: "run", documentId: "doc", markdownUri: "s3://t/m", guestVersion: "g", sources: [` ${a} `, b] });
     expect(lookup.status).toBe("partial");
     expect([...lookup.cached.keys()]).toEqual([a]);
     expect(lookup.cached.get(a)).toEqual(readTableCells(a));
@@ -621,6 +903,7 @@ describe("the VM boundary (H2)", () => {
     ["an array instead of a record", () => ["row 1 column 1 rowspan 1 colspan 1", "x"]],
   ])("rejects guest output with %s", async (_, change) => {
     const vm = vmRunner((cells) => (cells as Array<Array<Record<string, unknown>>>).map((records) => records.map(change)));
-    await expect(prepareHtmlTableCells([table], vm)).rejects.toThrow(/invalid HTML table cell/);
+    // Refused either by the pre-scan (nesting) or by the record check: never accepted.
+    await expect(prepareHtmlTableCells([table], vm)).rejects.toThrow(/invalid HTML table cell|JSON nesting exceeds limit/);
   });
 });

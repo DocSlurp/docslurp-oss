@@ -25,14 +25,24 @@ describe("production HTML table boundary", () => {
   vi.stubEnv("NODE_ENV", "production");
   const sources=Array.from({length:4},(_,i)=>`<table><tr><td>${"界".repeat(3_000_000)}${i}</td></tr></table>`);
   const run=vi.fn(async(plan)=>{const raw=await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1]);expect(raw.length).toBeLessThanOrEqual(32*1024*1024);const batch=JSON.parse(raw.toString());await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2],JSON.stringify(batch.map(()=>[])));return {stdout:"",stderr:""};});
-  await withPreparedHtmlTables(sources,{run},()=>{});expect(run).toHaveBeenCalledTimes(2);
+  // Each ~9 MiB table's output bound exceeds half the 16 MiB batch target, so each goes in a batch of its own.
+  await withPreparedHtmlTables(sources,{run},()=>{});expect(run).toHaveBeenCalledTimes(4);
+  for (const [plan] of run.mock.calls) expect((plan as { maxOutputFileBytes: number }).maxOutputFileBytes).toBeLessThanOrEqual(64*1024*1024);
  });
  it("applies the text budget across multiple batches", async () => {
   vi.stubEnv("NODE_ENV", "production");
-  const sources=Array.from({length:65},(_,i)=>source(`table${i}`));
+  // Quotes double under JSON escaping, so each table's output bound (~540 KB) admits 520,000 characters of cell text;
+  // 65 such tables cross the 32 Mi-character document budget in the third batch of 31.
+  const sources=Array.from({length:65},(_,i)=>`<table><tr><td>${i}${'"'.repeat(270_000)}</td></tr></table>`);
+  const cells=[{label:"row 1 column 1 rowspan 1 colspan 1",value:"x".repeat(520_000)}];
+  const run=vi.fn(async(plan)=>{const batch=JSON.parse(await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1],"utf8"));await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2],JSON.stringify(batch.map(()=>cells)));return {stdout:"",stderr:""};});
+  await expect(withPreparedHtmlTables(sources,{run},()=>{})).rejects.toThrow(/text exceeds limit/);expect(run).toHaveBeenCalledTimes(3);
+ });
+ it("refuses guest output larger than its tables can produce, before parsing it", async () => {
+  vi.stubEnv("NODE_ENV", "production");
   const cells=Array.from({length:128},()=>({label:"row 1 column 1 rowspan 1 colspan 1",value:"x".repeat(4096)}));
   const run=vi.fn(async(plan)=>{const batch=JSON.parse(await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1],"utf8"));await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2],JSON.stringify(batch.map(()=>cells)));return {stdout:"",stderr:""};});
-  await expect(withPreparedHtmlTables(sources,{run},()=>{})).rejects.toThrow(/text exceeds limit/);expect(run).toHaveBeenCalledTimes(2);
+  await expect(withPreparedHtmlTables([source("tableA")],{run},()=>{})).rejects.toThrow(/result exceeds limit/);
  });
  it("rejects hostile guest labels and missing VM credentials without fallback", async () => {
   vi.stubEnv("NODE_ENV", "production");await expect(withPreparedHtmlTables([source("tenantA")],runner(true),()=>[])).rejects.toThrow(/invalid HTML table cell/);

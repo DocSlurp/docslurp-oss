@@ -45,6 +45,7 @@ import {
   type ExtractionArtifactRef, switchDisabled } from "@docslurp/shared";
 import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
 import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
+import { visionMayReadDocumentPages } from "../lib/vision-reads-pages.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
@@ -1230,7 +1231,7 @@ export class ExtractMarkdownStage implements Stage {
                   );
 
                   const tableCells = await this.storeTableCellsForEmbed(state, document, {
-                    markdown: winningText, canonicalDocument: parserAwareCanonicalDocument, needsVision,
+                    markdown: winningText, markdownUri: artifactUri, canonicalDocument: parserAwareCanonicalDocument, needsVision,
                   }, signal);
                   const completedResult: DocumentStageResult = {
                     artifactUri,
@@ -1400,14 +1401,15 @@ export class ExtractMarkdownStage implements Stage {
   async storeTableCellsForEmbed(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
-    extracted: { markdown: string; canonicalDocument: import("@docslurp/shared").CanonicalDocument; needsVision: boolean },
+    extracted: { markdown: string; markdownUri: string; canonicalDocument: import("@docslurp/shared").CanonicalDocument; needsVision: boolean },
     signal?: AbortSignal,
   ): Promise<StoreEmbedTableCellsStats> {
     if (!mayHaveHtmlTables(extracted.markdown, extracted.canonicalDocument.blocks)) return { status: "no-tables" };
-    if (extracted.needsVision && state.run.pipeline.visionFallback) return { status: "vision-pending" };
+    // vision-extract is then the last stage to write this document's tables before pii-detect; it stores them fresh.
+    if (visionMayReadDocumentPages(state, document.id, extracted.needsVision)) return { status: "vision-pending" };
     return await storeEmbedTableCells({
       run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
-      markdown: extracted.markdown, canonicalDocument: extracted.canonicalDocument, signal,
+      markdown: extracted.markdown, markdownUri: extracted.markdownUri, canonicalDocument: extracted.canonicalDocument, signal,
     });
   }
 

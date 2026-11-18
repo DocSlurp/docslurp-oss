@@ -1,5 +1,6 @@
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
+import { visionRunMayReadPages } from "../lib/vision-reads-pages.js";
 import { recordPageExtracts, visionPageRecords } from "../pipeline/page-extracts.js";
 import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { recordPageEscalation } from "../pipeline/run-milestones.js";
@@ -350,9 +351,7 @@ export class VisionExtractStage implements Stage {
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     // Fast never reads a page; pages without a text layer were kept as page images (render-images).
-    const readsPages = state.run.pipeline.visionFallback
-      && qualityAllowsPageReading(state.run.pipeline.quality)
-      && (await this.visionAllowed(state));
+    const readsPages = visionRunMayReadPages(state.run.pipeline) && (await this.visionAllowed(state));
     const exportCharts = chartExportActive(state.run.pipeline);
     if (!readsPages) {
       // Chart export runs without general vision: the free tier (the default) exports only charts that carry their own
@@ -2391,8 +2390,9 @@ export class VisionExtractStage implements Stage {
   ): Promise<{
     changedPages: number[];
     decisions: CanonicalReconciliationDecision[];
-    /** The reconciled Markdown and canonical document now in the document's slots (absent when nothing was reconciled). */
+    /** The reconciled Markdown (and its slot URI) and canonical document now in the document's slots (absent when nothing was reconciled). */
     markdown?: string;
+    markdownUri?: string;
     canonicalDocument?: CanonicalDocument;
   }> {
     const contractUri = state.artifactLedger.readDocument(document.id, "extraction-contract");
@@ -2522,6 +2522,7 @@ export class VisionExtractStage implements Stage {
       changedPages: reconciled.changedPages,
       decisions: reconciled.decisions,
       markdown: reconciled.markdown,
+      markdownUri: this.storage.uri(reconciledMarkdownKey),
       canonicalDocument: reconciled.canonicalDocument,
     };
   }
@@ -2534,14 +2535,14 @@ export class VisionExtractStage implements Stage {
   async storeTableCellsForEmbed(
     state: WorkflowState,
     document: import("../models.js").Document,
-    reconciliation: { changedPages: number[]; markdown?: string; canonicalDocument?: CanonicalDocument },
+    reconciliation: { changedPages: number[]; markdown?: string; markdownUri?: string; canonicalDocument?: CanonicalDocument },
     signal?: AbortSignal,
   ): Promise<StoreEmbedTableCellsStats | null> {
-    if (reconciliation.changedPages.length === 0 || reconciliation.markdown === undefined) return null;
+    if (reconciliation.changedPages.length === 0 || reconciliation.markdown === undefined || reconciliation.markdownUri === undefined) return null;
     if (!mayHaveHtmlTables(reconciliation.markdown, reconciliation.canonicalDocument?.blocks)) return { status: "no-tables" };
     return await storeEmbedTableCells({
       run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
-      markdown: reconciliation.markdown, canonicalDocument: reconciliation.canonicalDocument, signal,
+      markdown: reconciliation.markdown, markdownUri: reconciliation.markdownUri, canonicalDocument: reconciliation.canonicalDocument, signal,
     });
   }
 }

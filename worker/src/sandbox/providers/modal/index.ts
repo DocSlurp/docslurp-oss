@@ -484,10 +484,10 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
         await fs.remove(staged).catch(() => {});
       }
     },
-    async readFile(p) {
+    async readFile(p, limit = 128 * 1024 * 1024) {
       // Read as the parser user: root never follows a link the job left in its own output (council K #5).
       const proc = await sandbox.exec([...asParserUser(), "/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });
-      const [data, , code] = await Promise.all([boundedJobOutput(proc.stdout, 128 * 1024 * 1024, "parser VM output file"), boundedVmStream(proc.stderr, 64 * 1024).catch(() => null), proc.wait()]);
+      const [data, , code] = await Promise.all([boundedJobOutput(proc.stdout, Math.min(limit, 128 * 1024 * 1024), "parser VM output file"), boundedVmStream(proc.stderr, 64 * 1024).catch(() => null), proc.wait()]);
       // Run as the parser user: a non-zero exit is the job's own output (made unreadable, a fifo), the document's fault.
       if (code !== 0) throw new SandboxOutputError("parser VM output could not be read back");
       return data;
@@ -1590,7 +1590,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               markCleaned();
               // Only what this command created or changed comes back.
               if (closed || lane.dead) throw new Error("parser VM session closed before download");
-              await staging!.download(snapshot);
+              await staging!.download(snapshot, { maxFileBytes: command.limits.maxOutputFileBytes });
               const usage = meterLane(lane);
               return { ...outcome.output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
             }
