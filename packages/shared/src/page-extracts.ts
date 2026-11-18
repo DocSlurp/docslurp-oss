@@ -6,9 +6,26 @@ import { z } from "zod";
  * No page text, document-supplied value or model id is ever part of a record.
  */
 
-/** The step that wrote or replaced a page's text. */
-export const PAGE_EXTRACT_PASSES = ["extract", "scan-ocr", "critique", "vision", "human"] as const;
+/**
+ * The passes that can write or replace a page's text, in rank order: a later adopted pass of a run replaces an earlier
+ * one, and the highest adopted pass is the page's final record (worker pipeline/page-extracts.ts finalizePageExtracts).
+ */
+export const PAGE_EXTRACT_FINAL_PASSES = ["extract", "scan-ocr", "critique", "vision", "human"] as const;
+export type PageExtractFinalPass = (typeof PAGE_EXTRACT_FINAL_PASSES)[number];
+
+/**
+ * Every pass a record can name: the final passes, then contributing reads that are never a page's final pass:
+ * - `video-frames`: the vision model's read of a video's sampled frames (migration 0193). Its descriptions are merged into
+ *   the page's transcript, which stays the page's final (`extract`) record.
+ */
+export const PAGE_EXTRACT_PASSES = [...PAGE_EXTRACT_FINAL_PASSES, "video-frames"] as const;
 export type PageExtractPass = (typeof PAGE_EXTRACT_PASSES)[number];
+
+const FINAL_PASS_SET: ReadonlySet<string> = new Set(PAGE_EXTRACT_FINAL_PASSES);
+/** Whether a pass can be a page's final record (one that writes the page's text rather than contributing to it). */
+export function isPageExtractFinalPass(value: unknown): value is PageExtractFinalPass {
+  return typeof value === "string" && FINAL_PASS_SET.has(value);
+}
 
 /**
  * How the page's text was produced:
@@ -74,7 +91,8 @@ export const pageExtractRecordSchema = z.object({
   adopted: z.boolean(),
   /** The page is published with this row's text (exactly one per page once its document completes). */
   isFinal: z.boolean(),
-  supersededByPass: z.enum(PAGE_EXTRACT_PASSES).nullable(),
+  /** The page's final pass, on its other adopted rows (a contributing pass such as `video-frames` names the transcript). */
+  supersededByPass: z.enum(PAGE_EXTRACT_FINAL_PASSES).nullable(),
   createdAt: z.string(),
 });
 export type PageExtractRecordView = z.infer<typeof pageExtractRecordSchema>;

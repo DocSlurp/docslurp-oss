@@ -21,7 +21,7 @@ export type IngestReportPage = {
   textBytes: number | null; imageCount: number | null; visionStatus: string | null; chunkCount: number;
   /** How the page's indexed text was produced (`text-layer`, `ocr`, `ocr-second-read`, `vision`, `correction`, `kept-as-image`, `none`). */
   extractMethod?: string | null;
-  /** The pass whose text the page was indexed with (`extract`, `scan-ocr`, `critique`, `vision`, `human`). */
+  /** The pass whose text the page was indexed with (`extract`, `scan-ocr`, `critique`, `vision`, `human`; never the contributing `video-frames`). */
   finalPass?: string | null;
   /** Page tags (`scanned`, `table`, `math`, `garbled-text-layer`, `low-confidence`, ...). */
   extractTags?: string[];
