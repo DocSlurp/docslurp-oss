@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 const report = vi.hoisted(() => vi.fn());
 vi.mock("@docslurp/shared/error-reporting", () => ({ reportException: report, exceptionDetails: vi.fn() }));
-vi.mock("./error-context.js", () => ({ errorContext: { getStore: () => ({ requestId: "req-test", userId: "user-test" }) } }));
+vi.mock("./error-context.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./error-context.js")>(),
+  errorContext: { getStore: () => ({ requestId: "req-test", userId: "user-test" }) },
+}));
 import { publicErrorMiddleware, reportPublicError, safeErrorResponse } from "./public-errors.js";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 

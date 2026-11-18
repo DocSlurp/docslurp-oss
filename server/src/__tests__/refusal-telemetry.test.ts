@@ -19,6 +19,7 @@ vi.mock("../lib/posthog-ai-observability.js", () => ({
 import { apiStatusError, middlewareErrorResponse, nativeErrorHandler } from "../lib/api-error.js";
 import { apiPublicErrorMiddleware } from "../lib/public-errors.js";
 import { requestContextMiddleware } from "../lib/request-context.js";
+import { REJECTION_TOKEN_HEADER } from "../lib/error-context.js";
 import { MAX_REJECTION_REASON_CHARS, sanitizeRejectionReason } from "../lib/rejection-reason.js";
 
 const SECRETS = [
@@ -47,6 +48,10 @@ function app() {
   app.post("/v1/throw-400", () => { throw new HTTPException(400, { message: MESSAGE }); });
   app.post("/v1/throw-500", () => { throw new Error(MESSAGE); });
   app.post("/v1/mcp", c => middlewareErrorResponse(c, 400, "invalid_request", MESSAGE));
+  // An error response built and then discarded, before a different one is sent.
+  app.post("/v1/replaced-other-status", c => { apiStatusError(c, 400, "STALEREASON one"); return c.json({ error: "gone" }, 404); });
+  app.post("/v1/replaced-same-status", c => { apiStatusError(c, 400, "STALEREASON two"); return c.json({ error: "other" }, 400); });
+  app.post("/v1/recorded-twice", c => { apiStatusError(c, 400, "STALEREASON three"); return apiStatusError(c, 400, "delivered reason"); });
   return app;
 }
 
@@ -69,6 +74,11 @@ async function refuse(path: string) {
   const response = await app().request(path, { method: "POST" });
   const body = await response.text();
   const line = logged.find(text => text.startsWith("[api] ")) ?? "";
+  // Every emitted record must exist, or the leak assertions would pass vacuously.
+  expect(line).toMatch(/^\[api\] requestId=/);
+  expect(spans).toHaveLength(1);
+  expect(posthog).toHaveLength(1);
+  expect(response.headers.has(REJECTION_TOKEN_HEADER)).toBe(false);
   return { status: response.status, body, line, span: spans.at(-1) ?? {}, posthog: posthog.at(-1) ?? {} };
 }
 
@@ -85,7 +95,23 @@ describe("refusal telemetry never carries credentials", () => {
     expect(result.span["docslurp.error.reason"]).toContain("https://files.example.com");
     expect(String(result.span["docslurp.error.reason"]).length).toBeLessThanOrEqual(MAX_REJECTION_REASON_CHARS);
     expect(result.line).toContain("error_reason=");
-    expect(JSON.stringify(result.posthog)).not.toContain("docslurp.error.reason");
+    // PostHog gets the closed code only.
+    expect(result.posthog["docslurp.error.code"]).toBe("invalid_request");
+    expect(JSON.stringify(result.posthog)).not.toMatch(/docslurp\.error\.reason|files\.example\.com/);
+  });
+
+  it.each(["/v1/replaced-other-status", "/v1/replaced-same-status"])("%s: a discarded error response's reason is never reported", async (path) => {
+    const result = await refuse(path);
+    expect(result.span["docslurp.error.code"]).toBeUndefined();
+    expect(result.span["docslurp.error.reason"]).toBeUndefined();
+    expect(result.posthog["docslurp.error.code"]).toBeUndefined();
+    for (const text of [result.line, JSON.stringify(result.span), JSON.stringify(result.posthog), result.body]) expect(text).not.toContain("STALEREASON");
+  });
+
+  it("reports the reason of the error response actually delivered", async () => {
+    const result = await refuse("/v1/recorded-twice");
+    expect(result.span["docslurp.error.reason"]).toBe("delivered reason");
+    expect(result.line).not.toContain("STALEREASON");
   });
 
   it("keeps a 5xx's raw text off the span and stdout line (code and id only)", async () => {
@@ -115,5 +141,6 @@ describe("refusal telemetry never carries credentials", () => {
       ids.add(spans.at(-1)?.["docslurp.error.reason_id"]);
     }
     expect(ids.size).toBe(1);
+    expect([...ids][0]).toMatch(/^[0-9a-f]{12}$/);
   });
 });

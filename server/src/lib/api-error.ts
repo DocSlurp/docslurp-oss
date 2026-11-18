@@ -3,14 +3,13 @@ import { boundedBodyLimit } from "./bounded-body-limit.js";
 import { HTTPException } from "hono/http-exception";
 import { apiError, apiErrorCodeForStatus, isApiErrorCode, publicApiErrorLinks, publicApiErrorMessage, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 import { upgradeLinkHeader, withUpgradeLinks } from "./upgrade-links.js";
-import { recordRequestRejection } from "./error-context.js";
+import { recordRequestRejection, REJECTION_TOKEN_HEADER } from "./error-context.js";
 
 type ErrorStatus = 400 | 401 | 402 | 403 | 404 | 408 | 409 | 410 | 413 | 415 | 422 | 424 | 429 | 500 | 502 | 503 | 504;
 
 /** Native error envelope response; `publicErrorMiddleware` stamps `requestId` and sanitizes copy. */
 export function apiErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
-  recordRequestRejection(status, code, message);
-  return envelopeResponse(c, status, code, message, details);
+  return recordRequestRejection(envelopeResponse(c, status, code, message, details), code, message);
 }
 
 function envelopeResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
@@ -71,8 +70,7 @@ export function usesNativeErrorEnvelope(path: string): boolean {
  */
 export function middlewareErrorResponse(c: Context, status: ErrorStatus, code: ApiErrorCode, message: string, details?: ApiErrorDetails): Response {
   if (usesNativeErrorEnvelope(c.req.path)) return apiErrorResponse(c, status, code, message, details);
-  recordRequestRejection(status, code, message);
-  return c.json({ error: message, code, ...linkedDetails(c, code, details) }, status);
+  return recordRequestRejection(c.json({ error: message, code, ...linkedDetails(c, code, details) }, status), code, message);
 }
 
 const thrownErrorDetails = new WeakMap<object, ApiErrorDetails>();
@@ -89,7 +87,8 @@ export function withApiErrorDetails<T>(error: T, details: ApiErrorDetails): T {
   return error;
 }
 
-const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-encoding", "transfer-encoding"]);
+// The rejection token belongs to the response it was recorded for, never to a replacement.
+const DROPPED_HEADERS = new Set(["content-type", "content-length", "content-encoding", "transfer-encoding", REJECTION_TOKEN_HEADER]);
 
 /**
  * The one place a thrown error becomes an envelope response. Copy comes from the
@@ -107,14 +106,13 @@ export function envelopeForError(c: Context, error: unknown, status: number, ori
   const autoTopUpOn = (error as { autoTopUpOn?: unknown } | null)?.autoTopUpOn === true;
   const details = withUpgradeLinks(code, autoTopUpOn ? { ...thrown, autoTopUpOn } : thrown);
   // The client gets the code's reviewed copy; telemetry gets what actually went wrong.
-  recordRequestRejection(status, code, rawErrorReason(error));
   const response = envelopeResponse(c, status as ErrorStatus, code, publicApiErrorMessage(code, details), details);
   for (const source of [error instanceof HTTPException ? error.res?.headers : undefined, originalHeaders]) {
     source?.forEach((value, name) => {
       if (!DROPPED_HEADERS.has(name.toLowerCase())) response.headers.set(name, value);
     });
   }
-  return response;
+  return recordRequestRejection(response, code, rawErrorReason(error));
 }
 
 function rawErrorReason(error: unknown): string {

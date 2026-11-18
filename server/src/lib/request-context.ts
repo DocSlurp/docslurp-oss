@@ -1,4 +1,4 @@
-import { errorContext, rejectionForStatus, type RequestRejection } from "./error-context.js";
+import { errorContext, takeDeliveredRejection, type RequestRejection } from "./error-context.js";
 import { withObservation, addTraceMetadata, withHttpSpan, exportsOtlpLogs, activeTraceparent } from "@docslurp/shared/observability";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -346,11 +346,12 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
   let identity: RequestContextState | undefined;
   // Error responses record their sanitized reason here (recordRequestRejection).
   const reportContext: { requestId: string; rejection?: RequestRejection } = { requestId };
-  const rejection = () => rejectionForStatus(reportContext.rejection, c.res.status);
+  // Set when the request ends, from the response actually delivered (L6: never a stale or replaced one).
+  let delivered: RequestRejection | undefined;
   await errorContext.run(reportContext, () => withHttpSpan({ method: c.req.method, route,
     headers: { traceparent: c.req.header("traceparent") ?? "", tracestate: c.req.header("tracestate") ?? "", baggage: c.req.header("baggage") ?? "" },
     status: () => c.res.status,
-    attributes: () => requestSpanAttributes({ requestId, route, pathname, identity, userAgent: c.req.header("User-Agent"), rejection: rejection() }),
+    attributes: () => requestSpanAttributes({ requestId, route, pathname, identity, userAgent: c.req.header("User-Agent"), rejection: delivered }),
     error: () => identity?.error,
     // A browser or API client's traceparent must not pick our trace id or force sampling.
     trustInboundParent: TRUST_INBOUND_TRACEPARENT,
@@ -389,6 +390,9 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
             ? 500
             : c.res.status;
       httpResponseStats.record(status);
+      // Read (and strip) the rejection token now, before any await: the response is final.
+      const taken = takeDeliveredRejection(reportContext.rejection, c.res);
+      delivered = thrownError ? undefined : taken;
       const durationMs = Date.now() - startedAt;
       const cpu = process.cpuUsage(cpuStart);
       const rssDeltaBytes = process.memoryUsage().rss - rssStart;
@@ -445,7 +449,7 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
         // SigNoz already receives the structured record below; the Fly log shipper
         // would ingest a second, uncorrelated copy. Stdout is the fallback only.
         const level = exportsOtlpLogs() ? undefined : status >= 500 ? console.error : status >= 400 ? console.warn : console.log;
-        const refused = rejectionForStatus(reportContext.rejection, status);
+        const refused = delivered;
         const reason = refused
           ? ` error_code=${refused.code} error_reason_id=${refused.reasonId}${refused.reason ? ` error_reason=${JSON.stringify(refused.reason)}` : ""}`
           : "";
@@ -456,8 +460,9 @@ export const requestContextMiddleware: MiddlewareHandler = async (c, next) => {
           body: `${c.req.method} ${pathname} ${status} ${finalDurationMs}ms`,
           attributes: {
             // Who made the request and the route's ids, so support can find a user's requests.
-            // The refusal reason goes to the request span and stdout line only, never to PostHog.
             ...requestSpanAttributes({ requestId, route, pathname, identity: requestContextStorage.getStore(), userAgent: c.req.header("User-Agent") }),
+            // The closed code only: the reason and its id stay on the span and stdout line.
+            ...(refused ? { "docslurp.error.code": refused.code } : {}),
             "http.request.method": c.req.method,
             "http.route": route,
             "http.response.status_code": status,
