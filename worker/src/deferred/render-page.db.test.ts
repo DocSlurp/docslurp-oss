@@ -138,3 +138,26 @@ it("clears a repeatedly renewed same-DPI demand when matching cached pixels alre
   expect(await sql`select dpi from document_page_renders`).toEqual([]);
   expect(mocks.render).not.toHaveBeenCalled();
 });
+it("renders a page a page-scoped PII redaction did not match, and refuses a matched or unscoped one", async () => {
+  await sql`delete from document_page_renders`;
+  await sql`update project_runs set artifacts='{}'::jsonb where id='run'`;
+  mocks.render.mockResolvedValue([{ artifactUri: "s3://page-clean", cacheHit: false }]);
+  const request = { documentId: "doc", runId: "run", pageNumber: 1, quality: "reader" as const, dpi: 120 as const };
+  const setPii = (pii: unknown) => sql`update documents set metadata=${sql.json({ pii } as never)}::jsonb where id='doc'`;
+  // Page 1 matched: refused before any render.
+  await setPii({ redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: true, withheldPages: [1] });
+  await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
+  // A record from before page scoping (or of unknown pages) withholds every page.
+  await setPii({ redacted: true, withheldArtifactUris: ["s3://source"] });
+  await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
+  await setPii({ redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: true, withheldPages: ["1"] });
+  await expect(renderDocumentPage(deps(), request)).rejects.toThrow("Document page is unavailable");
+  expect(mocks.render).not.toHaveBeenCalled();
+  // Only page 2 matched: page 1 renders although the source file itself stays withheld.
+  await setPii({ redacted: true, withheldArtifactUris: ["s3://source"], pageScoped: true, withheldPages: [2] });
+  await renderDocumentPage(deps(), request);
+  expect(mocks.render).toHaveBeenCalledTimes(1);
+  const [run] = await sql<{ artifacts: Record<string, string> }[]>`select artifacts from project_runs where id='run'`;
+  expect(run!.artifacts["doc:page-1"]).toBe("s3://page-clean");
+  await sql`update documents set metadata='{}'::jsonb where id='doc'`;
+});

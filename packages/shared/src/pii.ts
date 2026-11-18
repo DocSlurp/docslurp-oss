@@ -341,3 +341,66 @@ export function processPii(
 
   return { matches };
 }
+
+// ---- Page-scoped withholding (redact_artifacts) ------------------------------------------------------------------
+
+/**
+ * Page number of a page-image artifact slot: `<documentId>:page-N` (the viewer/reader image) or
+ * `<documentId>:raster-v…-page-N` (a sized render). Null for every other slot.
+ */
+export function pageImageSlotPage(documentId: string, slot: string): number | null {
+  const prefix = `${documentId}:`;
+  if (!slot.startsWith(prefix)) return null;
+  const match = /^(?:page-|raster-v\d+-[a-z0-9-]*?page-)(\d{1,7})$/.exec(slot.slice(prefix.length));
+  if (!match) return null;
+  const page = Number(match[1]);
+  return Number.isInteger(page) && page >= 1 ? page : null;
+}
+
+/**
+ * Which page images a document's PII outcome withholds. `all`: every page image (a block, a redaction whose match pages
+ * could not be determined, or an outcome written before page scoping, read fail-closed). Otherwise only `pages`.
+ * `pageScoped` is true only for a redact outcome that recorded its match pages: its source file stays withheld, but a
+ * page outside `pages` may be shown (and rendered).
+ */
+export type PiiPageWithholding = { all: boolean; pageScoped: boolean; pages: ReadonlySet<number> };
+
+const NOTHING_WITHHELD: PiiPageWithholding = { all: false, pageScoped: false, pages: new Set() };
+
+export function piiPageWithholding(metadata: unknown): PiiPageWithholding {
+  const pii = metadata && typeof metadata === "object" ? (metadata as { pii?: unknown }).pii : null;
+  if (!pii || typeof pii !== "object") return NOTHING_WITHHELD;
+  const record = pii as { blocked?: unknown; redacted?: unknown; withheldArtifactUris?: unknown; pageScoped?: unknown; withheldPages?: unknown };
+  if (record.blocked === true) return { all: true, pageScoped: false, pages: new Set() };
+  const withholds = record.redacted === true || (Array.isArray(record.withheldArtifactUris) && record.withheldArtifactUris.length > 0)
+    || (record.withheldArtifactUris !== undefined && !Array.isArray(record.withheldArtifactUris));
+  if (!withholds) return NOTHING_WITHHELD;
+  if (record.pageScoped === true && Array.isArray(record.withheldPages)
+    && record.withheldPages.every((page) => Number.isInteger(page) && (page as number) >= 1)) {
+    return { all: false, pageScoped: true, pages: new Set(record.withheldPages as number[]) };
+  }
+  return { all: true, pageScoped: false, pages: new Set() };
+}
+
+/** True when the PII outcome withholds this page's images. */
+export function piiWithholdsPage(metadata: unknown, pageNumber: number): boolean {
+  const withholding = piiPageWithholding(metadata);
+  return withholding.all || withholding.pages.has(pageNumber);
+}
+
+/** True when `slot` is a page image of a page the PII outcome withholds. */
+export function piiWithholdsPageImageSlot(metadata: unknown, documentId: string, slot: string): boolean {
+  const page = pageImageSlotPage(documentId, slot);
+  return page !== null && piiWithholdsPage(metadata, page);
+}
+
+/**
+ * 1-based page of a character offset in page-separated (`\f`) text, or null when the text has no page breaks and
+ * the document has more than one page (the page cannot be known).
+ */
+export function pageOfTextOffset(text: string, charOffset: number, pageCount: number | null | undefined): number | null {
+  if (!text.includes("\f")) return (pageCount ?? 1) <= 1 ? 1 : null;
+  let page = 1;
+  for (let index = text.indexOf("\f"); index !== -1 && index < charOffset; index = text.indexOf("\f", index + 1)) page += 1;
+  return page;
+}

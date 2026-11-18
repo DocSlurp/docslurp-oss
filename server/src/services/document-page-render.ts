@@ -1,4 +1,4 @@
-import { PII_BLOCKED_DOCUMENT_STATUS, type DataUnavailableReason, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
+import { PII_BLOCKED_DOCUMENT_STATUS, piiPageWithholding, type DataUnavailableReason, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { sql } from "../db.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
@@ -30,6 +30,11 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
       or pipeline->>'quality' = 'good' as page_images
     from projects where id = ${doc.projectId}`;
   if (project && !project.page_images) return { status: "unavailable" as const, reason: "disabled" as const, document: doc };
+  // PII (page-scoped under redact_artifacts): a page a match is on is never served or rendered; a block, or a
+  // redaction whose match pages are unknown, withholds every page (piiPageWithholding, fail closed).
+  const [piiRow] = await sql<{ metadata: unknown }[]>`select metadata from documents where id = ${doc.id}`;
+  const pii = piiPageWithholding(piiRow?.metadata ?? null);
+  if (pii.all || pii.pages.has(pageNumber)) return { status: "unavailable" as const, reason: "withheld" as const, document: doc };
   const artifact = viewer.artifacts.find(item => item.slot === pageRenderSlot(documentId, pageNumber, quality, dpi));
   if (!artifact && quality === "reader") {
     const legacy = viewer.artifacts.find(item => item.slot === `${documentId}:page-${pageNumber}` || item.slot === `${documentId}:raster-v2-reader-page-${pageNumber}`);
@@ -39,7 +44,8 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   }
   if (artifact) return { status: "ready" as const, dpi, capabilities, observation, artifact: { ...artifact, slot: `${documentId}:page-${pageNumber}` } };
   // Withheld sources may never be recreated as unredacted page images.
-  const unavailable = pageRenderUnavailableReason(doc, Boolean(viewer.source?.url));
+  // A page-scoped redaction withholds the source file itself, but this page has no match: it may be rendered from it.
+  const unavailable = pageRenderUnavailableReason(doc, Boolean(viewer.source?.url) || pii.pageScoped);
   if (unavailable || !doc.runId) return { status: "unavailable" as const, reason: unavailable ?? "processing", document: doc };
   const runId = doc.runId;
   // Scan what we parse (PR #339): the worker refuses to render a document without a parse decision from the current scan
