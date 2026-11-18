@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { requestDocumentPageRender } from "../services/document-page-render.js";
 import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/spend-guard.js";
@@ -44,9 +45,10 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
 import { isReprocessRejectedError } from "../services/reprocess-errors.js";
 import { reportPublicError } from "../lib/public-errors.js";
+import { bulkAuditResourceId, bulkDocumentIdsSchema, bulkDocumentsLimitResponse } from "../lib/bulk-documents.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { validationHook } from "../lib/validation.js";
-import { BULK_DOCUMENTS_MAX, deferredProfilesEnabled, publicApiErrorMessage } from "@docslurp/shared";
+import { deferredProfilesEnabled, publicApiErrorMessage } from "@docslurp/shared";
 import { HTTPException } from "hono/http-exception";
 import { getRun } from "../services/runs.js";
 import { runLifecycle } from "../services/run-lifecycle.js";
@@ -66,21 +68,10 @@ import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/doc
 import { DocumentPageExtractQueryError, getDocumentPageExtracts } from "../services/document-page-extracts.js";
 import { redactOperatorRun } from "../services/progress-snapshot.js";
 
-/**
- * The audit record's resource id for a bulk action: the ids themselves for a short list, else the first
- * BULK_AUDIT_LISTED and a count. A bulk request may name 500 documents, and the joined list would exceed what
- * the audit log's resource index can hold (8 KB); the full list goes in the record's metadata (`documentIds`).
- */
-const BULK_AUDIT_LISTED = 20;
-function bulkAuditResourceId(documentIds: string[]): string {
-  if (documentIds.length <= BULK_AUDIT_LISTED) return documentIds.join(",");
-  return `${documentIds.slice(0, BULK_AUDIT_LISTED).join(",")},+${documentIds.length - BULK_AUDIT_LISTED} more`;
-}
-
 const bulkSchema = z.object({
   speedBoost: z.boolean().optional(),
   action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
-  documentIds: z.array(z.string()).min(1),
+  documentIds: bulkDocumentIdsSchema,
   tags: documentTagsSchema.optional()
 });
 
@@ -334,7 +325,22 @@ export const documentsRoutes = new Hono()
     if (denied) return denied;
     let deleted;
     try {
-      deleted = await deleteDocument(c.req.param("docId"), userId);
+      // The audit record is written in the delete's own transaction: no delete commits without it.
+      deleted = await deleteDocument(c.req.param("docId"), userId, (row) => ({
+        userId,
+        apiKeyId: c.get("apiKey")?.keyId ?? null,
+        action: "document.deleted",
+        resourceType: "document",
+        resourceId: row.documentId,
+        ipAddress: requestIp(c),
+        metadata: {
+          filename: row.filename,
+          projectId: row.projectId,
+          runId: row.runId,
+          sourceKey: row.sourceKey,
+          userAgent: requestUserAgent(c)
+        }
+      }));
     } catch (error) {
       if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
       // Deleting a document whose run is still processing races the pipeline and
@@ -351,22 +357,6 @@ export const documentsRoutes = new Hono()
     if (!deleted) {
       return apiStatusError(c, 404, "Document not found");
     }
-
-    await appendAuditLog({
-      userId,
-      apiKeyId: c.get("apiKey")?.keyId ?? null,
-      action: "document.deleted",
-      resourceType: "document",
-      resourceId: deleted.documentId,
-      ipAddress: requestIp(c),
-      metadata: {
-        filename: deleted.filename,
-        projectId: deleted.projectId,
-        runId: deleted.runId,
-        sourceKey: deleted.sourceKey,
-        userAgent: requestUserAgent(c)
-      }
-    });
 
     return c.json(deleted);
   })
@@ -647,10 +637,8 @@ export const documentsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     // At most BULK_DOCUMENTS_MAX documents per request, checked before any lookup; the SDK splits larger batches.
-    if (body.documentIds.length > BULK_DOCUMENTS_MAX) {
-      const details = { policy: "bulk_documents_limit", limit: BULK_DOCUMENTS_MAX };
-      return apiErrorResponse(c, 400, "invalid_request", publicApiErrorMessage("invalid_request", details), details);
-    }
+    const overLimit = bulkDocumentsLimitResponse(c, body.documentIds);
+    if (overLimit) return overLimit;
     const denied = await denyOutOfScopeDocuments(c, body.documentIds, userId);
     if (denied) return denied;
     const apiKeyId = c.get("apiKey")?.keyId ?? null;
@@ -666,70 +654,44 @@ export const documentsRoutes = new Hono()
       if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
       throw error;
     };
+    // One id per request, in every audit record its chunks (or runs) write, so they can be read together.
+    const batchId = randomUUID();
+    const bulkAudit = (action: string, documentIds: string[], extra: Record<string, unknown> = {}) => ({
+      userId,
+      apiKeyId,
+      action,
+      resourceType: "document-bulk",
+      resourceId: bulkAuditResourceId(documentIds),
+      ipAddress: requestIp(c),
+      metadata: { batchId, documentIds, count: documentIds.length, ...extra, userAgent: requestUserAgent(c) },
+    });
 
     if (body.action === "apply-tags") {
       let updated: number;
-      try { updated = await addDocumentTags(body.documentIds, userId, body.tags ?? []); } catch (error) { return forbidden(error); }
-      await appendAuditLog({
-        userId,
-        apiKeyId,
-        action: "documents.tags.bulk_applied",
-        resourceType: "document-bulk",
-        resourceId: bulkAuditResourceId(body.documentIds),
-        ipAddress: requestIp(c),
-        metadata: {
-          documentIds: body.documentIds,
-          count: body.documentIds.length,
-          tags: body.tags ?? [],
-          userAgent: requestUserAgent(c)
-        }
-      });
+      // The audit record is written in the change's own transaction, from the documents it changed.
+      try { updated = await addDocumentTags(body.documentIds, userId, body.tags ?? [], (changed) => bulkAudit("documents.tags.bulk_applied", changed, { tags: body.tags ?? [] })); } catch (error) { return forbidden(error); }
       return c.json({ updated, documentIds: body.documentIds });
     }
 
     if (body.action === "remove-tags") {
       let updated: number;
-      try { updated = await removeDocumentTags(body.documentIds, userId, body.tags ?? []); } catch (error) { return forbidden(error); }
-      await appendAuditLog({
-        userId,
-        apiKeyId,
-        action: "documents.tags.bulk_removed",
-        resourceType: "document-bulk",
-        resourceId: bulkAuditResourceId(body.documentIds),
-        ipAddress: requestIp(c),
-        metadata: {
-          documentIds: body.documentIds,
-          count: body.documentIds.length,
-          tags: body.tags ?? [],
-          userAgent: requestUserAgent(c)
-        }
-      });
+      // The audit record is written in the change's own transaction, from the documents it changed.
+      try { updated = await removeDocumentTags(body.documentIds, userId, body.tags ?? [], (changed) => bulkAudit("documents.tags.bulk_removed", changed, { tags: body.tags ?? [] })); } catch (error) { return forbidden(error); }
       return c.json({ updated, documentIds: body.documentIds });
     }
 
     if (body.action === "delete") {
-      const audit = (documentIds: string[], count: number) => appendAuditLog({
-        userId,
-        apiKeyId,
-        action: "documents.deleted",
-        resourceType: "document-bulk",
-        resourceId: bulkAuditResourceId(documentIds),
-        ipAddress: requestIp(c),
-        metadata: {
-          documentIds,
-          count,
-          userAgent: requestUserAgent(c)
-        }
-      });
       let deleted: number;
       try {
-        deleted = await deleteDocuments(body.documentIds, userId);
+        // Each chunk's audit record is written in that chunk's transaction, from the rows its DELETE removed: no
+        // delete commits without its record, and an audit failure rolls its chunk back.
+        deleted = await deleteDocuments(body.documentIds, userId, (rows) => bulkAudit("documents.deleted", rows.map((row) => row.documentId)));
       } catch (error) {
-        // Deleted in chunks: a later chunk failed after earlier ones committed. Record and report what was deleted,
-        // with the failure's own status (a busy chunk is a retryable 503), so a retry names only the remaining ones.
+        // Deleted in chunks: a later chunk failed after earlier ones committed (each with its own audit record).
+        // Report what was deleted, with the failure's own status (a busy chunk is a retryable 503), so a retry names
+        // only the remaining ones.
         if (error instanceof DocumentDeletionPartialError) {
           const deletedIds = error.deleted.map((document) => document.documentId);
-          await audit(deletedIds, deletedIds.length);
           reportPublicError(error.cause, { surface: "documents.bulk-delete" });
           const status = error.cause instanceof HTTPException && error.cause.status === 503 ? 503 : 500;
           if (status === 503) c.header("Retry-After", "2");
@@ -738,7 +700,6 @@ export const documentsRoutes = new Hono()
         }
         return forbidden(error);
       }
-      await audit(body.documentIds, deleted);
       return c.json({ deleted, documentIds: body.documentIds });
     }
 
@@ -764,7 +725,11 @@ export const documentsRoutes = new Hono()
     );
     let bulk: Awaited<ReturnType<typeof bulkReprocessDocuments>>;
     try {
-      bulk = await bulkReprocessDocuments(body.documentIds, userId, { speedBoost: body.speedBoost === true });
+      // Each run's audit record commits with the run's publication (its documents and run id).
+      bulk = await bulkReprocessDocuments(body.documentIds, userId, {
+        speedBoost: body.speedBoost === true,
+        audit: (run) => bulkAudit("documents.bulk_reprocessed", run.documentIds, { runs: [run.runId] }),
+      });
     } catch (error) {
       if (isReprocessRejectedError(error)) return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
       // Every group refused (for example Fast with visual indexing); a partial refusal is reported in `failed`.
@@ -772,21 +737,6 @@ export const documentsRoutes = new Hono()
       throw error;
     }
     const { runs, failed, warnings } = bulk;
-    await appendAuditLog({
-      userId,
-      apiKeyId,
-      action: "documents.bulk_reprocessed",
-      resourceType: "document-bulk",
-      resourceId: bulkAuditResourceId(body.documentIds),
-      ipAddress: requestIp(c),
-      metadata: {
-        documentIds: body.documentIds,
-        count: body.documentIds.length,
-        runs: runs.map((run) => run.id),
-        failedDocuments: failed.reduce((total, group) => total + group.documentIds.length, 0),
-        userAgent: requestUserAgent(c)
-      }
-    });
     // One job id never spans organizations (organization isolation): runs of each organization get their own job,
     // so a job id seen in one organization can never report another's runs. The response carries the first one.
     const runsByOrg = new Map<string, typeof runs>();

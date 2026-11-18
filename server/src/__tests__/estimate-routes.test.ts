@@ -249,6 +249,16 @@ describe("estimate twins answer the unified quote from measured documents", () =
     expect(out.quote?.pages.high ?? 0).toBe(0);
   });
 
+  it("the bulk estimate takes the same ids and limit as the action: 501 ids or a malformed id get a 400 before any lookup", async () => {
+    const app = appFor("u1");
+    const over = await post(app, "/v1/projects/w/documents/bulk/estimate", { action: "reprocess", documentIds: Array.from({ length: 501 }, (_, i) => `d${i}`) });
+    expect(over.status).toBe(400);
+    expect((await over.json() as { error: { details: Record<string, unknown> } }).error.details).toMatchObject({ policy: "bulk_documents_limit", limit: 500 });
+    const malformed = await post(app, "/v1/projects/w/documents/bulk/estimate", { action: "delete", documentIds: ["d1", "x".repeat(65)] });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json() as { error: { code: string } }).error.code).toBe("invalid_request");
+  });
+
   it("pages a model read are the measured mix", async () => {
     const { storedQuoteFiles } = await import("../services/stored-quote.js");
     await sql`insert into document_page_facts (document_id, page_number, vision_status) values ('d1', 1, 'extracted'), ('d1', 2, 'not-selected'), ('d2', 1, 'extracted')`;

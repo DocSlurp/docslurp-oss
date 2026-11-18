@@ -210,8 +210,47 @@ describe.skipIf(!url)("document deletion under concurrency (real PostgreSQL)", (
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ deleted: 500 });
     expect(await pool`select id from documents where id = any(${pool.array(ids)})`).toEqual([]);
+    // Each committed chunk wrote exactly one audit record, in its transaction, listing the ids its DELETE removed.
+    const records = await pool<{ resource_id: string; ids: string[]; batch: string }[]>`
+      select resource_id, array(select jsonb_array_elements_text(metadata -> 'documentIds')) as ids, metadata ->> 'batchId' as batch
+      from audit_log where action = 'documents.deleted' and metadata -> 'documentIds' ?| ${pool.array(ids)}`;
+    expect(records).toHaveLength(5);
+    expect(new Set(records.map((record) => record.batch)).size).toBe(1);
+    for (const record of records) {
+      expect(record.ids).toHaveLength(100);
+      expect(record.resource_id.length).toBeLessThan(2_000);
+    }
+    expect(new Set(records.flatMap((record) => record.ids))).toEqual(new Set(ids));
+    // A valid id with an oversized one: a 400 before any work, and the valid one is not deleted.
+    const survivor = (await chain(["completed"])).ids[0]!;
+    const malformed = await bulk([survivor, "x".repeat(65)]);
+    expect(malformed.status).toBe(400);
+    expect(await pool`select id from documents where id = ${survivor}`).toHaveLength(1);
     // One chunk of 100 URL documents holds at most its own keys (3 per document), never all 1,500.
     expect(peak).toBeGreaterThan(0);
     expect(peak).toBeLessThanOrEqual(300);
   }, 120_000);
+
+  it("an audit record that cannot be written rolls back its chunk; earlier committed chunks keep exactly one record each", async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 150; i++) ids.push((await chain(["completed"])).ids[0]!);
+    const sorted = [...ids];
+    const marker = `audit-rollback-${randomUUID()}`;
+    // The record for the second chunk cannot be written (action is required): that chunk rolls back.
+    let chunk = 0;
+    const audit = (rows: Array<{ documentId: string }>) => ({
+      userId: user, action: (chunk++ === 1 ? null : "documents.deleted") as unknown as string, resourceType: "document-bulk",
+      resourceId: `test-${rows.length}`, metadata: { documentIds: rows.map((row) => row.documentId), test: marker },
+    });
+    const outcome = await deleteDocuments(sorted, user, audit).then((n) => n, (error: unknown) => error);
+    expect(outcome).toMatchObject({ name: "DocumentDeletionPartialError" });
+    const remaining = await pool<{ id: string }[]>`select id from documents where id = any(${pool.array(sorted)})`;
+    expect(remaining).toHaveLength(50);
+    const records = await pool<{ n: number }[]>`select jsonb_array_length(metadata -> 'documentIds')::int as n from audit_log where metadata ->> 'test' = ${marker}`;
+    expect(records).toEqual([{ n: 100 }]);
+    // A delete whose only chunk cannot audit deletes nothing at all.
+    const lone = (await chain(["completed"])).ids[0]!;
+    await expect(deleteDocuments([lone], user, () => ({ userId: user, action: null as unknown as string, resourceType: "document-bulk" }))).rejects.toBeTruthy();
+    expect(await pool`select id from documents where id = ${lone}`).toHaveLength(1);
+  }, 60_000);
 });

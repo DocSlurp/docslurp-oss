@@ -51,6 +51,7 @@ import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isProjectChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
 import { validationHook } from "../lib/validation.js";
+import { bulkDocumentIdsSchema, bulkDocumentsLimitResponse } from "../lib/bulk-documents.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
   archiveProject,
@@ -1946,10 +1947,13 @@ export const projectsRoutes = new Hono()
     zValidator("json", z.object({
       speedBoost: z.boolean().optional(),
       action: z.enum(["reprocess", "export-artifacts", "apply-tags", "remove-tags", "delete"]),
-      documentIds: z.array(z.string()).min(1),
+      // The same ids and limit as the action itself (lib/bulk-documents.ts), checked before any lookup.
+      documentIds: bulkDocumentIdsSchema,
       tags: z.array(z.string()).optional(),
-    })),
+    }), validationHook),
     async (c) => {
+      const overLimit = bulkDocumentsLimitResponse(c, c.req.valid("json").documentIds);
+      if (overLimit) return overLimit;
       const userId = c.get("sessionUser").id;
       const actor = getRequestActor(c);
       if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);

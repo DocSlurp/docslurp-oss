@@ -27,6 +27,7 @@ import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
 import { runCreation, urlSourceIdentity } from "./run-creation.js";
+import { appendAuditLog } from "./audit-log.js";
 import { HTTPException } from "hono/http-exception";
 import { boundLockWaits, lockChainKeys, withLockRetry } from "../lib/lock-retry.js";
 import {
@@ -1415,7 +1416,7 @@ export async function setDocumentTags(docId: string, userId: string, tags: strin
   return normalized;
 }
 
-export async function addDocumentTags(documentIds: string[], userId: string, tags: string[]): Promise<number> {
+export async function addDocumentTags(documentIds: string[], userId: string, tags: string[], audit?: InTransactionAudit<string[]>): Promise<number> {
   const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
   if (documentIds.length === 0 || normalized.length === 0) {
     return 0;
@@ -1441,12 +1442,13 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
       on conflict (document_id, tag) do nothing
     `;
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
+    if (audit) await appendAuditLog(audit(scopedIds.map((row) => row.id)), tx as unknown as typeof sql);
   });
 
   return scopedIds.length;
 }
 
-export async function removeDocumentTags(documentIds: string[], userId: string, tags: string[]): Promise<number> {
+export async function removeDocumentTags(documentIds: string[], userId: string, tags: string[], audit?: InTransactionAudit<string[]>): Promise<number> {
   const normalized = Array.from(new Set(tags.map((tag) => tag.trim()).filter(Boolean)));
   if (documentIds.length === 0 || normalized.length === 0) {
     return 0;
@@ -1465,6 +1467,7 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
         and tag = any(${tx.array(normalized)})
     `;
     await notifySearchEligibilityChanged(tx as unknown as typeof sql, scopedIds.map((row) => row.project_id));
+    if (audit) await appendAuditLog(audit(scopedIds.map((row) => row.id)), tx as unknown as typeof sql);
   });
 
   return scopedIds.length;
@@ -1477,6 +1480,9 @@ export interface DeletedDocumentResult {
   runId: string | null;
   sourceKey: string;
 }
+
+/** An audit record a bulk change writes inside its own transaction, built from what that transaction changed. */
+export type InTransactionAudit<T> = (changed: T) => Parameters<typeof appendAuditLog>[0];
 
 /** A document's chain identity, enough to name the advisory keys its version chain is serialized under. */
 type ChainMember = { project_id: string; canonical_id: string | null; metadata: unknown };
@@ -1528,7 +1534,7 @@ export class DocumentDeletionBusyError extends HTTPException {
   }
 }
 
-async function deleteDocumentRows(documentIds: string[], userId: string): Promise<DeletedDocumentResult[]> {
+async function deleteDocumentRows(documentIds: string[], userId: string, audit?: InTransactionAudit<DeletedDocumentResult[]>): Promise<DeletedDocumentResult[]> {
   const normalizedIds = Array.from(new Set(documentIds.map((id) => id.trim()).filter(Boolean)));
   if (normalizedIds.length === 0) {
     return [];
@@ -1548,7 +1554,7 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
   for (let start = 0; start < targetIds.length; start += DELETE_CHUNK) {
     const chunk = targetIds.slice(start, start + DELETE_CHUNK);
     try {
-      deleted.push(...await deleteDocumentChunk(chunk, editableProjectIds));
+      deleted.push(...await deleteDocumentChunk(chunk, editableProjectIds, audit));
     } catch (error) {
       if (start === 0) throw error;
       throw new DocumentDeletionPartialError(deleted, targetIds.slice(start), error);
@@ -1558,7 +1564,7 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
 }
 
 /** One chunk of a deletion, in one transaction (see deleteDocumentRows). */
-async function deleteDocumentChunk(targetIds: string[], editableProjectIds: string[]): Promise<DeletedDocumentResult[]> {
+async function deleteDocumentChunk(targetIds: string[], editableProjectIds: string[], audit?: InTransactionAudit<DeletedDocumentResult[]>): Promise<DeletedDocumentResult[]> {
   return await withLockRetry(() => sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
     // Lock order (lib/lock-retry.ts): the version chains' advisory keys first, the same keys run creation and the
@@ -1635,7 +1641,7 @@ async function deleteDocumentChunk(targetIds: string[], editableProjectIds: stri
       await notifySearchEligibilityChanged(transaction, projectIds);
     }
 
-    return deleted.map((row) => {
+    const results = deleted.map((row) => {
       // The delete result is a public response too: the same read-boundary redaction.
       const identity = publicDocumentIdentity(row);
       return {
@@ -1646,6 +1652,9 @@ async function deleteDocumentChunk(targetIds: string[], editableProjectIds: stri
         sourceKey: identity.sourceKey
       };
     });
+    // The chunk's audit record, from the rows this DELETE removed, in its transaction: no delete commits without it.
+    if (audit && results.length > 0) await appendAuditLog(audit(results), transaction);
+    return results;
   }), () => new DocumentDeletionBusyError());
 }
 
@@ -1662,13 +1671,13 @@ export async function listDocumentOwners(documentIds: string[], userId: string):
   return rows.map((row) => ({ id: row.id, projectId: row.project_id, orgId: row.org_id }));
 }
 
-export async function deleteDocument(docId: string, userId: string): Promise<DeletedDocumentResult | null> {
-  const [deleted] = await deleteDocumentRows([docId], userId);
+export async function deleteDocument(docId: string, userId: string, audit?: InTransactionAudit<DeletedDocumentResult>): Promise<DeletedDocumentResult | null> {
+  const [deleted] = await deleteDocumentRows([docId], userId, audit ? ([row]) => audit(row!) : undefined);
   return deleted ?? null;
 }
 
-export async function deleteDocuments(documentIds: string[], userId: string): Promise<number> {
-  return (await deleteDocumentRows(documentIds, userId)).length;
+export async function deleteDocuments(documentIds: string[], userId: string, audit?: InTransactionAudit<DeletedDocumentResult[]>): Promise<number> {
+  return (await deleteDocumentRows(documentIds, userId, audit)).length;
 }
 
 export async function exportDocumentArtifacts(documentIds: string[], userId: string): Promise<Record<string, DocumentArtifactEntry[]>> {
@@ -1729,7 +1738,7 @@ export async function exportDocumentArtifacts(documentIds: string[], userId: str
 export async function bulkReprocessDocuments(
   documentIds: string[],
   userId: string,
-  options: { useProjectPipeline?: boolean; speedBoost?: boolean } = {},
+  options: { useProjectPipeline?: boolean; speedBoost?: boolean; audit?: InTransactionAudit<{ runId: string; documentIds: string[] }> } = {},
 ): Promise<BulkReprocessResult> {
   const result: BulkReprocessResult = { runs: [], failed: [], warnings: [] };
   if (documentIds.length === 0) {
@@ -1803,6 +1812,11 @@ export async function bulkReprocessDocuments(
         // A replay: the run's stamped chart tier, capped at what the project resolves to now (never a billed surprise).
         chartExportReplay: {},
         sources: { kind: "versionsOf", documentIds: group.map((doc) => doc.id) },
+        // Each run's audit record commits with its publication.
+        // (the documents asked to be reprocessed, with the run made from them).
+        ...(options.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {
+          await appendAuditLog(options.audit!({ runId: run.runId, documentIds: group.map((doc) => doc.id) }), client);
+        } } : {}),
       });
       result.runs.push(created.run);
       if (created.deferredReason) result.warnings.push(created.deferredReason);

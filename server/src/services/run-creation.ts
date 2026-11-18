@@ -92,6 +92,11 @@ export class RunAdmissionRefusedError extends Error {
 
 export interface CreateRunInput {
   /**
+   * Runs inside the transaction that publishes the Run (creation_ready_at), so what it writes commits exactly
+   * when the Run does; a failure rolls the publication back and the Run is discarded (bulk reprocess's audit).
+   */
+  onPublish?: (client: SqlClient, run: { runId: string; documentIds: string[] }) => Promise<void>;
+  /**
    * Re-validate the principal at billable admission: inside the admission transaction, after the organization's spend
    * lock is held, the requesting user's access and the API key (live, this organization, `scope`, project allowlist,
    * owner still a member) are read again from rows locked FOR SHARE. A revocation, scope or allowlist change, or a
@@ -729,6 +734,7 @@ async function publishRunCreation(
   runId: string,
   totalDocuments: number,
   sql: SqlClient,
+  onPublish?: CreateRunInput["onPublish"],
 ): Promise<{ pagesTotal: number }> {
   return await sql.begin(async (tx) => {
     const client = tx as unknown as SqlClient;
@@ -746,6 +752,10 @@ async function publishRunCreation(
           creation_ready_at = now(), creation_expires_at = null, creation_source_keys = '{}', updated_at = now()
       where id = ${runId}
     `;
+    if (onPublish) {
+      const documents = await client<{ id: string }[]>`select id from documents where run_id = ${runId} order by id`;
+      await onPublish(client, { runId, documentIds: documents.map((row) => row.id) });
+    }
     return { pagesTotal: manifest.pages };
   });
 }
@@ -1189,6 +1199,7 @@ export function createRunCreation(deps: RunCreationDeps) {
   async function prepareAndPublish<T extends { documents: unknown[] }>(
     runId: string,
     prepare: () => Promise<T>,
+    onPublish?: CreateRunInput["onPublish"],
   ): Promise<T & { pagesTotal: number }> {
     let heartbeat: Promise<unknown> | undefined;
     const timer = setInterval(() => {
@@ -1204,7 +1215,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     timer.unref();
     try {
       const prepared = await prepare();
-      const { pagesTotal } = await publishRunCreation(runId, prepared.documents.length, sql);
+      const { pagesTotal } = await publishRunCreation(runId, prepared.documents.length, sql, onPublish);
       return { ...prepared, pagesTotal };
     } catch (error) {
       await discardUnstartedRun(runId, sql).catch((cleanupError: unknown) => {
@@ -1433,7 +1444,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         ? await materialiseFiles(runId, access.orgId, input, sources.files, indexingMode)
         : await materialiseVersions(runId, input, sourceDocuments, reuse, indexingMode);
       return materialised;
-    });
+    }, input.onPublish);
 
     const run = mapProjectRun(row);
     run.totalDocuments = published.documents.length;
