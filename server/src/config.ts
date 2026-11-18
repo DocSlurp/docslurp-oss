@@ -208,6 +208,18 @@ validateProductionSecrets();
 
 const storage = resolveObjectStorageConfig();
 
+/** MAX_MULTIPART_UPLOAD_BYTES, capped by MAX_UPLOAD_BYTES and the in-memory ceiling; warns once when clamped. */
+function clampedMultipartUploadBytes(): number {
+  const requested = Math.min(
+    readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),
+    readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
+  );
+  if (requested > MAX_IN_MEMORY_BODY_BYTES) {
+    console.warn(`[config] MAX_MULTIPART_UPLOAD_BYTES=${requested} is above the ${MAX_IN_MEMORY_BODY_BYTES}-byte in-memory ceiling; using ${MAX_IN_MEMORY_BODY_BYTES}. Larger files use direct upload sessions.`);
+  }
+  return Math.min(requested, MAX_IN_MEMORY_BODY_BYTES);
+}
+
 export const env = {
   chatMcpEnabled: readBoolean(process.env.DOCSLURP_CHAT_MCP_ENABLED, true),
   /** Public chat APIs (/v1/chat, its stream, chat completions) may run the bounded search agent. */
@@ -244,18 +256,17 @@ export const env = {
    * upload sessions (/v1/uploads/direct/sessions), which go straight to storage.
    * Never above MAX_IN_MEMORY_BODY_BYTES (100 MiB), whatever the environment says.
    */
-  maxMultipartUploadBytes: Math.min(
-    readNumber(process.env.MAX_MULTIPART_UPLOAD_BYTES, 25 * 1024 * 1024),
-    readNumber(process.env.MAX_UPLOAD_BYTES, 500 * 1024 * 1024),
-    MAX_IN_MEMORY_BODY_BYTES,
-  ),
+  maxMultipartUploadBytes: clampedMultipartUploadBytes(),
   /**
    * Request-body bytes the API buffers at once across all requests (the bulk
    * multipart and JSON body limits). Past it a request gets 503 + Retry-After.
    */
   maxBufferedRequestBytes: readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES, 256 * 1024 * 1024),
-  /** One org's share of it for large (over 64 KiB) bodies. */
-  maxBufferedRequestBytesPerOrg: readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES_PER_ORG, 64 * 1024 * 1024),
+  /** One org's share of it for large (over 64 KiB) bodies: a quarter by default, never below the multipart cap. */
+  maxBufferedRequestBytesPerOrg: readNumber(
+    process.env.MAX_BUFFERED_REQUEST_BYTES_PER_ORG,
+    Math.floor(readNumber(process.env.MAX_BUFFERED_REQUEST_BYTES, 256 * 1024 * 1024) / 4),
+  ),
   /** A separate pool for unauthenticated bodies (SAML callback, webhooks): 1 MiB per client IP and per request. */
   maxPublicBufferedRequestBytes: readNumber(process.env.MAX_PUBLIC_BUFFERED_REQUEST_BYTES, 8 * 1024 * 1024),
   /**

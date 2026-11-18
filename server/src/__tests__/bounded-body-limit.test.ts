@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeBodyLimit } from "../lib/api-error.js";
-import { BODY_IDLE_TIMEOUT_MS, MAX_IN_MEMORY_BODY_BYTES, bodyReadDeadlineMs, bodyReadSettings, boundedBodyLimit, bufferedBodyBytes, configureBodyReads } from "../lib/bounded-body-limit.js";
+import { BODY_IDLE_TIMEOUT_MS, MAX_IN_MEMORY_BODY_BYTES, bodyBudgetWarnings, bodyReadDeadlineMs, bodyReadSettings, boundedBodyLimit, bufferedBodyBytes, configureBodyReads } from "../lib/bounded-body-limit.js";
 import { multipartBodyLimit } from "../lib/upload-policy.js";
 import { safeErrorResponse } from "../lib/public-errors.js";
 import { rejectNulBytes } from "../lib/reject-nul.js";
@@ -98,7 +98,8 @@ describe("request body buffer budgets", () => {
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 
   it("keeps public requests in their own pool: they cannot starve authenticated ones", async () => {
-    configureBodyReads({ publicBytes: 100 * 1024, perIpBytes: 1024 * 1024, bufferBudgetBytes: 1024 * 1024 });
+    // One client IP may hold at most a quarter of the public pool (100 KiB here).
+    configureBodyReads({ publicBytes: 400 * 1024, perIpBytes: 1024 * 1024, bufferBudgetBytes: 1024 * 1024 });
     const { post, release } = budgetApp();
     const holding = post("/v1/hold", 80 * 1024);
     await settle();
@@ -122,7 +123,7 @@ describe("request body buffer budgets", () => {
   });
 
   it("leaves another org's small requests working while one org's large bodies fill its share", async () => {
-    configureBodyReads({ bufferBudgetBytes: 1024 * 1024, smallReserveBytes: 256 * 1024, smallRequestBytes: 64 * 1024, perOwnerBytes: 600 * 1024 });
+    configureBodyReads({ bufferBudgetBytes: 1024 * 1024, smallReserveBytes: 256 * 1024, smallRequestBytes: 64 * 1024, perOwnerBytes: 600 * 1024, largestBodyBytes: 300 * 1024 });
     const { post, release } = budgetApp();
     const holding = [post("/v1/hold", 300 * 1024, "org-a"), post("/v1/hold", 300 * 1024, "org-a")];
     await settle();
@@ -135,6 +136,28 @@ describe("request body buffer budgets", () => {
     release();
     for (const response of await Promise.all(holding)) expect(response.status).toBe(200);
     expect(bufferedBodyBytes()).toBe(0);
+  });
+
+  it("fits one cap-sized upload per org, and concurrent cap-sized uploads never reach the small-request reserve", async () => {
+    // Scaled: a 1 MiB pool, a 256 KiB reserve, a 300 KiB bulk cap and an org share set below it.
+    configureBodyReads({ bufferBudgetBytes: 1024 * 1024, smallReserveBytes: 256 * 1024, perOwnerBytes: 128 * 1024, largestBodyBytes: 300 * 1024 });
+    const { post, release } = budgetApp();
+    // The share is never below one upload of the cap, so honest uploads from two orgs fit.
+    const holding = [post("/v1/hold", 300 * 1024, "org-a"), post("/v1/hold", 300 * 1024, "org-b")];
+    await settle();
+    expect(bufferedBodyBytes("authenticated")).toBe(600 * 1024);
+    // A third would reach into the reserve: refused, while small requests keep working.
+    expect((await post("/v1/quick", 300 * 1024, "org-c")).status).toBe(503);
+    expect((await post("/v1/quick", 10 * 1024, "org-d")).status).toBe(200);
+    release();
+    for (const response of await Promise.all(holding)) expect(response.status).toBe(200);
+  });
+
+  it("warns at startup when the pool holds fewer than four uploads of the bulk cap", () => {
+    configureBodyReads({ bufferBudgetBytes: 256 * 1024 * 1024, largestBodyBytes: 100 * 1024 * 1024 });
+    expect(bodyBudgetWarnings()).toEqual([expect.stringContaining("fewer than 4 concurrent bodies")]);
+    configureBodyReads({ largestBodyBytes: 25 * 1024 * 1024 });
+    expect(bodyBudgetWarnings()).toEqual([]);
   });
 
   it("releases an aborted request's reservation and cancels its pending read", async () => {

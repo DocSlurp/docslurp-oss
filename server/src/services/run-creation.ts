@@ -49,6 +49,7 @@ import { extractNotReprocessable } from "./reprocess-errors.js";
 import { assertVisualModeAllowed, IndexingModeError } from "./project-indexing-mode.js";
 import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
 import { storedSummaryTree, withProjectSummaryTree } from "./run-summary-tree.js";
+import { withUniqueRedactedFilenames } from "../lib/url-document-identity.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
 // it never authorizes processing. Every document write and publication locks
@@ -1124,7 +1125,7 @@ export function createRunCreation(deps: RunCreationDeps) {
 
     return {
       run,
-      documents: published.documents.map(mapDocument),
+      documents: withUniqueRedactedFilenames(published.documents.map(mapDocument)),
       unreadable: published.unreadable,
       deferredReason,
     };

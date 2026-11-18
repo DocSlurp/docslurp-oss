@@ -154,6 +154,8 @@ export async function nameProjectFromUpload(args: { projectId: string; filenames
       select filename from documents
       where project_id = ${args.projectId} and superseded_at is null and purged_at is null and archived_at is null
         and status = 'completed'
+        -- A URL-origin document's filename never seeds a title (legacy ones carry the URL's path).
+        and (metadata ->> 'sourceUrl') is null
       order by created_at, id
     `;
     const filenames = [...new Set(documents.map((document) => document.filename))];

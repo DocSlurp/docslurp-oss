@@ -423,7 +423,16 @@ API, with a default 25 MB limit (`MAX_MULTIPART_UPLOAD_BYTES`). This is a separa
 transport from object-storage multipart. In the SDK, select it with
 `directUpload: false`. A larger request gets `413 payload_too_large` whose
 `details` carry `maxBytes` and `directUpload.maxFileBytes`, the per-file limit
-for direct sessions (`MAX_UPLOAD_BYTES`, default 500 MB).
+for direct sessions (`MAX_UPLOAD_BYTES`, default 500 MB). An upload that does
+not arrive in time (a pause over 45 s, or slower than the minimum rate) gets
+`408` pointing to direct upload sessions (the CLI retries 408s).
+
+Request bodies have one media type per endpoint: `/v1/uploads/bulk` (and the
+other bulk routes) take `multipart/form-data`, and every other JSON endpoint
+takes `application/json` (or `application/*+json`). A body of another type gets
+`415 unsupported_type` before any of it is read, with `details.policy` naming the
+expected type (for example `request_body:json`: "Send the request body as
+application/json."). A request with no body needs no `Content-Type`.
 
 Self-hosters: see [automatic completion and Tigris setup](self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
 for the reconciler, Token authentication, bucket filter and deployment order.

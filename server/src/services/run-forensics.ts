@@ -10,6 +10,7 @@ import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { getRun, listRunStageStates, summarizeStageResources } from "./runs.js";
 import { s3ClientConfig } from "@docslurp/shared";
 import { loadWithheldArtifactUrisForRun } from "./pii-artifact-guard.js";
+import { markRedactedFilename, publicDocumentIdentity, withUniqueRedactedFilenames } from "../lib/url-document-identity.js";
 
 type RunDocumentRow = {
   id: string;
@@ -29,6 +30,7 @@ type RunDocumentRow = {
   version_number: number;
   previous_version_id: string | null;
   canonical_id?: string | null;
+  metadata?: Record<string, unknown> | null;
   superseded_at?: string | null;
   superseded_by_document_id?: string | null;
   created_at: string;
@@ -156,16 +158,18 @@ const LOW_CONFIDENCE_THRESHOLD = 0.45;
 
 const s3Client = instrumentS3Client(new S3Client(s3ClientConfig(env.storage)), env.storage.endpoint);
 
-function mapDocument(row: RunDocumentRow): DocumentRecord {
-  return {
+export function mapRunForensicsDocument(row: RunDocumentRow): DocumentRecord {
+  // URL-origin documents: legacy canonical IDs, source keys and filenames are redacted at this read boundary.
+  const identity = publicDocumentIdentity(row);
+  return markRedactedFilename({
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
     projectId: row.project_id,
     runId: row.run_id,
-    filename: row.filename,
+    filename: identity.filename,
     mimeType: row.mime_type,
-    sourceKey: row.source_key,
+    sourceKey: identity.sourceKey,
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
@@ -175,12 +179,12 @@ function mapDocument(row: RunDocumentRow): DocumentRecord {
     tags: [],
     versionNumber: row.version_number ?? 1,
     previousVersionId: row.previous_version_id ?? null,
-    canonicalId: row.canonical_id ?? null,
+    canonicalId: identity.canonicalId,
     supersededAt: row.superseded_at ?? null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
-  };
+  }, identity.filenameRedacted);
 }
 
 export function parseArtifactSlot(slot: string): ArtifactSlotInfo {
@@ -353,6 +357,7 @@ export async function getRunForensics(runId: string, userId: string): Promise<Ru
         version_number,
         previous_version_id,
         canonical_id,
+        metadata,
         superseded_at::text,
         superseded_by_document_id,
         created_at::text,
@@ -393,7 +398,7 @@ export async function getRunForensics(runId: string, userId: string): Promise<Ru
     `
   ]);
 
-  const documentRecords = documents.map(mapDocument);
+  const documentRecords = withUniqueRedactedFilenames(documents.map(mapRunForensicsDocument));
   const documentLookup = new Map(documentRecords.map((document) => [document.id, document]));
   const chunkLookup = new Map(chunkRows.map((row) => [row.document_id, row]));
   const failureLookup = new Map(failureRows.map((row) => [row.document_id, row.failed_pages]));

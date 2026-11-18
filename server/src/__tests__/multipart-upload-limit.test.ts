@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { publicApiErrorMessage } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../config.js", () => ({ env: { maxUploadBytes: 500 * 1024 * 1024 } }));
@@ -143,9 +144,13 @@ describe("bulk upload cap through the /v1 limiter (in-process entry)", () => {
     // Reading this stream would hang the test; highWaterMark 0 so it is pulled only when read.
     const pull = vi.fn(() => new Promise<void>(() => {}));
     const stalled = new ReadableStream({ pull }, { highWaterMark: 0 });
-    for (const headers of [{ "content-type": "text/plain", "content-length": "5" }, { "transfer-encoding": "chunked" }] as Array<Record<string, string>>) {
+    for (const headers of [{ "content-type": "text/plain", "content-length": "5" }, { "content-type": "text/plain", "transfer-encoding": "chunked" }, { "content-length": "5" }] as Array<Record<string, string>>) {
       const response = await hono.fetch(new Request("http://localhost/v1/uploads/bulk", { method: "POST", headers, body: stalled, duplex: "half" } as RequestInit));
       expect(response.status).toBe(415);
+      // The bulk route names its own media type; the public envelope's reviewed copy follows it.
+      const body = await response.json() as { error: { details?: { policy?: string } } };
+      expect(body.error.details?.policy).toBe("request_body:multipart");
+      expect(publicApiErrorMessage("unsupported_type", { policy: "request_body:multipart" })).toBe("Send the request body as multipart/form-data.");
     }
     expect(pull).not.toHaveBeenCalled();
     expect(reached).not.toHaveBeenCalled();

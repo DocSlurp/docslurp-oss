@@ -12,6 +12,7 @@ import {
   type ProjectIntakeRequest,
 } from "../services/project-intake.js";
 import { remoteUrlIntakeItems } from "../services/remote-ingest.js";
+import { opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
 import { AllSourcesUnreadableError, UnreadableSourceError } from "../services/source-metadata.js";
 import { ProjectAccessError } from "../services/default-project.js";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
@@ -713,6 +714,32 @@ describe("Project Intake from remote URLs", () => {
         expect.objectContaining({ path: "urls[?]", message: "The URL's content could not be taken" }),
       ]);
       expect(JSON.stringify({ message: error.message, issues: error.issues })).not.toContain("GRANTSECRET");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("names crawled pages <host>-<index>.md with the same opaque canonical ID as /uploads/url, and indexes their refusals", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { createWebsiteProjectIntake } = await import("../services/project-intake-actions.js");
+      const fakes = createProjectIntakeFakes();
+      // The second page's stored file is unreadable at run creation.
+      fakes.state.unreadable.add("docs.example.com-1.md");
+      const pages = [
+        { url: "https://docs.example.com/guide/GRANTSECRET-a1b2.html?token=TOKSECRET", markdown: "# Guide" },
+        { url: "https://docs.example.com/s/GRANTSECRET-c3d4", markdown: "# Other" },
+      ];
+      const result = await createWebsiteProjectIntake({
+        userId: "user-1", orgId: "org-1", project: null, newProject: true,
+        startUrl: "https://docs.example.com/", crawlOptions: {}, crawl: async () => ({ pages, credits: 1 }),
+      }, fakes.ports);
+      const [file] = fakes.runs[0].files;
+      expect(file).toMatchObject({ filename: "docs.example.com-0.md", canonicalId: opaqueCanonicalIdForUrl(pages[0]!.url) });
+      // /v1/uploads/url derives the same ID for the same URL, so either path supersedes the other.
+      expect(file.canonicalId).toBe(opaqueCanonicalIdForUrl(new URL(pages[0]!.url).href));
+      expect(result.payload.rejected).toEqual([expect.objectContaining({ filename: "pages[1]", index: 1, code: "unreadable_source" })]);
+      expect(JSON.stringify(result.payload)).not.toMatch(/GRANTSECRET|TOKSECRET/);
     } finally {
       warn.mockRestore();
     }

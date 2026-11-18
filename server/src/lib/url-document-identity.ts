@@ -49,17 +49,72 @@ export function publicUrlSourceKey(sourceKey: string, sourceUrl: URL, mimeType: 
   const segment = sourceKey.slice(sourceKey.lastIndexOf("/") + 1);
   const name = UUID_PREFIXED.exec(segment)?.[2] ?? segment;
   const host = sourceUrl.hostname;
-  const safe = new RegExp(`^${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+\\.[a-z0-9]+$`, "i");
-  return safe.test(name) ? sourceKey : sourceKeyWithName(sourceKey, `${host}${extensionForMimeType(mimeType ?? "")}`);
+  return isSafeUrlName(name, host) ? sourceKey : sourceKeyWithName(sourceKey, `${host}${extensionForMimeType(mimeType ?? "")}`);
+}
+
+/** Whether `name` is the safe `<host>-<index><ext>` form for `host`. */
+function isSafeUrlName(name: string, host: string): boolean {
+  return new RegExp(`^${host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+\\.[a-z0-9]+$`, "i").test(name);
 }
 
 /**
- * The public read boundary for a stored document's identity (document, run and
- * project responses): a URL-origin document's legacy canonical ID and source
- * key are redacted at read time; any other document is unchanged. No data migration.
+ * A URL-origin document's filename as responses show it: unchanged in the safe
+ * `<host>-<index><ext>` form, otherwise `<host><ext>` (a legacy name taken
+ * from the URL's path). Display only.
  */
-export function publicDocumentIdentity(row: { canonical_id?: string | null; source_key: string; mime_type?: string | null; metadata?: unknown }): { canonicalId: string | null; sourceKey: string } {
+export function publicUrlFilename(filename: string, sourceUrl: URL, mimeType: string | null | undefined): string {
+  return isSafeUrlName(filename, sourceUrl.hostname) ? filename : `${sourceUrl.hostname}${extensionForMimeType(mimeType ?? "")}`;
+}
+
+/** Documents whose filename the read boundary replaced, so a list can make the replacements unique. */
+const redactedNames = new WeakSet<object>();
+
+/** Whether `document` carries a read-boundary filename. */
+export function hasRedactedFilename(document: object): boolean {
+  return redactedNames.has(document);
+}
+
+/** Marks `document` as carrying a read-boundary filename (call on the mapped response object). */
+export function markRedactedFilename<T extends object>(document: T, redacted: boolean): T {
+  if (redacted) redactedNames.add(document);
+  return document;
+}
+
+/**
+ * Makes read-boundary filenames unique within one response: a second document
+ * presented as `<host><ext>` becomes `<host>-<n><ext>` (the first free n).
+ * Other filenames are never changed. Returns the same array.
+ */
+export function withUniqueRedactedFilenames<T extends { filename: string }>(documents: T[]): T[] {
+  const used = new Set(documents.filter((document) => !redactedNames.has(document)).map((document) => document.filename));
+  for (const document of documents) {
+    if (!redactedNames.has(document)) continue;
+    if (!used.has(document.filename)) { used.add(document.filename); continue; }
+    const dot = document.filename.lastIndexOf(".");
+    const [stem, ext] = dot > 0 ? [document.filename.slice(0, dot), document.filename.slice(dot)] : [document.filename, ""];
+    let n = 1;
+    while (used.has(`${stem}-${n}${ext}`)) n++;
+    document.filename = `${stem}-${n}${ext}`;
+    used.add(document.filename);
+  }
+  return documents;
+}
+
+/**
+ * The public read boundary for a stored document's identity (document, run,
+ * project, forensics and delete responses): a URL-origin document's legacy
+ * canonical ID, source key and filename are redacted at read time; any other
+ * document is unchanged. No data migration.
+ */
+export function publicDocumentIdentity(row: { canonical_id?: string | null; source_key: string; filename?: string; mime_type?: string | null; metadata?: unknown }): { canonicalId: string | null; sourceKey: string; filename: string; filenameRedacted: boolean } {
   const sourceUrl = documentSourceUrl(row.metadata);
-  if (!sourceUrl) return { canonicalId: row.canonical_id ?? null, sourceKey: row.source_key };
-  return { canonicalId: publicUrlCanonicalId(row.canonical_id, sourceUrl), sourceKey: publicUrlSourceKey(row.source_key, sourceUrl, row.mime_type) };
+  const filename = row.filename ?? "";
+  if (!sourceUrl) return { canonicalId: row.canonical_id ?? null, sourceKey: row.source_key, filename, filenameRedacted: false };
+  const publicName = publicUrlFilename(filename, sourceUrl, row.mime_type);
+  return {
+    canonicalId: publicUrlCanonicalId(row.canonical_id, sourceUrl),
+    sourceKey: publicUrlSourceKey(row.source_key, sourceUrl, row.mime_type),
+    filename: publicName,
+    filenameRedacted: publicName !== filename,
+  };
 }

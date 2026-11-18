@@ -31,7 +31,14 @@ import { seedNonProductionUsers } from "./lib/seed-users.js";
 import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { v1BodyLimit } from "./lib/v1-body-limit.js";
-import { configureBodyReads } from "./lib/bounded-body-limit.js";
+import { bodyBudgetWarnings, configureBodyReads } from "./lib/bounded-body-limit.js";
+
+const bodyBudgetWarned = new Set<string>();
+function warnBodyBudgetOnce(warning: string): void {
+  if (bodyBudgetWarned.has(warning)) return;
+  bodyBudgetWarned.add(warning);
+  console.warn(warning);
+}
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { createBootWarmGate, warmRecentSearchIndexes } from "./search/boot-warm.js";
 import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
@@ -181,8 +188,11 @@ export function createApiApp(): Hono {
     bufferBudgetBytes: env.maxBufferedRequestBytes,
     perOwnerBytes: env.maxBufferedRequestBytesPerOrg,
     publicBytes: env.maxPublicBufferedRequestBytes,
+    // One org's share is never below one upload of the bulk cap.
+    largestBodyBytes: env.maxMultipartUploadBytes,
     minBytesPerSecond: env.bodyReadMinBytesPerSecond,
   });
+  for (const warning of bodyBudgetWarnings()) warnBodyBudgetOnce(warning);
   app.use("/v1/*", v1BodyLimit(env));
 
   app.use(

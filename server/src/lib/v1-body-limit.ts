@@ -32,11 +32,16 @@ export function acceptedBodyKinds(path: string): readonly BodyMediaKind[] {
   return v1BodyRoute(path).kinds;
 }
 
-/** A body of a media type the endpoint does not take: 415, in the caller's error shape. */
+/**
+ * A body of a media type the endpoint does not take: 415, in the caller's error
+ * shape. `details.policy` names the expected type, so the public envelope gets
+ * its reviewed copy ("Send the request body as application/json.").
+ */
 export function unsupportedBodyResponse(c: Context): Response {
-  const accepted = acceptedBodyKinds(c.req.path).map((kind) =>
+  const kinds = acceptedBodyKinds(c.req.path);
+  const accepted = kinds.map((kind) =>
     kind === "json" ? "application/json" : kind === "multipart" ? "multipart/form-data" : "application/x-www-form-urlencoded");
-  return middlewareErrorResponse(c, 415, "unsupported_type", `This endpoint accepts ${accepted.join(" or ")} request bodies.`);
+  return middlewareErrorResponse(c, 415, "unsupported_type", `This endpoint accepts ${accepted.join(" or ")} request bodies.`, { policy: `request_body:${kinds[0]}` });
 }
 
 /**
@@ -61,8 +66,11 @@ export function v1BodyLimit(limits: { maxMultipartUploadBytes: number }): Middle
     const route = v1BodyRoute(c.req.path);
     const kind = bodyMediaKind(c.req.header("content-type"));
     const accepted = route.kinds.includes(kind);
-    // A declared body with no Content-Type, or one this endpoint does not read.
-    if (BODY_METHODS.has(c.req.method) && !accepted && framingDeclaresBody(c.req.raw.headers)) return unsupportedBodyResponse(c);
+    // A declared body this endpoint does not read is refused unread. A chunked body with no
+    // Content-Type may be empty, so it is read (under the JSON cap) and decided on the bytes counted.
+    const declaredLength = Number(c.req.header("content-length") ?? "0");
+    const chunkedWithoutType = kind === "none" && c.req.raw.headers.has("transfer-encoding") && !(declaredLength > 0);
+    if (BODY_METHODS.has(c.req.method) && !accepted && !chunkedWithoutType && framingDeclaresBody(c.req.raw.headers)) return unsupportedBodyResponse(c);
     return caps[accepted ? route.cap : "json"](c, next);
   };
 }

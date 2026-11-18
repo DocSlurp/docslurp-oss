@@ -88,6 +88,14 @@ describe("requests with neither Content-Length nor Transfer-Encoding on the wire
     expect(response.text).toContain('{"route":"abort","bytes":"none"}');
   });
 
+  it("a chunked body with no Content-Type is read: empty reaches the route, bytes get 415", async () => {
+    const empty = await wire("POST", PATH, ["Transfer-Encoding: chunked"], "0\r\n\r\n");
+    expect(empty.status).toBe(202);
+    expect(empty.text).toContain('{"route":"abort","bytes":"none"}');
+    const bytes = await wire("POST", PATH, ["Transfer-Encoding: chunked"], "3\r\nabc\r\n0\r\n\r\n");
+    expect(bytes.status).toBe(415);
+  });
+
   it("a DELETE reaches the route with no body", async () => {
     const response = await wire("DELETE", "/v1/documents/00000000-0000-4000-8000-000000000000");
     expect(response.status).toBe(202);
@@ -136,9 +144,9 @@ describe("body-less POSTs reach the route", () => {
   it("still refuses a non-JSON body that carries bytes", async () => {
     const response = await raw({ "content-type": "text/plain" }, '{"workspaceId":"other"}');
     expect(response.status).toBe(415);
-    // The reason stays out of the response; the public copy is generic.
-    expect(response.body).not.toContain("application/json");
-    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "unsupported_type" } });
+    // The raw reason stays out of the response; the public copy is the reviewed one.
+    expect(response.body).not.toContain("This endpoint accepts");
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "unsupported_type", message: "Send the request body as application/json.", details: { policy: "request_body:json" } } });
   });
 });
 

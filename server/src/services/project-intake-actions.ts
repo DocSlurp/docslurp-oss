@@ -41,11 +41,11 @@ import {
   loadDirectUploadSession,
   withDirectUploadLock,
 } from "./direct-upload-session.js";
-import { canonicalIdForUrl, isUrlShapedCanonicalId, opaqueCanonicalIdForUrl } from "../lib/canonical-id.js";
+import { opaqueCanonicalIdForUrl, tryCanonicalIdForUrl } from "../lib/canonical-id.js";
 import { sourceKeyWithName } from "../lib/url-document-identity.js";
 import { inferProjectTitleFromUrls } from "./project-naming.js";
 import { attachExtractRun, chargeExtractRetention, describeExtractById, loadIntakeExtract } from "./extracts.js";
-import { extensionForMimeType, remoteUrlIntakeItems } from "./remote-ingest.js";
+import { extensionForMimeType, remoteUrlIntakeItems, urlDerivedFilename } from "./remote-ingest.js";
 import {
   intakeIntoProject,
   REFERENCED_REFUSAL_MESSAGES,
@@ -173,12 +173,16 @@ export function projectCurrentUrlReceipt(payload: ProjectIntakePayload): Project
  * - project.name and run.projectName: the host-only title from the request's
  *   URLs ("Import from example.com"), else "URL import"; project.slug: the project id.
  * - documents and ingested: `url-<i><ext>` names, source keys renamed to match,
- *   titles dropped, and a URL-shaped canonical ID made opaque (never throws).
+ *   titles dropped. A canonical ID is made opaque only when it is the server's
+ *   legacy default for one of the request's URLs; a caller's own ID is kept.
+ *   Never throws.
  * - rejected: `urls[i]` with the per-code copy; the not-accepted warning rebuilt.
  */
 export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: readonly string[]): ProjectIntakePayload {
   const title = urls?.length ? inferProjectTitleFromUrls([...urls]) : "URL import";
   const genericName = (position: number, mimeType: string) => `url-${position}${extensionForMimeType(mimeType ?? "")}`;
+  // Server-derived legacy IDs: the default for each request URL (unparseable URLs have none).
+  const serverDefaults = new Set((urls ?? []).map(tryCanonicalIdForUrl).filter((id): id is string => id !== null));
   const rejected = payload.rejected?.map((file, position) => {
     const index = typeof file.index === "number" ? file.index : position;
     return { index, filename: `urls[${index}]`, statusCode: file.statusCode, code: file.code, message: REFERENCED_REFUSAL_MESSAGES[file.code] ?? REFERENCED_REFUSAL_MESSAGES.rejected };
@@ -190,7 +194,7 @@ export function sanitizeLegacyUrlReceipt(payload: ProjectIntakePayload, urls?: r
       ...rest,
       filename: name,
       ...(typeof document.sourceKey === "string" ? { sourceKey: sourceKeyWithName(document.sourceKey, name) } : {}),
-      ...(typeof document.canonicalId === "string" && isUrlShapedCanonicalId(document.canonicalId)
+      ...(typeof document.canonicalId === "string" && serverDefaults.has(document.canonicalId)
         ? { canonicalId: opaqueCanonicalIdForUrl(document.canonicalId) }
         : {}),
     };
@@ -538,11 +542,16 @@ export async function createRemoteUrlProjectIntake(
   );
 }
 
-/** A crawled page becomes a Markdown document named after its URL path. */
-function webPageFilename(rawUrl: string): string {
-  const url = new URL(rawUrl);
-  const slug = `${url.hostname}${url.pathname}`.replace(/\/+$/, "").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return `${(slug || url.hostname).slice(0, 180)}.md`;
+/**
+ * A crawled page's document name: `<host>-<index>.md`, the rule every URL
+ * source follows (never its path or query). A URL the crawler returned that
+ * does not parse is named after the crawl's own host.
+ */
+function webPageFilename(rawUrl: string, index: number, startUrl: string): string {
+  for (const candidate of [rawUrl, startUrl]) {
+    try { return urlDerivedFilename(new URL(candidate), index, "text/markdown"); } catch { /* try the next */ }
+  }
+  return `page-${index}${extensionForMimeType("text/markdown")}`;
 }
 
 /**
@@ -583,12 +592,15 @@ export async function createWebsiteProjectIntake(
         {
           ...target,
           kind: "url-ingest",
-          items: pages.map((page) => {
+          items: pages.map((page, index) => {
             const body = page.title && !page.markdown!.trimStart().startsWith("#") ? `# ${page.title}\n\n${page.markdown}` : page.markdown!;
             return {
-              filename: webPageFilename(page.url),
+              filename: webPageFilename(page.url, index, startUrl),
               mimeType: "text/markdown",
-              canonicalId: canonicalIdForUrl(page.url),
+              // The same opaque ID /v1/uploads/url gives the same URL, so either path supersedes the other.
+              canonicalId: opaqueCanonicalIdForUrl(page.url),
+              // Refusals name the page by its position in the crawl, never its URL.
+              refusalRef: { name: `pages[${index}]`, index },
               metadata: { sourceUrl: page.url, source: "website-crawl", crawlStartUrl: startUrl },
               content: { bytes: Buffer.from(body, "utf8") },
             };

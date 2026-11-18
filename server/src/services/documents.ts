@@ -35,7 +35,7 @@ import {
   type UsageAggregate,
 } from "./usage-attribution.js";
 import { extractNotReprocessable } from "./reprocess-errors.js";
-import { publicDocumentIdentity } from "../lib/url-document-identity.js";
+import { hasRedactedFilename, markRedactedFilename, publicDocumentIdentity, withUniqueRedactedFilenames } from "../lib/url-document-identity.js";
 
 type DocumentRow = {
   id: string;
@@ -664,17 +664,18 @@ function documentTitle(row: Pick<DocumentRow, "filename" | "metadata">): string 
 }
 
 function mapDocument(row: DocumentRow): DocumentRecord {
-  return documentSchema.parse({
+  // URL-origin documents: legacy canonical IDs, source keys and filenames are redacted at this read boundary.
+  const identity = publicDocumentIdentity(row);
+  return markRedactedFilename(documentSchema.parse({
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
     projectId: row.project_id,
     runId: row.run_id,
-    filename: row.filename,
+    filename: identity.filename,
     title: documentTitle(row),
     mimeType: row.mime_type,
-    // URL-origin documents: legacy canonical IDs and source keys are redacted at this read boundary.
-    sourceKey: publicDocumentIdentity(row).sourceKey,
+    sourceKey: identity.sourceKey,
     status: row.status,
     statusReason: documentStatusReason(row),
     extractionMode: row.extraction_mode,
@@ -685,22 +686,23 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     tags: row.tags ?? [],
     versionNumber: row.version_number ?? 1,
     previousVersionId: row.previous_version_id ?? null,
-    canonicalId: publicDocumentIdentity(row).canonicalId,
+    canonicalId: identity.canonicalId,
     supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
     ...ingestRecordFields(row),
     createdAt: serializeTimestamp(row.created_at),
     updatedAt: serializeTimestamp(row.updated_at)
-  });
+  }), identity.filenameRedacted);
 }
 
 function mapDocumentIndexEntry(row: DocumentIndexRow): DocumentIndexEntry {
-  return documentIndexEntrySchema.parse({
-    ...mapDocument(row),
+  const document = mapDocument(row);
+  return markRedactedFilename(documentIndexEntrySchema.parse({
+    ...document,
     projectName: row.project_name,
     orgName: row.org_name ?? null,
     summary: row.summary ?? null
-  });
+  }), hasRedactedFilename(document));
 }
 
 /** A session/key-bound file proxy URL; storage is never exposed (lib/file-urls.ts). */
@@ -882,7 +884,7 @@ export async function listDocumentsWithFilters(args: {
   const page = rows.slice(0, limit);
   const last = page.at(-1);
   return {
-    documents: page.map(mapDocument),
+    documents: withUniqueRedactedFilenames(page.map(mapDocument)),
     hasMore,
     nextCursor: hasMore && last ? encodeListCursor("documents", { createdAt: last.cursor_created_at, id: last.id }) : null,
   };
@@ -1007,7 +1009,7 @@ export async function listDocumentIndexEntries(args: {
 
   const totalCount = summaryRow?.total_count ?? 0;
   return {
-    documents: rows.map(mapDocumentIndexEntry),
+    documents: withUniqueRedactedFilenames(rows.map(mapDocumentIndexEntry)),
     totalCount,
     limit,
     truncated: totalCount > limit + Math.max(0, Math.min(args.offset ?? 0, 50_000))
@@ -1522,10 +1524,10 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
       `;
     }
 
-    const deleted = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key">[]>`
+    const deleted = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "canonical_id" | "mime_type" | "metadata">[]>`
       delete from documents
       where id = any(${transaction.array(docs.map((doc) => doc.id))})
-      returning id, project_id, filename, run_id, source_key
+      returning id, project_id, filename, run_id, source_key, canonical_id, mime_type, metadata
     `;
 
     // Deleting a current version leaves its archived predecessors to the retention sweep.
@@ -1536,13 +1538,17 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
       await notifySearchEligibilityChanged(transaction, projectIds);
     }
 
-    return deleted.map((row) => ({
-      documentId: row.id,
-      projectId: row.project_id,
-      filename: row.filename,
-      runId: row.run_id,
-      sourceKey: row.source_key
-    }));
+    return deleted.map((row) => {
+      // The delete result is a public response too: the same read-boundary redaction.
+      const identity = publicDocumentIdentity(row);
+      return {
+        documentId: row.id,
+        projectId: row.project_id,
+        filename: identity.filename,
+        runId: row.run_id,
+        sourceKey: identity.sourceKey
+      };
+    });
   });
 }
 

@@ -68,6 +68,7 @@ import { processSingleton } from "../lib/process-singleton.js";
 import { toPublicRunStage } from "../lib/public-run-stage.js";
 import { extractNotReprocessable, ReprocessRejectedError } from "./reprocess-errors.js";
 import { loadProjectSummaryTree, withProjectSummaryTree } from "./run-summary-tree.js";
+import { withUniqueRedactedFilenames } from "../lib/url-document-identity.js";
 
 export { summarizeRunUsageCost };
 export { isRunCreationBlockedError, RunCreationBlockedError } from "./run-creation.js";
@@ -254,7 +255,7 @@ export async function listDocuments(userId: string): Promise<DocumentRecord[]> {
     limit 100
   `;
 
-  return rows.map(mapDocument);
+  return withUniqueRedactedFilenames(rows.map(mapDocument));
 }
 
 export async function getDocumentVersions(

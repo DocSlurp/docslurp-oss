@@ -18,10 +18,13 @@ export type BodyBudgetOwner = { pool: "authenticated" | "public"; key: string };
  * - `authenticatedBytes` (MAX_BUFFERED_REQUEST_BYTES): every authenticated
  *   body; of it, `smallReserveBytes` is kept for small requests (at most
  *   `smallRequestBytes`), so large bodies cannot starve them.
- * - `perOwnerBytes` (MAX_BUFFERED_REQUEST_BYTES_PER_ORG): one org's large bodies.
+ * - `perOwnerBytes` (MAX_BUFFERED_REQUEST_BYTES_PER_ORG, default a quarter of
+ *   the pool): one org's large bodies. Never below `largestBodyBytes` (the
+ *   largest route cap, the bulk multipart cap), so one honest upload of the cap
+ *   always fits, and never into the small-request reserve.
  * - `publicBytes` (MAX_PUBLIC_BUFFERED_REQUEST_BYTES): unauthenticated bodies
- *   (the SAML callback, webhooks), a separate pool, with `perIpBytes` per client
- *   IP and at most `publicRequestBytes` per request.
+ *   (the SAML callback, webhooks), a separate pool, with at most a quarter of it
+ *   (and `perIpBytes`) per client IP and `publicRequestBytes` per request.
  * - `minBytesPerSecond` (BODY_READ_MIN_BYTES_PER_SECOND): the slowest sustained
  *   rate the overall read deadline allows for.
  */
@@ -30,6 +33,7 @@ const bodyReads = {
   smallReserveBytes: 16 * 1024 * 1024,
   smallRequestBytes: 64 * 1024,
   perOwnerBytes: 64 * 1024 * 1024,
+  largestBodyBytes: 25 * 1024 * 1024,
   publicBytes: 8 * 1024 * 1024,
   perIpBytes: 1024 * 1024,
   publicRequestBytes: 1024 * 1024,
@@ -60,13 +64,31 @@ export function bufferedBodyBytes(pool?: BodyBudgetOwner["pool"]): number {
 function budgetAllows(owner: BodyBudgetOwner, bytes: number, requestBytes: number): boolean {
   const held = ownerInUse.get(owner.key) ?? 0;
   if (owner.pool === "public") {
-    return inUse.public + bytes <= bodyReads.publicBytes && held + bytes <= bodyReads.perIpBytes;
+    return inUse.public + bytes <= bodyReads.publicBytes && held + bytes <= Math.min(bodyReads.perIpBytes, bodyReads.publicBytes / 4);
   }
   if (requestBytes <= bodyReads.smallRequestBytes) return inUse.authenticated + bytes <= bodyReads.authenticatedBytes;
   // A large body: never into the small-request reserve (at most a quarter of the pool), nor past its org's share.
   const reserve = Math.min(bodyReads.smallReserveBytes, bodyReads.authenticatedBytes / 4);
   return inUse.authenticated + bytes <= bodyReads.authenticatedBytes - reserve
-    && held + bytes <= bodyReads.perOwnerBytes;
+    && held + bytes <= perOwnerShare(reserve);
+}
+
+/** One org's share of the authenticated pool for large bodies (see bodyReads). */
+function perOwnerShare(reserve: number): number {
+  return Math.min(bodyReads.authenticatedBytes - reserve, Math.max(bodyReads.perOwnerBytes, bodyReads.largestBodyBytes));
+}
+
+/**
+ * Startup warnings for budgets that cannot serve concurrent uploads of the
+ * largest cap well: fewer than four fit in the pool (the rest get 503 while the
+ * small-request reserve stays free).
+ */
+export function bodyBudgetWarnings(): string[] {
+  const warnings: string[] = [];
+  if (bodyReads.authenticatedBytes < 4 * bodyReads.largestBodyBytes) {
+    warnings.push(`[body-budget] MAX_BUFFERED_REQUEST_BYTES (${bodyReads.authenticatedBytes}) holds fewer than 4 concurrent bodies of the ${bodyReads.largestBodyBytes}-byte multipart cap; more concurrent bulk uploads get 503 Retry-After`);
+  }
+  return warnings;
 }
 
 function charge(owner: BodyBudgetOwner, bytes: number): void {
