@@ -44,6 +44,29 @@ describe("chat executor pricing startup (council E #2)", () => {
     if (built.status !== 0) throw new Error(`@docslurp/shared build failed: ${built.stderr.slice(-2000)}`);
   }, 300_000);
 
+  it("refuses to start with a too-short estimate signing secret, without printing it", () => {
+    // The executor signs chat-proposal estimates the API verifies; a weak shared key stops it before any claim.
+    const run = runExecutor({ DOCSLURP_ESTIMATE_SIGNING_SECRET: "too-short-signing-value" });
+    expect(run.status).toBe(1);
+    // The entrypoint's own guard (imported before config.js loads) refuses, not an import-time throw.
+    expect(run.output).toMatch(/\[native-chat\] startup_refused estimate signing: DOCSLURP_ESTIMATE_SIGNING_SECRET must be at least 32 characters/);
+    expect(run.output).not.toContain("too-short-signing-value");
+  }, 120_000);
+
+  it("in production with no signing key at all, refuses before anything else loads", () => {
+    const run = runExecutor({ NODE_ENV: "production" });
+    expect(run.status).toBe(1);
+    expect(run.output).toMatch(/\[native-chat\] startup_refused estimate signing: DOCSLURP_ESTIMATE_SIGNING_SECRET is required in production/);
+  }, 120_000);
+
+  it("logs the signing key source and fingerprint, never the value", () => {
+    const secret = "s".repeat(44);
+    // Pricing required without a provider stops it right after the guard, before any database work.
+    const run = runExecutor({ DOCSLURP_ESTIMATE_SIGNING_SECRET: secret, DOCSLURP_PRICING_REQUIRED: "1" });
+    expect(run.output).toMatch(/\[native-chat\] estimate signing key source=DOCSLURP_ESTIMATE_SIGNING_SECRET fingerprint=[0-9a-f]{12}/);
+    expect(run.output).not.toContain(secret);
+  }, 120_000);
+
   it("refuses to start with DOCSLURP_PRICING_REQUIRED=1 and no provider", () => {
     const run = runExecutor({ DOCSLURP_PRICING_REQUIRED: "1" });
     expect(run.status).toBe(1);

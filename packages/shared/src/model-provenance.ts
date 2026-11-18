@@ -156,3 +156,32 @@ export function embeddingSpaceUri(input: EmbeddingSpaceInput): string | null {
 export function embeddingSpaceMatches(storedUri: string | null | undefined, expectedUri: string | null | undefined): boolean {
   return !storedUri || !expectedUri || storedUri === expectedUri;
 }
+
+/** The run-level settings `runModelClass` reads: structural, so this module keeps no dependency on the pipeline schema. */
+export interface RunModelClassPipeline {
+  quality?: string | null;
+  vision?: { profile?: string | null } | null;
+  embedding?: { profile?: string | null } | null;
+  pageRouter?: { router?: string | null } | null;
+  inferenceLane?: string | null;
+  speedBoost?: boolean | null;
+}
+
+/**
+ * The levels a run was configured with, as recorded next to every model it calls (the worker usage ledger's
+ * `modelClass`, and `document_page_extracts.model_class` through it). Null when the run names none.
+ */
+export function runModelClass(pipeline: RunModelClassPipeline | null | undefined): Record<string, string> | null {
+  if (!pipeline) return null;
+  const levels: Record<string, string | null | undefined> = {
+    quality: pipeline.quality,
+    visionProfile: pipeline.vision?.profile,
+    embeddingProfile: pipeline.embedding?.profile,
+    pageRouter: pipeline.pageRouter?.router,
+    inferenceLane: pipeline.inferenceLane,
+    // Speed boost swaps hosted models for their fast hosts: part of what selected the model.
+    speedBoost: pipeline.speedBoost === true ? "on" : undefined,
+  };
+  const known = Object.fromEntries(Object.entries(levels).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""));
+  return Object.keys(known).length ? known : null;
+}

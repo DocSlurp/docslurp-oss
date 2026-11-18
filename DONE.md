@@ -1,8 +1,21 @@
+## Model URI backfill for rows written before migrations 0191-0192 (2026-11-18)
+
+- `server/scripts/backfill-model-uris.ts` (`services/model-uri-backfill.ts`): a one-off, idempotent, batched backfill. Dry run by default; `--write` applies it; `--target`, `--batch-size` and per-batch statement and lock timeouts are options. Each batch runs in its own transaction and only null fields are filled. Runbook: docs/self-host/operations.md.
+- Vector rows get the space URI search computes for their document, through the same shared code (`effectiveProjectIndexing`, `embeddingConfigFor`, `resolveEmbeddingRoute`, `embeddingRouteSpaceUri`). It is written only when the route's bare id and dimensions equal the row's, so the URI always equals the one readers expect and search serves the same vectors as before. A DB test checks eligibility before and after. Rows it cannot prove stay null and are counted by reason.
+- Usage rows get `withModelProvenance`'s `modelUri` plus `modelUriBackfilled: true`. Runs get `resolved_models` derived from their usage in the worker's shape, with `backfilled: true` on each entry. Vision page reads get `model_uri` and `model_class` when their document and run saw exactly one model.
+- `runModelClass` moved to `@docslurp/shared` (the worker re-exports it), so the backfill labels page extracts the way the worker does.
+
 ## Autoscaler snapshot reads active runs only (2026-11-18)
 
 - Migration 0195: partial index `project_runs_org_active_idx` on `project_runs (org_id)` over `status IN ('queued', 'processing')`, including the run id, project, status, control state, lease, shard demand, document and page totals and processed counts, and created/worker-started/updated times. It serves the scaler snapshot and an organization's active runs (org_id leading) as an index read.
 - `queryWorkerScalerSnapshot` restricts every `project_runs` read to active runs, so the 10 s poll from the app and the worker leader no longer aggregates finished history. Its lifetime `pages_processed_total` sum is gone, along with the `docslurp_pages_processed_total` gauge on `/metrics` (nothing read it). `/metrics` now reuses the shared snapshot instead of a drifted copy of the query, so it reports the same queue view and worker target as `/fly-scaler-metrics`.
 - DB test: with a million finished runs on real Postgres (100K on the PGlite fallback), the snapshot plan uses the partial index with no sequential scan on `project_runs`, and its counts cover only live work.
+
+## Shared estimate-signing secret and the MCP reindex tools (2026-11-18)
+
+- Estimate signatures (`signature` / `confirmEstimate`) are keyed by `DOCSLURP_ESTIMATE_SIGNING_SECRET` (at least 32 characters), falling back to `SECRETS_ENCRYPTION_KEY`, `BETTER_AUTH_SECRET`, `FILE_TOKEN_SECRET`. Every process that signs or verifies them (the API and standalone server via `config.ts` and `ensureApiStartup`, the chat executor entrypoint) refuses to start in production without a stable key, and everywhere on a too-short dedicated secret; development and tests keep a per-process random key with a one-time warning. The startup log names the source variable, never the value. The worker does not sign estimates.
+- MCP `reindexEstimate` (read-only: locked settings, documents, pages, credits, signature) and `reindex` (requires that signature as `confirmEstimate`), forwarding to `POST /v1/projects/:id/reindex[/estimate]` with the route's gates (editor; server key with `projects:manage`, bound to the organization and project). Project chat never offers them.
+- Council (#508): each signing process logs `estimate signing key source=<variable> fingerprint=<12 hex>` (HMAC under the key), the API serves the same at `GET /ops/estimate-signing` (metrics bearer) and `server/scripts/estimate-signing-fingerprint.ts` prints it elsewhere; the chat executor's guard runs before `config.ts` loads; production refuses a weak dedicated secret; signatures bind `speedBoost` and the billing state and are compared in constant time; the reindex routes and MCP tools refuse delegated OAuth tokens; project chat never offers a tool annotated non-read-only or consequential; self-host compose blanks the signing secret for both workers.
 
 ## Locked index settings and the reindex command (2026-11-18)
 

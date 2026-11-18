@@ -13,14 +13,25 @@ import { describe, expect, it } from "vitest";
  */
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
-const READ_OWNERS = new Set(["server/src/services/usage-attribution.ts"]);
+// The one-off model URI backfill reads usage rows for their model labels only (never spend) and adds
+// `metadata.modelUri` to existing rows; it records no usage.
+const MODEL_URI_BACKFILL = "server/src/services/model-uri-backfill.ts";
+// Found once the check ran from server/ (it used to scan nothing there): the worker ledger's own existence check for a
+// skipped OCR charge (migration 0185), and the vision receipt reconciliation, which swaps estimated receipt metadata for
+// provider receipts with a tenant-scoped compare-and-swap and never changes spend.
+const LEDGER_STORE = "worker/src/db/usage-event-store.ts";
+const RECEIPT_RECONCILIATION = "worker/src/db/vision-receipt-reconciliation.ts";
+const READ_OWNERS = new Set(["server/src/services/usage-attribution.ts", MODEL_URI_BACKFILL, LEDGER_STORE, RECEIPT_RECONCILIATION]);
 const WRITE_OWNERS = new Set([
   "server/src/lib/ai-usage.ts",
-  "worker/src/db/usage-event-store.ts",
+  LEDGER_STORE,
+  MODEL_URI_BACKFILL,
+  RECEIPT_RECONCILIATION,
 ]);
 
-// app/src is absent from the open-source export; roots that do not exist are skipped.
-const SOURCE_ROOTS = ["app/src", "server/src", "worker/src", "packages"].filter((root) => existsSync(root));
+// app/src is absent from the open-source export; roots that do not exist are skipped. Resolved from the repository
+// root, so the check scans the same files whether vitest runs from server/ or from the root.
+const SOURCE_ROOTS = ["app/src", "server/src", "worker/src", "packages"].filter((root) => existsSync(join(repoRoot, root)));
 const SKIP_DIRS = new Set(["node_modules", "dist", "__tests__", "test", "testdata", ".astro"]);
 
 function sourceFiles(dir: string): string[] {
@@ -53,6 +64,10 @@ function offenders(pattern: RegExp, owners: Set<string>): string[] {
 }
 
 describe("usage_events ownership", () => {
+  it("scans the server and worker sources", () => {
+    expect(SOURCE_ROOTS).toEqual(expect.arrayContaining(["server/src", "worker/src"]));
+  });
+
   it("reads usage_events only in usage-attribution.ts", () => {
     expect(offenders(/\b(?:from|join)\s+usage_events\b/i, READ_OWNERS)).toEqual([]);
   });

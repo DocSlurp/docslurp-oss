@@ -459,7 +459,7 @@ describe("mcpRoutes", () => {
       return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
     };
     expect(await listed({ scopes: ["search:deep", "ingest", "projects:manage"], keyType: "server" })).toEqual([
-      "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
+      "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "reindexEstimate",
     ]);
     expect(await listed({ scopes: ["ingest"] })).toEqual(["uploadEstimate", "fullIndexEstimate", "reprocessEstimate"]);
     expect(await listed({ scopes: ["search:deep"] })).toEqual([]);
@@ -504,6 +504,73 @@ describe("mcpRoutes", () => {
       expect(forwardInProcess).toHaveBeenCalledTimes(1);
       expect((await post("searchSettingsEstimate", { project: "ws-1", changes: {} })).status).toBe(200);
       expect(forwardInProcess).toHaveBeenLastCalledWith(expect.anything(), "POST", "/v1/projects/ws-1/search-settings/estimate", {}, expect.anything());
+    });
+
+    describe("reindex", () => {
+      const SIGNATURE = "ab".repeat(32);
+      const routeEstimate = {
+        impact: { kind: "reindex", stages: ["chunk", "embed", "index"], reasons: [{ field: "embedding", effect: "Re-embeds." }], documents: 2, pages: 10 },
+        estimate: { documents: 2, pages: 10, billing: "enforced", credits: { low: 4, high: 6 }, seconds: { low: 1, high: 2 }, basis: "b" },
+        lockedSettings: ["embedding"], signature: SIGNATURE, quote: { lines: [] }, billing: "enforced",
+      };
+
+      it("reindexEstimate forwards the route body and returns the locked settings, work, credits and signature", async () => {
+        forwardInProcess.mockResolvedValueOnce(Response.json(routeEstimate));
+        const response = await post("reindexEstimate", { project: "ws-1", embeddingProfile: "fastest-local", chunkOverlap: true });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body).toMatchObject({ tool: "reindexEstimate", lockedSettings: ["embedding"], documents: 2, pages: 10, credits: { low: 4, high: 6 }, signature: SIGNATURE });
+        expect(body.quote).toBeUndefined();
+        expect(forwardInProcess).toHaveBeenCalledWith(expect.anything(), "POST", "/v1/projects/ws-1/reindex/estimate",
+          { pipeline: { embedding: { profile: "fastest-local" }, chunkOverlap: true } }, expect.anything());
+      });
+
+      it("reindex forwards the confirmed signature and returns the outcome without the project record", async () => {
+        forwardInProcess.mockResolvedValueOnce(Response.json({
+          project: { id: "ws-1", slug: "main", name: "Main", pipeline: { embedding: { modelUri: "llm://hidden/model" } } },
+          changedSettings: ["embedding"], outcome: "queued", impact: routeEstimate.impact, estimate: routeEstimate.estimate, runIds: ["r1"], job: { id: "j1" },
+        }));
+        const response = await post("reindex", { embeddingProfile: "fastest-local", confirmEstimate: SIGNATURE });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body).toMatchObject({ tool: "reindex", outcome: "queued", changedSettings: ["embedding"], runIds: ["r1"], job: { id: "j1" }, project: { id: "ws-1", slug: "main", name: "Main" } });
+        expect(JSON.stringify(body)).not.toContain("llm://");
+        // Omitted project: the organization default.
+        expect(forwardInProcess).toHaveBeenCalledWith(expect.anything(), "POST", "/v1/projects/default-ws/reindex",
+          { pipeline: { embedding: { profile: "fastest-local" } }, confirmEstimate: SIGNATURE }, expect.anything());
+      });
+
+      it("refuses without a valid signature, nothing forwarded", async () => {
+        expect((await post("reindex", { project: "ws-1" })).status).toBe(400);
+        expect((await post("reindex", { project: "ws-1", confirmEstimate: "yes" })).status).toBe(400);
+        expect((await post("reindex", { project: "ws-1", confirmEstimate: SIGNATURE, summarize: true })).status).toBe(400);
+        expect(forwardInProcess).not.toHaveBeenCalled();
+      });
+
+      it("passes a stale signature's 409 through", async () => {
+        forwardInProcess.mockResolvedValueOnce(Response.json({ error: { code: "estimate_stale" } }, { status: 409 }));
+        const response = await post("reindex", { project: "ws-1", confirmEstimate: SIGNATURE });
+        expect(response.status).toBe(409);
+      });
+
+      it("refuses another organization's project, read-only or ingest grants and browser keys", async () => {
+        expect((await post("reindex", { project: "foreign", confirmEstimate: SIGNATURE })).status).toBe(404);
+        expect((await post("reindexEstimate", { project: "foreign" })).status).toBe(404);
+        for (const key of [
+          { scopes: ["search:deep", "chat"] },
+          { scopes: ["search:deep", "ingest"] },
+          // A browser (client) key, even with projects:manage.
+          { keyType: "client" as const, scopes: ["search:deep", "projects:manage"] },
+          // A delegated OAuth token, even one that somehow carried projects:manage.
+          { scopes: ["search:deep", "projects:manage"], oauth: { audience: "mcp" as const, grantId: "g", clientId: "c", clientName: "Client", resource: "r", grantedScopes: ["search:deep"] } },
+        ]) {
+          for (const [tool, input] of [["reindex", { project: "ws-1", confirmEstimate: SIGNATURE }], ["reindexEstimate", { project: "ws-1" }]] as const) {
+            validateApiKey.mockResolvedValueOnce({ ...validatedKey, ...key });
+            expect((await post(tool, input)).status).toBe(403);
+          }
+        }
+        expect(forwardInProcess).not.toHaveBeenCalled();
+      });
     });
 
     it("getJob forwards to /v1/jobs/:id and surfaces route_unavailable", async () => {
@@ -697,7 +764,7 @@ describe("session MCP tools", () => {
     expect(tool.inputSchema.properties.files).toBeDefined();
     expect(tool.inputSchema.properties.inlineFiles.items.properties.contentBase64).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listProjects", "upload", "getUploadStatus", "search", "chat", "extract", "getMediaEvidence", "suggestQueries", "getProjectSettings", "proposeProjectSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "getJob", "completeUpload"]);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listProjects", "upload", "getUploadStatus", "search", "chat", "extract", "getMediaEvidence", "suggestQueries", "getProjectSettings", "proposeProjectSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "reindexEstimate", "reindex", "getJob", "completeUpload"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });
