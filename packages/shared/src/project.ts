@@ -1,7 +1,7 @@
 import { CHAT_TIERS } from "./project-chat-models.js";
 import { geoPredicateSchema } from "./geo.js";
 import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema, type ChartExportTier } from "./chart-export.js";
-import { chartTierForVisuals, qualityLevelSchema, visualsLevelSchema, type VisualsLevel } from "./extraction-config.js";
+import { chartTierForVisuals, normalizeQualityLevel, qualityLevelSchema, visualsLevelSchema, type VisualsLevel } from "./extraction-config.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
@@ -952,11 +952,11 @@ export const reprocessRunSchema = z
   .object({
     speedBoost: z.boolean().optional(),
     /**
-     * Quality for this reprocess (`fastest` | `smartest`). Omitted: the source run's
+     * Quality for this reprocess (`fastest` | `smartest`; `balanced` / `smart` deprecated). Omitted: the source run's
      * quality, capped at the project's now. `smartest` above the project's quality needs editor rights (or an API key
      * with pipeline:billed-features).
      */
-    quality: qualityLevelSchema.optional(),
+    quality: z.preprocess((value) => normalizeQualityLevel(value) ?? value, qualityLevelSchema).optional(),
     /** Visuals for this reprocess (`none` | `figures` | `charts` | `charts-ai`); replaces the deprecated `chartExport`. */
     visuals: visualsLevelSchema.optional(),
     /** @deprecated Use `visuals`. */

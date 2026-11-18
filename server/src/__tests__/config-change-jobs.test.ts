@@ -525,7 +525,8 @@ describe("chart export estimates", () => {
     // Seeded where the worker records them: the vision-extract stage stats of the document's run.
     await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, stats)
       values ('src', 'd0', 'vision-extract', 'completed', ${sql.json({ visualCandidates: { charts: 3, diagrams: 0, pagesWithUnexportedVisuals: [1], exported: 0, bySource: {} } })})`;
-    const features = pipeline({ chartExport: { tier: "models", formats: ["description", "mermaid"], diagrams: true } });
+    // AI chart reads run on Smartest only (the ladder's intelligent rung).
+    const features = pipeline({ ladder: { maxRung: "intelligent" }, chartExport: { tier: "models", formats: ["description", "mermaid"], diagrams: true } });
     const estimate = (documentIds: string[], projectId = "w") => change.estimateWork({
       features, stages: ["vision-extract"], documents: documentIds.length, pages: 10, orgId: "o1", env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
       visualScope: { projectId, documentIds },
@@ -564,6 +565,8 @@ describe("chart export estimates", () => {
   it("classifies a tier change for the caller's surface and prices only models (the chat suggestion path)", async () => {
     await seed({ credits: 10_000, documents: 2 });
     const env = { ...process.env, DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" };
+    // AI chart reads run on Smartest only (the ladder's intelligent rung).
+    await sql`update projects set pipeline = jsonb_set(pipeline, '{ladder}', '{"maxRung": "intelligent"}') where id = 'w'`;
     const plan = (tier: string, origin: "app" | "machine") => change.planProjectChange({
       projectId: "w", userId: "u1", input: { apply: "reindex" }, pipelineOverrides: { chartExport: { tier } } as never, env, origin,
     });

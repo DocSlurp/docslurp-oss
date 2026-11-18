@@ -30,11 +30,11 @@ afterEach(() => { vi.unstubAllEnvs(); });
 
 describe("POST /v1/estimate (public)", () => {
   it("quotes profiles with no account, reads no tenant data and labels the answer an estimate", async () => {
-    const response = await post({ files: [{ name: "a.pdf", size: 40_000, profile: profile(40_000, 12) }], settings: { quality: "good", hostingMonths: 6 } });
+    const response = await post({ files: [{ name: "a.pdf", size: 40_000, profile: profile(40_000, 12) }], settings: { quality: "smartest", hostingMonths: 6 } });
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
     const quote = await response.json() as { kind: string; pricingVersion: string; validUntil: string; pages: { low: number }; settings: { quality: string; hostingMonths: number } };
-    expect(quote).toMatchObject({ kind: "estimate", pricingVersion: expect.any(String), pages: { low: 12, high: 12 }, settings: { quality: "good", hostingMonths: 6 } });
+    expect(quote).toMatchObject({ kind: "estimate", pricingVersion: expect.any(String), pages: { low: 12, high: 12 }, settings: { quality: "smartest", hostingMonths: 6 } });
     expect(Date.parse(quote.validUntil)).toBeGreaterThan(Date.now());
     expect(sqlSpy).not.toHaveBeenCalled();
   });
@@ -96,15 +96,15 @@ describe("POST /v1/estimate (public)", () => {
     expect(clamped.pages.high).toBeLessThanOrEqual(2 + Math.ceil((70_000 + 80) / 3_500) + 2 + 2);
   });
 
-  it("quotes visual indexing as a read of every page", async () => {
+  it("quotes visual indexing as a read of every page, on Smartest only", async () => {
     vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_x");
     const good = { name: "a.pdf", size: 40_000, profile: profile(40_000, 12) };
-    const full = await (await post({ files: [good], settings: { quality: "auto", indexing: "full" } })).json() as { ingest: { credits: { low: number } }; settings: { indexing: string; quality: string } };
-    const visual = await (await post({ files: [good], settings: { quality: "auto", indexing: "visual" } })).json() as typeof full;
-    const every = await (await post({ files: [good], settings: { quality: "good", indexing: "full" } })).json() as typeof full;
-    expect(visual.settings).toMatchObject({ indexing: "visual", quality: "auto" });
-    expect(visual.ingest.credits.low).toBe(every.ingest.credits.low);
+    const full = await (await post({ files: [good], settings: { quality: "smartest", indexing: "full" } })).json() as { ingest: { credits: { low: number } }; settings: { indexing: string; quality: string } };
+    const visual = await (await post({ files: [good], settings: { quality: "smartest", indexing: "visual" } })).json() as typeof full;
+    expect(visual.settings).toMatchObject({ indexing: "visual", quality: "smartest" });
     expect(visual.ingest.credits.low).toBeGreaterThanOrEqual(full.ingest.credits.low);
+    // Fastest never reads a page with a model, so it cannot be combined with visual indexing.
+    expect((await post({ files: [good], settings: { quality: "fastest", indexing: "visual" } })).status).toBe(400);
   });
 
   it("rate limits per client IP", async () => {

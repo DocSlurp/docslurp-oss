@@ -1,9 +1,13 @@
-import { defaultPipelineFeatures, estimatePageEmbedCredits, pipelineVersionFeatures, setPrivateModelEndpointRegistryForTests } from "@docslurp/shared";
+import { defaultPipelineFeatures as fastestPipelineDefaults, estimatePageEmbedCredits, pipelineVersionFeatures, setPrivateModelEndpointRegistryForTests } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
+
+// Visual indexing embeds every page image with a model: it needs Smartest (the ladder's intelligent rung).
+const defaultPipelineFeatures = { ...fastestPipelineDefaults, ladder: { maxRung: "intelligent" as const } };
+
 
 /** Indexing-mode API against a database built from db/migrations. */
 let stop: () => Promise<void>;
@@ -141,8 +145,8 @@ describe("mode switching", () => {
     await expect(ws.updateProject("t-visual-fast", "u1", { pipeline: { quality: "fast" } as never })).rejects.toMatchObject({ status: 400, code: "visual_mode_quality" });
     await expect(ws.createProject({ userId: "u1", orgId: "gold", name: "FV", pipeline: { ...defaultPipelineFeatures, quality: "fast", indexingMode: "visual" } }))
       .rejects.toMatchObject({ code: "visual_mode_quality" });
-    // Auto with visual stays allowed.
-    expect((await ws.updateProject("t-visual-fast", "u1", { pipeline: { quality: "auto" } as never }))?.indexingMode).toBe("visual");
+    // Smartest with visual stays allowed.
+    expect((await ws.updateProject("t-visual-fast", "u1", { pipeline: { quality: "smartest" } as never }))?.indexingMode).toBe("visual");
   });
 
   it("lets any organization switch to full; credits are checked when the indexing work is admitted", async () => {
@@ -346,7 +350,7 @@ describe("upload indexingMode", () => {
     }, fresh.ports)).rejects.toMatchObject({ code: "visual_mode_quality" });
     expect(fresh.runs).toHaveLength(0);
     expect(fast.runs).toHaveLength(0);
-    // Auto with visual stays allowed.
+    // Smartest with visual stays allowed.
     await intake.intakeIntoProject({ userId: "u1", project: "ws-existing", kind: "bulk-upload", pipeline: { quality: "auto" } as never, items: [item] }, visual.ports);
     expect(visual.runs.at(-1)!.pipeline).toMatchObject({ quality: "auto", indexingMode: "visual" });
   });

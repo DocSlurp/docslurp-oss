@@ -5,8 +5,8 @@ import { assertVisualModeAllowed } from "../services/project-indexing-mode.js";
 import { qualityAllowsVision } from "../services/ingest-report.js";
 
 describe("visual indexing under the Auto ladder", () => {
-  it("is refused with Auto capped at the fast rung (as with Fast) and with any ladder limit", () => {
-    const base = { ...defaultPipelineFeatures, indexingMode: "visual" as const };
+  it("is allowed on Smartest only: refused on Fastest (any rung below intelligent) and with any share limit", () => {
+    const base = { ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" as const }, indexingMode: "visual" as const };
     expect(() => assertVisualModeAllowed(base)).not.toThrow();
     for (const ladder of [
       { maxRung: "fast" as const },
@@ -16,8 +16,8 @@ describe("visual indexing under the Auto ladder", () => {
     ]) {
       expect(() => assertVisualModeAllowed({ ...base, ladder }), JSON.stringify(ladder)).toThrow(expect.objectContaining({ code: "visual_mode_quality" }));
     }
-    // Good ignores the ladder (every page is read), so visual mode stays allowed there.
-    expect(() => assertVisualModeAllowed({ ...base, quality: "good", ladder: { maxRung: "fast" } })).not.toThrow();
+    // The default (Fastest) refuses it.
+    expect(() => assertVisualModeAllowed({ ...defaultPipelineFeatures, indexingMode: "visual" })).toThrow(expect.objectContaining({ code: "visual_mode_quality" }));
   });
 
   it("the ingest report treats Auto capped at the fast rung as reading no page", () => {
