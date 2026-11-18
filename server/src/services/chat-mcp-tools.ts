@@ -199,7 +199,7 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
 /**
  * Chat never exposes ingestion tools: upload fetches arbitrary URLs and starts
  * paid ingestion, and the model's arguments can be steered by document text (G-04).
- * fullIndex is excluded for the same reason: it spends credits on the model's say-so.
+ * fullIndex and reindex are excluded for the same reason: they spend credits on the model's say-so.
  * The cost estimates, getJob and suggestQueries are left out because every tool
  * definition is resent on every step: in production (30 days to 2026-10-25) they
  * made 24 of ~9,000 chat tool calls. proposeProjectSettings already reports a
@@ -207,7 +207,7 @@ function webActivityResult(request: WebToolActivity, result: unknown): WebToolAc
  */
 // The agent generates the answer itself. A nested chat starts another paid answer
 // generator under a short tool deadline and can block otherwise usable retrieval.
-const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract", "completeUpload", "listProjects", "webMap", "webCrawl", "ingestWebsite", "fullIndex",
+const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract", "completeUpload", "listProjects", "webMap", "webCrawl", "ingestWebsite", "fullIndex", "reindex",
   ...ESTIMATE_TOOL_NAMES, "getJob", "suggestQueries"]);
 /**
  * Project settings tools: offered to the chat agent only for the first-party
@@ -543,7 +543,10 @@ export function createChatMcpTools(args: {
     && (id !== "proposeFigureResume" || figureResumeChatEnabled())
     && (args.settingsTools === true || !CHAT_SETTINGS_TOOLS.has(id))
     && (args.publicClient !== true || !CHAT_PUBLIC_CLIENT_EXCLUDED_TOOLS.has(id)) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
-  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id))) {
+  // Beyond the denylist: a tool the catalog marks as writing or spending (not read-only, or consequential) is never
+  // offered, so a new paid tool stays out of chat even if nobody adds it to CHAT_EXCLUDED_TOOLS.
+  const writesOrSpends = (item: McpManifest["capabilities"][number]) => item.annotations?.readOnly === false || item.annotations?.consequential === true;
+  for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id) && !writesOrSpends(item))) {
     // OpenAI-compatible providers restrict function names to letters, numbers, _ and -.
     const name = definition.id.replace(/[^a-zA-Z0-9_-]/g, "_");
     if (tools[name]) throw new Error("Duplicate model tool name");

@@ -56,6 +56,8 @@ beforeAll(async () => {
     if (auth?.startsWith("Bearer ")) {
       const key = await keys.validateApiKey(auth.slice(7), { origin: c.req.header("origin") ?? null });
       if (!key) return c.json({ error: "invalid key" }, 401);
+      // Test hook: present the key as a delegated OAuth token (the route must refuse it whatever its scopes).
+      if (c.req.header("x-test-oauth")) Object.assign(key, { oauth: { audience: "api", grantId: "g", clientId: "c", clientName: "CLI", resource: "r", grantedScopes: [] } });
       c.set("apiKey", key);
       c.set("sessionUser", syntheticApiKeySessionUser(key));
       context.setCurrentRequestUserId(key.userId);
@@ -256,6 +258,24 @@ describe("POST /v1/projects/:id/reindex", () => {
     expect((await stored("proj-b")).pipeline.embedding.profile).toBe(defaultPipelineFeatures.embedding.profile);
   });
 
+  it("refuses a delegated OAuth token even with projects:manage; nothing is queued", async () => {
+    const { rawKey } = await keys.createApiKey("ua", `oauth-${randomUUID()}`, { orgId: "org-a", scopes: ["projects:manage"] });
+    for (const path of ["/v1/projects/proj-a/reindex", "/v1/projects/proj-a/reindex/estimate"]) {
+      expect((await send("POST", path, { ...asKey(rawKey), "x-test-oauth": "1" }, {})).status).toBe(403);
+    }
+    expect(await reindexRuns("proj-a")).toBe(0);
+  });
+
+  it("binds speedBoost into the signature: a confirmation priced without it is stale with it", async () => {
+    const plain = await (await send("POST", "/v1/projects/proj-a/reindex/estimate", asUser("ua"), {})).json() as { signature: string };
+    const boosted = await (await send("POST", "/v1/projects/proj-a/reindex/estimate", asUser("ua"), { speedBoost: true })).json() as { signature: string };
+    expect(boosted.signature).not.toBe(plain.signature);
+    const response = await send("POST", "/v1/projects/proj-a/reindex", asUser("ua"), { speedBoost: true, confirmEstimate: plain.signature });
+    expect(response.status).toBe(409);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe("estimate_stale");
+    expect(await reindexRuns("proj-a")).toBe(0);
+  });
+
   it("a server key with projects:manage whose user may edit can re-index", async () => {
     const { rawKey } = await keys.createApiKey("ua", `manage-${randomUUID()}`, { orgId: "org-a", scopes: ["projects:manage"] });
     const response = await send("POST", "/v1/projects/proj-a/reindex", asKey(rawKey), { pipeline: { embedding: { profile: "fastest-local" } } });
@@ -406,4 +426,87 @@ describe("re-check fixes", () => {
     const response = await send("PATCH", "/v1/projects/proj-a", asUser("ua"), { pipeline: { ...off, embed: true, indexVectors: true } });
     expect(response.status).toBe(409);
   });
+});
+
+/**
+ * The MCP pair against the real routes: reindexEstimate prices and signs, reindex needs that signature, and the
+ * route's gates hold through the in-process forward (another organization, a key without projects:manage, a browser
+ * key, a viewer, a stale or missing signature: nothing saved or queued).
+ */
+describe("MCP reindexEstimate and reindex", () => {
+  type Actor = import("../lib/request-actor.js").RequestActor;
+  const sessionActor = (user: string): Actor => ({ type: "session", userId: user, sessionId: `session-${user}`, user: { id: user, email: `${user}@example.com`, name: user } } as never);
+  const keyActor = async (raw: string, origin: string | null = null): Promise<Actor> => {
+    const key = await keys.validateApiKey(raw, { origin });
+    if (!key) throw new Error("invalid key");
+    return { type: "apiKey", userId: key.userId, apiKey: key };
+  };
+  const call = async (actor: Actor, tool: string, input: unknown) => {
+    const { createMcpDispatcher } = await import("../services/mcp-tools.js");
+    const context = await import("../lib/request-context.js");
+    // Inside a request context, as the MCP server runs the dispatcher.
+    const outer = new Hono().use("*", context.requestContextMiddleware).all("*", () =>
+      createMcpDispatcher(actor)(`/tools/${tool}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }));
+    const response = await outer.request("/");
+    return { status: response.status, body: await response.json() as Record<string, unknown> };
+  };
+  const input = { project: "proj-a", embeddingProfile: "fastest-local" };
+
+  it("estimates with a signature, then re-indexes only with it", async () => {
+    const actor = sessionActor("ua");
+    const estimate = await call(actor, "reindexEstimate", input);
+    expect(estimate.status).toBe(200);
+    expect(estimate.body).toMatchObject({ tool: "reindexEstimate", lockedSettings: ["embedding"], documents: 2, pages: 10 });
+    expect(estimate.body.signature).toMatch(/^[a-f0-9]{64}$/);
+    expect(await reindexRuns("proj-a")).toBe(0);
+
+    // Without (or with a malformed) signature: refused before anything is planned.
+    expect((await call(actor, "reindex", input)).status).toBe(400);
+    expect((await call(actor, "reindex", { ...input, confirmEstimate: "0".repeat(63) })).status).toBe(400);
+    expect(await reindexRuns("proj-a")).toBe(0);
+
+    // A signature for other inputs is stale.
+    const stale = await call(actor, "reindex", { ...input, embeddingProfile: "cheapest-local", confirmEstimate: estimate.body.signature });
+    expect(stale.status).toBe(409);
+    expect(await reindexRuns("proj-a")).toBe(0);
+    expect((await stored("proj-a")).pipeline.embedding.profile).toBe(defaultPipelineFeatures.embedding.profile);
+
+    const applied = await call(actor, "reindex", { ...input, confirmEstimate: estimate.body.signature });
+    expect(applied.status).toBe(200);
+    expect(applied.body).toMatchObject({ tool: "reindex", outcome: "queued", changedSettings: ["embedding"], project: { id: "proj-a" } });
+    expect((applied.body.project as Record<string, unknown>).pipeline).toBeUndefined();
+    expect(await reindexRuns("proj-a")).toBeGreaterThan(0);
+    expect((await stored("proj-a")).pipeline.embedding.profile).toBe("fastest-local");
+  }, 60_000);
+
+  it("a server key with projects:manage can re-index; other organizations, scopes, browser keys and viewers cannot", async () => {
+    const signature = (await call(sessionActor("ua"), "reindexEstimate", input)).body.signature as string;
+    const { rawKey: foreign } = await keys.createApiKey("ub", `mcp-foreign-${randomUUID()}`, { orgId: "org-b", scopes: ["projects:manage", "ingest"] });
+    const { rawKey: noManage } = await keys.createApiKey("ua", `mcp-no-manage-${randomUUID()}`, { orgId: "org-a", scopes: ["ingest", "search:keyword"] });
+    const { rawKey: browserKey } = await keys.createApiKey("ua", `mcp-browser-${randomUUID()}`, { orgId: "org-a", keyType: "client", scopes: ["search:keyword"], allowedDomains: ["example.com"], projectIds: ["proj-a"] });
+    const refused: Array<[Actor, number]> = [
+      [sessionActor("ub"), 404],
+      [await keyActor(foreign), 404],
+      [await keyActor(noManage), 403],
+      [await keyActor(browserKey, "https://example.com"), 403],
+      [sessionActor("uv"), 403],
+    ];
+    for (const [actor, status] of refused) {
+      expect((await call(actor, "reindexEstimate", input)).status).toBe(status);
+      expect((await call(actor, "reindex", { ...input, confirmEstimate: signature })).status).toBe(status);
+    }
+    // Org A's editor cannot reach org B's project either.
+    expect((await call(sessionActor("ua"), "reindex", { project: "proj-b", confirmEstimate: signature })).status).toBe(404);
+    expect(await reindexRuns("proj-a")).toBe(0);
+    expect(await reindexRuns("proj-b")).toBe(0);
+
+    const { rawKey: manage } = await keys.createApiKey("ua", `mcp-manage-${randomUUID()}`, { orgId: "org-a", scopes: ["projects:manage"] });
+    const keyed = await keyActor(manage);
+    const priced = await call(keyed, "reindexEstimate", input);
+    expect(priced.status).toBe(200);
+    // The same work priced by another caller signs the same (one deployment key).
+    expect(priced.body.signature).toBe(signature);
+    expect((await call(keyed, "reindex", { ...input, confirmEstimate: priced.body.signature })).status).toBe(200);
+    expect(await reindexRuns("proj-a")).toBeGreaterThan(0);
+  }, 60_000);
 });

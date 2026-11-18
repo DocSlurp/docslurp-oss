@@ -671,7 +671,8 @@ function reindexInput(body: { speedBoost?: boolean }): UpdateProjectInput {
 
 /**
  * The reindex command's gates, the same as PATCH /:projectId (it spends credits and changes settings): a server key
- * with projects:manage, bound to its organization; a project the caller can see; edit access to it. Managed model
+ * with projects:manage, bound to its organization (never a delegated OAuth token: defense in depth, their scopes do
+ * not map to projects:manage); a project the caller can see; edit access to it. Managed model
  * fields and prohibited models are refused before anything is planned.
  */
 async function reindexGate(c: Context): Promise<Response | { project: NonNullable<Awaited<ReturnType<typeof getProject>>>; userId: string }> {
@@ -685,7 +686,7 @@ async function reindexGate(c: Context): Promise<Response | { project: NonNullabl
   if (!project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
   const actor = getRequestActor(c);
   if (actor.type === "apiKey") {
-    if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["projects:manage"])) {
+    if (actor.apiKey.keyType !== "server" || actor.apiKey.oauth || !actorHasAnyApiKeyScope(actor, ["projects:manage"])) {
       return apiErrorResponse(c, 403, "forbidden", "This endpoint requires a server API key with the projects:manage scope");
     }
     if (!apiKeyCanUseProject(actor.apiKey, project)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
