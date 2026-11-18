@@ -31,6 +31,7 @@ import { fromEnv } from "../config.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
+import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 import { readTableCells } from "../pipeline/table-cells-guest.js";
 import { readTableCellsArtifact, tableCellsArtifactKey, tableSourceSha256, TABLE_CELLS_ARTIFACT_MAX_BYTES, TABLE_CELLS_ARTIFACT_SCHEMA } from "../pipeline/html-table-cells-cache.js";
 import { vmTableSources } from "../pipeline/html-table-vm.js";
@@ -121,13 +122,8 @@ async function embed(storage: MemoryStorage, id: string, text: string, slots: { 
   } as unknown as ProjectRun;
   const state = WorkflowState.create(projectRun, [document(id, text)]);
   state.docConcurrency = 1;
-  state.store = {
-    updateProgress: async () => {}, startRunStage: async () => {}, completeRunStage: async () => {}, failRunStage: async () => {},
-    startDocumentStage: async () => {}, completeDocumentStage: async () => {}, failDocumentStage: async () => {}, appendEvent: async () => {},
-    setPageStageComplete: async () => {}, setPagesStageComplete: async () => {}, getCompletedPages: async () => new Set<number>(),
-    findEmbeddingReuseRefs: async () => [], recordEmbeddingReuseRefs: async () => {}, forgetEmbeddingReuseRefs: async () => {},
-    insertChunks: async () => {},
-  } as unknown as WorkflowState["store"];
+  // The shared in-memory checkpoint store: stages write through its ports (#472), so a hand-written stub drifts.
+  state.store = memoryCheckpointStore();
   await new EmbedStage(runner as CommandRunner, storage as unknown as ArtifactStore, { ...fromEnv(), openRouterApiKey: "k", openAiApiKey: "k" }).run(state);
   const artifactUri = state.artifactLedger.readDocument(id, "embeddings");
   expect(artifactUri).toBeTruthy();
