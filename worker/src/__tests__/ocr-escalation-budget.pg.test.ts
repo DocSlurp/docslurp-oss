@@ -194,7 +194,8 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     const activity = () => {
       const state = WorkflowState.create({
         id: run, orgId: "ocrb-org", projectId: "ocrb-ws", userId: "ocrb-u1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
-        pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
+        // Smartest: hosted escalation is refused on Fastest (the ladder forbids vision below the intelligent rung).
+        pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } },
       } as unknown as ProjectRun, []);
       const created = store();
       state.visionAttempts = created.visionAttempts;

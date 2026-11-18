@@ -28,7 +28,8 @@ import {
 afterEach(() => resetPricingProviderForTests());
 
 const env = { STRIPE_SECRET_KEY: "sk_test", DOCSLURP_CHART_EXPORT: "on" };
-const base = normalizePipelineFeatures(defaultPipelineFeatures);
+// AI chart reads are vision reads: Smartest (the ladder's intelligent rung) runs them, Fastest keeps the free tier.
+const base = normalizePipelineFeatures({ ...defaultPipelineFeatures, quality: "smartest" } as never);
 // Tolerant of the pipeline schema not yet carrying `chartExport`: the estimate reads it off the features object.
 const withChartExport = (chartExport: Record<string, unknown>): PipelineFeatures => ({ ...base, chartExport } as unknown as PipelineFeatures);
 

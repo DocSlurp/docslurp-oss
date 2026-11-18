@@ -67,7 +67,7 @@ describe("materialize run rows", () => {
     const stored = insert.values.find((value) => typeof value === "object" && value !== null && "quality" in (value as object));
     // The run row carries the resolved pipeline (managed models applied, defaults filled), never the rejected path; a
     // source pipeline with no chart export tier is stamped the machine default (off).
-    expect(stored).toMatchObject({ quality: "good", documentExtraction: { options: { dolphin: { mode: "page" } } }, chartExport: { tier: "off" } });
+    expect(stored).toMatchObject({ quality: "auto", ladder: { maxRung: "intelligent" }, documentExtraction: { options: { dolphin: { mode: "page" } } }, chartExport: { tier: "off" } });
     expect((stored as { documentExtraction: { options: { dolphin: Record<string, unknown> } } }).documentExtraction.options.dolphin).not.toHaveProperty("repoPath");
     expect(JSON.stringify(insert.values)).not.toContain("/tmp/attacker");
   });

@@ -23,27 +23,38 @@ export function runReadsPagesSql(runAlias: string): string {
   const r = alias(runAlias);
   return `coalesce((${r}.pipeline->'effective'->>'readsPages')::boolean,
     coalesce(${r}.pipeline->>'quality', 'auto') not in ('fast', 'fastest')
-      and (${r}.pipeline->>'quality' in ('good', 'smart') or coalesce((${r}.pipeline->>'visionFallback')::boolean, false)))`;
+      and (${r}.pipeline->>'quality' in ('good', 'smart', 'smartest') or coalesce((${r}.pipeline->>'visionFallback')::boolean, false)))`;
 }
 
 /**
- * The run's quality in the deprecated words (`fast` | `auto` | `good`), for queries that group history by quality:
- * the stamp, else a new-shape word, else the legacy keys as `legacyQualityMode` reads them (`vision.forceAllPages:
- * true` is good, `parserPlaybook: fast` is fast, every other playbook is auto).
+ * The run's stored quality word (`fast` | `auto`), for queries that read it beside the run's `ladder` (which holds the
+ * level of an `auto` run): a stored `fast` (text layer only) stays `fast`; every other word, the retired `good` and the
+ * level names included, is `auto`; `parserPlaybook: fast` on rows older than `quality` is `fast`.
  */
 export function runLegacyQualitySql(runAlias: string): string {
   const r = alias(runAlias);
-  const word = (expr: string) => `case ${expr} when 'fastest' then 'fast' when 'balanced' then 'auto' when 'smart' then 'good' else null end`;
-  return `coalesce(
-    ${word(`${r}.pipeline->'effective'->>'quality'`)},
-    ${word(`${r}.pipeline->>'quality'`)},
-    case when ${r}.pipeline->>'quality' in ('fast', 'auto', 'good') then ${r}.pipeline->>'quality' else null end,
-    case
-      when ${r}.pipeline->'vision'->>'forceAllPages' = 'true' then 'good'
-      when ${r}.pipeline->>'parserPlaybook' = 'fast' then 'fast'
-      else 'auto'
-    end
-  )`;
+  return `case
+    when ${r}.pipeline->>'quality' = 'fast' then 'fast'
+    when ${r}.pipeline->>'quality' is null and ${r}.pipeline->>'parserPlaybook' = 'fast' then 'fast'
+    else 'auto'
+  end`;
+}
+
+/**
+ * The run's pricing profile (billing.ts PIPELINE_PROFILE_IDS) as `fast` | `fastest` | `smartest`, for queries that group
+ * history by quality: `fast` when it read no page (a stored `fast`, or the ladder's `fast` rung), `smartest` when its
+ * ladder allowed the vision rung (or the retired `good`; runs stamped before the ladder default moved read `intelligent`
+ * when the rung is unset), else `fastest`.
+ */
+export function runQualityProfileSql(runAlias: string): string {
+  const r = alias(runAlias);
+  return `case
+    when ${r}.pipeline->>'quality' = 'fast' or (${r}.pipeline->>'quality' is null and ${r}.pipeline->>'parserPlaybook' = 'fast') then 'fast'
+    when ${r}.pipeline->>'quality' = 'good' or ${r}.pipeline->'vision'->>'forceAllPages' = 'true' then 'smartest'
+    when coalesce(${r}.pipeline->'ladder'->>'maxRung', 'intelligent') = 'fast' then 'fast'
+    when coalesce(${r}.pipeline->'ladder'->>'maxRung', 'intelligent') = 'intelligent' then 'smartest'
+    else 'fastest'
+  end`;
 }
 
 /**
@@ -62,4 +73,21 @@ export function runChartTierSql(runAlias: string): string {
   const r = alias(runAlias);
   return `coalesce(${r}.pipeline -> 'chartExport' ->> 'tier',
     case ${r}.pipeline ->> 'visuals' when 'charts-ai' then 'models' when 'charts' then 'free' when 'figures' then 'off' when 'none' then 'off' else null end)`;
+}
+
+/**
+ * True when the project row keeps page images: its `pageImages` (a non-boolean stored value reads as the default, on,
+ * never an error), or Smartest, which always keeps them (an `auto` row on the intelligent rung, or a row still on the
+ * retired `good`).
+ */
+export function pageImagesOnSql(projectAlias: string): string {
+  const p = alias(projectAlias);
+  return `((case when jsonb_typeof(${p}.pipeline->'pageImages') = 'boolean' then (${p}.pipeline->'pageImages')::boolean else true end)
+    or (coalesce(${p}.pipeline->>'quality', 'auto') = 'auto' and ${p}.pipeline->'ladder'->>'maxRung' = 'intelligent')
+    or coalesce(${p}.pipeline->>'quality' = 'good', false))`;
+}
+
+/** True when the row is still on the retired `good` quality (before migration 0199 moved it to Smartest). */
+export function retiredGoodQualitySql(alias_: string): string {
+  return `coalesce(${alias(alias_)}.pipeline->>'quality' = 'good', false)`;
 }

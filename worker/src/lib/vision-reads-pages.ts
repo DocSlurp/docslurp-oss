@@ -2,7 +2,7 @@
  * Whether vision-extract will read pages: the run-level gate vision-extract itself applies, and the per-document
  * decision it makes. Pure (no privacy audit is written here; vision-extract audits a blocked route when it runs).
  */
-import { isProviderCallAllowed, qualityAllowsPageReading, qualityReadsEveryPage, resolveVisionRoute, type PipelineFeatures } from "@docslurp/shared";
+import { isProviderCallAllowed, qualityAllowsPageReading, resolveVisionRoute, type PipelineFeatures } from "@docslurp/shared";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { visionCall } from "../tools/vision-runtime.js";
 import { visionAllowedForDocument } from "./vision-page-budget.js";
@@ -21,16 +21,15 @@ export function visionRunReadsPages(pipeline: VisionPipeline): boolean {
 }
 
 /**
- * Whether vision-extract may read this document's pages: the run reads pages, and either the quality reads every page
- * (vision's all-pages override) or extraction asked for vision and the document's playbook allows it. Errs towards
- * true: a document vision then leaves alone only loses stored table cells, never correctness.
+ * Whether vision-extract may read this document's pages: the run reads pages, extraction asked for vision and the
+ * document's playbook allows it. Errs towards true: a document vision then leaves alone only loses stored table cells,
+ * never correctness.
  */
 export function visionMayReadDocumentPages(state: Pick<WorkflowState, "run" | "artifactLedger">, document: { id: string; mimeType: string }, needsVision: boolean): boolean {
   const pipeline = state.run.pipeline;
   if (!visionRunReadsPages(pipeline)) return false;
-  // vision-extract never reads a text-native source (it records `text-native-source` and stops), Good included.
+  // vision-extract never reads a text-native source (it records `text-native-source` and stops).
   if (visionSkipsTextNativeSource(document)) return false;
-  if (qualityReadsEveryPage(pipeline.quality)) return true;
   return needsVision && visionAllowedForDocument(pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook"), { evidenceRouting: resolveRunRoutingV2(state as WorkflowState) });
 }
 

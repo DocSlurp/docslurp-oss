@@ -1,4 +1,4 @@
-import { runLegacyQualitySql } from "@docslurp/shared";
+import { runQualityProfileSql } from "@docslurp/shared";
 import {
   defaultPipelineFeatures,
   detectFileFormat,
@@ -7,14 +7,16 @@ import {
   parserPlaybookForQuality,
   QUALITY_MODE_ORDER,
   QUALITY_MODES,
-  qualityModeSchema,
+  pipelineFieldsForQuality,
+  pipelineProfileIdFor,
+  pipelineProfileIdSchema,
   quoteFilePages,
   quoteUpload,
   runProcessingPreviewRequestSchema,
   runProcessingPreviewSchema,
   type PipelineFeatures,
   type QuoteFile,
-  type QualityMode,
+  type PipelineProfileId,
   type RunProcessingPreview,
   type RunProcessingPreviewRequest,
   type RunProcessingPreviewScenario,
@@ -186,7 +188,7 @@ type PreviewHistorySummary = {
   averageLatencyMinutes: number | null;
   byQuality: Partial<
     Record<
-      QualityMode,
+      PipelineProfileId,
       {
         sampledDocuments: number;
         averagePlausibilityScore: number | null;
@@ -208,7 +210,7 @@ function summarizePreviewHistory(
   let weightedLatencyDocs = 0;
 
   for (const row of rows) {
-    const quality = qualityModeSchema.safeParse(row.quality ?? "auto");
+    const quality = pipelineProfileIdSchema.safeParse(row.quality ?? "fastest");
     completedRuns += row.completed_runs;
     sampledDocuments += row.sampled_documents;
     if (quality.success) {
@@ -245,10 +247,10 @@ function summarizePreviewHistory(
   };
 }
 
-const BASE_QUALITY: Record<QualityMode, number> = { fast: 0.57, auto: 0.76, good: 0.9 };
+const BASE_QUALITY: Record<PipelineProfileId, number> = { fast: 0.57, fastest: 0.72, smartest: 0.86, visual: 0.88 };
 
 function estimateScenario(args: {
-  quality: QualityMode;
+  quality: PipelineProfileId;
   pipeline: PipelineFeatures;
   estimatedPages: number;
   documentCount: number;
@@ -257,19 +259,23 @@ function estimateScenario(args: {
   history: PreviewHistorySummary;
 }): RunProcessingPreviewScenario {
   const mode = QUALITY_MODES[args.quality];
-  const playbook = parserPlaybookCatalog[parserPlaybookForQuality(args.quality)];
+  const playbook = parserPlaybookCatalog[parserPlaybookForQuality(args.quality === "fast" ? "fast" : "auto")];
   const historyForQuality = args.history.byQuality[args.quality];
   // Customer price in credits (= cents) from the pricing provider, by the same quote an upload gets: counted pages price exactly, uncounted
   // ones over the range their size allows, with the high end every page read by a vision model.
-  const profile = { ...estimateProfileFor({ ...args.pipeline, quality: args.quality }, { env: process.env }), billing: "enforced" as const };
+  const level = args.quality === "smartest" || args.quality === "visual" ? "smartest" : "fastest";
+  const fields = pipelineFieldsForQuality(level, { readScans: args.quality !== "fast", ladder: args.pipeline.ladder });
+  const scenarioPipeline = { ...args.pipeline, quality: fields.quality, ladder: fields.ladder as PipelineFeatures["ladder"] };
+  const profile = { ...estimateProfileFor(scenarioPipeline, { env: process.env }), billing: "enforced" as const };
   const quoted = quoteUpload({ files: args.files, profile, speedBoost: args.pipeline.speedBoost }).estimate.credits ?? { low: 0, high: 0 };
   const minCents = quoted.low;
   const maxCents = Math.max(minCents, quoted.high);
 
   let quality = BASE_QUALITY[args.quality];
-  if (args.signals.tableHeavy) quality += args.quality === "fast" ? -0.08 : args.quality === "good" ? 0.05 : 0.02;
-  if (args.signals.scanHeavy) quality += args.quality === "fast" ? -0.2 : args.quality === "good" ? 0.04 : 0;
-  if (args.signals.mediaHeavy) quality += args.quality === "good" ? 0.03 : -0.05;
+  const smartest = args.quality === "smartest" || args.quality === "visual";
+  if (args.signals.tableHeavy) quality += args.quality === "fast" ? -0.08 : smartest ? 0.05 : 0;
+  if (args.signals.scanHeavy) quality += args.quality === "fast" ? -0.2 : smartest ? 0.04 : -0.02;
+  if (args.signals.mediaHeavy) quality += smartest ? 0.03 : -0.05;
   quality = clamp(quality, 0.3, 0.97);
 
   const baseLatencyMinutes =
@@ -346,7 +352,7 @@ export function buildRunProcessingPreview(args: {
   );
 
   const current =
-    options.find((option) => option.quality === pipeline.quality) ??
+    options.find((option) => option.quality === pipelineProfileIdFor(pipeline)) ??
     options[0]!;
   const recommendedBase =
     options.find(
@@ -405,7 +411,7 @@ export async function getRunProcessingPreview(
   const historyRows = await sql<RunPreviewHistoryRow[]>`
     select
       -- Runs stored before pipeline.quality carry the retired parserPlaybook / vision.forceAllPages keys.
-      ${sql.unsafe(runLegacyQualitySql("runs"))} as quality,
+      ${sql.unsafe(runQualityProfileSql("runs"))} as quality,
       count(distinct runs.id)::int as completed_runs,
       count(distinct d.id)::int as sampled_documents,
       avg(nullif(drss.stats->>'plausibilityScore', '')::numeric)::float8 as avg_plausibility_score,

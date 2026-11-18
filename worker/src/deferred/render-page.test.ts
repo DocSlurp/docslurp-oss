@@ -4,15 +4,15 @@ vi.mock("../pipeline/pdf-asset-cache.js", () => ({ PdfRasterCache: class { rende
 vi.mock("../db/usage-event-store.js", () => ({ persistScopedUsageEvents: mocks.persist }));
 import { renderDocumentPage } from "./render-page.js";
 const document = { id: "doc", runId: "run", userId: "owner", mimeType: "application/pdf", status: "completed", pageCount: 3 };
-function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: boolean; existing?: string } = {}) {
+function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: boolean; existing?: string; pageImages?: boolean } = {}) {
   const artifacts: Record<string, string> = {};
   const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
-    if (query.includes("select d.org_id")) return [{ org_id: "org", project_id: "project", withheld: options.withheld ?? false, low:options.existing, high:options.existing }];
+    if (query.includes("select d.org_id")) return [{ org_id: "org", project_id: "project", withheld: options.withheld ?? false, page_images: options.pageImages ?? true, low:options.existing, high:options.existing }];
     if (query.includes("select d.id")) return options.deleted ? [] : [{ id: "doc" }];
     if (query.includes("update project_runs")) Object.assign(artifacts, values[0]);
     return [];
-  }), { json: (value: unknown) => value, begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
+  }), { json: (value: unknown) => value, unsafe: (text: string) => ({ unsafe: text }), begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
   return { artifacts, deps: { store: { stageSql: sql, loadDocument: vi.fn(async () => document) }, runner: {}, storage: {} } as never };
 }
 beforeEach(() => { let now = 1000; vi.spyOn(Date, "now").mockImplementation(() => now += 25); vi.clearAllMocks(); mocks.receipts.length = 0; mocks.persist.mockImplementation(async (input: unknown) => { mocks.receipts.push(structuredClone({ ...(input as any), client: undefined })); }); vi.stubEnv("STRIPE_SECRET_KEY", ""); vi.stubEnv("DOCSLURP_BILL_COMPUTE", "false"); vi.stubEnv("DOCSLURP_BILL_STORAGE", "false"); mocks.render.mockImplementation(async ({ pageNumbers }: { pageNumbers: number[] }) => { return [{ artifactUri: `s3://page-${pageNumbers[0]}`, cacheHit: false }]; }); });
@@ -21,6 +21,8 @@ describe("lazy PDF worker rendering", () => {
   it("refuses withheld, missing and out-of-bounds pages before rasterizing", async () => {
     await expect(renderDocumentPage(setup({ withheld: true }).deps, { documentId: "doc", runId: "run", pageNumber: 1 })).rejects.toThrow("unavailable");
     await expect(renderDocumentPage(setup().deps, { documentId: "doc", runId: "run", pageNumber: 4 })).rejects.toThrow("not renderable");
+    // Page images off for the project: no viewer page image is rendered.
+    await expect(renderDocumentPage(setup({ pageImages: false }).deps, { documentId: "doc", runId: "run", pageNumber: 1 })).rejects.toThrow("Page images are turned off");
     expect(mocks.render).not.toHaveBeenCalled();
     expect(mocks.persist).not.toHaveBeenCalled();
   });

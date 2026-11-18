@@ -123,12 +123,14 @@ Request (strict: unknown fields are refused):
 ```json
 {
   "files": [{ "name": "scan.pdf", "size": 812345, "type": "application/pdf", "profile": { "schema": 1, "...": "..." } }],
-  "settings": { "quality": "auto", "indexing": "full", "hostingMonths": 12, "searchesPerMonth": 0 }
+  "settings": { "quality": "fastest", "indexing": "full", "hostingMonths": 12, "searchesPerMonth": 0 }
 }
 ```
 
-Knobs (`quoteSettingsSchema`; omitted ones take a new project's defaults): `quality` (`fast`, `auto`, `good`),
-`indexing` (`full`, `on-demand`, `visual`: page images embedded on upload, a read of every page, refused with `fast`), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
+Knobs (`quoteSettingsSchema`; omitted ones take a new project's defaults): `quality` as a pricing profile (`fastest`, `smartest`, or `fast` for Fastest with `readScans: false`; deprecated
+`auto`/`balanced` and `good`/`smart` are mapped), `readScans`, `indexing` (`full`, `on-demand`, `visual`: page images
+embedded on upload, a read of every page, priced as the `visual` profile and refused unless `smartest`). The provider's
+`qualityModePricing(mode)` and `profile.quality` take the profile ids `fast` | `fastest` | `smartest` | `visual`, `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
 `videoFrames`, `speedBoost`, `hostingMonths` (1–60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`.
 
 Response (`EstimateQuote`): `kind: "estimate"`, `pricingVersion`, `validUntil`, `billing`, the resolved `settings`,

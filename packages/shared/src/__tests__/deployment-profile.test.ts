@@ -163,7 +163,9 @@ describe("kill switches only lower: no env or request path raises a rung", () =>
   // its answer without them.
   const SUBSETS: DisableToken[][] = [[], ...DISABLE_TOKENS.map((token) => [token]), ["ai", "charts"], ["charts-ai", "figures"], [...DISABLE_TOKENS]];
   const CHART_RANK = { off: 0, free: 1, on: 2 } as const;
-  const QUALITY_RANK: Record<string, number> = { fast: 0, auto: 1, good: 2 };
+  // Fast (text only) < Fastest (auto below the intelligent rung) < Smartest (good, or auto on the intelligent rung).
+  const qualityRank = (pipeline: { quality?: string; ladder?: { maxRung?: string } }): number =>
+    pipeline.quality === "fast" ? 0 : pipeline.quality === "good" || pipeline.ladder?.maxRung === "intelligent" ? 2 : 1;
   const TIER_RANK: Record<string, number> = { off: 0, free: 1, models: 2 };
 
   it.each(["off", "free", "on", undefined, "garbage"])("chartExportSwitch with DOCSLURP_CHART_EXPORT=%s", (chart) => {
@@ -193,9 +195,11 @@ describe("kill switches only lower: no env or request path raises a rung", () =>
   it("applyKillSwitchesToPipeline never raises quality, rescue reads or the chart tier", () => {
     const pipelines = [];
     for (const quality of ["fast", "auto", "good", undefined]) {
-      for (const visionFallback of [true, false, undefined]) {
-        for (const tier of ["off", "free", "models", undefined]) {
-          pipelines.push({ quality, visionFallback, chartExport: tier === undefined ? undefined : { tier }, vision: { forceAllPages: quality === "good" } });
+      for (const maxRung of ["fast", "ocr", "intelligent", undefined]) {
+        for (const visionFallback of [true, false, undefined]) {
+          for (const tier of ["off", "free", "models", undefined]) {
+            pipelines.push({ quality, ...(maxRung ? { ladder: { maxRung } } : {}), visionFallback, chartExport: tier === undefined ? undefined : { tier }, vision: { forceAllPages: quality === "good" } });
+          }
         }
       }
     }
@@ -203,18 +207,19 @@ describe("kill switches only lower: no env or request path raises a rung", () =>
       for (const subset of SUBSETS) {
         const next = applyKillSwitchesToPipeline(pipeline, { DOCSLURP_DISABLE: subset.join(",") });
         const label = `${JSON.stringify(pipeline)} ${subset.join(",")}`;
-        expect(QUALITY_RANK[next.quality ?? "auto"], label).toBeLessThanOrEqual(QUALITY_RANK[pipeline.quality ?? "auto"]);
+        expect(qualityRank(next), label).toBeLessThanOrEqual(qualityRank(pipeline));
         if (pipeline.visionFallback === false) expect(next.visionFallback, label).toBe(false);
         if (pipeline.visionFallback === undefined && !subset.length) expect(next.visionFallback, label).toBeUndefined();
         expect(TIER_RANK[next.chartExport?.tier ?? "off"], label).toBeLessThanOrEqual(TIER_RANK[pipeline.chartExport?.tier ?? "off"]);
         if (!pipeline.vision.forceAllPages) expect((next.vision as { forceAllPages?: boolean } | undefined)?.forceAllPages, label).toBeFalsy();
       }
     }
-    expect(applyKillSwitchesToPipeline({ quality: "good", visionFallback: true }, { DOCSLURP_DISABLE: "ai" })).toEqual({ quality: "auto", visionFallback: false });
+    expect(applyKillSwitchesToPipeline({ quality: "good", visionFallback: true }, { DOCSLURP_DISABLE: "ai" })).toEqual({ quality: "auto", ladder: { maxRung: "ocr" }, visionFallback: false });
+    expect(applyKillSwitchesToPipeline({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true }, { DOCSLURP_DISABLE: "ai" })).toEqual({ quality: "auto", ladder: { maxRung: "ocr" }, visionFallback: false });
     expect(applyKillSwitchesToPipeline({ quality: "auto", visionFallback: true }, { DOCSLURP_DISABLE: "ai-rescue" })).toEqual({ quality: "auto", visionFallback: false });
-    // ai-rescue alone leaves smart's every-page reads alone (they are not rescue reads); ai lowers smart first.
-    expect(applyKillSwitchesToPipeline({ quality: "good", visionFallback: true }, { DOCSLURP_DISABLE: "ai-rescue" })).toEqual({ quality: "good", visionFallback: true });
-    const untouched = { quality: "good", visionFallback: true };
+    // ai-rescue alone leaves Smartest's vision reads alone (they are its primary reads, not rescue reads).
+    expect(applyKillSwitchesToPipeline({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true }, { DOCSLURP_DISABLE: "ai-rescue" })).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true });
+    const untouched = { quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true };
     expect(applyKillSwitchesToPipeline(untouched, {})).toBe(untouched);
   });
 
@@ -223,11 +228,11 @@ describe("kill switches only lower: no env or request path raises a rung", () =>
     for (const subset of SUBSETS) {
       const policy = extractionPolicyFromEnv({ DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on", DOCSLURP_DISABLE: subset.join(",") });
       for (const caller of callers) {
-        for (const quality of ["fastest", "balanced", "smart"] as const) {
+        for (const quality of ["fastest", "smartest"] as const) {
           for (const visuals of ["none", "figures", "charts", "charts-ai"] as const) {
             const result = resolveExtractionSettings({
               request: { quality, visuals },
-              project: { quality: "smart", visuals: "charts-ai" },
+              project: { quality: "smartest", visuals: "charts-ai" },
               origin: "app",
               caller,
               constraints: {},
@@ -235,7 +240,7 @@ describe("kill switches only lower: no env or request path raises a rung", () =>
             });
             if (!result.ok) continue;
             const off = new Set(subset.flatMap((token) => (token === "ai" ? ["ai", "charts-ai"] : token === "charts" ? ["charts", "charts-ai"] : [token])));
-            if (off.has("ai")) expect(result.quality, subset.join(",")).not.toBe("smart");
+            if (off.has("ai")) expect(result.quality, subset.join(",")).not.toBe("smartest");
             if (off.has("charts-ai")) expect(result.visuals).not.toBe("charts-ai");
             if (off.has("charts")) expect(["none", "figures"]).toContain(result.visuals);
             if (off.has("figures")) expect(result.visuals).not.toBe("figures");

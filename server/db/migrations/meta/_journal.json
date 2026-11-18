@@ -1338,6 +1338,13 @@
       "when": 1798800000018,
       "tag": "0198_hot_query_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 191,
+      "version": "7",
+      "when": 1798800000019,
+      "tag": "0199_two_quality_levels",
+      "breakpoints": true
     }
   ]
 }

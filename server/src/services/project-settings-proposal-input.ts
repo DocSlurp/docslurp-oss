@@ -1,6 +1,6 @@
-import { applyExtractionConfigInput, ExtractionConfigConflictError, qualityLevelSchema, upgradeStoredPipelineChartExport, visualsLevelSchema } from "@docslurp/shared";
+import { applyExtractionConfigInput, ExtractionConfigConflictError, ladderRungSchema, qualityLevelInputSchema, qualityLevelOfPipeline, upgradeStoredPipelineChartExport, visualsLevelSchema } from "@docslurp/shared";
 import { z } from "zod";
-import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
+import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySettings, qualityModeSchema, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
 
 /**
  * A retired `vision: { forceAllPages }` patch (older ingest-report recommendations) arrives as `quality`:
@@ -9,7 +9,7 @@ import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, m
  */
 function migrateLegacyPatch(value: unknown, ctx?: { addIssue(issue: { code: "custom"; path: string[]; message: string; input: unknown }): void }): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  // The current names (`quality: fastest|balanced|smart`, `visuals`) become the stored legacy fields (extraction-config.ts).
+  // The current names (`quality: fastest|smartest`, `readScans`, `visuals`) become the stored legacy fields (extraction-config.ts).
   // A proposal is a patch merged onto the project, which cannot express "unset the tier": `visuals: null` is refused.
   if ((value as { visuals?: unknown }).visuals === null) {
     ctx?.addIssue({ code: "custom", path: ["visuals"], message: "Choose a visuals rung (none, figures, charts or charts-ai); a proposal cannot reset visuals to the default", input: value });
@@ -44,16 +44,17 @@ export function legacyForceAllPagesOff(raw: unknown): boolean {
 }
 
 /**
- * Applies a retired `vision: { forceAllPages: false }` to a parsed patch: on a Good project (vision on every page,
- * what forceAllPages: true used to mean) it means Auto; on any other project it changes nothing.
+ * Applies a retired `vision: { forceAllPages: false }` to a parsed patch: on a Smartest project (what forceAllPages:
+ * true became) it means Fastest; on any other project it changes nothing.
  */
-export function resolveLegacyQualityPatch<T extends { quality?: QualityMode }>(
+export function resolveLegacyQualityPatch<T extends { quality?: unknown; ladder?: unknown }>(
   patch: T,
   raw: unknown,
-  currentQuality: QualityMode,
+  current: { quality?: unknown; ladder?: unknown },
 ): T {
-  if (!legacyForceAllPagesOff(raw) || patch.quality !== undefined || currentQuality !== "good") return patch;
-  return { ...patch, quality: "auto" };
+  if (!legacyForceAllPagesOff(raw) || patch.quality !== undefined || qualityLevelOfPipeline(current).quality !== "smartest") return patch;
+  const ladder = patch.ladder && typeof patch.ladder === "object" ? patch.ladder : {};
+  return { ...patch, quality: "auto", ladder: { ...ladder, maxRung: "ocr" } };
 }
 
 const projectSettingsPipelinePatchObjectSchema = z.object({
@@ -67,10 +68,14 @@ const projectSettingsPipelinePatchObjectSchema = z.object({
   /** Finishing figures a pass left out: auto (queued on their own), manual (only on request) or off (figure-resume.ts). */
   figureResume: z.enum(["auto", "manual", "off"]).optional(),
   /**
-   * Processing quality (`fastest` / `balanced` / `smart`; the deprecated `fast` / `auto` / `good` still accepted): the
-   * setting the ingest report's vision recommendations change.
+   * Stored processing quality (`auto`, `fast`); the level (`fastest` / `smartest`, plus `readScans`) is converted onto it
+   * and onto `ladder.maxRung` before this schema runs. The setting the ingest report's vision recommendations change.
    */
   quality: qualityModeSchema.optional(),
+  /** The level's rung (`ocr` Fastest, `fast` Fastest without Read scans, `intelligent` Smartest), from `quality`. */
+  ladder: z.object({ maxRung: ladderRungSchema.optional() }).strict().optional(),
+  /** Page images for thumbnails, the reader and cited-page previews (on by default). */
+  pageImages: z.boolean().optional(),
   /**
    * Chart and diagram export. Bounded: tier (off, free, models), formats and diagrams only. The generator model is an operator and
    * settings-page choice that chat can never propose (it would route customer pages to another model).
@@ -89,8 +94,10 @@ export const projectSettingsPipelinePatchSchema = Object.assign(
     // current names onto the stored fields before the object schema runs.
     shape: {
       ...projectSettingsPipelinePatchObjectSchema.shape,
-      quality: z.union([qualityLevelSchema, qualityModeSchema]).optional()
-        .describe("Processing quality: fastest (text layers only), balanced (default: reads scans and complex pages), smart (reads every page with AI). fast/auto/good are deprecated aliases."),
+      quality: z.union([qualityLevelInputSchema, qualityModeSchema]).optional()
+        .describe("Processing quality: fastest (default: native readers, OCR for scans and images, never a vision model) or smartest (native readers, a vision model for scans, images and hard math, layouts or fonts). balanced/smart and fast/auto/good are deprecated aliases."),
+      readScans: z.boolean().optional()
+        .describe("Fastest only: false keeps scanned pages and images as page images without reading them (cheapest)."),
       visuals: visualsLevelSchema.optional()
         .describe("Figures and charts: none, figures (PDF figure files), charts (chart data from files, no model), charts-ai (also reads charts with AI, billed per chart). Replaces figures and chartExport.tier."),
     },

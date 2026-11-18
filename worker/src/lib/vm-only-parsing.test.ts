@@ -113,7 +113,8 @@ describe("kill switch call sites", () => {
   it("each model-read site that quality alone would allow checks the switch", async () => {
     const { readFileSync } = await import("node:fs");
     const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
-    expect(read("../deferred/materialize-pages.ts")).toMatch(/switchDisabled\(process\.env, "ai-rescue"\)[\s\S]*switchDisabled\(process\.env, "ai"\)/);
+    // Query-time reads are rescue reads of textless pages: `ai` implies `ai-rescue` (kill-switches.ts), so one check covers both.
+    expect(read("../deferred/materialize-pages.ts")).toMatch(/switchDisabled\(process\.env, "ai-rescue"\)/);
     expect(read("../stages/extract-markdown.ts")).toMatch(/runSelfCritique[\s\S]*switchDisabled\(process\.env, "ai-rescue"\)/);
     expect(read("../stages/document-map.ts").match(/switchDisabled\(process\.env, "ai"\)/g)?.length).toBeGreaterThanOrEqual(2);
     expect(read("../media/extract.ts")).toMatch(/visualEnabled[\s\S]{0,200}switchDisabled\(process\.env, "ai"\)/);

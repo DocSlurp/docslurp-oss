@@ -41,7 +41,7 @@ afterEach(async () => {
 function runState(run: Record<string, unknown> = {}): WorkflowState {
   const state = WorkflowState.create({
     id: "run-1", orgId: "org-1", projectId: "proj-1", userId: "user-1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
-    pipeline: { privacyMode: "standard" },
+    pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, privacyMode: "standard" },
     ...run,
   } as unknown as ProjectRun, []);
   state.usageLedger.runId = String(run.id ?? "run-1");
@@ -371,7 +371,7 @@ describe("readPagesWithProvider", () => {
   });
 
   it("stops at the run cost cap", async () => {
-    const state = runState({ spentCents: 500, pipeline: { privacyMode: "standard", maxCostCents: 100 } });
+    const state = runState({ spentCents: 500, pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, privacyMode: "standard", maxCostCents: 100 } });
     const provider = reader(echo);
     const summary = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state));
     expect(provider.read).not.toHaveBeenCalled();
@@ -682,6 +682,21 @@ describe("ocrDocument with the page reader", () => {
     expect(result.pageReader).toBeUndefined();
   });
 
+  it("Fastest never runs the page reader or hosted escalation, whatever the OCR env says", async () => {
+    const provider = reader(echo);
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "test-reader-plugin", pageImageReader: provider });
+    const { runner, jobs } = fakeOcrRunner((job) => job.pages!.map((frame) => ({ frame, text: "low", meanConfidence: 0.3, image: true })));
+    const hosted = hostedReader();
+    const state = runState({ pipeline: { quality: "auto", ladder: { maxRung: "ocr" }, privacyMode: "standard" } });
+    const result = await ocrDocument({ runner, state, documentId: "doc-1", source, kind: "pdf", pages: [1, 2], stage: "s", hostedReader: hosted,
+      env: { DOCSLURP_OCR_MODE: "vm", DOCSLURP_OCR_SCRATCH_DIR: scratch, DOCSLURP_OCR_PAGE_READER: "all", DOCSLURP_OCR_ESCALATION: "on" } });
+    expect(jobs[0]!.escalation).toBeNull();
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(hosted.read).not.toHaveBeenCalled();
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
+    expect(result.pages.map((page) => page.text)).toEqual(["low", "low"]);
+  });
+
   it("escalation mode reads the candidates first; the hosted reader only gets what it did not replace", async () => {
     const provider = reader(async (job) => ({
       // Reads the first page sent, fails the second.
@@ -788,7 +803,7 @@ describe("privacy mode (design Q14): only a registered private reader reads rest
 
   it.each(["local-only", "strict-privacy"])("%s: an undeclared reader is sent no pages and the recogniser text stands", async (privacyMode) => {
     const provider = reader(echo);
-    const state = runState({ pipeline: { privacyMode } });
+    const state = runState({ pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, privacyMode } });
     const outcome = await outcomeWith([{ pageNumber: 1, escalate: true }, { pageNumber: 2, escalate: true }]);
     const summary = await readPagesWithProvider(outcome, provider, ctx(state, { mode: "all" }));
     expect(provider.read).not.toHaveBeenCalled();
@@ -810,7 +825,7 @@ describe("privacy mode (design Q14): only a registered private reader reads rest
   it("the configured OCR entry point refuses before any warm gate or VM start", async () => {
     const warmStart = vi.fn();
     registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "privacy-reader", pageImageReader: reader(echo, { warm: { start: warmStart, status: vi.fn(() => "cold") } as never }) });
-    const state = runState({ pipeline: { privacyMode: "strict-privacy" } });
+    const state = runState({ pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, privacyMode: "strict-privacy" } });
     const result = await readOcrPagesWithConfiguredReader(await outcomeWith([{ pageNumber: 1, escalate: true }]), { state, documentId: "doc-1" }, { DOCSLURP_OCR_PAGE_READER: "all" });
     expect(result).toBeNull();
     expect(warmStart).not.toHaveBeenCalled();
@@ -819,7 +834,7 @@ describe("privacy mode (design Q14): only a registered private reader reads rest
   it("a registered private reader reads restricted projects", async () => {
     setPrivateModelEndpointRegistryForTests([privateEndpoint]);
     const provider = reader(echo, { privateRoute: registered });
-    const state = runState({ pipeline: { privacyMode: "local-only" } });
+    const state = runState({ pipeline: { quality: "auto", ladder: { maxRung: "intelligent" }, privacyMode: "local-only" } });
     const outcome = await outcomeWith([{ pageNumber: 1 }]);
     const summary = await readPagesWithProvider(outcome, provider, ctx(state, { mode: "all" }));
     expect(provider.read).toHaveBeenCalledTimes(1);

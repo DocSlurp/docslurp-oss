@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { isBillingEnforced, pipelineProfileIdSchema, pricingVersion } from "./billing.js";
+import { isBillingEnforced, pipelineProfileIdFor, pipelineProfileIdSchema, pricingVersion } from "./billing.js";
 import { fileProfileSchema, normalizeFileProfile, type FileProfile } from "./file-profile.js";
 import { type CostEstimate } from "./jobs.js";
 import type { UploadMediaEstimate, UploadMediaFile } from "./media-upload-estimate.js";
@@ -83,8 +83,8 @@ export function estimateProfileFor(
   const stages = compilePipelinePlan(pipeline).stageOrder;
   return {
     pricingVersion: pricingVersion(),
-    // Auto capped at the fast rung (pipeline.ladder) reads as Fast, so it is quoted as Fast.
-    quality: pageReadingQuality(pipeline),
+    // The pricing profile the pipeline reads with: Read scans off (the fast rung) is quoted as Fast.
+    quality: pipelineProfileIdFor(pipeline),
     documentFeatures: {
       documentSummary: stages.includes("document-summary"),
       structuredFields: stages.includes("structured-extract"),
@@ -199,7 +199,7 @@ export function quoteUpload(args: {
   const files = args.files.map(applyFileProfile);
   const speedBoost = args.speedBoost === true;
   const quote = pricing().quoteUpload({ files, profile, speedBoost });
-  if (aboveFastShare === undefined || profile.quality !== "auto" || !quote.estimate.credits) return quote;
+  if (aboveFastShare === undefined || (profile.quality !== "fastest" && profile.quality !== "smartest") || !quote.estimate.credits) return quote;
   // Auto with an above-fast share (pipeline.ladder): pages beyond the share are not read, so they are not quoted Rich.
   const fast = pricing().quoteUpload({ files, profile: { ...profile, quality: "fast" }, speedBoost });
   if (!fast.estimate.credits) return quote;

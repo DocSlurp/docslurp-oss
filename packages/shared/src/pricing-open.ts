@@ -64,7 +64,7 @@ function openEstimateIngest(input: IngestEstimateInput): IngestEstimate {
   for (const [feature, on] of Object.entries(input.features ?? {})) if (on) featureCredits[feature as DocumentFeature] = 0;
   return {
     pages,
-    profile: input.profile ?? "auto",
+    profile: input.profile ?? "fastest",
     workers,
     effectiveParallelism,
     workerSeconds,

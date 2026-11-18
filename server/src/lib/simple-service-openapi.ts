@@ -169,10 +169,14 @@ export const simpleServiceSchemas = {
   },
 };
 
-const qualityDescription = "Processing quality for these files; omitted uses the project's (auto by default). fast: text layer only, scanned pages kept as page images and not read (Text pages, $0.10 per 1,000 pages). auto: each page read the cheapest faithful way (Text, Scan or Vision pages, $0.10 to $1.50). good: a vision model reads every page (Vision pages, $1.50).";
+const qualityDescription = "Processing quality for these files; omitted uses the project's (fastest by default). fastest: native readers, scanned pages and images read by OCR, never a vision model (Text and Scan pages). smartest: native readers, a vision model for scans, images and hard math, layouts or fonts (Text and Vision pages). Estimates quote the price.";
 const pipelineOverrides = {
   type: "object", description: "Per-upload pipeline overrides merged onto the project pipeline.",
-  properties: { quality: { type: "string", enum: ["fast", "auto", "good"], description: qualityDescription } },
+  properties: {
+    quality: { type: "string", enum: ["fastest", "smartest"], description: qualityDescription },
+    readScans: { type: "boolean", description: "Fastest only: false keeps scanned pages and images as page images, not read (Text pages only)." },
+    pageImages: { type: "boolean", description: "Store page images for thumbnails, the reader and cited-page previews (default true). Smartest always keeps them; false applies to Fastest only." },
+  },
 };
 
 const canonicalServicePaths = {

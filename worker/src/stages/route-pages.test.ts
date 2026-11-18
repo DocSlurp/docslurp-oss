@@ -64,6 +64,8 @@ function makeState(options: { mode?: PageRouterMode; pageRouter?: Partial<PageRo
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
       quality: options.quality ?? "auto",
+      // Smartest: Fastest never asks decision models about its pages (it reads with OCR only).
+      ladder: { maxRung: "intelligent" },
       privacyMode: options.privacyMode ?? "standard",
       maxCostCents: options.maxCostCents ?? null,
       pageRouter: { ...defaultPageRouterConfig, router: "decision-model", triageFormat: "text-state", ...options.pageRouter, mode: options.mode },

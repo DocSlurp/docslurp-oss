@@ -80,7 +80,7 @@ function makeState(options: { mode?: PageRouterMode; pageRouter?: Partial<PageRo
   const state = WorkflowState.create({
     id: "run", orgId: "org", spentCents: 0, artifacts: {}, stats: {},
     pipeline: {
-      quality: "auto", privacyMode: "standard", maxCostCents: null,
+      quality: "auto", ladder: { maxRung: "intelligent" }, privacyMode: "standard", maxCostCents: null,
       pageRouter: { ...defaultPageRouterConfig, router: "baseline", marginFloor: 0, ...options.pageRouter, mode: options.mode ?? "shadow" },
     },
   } as unknown as ProjectRun, [document]);

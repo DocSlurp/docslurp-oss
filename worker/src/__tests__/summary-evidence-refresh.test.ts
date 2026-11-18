@@ -39,7 +39,7 @@ function setup() {
     createdAt: new Date(), updatedAt: new Date(),
   };
   const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stage: "vision-extract", status: "processing",
-    pipeline: normalizePipelineFeatures({ summarize: true, quality: "good" }), stats: {}, artifacts: {} } as unknown as ProjectRun;
+    pipeline: normalizePipelineFeatures({ summarize: true, quality: "smartest" } as never), stats: {}, artifacts: {} } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   return { storage, document, state };
 }

@@ -67,7 +67,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { dopplerImageLimits, figuresEnabled, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, ladderSkipsOcr, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -351,6 +351,12 @@ export class ExtractMarkdownStage implements Stage {
         const ladderPolicy = documentLadderPolicy(state.run.pipeline, document.pageCount);
         const pageQuality = ladderPolicy.quality;
         const ladderBinding = pageQuality === "auto" && ladderPolicy.aboveFastBinding;
+        // Smartest has no OCR step: the text-layer extractors run (as in Fast), and scans and image pages are left for
+        // the vision model. Only while vision can actually read this run's pages; otherwise OCR reads them, so a scan is
+        // never left unread because vision is off or refused by the privacy mode.
+        // Per document: a document vision-extract will not read (its playbook disallows vision, a text-native source) is
+        // read by OCR here, as on Fastest.
+        const skipOcr = pageQuality === "auto" && ladderSkipsOcr(state.run.pipeline) && visionMayReadDocumentPages(state, document, true);
         const playbook =
           (state.artifactLedger.readDocument(document.id, "parser-playbook") as
             | keyof typeof parserPlaybookCatalog
@@ -359,7 +365,7 @@ export class ExtractMarkdownStage implements Stage {
         // Fast runs only text-layer extractors with OCR off, whatever the request or project asked for.
         const { config: extractionConfig, removed: fastRemoved } = documentExtractionForQuality(
           { ...defaultDocumentExtractionConfig, ...(state.run.pipeline.documentExtraction ?? {}) },
-          ladderBinding ? "fast" : pageQuality,
+          ladderBinding || skipOcr ? "fast" : pageQuality,
         );
         if (fastRemoved.length > 0) {
           console.warn(
@@ -484,17 +490,19 @@ export class ExtractMarkdownStage implements Stage {
                 // Under an above-fast share the OCR engine (which reads every frame) does not read a multi-frame image or one
                 // whose frames the share does not cover (ladderKeepsImageUnread): kept unread, as Fast keeps it.
                 const ladderKeepsImage = ladderKeepsImageUnread(ladderPolicy, { filename: document.filename, mimeType: document.mimeType, sniffedMimeType: document.fileFacts?.sniffedMimeType ?? null });
-                const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
-                  (!qualityAllowsPageReading(pageQuality) || ladderKeepsImage);
+                const isImageSource = format === "image" || (document.mimeType ?? "").startsWith("image/");
+                const keepImageUnread = isImageSource && (!qualityAllowsPageReading(pageQuality) || ladderKeepsImage);
+                // Smartest: an image goes to the vision model, not OCR (an empty extraction that vision fills).
+                const imageToVision = isImageSource && !keepImageUnread && skipOcr;
                 // An Office file no reader here can open fails now, loudly and for good, never through a weaker reader.
-                const unsupported = keepImageUnread ? null : await unsupportedSourceReason(tempFile, {
+                const unsupported = keepImageUnread || imageToVision ? null : await unsupportedSourceReason(tempFile, {
                   format, mimeType: document.fileFacts?.sniffedMimeType ?? document.mimeType, filename: document.filename,
                 });
                 if (unsupported) {
                   console.error(`[extract-markdown] unsupported-format document=${document.id} format=${format} reason=${JSON.stringify(unsupported)}`);
                   throw new Error(unsupported);
                 }
-                let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
+                let plannedExtractors = keepImageUnread || imageToVision ? null : await this.planExtractors({
                   mimeType: document.fileFacts?.sniffedMimeType ?? null,
                   pageCount: document.pageCount,
                   tempFile,
@@ -511,6 +519,13 @@ export class ExtractMarkdownStage implements Stage {
                   textlessFallback = ladderKeepsImage ? "ladder share cap keeps images unread" : "quality fast keeps images unread";
                   plannedExtractors = {
                     primary: this.textlessImageExtractor(state, document, textlessFallback, true),
+                    secondary: null,
+                    tableAware: false,
+                  };
+                } else if (imageToVision) {
+                  textlessFallback = "smartest reads images with vision";
+                  plannedExtractors = {
+                    primary: this.textlessImageExtractor(state, document, textlessFallback, false),
                     secondary: null,
                     tableAware: false,
                   };
@@ -725,7 +740,7 @@ export class ExtractMarkdownStage implements Stage {
                   // text-layer extractors never OCR. The engine charges each page it reads.
                   const sourceLexical = new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? [])
                     .map((text, index) => [index + 1, winningCandidate.ocrPages?.includes(index + 1) ? null : ocrPageHasWords(text)] as const));
-                  const scanFill = isPdf && qualityAllowsPageReading(pageQuality)
+                  const scanFill = isPdf && qualityAllowsPageReading(pageQuality) && !skipOcr
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash,
                       ...(ladderPolicy.ladder.active ? { ladderBudget: ladderPolicy.aboveFastBudget } : {}) }, signal)
                     : null;
@@ -1245,7 +1260,8 @@ export class ExtractMarkdownStage implements Stage {
                       textlessFallback,
                       plausibilityScore,
                       // Fast kept the image unread on purpose: its empty text is not a low-quality extraction to retry.
-                      ...(winningCandidate.label === "image-textless" ? { keptUnread: true } : {}),
+                      // Smartest's empty extraction of an image is vision's to fill, not an image kept unread.
+                      ...(winningCandidate.label === "image-textless" && !imageToVision ? { keptUnread: true } : {}),
                       manifestUri,
                       artifactGraphUri: graph?.manifestUri ?? null,
                       artifactGraphTargets: graph?.requestedTargets ?? [],

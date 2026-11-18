@@ -83,7 +83,8 @@ function appFor(userId: string, key?: Key, options: { session?: boolean } = {}) 
 const post = (app: Hono, path: string, body: unknown = {}) =>
   app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
-const graphPipeline = { ...defaultPipelineFeatures, graphRag: true, embed: true };
+// Smartest (the ladder's intelligent rung): AI chart reads run and are priced only there; Fastest keeps the free tier.
+const graphPipeline = { ...defaultPipelineFeatures, ladder: { maxRung: "intelligent" as const }, graphRag: true, embed: true };
 
 async function seed() {
   await sql`delete from graph_jobs`;
@@ -831,9 +832,9 @@ describe("quality and visuals (extraction config R0): raise authorisation, caps,
     await seed();
     await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('k1', 'u1', 'o1', 'hash-quality-k1', 'quality', 'server') on conflict (id) do nothing`;
     await sql`update api_keys set scopes = array['ingest', 'search:deep', 'artifacts'], revoked_at = null where id = 'k1'`;
-    // The run being reprocessed was read at good (smart); the project is now auto (balanced).
+    // The run being reprocessed was read at good (Smartest); the project is now Fastest (auto on the ocr rung).
     await sql`update project_runs set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = 'run'`;
-    await sql`update projects set pipeline = jsonb_set(pipeline, '{quality}', '"auto"') where id = 'w'`;
+    await sql`update projects set pipeline = jsonb_set(jsonb_set(pipeline, '{quality}', '"auto"'), '{ladder}', '{"maxRung": "ocr"}') where id = 'w'`;
   });
   afterAll(() => { vi.unstubAllEnvs(); });
   const server = (patch: Partial<Key> = {}): Key => ({ orgId: "o1", scopes: ["ingest"], keyType: "server", ...patch });
@@ -851,12 +852,14 @@ describe("quality and visuals (extraction config R0): raise authorisation, caps,
     return app;
   };
 
-  it("a plain reprocess caps the inherited smart at the project's balanced and stamps effective with capsApplied", async () => {
+  it("a plain reprocess caps the inherited smartest at the project's fastest and stamps effective with capsApplied", async () => {
     const res = await post(appFor("u1", server()), "/v1/runs/run/reprocess", {});
     expect(res.status, await res.clone().text()).toBe(201);
     const run = await latestRun();
     expect(run!.pipeline.quality).toBe("auto");
-    expect(run!.pipeline.effective).toMatchObject({ quality: "balanced", readsPages: true, capsApplied: [{ field: "quality", from: "smart", to: "balanced", reason: "replay" }] });
+    expect(run!.pipeline.ladder).toMatchObject({ maxRung: "ocr" });
+    // A non-editor's replay is held to the project's ladder before resolution (clampRunLadder), so it runs as Fastest.
+    expect(run!.pipeline.effective).toMatchObject({ quality: "fastest", readsPages: false });
   });
 
   it("smart above the project: wrong-scope key 403, revoked billed key 403, other org 404; billed key and editor session allowed", async () => {
@@ -870,7 +873,7 @@ describe("quality and visuals (extraction config R0): raise authorisation, caps,
     expect(await runCount()).toBe(before);
     await sql`update api_keys set revoked_at = null where id = 'k1'`;
     expect((await post(appFor("u1", server({ scopes: ["ingest", "pipeline:billed-features"] })), "/v1/runs/run/reprocess", { quality: "smart" })).status).toBe(201);
-    expect((await latestRun())!.pipeline).toMatchObject({ quality: "good", effective: { quality: "smart", capsApplied: [] } });
+    expect((await latestRun())!.pipeline).toMatchObject({ quality: "auto", ladder: { maxRung: "intelligent" }, effective: { quality: "smartest", capsApplied: [] } });
     expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { quality: "smart" })).status).toBe(201);
   });
 
@@ -889,10 +892,10 @@ describe("quality and visuals (extraction config R0): raise authorisation, caps,
     const visuals = await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { visuals: "charts-ai" });
     expect(visuals.status).toBe(400);
     expect(await visuals.json()).toMatchObject({ error: { code: "visuals_unavailable", details: { field: "visuals", reason: "privacy" } } });
-    // The project itself saved on good under local-only: runs are capped to balanced, recorded, never refused.
-    await sql`update projects set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = 'w'`;
+    // The project itself saved on Smartest under local-only: runs are capped to Fastest, recorded, never refused.
+    await sql`update projects set pipeline = jsonb_set(pipeline, '{ladder}', '{"maxRung": "intelligent"}') where id = 'w'`;
     expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", {})).status).toBe(201);
-    expect((await latestRun())!.pipeline).toMatchObject({ quality: "auto", effective: { quality: "balanced", capsApplied: [{ field: "quality", reason: "privacy" }] } });
+    expect((await latestRun())!.pipeline).toMatchObject({ quality: "auto", ladder: { maxRung: "ocr" }, effective: { quality: "fastest", capsApplied: [{ field: "quality", reason: "privacy" }] } });
   });
 
   it("reprocess takes visuals; chartExport still works with a Deprecation header and warnings[]", async () => {
@@ -914,11 +917,11 @@ describe("quality and visuals (extraction config R0): raise authorisation, caps,
     const res = await patch({ pipeline: { ...graphPipeline, quality: "fastest", visuals: "charts", figures: undefined, chartExport: undefined, visionFallback: undefined } });
     expect(res.status, await res.clone().text()).toBe(200);
     const stored = (await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from projects where id = 'w'`)[0]!.pipeline;
-    expect(stored).toMatchObject({ quality: "fast", figures: true, chartExport: { tier: "free" } });
+    expect(stored).toMatchObject({ quality: "auto", ladder: { maxRung: "ocr" }, figures: true, chartExport: { tier: "free" } });
     expect(stored.visuals).toBeUndefined();
     const project = await (await app.request("/v1/projects/w")).json() as { extraction?: unknown; visualsDefaults?: unknown; project?: { extraction?: unknown; visualsDefaults?: unknown } };
     const record = project.project ?? project;
-    expect(record.extraction).toEqual({ quality: "fastest", visuals: "charts" });
+    expect(record.extraction).toEqual({ quality: "fastest", readScans: true, visuals: "charts" });
     expect(record.visualsDefaults).toMatchObject({ machine: "figures", available: expect.arrayContaining(["charts-ai"]) });
     const legacy = await patch({ pipeline: { ...graphPipeline, quality: "auto" } });
     expect(legacy.status).toBe(200);
@@ -929,6 +932,6 @@ describe("quality and visuals (extraction config R0): raise authorisation, caps,
     const app = appFor("u1", undefined, { session: true });
     const body = await (await app.request("/v1/runs?projectId=w")).json() as { runs?: Array<{ id: string; extraction?: unknown }> } | Array<{ id: string; extraction?: unknown }>;
     const runs = Array.isArray(body) ? body : body.runs ?? [];
-    expect(runs.find((run) => run.id === "run")?.extraction).toMatchObject({ quality: "smart", legacy: true });
+    expect(runs.find((run) => run.id === "run")?.extraction).toMatchObject({ quality: "smartest", legacy: true });
   });
 });
