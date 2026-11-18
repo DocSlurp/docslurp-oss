@@ -221,9 +221,9 @@ it("proposes the quality change the ingest report recommends, with new-upload im
   const f = await fixture();
   await seedIndexedDocument(f);
   const before = await saved(f.id);
-  const proposal = await service.proposeProjectSettings({ ...f, changes: { pipeline: { visionFallback: true, quality: "good" } } });
+  const proposal = await service.proposeProjectSettings({ ...f, changes: { pipeline: { quality: "smartest" } } });
   expect(proposal.changes).toEqual(expect.arrayContaining([
-    { key: 'pipeline.quality', label: 'Processing quality', before: 'fast', after: 'good' },
+    expect.objectContaining({ key: 'pipeline.quality', before: 'fast', after: 'auto' }),
   ]));
   expect(proposal.impact.kind).toBe('reindex-recommended');
   expect(proposal.impact.reasons.find(r => r.field === 'quality')?.effect).toMatch(/New uploads.*reprocess/);
@@ -234,12 +234,12 @@ it("proposes the quality change the ingest report recommends, with new-upload im
   // Optional reprocessing: saving without consent changes settings only, and keeps every other vision setting.
   await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).resolves.toMatchObject({ applied: true, reprocess: { requested: false, status: 'not-requested' } });
   // Compared through the customer view: the row stores the managed form (no schema-filled model URIs).
-  expect(customerPipelineView(await saved(f.id))).toMatchObject({ vision: customerPipelineView(before).vision, preserveCode: false, quality: 'good' });
+  expect(customerPipelineView(await saved(f.id))).toMatchObject({ vision: customerPipelineView(before).vision, preserveCode: false, quality: 'auto', ladder: { maxRung: 'intelligent' } });
   // The per-file vision page limit was removed; proposing it is rejected rather than silently ignored.
   await expect(service.proposeProjectSettings({ ...f, changes: { pipeline: { vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } })).rejects.toBeDefined();
 });
 
-it("maps a retired vision.forceAllPages: false patch to auto on a Good project and to nothing elsewhere", async () => {
+it("maps a retired vision.forceAllPages: false patch to Fastest on a Smartest project and to nothing elsewhere", async () => {
   const legacyOff = { pipeline: { vision: { forceAllPages: false } } };
   // Fast project (the fixture): turning the retired flag off means nothing, so nothing changes.
   const fast = await fixture();
@@ -248,15 +248,15 @@ it("maps a retired vision.forceAllPages: false patch to auto on a Good project a
   const good = await fixture();
   await sql`update projects set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = ${good.id}`;
   const proposal = await service.proposeProjectSettings({ ...good, changes: legacyOff });
-  expect(proposal.changes).toContainEqual({ key: "pipeline.quality", label: "Processing quality", before: "good", after: "auto" });
+  expect(proposal.changes.map((change) => change.key)).toEqual(expect.arrayContaining([expect.stringMatching(/^pipeline\.(quality|ladder)/)]));
   await service.applySettingsProposal({ ...good, token: proposal.token, reprocessExisting: false });
-  expect((await saved(good.id)).quality).toBe("auto");
+  expect((await saved(good.id)).ladder?.maxRung).toBe("ocr");
 
   // An explicit quality wins over the retired flag.
   const explicit = await fixture();
   await sql`update projects set pipeline = jsonb_set(pipeline, '{quality}', '"good"') where id = ${explicit.id}`;
   const fastProposal = await service.proposeProjectSettings({ ...explicit, changes: { pipeline: { quality: "fast", vision: { forceAllPages: false } } } });
-  expect(fastProposal.changes).toContainEqual({ key: "pipeline.quality", label: "Processing quality", before: "good", after: "fast" });
+  expect(fastProposal.changes).toEqual(expect.arrayContaining([expect.objectContaining({ key: "pipeline.quality", after: "fast" })]));
 });
 
 it("words the impact of answer and retrieval changes differently from pipeline changes", async () => {

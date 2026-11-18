@@ -40,7 +40,7 @@ describe("materialize run source pipeline", () => {
   it("uses the document's own run pipeline inside its project", async () => {
     const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "theirs", documentId: "their-doc", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
     const [run] = await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from project_runs where id = ${id}`;
-    expect(run!.pipeline).toMatchObject({ quality: "good" });
+    expect(run!.pipeline).toMatchObject({ quality: "auto", ladder: { maxRung: "intelligent" } });
   });
 
   it("never copies the source run's model values: the project's explicit overrides and current defaults apply", async () => {
@@ -55,7 +55,7 @@ describe("materialize run source pipeline", () => {
     await sql`update projects set managed_models = ${sql.json({ pipeline: { textGeneration: { model: "llm://private/gpu1/acme/text" } } })} where id = 'mine'`;
     const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "mine", documentId: "legacy-doc", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
     const [run] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = ${id}`;
-    expect(run!.pipeline).toMatchObject({ quality: "good" });
+    expect(run!.pipeline).toMatchObject({ quality: "auto", ladder: { maxRung: "intelligent" } });
     expect(run!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
     expect(run!.pipeline.textGeneration).toMatchObject({ model: "llm://private/gpu1/acme/text" });
   });
