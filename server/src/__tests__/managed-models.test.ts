@@ -117,7 +117,7 @@ describe("platform-admin managed model route", () => {
 
   it("refuses an override that conflicts with the project's privacy mode", async () => {
     sqlMock.mockResolvedValueOnce(projectRow({ pipeline: { privacyMode: "local-only", vision: { profile: "cheapest-local" }, embedding: { profile: "cheapest-local" } } }));
-    const response = await put(adminSession, { pipeline: { vision: { remoteFallbackModelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } });
+    const response = await put(adminSession, { pipeline: { vision: { remoteFallbackModelUri: "llm://openrouter/z-ai/glm-5.3-flash" } } });
     expect(response.status).toBe(400);
     expect((await response.json()).error.message).toContain("conflict");
   });

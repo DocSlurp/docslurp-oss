@@ -1504,12 +1504,13 @@ export function readVisionModelUriOverride(
   const raw = env[VISION_MODEL_URI_ENV]?.trim();
   if (!raw) return null;
   const entry = llmModelUriSchema.safeParse(raw).success ? visionModelCatalogByUri[raw] : undefined;
-  if (entry?.target === "hosted") return entry.uri;
+  // A refused catalog model is never the default: every vision call on it would be refused at call time.
+  if (entry?.target === "hosted" && !("refusedReason" in entry)) return entry.uri;
   if (!reportedVisionOverrideErrors.has(raw)) {
     reportedVisionOverrideErrors.add(raw);
     onError(
       `[config] ${VISION_MODEL_URI_ENV}=${raw} ignored: expected one of ${
-        visionModelCatalog.filter((model) => model.target === "hosted").map((model) => model.uri).join(", ")
+        visionModelCatalog.filter((model) => model.target === "hosted" && !("refusedReason" in model)).map((model) => model.uri).join(", ")
       }`,
     );
   }

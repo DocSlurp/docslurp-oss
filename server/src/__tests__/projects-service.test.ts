@@ -88,6 +88,34 @@ describe("listProjects", () => {
     });
   });
 
+  it("lists every readable project when one row's stored settings no longer validate", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const row = (id: string, pipeline: unknown) => ({
+      id, org_id: "org-1", user_id: "user-1", name: id, template_key: null, system_prompt: null, pipeline, monthly_budget_cents: null,
+      document_count: 0, total_page_count: 0, run_count: 0, latest_run_id: null, latest_run_status: null, archived_at: null,
+      slug: `slug-${id}`, last_activity_at: "2026-04-08T18:00:00.000Z", created_at: "2026-04-08T17:00:00.000Z", updated_at: "2026-04-08T18:00:00.000Z",
+    });
+    listAccessibleProjectIdsMock.mockResolvedValue(["good", "old-model", "bad-field", "unreadable"]);
+    sqlMock.mockResolvedValueOnce([
+      row("good", null),
+      // The production shape: a model named by catalog id that is refused today.
+      row("old-model", { vision: { model: "gpt-4.1-mini", prompt: "<OCR>", baseUrl: null, runtime: "remote-openai", benchmarkProfile: "difficult-pages", maxPagesPerDocument: 4, remoteFallbackModel: "gpt-4.1-mini" } }),
+      // A setting the schema rejects outright: listed with the default for that field.
+      row("bad-field", { quality: "no-such-quality", vision: { profile: "cheapest-hosted" } }),
+      // Not a project row at all: left out, the others still listed.
+      { ...row("unreadable", null), org_id: null, name: null },
+    ]);
+
+    const projects = await listProjects("user-1");
+
+    expect(projects.map((project) => project.id)).toEqual(["good", "old-model", "bad-field"]);
+    expect(JSON.stringify(projects)).not.toContain("gpt-4.1-mini");
+    expect(projects[2]!.pipeline.vision.profile).toBe("cheapest-hosted");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("project bad-field has stored settings that no longer validate"));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("project unreadable could not be read even with defaults; left out of the list"));
+    error.mockRestore();
+  });
+
   it("reads corpus totals from counters and in-flight work separately", async () => {
     listAccessibleProjectIdsMock.mockResolvedValue(["ws-1"]);
     sqlMock.mockResolvedValueOnce([

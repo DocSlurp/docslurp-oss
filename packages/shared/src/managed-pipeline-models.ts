@@ -122,9 +122,13 @@ export function stripManagedPipelineFields<T>(pipeline: T): T {
  */
 const LEGACY_VISION_MODEL_KEYS = ["model", "runtime", "baseUrl", "remoteFallbackModel"] as const;
 
-function stripLegacyVisionModel(pipeline: PipelineLike): PipelineLike {
+function stripLegacyVisionModel(pipeline: PipelineLike, source: string): PipelineLike {
   const vision = record(pipeline.vision);
   if (!vision || !LEGACY_VISION_MODEL_KEYS.some((key) => Object.hasOwn(vision, key))) return pipeline;
+  // An endpoint of its own was a deliberate choice: say that it no longer applies.
+  if (typeof vision.baseUrl === "string" && vision.baseUrl !== "" && vision.baseUrl.replace(/\/$/, "") !== "https://openrouter.ai/api/v1") {
+    console.error(`[managed-models] stored pipeline of ${source} names its own vision endpoint; projects do not choose a model or endpoint, so it is ignored`);
+  }
   return { ...pipeline, vision: Object.fromEntries(Object.entries(vision).filter(([key]) => !(LEGACY_VISION_MODEL_KEYS as readonly string[]).includes(key))) };
 }
 
@@ -192,7 +196,7 @@ export function resolveManagedPipeline(
   overrides: ManagedPipelineOverrides | null | undefined,
   source: string,
 ): ResolvedManagedPipeline {
-  const base = stripLegacyVisionModel(stripManagedPipelineFields(record(stored) ?? {}) as PipelineLike);
+  const base = stripLegacyVisionModel(stripManagedPipelineFields(record(stored) ?? {}) as PipelineLike, source);
   const entries = overrideEntries(overrides);
   const attempt = (kept: readonly OverrideEntry[]) => {
     // The stored-row reader drops a refused vision model quietly so old rows still read; an override naming one is not

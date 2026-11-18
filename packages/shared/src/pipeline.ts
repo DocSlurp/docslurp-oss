@@ -1215,17 +1215,27 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
     const refused = ["model", "modelUri", "remoteFallbackModel", "remoteFallbackModelUri"]
       .filter((key) => typeof vision[key] === "string" && visionModelRefusal(vision[key] as string) !== null);
     if (refused.length > 0) {
-      for (const key of refused) delete vision[key];
-      if (refused.includes("model")) {
-        // The legacy shape is converted only while `model` is present (stored-model-settings.ts): finish it here.
-        delete vision.runtime;
-        delete vision.baseUrl;
-        const fallback = visionModelCatalog.find((spec) => spec.id === vision.remoteFallbackModel);
-        if (fallback) vision.remoteFallbackModelUri ??= fallback.uri;
-        delete vision.remoteFallbackModel;
+      // A row that pinned its own endpoint is not rerouted to the default one: it keeps failing, as it did before.
+      const customEndpoint = typeof vision.baseUrl === "string" && vision.baseUrl !== ""
+        && vision.baseUrl.replace(/\/$/, "") !== "https://openrouter.ai/api/v1";
+      if (!(refused.includes("model") && customEndpoint)) {
+        for (const key of refused) delete vision[key];
+        // The stored target described the dropped model; the profile's or the default model brings its own.
+        if (refused.includes("model") || refused.includes("modelUri")) delete vision.target;
+        if (refused.includes("model")) {
+          // The legacy shape is converted only while `model` is present (stored-model-settings.ts): finish it here.
+          delete vision.runtime;
+          delete vision.baseUrl;
+          if (vision.remoteFallbackModel !== undefined && vision.remoteFallbackModel !== null) {
+            const fallback = visionModelCatalog.find((spec) => spec.id === vision.remoteFallbackModel);
+            if (fallback) vision.remoteFallbackModelUri ??= fallback.uri;
+            else refused.push("remoteFallbackModel");
+          }
+          delete vision.remoteFallbackModel;
+        }
+        next = { ...next, vision };
+        dropped.push(...refused.map((key) => `vision.${key}`));
       }
-      next = { ...next, vision };
-      dropped.push(...refused.map((key) => `vision.${key}`));
     }
   }
   if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
