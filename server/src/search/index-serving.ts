@@ -1,10 +1,12 @@
 import { HTTPException } from "hono/http-exception";
 import { reportException } from "@docslurp/shared/error-reporting";
 import {
+  applyPrivateModelMode,
   embeddingModelBaseUri,
   embeddingModelCatalogByUri,
   indexConfigHash,
   indexConfigOf,
+  isPrivacyModeViolation,
   normalizeStoredPipelineFeatures,
   resolveEmbeddingRoute,
   type EmbeddingConfig,
@@ -105,7 +107,8 @@ export async function pruneIndexConfigs(projectId: string, sql: SqlClient = defa
     select pipeline from projects where id = ${projectId} and index_configs is not null
   `;
   if (!ws) return {};
-  const current = indexConfigOf(normalizeStoredPipelineFeatures(ws.pipeline ?? null, `project ${projectId}`));
+  // The effective config (the operator's private model where hosted ones are not allowed), as search and the worker use.
+  const current = indexConfigOf(applyPrivateModelMode(normalizeStoredPipelineFeatures(ws.pipeline ?? null, `project ${projectId}`)));
   const currentHash = indexConfigHash(current);
   const unchanged = ws.pipeline === null
     ? sql`ws.pipeline is null`
@@ -197,7 +200,13 @@ export async function servedVectorSearch<T extends ChunkLike>(args: {
     const config = hash === currentHash ? null : args.indexConfigs[hash]!;
     const embedding = config ? embeddingConfigFor(args.pipeline.embedding, config) : args.pipeline.embedding;
     const key = spaceKey(embedding);
-    if (!vectors.has(key)) vectors.set(key, args.query ? args.deps.embed(args.query, embedding) : Promise.resolve(null));
+    // An older config's model may no longer be callable (its hosted route refused once the deployment runs in private
+    // model mode): those documents are skipped until re-indexed, never served by another model's vectors.
+    if (!vectors.has(key)) vectors.set(key, args.query ? args.deps.embed(args.query, embedding).catch((error: unknown) => {
+      if (!isPrivacyModeViolation(error)) throw error;
+      args.deps.diagnostic?.("indexConfigUnavailable", { hash, reason: "privacy-mode", documents: counts.get(hash) ?? 0 });
+      return null;
+    }) : Promise.resolve(null));
     const vector = await vectors.get(key)!;
     if (!vector) return [] as T[];
     return await args.deps.search(vector, { embedding, hash: { op: "eq", value: hash } });

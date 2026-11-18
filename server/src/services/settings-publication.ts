@@ -2,7 +2,7 @@ import { prepareModeSwitchJobs, commitIndexJobs } from "./project-indexing-mode.
 import { resolveMaterializationPolicy } from "./materialization-policy.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { createHash } from "node:crypto";
-import { publishProjectSettingsSchema, indexConfigHash, indexConfigOf, privacyModeAllowsHosted, projectSettingsProjection, managedPipelineModelPaths, type ProjectRecord, type ProjectSearchSettings } from "@docslurp/shared";
+import { publishProjectSettingsSchema, indexConfigHash, indexConfigOf, privacyModeAllowsHosted, privateServiceModelFor, projectSettingsProjection, managedPipelineModelPaths, type ProjectRecord, type ProjectSearchSettings } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { searchModeOfScopes } from "../lib/search-tiers.js";
 import { env } from "../config.js";
@@ -118,7 +118,7 @@ export async function publishSettings(args: { actor: RequestActor; projectId: st
         const before = await getProjectSearchSettings(args.projectId, args.actor.userId, client);
         const settings = mergeProjectSearchSettings(before, input.search);
         if (settings.retrievalDefaults.candidateDepth !== undefined && settings.retrievalDefaults.candidateDepth < settings.retrievalDefaults.resultCount) throw new SettingsPublicationError(400, "unsupported_search_settings", "Candidate depth must cover the requested result count.");
-        if (!privacyModeAllowsHosted(plan.nextPipeline.privacyMode) && settings.retrievalDefaults.rerankProvider === "deepinfra") throw new SettingsPublicationError(400, "privacy_mode_violation", "Hosted model reranking is unavailable under this project's privacy policy.");
+        if (!privacyModeAllowsHosted(plan.nextPipeline.privacyMode) && !privateServiceModelFor("rerank", plan.nextPipeline.privacyMode) && settings.retrievalDefaults.rerankProvider === "deepinfra") throw new SettingsPublicationError(400, "privacy_mode_violation", "Hosted model reranking is unavailable under this project's privacy policy.");
         await upsertProjectSearchSettings(settings, client);
         result = { requestId: input.requestId, snapshot: await loadSettingsSnapshot(args.actor, args.projectId, client) };
         await appendAuditLog({ orgId: result.snapshot.project.orgId, userId: args.actor.userId, projectId: args.projectId,

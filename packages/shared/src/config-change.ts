@@ -7,6 +7,7 @@ import type { VisualCandidateStats } from "./chart-export.js";
 import { chartExportDefaults, chartExportModelsAvailable, CONSERVATIVE_CHART_EXPORT_DEFAULTS, effectiveTierFromDefaults, type ChartExportDefaults, type ChartExportTier, type RunOrigin } from "./chart-export.js";
 import { chartExportConfigOf, expectedBillableVisuals, type VisualExportModes } from "./chart-export-estimate.js";
 import { sha256Hex } from "./hash.js";
+import { isPrivateModelUri, lookupPrivateModelRoute } from "./private-endpoints.js";
 import { embeddingModelBaseUri,
   embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
 import { costEstimateSchema, type CostEstimate } from "./jobs.js";
@@ -76,12 +77,20 @@ export type IndexConfig = {
   vectorBackends: string[];
 };
 
+function privateEmbeddingDimensions(modelUri: string): number | null {
+  if (!isPrivateModelUri(modelUri)) return null;
+  const lookup = lookupPrivateModelRoute({ ref: modelUri, capability: "embedding" });
+  return lookup.ok ? lookup.route.model.dimensions ?? null : null;
+}
+
 export function indexConfigOf(features: PipelineFeatures): IndexConfig {
   const embedding = features.embedding;
   const modelUri = embedding.modelUri ?? embeddingProfileCatalog[embedding.profile].config.modelUri;
   return {
     embeddingModel: modelUri,
-    dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? null,
+    // A private route's size is the operator registry's (embedding.ts resolveEmbeddingRoute), so a private model and a
+    // catalog model never share an index identity even where their ids match.
+    dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? privateEmbeddingDimensions(modelUri),
     normalize: embedding.normalize ?? embeddingProfileCatalog[embedding.profile].config.normalize,
     chunking: {
       chunkOverlap: features.chunkOverlap,

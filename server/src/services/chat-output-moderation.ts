@@ -1,5 +1,5 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
-import { createOpenRouterRoutingFetch, liveModelPrice, readProviderCharge, type PrivacyMode, type ProjectChatResponse } from "@docslurp/shared";
+import { createOpenRouterRoutingFetch, liveModelPrice, privacyModeAllowsHosted, readProviderCharge, type PrivacyMode, type ProjectChatResponse } from "@docslurp/shared";
 
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
@@ -149,7 +149,7 @@ export async function moderateChatAnswer(response: ProjectChatResponse, args: {
 }): Promise<ProjectChatResponse> {
   const moderator = args.moderator === undefined ? configuredOutputModerator() : args.moderator;
   if (!moderator || moderator === noopOutputModerator || !moderationAppliesTo(args.actor) || !response.answer.trim()) return response;
-  if (args.privacyMode !== "standard") {
+  if (!privacyModeAllowsHosted(args.privacyMode)) {
     console.warn(`[chat-moderation] skipped project=${args.projectId}: privacy mode ${args.privacyMode} does not allow the moderation provider`);
     return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
   }

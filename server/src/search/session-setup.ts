@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveGeoDocumentScope } from "./geo-scope.js";
 import {
+  applyPrivateModelMode,
   defaultProjectSearchSettings,
   normalizePipelineFeatures,
   normalizeStoredPipelineFeatures,
@@ -14,6 +15,7 @@ import {
 import { sql } from "../db.js";
 import { resolveOpenRouterApiKey, SEARCH_OPENROUTER_MODEL } from "../lib/ai.js";
 import { hostedApiKeyForProject, openRouterCall } from "../lib/privacy.js";
+import { PRIVATE_RERANK_KEY, privateRerankModelFor } from "./hosted-rerank.js";
 import { canSpend } from "../services/billing/spend-guard.js";
 import { assertSearchAccessScope, effectiveProjectAllowlist, type SearchAccessScope } from "./access-scope.js";
 import { getProjectAccess } from "../services/organizations.js";
@@ -201,7 +203,10 @@ export async function resolveSearchSetup(
   if (!privacyModeAllowsHosted(privacyMode)) {
     session.recordDiagnostic("privacyMode", { privacyMode, hostedStrategies: "blocked" });
   }
-  const rerankApiKey = resolvedOptions.useRerank && resolvedOptions.rerankProvider === "deepinfra"
+  // Where hosted models are not allowed the model reranker is the operator's private endpoint, when one is mapped.
+  const rerankApiKey = resolvedOptions.useRerank && resolvedOptions.rerankProvider === "deepinfra" && privateRerankModelFor(privacyMode)
+    ? PRIVATE_RERANK_KEY
+    : resolvedOptions.useRerank && resolvedOptions.rerankProvider === "deepinfra"
     ? await hostedApiKeyForProject({
         apiKey: process.env.DEEPINFRA_API_KEY,
         privacyMode, projectId: normalizedScope.projectId,
@@ -314,7 +319,7 @@ async function readSearchProjectContext(projectId: string, userId: string, acces
   }
   let indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   try {
-    indexing = { pipeline: normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`), indexConfigs: parseIndexConfigs(row.index_configs) };
+    indexing = { pipeline: applyPrivateModelMode(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`)), indexConfigs: parseIndexConfigs(row.index_configs) };
   } catch {
     // Fail closed, as loadProjectIndexing does.
     indexing = { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
@@ -534,11 +539,12 @@ export async function loadProjectIndexing(
       where id = ${projectId}
       limit 1
     `;
-    return { pipeline: normalizeStoredPipelineFeatures(row?.pipeline ?? null, `project ${projectId}`), indexConfigs: parseIndexConfigs(row?.index_configs) };
+    // Queries embed with the model new documents index with: the operator's private model where hosted ones are not allowed.
+    return { pipeline: applyPrivateModelMode(normalizeStoredPipelineFeatures(row?.pipeline ?? null, `project ${projectId}`)), indexConfigs: parseIndexConfigs(row?.index_configs) };
   } catch {
     // Fail closed: an unreadable or invalid pipeline must not fall back to the
     // standard (hosted-allowed) default and leak a private project's queries.
-    return { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
+    return { pipeline: applyPrivateModelMode({ ...normalizePipelineFeatures(null), privacyMode: "local-only" as const }), indexConfigs: {} };
   }
 }
 

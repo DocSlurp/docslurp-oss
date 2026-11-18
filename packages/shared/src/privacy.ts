@@ -11,6 +11,7 @@ import {
   type PrivateModelCapability,
   type PrivateModelRoute,
 } from "./private-endpoints.js";
+import { hostedModelsAllowed } from "./private-model-mode.js";
 
 /**
  * Project privacy execution modes (`pipeline.privacyMode`).
@@ -52,9 +53,12 @@ export interface ProviderCallDescriptor {
   baseUrl?: string | null;
 }
 
-/** `standard` (or an unset mode, which defaults to standard) allows hosted providers. */
+/**
+ * `standard` (or an unset mode, which defaults to standard) allows hosted providers, unless the deployment runs in
+ * private model mode (`DOCSLURP_MODEL_MODE=private`, private-model-mode.ts), where no project may reach one.
+ */
 export function privacyModeAllowsHosted(mode: string | null | undefined): boolean {
-  return mode === undefined || mode === null || mode === "standard";
+  return hostedModelsAllowed(mode);
 }
 
 /** strict-privacy records every blocked hosted attempt in `privacy_audit_log`. */

@@ -2,7 +2,7 @@ import { ApplicationFailure } from "@temporalio/common";
 import { QUALITY_RANK, runLegacyQualitySql } from "@docslurp/shared";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyPrivateModelMode, applyKillSwitchesToPipeline, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
 import { DocumentOutOfScopeError, isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
@@ -97,7 +97,7 @@ export async function withSourcePipeline<R extends { id: string; kind?: string; 
     label,
   );
   // The Auto ladder's limits apply to query-time reads as to ingest (db/run-ledger.ts).
-  return tighten({ ...run, pipeline: applyDefaultVisionOverride(managed.pipeline) });
+  return tighten({ ...run, pipeline: applyPrivateModelMode(applyDefaultVisionOverride(managed.pipeline)) });
 }
 
 /**

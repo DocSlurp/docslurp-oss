@@ -1484,9 +1484,9 @@ async function chatProjectTurn(
     maxChars: wholeCorpus.stats.maxChars,
     fallbackReason: wholeCorpus.reason,
   });
-  // Hosted chat blocked by privacyMode: answer with the project's (or the
-  // operator's) registered private text route when one resolves.
-  const privateChatModel = chatApiKey ? undefined : privateTextModelForProject(project?.pipeline, privacyMode) as PrivateChatModel | undefined;
+  // Hosted chat not allowed (privacyMode, or private model mode): answer with the
+  // operator's mapped private text model (DOCSLURP_PRIVATE_TEXT_MODEL) when set.
+  const privateChatModel = chatApiKey ? undefined : privateTextModelForProject(privacyMode) as PrivateChatModel | undefined;
   const openRouterApiKey = chatApiKey ?? (privateChatModel ? "private-endpoint" : undefined);
   const prefersWholeCorpus = searchSettings.chat.mode === "whole-corpus" && !narrowingFilters;
 

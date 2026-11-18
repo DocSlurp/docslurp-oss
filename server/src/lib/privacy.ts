@@ -1,10 +1,10 @@
 import {
   configurePrivateCallAudit,
   getPrivateModelEndpointRegistry,
-  isPrivateModelUri,
-  lookupPrivateModelRoute,
+  privateServiceModelFor,
   startPrivateEndpointHealthProbe,
   validatePrivateModelEndpointsAtStartup,
+  validatePrivateModelModeAtStartup,
   buildBlockedPrivacyAuditEntry,
   formatPrivacyBlockLog,
   isProviderCallAllowed,
@@ -148,28 +148,25 @@ export function openRouterCall(operation: string, model: string): ProviderCallDe
 configurePrivateCallAudit({ write: insertPrivacyAuditEntries });
 
 /**
- * API startup: validates DOCSLURP_PRIVATE_MODEL_ENDPOINTS (throws on invalid
- * config) and starts a non-blocking `GET /models` probe per endpoint.
+ * API startup: validates DOCSLURP_PRIVATE_MODEL_ENDPOINTS, DOCSLURP_MODEL_MODE and
+ * the DOCSLURP_PRIVATE_*_MODEL service map (throws on invalid config) and starts a non-blocking `GET /models` probe per endpoint.
  */
 export function initializePrivateModelEndpoints(): void {
   for (const line of validatePrivateModelEndpointsAtStartup()) console.log(line);
+  // DOCSLURP_MODEL_MODE and the DOCSLURP_PRIVATE_*_MODEL service map: an invalid value refuses to start.
+  const modelMode = validatePrivateModelModeAtStartup();
+  for (const line of modelMode.info) console.log(line);
+  for (const line of modelMode.warnings) console.warn(line);
   if (getPrivateModelEndpointRegistry().endpoints.length > 0) startPrivateEndpointHealthProbe();
 }
 
 /**
- * Text model the API may use for a project's content when hosted models are
- * blocked: the project's `textGeneration.model` when it is a registered
- * private route, else the operator's `DOCSLURP_PRIVATE_TEXT_MODEL`. Returns
- * undefined in standard mode (behaviour unchanged) or when nothing resolves.
+ * Text model the API uses for a project's content when hosted models are not
+ * allowed (a restricted project, or `DOCSLURP_MODEL_MODE=private`): the
+ * operator's `DOCSLURP_PRIVATE_TEXT_MODEL`. Projects hold a level, never a
+ * model, so a model stored on the project row is ignored. Undefined where
+ * hosted models are allowed, or when the service is unmapped (unavailable).
  */
-export function privateTextModelForProject(pipeline: unknown, privacyMode: PrivacyMode): string | undefined {
-  if (privacyMode === "standard") return undefined;
-  const projectModel = pipeline && typeof pipeline === "object"
-    ? (pipeline as { textGeneration?: { model?: unknown } }).textGeneration?.model
-    : undefined;
-  for (const candidate of [projectModel, process.env.DOCSLURP_PRIVATE_TEXT_MODEL?.trim()]) {
-    if (typeof candidate === "string" && isPrivateModelUri(candidate)
-      && lookupPrivateModelRoute({ ref: candidate, capability: "text" }).ok) return candidate;
-  }
-  return undefined;
+export function privateTextModelForProject(privacyMode: PrivacyMode): string | undefined {
+  return privateServiceModelFor("text", privacyMode);
 }
