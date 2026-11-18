@@ -44,6 +44,7 @@ import {
   type ExtractionContract,
   type ExtractionArtifactRef, switchDisabled } from "@docslurp/shared";
 import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
+import { mayHaveHtmlTables, storeEmbedTableCells, type StoreEmbedTableCellsStats } from "./embed-table-cells.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
@@ -1228,9 +1229,20 @@ export class ExtractMarkdownStage implements Stage {
                       `artifactUri=${artifactUri}`,
                   );
 
+                  // Embed parses HTML tables into cells in a parser VM; this activity's VM lane is warm for the document, so parse
+                  // them here and store them for embed (DOCSLURP_TABLE_CELLS_CACHE). Run after the other commands of this stage, not
+                  // beside them, so it takes the idle warm lane instead of growing a new one. Best effort: never fails extraction.
+                  // Documents without `<table` do no extra work.
+                  const tableCells: StoreEmbedTableCellsStats = mayHaveHtmlTables(winningText, parserAwareCanonicalDocument.blocks)
+                    ? await storeEmbedTableCells({
+                        run: state.run, document, runner: this.runner, storage: this.storage, stage: this.name,
+                        markdownUri: artifactUri, canonicalUri, signal,
+                      })
+                    : { status: "no-tables" };
                   const completedResult: DocumentStageResult = {
                     artifactUri,
                     stats: {
+                      tableCells,
                       // What later stages read: a first-pass checkpoint after this one runs again only if it changed (C1).
                       markdownSha256: createHash("sha256").update(winningText).digest("hex"),
                       strategy,
