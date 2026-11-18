@@ -4,7 +4,7 @@ import { vi } from "vitest";
 
 import { documentExtractionConfigSchema, sanitizeStoredDocumentExtraction } from "./extraction.js";
 import { hostPdfExtractorsUnderSandbox } from "./extractors.js";
-import { defaultPipelineFeatures, normalizePipelineFeatures, normalizeStoredPipelineFeatures, parseStoredPipelineFeatures, sanitizeStoredPipeline } from "./pipeline.js";
+import { defaultPipelineFeatures, normalizePipelineFeatures, normalizeStoredPipelineFeatures, parseStoredPipelineFeatures, readStoredPipelineSettings, sanitizeStoredPipeline } from "./pipeline.js";
 
 describe("parseStoredPipelineFeatures", () => {
   it("reads historical snapshots with retired keys and nulls (prod /v1/runs 500)", () => {
@@ -87,5 +87,102 @@ describe("a stored host PDF extractor under a sandboxed PDF deployment", () => {
     const stored = { order: { pdf: ["poppler-text"] }, voting: { enabled: true, secondary: "native-pdf" } };
     expect(sanitizeStoredDocumentExtraction(stored).dropped).toEqual([]);
     expect(documentExtractionConfigSchema.safeParse(stored).success).toBe(true);
+  });
+});
+
+describe("readStoredPipelineSettings: drop the invalid field, keep the rest, never weaken a guarded setting", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+  it("reads a valid row as is, with no repairs", () => {
+    const read = readStoredPipelineSettings({ summarize: true, privacyMode: "standard" }, "project p1");
+    expect(read.repairs).toEqual([]);
+    expect(read.features.summarize).toBe(true);
+  });
+
+  it("drops one bad enum and keeps every other stored setting", () => {
+    quiet();
+    const read = readStoredPipelineSettings({ quality: "no-such-quality", summarize: true, webTools: false }, "project p1");
+    expect(read.features).toMatchObject({ quality: defaultPipelineFeatures.quality, summarize: true, webTools: false });
+    expect(read.repairs).toEqual([{ path: "pipeline.quality", reason: "invalid" }]);
+  });
+
+  it("reports a refused vision model as retired, by setting name only", () => {
+    quiet();
+    const read = readStoredPipelineSettings({ vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/no-such/model" } }, "project p1");
+    expect(read.repairs).toEqual([{ path: "pipeline.vision", reason: "retired" }]);
+    expect(JSON.stringify(read.repairs)).not.toContain("no-such");
+  });
+
+  it("guarded settings that do not validate fall to their strictest value", () => {
+    quiet();
+    const read = readStoredPipelineSettings({
+      privacyMode: "Local-Only",
+      piiPolicy: { enabled: "yes" },
+      webTools: "off",
+      webhooks: { enabled: true, events: "run.completed" },
+      maxCostCents: -5,
+      ladder: { maxRung: "gold" },
+      visionFallback: "sometimes",
+      mediaVideo: { enabled: true, maxFrames: 999_999 },
+      embedding: { profile: "cheapest-local" },
+      vision: { profile: "cheapest-local" },
+    }, "project p1");
+    expect(read.features).toMatchObject({
+      privacyMode: "strict-privacy",
+      piiPolicy: { enabled: true, action: "block_indexing" },
+      webTools: false,
+      webhooks: { enabled: false, events: [] },
+      maxCostCents: 1,
+      ladder: { maxRung: "fast" },
+      visionFallback: false,
+      mediaVideo: { enabled: false },
+    });
+    expect(read.features.piiPolicy.patterns.length).toBeGreaterThan(5);
+    for (const key of ["privacyMode", "piiPolicy", "webTools", "webhooks", "maxCostCents", "ladder", "visionFallback", "mediaVideo"]) {
+      expect(read.repairs).toContainEqual({ path: `pipeline.${key}`, reason: "restricted" });
+    }
+  });
+
+  it("a cost cap is never read as no cap: a positive value is floored, garbage is 1 cent", () => {
+    quiet();
+    expect(readStoredPipelineSettings({ maxCostCents: 250.7 }, "p").features.maxCostCents).toBe(250);
+    expect(readStoredPipelineSettings({ maxCostCents: "500" }, "p").features.maxCostCents).toBe(500);
+    expect(readStoredPipelineSettings({ maxCostCents: "lots" }, "p").features.maxCostCents).toBe(1);
+    expect(readStoredPipelineSettings({ maxCostCents: 0.5 }, "p").features.maxCostCents).toBe(1);
+    expect(readStoredPipelineSettings({ maxCostCents: null }, "p").features.maxCostCents).toBeNull();
+  });
+
+  it("under a restricted privacy mode a dropped model profile becomes local, never the hosted default", () => {
+    quiet();
+    const read = readStoredPipelineSettings({ privacyMode: "local-only", vision: { profile: "retired-profile" }, embedding: "garbage" }, "project p1");
+    expect(read.features.privacyMode).toBe("local-only");
+    expect(read.features.vision.profile).toBe("cheapest-local");
+    expect(read.features.embedding.profile).toBe("cheapest-local");
+    expect(read.repairs).toContainEqual({ path: "pipeline.vision", reason: "restricted" });
+  });
+
+  it("a pipeline stored as a non-object reads as defaults with every guarded setting at its strictest", () => {
+    quiet();
+    for (const stored of ["nonsense", 42, ["a"], true]) {
+      const read = readStoredPipelineSettings(stored, "project p1");
+      expect(read.repairs).toEqual([{ path: "pipeline", reason: "restricted" }]);
+      expect(read.features).toMatchObject({ privacyMode: "strict-privacy", webTools: false, webhooks: { enabled: false }, maxCostCents: 1, visionFallback: false, mediaVideo: { enabled: false } });
+      expect(read.features.piiPolicy).toMatchObject({ enabled: true, action: "block_indexing" });
+      expect(read.features.embedding.profile).toBe("cheapest-local");
+    }
+    expect(readStoredPipelineSettings(null, "p").repairs).toEqual([]);
+  });
+
+  it("a conflict on a setting the row does not hold takes the narrower value", () => {
+    quiet();
+    const read = readStoredPipelineSettings({ embed: false, summarize: true }, "project p1");
+    expect(read.features).toMatchObject({ embed: false, indexVectors: false, summarize: true });
+  });
+
+  it("the strict reader still throws on the same rows (requests stay strict)", () => {
+    quiet();
+    expect(() => normalizeStoredPipelineFeatures({ quality: "no-such-quality" } as never, "p")).toThrow();
+    expect(() => normalizePipelineFeatures({ maxCostCents: -5 } as never)).toThrow();
   });
 });

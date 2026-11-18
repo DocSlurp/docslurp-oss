@@ -178,6 +178,18 @@ export const projectSchema = z.object({
    * defaults, SPEED_BOOST_CHAT_TIERS).
    */
   chatSpeedBoostTiers: z.array(z.enum(CHAT_TIERS)).optional(),
+  /**
+   * Stored settings that no longer validated and were reset on read (present only when there are some). `pipeline`
+   * already holds the value in use: the product default, or for privacy, egress and spend settings the strictest one.
+   * The next settings save writes the reset values back, which clears this list. Clients can say "some saved
+   * settings were reset" and name the settings.
+   */
+  settingsRepairs: z.array(z.object({
+    /** `pipeline.<setting>`, or `pipeline` when the whole stored value was unreadable. */
+    path: z.string(),
+    /** `retired`: named something no longer offered; `invalid`: no longer valid; `restricted`: set to its strictest value. */
+    reason: z.enum(["retired", "invalid", "restricted"]),
+  })).optional(),
   lastActivityAt: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),

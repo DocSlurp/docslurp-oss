@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import {
@@ -63,6 +63,18 @@ describe("project-utils", () => {
     expect(snapshot?.name).toBe("Playbooks");
     expect(snapshot?.templateKey).toBe("meeting-notes");
     expect(snapshot?.systemPrompt).toBe("Use terse meeting-recap language.");
+  });
+
+  it("reads a snapshot whose stored settings no longer validate with each invalid field reset (rollback stays possible)", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const snapshot = readProjectVersionSnapshot({
+      snapshot: {
+        name: "Old", templateKey: null, systemPrompt: null,
+        pipeline: { quality: "no-such-quality", summarize: true, privacyMode: "Local-Only", vision: { modelUri: "llm://openrouter/no-such/model" } },
+      },
+    });
+    expect(snapshot?.pipeline).toMatchObject({ summarize: true, privacyMode: "strict-privacy" });
+    vi.restoreAllMocks();
   });
 
   it("returns null for malformed snapshot metadata", () => {

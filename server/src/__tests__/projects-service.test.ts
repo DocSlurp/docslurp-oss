@@ -116,7 +116,7 @@ describe("listProjects", () => {
     error.mockRestore();
   });
 
-  it("shows one project whose stored settings no longer validate, and refuses to start work or draft a save from it", async () => {
+  it("reads one project whose stored settings no longer validate with each invalid field reset, on every path", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { getProject } = await import("../services/projects.js");
     const { getProjectAccess } = await import("../services/organizations.js");
@@ -140,9 +140,30 @@ describe("listProjects", () => {
     expect(strictest?.pipeline.piiPolicy).toMatchObject({ enabled: true, action: "block_indexing" });
     expect(strictest?.pipeline.webTools).toBe(false);
 
-    // The same row read to start work or to draft a save still fails: nothing is guessed there.
+    expect(strictest?.settingsRepairs).toEqual(expect.arrayContaining([
+      { path: "pipeline.privacyMode", reason: "restricted" },
+      { path: "pipeline.piiPolicy", reason: "restricted" },
+      { path: "pipeline.webTools", reason: "restricted" },
+      { path: "pipeline.quality", reason: "invalid" },
+    ]));
+
+    // The read that starts work or drafts a save is the same read: the invalid field is reset, the guarded ones kept.
     sqlMock.mockResolvedValueOnce(row(stale));
-    await expect(getProject("ws-old", "user-1")).rejects.toThrow();
+    const forWork = await getProject("ws-old", "user-1");
+    expect(forWork?.pipeline).toMatchObject({ privacyMode: "local-only", webTools: false, piiPolicy: { enabled: true, action: "block_indexing" }, embedding: { profile: "cheapest-local" } });
+    expect(forWork?.settingsRepairs).toEqual([{ path: "pipeline.quality", reason: "invalid" }]);
+    expect(JSON.stringify(forWork?.settingsRepairs)).not.toContain("no-such-quality");
+
+    // A pipeline that is not an object: defaults, with every guarded setting at its strictest.
+    sqlMock.mockResolvedValueOnce(row("garbage"));
+    const unreadable = await getProject("ws-old", "user-1");
+    expect(unreadable?.pipeline).toMatchObject({ privacyMode: "strict-privacy", webTools: false, maxCostCents: 1, webhooks: { enabled: false }, visionFallback: false, mediaVideo: { enabled: false } });
+    expect(unreadable?.settingsRepairs).toEqual([{ path: "pipeline", reason: "restricted" }]);
+
+    // A valid row carries no repairs field at all (response shape unchanged).
+    sqlMock.mockResolvedValueOnce(row({ summarize: true }));
+    const valid = await getProject("ws-old", "user-1");
+    expect(valid).not.toHaveProperty("settingsRepairs");
     error.mockRestore();
   });
 

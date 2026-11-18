@@ -1196,7 +1196,12 @@ export function normalizeStoredPipelineFeatures(
  * other detectors stay). New writes stay strict.
  */
 export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
-  if (!isPlainRecord(stored)) return stored;
+  return sanitizeStoredPipelineReport(stored, source).value;
+}
+
+/** sanitizeStoredPipeline, plus the dotted paths it dropped (for logs; never shown to callers as is). */
+function sanitizeStoredPipelineReport<T>(stored: T, source: string): { value: T; dropped: string[] } {
+  if (!isPlainRecord(stored)) return { value: stored, dropped: [] };
   // Canonical ids drop retired extractors silently; a stored read reports what they named.
   const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
   // Legacy chart export keys (rows from before migration 0151 or from an older API during a deploy): mapped, not dropped.
@@ -1275,9 +1280,9 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
       reasons.add("pii-pattern-unknown");
     }
   }
-  if (dropped.length === 0) return next as T;
+  if (dropped.length === 0) return { value: next as T, dropped };
   console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")} reasons=${[...reasons].join(",")}`);
-  return next as T;
+  return { value: next as T, dropped };
 }
 
 /**
@@ -1793,69 +1798,250 @@ export function compilePipelinePlan(
 }
 
 /**
+ * Why a stored setting was reset on read. Generic on purpose: callers see the setting's top-level name and one of
+ * these, never the stored value or the validation text (which can name a model or an extractor).
+ * - `retired`: it named something no longer offered (a model, an extractor, a PII detector); the default applies.
+ * - `invalid`: it no longer validates; the product default applies.
+ * - `restricted`: it restricts privacy, egress or spend and no longer validates; the strictest value applies.
+ */
+export type StoredSettingsRepairReason = "retired" | "invalid" | "restricted";
+export interface StoredSettingsRepair {
+  /** `pipeline.<setting>` (top-level setting only), or `pipeline` when the whole stored value was unreadable. */
+  path: string;
+  reason: StoredSettingsRepairReason;
+}
+export interface StoredPipelineRead {
+  /** The settings to use: every stored value that validates, with a fallback for each one that does not. */
+  features: PipelineFeatures;
+  /** One entry per reset top-level setting; empty when the stored value read as is. */
+  repairs: StoredSettingsRepair[];
+  /** The exact dotted paths dropped, for logs only (may include stored ids). */
+  dropped: string[];
+}
+
+/**
  * Read a stored pipeline snapshot (a run's, or an old project row) that may
  * predate the current schema: retired keys and nulls where values are now
  * required. Each validation pass drops exactly the fields the schema reports
  * so defaults fill them; a list of historical runs never fails on one row.
  */
 export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a stored pipeline"): PipelineFeatures {
-  const sanitized = structuredClone(sanitizeStoredPipeline((stored ?? null) as Record<string, unknown> | null, sourceName));
+  return readStoredPipelineSettings(stored, sourceName).features;
+}
+
+const RESTRICTED_LOCAL_PROFILE = "cheapest-local";
+
+/**
+ * The one reader for a stored pipeline (project rows, run snapshots, project version snapshots). It never throws
+ * because a stored field no longer validates: each such field is dropped and replaced, and reported in `repairs`.
+ * A field that validates is kept as stored. Writes stay strict (normalizePipelineFeatures on the request).
+ *
+ * Fallbacks for a field that does not validate. A setting that restricts privacy, egress or spend is never replaced
+ * by a value weaker than any valid value it could have held:
+ *
+ * | Setting                     | Fallback when unreadable                                                         |
+ * |-----------------------------|----------------------------------------------------------------------------------|
+ * | privacyMode                 | "strict-privacy" (no hosted calls, every blocked call audited)                   |
+ * | piiPolicy                   | enabled, every detector, action "block_indexing"                                 |
+ * | webTools                    | false (no web search or fetch)                                                   |
+ * | webhooks                    | { enabled: false, events: [] } (no deliveries)                                   |
+ * | maxCostCents                | a positive number is floored (at least 1); anything else is a 1 cent cap.        |
+ * |                             | 0 and null mean "no cap" to the worker, so neither is ever the fallback.         |
+ * | ladder                      | { maxRung: "fast" } (Auto never escalates a page to a billed rung)               |
+ * | visionFallback              | false (no vision reads unless quality "good" turns them on)                      |
+ * | mediaVideo                  | { enabled: false } (no frame reads)                                              |
+ * | embedding, vision (section  | under a restricted privacy mode: profile "cheapest-local" (never a hosted model) |
+ * |   or profile)               | under "standard": the product default                                            |
+ * | anything else               | the product default (embed, indexVectors, quality, summaryTree off, ...)         |
+ *
+ * A stored value that is not an object at all (a string, a number, a list) reads as defaults with every guarded
+ * setting above at its strictest value, and local profiles. `null`/absent reads as plain defaults (nothing stored).
+ */
+export function readStoredPipelineSettings(stored: unknown, sourceName = "a stored pipeline"): StoredPipelineRead {
+  const repairs = new Map<string, StoredSettingsRepairReason>();
+  const dropped: string[] = [];
+  const rank: Record<StoredSettingsRepairReason, number> = { retired: 0, invalid: 1, restricted: 2 };
+  const note = (path: string, reason: StoredSettingsRepairReason) => {
+    dropped.push(path);
+    const top = path === "" ? "pipeline" : `pipeline.${path.split(/[.[]/)[0]}`;
+    const previous = repairs.get(top);
+    if (previous === undefined || rank[reason] > rank[previous]) repairs.set(top, reason);
+  };
+  const result = (read: PipelineFeatures): StoredPipelineRead => {
+    let features = read;
+    // A restricted privacy mode never reads with a hosted vision model when the row's vision or privacy setting was
+    // reset (the schema admits a hosted vision profile there; calls are refused at run time, the page must not show it).
+    const touched = ["pipeline", "pipeline.vision", "pipeline.privacyMode"].some((path) => repairs.has(path));
+    if (touched && features.privacyMode !== "standard" && features.vision.target !== "local") {
+      try {
+        features = normalizePipelineFeatures({ ...features, vision: { profile: RESTRICTED_LOCAL_PROFILE } } as PipelineFeatureOverrides);
+        note("vision", "restricted");
+      } catch {
+        // Keep the read; the run-time privacy gate still refuses hosted vision calls.
+      }
+    }
+    return { features, repairs: [...repairs].map(([path, reason]) => ({ path, reason })), dropped };
+  };
+
+  if (stored === null || stored === undefined) return result(normalizePipelineFeatures(null));
+  if (!isPlainRecord(stored)) {
+    note("", "restricted");
+    console.error(`[pipeline] stored pipeline of ${sourceName} is not an object (${Array.isArray(stored) ? "array" : typeof stored}); read as defaults with privacy, egress and spend settings at their strictest`);
+    return result(normalizePipelineFeatures(strictestGuardedSettings() as PipelineFeatureOverrides));
+  }
+
+  let sanitized: Record<string, unknown>;
+  try {
+    const report = sanitizeStoredPipelineReport(stored, sourceName);
+    sanitized = structuredClone(report.value);
+    for (const path of report.dropped) note(path, "retired");
+  } catch (error) {
+    // A `configVersion` this build does not know was written by a newer one: its fields cannot be read with this
+    // build's meanings, so the read fails closed (callers that list rows read such a row with every guarded setting
+    // at its strictest).
+    if (error instanceof UnsupportedConfigVersionError) throw error;
+    sanitized = structuredClone(stored);
+  }
+  try {
+    return result(normalizePipelineFeatures(sanitized as PipelineFeatureOverrides));
+  } catch {
+    // Fall through to the per-field pass.
+  }
+
   // Settings that restrict what may happen to a customer's content are never replaced by a weaker default: an
   // unreadable value becomes the strictest one.
   const guarded = guardedStoredSettings(sanitized);
-  let source = isPlainRecord(sanitized) ? { ...sanitized, ...guarded } : sanitized;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (const key of guarded.replaced) note(key, "restricted");
+  // The row holds a privacy mode whenever `guarded` does; absent means the default, "standard".
+  const restrictedPrivacy = guarded.values.privacyMode !== undefined && guarded.values.privacyMode !== "standard";
+  const source: Record<string, unknown> = { ...sanitized, ...guarded.values };
+  // Settings set to false below because they conflicted while absent: never deleted again (no toggling).
+  const forced = new Set<string>();
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
-      return normalizePipelineFeatures(source as PipelineFeatureOverrides | null);
+      return result(normalizePipelineFeatures(source as PipelineFeatureOverrides));
     } catch (error) {
       const issues = (error as { issues?: Array<{ code: string; path: PropertyKey[]; keys?: string[] }> }).issues;
-      if (!issues?.length || !source) break;
+      if (!issues?.length) break;
+      let changed = false;
       for (const issue of issues) {
+        const path = issue.path.map(String);
         // Guarded settings were made valid above; an issue on one is a conflict with another field, which goes instead.
-        if (issue.path.length === 1 && Object.hasOwn(guarded, String(issue.path[0]))) continue;
+        if (path.length === 1 && Object.hasOwn(guarded.values, path[0]!)) continue;
+        const head = path[0];
+        // Under a restricted privacy mode a dropped model section or profile becomes the local profile, never the
+        // hosted default.
+        if (restrictedPrivacy && (head === "embedding" || head === "vision") && (path.length === 1 || (path.length === 2 && path[1] === "profile"))) {
+          const local = { profile: RESTRICTED_LOCAL_PROFILE };
+          if (JSON.stringify(source[head]) !== JSON.stringify(local)) {
+            source[head] = local;
+            note(head, "restricted");
+            changed = true;
+          }
+          continue;
+        }
         let node: unknown = source;
         for (const segment of issue.path.slice(0, -1)) node = (node as Record<PropertyKey, unknown> | undefined)?.[segment];
         if (!node || typeof node !== "object") continue;
-        const target = issue.code === "unrecognized_keys"
-          ? (issue.path.length ? (node as Record<PropertyKey, unknown>)[issue.path.at(-1)!] : node)
-          : node;
         if (issue.code === "unrecognized_keys") {
-          if (target && typeof target === "object") for (const key of issue.keys ?? []) delete (target as Record<string, unknown>)[key];
+          const target = issue.path.length ? (node as Record<PropertyKey, unknown>)[issue.path.at(-1)!] : node;
+          if (!target || typeof target !== "object") continue;
+          for (const key of issue.keys ?? []) {
+            if (!Object.hasOwn(target, key)) continue;
+            delete (target as Record<string, unknown>)[key];
+            note([...path, key].join("."), "invalid");
+            changed = true;
+          }
         } else if (issue.path.length) {
-          delete (node as Record<PropertyKey, unknown>)[issue.path.at(-1)!];
+          const key = issue.path.at(-1)!;
+          if (path.length === 1 && forced.has(path[0]!)) continue;
+          if (Object.hasOwn(node, key)) {
+            delete (node as Record<PropertyKey, unknown>)[key];
+            note(path.join("."), "invalid");
+            changed = true;
+          } else if (path.length === 1 && issue.code === "custom") {
+            // A conflict on a setting the row does not hold (indexVectors defaults on while embed is off): the
+            // narrower value, never the default that keeps conflicting.
+            source[key as string] = false;
+            forced.add(path[0]!);
+            note(path.join("."), "invalid");
+            changed = true;
+          }
         }
       }
+      if (!changed) break;
     }
   }
   // Nothing else is readable. Keep the guarded settings, with the local profiles a restricted privacy mode requires;
   // if even that does not validate the row is unreadable, and a row with guarded settings never reads as plain defaults.
-  if (Object.keys(guarded).length === 0) return normalizePipelineFeatures(null);
+  note("", "invalid");
+  console.error(`[pipeline] stored pipeline of ${sourceName} could not be read field by field; read as defaults with its guarded settings`);
+  const kept = { ...guarded.values, ...(restrictedPrivacy ? { embedding: { profile: RESTRICTED_LOCAL_PROFILE }, vision: { profile: RESTRICTED_LOCAL_PROFILE } } : {}) };
+  if (Object.keys(kept).length === 0) return result(normalizePipelineFeatures(null));
   try {
-    return normalizePipelineFeatures(guarded as PipelineFeatureOverrides);
+    return result(normalizePipelineFeatures(kept as PipelineFeatureOverrides));
   } catch {
-    return normalizePipelineFeatures({ ...guarded, embedding: { profile: "cheapest-local" }, vision: { profile: "cheapest-local" } } as PipelineFeatureOverrides);
+    return result(normalizePipelineFeatures({ ...kept, embedding: { profile: RESTRICTED_LOCAL_PROFILE }, vision: { profile: RESTRICTED_LOCAL_PROFILE } } as PipelineFeatureOverrides));
   }
 }
 
+/** The strictest value of every guarded setting (readStoredPipelineSettings' table), with local model profiles. */
+function strictestGuardedSettings(): Record<string, unknown> {
+  return {
+    privacyMode: "strict-privacy",
+    piiPolicy: { enabled: true, action: "block_indexing", patterns: [...piiPatternTypeSchema.options] },
+    webTools: false,
+    webhooks: { enabled: false, events: [] },
+    maxCostCents: 1,
+    ladder: { maxRung: "fast" },
+    visionFallback: false,
+    mediaVideo: { enabled: false },
+    embedding: { profile: RESTRICTED_LOCAL_PROFILE },
+    vision: { profile: RESTRICTED_LOCAL_PROFILE },
+  };
+}
+
+/** A stored cost cap that does not validate: never "no cap" (null or 0). A positive number is floored, else 1 cent. */
+function fallbackCostCap(value: unknown): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
+  return Number.isFinite(numeric) && numeric >= 1 ? Math.min(Math.floor(numeric), Number.MAX_SAFE_INTEGER) : 1;
+}
+
 /**
- * The stored settings a tolerant read must not weaken (privacy mode, PII policy, web tools), each made valid: kept when
- * it validates, otherwise the strictest value. Only settings the row actually holds are returned.
+ * The stored settings a tolerant read must not weaken, each made valid: kept when it validates on its own, otherwise
+ * the strictest value (readStoredPipelineSettings' table). Only settings the row actually holds are returned;
+ * `replaced` names the ones that did not validate.
  */
-function guardedStoredSettings(stored: unknown): Record<string, unknown> {
-  if (!isPlainRecord(stored)) return {};
-  const guarded: Record<string, unknown> = {};
-  if (stored.privacyMode !== undefined) {
-    // Same reading as the request-time gates: a mode that is not recognized is the strictest one.
-    guarded.privacyMode = privacyModeSchema.safeParse(stored.privacyMode).success ? stored.privacyMode : "strict-privacy";
-  }
-  if (stored.piiPolicy !== undefined) {
-    let valid = isPlainRecord(stored.piiPolicy);
-    if (valid) try { normalizePipelineFeatures({ piiPolicy: stored.piiPolicy } as PipelineFeatureOverrides); } catch { valid = false; }
-    // Unreadable: every detector on, and pages with a match kept out of the index.
-    guarded.piiPolicy = valid ? stored.piiPolicy : { enabled: true, action: "block_indexing", patterns: [...piiPatternTypeSchema.options] };
-  }
-  if (stored.webTools !== undefined) guarded.webTools = typeof stored.webTools === "boolean" ? stored.webTools : false;
-  return guarded;
+function guardedStoredSettings(stored: Record<string, unknown>): { values: Record<string, unknown>; replaced: string[] } {
+  const values: Record<string, unknown> = {};
+  const replaced: string[] = [];
+  const strictest = strictestGuardedSettings();
+  const validAlone = (key: string, value: unknown) => {
+    try { normalizePipelineFeatures({ [key]: value } as PipelineFeatureOverrides); return true; } catch { return false; }
+  };
+  const guard = (key: string, valid: (value: unknown) => boolean, fallback: (value: unknown) => unknown) => {
+    if (stored[key] === undefined) return;
+    if (valid(stored[key])) {
+      values[key] = stored[key];
+    } else {
+      values[key] = fallback(stored[key]);
+      replaced.push(key);
+    }
+  };
+  // Same reading as the request-time gates: a mode that is not recognized is the strictest one.
+  guard("privacyMode", (value) => privacyModeSchema.safeParse(value).success, () => strictest.privacyMode);
+  // Unreadable: every detector on, and pages with a match kept out of the index.
+  guard("piiPolicy", (value) => isPlainRecord(value) && validAlone("piiPolicy", value), () => strictest.piiPolicy);
+  guard("webTools", (value) => typeof value === "boolean", () => false);
+  // A webhook setting that does not validate delivers nothing (dropping only a bad `events` list would widen it to all).
+  guard("webhooks", (value) => isPlainRecord(value) && validAlone("webhooks", value), () => strictest.webhooks);
+  guard("maxCostCents", (value) => value === null || validAlone("maxCostCents", value), fallbackCostCap);
+  // Auto ladder limits exist only to cap spend: an unreadable one is the lowest rung.
+  guard("ladder", (value) => isPlainRecord(value) && validAlone("ladder", value), () => strictest.ladder);
+  guard("visionFallback", (value) => typeof value === "boolean", () => false);
+  // Its per-document limits cap frame reads: an unreadable section reads no frames rather than the preset maximum.
+  guard("mediaVideo", (value) => isPlainRecord(value) && validAlone("mediaVideo", value), () => strictest.mediaVideo);
+  return { values, replaced };
 }
 
 /**
