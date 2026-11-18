@@ -39,12 +39,30 @@ const mocks = vi.hoisted(() => ({
   /** A provider error name the next multipart completion fails with. */
   completeFailure: null as string | null,
 }));
-vi.mock("../db.js", () => ({ sql: Object.assign(
-  (strings: TemplateStringsArray, ...values: unknown[]) => {
-    const text = strings.reduce((text, part, index) => text + (index ? `$${index}` : "") + part, "");
+vi.mock("../db.js", () => {
+  /** postgres.js's `sql(rows)` insert helper: "(columns) values (...), (...)" with every value a parameter. */
+  type Rows = { rows: Array<Record<string, unknown>> };
+  const isRows = (value: unknown): value is Rows => typeof value === "object" && value !== null && "rows" in value && Array.isArray((value as Rows).rows) && !("raw" in value);
+  const sql = (strings: TemplateStringsArray | Array<Record<string, unknown>>, ...values: unknown[]) => {
+    if (!("raw" in strings)) return { rows: strings } satisfies Rows;
+    const params: unknown[] = [];
+    let text = strings[0]!;
+    values.forEach((value, index) => {
+      if (isRows(value)) {
+        const columns = Object.keys(value.rows[0] ?? {});
+        const tuples = value.rows.map(row => `(${columns.map(column => (params.push(row[column]), `$${params.length}`)).join(", ")})`);
+        text += `(${columns.map(column => `"${column}"`).join(", ")}) values ${tuples.join(", ")}`;
+      } else {
+        params.push(value);
+        text += `$${params.length}`;
+      }
+      text += strings[index + 1]!;
+    });
     return { then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
-      mocks.query(text, values).then((result: { rows: unknown[] }) => result.rows).then(resolve, reject) };
-  }, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) }));
+      mocks.query(text, params).then((result: { rows: unknown[] }) => result.rows).then(resolve, reject) };
+  };
+  return { sql: Object.assign(sql, { json: (value: unknown) => JSON.stringify(value), array: (value: unknown) => value }) };
+});
 vi.mock("../lib/direct-upload-locks.js", () => ({ DirectUploadLockUnavailable: class extends Error {}, reserveDirectUploadLockConnection: async (options: { lockClass?: string; tenant?: string } = {}) => (mocks.tenants.push(`${options.lockClass ?? "short"}:${options.tenant ?? ""}`), {
   connection: async (strings: TemplateStringsArray) => {
     if (!strings.join("").includes("pg_try_advisory_lock")) return [];
@@ -769,7 +787,7 @@ describe("minting targets re-checks the caller under the lock (H2)", () => {
     };
     const { createDirectUploadSession } = await import("../services/direct-upload-session.js");
     await expect(createDirectUploadSession({ userId: "u", orgId: "o", apiKeyId: "k-u", pipeline: {},
-      files: [{ filename: "results.pdf", mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 }] })).rejects.toMatchObject({ statusCode: 403 });
+      files: [{ filename: "results.pdf", mimeType: "application/pdf", sizeBytes: 100 * 1024 * 1024 }] })).rejects.toMatchObject({ statusCode: 403 });
     expect(mocks.multipartCreates).toBe(1);
     expect(mocks.putSignatures + mocks.partSignatures).toBe(0);
   });
@@ -778,7 +796,7 @@ describe("minting targets re-checks the caller under the lock (H2)", () => {
     await db.query("update api_keys set revoked_at = now() where id = 'k-u'");
     const { createDirectUploadSession } = await import("../services/direct-upload-session.js");
     await expect(createDirectUploadSession({ userId: "u", orgId: "o", apiKeyId: "k-u", pipeline: {},
-      files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 }, { filename: "b.pdf", mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 }] }))
+      files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 100 * 1024 * 1024 }, { filename: "b.pdf", mimeType: "application/pdf", sizeBytes: 100 * 1024 * 1024 }] }))
       .rejects.toMatchObject({ statusCode: 403 });
     expect(mocks.multipartCreates).toBe(0);
   });
