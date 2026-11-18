@@ -1,5 +1,5 @@
 import type { GeoFinalSource } from "../db/geo-final-source.js";
-import type { PrivacyAuditEntry } from "@docslurp/shared";
+import { runModelClass, type PrivacyAuditEntry } from "@docslurp/shared";
 import type { StageState, ProjectRunEvent } from "../models.js";
 import type { Document, ParserEvaluation, PerformanceEvent, ProjectRun } from "../models.js";
 import { cloneArtifacts, cloneJsonMap } from "../models.js";
@@ -284,18 +284,5 @@ export class WorkflowState {
   }
 }
 
-/** The levels a run was configured with, as recorded next to every model it calls (usage-ledger.ts `modelClass`). */
-export function runModelClass(pipeline: ProjectRun["pipeline"] | null | undefined): Record<string, string> | null {
-  if (!pipeline) return null;
-  const levels: Record<string, string | undefined> = {
-    quality: pipeline.quality,
-    visionProfile: pipeline.vision?.profile,
-    embeddingProfile: pipeline.embedding?.profile,
-    pageRouter: pipeline.pageRouter?.router,
-    inferenceLane: pipeline.inferenceLane,
-    // Speed boost swaps hosted models for their fast hosts: part of what selected the model.
-    speedBoost: pipeline.speedBoost === true ? "on" : undefined,
-  };
-  const known = Object.fromEntries(Object.entries(levels).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1] !== ""));
-  return Object.keys(known).length ? known : null;
-}
+/** The levels a run was configured with (`@docslurp/shared` runModelClass, shared with the model-URI backfill). */
+export { runModelClass };
