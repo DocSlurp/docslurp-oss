@@ -1,4 +1,4 @@
-import { authorizeComputeCohort } from "../extractors/plugins.js";
+import { authorizeComputeCohort, runBacklogHint } from "../extractors/plugins.js";
 import { firstPassResultGlyphs, serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
@@ -1879,6 +1879,8 @@ export class CommandRunner {
       const ocrContext = {
         ...(context?.orgId ? { tenantKey: context.orgId } : {}), ...(context?.documentId ? { affinityKey: context.documentId } : {}),
         ...(scope ? { authorizeCohort: () => authorizeComputeCohort(scope) } : {}),
+        // Read lazily (a provider asks only when it needs it), cached per run, scoped to the run's own organization.
+        ...(context?.orgId && context.runId ? { runBacklog: () => runBacklogHint({ orgId: context.orgId!, runId: context.runId }) } : {}),
       };
       return { remote: provider.run(plan.sandboxedOcr, signal, ocrContext), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
     }

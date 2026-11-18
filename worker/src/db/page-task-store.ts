@@ -160,3 +160,24 @@ function stripTaskFlags(task: VisionPageTask): VisionPageTask {
   const { slotGate: _slotGate, ...rest } = task;
   return rest;
 }
+
+/** At most this many queued tasks are counted: a capacity hint needs no exact count past it. */
+export const RUN_BACKLOG_COUNT_LIMIT = 100_000;
+
+/**
+ * Queued (unclaimed) page tasks of one run, only when the run belongs to `orgId`; any other organization's run reads 0.
+ * Served by page_work_tasks_pending_idx (run_id, status). Capped at RUN_BACKLOG_COUNT_LIMIT.
+ */
+export async function queuedRunPageTasks(sql: Sql<Record<string, unknown>>, scope: { orgId: string; runId: string }): Promise<number> {
+  for (const value of [scope.orgId, scope.runId]) {
+    if (!value || value.length > 200) throw new Error("Invalid run backlog scope");
+  }
+  const [row] = await sql<{ queued: number }[]>`
+    select count(*)::int as queued from (
+      select 1 from page_work_tasks t
+      where t.run_id = ${scope.runId} and t.status = 'queued'
+        and exists (select 1 from project_runs r where r.id = ${scope.runId} and r.org_id = ${scope.orgId})
+      limit ${RUN_BACKLOG_COUNT_LIMIT}
+    ) q`;
+  return Number(row?.queued ?? 0);
+}

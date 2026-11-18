@@ -303,6 +303,68 @@ export interface SandboxedOcrRunContext {
   affinityKey?: string;
   /** Revalidate live authorization (the run is still live) when a provider wants to; an expired/revoked scope returns null. */
   authorizeCohort?: () => Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
+  /**
+   * The job's own run's queued page work (runBacklogHint): a capacity hint for placement, never an authorization or a
+   * billing figure. Never rejects; resolves undefined when unknown. Absent outside a run.
+   */
+  runBacklog?: () => Promise<RunBacklogHint | undefined>;
+}
+
+/**
+ * Queued page work of one run when it was read. Fleet-internal: it counts only the job's own run and never reaches users.
+ * Consumers must reject a stale value by `observedAt`.
+ */
+export interface RunBacklogHint {
+  /** Page tasks of the run still waiting to be claimed (a lower bound on remaining page work). */
+  queuedPages: number;
+  /** When the database answered (epoch ms on this worker's clock). */
+  observedAt: number;
+}
+
+/** Counts a run's queued page tasks, only when the run belongs to `orgId` (worker startup binds it; tests). */
+export type RunBacklogLookup = (scope: { orgId: string; runId: string }) => Promise<number>;
+let runBacklogLookup: RunBacklogLookup | undefined;
+const runBacklogCache = new Map<string, { at: number; value: Promise<RunBacklogHint | undefined> }>();
+/** One read per run per this window, however many OCR jobs of the run ask. */
+export const RUN_BACKLOG_CACHE_MS = 5_000;
+const RUN_BACKLOG_CACHE_MAX = 2_000;
+
+export function setExtractorRunBacklog(lookup: RunBacklogLookup | undefined): void {
+  runBacklogLookup = lookup;
+  runBacklogCache.clear();
+}
+
+/**
+ * The run's backlog hint, cached per run for RUN_BACKLOG_CACHE_MS (concurrent callers share one read). Unbound lookup,
+ * an invalid answer or a failed read resolves undefined (logged), so a consumer falls back to its rule without a hint.
+ */
+export function runBacklogHint(scope: { orgId: string; runId: string }, now: () => number = Date.now): Promise<RunBacklogHint | undefined> {
+  const lookup = runBacklogLookup;
+  if (!lookup || !scope.orgId || !scope.runId) return Promise.resolve(undefined);
+  const key = `${scope.orgId}\u0000${scope.runId}`;
+  const at = now();
+  const cached = runBacklogCache.get(key);
+  if (cached && at - cached.at >= 0 && at - cached.at < RUN_BACKLOG_CACHE_MS) return cached.value;
+  if (runBacklogCache.size >= RUN_BACKLOG_CACHE_MAX) {
+    for (const [entry, value] of runBacklogCache) if (at - value.at >= RUN_BACKLOG_CACHE_MS) runBacklogCache.delete(entry);
+    if (runBacklogCache.size >= RUN_BACKLOG_CACHE_MAX) runBacklogCache.clear();
+  }
+  const value = lookup({ orgId: scope.orgId, runId: scope.runId }).then(
+    (queuedPages) => {
+      if (!Number.isSafeInteger(queuedPages) || queuedPages < 0) {
+        console.warn(`[run-backlog] run=${scope.runId} status=invalid-count; no hint`);
+        return undefined;
+      }
+      return { queuedPages, observedAt: now() };
+    },
+    (error: unknown) => {
+      console.warn(`[run-backlog] run=${scope.runId} status=lookup-failed error=${error instanceof Error ? error.message.slice(0, 200) : "unknown"}; no hint`);
+      runBacklogCache.delete(key);
+      return undefined;
+    },
+  );
+  runBacklogCache.set(key, { at, value });
+  return value;
 }
 
 export interface SandboxedOcrProvider {
@@ -553,8 +615,22 @@ export interface ExtractorPluginHost {
    */
   computeJobAdmission: import("@docslurp/shared").ComputeJobAdmission;
   authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null>;
+  /**
+   * Platform compute spend, in cents, recorded across every organization in the last `sinceSeconds` (1 s to 24 h) for
+   * one provider and model of `sandbox_compute` usage, read through the usage_attribution view: what a provider's own
+   * spend cap compares against. Recorded usage only (a job still running is not in it yet). Rejects when unbound or on a
+   * failed read: a provider must treat that as over its cap, never as zero.
+   */
+  computeSpendCents(query: ComputeSpendQuery): Promise<number>;
   /** The figure outcomes this core accepts: a provider reports `partial` (exit 5, folder kept) only when it is listed. */
   figureOutcomes: readonly ("extracted" | "partial" | "failed")[];
+}
+
+export interface ComputeSpendQuery { provider: string; model: string; sinceSeconds: number }
+let computeSpendLookup: ExtractorPluginHost["computeSpendCents"] | undefined;
+/** Bind the usage_attribution read behind ExtractorPluginHost.computeSpendCents (worker startup; tests). */
+export function setExtractorComputeSpend(lookup: ExtractorPluginHost["computeSpendCents"] | undefined): void {
+  computeSpendLookup = lookup;
 }
 
 type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
@@ -626,6 +702,10 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
       demand: async (...args) => requireJobAdmission().demand(...args),
     },
     authorizeComputeCohort,
+    computeSpendCents: async (query) => {
+      if (!computeSpendLookup) throw new SandboxRunError("Compute spend lookup is not bound in this worker");
+      return await computeSpendLookup(query);
+    },
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,
   };
 }
