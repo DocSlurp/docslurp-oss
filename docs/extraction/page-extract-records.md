@@ -12,7 +12,7 @@ project by composite foreign keys to the document and the run.
 
 | Column | Meaning |
 | --- | --- |
-| `pass` | `extract` (the primary extractor), `scan-ocr` (OCR of pages without words, inside extraction), `critique` (self-critique correction), `vision` (the vision stage), `human` (reserved for human corrections) |
+| `pass` | `extract` (the primary extractor), `scan-ocr` (OCR of pages without words, inside extraction), `critique` (self-critique correction), `vision` (the vision stage), `human` (reserved for human corrections); and one contributing pass that is never final: `video-frames` (migration 0193, the vision model's read of a video's sampled frames, merged into the transcript) |
 | `method` | `text-layer`, `ocr`, `ocr-second-read` (page reader or escalation read), `vision`, `transcription` (audio and video), `correction`, `kept-as-image` (Fast pages without a text layer, textless images), `none` |
 | `engine` | Route token: an extractor id or a route word (`page-ocr`, `ocr-escalation`, `gpu-page-reader`, `hosted-ocr`, `vision-model`, `chart-export`, `self-critique`). Never a model id: that is `model_uri`. |
 | `member_id`, `region` | The capability-pool member that served the page and its region (not yet populated; not served by the API until they hold tier-safe values) |
@@ -22,7 +22,7 @@ project by composite foreign keys to the document and the run.
 | `confidence`, `plausibility` | OCR mean confidence, extraction plausibility, in [0, 1] |
 | `text_bytes`, `finish_reason`, `duration_ms` | Size of the final text, the reader's finish (`stop`, `length`, `refused`, `error`, `empty`, `other`), timing |
 | `adopted` | The pass's text was taken for the page in its run (a retry that rejects the pass withdraws it) |
-| `is_final`, `superseded_by_pass` | Exactly one final row per page once its document completes: the highest adopted pass (extract < scan-ocr < critique < vision < human) of the document's current run. The page's other adopted rows name that pass. |
+| `is_final`, `superseded_by_pass` | Exactly one final row per page once its document completes: the highest adopted pass (extract < scan-ocr < critique < vision < human, `PAGE_EXTRACT_FINAL_PASSES`) of the document's current run. A contributing pass (`video-frames`) has no rank and is never final. The page's other adopted rows, contributing ones included, name the final pass. |
 
 `pii-withheld` is added on read for pages whose state is `blocked-pii`, and their `textBytes` is withheld.
 
@@ -36,10 +36,10 @@ organization records nothing.
 
 | Stage | Records |
 | --- | --- |
-| extract-markdown | `extract` for every page; `scan-ocr` for pages OCR read (confidence, escalation cap or unfunded tags); `critique` for corrected pages; `transcription` for audio and video |
+| extract-markdown | `extract` for every page; `scan-ocr` for pages OCR read (confidence, escalation cap or unfunded tags); `critique` for corrected pages; `transcription` for audio and video, plus a `video-frames` row (method `vision`, engine `media-video-frames`, the frame batches' summed text size and request time, named by the vision model) when a video's frames were read |
 | classify-route | Tags merged into the page's rows of the run |
 | vision-extract | `vision` for pages read (adopted when reconciliation accepted the read), and unadopted rows for selected pages with no output |
-| query-time materialization | the pages it publishes (text layer or model read), kept-as-image pages, and unadopted rows for blocked or failed pages |
+| query-time materialization | the pages it publishes (text layer or model read), kept-as-image pages, and unadopted rows for blocked or failed pages. A published read another claim made and kept is named by its reading run's usage row (`metadata.modelUri`; null for a read recorded before usage rows carried it) |
 
 ## Finalization
 
@@ -54,7 +54,9 @@ Stages only record what they adopted; `is_final` is set by one statement (worker
 A page a newer run (by creation time) already finalized is left alone, so a late or retried older run never takes it back.
 A completion clears older finals on pages the run has no adopted row for (past a shorter reprocess's page count); a
 query-time read whose page failed keeps the older final, and clears it only on a page it found PII on. A partial unique
-index allows at most one final row per page; finalization demotes before it promotes.
+index allows at most one final row per page; finalization demotes before it promotes. A release older than migration 0193
+ranks no contributing pass and would write `is_final = NULL` on one; a trigger (it fires only on NULL) keeps it false, so a
+rollback still finalizes video documents.
 
 Lock order: every writer of extract rows holds the document's row lock first (FOR NO KEY UPDATE, the lock a completion's
 documents UPDATE takes): completions update the document before finalizing, a query-time read locks the document before
