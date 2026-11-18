@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import type { CanonicalDocument } from "@docslurp/shared";
 import { htmlTableSources } from "./chunking.js";
-import { assertHtmlTableCells, HTML_TABLE_DOCUMENT_LIMITS, htmlTableCellTagCount, htmlTableValueBound, tableParseMemoryBudget, vmTableSources, type HtmlTableStatsMemo, type PreparedHtmlTableCells } from "./html-table-vm.js";
+import { assertHtmlTableCells, effectiveHtmlTableOutputCap, HTML_TABLE_DOCUMENT_LIMITS, htmlTableCellTagCount, htmlTableValueBound, TABLE_PARSE_HEAP_FACTOR, tableParseMemoryBudget, vmTableSources, type HtmlTableStatsMemo, type PreparedHtmlTableCells } from "./html-table-vm.js";
 import { HTML_TABLE_MAX_CELLS, HTML_TABLE_MAX_SOURCE_CHARS } from "./html-table-limits.js";
 import { assertJsonShape } from "../lib/json-shape.js";
 import type { HtmlTableCell } from "./table-cells-guest.js";
@@ -89,14 +89,16 @@ export function tableCellsByteCap(sources: string[], memo?: HtmlTableStatsMemo):
 
 /**
  * The generation an artifact belongs to: sha256 over the distinct VM table sources it holds cells for, sorted and each
- * JSON-encoded (lossless, unambiguous). Cells depend on nothing else (they are a pure function of the source and the
- * guest), so this is exactly the content a stored artifact is valid for. The writer hashes the sources it derived from
+ * JSON-encoded (lossless, unambiguous), and the per-table output cap in effect. Cells depend on nothing else (a pure
+ * function of the source, the guest and that cap), so this is exactly the content a stored artifact is valid for. The writer hashes the sources it derived from
  * what it wrote; embed hashes the sources it derived from what it read. Only an exact match is used, so a late write of
  * an older generation (a retried stage's slower PUT) is never served for a newer one, and neither side copies or
  * hashes the whole document text.
  */
 export function tableCellsGeneration(sources: string[]): string {
-  const hash = createHash("sha256");
+  // The per-table output cap in effect is part of the identity: cells stored under another cap (a table that was
+  // over it there is null) are a different generation, a miss.
+  const hash = createHash("sha256").update(`cap:${effectiveHtmlTableOutputCap()}\n`);
   for (const source of vmTableSources(sources).sort()) hash.update(JSON.stringify(source), "utf8").update("\n");
   return hash.digest("hex");
 }
@@ -262,7 +264,9 @@ function isStorageNotFound(error: unknown): boolean {
 interface ReadBudget { bytes: number; tables: number; containers: number; scalars: number; longestString: number }
 function readBudget(unique: string[]): ReadBudget {
   const memo: HtmlTableStatsMemo = new Map();
-  const tags = unique.reduce((total, source) => total + htmlTableCellTagCount(source, memo), 0);
+  // Records the artifact may hold: one per cell tag, but never more than a table's or the document's cell limit, so a
+  // tag-heavy source cannot raise the pre-scan's container and scalar limits past what decoding would accept.
+  const tags = Math.min(HTML_TABLE_DOCUMENT_LIMITS.cells, unique.reduce((total, source) => total + Math.min(HTML_TABLE_MAX_CELLS, htmlTableCellTagCount(source, memo)), 0));
   return {
     bytes: tableCellsByteCap(unique, memo),
     tables: unique.length,
@@ -397,7 +401,11 @@ export async function readTableCellsArtifact(args: {
   if (unique.length > HTML_TABLE_DOCUMENT_LIMITS.tables) return miss("unavailable", "more tables than an artifact may hold");
   const scope: TableCellsScope = { runId: args.runId, documentId: args.documentId, generation: args.generation, guestVersion: args.guestVersion };
   const budget = readBudget(unique);
-  const release = await tableParseMemoryBudget().reserve(budget.bytes, args.signal);
+  // The read holds the worker budget for all it can cost: the bytes, the decoded string and JSON.parse's heap
+  // (TABLE_PARSE_HEAP_FACTOR per byte). A read that could not fit is not attempted.
+  const reservation = budget.bytes * TABLE_PARSE_HEAP_FACTOR;
+  if (reservation > tableParseMemoryBudget().total) return miss("unavailable", "artifact read would exceed the worker table-parse budget");
+  const release = await tableParseMemoryBudget().reserve(reservation, args.signal);
   try {
     let body: string;
     try {

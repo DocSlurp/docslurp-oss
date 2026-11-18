@@ -1,6 +1,6 @@
 import { HTML_TABLE_MAX_SOURCE_CHARS, HTML_TABLE_MAX_CELLS, HTML_TABLE_MAX_BATCH_BYTES } from "./html-table-limits.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
@@ -151,6 +151,22 @@ export function htmlTableMaxOutputBytes(env: NodeJS.ProcessEnv = process.env): n
 }
 /** Batches of one document parsed at once (each within the worker-wide budget). */
 const DOCUMENT_BATCH_CONCURRENCY = 2;
+/**
+ * Worker-budget bytes held per byte of a result being parsed: the transferred bytes (1), the decoded string (at most
+ * 2), and JSON.parse's heap for shapes the pre-scan admits (measured at most 12 per input byte, test "worst-case heap").
+ */
+export const TABLE_PARSE_HEAP_FACTOR = 15;
+/**
+ * The per-table output cap in effect: DOCSLURP_HTML_TABLE_MAX_OUTPUT_BYTES, lowered so one table's reservation
+ * (cap × TABLE_PARSE_HEAP_FACTOR) fits the worker budget. Part of the stored cells' identity (tableCellsGeneration).
+ */
+export function effectiveHtmlTableOutputCap(): number {
+  return Math.min(htmlTableMaxOutputBytes(), Math.floor(tableParseMemoryBudget().total / TABLE_PARSE_HEAP_FACTOR));
+}
+/** The output bound a batch of several tables may reach, likewise fitted to the worker budget. */
+function batchOutputTarget(): number {
+  return Math.min(HTML_TABLE_BATCH_OUTPUT_TARGET, Math.floor(tableParseMemoryBudget().total / TABLE_PARSE_HEAP_FACTOR));
+}
 
 /**
  * Worker-wide budget for table-parse results in flight (DOCSLURP_HTML_TABLE_PARSE_MEMORY_BYTES, default 128 MiB):
@@ -219,7 +235,7 @@ export async function prepareHtmlTableCells(sources: string[], runner: Pick<Comm
 interface TableBatch { sources: string[]; cap: number; single: boolean }
 
 /** Group tables into batches: by input bytes, at most 64, and by output bound; a table over the per-table cap alone. */
-function planBatches(misses: string[], tableCap: number, memo: HtmlTableStatsMemo): TableBatch[] {
+function planBatches(misses: string[], tableCap: number, batchTarget: number, memo: HtmlTableStatsMemo): TableBatch[] {
   const batches: TableBatch[] = [];
   let current: TableBatch | null = null;
   let inputBytes = 2;
@@ -231,7 +247,7 @@ function planBatches(misses: string[], tableCap: number, memo: HtmlTableStatsMem
       batches.push({ sources: [source], cap: tableCap, single: true });
       continue;
     }
-    if (!current || current.sources.length >= 64 || inputBytes + bytes > HTML_TABLE_MAX_BATCH_BYTES || current.cap + bound > Math.min(HTML_TABLE_BATCH_OUTPUT_TARGET, tableParseMemoryBudget().total)) {
+    if (!current || current.sources.length >= 64 || inputBytes + bytes > HTML_TABLE_MAX_BATCH_BYTES || current.cap + bound > batchTarget) {
       current = { sources: [], cap: 64, single: false };
       batches.push(current);
       inputBytes = 2;
@@ -259,24 +275,32 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
   }
   let vmCommands = 0, overCap = 0;
   if (misses.length) {
-    const tableCap = htmlTableMaxOutputBytes();
+    // Every batch's transfer cap times TABLE_PARSE_HEAP_FACTOR fits the worker budget, so each reservation is the
+    // whole cost of the batch, never clamped: a table over the effective cap is null (below), several share a batch
+    // only up to the fitted target.
+    const tableCap = effectiveHtmlTableOutputCap();
     const budget = tableParseMemoryBudget();
     const memo: HtmlTableStatsMemo = new Map();
-    const batches = planBatches(misses, tableCap, memo);
+    const batches = planBatches(misses, tableCap, batchOutputTarget(), memo);
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-tables-"));
     // A failed batch stops its sibling: one document's batches share this controller.
     const stop = new AbortController();
     const batchSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
     try {
       let next = 0;
-      const results: Array<{ batch: TableBatch; result: unknown[] | null }> = [];
+      let firstError: unknown;
       const worker = async () => {
         while (next < batches.length) {
+          if (batchSignal.aborted) throw batchSignal.reason;
           const index = next++;
           const batch = batches[index]!;
-          const release = await budget.reserve(batch.cap, batchSignal);
+          const release = await budget.reserve(batch.cap * TABLE_PARSE_HEAP_FACTOR, batchSignal);
           try {
-            const input = path.join(dir, `tables-${index}.json`), output = path.join(dir, `cells-${index}.json`);
+            // Each batch stages into its own directories: its input, and an output directory holding only its result
+            // file (the command's only writable path), so concurrent batches never see or download each other's files.
+            const input = path.join(dir, `in-${index}`, "tables.json"), outputDir = path.join(dir, `out-${index}`), output = path.join(outputDir, "cells.json");
+            await mkdir(path.dirname(input), { mode: 0o700 });
+            await mkdir(outputDir, { mode: 0o700 });
             await writeFile(input, JSON.stringify(batch.sources), { mode: 0o600 });
             vmCommands++;
             let text: string | null = null;
@@ -291,7 +315,7 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
               if (!batch.single || !isOutputLimit(error) || batchSignal.aborted) throw error;
               console.warn(`[table-cells] table output over its ${batch.cap}-byte cap; chunked as source text`);
               overCap++;
-              results.push({ batch, result: [null] });
+              prepared.set(batch.sources[0]!, null);
               continue;
             }
             // Before JSON.parse builds anything: the guest's result is [ table [ record {…} ] ], one record per cell tag,
@@ -307,25 +331,25 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
             text = null;
             if (!Array.isArray(result) || result.length !== batch.sources.length) throw new Error("invalid HTML table result");
             for (const cells of result as unknown[]) assertHtmlTableCells(cells);
-            results.push({ batch, result: result as unknown[] });
+            // Charged as soon as it decodes: what this document retains never exceeds its cell and text budgets, and
+            // the first batch that crosses them stops both workers (HtmlTableBudgetError, the over-budget path).
+            for (let i = 0; i < batch.sources.length; i++) {
+              const cells = (result[i] ?? null) as HtmlTableCell[] | null;
+              charge(cells);
+              prepared.set(batch.sources[i]!, cells);
+            }
           } finally {
             release();
           }
         }
       };
-      const workers = Array.from({ length: Math.min(DOCUMENT_BATCH_CONCURRENCY, batches.length) }, () => worker().catch((error: unknown) => { stop.abort(error); throw error; }));
-      const settled = await Promise.allSettled(workers);
-      const failed = settled.find((entry): entry is PromiseRejectedResult => entry.status === "rejected");
-      if (failed) throw failed.reason;
-      // Charged in batch order, so the document budget fails the same way however the batches interleaved.
-      results.sort((a, b) => batches.indexOf(a.batch) - batches.indexOf(b.batch));
-      for (const { batch, result } of results) {
-        for (let i = 0; i < batch.sources.length; i++) {
-          const cells = (result![i] ?? null) as HtmlTableCell[] | null;
-          charge(cells);
-          prepared.set(batch.sources[i]!, cells);
-        }
-      }
+      const workers = Array.from({ length: Math.min(DOCUMENT_BATCH_CONCURRENCY, batches.length) }, () => worker().catch((error: unknown) => {
+        firstError ??= error;
+        stop.abort(error);
+      }));
+      await Promise.all(workers);
+      // The error that stopped the work (not the sibling's resulting abort), so the over-budget path sees its own error.
+      if (firstError !== undefined) throw firstError;
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
   return { prepared, vmTables: misses.length, cachedTables: unique.length - misses.length, vmCommands, overCap };
