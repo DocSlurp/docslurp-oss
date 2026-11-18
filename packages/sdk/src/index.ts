@@ -1176,6 +1176,39 @@ export type ActivityEvent = {
   event: JsonObject;
 };
 
+/** Remaining-time bucket. Shown as a bucket, never a countdown. */
+export type EtaBucket = "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-3h" | ">3h";
+/** An ETA: `estimate` is true when it comes from project history rather than the run's own progress. */
+export type RunEta = { seconds: number; bucket: EtaBucket; basis: "observed" | "historical"; estimate: boolean; pagesPerMinute: number };
+type ActivityCounts = { runs: number; documents: number; pages: number };
+/** Your organization's ingestion at a glance (`GET /v1/runs/activity/summary`, `GET /v1/runs?activity=true`, and the stream's `activity-summary` event). */
+export type ActivitySummary = {
+  queued: ActivityCounts;
+  inProgress: ActivityCounts & { pagesProcessed: number; pagesTotal: number };
+  recentlyCompleted: ActivityCounts;
+  recentWindowMinutes: number;
+  /** Observed throughput of processing runs; null with nothing to observe. */
+  pagesPerMinute: number | null;
+  /** Until every active run finishes; null while estimating. */
+  eta: { seconds: number; bucket: EtaBucket; estimate: boolean } | null;
+  /** More active runs than the summary reads: counts cover the oldest ones and eta is null. */
+  truncated: boolean;
+  generatedAt: string;
+};
+/** Upload-session progress: transfer, then the run it started (null until ingestion starts). */
+export type UploadSessionProgress = {
+  files: { total: number; completed: number };
+  bytes: { total: number; completed: number };
+  run: {
+    id: string;
+    status: string;
+    documents: { total: number; processed: number };
+    pages: { total: number; processed: number };
+    pagesPerMinute: number | null;
+    eta: RunEta | null;
+  } | null;
+};
+
 export type StreamActivityOptions = RequestOptions & {
   /** Only yield these event types. */
   types?: string[];
@@ -1493,6 +1526,8 @@ export type UploadSession = {
   result?: UploadResponse | null;
   /** Files the server left out of the session (the others were accepted), keyed by request index. */
   rejected?: RejectedUpload[];
+  /** Files and bytes received, then the run's documents, pages, pages per minute and ETA bucket. */
+  progress?: UploadSessionProgress;
 };
 export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 /** One file's answer from a batched completion: completed, or failed with the status the single-file call would have answered. */
@@ -2973,6 +3008,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamRun,
     streamActivity,
     waitForRun,
+
+    /** Your organization's queued, in-progress and recently completed work, pages per minute and ETA bucket; null when unavailable. */
+    async getActivitySummary(options?: RequestOptions): Promise<ActivitySummary | null> {
+      return (await request<{ summary?: ActivitySummary | null }>("/v1/runs/activity/summary", {}, options, true)).summary ?? null;
+    },
 
     /** One page of run history (highest priority, then newest first). Follow `nextCursor` for the rest. */
     listRunsPage,

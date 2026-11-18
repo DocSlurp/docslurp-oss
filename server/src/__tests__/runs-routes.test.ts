@@ -15,6 +15,15 @@ const startPipelineWorkflowMock = vi.fn();
 const listenForRunEventsMock = vi.fn();
 const listRunEventsMock = vi.fn();
 const isApiKeyLiveMock = vi.fn(async () => true);
+const summaryFor = (orgId: string) => ({ orgId, queued: { runs: 0, documents: 0, pages: 0 } });
+type Scope = { orgId: string; projectIds: readonly string[] };
+const getOrgActivitySummaryMock = vi.fn(async (scope: Scope) => summaryFor(scope.orgId));
+// The real scope: the key's org (else the user's), over the projects the caller may read (services/run-activity-summary.ts).
+const activitySummaryScopeForMock = vi.fn(async (_userId: string, apiKeyOrgId: string | null): Promise<Scope | null> => ({ orgId: apiKeyOrgId ?? "org-session", projectIds: ["ws-visible"] }));
+vi.mock("../services/run-activity-summary.js", () => ({
+  getOrgActivitySummary: getOrgActivitySummaryMock,
+  activitySummaryScopeFor: activitySummaryScopeForMock,
+}));
 vi.mock("../services/api-key-liveness.js", () => ({ isApiKeyLive: isApiKeyLiveMock }));
 // Who may reprocess is decided against the database (reprocess-editors-only.db.test.ts); these route tests stub it.
 const denyReprocessMock = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
@@ -330,7 +339,51 @@ describe("API-key run reads", () => {
   it("keeps the activity list organization-filtered and reports it as complete", async () => {
     listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }, { id: "foreign", orgId: "org-2" }]);
     const response = await keyApp().request("/runs?activity=true");
-    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }], hasMore: false, nextCursor: null });
+    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }], hasMore: false, nextCursor: null, summary: summaryFor("org-1") });
+  });
+  it("serves the summary alone for the key's own organization", async () => {
+    getOrgActivitySummaryMock.mockClear();
+    const response = await keyApp().request("/runs/activity/summary?orgId=org-2");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ summary: summaryFor("org-1") });
+    expect(getOrgActivitySummaryMock.mock.calls.map(([scope]) => scope.orgId)).toEqual(["org-1"]);
+    expect(listRunsMock).not.toHaveBeenCalledWith("user-1", true);
+  });
+  it("summarizes only the key's own organization, never one named in the request", async () => {
+    getOrgActivitySummaryMock.mockClear();
+    listRunsMock.mockResolvedValue([]);
+    const response = await keyApp().request("/runs?activity=true&orgId=org-2");
+    expect((await response.json()).summary).toEqual(summaryFor("org-1"));
+    expect(getOrgActivitySummaryMock.mock.calls.map(([scope]) => scope.orgId)).toEqual(["org-1"]);
+    expect(activitySummaryScopeForMock).toHaveBeenLastCalledWith("user-1", "org-1");
+  });
+  it("keeps the activity feed up when the summary cannot be read", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    getOrgActivitySummaryMock.mockRejectedValueOnce(Object.assign(new Error("password=hunter2"), { name: "PostgresError" }));
+    listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }]);
+    const response = await keyApp().request("/runs?activity=true");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ runs: [{ id: "own" }], summary: null });
+    expect(JSON.stringify(error.mock.calls)).not.toContain("hunter2");
+    error.mockRestore();
+  });
+  it("rejects a key without run scopes before reading any summary", async () => {
+    getOrgActivitySummaryMock.mockClear();
+    expect((await keyApp(["search"], "client").request("/runs?activity=true")).status).toBe(403);
+    expect((await keyApp([]).request("/runs?activity=true")).status).toBe(403);
+    expect((await keyApp(["search"], "client").request("/runs/activity/summary")).status).toBe(403);
+    expect((await keyApp([]).request("/runs/activity/summary")).status).toBe(403);
+    expect(getOrgActivitySummaryMock).not.toHaveBeenCalled();
+  });
+  it("ends the activity stream for a key revoked while it is open", async () => {
+    listenForRunEventsMock.mockResolvedValue({ close: vi.fn().mockResolvedValue(undefined) });
+    listRunsMock.mockResolvedValue([]);
+    isApiKeyLiveMock.mockResolvedValueOnce(false);
+    getOrgActivitySummaryMock.mockClear();
+    const text = await (await keyApp().request("/runs/activity/stream")).text();
+    expect(text).toContain("event: activity-error");
+    expect(text).not.toContain("event: activity\n");
+    expect(getOrgActivitySummaryMock).not.toHaveBeenCalled();
   });
   it.each(["/events", "/events/stream", "/progress/stream"])("isolates streaming/event reads across organizations at %s", async suffix => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-2" });
@@ -464,6 +517,34 @@ describe("API-key run reads", () => {
     await reader.cancel();
     await vi.waitFor(() => expect(close).toHaveBeenCalledOnce(), { timeout: 5000 });
   });
+  it("streams the summary with the inventory, then only when it changes", async () => {
+    vi.useFakeTimers();
+    listenForRunEventsMock.mockResolvedValue({ close: vi.fn().mockResolvedValue(undefined) });
+    listRunsMock.mockResolvedValue([]);
+    let pages = 1;
+    getOrgActivitySummaryMock.mockImplementation(async (scope: Scope) => ({ ...summaryFor(scope.orgId), queued: { runs: 1, documents: 1, pages } }));
+    const response = await keyApp().request("/runs/activity/stream");
+    const reader = response.body!.getReader();
+    const chunks: string[] = [];
+    const drain = (async () => { while (true) { const chunk = await reader.read(); if (chunk.done) break; chunks.push(new TextDecoder().decode(chunk.value)); } })();
+    try {
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(chunks.join("")).toContain('"summary":{"orgId":"org-1"');
+      expect(chunks.filter(chunk => chunk.includes("event: activity-summary"))).toHaveLength(0);
+      pages = 7;
+      await vi.advanceTimersByTimeAsync(9_000);
+      const updates = chunks.filter(chunk => chunk.includes("event: activity-summary"));
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toContain('"pages":7');
+      expect(getOrgActivitySummaryMock.mock.calls.every(([scope]) => scope.orgId === "org-1")).toBe(true);
+    } finally {
+      await reader.cancel();
+      await drain;
+      vi.useRealTimers();
+      getOrgActivitySummaryMock.mockImplementation(async (scope: Scope) => summaryFor(scope.orgId));
+    }
+  });
+
   it("uses cheap heartbeats between bounded inventory reconciliations", async () => {
     vi.useFakeTimers();
     const close = vi.fn().mockResolvedValue(undefined);
@@ -541,6 +622,16 @@ describe("runsRoutes operator redaction", () => {
     listRunsPageMock.mockResolvedValue({ runs: [{ id: "run-1", orgId: "org-1", stats: workerStats }], hasMore: false, nextCursor: null });
   });
 
+  it("summarizes a session user's own organization", async () => {
+    activitySummaryScopeForMock.mockClear();
+    getOrgActivitySummaryMock.mockClear();
+    const body = await (await sessionApp(false).request("/runs?activity=true")).json();
+    expect(activitySummaryScopeForMock).toHaveBeenCalledWith("user-1", null);
+    expect(body.summary).toEqual(summaryFor("org-session"));
+    expect(getOrgActivitySummaryMock).toHaveBeenCalledWith({ orgId: "org-session", projectIds: ["ws-visible"] });
+    activitySummaryScopeForMock.mockResolvedValueOnce(null);
+    expect((await (await sessionApp(false).request("/runs?activity=true")).json()).summary).toBeNull();
+  });
   it.each(["/runs", "/runs?activity=true"])("strips worker diagnostics from %s for a non-operator, keeps the customer's numbers", async (path) => {
     const body = await (await sessionApp(false).request(path)).text();
     expect(leaks(body)).toBe(false);
