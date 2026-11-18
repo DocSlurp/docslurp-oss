@@ -14,7 +14,7 @@ describe("separate direct upload lock connections", () => {
   it("uses a lazy bounded pool separate from intake query connections", async () => {
     setup();
     const lock = await reserveDirectUploadLockConnection();
-    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:2,applicationName:"docslurp-upload-locks"});
+    expect(mocks.create).toHaveBeenCalledWith("postgres://lock-test", {max:6,applicationName:"docslurp-upload-locks"});
     lock.release(); lock.release();
     expect(mocks.release).toHaveBeenCalledOnce();
     await closeDirectUploadLockPool();

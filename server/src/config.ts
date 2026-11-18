@@ -242,6 +242,19 @@ export const env = {
    * reconciler, a recovery read). Storage operations per file are independent; the session lock is held for the batch.
    */
   directUploadFinalizeConcurrency: Math.min(32, Math.max(1, Math.floor(readNumber(process.env.DOCSLURP_UPLOAD_FINALIZE_CONCURRENCY, 8)))),
+  /** Upload-session lock connections per process (default 6, at least 3); see lib/direct-upload-locks.ts. */
+  directUploadLockPoolMax: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_POOL_MAX, 6),
+  /** Concurrent files/complete holders per process (default: pool size minus two). */
+  directUploadLockBatchMax: process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX, 4) : undefined,
+  /** Concurrent files/complete holders per organization in one process (default 2). */
+  directUploadLockBatchPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_PER_ORG, 2),
+  /**
+   * How long one lock hold keeps starting new files (default 5 s); files not started are answered retryable
+   * `upload_session_busy`. Work already started may run to the hard cap below.
+   */
+  directUploadLockHoldBudgetMs: Math.max(250, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_BUDGET_MS, 5_000)),
+  /** Hard cap on one lock hold's storage work: in-flight calls are cancelled after it (default 30 s). */
+  directUploadLockHoldMaxMs: Math.max(1_000, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS, 30_000)),
   /**
    * Cap for the buffered multipart path (POST /v1/uploads/bulk). Hono's
    * parseBody holds the whole body in memory, so larger files must use direct

@@ -43,7 +43,7 @@ describe("files/complete request shapes", () => {
     const response = await complete({ files: [{ fileId: "f1" }, { fileId: "f2", sizeBytes: 9 }] });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, completedCount: 2, files: [{ fileId: "f1", status: "completed" }, { fileId: "f2", status: "completed" }] });
-    expect(mocks.batch).toHaveBeenCalledWith({ sessionId: session, userId: "u", files: [{ fileId: "f1" }, { fileId: "f2", sizeBytes: 9 }] });
+    expect(mocks.batch).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session, userId: "u", files: [{ fileId: "f1" }, { fileId: "f2", sizeBytes: 9 }] }));
   });
 
   it("reports ok:false with 200 when some files fail", async () => {

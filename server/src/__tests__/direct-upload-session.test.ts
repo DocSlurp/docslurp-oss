@@ -183,19 +183,28 @@ describe("Direct Upload Session Module", () => {
     const fixture = directUploadSessionFixture();
     fixture.files[0].status = "pending";
     for (const actualSize of [null, 41, 42]) {
-      sqlMock.mockReset();
-      sqlMock.mockResolvedValueOnce([fixture.session]).mockResolvedValueOnce(fixture.files).mockResolvedValue([{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0], "etag") }]);
+      sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => {
+        const query = strings.join("?");
+        if (query.includes("from upload_sessions") && !query.includes("update")) return [fixture.session];
+        if (query.includes("from upload_session_files") && !query.includes("exists")) return fixture.files;
+        if (query.includes("set status = 'completed'")) return [{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0], "etag") }];
+        if (query.includes("exists (select 1 from upload_session_files")) return [{ open: true }];
+        return [{ one: 1 }];
+      });
       getUploadedObjectMetadata.mockResolvedValue({ contentLength: actualSize, etag: "etag" });
       const completing = completeDirectUploadFile({ sessionId: "session-1", userId: "user-1", fileId: "file-1" });
+      const queries = () => sqlMock.mock.calls.map(([strings]) => (strings as string[]).join("?"));
       if (actualSize === 42) {
         await expect(completing).resolves.toEqual({ sessionComplete: false });
-        expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
+        expect(queries().some(query => query.includes("set status = 'completed'"))).toBe(true);
+        // New progress extends the hold, within the cap from when it began.
+        expect(queries().at(-1)).toContain("client_finalizing_since");
       } else {
         await expect(completing).rejects.toThrow();
-        // Session, the named file, membership, the open-file check, then only the client-finalizing hold: nothing is completed.
-        expect(sqlMock).toHaveBeenCalledTimes(5);
-        expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(false);
-        expect(sqlMock.mock.calls.at(-1)?.[0].join("?")).toContain("client_finalizing_until = now() +");
+        // Nothing is completed, and with no new progress the hold opened before the lock is not extended.
+        expect(queries().some(query => query.includes("set status = 'completed'"))).toBe(false);
+        expect(queries().filter(query => query.includes("client_finalizing_until = least("))).toHaveLength(0);
+        expect(queries().some(query => query.includes("client_finalizing_since is null"))).toBe(true);
       }
     }
   });

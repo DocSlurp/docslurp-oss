@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({ sql: vi.fn(), load: vi.fn(), finalize: vi.fn()
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../services/direct-upload-session.js", () => ({
   loadDirectUploadSession: mocks.load, finalizeDirectUploadFile: mocks.finalize,
+  lockHoldBudget: () => ({ signal: new AbortController().signal, shouldStart: () => true }),
   abortDirectUploadSession: vi.fn(), queueAbandonedDirectUploadCleanup: vi.fn(),
   withDirectUploadLock: (_id: string, work: () => Promise<unknown>) => mocks.lock(work),
 }));
@@ -48,7 +49,7 @@ describe("reconcile kick", () => {
     await vi.advanceTimersByTimeAsync(0);
     kickTarget = [SESSION];
     kickDirectUploadReconcile("session-1");
-    kickDirectUploadReconcile("session-1"); // at most one kick per session at a time
+    kickDirectUploadReconcile("session-1"); // at most one kick per session at a time (this one earns a later re-run)
     expect(mocks.confirm).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(DIRECT_UPLOAD_KICK_DELAY_MS + 10);
     expect(mocks.confirm).toHaveBeenCalledOnce();

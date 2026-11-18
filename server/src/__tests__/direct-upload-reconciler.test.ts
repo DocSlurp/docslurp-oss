@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../services/direct-upload-session.js", () => ({
   loadDirectUploadSession: mocks.load, finalizeDirectUploadFile: mocks.finalize,
+  lockHoldBudget: () => ({ signal: new AbortController().signal, shouldStart: () => true }),
   abortDirectUploadSession: mocks.abort, queueAbandonedDirectUploadCleanup: mocks.cleanup,
   withDirectUploadLock: async (_id: string, work: () => Promise<unknown>) => work(),
 }));
@@ -17,7 +18,13 @@ let scheduled: typeof session[];
 beforeEach(() => {
   vi.clearAllMocks();
   scheduled = [{ ...session }];
-  mocks.sql.mockImplementation(async (strings: TemplateStringsArray) => strings.join("").includes("select id, user_id, status") ? scheduled : []);
+  mocks.sql.mockImplementation(async (strings: TemplateStringsArray) => {
+    const text = strings.join("");
+    if (text.includes("select id, user_id, status")) return scheduled;
+    // The guarded terminal transition finds the session as observed.
+    if (text.includes("set status = 'failed'")) return [{ id: "session-1" }];
+    return [];
+  });
   mocks.load.mockResolvedValue({ session:{status:"pending"},files:[{id:"file-1"}] });
   mocks.finalize.mockResolvedValue(true);
   mocks.confirm.mockResolvedValue({});

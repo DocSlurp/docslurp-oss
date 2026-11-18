@@ -10,6 +10,7 @@ import type { Config } from "../config.js";
 import type { Document, ProjectRun } from "../models.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { type CheckpointStore, WorkflowState } from "../pipeline/pipeline.js";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { sha256Bytes } from "../sandbox/source-integrity.js";
 import { QuarantineStage } from "../stages/quarantine.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -40,9 +41,9 @@ async function fixture(extra: Document[] = []) {
   const store: CheckpointStore = {
     startDocumentStage: vi.fn(async () => {}), completeDocumentStage: vi.fn(async () => {}), failDocumentStage: vi.fn(async () => {}),
     updateProgress: vi.fn(async () => {}), startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
-    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()),
+    appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()), pageBasisLedger: new MemoryPageBasisLedger(),
   };
-  state.store = store;
+  state.bindStore(store);
   let sequence = 0;
   const storage = {
     downloadSourceToTempFile: async (key: string) => { const p = join(await mkdtemp(join(dir, "doc-")), `${sequence++}-${key}`); await writeFile(p, sources.get(key)!); return p; },

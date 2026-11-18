@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -21,6 +22,7 @@ function doc(id: string): Document {
 
 /** Persists document stage checkpoints between stage activities, like document_run_stage_states. */
 class MemoryStore implements StageExecutionStore {
+  pageBasisLedger = new MemoryPageBasisLedger();
   run: ProjectRun;
   documents: Document[];
   docStages = new Map<string, StageState>();

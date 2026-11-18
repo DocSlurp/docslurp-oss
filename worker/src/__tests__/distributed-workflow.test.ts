@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ budget: false, cleanupInit: false, activities: {} as Record<string, any> }));
+const mocks = vi.hoisted(() => ({ budget: false, cleanupInit: false, spendPause: false, activities: {} as Record<string, any> }));
 vi.mock("@temporalio/workflow", async () => ({
   ActivityFailure: (await import("@temporalio/common")).ActivityFailure,
   sleep: async () => {},
-  patched: (id: string) => (id === "pipeline-init-lifecycle-v1" && mocks.cleanupInit) || (id === "admission-history-budget-v1" && mocks.budget),
+  patched: (id: string) => (id === "pipeline-init-lifecycle-v1" && mocks.cleanupInit) || (id === "admission-history-budget-v1" && mocks.budget)
+    || (id === "page-task-spend-pause-v1" && mocks.spendPause),
   proxyActivities: () => new Proxy({}, { get: (_, key: string) => (...args: unknown[]) => mocks.activities[key](...args) }),
   defineQuery: (name:string) => name, defineSignal: (name:string) => name,
   CancellationScope: { nonCancellable: async (fn: () => Promise<unknown>) => fn() },
@@ -67,6 +68,55 @@ describe("page workflow scheduling", () => {
     mocks.activities.failPipelineRun.mockImplementation(async()=>{expect(active).toBe(0);});
     await documentPipeline({runId:"run",pipeline:{} as never,stageOrder:["vision-extract"],pageConcurrency:10}).catch(()=>{});
     expect(mocks.activities.failPipelineRun).toHaveBeenCalled();expect(mocks.activities.runPipelineStage).not.toHaveBeenCalled();
+  });
+});
+
+describe("page tasks refused for funds (council #469)", () => {
+  const spendPaused = async () => {
+    const { ActivityFailure, ApplicationFailure } = await import("@temporalio/common");
+    const { PAGE_TASK_SPEND_PAUSED } = await import("../temporal/shared.js");
+    return new ActivityFailure("activity failed", "runVisionPageTask", "1", 1 as never, undefined,
+      ApplicationFailure.create({ type: PAGE_TASK_SPEND_PAUSED, message: "Credits do not cover the OCR read; run paused", nonRetryable: true }));
+  };
+  beforeEach(() => {
+    Object.assign(mocks.activities, {
+      initPipelineRun: vi.fn(async()=>({artifacts:{},documentIds:["doc"]})),
+      runPipelineStage: vi.fn(async()=>({artifacts:{},usage:zero})),
+      completePipelineRun: vi.fn(async()=>({})), failPipelineRun: vi.fn(async()=>{}),
+      prepareVisionPageTasks: vi.fn(async()=>Array.from({length:5},(_,i)=>({documentId:"doc",pageNumber:i+1}))),
+      runVisionPageTask: vi.fn(async()=>zero),
+      runVisionPageBundle: vi.fn(async()=>zero),
+    });
+  });
+
+  it("requeues the bundle and redispatches it instead of failing the run", async () => {
+    mocks.spendPause = true;
+    try {
+      const failure = await spendPaused();
+      let refused = 0;
+      mocks.activities.runVisionPageTask.mockImplementation(async (task: { pageNumber: number }) => {
+        if (task.pageNumber === 2 && refused < 2) { refused++; throw failure; }
+        return zero;
+      });
+      await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ["vision-extract"], pageConcurrency: 2 });
+      expect(refused).toBe(2);
+      const pages = mocks.activities.runVisionPageTask.mock.calls.map((call: [{ pageNumber: number }]) => call[0].pageNumber);
+      expect(pages.filter((page: number) => page === 2)).toHaveLength(3);
+      expect(mocks.activities.failPipelineRun).not.toHaveBeenCalled();
+      expect(mocks.activities.completePipelineRun).toHaveBeenCalled();
+    } finally {
+      mocks.spendPause = false;
+    }
+  });
+
+  it("keeps the old outcome for runs from before the rule (patch absent): the refusal fails the fan-out", async () => {
+    const failure = await spendPaused();
+    mocks.activities.runVisionPageTask.mockImplementation(async (task: { pageNumber: number }) => {
+      if (task.pageNumber === 2) throw failure;
+      return zero;
+    });
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ["vision-extract"], pageConcurrency: 2 }).catch(() => {});
+    expect(mocks.activities.failPipelineRun).toHaveBeenCalled();
   });
 });
 

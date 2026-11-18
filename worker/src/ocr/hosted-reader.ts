@@ -8,7 +8,7 @@
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
  * missing VM: escalation only follows a VM (or self-hosted) read, and hosted mode is its own operator setting.
  */
-import { admitAutomaticCall, DEFAULT_OCR_ESCALATION_MODEL, isAutomaticSelectionDenied, ocrEscalationAutomaticRoute, ocrEscalationRoutes, pageUpgradeCredits, prepareAutomaticCallPrices, reportAutomaticCallOutcome, speedBoostMultiplier, switchDisabled, type OcrEscalationRoute } from "@docslurp/shared";
+import { admitAutomaticCall, DEFAULT_OCR_ESCALATION_MODEL, isAutomaticSelectionDenied, ocrEscalationAutomaticRoute, ocrEscalationRoutes, prepareAutomaticCallPrices, reportAutomaticCallOutcome, switchDisabled, type OcrEscalationRoute } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
@@ -204,7 +204,7 @@ export function createHostedOcrReader(args: {
       // A new escalation read upgrades its page from OCR to Rich: before the call, the balance must cover that upgrade plus the
       // run's charges still buffered here. Read-only: an unfunded org skips the escalation (the page keeps its OCR read) and
       // the run goes on, unpaused; a check that cannot decide throws SpendCheckUnavailableError (retryable).
-      if (purpose === "ocr-escalation") await authorizeEscalationRead(state, page);
+      if (purpose === "ocr-escalation") await authorizeEscalationRead(state, page, durable !== null);
       // Unique per real call: two calls of the same page (overlapping activities) never share a usage id, so neither's cost
       // is dropped by the ledger's id dedup. Replays reuse the ids persisted with the call.
       const callId = `${purpose}:${state.run.id}:${page.documentId}:${page.pageNumber}:${randomUUID()}`;
@@ -327,19 +327,20 @@ export function createHostedOcrReader(args: {
 }
 
 /**
- * The balance check before an escalation read: the page's upgrade from OCR to Rich, plus this activity's buffered charges.
- * Read-only (largestFundedCharge): it never pauses the run. Fails closed: no store to check with, no user or no organization
- * skips the escalation, as an unfunded balance does.
+ * The balance check before an escalation read: the page's upgrade from OCR to Rich, plus this activity's buffered charges
+ * (the page basis sizes it). Read-only: it never pauses the run. Fails closed: a state with no store to persist the read (a
+ * page task, which leaves state.store unset) and a run with no user or no organization to charge skip the escalation (an
+ * optional upgrade), as an unfunded balance does; an unbound page basis or a check that cannot decide throws (the page basis
+ * refuses, never skips).
  */
-async function authorizeEscalationRead(state: WorkflowState, page: HostedOcrPage): Promise<void> {
-  const store = state.store;
+async function authorizeEscalationRead(state: WorkflowState, page: HostedOcrPage, durable: boolean): Promise<void> {
   const skip = (why: string): never => {
     console.warn(`[ocr] ocr-escalation skipped run=${state.run.id} document=${page.documentId} page=${page.pageNumber} reason=${why}`);
     throw new HostedOcrSkipped("unfunded", `the escalation read is not funded (${why}); the page keeps its OCR read`);
   };
-  if (!store?.largestFundedCharge || !state.run.userId || !state.run.orgId) skip("no-balance-check");
-  const credits = pageUpgradeCredits("ocr", "rich") * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
-  const funded = await store!.largestFundedCharge!({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId }, 1, () => credits);
+  if (!durable) skip("no-durable-store");
+  if (!state.run.userId || !state.run.orgId) skip("no-balance-check");
+  const funded = await state.pageBasis.affordable({ kind: "page-upgrade", from: "ocr", to: "rich" }, 1);
   if (funded < 1) skip("unfunded");
 }
 

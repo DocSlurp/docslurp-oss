@@ -1,12 +1,13 @@
 import { countFirstPassPages, firstPassPipeline, planFirstPass, runFirstPassBatch } from "../pipeline/first-pass.js";
 import { RunPolicyError } from "../lib/document-failure.js";
+import { UnfundedPagesError } from "../pipeline/page-basis.js";
 import { isFinalBatchFailure } from "../extractors/sandboxed-pdf-batch.js";
 import { withPlanningProgress } from "./planning-progress.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { buildDocumentExport, DOCUMENT_EXPORT_MAX_ATTEMPTS } from "../exports/build-document-export.js";
 import { runPageBundle } from "./page-bundle.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
-import { FIRST_PASS_BATCH_FINAL_FAILURE, FIRST_PASS_RUN_POLICY_FAILURE, type FirstPassBatchInput, type FirstPassBatchOutput, type FirstPassCountInput, type FirstPassPlanInput, type FirstPassPlanOutput, type VisionPageTask } from "./shared.js";
+import { FIRST_PASS_BATCH_FINAL_FAILURE, FIRST_PASS_RUN_POLICY_FAILURE, PAGE_TASK_SPEND_PAUSED, type FirstPassBatchInput, type FirstPassBatchOutput, type FirstPassCountInput, type FirstPassPlanInput, type FirstPassPlanOutput, type VisionPageTask } from "./shared.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 /**
@@ -91,6 +92,20 @@ export interface ActivityDependencies {
  * or later becomes non-retryable, so an activity whose retry policy allows
  * extra attempts for throttling still gives up on ordinary errors on time.
  */
+/**
+ * A page task the page basis refused for funds (UnfundedPagesError anywhere in the cause chain): a typed, non-retryable
+ * failure the page fan-out requeues until the run resumes (temporal/page-fanout.ts), never retried against a paused run and
+ * never recorded as the page's failure. Null for any other error.
+ */
+export function pageTaskSpendPausedFailure(error: unknown): ApplicationFailure | null {
+  for (let link = error, depth = 0; link && depth < 8; link = (link as { cause?: unknown }).cause, depth += 1) {
+    if (link instanceof UnfundedPagesError) {
+      return ApplicationFailure.create({ type: PAGE_TASK_SPEND_PAUSED, message: link.message, nonRetryable: true, details: [{ paused: link.paused }], cause: link });
+    }
+  }
+  return null;
+}
+
 export function toActivityFailure(error: unknown, attempt?: number, ordinaryAttemptLimit?: number): unknown {
   const throttled = findProviderRetryableError(error);
   if (!throttled) {
@@ -325,6 +340,8 @@ export function createActivities(deps: ActivityDependencies) {
         return await withWorkerSlot(store, { runId: task.runId, kind: "page", enabled: slotsEnabled && task.slotGate === true },
           () => runVisionPage(task, allocationFraction));
       } catch (error) {
+        const unfunded = pageTaskSpendPausedFailure(error);
+        if (unfunded) throw unfunded;
         const classification = classifyActivityError(error, { signal: Context.current().cancellationSignal });
         if (classification === "interruption") throw interruptionFailure(error);
         if (classification === "hung") throw hungWorkFailure(error);

@@ -319,6 +319,11 @@ export interface VisionPageBatchPlan {
 
 /** Temporal ApplicationFailure type for "org (or fleet) has no free worker slot". */
 export const WORKER_SLOT_UNAVAILABLE = "WorkerSlotUnavailable";
+/**
+ * A page task refused because its run is out of funds (worker pipeline/page-basis.ts UnfundedPagesError): non-retryable, so
+ * Temporal does not retry it against a paused run; the page fan-out requeues the bundle and waits for the run to resume.
+ */
+export const PAGE_TASK_SPEND_PAUSED = "PageTaskSpendPaused";
 /** Provider 429/5xx that survived in-process retries; Temporal retries with nextRetryDelay. */
 export const PROVIDER_RATE_LIMITED = "ProviderRateLimited";
 /**

@@ -6,8 +6,8 @@ import type { PipelineFeatureOverrides, ProjectTemplateKey } from "@docslurp/sha
 import { sql } from "../db.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { env } from "../config.js";
-import { reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
-import { settleBounded } from "../lib/bounded-settle.js";
+import { DirectUploadLockUnavailable, reserveDirectUploadLockConnection, type DirectUploadLockClass } from "../lib/direct-upload-locks.js";
+import { NOT_STARTED, settleBounded } from "../lib/bounded-settle.js";
 import { isTransientStorageError, withStorageRetry } from "../lib/storage-retry.js";
 import { MAX_DIRECT_UPLOAD_COMPLETE_BATCH } from "../lib/direct-upload-limits.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
@@ -446,11 +446,14 @@ export async function getDirectUploadSessionDescription(
   sessionId: string,
   userId: string,
   statusOnly = false,
+  signal?: AbortSignal,
 ) {
   if (statusOnly) {
     const loaded = await loadDirectUploadSession(sessionId, userId);
     return loaded ? describeDirectUploadSession(loaded, true) : null;
   }
+  const owned = await loadDirectUploadSessionRow(sessionId, userId);
+  if (!owned) return null;
   return withDirectUploadLock(sessionId, async () => {
     let loaded = await loadDirectUploadSession(sessionId, userId);
     if (!loaded) return null;
@@ -461,13 +464,16 @@ export async function getDirectUploadSessionDescription(
     // Inspect all final objects before authorizing any retry. An outage is not absence.
     try {
       const open = loaded.files.filter(file => file.status === "pending" && !file.unknown_size);
+      const budget = lockHoldBudget(signal);
       const inspected = await settleBounded(open, env.directUploadFinalizeConcurrency, async file => {
         let exists = false;
-        try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key)); exists = true; }
+        try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, budget.signal), undefined, budget.signal); exists = true; }
         catch (error) { if (!isStorageNotFound(error)) throw error; }
-        if (exists) await finalizeDirectUploadFile(file);
-      });
+        if (exists) await finalizeDirectUploadFile(file, undefined, { signal: budget.signal });
+      }, { shouldStart: budget.shouldStart });
       // Every file is inspected before any failure is reported; the first failure (in file order) decides the answer.
+      // A file this hold did not reach was not inspected: no URL is signed for it, so the answer is "retry later" (the
+      // files that were reached keep their progress).
       const failure = inspected.find(result => result.status === "rejected");
       if (failure) throw failure.reason;
       loaded = (await loadDirectUploadSession(sessionId, userId))!;
@@ -476,7 +482,7 @@ export async function getDirectUploadSessionDescription(
       if (error instanceof ProjectIntakeError && error.code === "intake_reconciliation_required") throw error;
       throw new ProjectIntakeError("Upload storage evidence is unavailable; retry status later", 503, undefined, "upload_storage_unavailable");
     }
-  });
+  }, undefined, undefined, { lockClass: "batch", orgId: owned.org_id });
 }
 
 /** Confirmed results remain readable after the transfer deadline. */
@@ -490,15 +496,32 @@ export function assertUploadSessionActive(session: UploadSessionRow): number {
 /** How often a caller that may wait for a held session lock tries it again. */
 const LOCK_RETRY_INTERVAL_MS = 250;
 
+export interface DirectUploadLockOptions {
+  /** How long to wait out another holder of the session (0: answer busy at once). */
+  waitMs?: number;
+  /** Which connection class to hold (lib/direct-upload-locks.ts); default `short`. */
+  lockClass?: DirectUploadLockClass;
+  /** The organization a `batch` holder counts against. */
+  orgId?: string | null;
+}
+
 /**
  * Cross-process serialization: the dedicated connection owns the lock until release. A held lock answers 409
- * `upload_session_busy` at once, or after `waitMs` of retries. A waiting caller releases its lock connection between
- * tries: the per-process lock pool is tiny and must stay free for the holder and other sessions.
+ * `upload_session_busy` at once, or after `waitMs` of retries; so does a saturated lock pool, on the caller's deadline.
+ * A waiting caller releases its lock connection between tries: the pool must stay free for the holder and other sessions.
  */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy", waitMs = 0): Promise<T> {
-  const deadline = Date.now() + Math.max(0, waitMs);
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode: ProjectIntakeErrorCode = "upload_session_busy", waitOrOptions: number | DirectUploadLockOptions = 0): Promise<T> {
+  const options = typeof waitOrOptions === "number" ? { waitMs: waitOrOptions } : waitOrOptions;
+  const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
   for (;;) {
-    const { connection, release } = await reserveDirectUploadLockConnection();
+    let reserved: Awaited<ReturnType<typeof reserveDirectUploadLockConnection>>;
+    try {
+      reserved = await reserveDirectUploadLockConnection({ lockClass: options.lockClass, orgId: options.orgId, deadline });
+    } catch (error) {
+      if (error instanceof DirectUploadLockUnavailable) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
+      throw error;
+    }
+    const { connection, release } = reserved;
     try {
       const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
       if (lock?.acquired) {
@@ -509,6 +532,22 @@ export async function withDirectUploadLock<T>(sessionId: string, run: () => Prom
     if (Date.now() >= deadline) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
     await new Promise(resolve => setTimeout(resolve, Math.min(LOCK_RETRY_INTERVAL_MS, Math.max(1, deadline - Date.now()))));
   }
+}
+
+/**
+ * The cancellation for storage work under one lock hold: the caller's own (a disconnected client) or the hard cap,
+ * and a predicate that stops starting new files once the hold's budget is spent.
+ */
+export function lockHoldBudget(signal?: AbortSignal): { signal: AbortSignal; shouldStart: () => boolean } {
+  const startedAt = Date.now();
+  const hard = AbortSignal.timeout(env.directUploadLockHoldMaxMs);
+  const combined = signal ? AbortSignal.any([signal, hard]) : hard;
+  return { signal: combined, shouldStart: () => !combined.aborted && Date.now() - startedAt < env.directUploadLockHoldBudgetMs };
+}
+
+/** A file this hold did not get to: repeat it (the next call starts with it). */
+export function notStartedError(): ProjectIntakeError {
+  return new ProjectIntakeError("Not started within this request's time budget; repeat this file", 409, undefined, "upload_session_busy");
 }
 
 export function validMultipartLayout(parts: Array<{ partNumber: number; sizeBytes: number }>, size: number, partSize: number): boolean {
@@ -707,6 +746,9 @@ export { MAX_DIRECT_UPLOAD_COMPLETE_BATCH };
  * completing loses the hold after this and the reconciler takes over; an expired session is reconciled regardless.
  */
 export const CLIENT_FINALIZING_HOLD_SECONDS = 30;
+/** The longest a run of client holds can keep the reconciler off a session, from the first hold. */
+export const CLIENT_FINALIZING_MAX_HOLD_SECONDS = 15 * 60;
+export const PARTS_INCOMPLETE_MESSAGE = "Upload parts are incomplete or have incorrect sizes";
 
 export type DirectUploadFileCompletion =
   | { fileId: string; status: "completed" }
@@ -721,15 +763,27 @@ type FinalizeOutcome = { fileId: string; completed: true } | { fileId: string; c
  * and a file is completed only through `finalizeDirectUploadFile`: verified size, sealed by an If-Match copy or a
  * storage-validated multipart assembly, re-admitted by intake policy. A file's failure never affects the others.
  */
-async function finalizeSessionFiles(sessionId: string, userId: string, entries: readonly CompleteDirectUploadFileEntry[]): Promise<{ outcomes: FinalizeOutcome[]; sessionComplete: boolean }> {
+async function finalizeSessionFiles(sessionId: string, userId: string, entries: readonly CompleteDirectUploadFileEntry[], options: { signal?: AbortSignal } = {}): Promise<{ outcomes: FinalizeOutcome[]; sessionComplete: boolean }> {
   if (entries.length < 1 || entries.length > MAX_DIRECT_UPLOAD_COMPLETE_BATCH) {
     throw new ProjectIntakeError(`Complete between 1 and ${MAX_DIRECT_UPLOAD_COMPLETE_BATCH} files per request`, 400);
   }
   // Two finalizers on one file would race the sealing copy and the completion write.
   if (new Set(entries.map(entry => entry.fileId)).size !== entries.length) throw new ProjectIntakeError("Each fileId may appear once per request", 400);
+  // Only the session row and the named files: per-call work must not grow with the session (a 1,000-file session is
+  // completed in 10+ calls, and loading every row on each made the whole upload quadratic).
+  const owned = await loadDirectUploadSessionRow(sessionId, userId);
+  if (!owned) throw new ProjectIntakeError("Upload session not found", 404);
+  assertUploadSessionActive(owned);
+  if (["aborted", "failed"].includes(owned.status)) throw new ProjectIntakeError("Upload session is closed", 409);
+  // This client is finalizing: hold the reconciler off before taking the lock, so a sweep does not take it between this
+  // client's calls. Only the first call opens a hold; later ones extend it only on new progress (below), up to a cap.
+  if (["pending", "uploading"].includes(owned.status)) {
+    await sql`update upload_sessions set client_finalizing_since = now(),
+      client_finalizing_until = now() + ${CLIENT_FINALIZING_HOLD_SECONDS}::int * interval '1 second'
+      where id = ${sessionId} and user_id = ${userId} and status in ('pending', 'uploading') and client_finalizing_since is null`;
+  }
   return withDirectUploadLock(sessionId, async () => {
-    // Only the session row and the named files: per-call work must not grow with the session (a 1,000-file session is
-    // completed in 10+ calls, and loading every row on each made the whole upload quadratic).
+    // Re-check under the lock: the session may have closed meanwhile.
     const session = await loadDirectUploadSessionRow(sessionId, userId);
     if (!session) throw new ProjectIntakeError("Upload session not found", 404);
     assertUploadSessionActive(session);
@@ -738,32 +792,37 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
     const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
     await assertSessionProjectStillContributable(session, userId);
     const byId = new Map(targeted.map(file => [file.id, file]));
+    const budget = lockHoldBudget(options.signal);
     const settled = await settleBounded(entries, env.directUploadFinalizeConcurrency, async entry => {
       const file = byId.get(entry.fileId);
       if (!file) throw new ProjectIntakeError("Upload file not found", 404);
-      if (!await finalizeDirectUploadFile(file, entry.sizeBytes)) throw new ProjectIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
-    });
+      if (!await finalizeDirectUploadFile(file, entry.sizeBytes, { signal: budget.signal })) throw new ProjectIntakeError(PARTS_INCOMPLETE_MESSAGE, 409);
+    }, { shouldStart: budget.shouldStart });
     const outcomes = settled.map((result, i): FinalizeOutcome => result.status === "fulfilled"
       ? { fileId: entries[i]!.fileId, completed: true }
-      : { fileId: entries[i]!.fileId, completed: false, error: result.reason });
+      : { fileId: entries[i]!.fileId, completed: false, error: result.reason === NOT_STARTED ? notStartedError() : result.reason });
+    const progressed = outcomes.some(outcome => outcome.completed && byId.get(outcome.fileId)?.status !== "completed");
     // Stops at the first open file, so it is cheap while the session is still filling; the lock keeps it current.
     const [open] = await sql<Array<{ open: boolean }>>`select exists (select 1 from upload_session_files where session_id = ${sessionId} and status <> 'completed') as open`;
     const sessionComplete = open?.open === false;
-    // Every file ready: the reconciler confirms on its next sweep. Files still open: this client is finalizing, so hold the
-    // reconciler (and webhook nudges, which only move next_reconcile_at) off the session instead of letting a full sweep
-    // take the lock between this client's calls.
     if (sessionComplete) {
-      await sql`update upload_sessions set next_reconcile_at = now(), client_finalizing_until = null where id = ${sessionId}`;
-    } else if (["pending", "uploading"].includes(session.status)) {
-      await sql`update upload_sessions set client_finalizing_until = now() + ${CLIENT_FINALIZING_HOLD_SECONDS}::int * interval '1 second' where id = ${sessionId}`;
+      // Every file ready: release the hold; ingestion starts at once (the route's kick, else the next sweep).
+      await sql`update upload_sessions set next_reconcile_at = now(), client_finalizing_until = null, client_finalizing_since = null where id = ${sessionId}`;
+    } else if (progressed && ["pending", "uploading"].includes(session.status)) {
+      // New progress persisted: extend the hold, never beyond the cap from when the hold began.
+      await sql`update upload_sessions set client_finalizing_until = least(
+          now() + ${CLIENT_FINALIZING_HOLD_SECONDS}::int * interval '1 second',
+          coalesce(client_finalizing_since, now()) + ${CLIENT_FINALIZING_MAX_HOLD_SECONDS}::int * interval '1 second')
+        where id = ${sessionId} and status in ('pending', 'uploading')`;
     }
     return { outcomes, sessionComplete };
-  });
+  }, undefined, undefined, { lockClass: "batch", orgId: owned.org_id });
 }
 
 /** The single-file `files/complete` body: throws the file's own error, exactly as before batching existed. */
-export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput): Promise<{ sessionComplete: boolean }> {
-  const { outcomes: [outcome], sessionComplete } = await finalizeSessionFiles(input.sessionId, input.userId, [input]);
+export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput & { signal?: AbortSignal }): Promise<{ sessionComplete: boolean }> {
+  const { signal, sessionId, userId, ...entry } = input;
+  const { outcomes: [outcome], sessionComplete } = await finalizeSessionFiles(sessionId, userId, [entry], { signal });
   if (outcome && !outcome.completed) throw outcome.error;
   return { sessionComplete };
 }
@@ -772,8 +831,8 @@ export async function completeDirectUploadFile(input: CompleteDirectUploadFileIn
  * The batched `files/complete` body. Good files complete and bad ones are reported per file (with the status code and
  * message the single-file call would have answered); only a session-level problem fails the request.
  */
-export async function completeDirectUploadFiles(input: { sessionId: string; userId: string; files: readonly CompleteDirectUploadFileEntry[] }): Promise<{ files: DirectUploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean }> {
-  const { outcomes, sessionComplete } = await finalizeSessionFiles(input.sessionId, input.userId, input.files);
+export async function completeDirectUploadFiles(input: { sessionId: string; userId: string; files: readonly CompleteDirectUploadFileEntry[]; signal?: AbortSignal }): Promise<{ files: DirectUploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean }> {
+  const { outcomes, sessionComplete } = await finalizeSessionFiles(input.sessionId, input.userId, input.files, { signal: input.signal });
   const files = outcomes.map((outcome): DirectUploadFileCompletion => {
     if (outcome.completed) return { fileId: outcome.fileId, status: "completed" };
     if (outcome.error instanceof ProjectIntakeError) {

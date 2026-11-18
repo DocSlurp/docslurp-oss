@@ -441,7 +441,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
     try {
-    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true");
+    const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true", c.req.raw.signal);
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
@@ -466,7 +466,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         const body = parsedBody;
         // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
         try {
-          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files });
+          // A client that disconnects cancels this hold's storage work (fenced, so nothing half-published).
+          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files, signal: c.req.raw.signal });
           // The last file is in: start ingestion now rather than at the next sweep (after this request's lock is released).
           if (result.sessionComplete) kickDirectUploadReconcile(sessionId);
           return c.json({ ok: result.failedCount === 0, ...result });
@@ -483,6 +484,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           etag: body.etag,
           sizeBytes: body.sizeBytes,
           parts: body.parts,
+          signal: c.req.raw.signal,
         });
         if (completed?.sessionComplete) kickDirectUploadReconcile(sessionId);
       } catch (error) {

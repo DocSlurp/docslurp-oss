@@ -34,6 +34,7 @@ import {
 } from "./local-compute-cost.js";
 import { hasFailedDocumentStage } from "./document-health.js";
 import { WorkflowState, type Stage } from "./pipeline.js";
+import { PageBasis } from "./page-basis.js";
 import { pageRangeExecutorIsolated, pagesInRanges, resolveShardPageRanges } from "./page-ranges.js";
 import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
@@ -77,6 +78,7 @@ export type StageExecutionStore = Pick<
   | "triggerWebhooks"
   | "seedReusedStageOutputs"
   | "finishShard"
+  | "pageBasisLedger"
 > & {
   readonly pageTasks: Pick<Store["pageTasks"], "completed">;
   /** Whether every live worker advertises `capability` (Store.fleetAdvertises); absent: no (the old behaviour). */
@@ -159,7 +161,7 @@ export function coerceIndexingModeForFlag<T extends { pipeline: { indexingMode?:
 
 /** The one Run hydration path for every activity entry point. */
 export async function loadRunState(
-  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState"> & {
+  store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState" | "pageBasisLedger"> & {
     /** Reads the run's stage checkpoints so they travel beside the run and document reads. */
     readStageStates?(runId: string): Promise<unknown>;
     /** The shared vision attempt ledger (page bound, rejection breaker, org bound). */
@@ -180,6 +182,9 @@ export async function loadRunState(
     ? [options.preloaded.run, options.preloaded.documents]
     : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
+  // Every loaded state checks spend through the store's page basis, hydrated or not (a page task leaves state.store unset so
+  // it never flushes a stale run snapshot, but its OCR reads are still checked against the balance).
+  state.pageBasis = new PageBasis(state, store.pageBasisLedger);
   // A store-backed run never falls back to a per-process count: without the shared ledger, vision refuses.
   state.visionAttempts = store.visionAttempts ?? null;
   state.pageReaderBudget = store.pageReaderBudget ?? null;

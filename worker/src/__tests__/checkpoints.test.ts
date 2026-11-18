@@ -14,6 +14,7 @@ import { RunPolicyError } from "../lib/document-failure.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { hasFailedDocumentStage } from "../pipeline/document-health.js";
 import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
+import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import type { Document, StageState, ProjectRun } from "../models.js";
 
@@ -80,6 +81,7 @@ function makeCheckpointStore(overrides: Partial<CheckpointStore> = {}): Checkpoi
     setPageStageComplete: vi.fn(async () => undefined),
     getCompletedPages: vi.fn(async () => new Set<number>()),
     ...overrides,
+    pageBasisLedger: overrides.pageBasisLedger ?? new MemoryPageBasisLedger(),
   };
 }
 
