@@ -7,20 +7,24 @@ import { processSingleton } from "./process-singleton.js";
  * Dedicated connections for direct-upload session advisory locks. Lock holders must never reserve the query pool:
  * intake needs it while locked.
  *
- * Holders come in classes so a slow class, or one tenant, can never take every connection:
- *  - `batch`: storage work under the lock (a files/complete call, a recovery read, an idempotent session create). At
- *    most `batchMax` per process and `batchPerOrg` per organization at a time.
- *  - `start`: a run start (the client's confirm, the reconciler's or kick's confirm, an idempotent bulk or URL intake),
- *    which holds the lock through run creation. At most `startMax` per process and `startPerOrg` per organization.
- *  - `reconcile`: the background sweep's and kick's finalize pass. One at a time.
- *  - `short`: genuinely short work (part signing with a 2 s provider budget, abort's status change). The only class
- *    that may use the last `shortReserve` connections: the heavy classes together never hold more than pool size
- *    minus that reserve. One organization holds at most `shortPerOrg` short connections at a time.
+ * The pool is partitioned so no class, and no one tenant, can take every connection. Storage, network and crawl work
+ * stays off the short and start slots: run starts hold theirs only around the database decision and run creation,
+ * provider multipart creation and aborts run outside any lock, part signing has a 2 s provider budget, batch work a
+ * 5 s budget, and the one holder that must keep its lock across external work (an idempotent intake) has its own class:
+ *  - `short` (part signing with a 2 s provider budget, abort's status change, status recovery): at most
+ *    `shortMax` = pool − heavyMax connections (2), `shortPerOrg` per organization.
+ *  - the heavy classes, together at most heavyMax = pool − 2:
+ *    - `reconcile`: the background sweep's and kick's finalize pass. One slot, always left free by the others.
+ *    - `batch` (files/complete, the recovery read), `start` (a run start: the client's, the kick's or the sweep's
+ *      confirm) and `intake` (an idempotent bulk, URL or website intake, which keeps its Idempotency-Key lock for the
+ *      whole request): together at most heavyMax − 1, each with its own process and per-organization cap.
+ * At the default pool of 5: 2 short, 1 reconcile, and 2 shared by batch, start and intake (1 each at most).
+ * At 8: 2 short, 1 reconcile, 5 shared (batch 3, start 2, intake 2 at most).
  * Every capped holder names its tenant (`tenant`): the organization, resolved from stored rows, never a request field.
  * Every reservation has a deadline: a caller that cannot get a slot or a connection in time gets
  * DirectUploadLockUnavailable (answered as 409 upload_session_busy), never an unbounded wait.
  */
-export type DirectUploadLockClass = "short" | "batch" | "start" | "reconcile";
+export type DirectUploadLockClass = "short" | "batch" | "start" | "intake" | "reconcile";
 
 export class DirectUploadLockUnavailable extends Error {
   constructor() { super("Upload lock connection unavailable"); this.name = "DirectUploadLockUnavailable"; }
@@ -38,18 +42,23 @@ function intOr(value: number | undefined, fallback: number, min: number, max: nu
 const SHORT_RESERVE = 2;
 
 export function directUploadLockLimits() {
-  // Default 5, the smallest pool that keeps every invariant: 2 short-only connections, then one slot each for batch,
-  // start and reconcile. Deployments with connection headroom can raise it (8 gives 3 batch and 2 start slots).
+  // Default 5, the smallest pool that keeps every invariant. Deployments with connection headroom can raise it.
   const poolMax = intOr(env.directUploadLockPoolMax, 5, SHORT_RESERVE + 3, 64);
-  // Batch, start and reconcile holders together.
   const heavyMax = poolMax - SHORT_RESERVE;
-  const startMax = intOr(env.directUploadLockStartMax, Math.max(1, Math.floor((heavyMax - 1) / 2)), 1, heavyMax - 2);
-  const batchMax = intOr(env.directUploadLockBatchMax, Math.max(1, heavyMax - 1 - startMax), 1, heavyMax - 2);
+  // Short work is capped at what the heavy classes leave, so they always find their slots.
+  const shortMax = poolMax - heavyMax;
+  const reconcileMax = 1;
+  // Batch, start and intake share what the reconciler leaves: a misconfiguration can never starve it.
+  const sharedMax = heavyMax - reconcileMax;
+  const startMax = intOr(env.directUploadLockStartMax, Math.max(1, Math.floor(sharedMax / 2)), 1, sharedMax);
+  const batchMax = intOr(env.directUploadLockBatchMax, Math.max(1, sharedMax - startMax), 1, sharedMax);
+  const intakeMax = intOr(env.directUploadLockIntakeMax, Math.max(1, Math.floor(sharedMax / 2)), 1, sharedMax);
   const batchPerOrg = intOr(env.directUploadLockBatchPerOrg, 2, 1, batchMax);
   const startPerOrg = intOr(env.directUploadLockStartPerOrg, 1, 1, startMax);
-  // One organization can never hold every connection short work may use.
-  const shortPerOrg = intOr(env.directUploadLockShortPerOrg, SHORT_RESERVE, 1, poolMax - 1);
-  return { poolMax, heavyMax, batchMax, batchPerOrg, startMax, startPerOrg, shortPerOrg, reconcileMax: 1 };
+  const intakePerOrg = intOr(env.directUploadLockIntakePerOrg, 1, 1, intakeMax);
+  // One organization never holds every short connection.
+  const shortPerOrg = intOr(env.directUploadLockShortPerOrg, Math.max(1, shortMax - 1), 1, Math.max(1, shortMax - 1));
+  return { poolMax, heavyMax, shortMax, shortPerOrg, sharedMax, batchMax, batchPerOrg, startMax, startPerOrg, intakeMax, intakePerOrg, reconcileMax };
 }
 
 const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => ({
@@ -63,6 +72,8 @@ const state = processSingleton(`direct-upload-locks:${env.databaseUrl}`, () => (
   startByOrg: new Map<string, number>(),
   short: 0,
   shortByOrg: new Map<string, number>(),
+  intake: 0,
+  intakeByOrg: new Map<string, number>(),
   reconcile: 0,
   waiters: new Set<() => void>(),
 }));
@@ -80,33 +91,32 @@ function waitForRelease(deadline: number): Promise<void> {
   });
 }
 
-function heavyInUse(): number {
-  return state.batch + state.start + state.reconcile;
+function sharedInUse(): number {
+  return state.batch + state.start + state.intake;
 }
 
 async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, deadline: number): Promise<() => void> {
   for (;;) {
     const limits = directUploadLockLimits();
-    if (lockClass === "short" && (state.shortByOrg.get(orgKey) ?? 0) < limits.shortPerOrg) return take("short", state.shortByOrg, orgKey);
-    if (lockClass !== "short" && heavyInUse() < limits.heavyMax) {
-      if (lockClass === "batch" && state.batch < limits.batchMax && (state.batchByOrg.get(orgKey) ?? 0) < limits.batchPerOrg) {
-        return take("batch", state.batchByOrg, orgKey);
-      }
-      if (lockClass === "start" && state.start < limits.startMax && (state.startByOrg.get(orgKey) ?? 0) < limits.startPerOrg) {
-        return take("start", state.startByOrg, orgKey);
-      }
-      if (lockClass === "reconcile" && state.reconcile < limits.reconcileMax) {
+    if (lockClass === "short") {
+      if (state.short < limits.shortMax && (state.shortByOrg.get(orgKey) ?? 0) < limits.shortPerOrg) return take("short", state.shortByOrg, orgKey);
+    } else if (lockClass === "reconcile") {
+      if (state.reconcile < limits.reconcileMax) {
         state.reconcile += 1;
         let released = false;
         return () => { if (!released) { released = true; state.reconcile -= 1; wake(); } };
       }
+    } else if (sharedInUse() < limits.sharedMax) {
+      const caps = { batch: [limits.batchMax, limits.batchPerOrg], start: [limits.startMax, limits.startPerOrg], intake: [limits.intakeMax, limits.intakePerOrg] }[lockClass];
+      const byOrg = { batch: state.batchByOrg, start: state.startByOrg, intake: state.intakeByOrg }[lockClass];
+      if (state[lockClass] < caps[0]! && (byOrg.get(orgKey) ?? 0) < caps[1]!) return take(lockClass, byOrg, orgKey);
     }
     if (Date.now() >= deadline) throw new DirectUploadLockUnavailable();
     await waitForRelease(deadline);
   }
 }
 
-function take(kind: "batch" | "start" | "short", byOrg: Map<string, number>, orgKey: string): () => void {
+function take(kind: "batch" | "start" | "intake" | "short", byOrg: Map<string, number>, orgKey: string): () => void {
   state[kind] += 1;
   byOrg.set(orgKey, (byOrg.get(orgKey) ?? 0) + 1);
   let released = false;

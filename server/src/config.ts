@@ -254,8 +254,12 @@ export const env = {
   directUploadLockStartMax: process.env.DOCSLURP_UPLOAD_LOCK_START_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_MAX, 2) : undefined,
   /** Concurrent run starts per organization in one process (default 1). */
   directUploadLockStartPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_START_PER_ORG, 1),
-  /** Short lock holders (part signing, abort) per organization in one process (default 2). */
-  directUploadLockShortPerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_SHORT_PER_ORG, 2),
+  /** Short lock holders (part signing, abort) per organization in one process (default 1 of the 2 short connections). */
+  directUploadLockShortPerOrg: process.env.DOCSLURP_UPLOAD_LOCK_SHORT_PER_ORG ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_SHORT_PER_ORG, 1) : undefined,
+  /** Concurrent idempotent bulk, URL and website intakes holding their Idempotency-Key lock per process (default 1 at pool 5, 2 at 8). */
+  directUploadLockIntakeMax: process.env.DOCSLURP_UPLOAD_LOCK_INTAKE_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_INTAKE_MAX, 1) : undefined,
+  /** Of those, per organization in one process (default 1). */
+  directUploadLockIntakePerOrg: readNumber(process.env.DOCSLURP_UPLOAD_LOCK_INTAKE_PER_ORG, 1),
   /** Concurrent files/complete holders per process (default 1 at pool 5, 3 at 8). */
   directUploadLockBatchMax: process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX ? readNumber(process.env.DOCSLURP_UPLOAD_LOCK_BATCH_MAX, 3) : undefined,
   /** Concurrent files/complete holders per organization in one process (default 2, at most the batch cap). */

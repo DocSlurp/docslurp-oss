@@ -624,9 +624,10 @@ export function replayChartExport<T extends PipelineFeatures>(
 /**
  * The principal check for `principalAtAdmission`, run with the admission transaction's client.
  *
- * Lock order is global: membership rows first, then the API key row, the order membership removal uses (it deletes
- * the membership, then revokes the key), so the two never deadlock. FOR SHARE serializes this check with key
- * revocation and edits and with membership removal. Time-based validity (key expiry) is read with clock_timestamp()
+ * Lock order is global and matches membership removal (which deletes the membership, revokes the member's keys and
+ * OAuth grants, then removes their project shares): org membership, then the API key, then its OAuth grant, then the
+ * project membership, so the two never deadlock. FOR SHARE serializes this check with those changes (and makes a
+ * key's usage flush wait for this short transaction). Time-based validity (key expiry) is read with clock_timestamp()
  * after the locks are held: now() is the transaction's start, which can be long before the admission lock was granted.
  */
 export async function assertPrincipalAtAdmission(
@@ -635,7 +636,6 @@ export async function assertPrincipalAtAdmission(
 ): Promise<void> {
   const [membership] = await tx<Array<{ one: number }>>`select 1 as one from org_memberships
     where org_id = ${args.orgId} and user_id = ${args.userId} for share`;
-  await tx`select 1 from project_members where project_id = ${args.projectId} and user_id = ${args.userId} for share`;
   if (args.apiKeyId) {
     // A key acts only for a current member of its organization.
     if (!membership) throw new RunAdmissionRefusedError();
@@ -648,11 +648,16 @@ export async function assertPrincipalAtAdmission(
       || !(key.scopes ?? []).includes(args.scope) || (projectIds.length > 0 && !projectIds.includes(args.projectId))) {
       throw new RunAdmissionRefusedError();
     }
+    // A key that backs an OAuth grant (device login, MCP) stops with its grant, which can be revoked on its own.
+    const grants = await tx<Array<{ revoked: boolean }>>`select revoked_at is not null as revoked from mcp_oauth_grants
+      where api_key_id = ${args.apiKeyId} for share`;
+    if (grants.some(grant => grant.revoked)) throw new RunAdmissionRefusedError();
     // Statement time, after the row locks: a key that expired while this admission waited is refused.
     const [live] = await tx<Array<{ live: boolean }>>`select (expires_at is null or expires_at > clock_timestamp()) as live
       from api_keys where id = ${args.apiKeyId}`;
     if (!live?.live) throw new RunAdmissionRefusedError();
   }
+  await tx`select 1 from project_members where project_id = ${args.projectId} and user_id = ${args.userId} for share`;
   const access = await getProjectAccess(args.projectId, args.userId, tx);
   if (!access || access.orgId !== args.orgId || !canContributeToProject(access, args.userId)) throw new RunAdmissionRefusedError();
 }

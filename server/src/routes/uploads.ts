@@ -418,6 +418,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             files: input.files,
             tags: input.tags,
           }),
+          discard: async (created) => { await abortDirectUploadSession(created.sessionId, userId); },
           describe: async (sessionId) => {
             // A replay is authorized like any session route: same organization, same key, inside the key's project allowlist.
             const loaded = await loadDirectUploadSession(sessionId, userId);

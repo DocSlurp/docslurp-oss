@@ -161,7 +161,9 @@ export async function liveDirectUploadAdmission(
   const stored = session.allowed_project_ids ?? [];
   if (!session.api_key_id) return { allowedProjectIds: stored.length ? stored : null };
   const key = await getLiveApiKeyById(session.api_key_id);
-  if (!key || key.keyType !== "server" || !session.org_id || key.orgId !== session.org_id || !key.scopes.includes("ingest")) {
+  const [revokedGrant] = await sql<Array<{ one: number }>>`select 1 as one from mcp_oauth_grants
+    where api_key_id = ${session.api_key_id} and revoked_at is not null limit 1`;
+  if (!key || revokedGrant || key.keyType !== "server" || !session.org_id || key.orgId !== session.org_id || !key.scopes.includes("ingest")) {
     throw new ProjectIntakeError("API key no longer permits this upload", 403);
   }
   const live = key.projectIds;
@@ -252,8 +254,9 @@ async function idempotently(
     });
     return result;
   }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
-  // Holds the lock through run creation: a capped run-start holder, counted against the organization.
-  { lockClass: "start", tenant: await principalLockTenant(args.userId, args.apiKeyId) });
+  // Holds its Idempotency-Key lock for the whole request (crawl, fetch, storage writes, run creation) so a concurrent
+  // repeat is refused rather than run twice: its own capped class, so it never takes a run-start slot.
+  { lockClass: "intake", tenant: await principalLockTenant(args.userId, args.apiKeyId) });
 }
 
 /**

@@ -13,6 +13,11 @@ const store = vi.hoisted(() => ({
   copies: 0,
   headDelayMs: 0,
   intakeDelayMs: 0,
+  /** Ordering probes: HEADs issued, run creations started, multipart uploads created. */
+  heads: 0,
+  runsStarted: 0,
+  multipartCreated: 0,
+  multipartCreateDelayMs: 0,
   /** Storage calls on keys under this prefix stall until their signal aborts or `releaseStalls` runs. */
   stallPrefix: null as string | null,
   stalls: [] as Array<() => void>,
@@ -21,6 +26,7 @@ const store = vi.hoisted(() => ({
 vi.mock("../lib/storage.js", async importOriginal => ({
   ...await importOriginal<typeof import("../lib/storage.js")>(),
   getUploadedObjectMetadata: async (key: string, signal?: AbortSignal) => {
+    store.heads += 1;
     await stallFor(key, signal);
     if (store.headDelayMs) await new Promise(resolve => setTimeout(resolve, store.headDelayMs));
     const object = store.objects.get(key);
@@ -39,6 +45,11 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   listMultipartUploadParts: async (args: { key: string; signal?: AbortSignal }) => { await stallFor(args.key, args.signal); return []; },
   signMultipartUploadPart: async () => "https://storage.example/part",
   signSingleUploadPut: async () => "https://storage.example/put",
+  createMultipartUpload: async () => {
+    if (store.multipartCreateDelayMs) await new Promise(resolve => setTimeout(resolve, store.multipartCreateDelayMs));
+    store.multipartCreated += 1;
+    return `mpu-${store.multipartCreated}`;
+  },
 }));
 /** A stalled provider: waits until the caller's deadline aborts it, or until the test releases every stall. */
 async function stallFor(key: string, signal?: AbortSignal): Promise<void> {
@@ -74,6 +85,7 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     // Intake that takes a while, so the session lock is visibly held during a confirm.
     const createRun = fakes.ports.records.createRun.bind(fakes.ports.records);
     fakes.ports.records.createRun = (async (...args: Parameters<typeof createRun>) => {
+      store.runsStarted += 1;
       if (store.intakeDelayMs) await new Promise(resolve => setTimeout(resolve, store.intakeDelayMs));
       return createRun(...args);
     }) as typeof createRun;
@@ -122,6 +134,11 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     method: "POST", headers: { "content-type": "application/json", "x-test-user": user }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const status = async (id: string) => (await sql<Array<{ status: string }>>`select status from upload_sessions where id = ${id}`)[0]!.status;
+  /** A request whose completion can be asserted against others: ordering, never wall-clock windows. */
+  function tracked<T>(promise: Promise<T>) {
+    const handle = { settled: false, promise: promise.finally(() => { handle.settled = true; }) };
+    return handle;
+  }
 
   it("a client's confirm racing the reconcile kick admits exactly one run", async () => {
     const { id, fileIds } = await seedSession(5, "upl-u", "upl-o", "upl-p");
@@ -143,14 +160,16 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
   it("an abort racing a batch waits for the batch, then closes the session", async () => {
     const { id, fileIds } = await seedSession(16);
     store.headDelayMs = 60;
+    const headsBefore = store.heads;
     const batch = post(`${id}/files/complete`, { files: fileIds.map(fileId => ({ fileId })) });
-    await new Promise(resolve => setTimeout(resolve, 100));
-    const started = Date.now();
+    // Ordering: the batch is inside its lock hold (finalizing) before the abort is sent.
+    await vi.waitFor(() => expect(store.heads).toBeGreaterThan(headsBefore));
     const abort = await post(`${id}/abort`);
     expect(abort.status).toBe(200);
-    expect(Date.now() - started).toBeGreaterThan(100);
     const batchResponse = await batch;
     expect(batchResponse.status).toBe(200);
+    // The abort waited for the whole batch: every file completed before the session closed.
+    expect(await batchResponse.json()).toMatchObject({ completedCount: 16 });
     expect(await status(id)).toBe("aborted");
     // Nothing completes after the abort.
     const late = await post(`${id}/files/complete`, { files: [{ fileId: fileIds[0]! }] });
@@ -174,20 +193,18 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     const refusedSession = await seedSession(2, "upl-v", "upl-o2");
     const abortable = await seedSession(1, "upl-w", "upl-o3");
     store.headDelayMs = 400; // 30 files, 8 at a time, two HEADs each: the holder keeps its slot for a few seconds
-    const holding = post(`${holder.id}/files/complete`, { files: holder.fileIds.map(fileId => ({ fileId })) });
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const started = Date.now();
+    const headsBefore = store.heads;
+    const holding = tracked(post(`${holder.id}/files/complete`, { files: holder.fileIds.map(fileId => ({ fileId })) }));
+    await vi.waitFor(() => expect(store.heads).toBeGreaterThan(headsBefore));
+    // Refused (on its deadline) while the holder still holds the slot.
     const refused = await post(`${refusedSession.id}/files/complete`, { files: refusedSession.fileIds.map(fileId => ({ fileId })) }, "upl-v");
-    const waited = Date.now() - started;
     expect(refused.status).toBe(409);
     expect(await refused.json()).toMatchObject({ error: { code: "upload_session_busy" } });
-    expect(waited).toBeGreaterThanOrEqual(1_900);
-    expect(waited).toBeLessThan(3_500);
-    // A short operation (abort) gets one of the reserved connections at once.
-    const shortStarted = Date.now();
+    expect(holding.settled).toBe(false);
+    // A short operation (abort) gets one of the reserved connections while the holder still works.
     expect((await post(`${abortable.id}/abort`, undefined, "upl-w")).status).toBe(200);
-    expect(Date.now() - shortStarted).toBeLessThan(1_000);
-    expect((await holding).status).toBe(200);
+    expect(holding.settled).toBe(false);
+    expect((await holding.promise).status).toBe(200);
   }, 30_000);
 
   it("many concurrent run starts from one organization never block another organization's abort or part signing", async () => {
@@ -204,18 +221,17 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
       values (${`${signable.id.slice(-6)}-mp`}, ${signable.id}, 'big.pdf', 'application/pdf', ${20 * 1024 * 1024}, ${`upl-v/${signable.id}/raw/big.pdf`}, 'multipart', 'up-1', ${8 * 1024 * 1024}, 'pending')`;
     const abortable = await seedSession(1, "upl-v", "upl-o2");
     store.intakeDelayMs = 1_500;
-    const confirms = sessions.map(session => post(`${session.id}/confirm`));
-    await new Promise(resolve => setTimeout(resolve, 400));
-    // Org A's starts hold (or wait for) the capped run-start slots; org B's short work answers at once.
-    let started = Date.now();
+    const runsBefore = store.runsStarted;
+    const confirms = sessions.map(session => tracked(post(`${session.id}/confirm`)));
+    // Ordering: one of org A's run starts is under way (holding its start slot) before org B acts.
+    await vi.waitFor(() => expect(store.runsStarted).toBeGreaterThan(runsBefore));
     const signed = await post(`${signable.id}/files/${signable.id.slice(-6)}-mp/parts/sign`, { partNumbers: [1, 2] }, "upl-v");
     expect(signed.status).toBe(200);
-    expect(Date.now() - started).toBeLessThan(1_000);
-    started = Date.now();
     expect((await post(`${abortable.id}/abort`, undefined, "upl-v")).status).toBe(200);
-    expect(Date.now() - started).toBeLessThan(1_000);
+    // Both were served while org A's run starts were still going.
+    expect(confirms.some(confirm => !confirm.settled)).toBe(true);
     // Each of org A's confirms either started its run or was told to repeat (its slot wait ran out): never a 5xx.
-    for (const response of await Promise.all(confirms)) {
+    for (const response of await Promise.all(confirms.map(confirm => confirm.promise))) {
       if (response.status >= 300) expect(await response.json()).toMatchObject({ error: { code: "upload_session_busy" } });
       expect(response.status === 409 || response.status < 300).toBe(true);
     }
@@ -256,17 +272,16 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     const ready = await seedSession(1, "upl-v", "upl-o2", "upl-p2");
     expect((await post(`${ready.id}/files/complete`, { files: [{ fileId: ready.fileIds[0]! }] }, "upl-v")).status).toBe(200);
     store.stallPrefix = "upl-u/";
-    const signings = orgA.map(session => post(`${session.id}/files/${session.fileId}/parts/sign`, { partNumbers: [1] }));
+    const signings = orgA.map(session => tracked(post(`${session.id}/files/${session.fileId}/parts/sign`, { partNumbers: [1] })));
     const aborts = orgA.map(session => post(`${session.id}/abort`));
-    await new Promise(resolve => setTimeout(resolve, 200));
-    let started = Date.now();
+    // Ordering: org A's provider calls are stalled before org B acts.
+    await vi.waitFor(() => expect(store.stalls.length).toBeGreaterThan(0));
     const signed = await post(`${signable.id}/files/${signable.id.slice(-6)}-mp/parts/sign`, { partNumbers: [1, 2] }, "upl-v");
     expect(signed.status).toBe(200);
-    expect(Date.now() - started).toBeLessThan(1_500);
-    started = Date.now();
     const confirmed = await post(`${ready.id}/confirm`, undefined, "upl-v");
     expect(confirmed.status).toBeLessThan(300);
-    expect(Date.now() - started).toBeLessThan(3_000);
+    // Both were served while org A's stalled signings were still waiting.
+    expect(signings.some(signing => !signing.settled)).toBe(true);
     // Org A's aborts only change state under the lock: they answer promptly although the provider is stalled.
     // (or, behind the org's capped short slots, a retryable busy). Each one that answered 200 closed its session.
     const abortAnswers = await Promise.all(aborts);
@@ -276,8 +291,49 @@ describe.skipIf(!databaseUrl)("direct-upload finalization on real Postgres", () 
     }
     expect(abortAnswers.some(response => response.status === 200)).toBe(true);
     // Its signings give up on their own budget or slot deadline: retryable answers, never a hang.
-    for (const response of await Promise.all(signings)) expect([409, 503]).toContain(response.status);
+    for (const response of await Promise.all(signings.map(signing => signing.promise))) expect([409, 503]).toContain(response.status);
     store.stallPrefix = null;
     for (const release of store.stalls.splice(0)) release();
   }, 30_000);
+
+  it("a website crawl holding its idempotent intake lock does not block another organization's confirm", async () => {
+    const { createWebsiteProjectIntake } = await import("../services/project-intake-actions.js");
+    const ready = await seedSession(1, "upl-v", "upl-o2", "upl-p2");
+    expect((await post(`${ready.id}/files/complete`, { files: [{ fileId: ready.fileIds[0]! }] }, "upl-v")).status).toBe(200);
+    // Org A's crawl stalls inside its Idempotency-Key lock (the intake class).
+    let finishCrawl!: () => void;
+    let crawlStarted = false;
+    const crawling = tracked(createWebsiteProjectIntake({
+      userId: "upl-u", orgId: "upl-o", project: "upl-p", idempotencyKey: "crawl-holds-intake",
+      startUrl: "https://docs.example.com/", crawlOptions: {},
+      crawl: async () => { crawlStarted = true; await new Promise<void>(resolve => { finishCrawl = resolve; }); return { pages: [], credits: 0 }; },
+    }, fakes.ports).catch(() => null));
+    await vi.waitFor(() => expect(crawlStarted).toBe(true));
+    const confirmed = await post(`${ready.id}/confirm`, undefined, "upl-v");
+    expect(confirmed.status).toBeLessThan(300);
+    expect(crawling.settled).toBe(false);
+    finishCrawl();
+    await crawling.promise;
+  }, 30_000);
+
+  it("a 1,000-file multipart session create does not block files/complete", async () => {
+    const other = await seedSession(1);
+    store.multipartCreateDelayMs = 10; // 1,000 provider calls, 8 at a time: the create takes a while
+    const createdBefore = store.multipartCreated;
+    const creating = tracked(Promise.resolve(app.request("/uploads/direct/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-user": "upl-u", "idempotency-key": "thousand-multipart" },
+      body: JSON.stringify({ orgId: "upl-o", files: Array.from({ length: 1_000 }, (_, i) => ({ filename: `big-${i}.pdf`, mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 })) }),
+    })));
+    // Ordering: the create is opening provider uploads before the complete is sent.
+    await vi.waitFor(() => expect(store.multipartCreated).toBeGreaterThan(createdBefore));
+    const completed = await post(`${other.id}/files/complete`, { files: [{ fileId: other.fileIds[0]! }] });
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({ ok: true });
+    expect(creating.settled).toBe(false);
+    const created = await creating.promise;
+    expect(created.status).toBe(201);
+    expect(store.multipartCreated - createdBefore).toBe(1_000);
+    store.multipartCreateDelayMs = 0;
+  }, 60_000);
 });

@@ -290,6 +290,9 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   };
 }
 
+/** Provider multipart uploads a session create opens at once. */
+const SESSION_UPLOAD_CREATE_CONCURRENCY = 8;
+
 export async function createDirectUploadSession(input: CreateDirectUploadSessionInput) {
   // Project Intake's policy screens each declared file before any upload target exists. One bad file never fails the
   // request: the good files get a session and the rest come back as per-file rejections keyed by request index. Only a
@@ -359,13 +362,24 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
     )
   `;
 
-  for (const file of files) {
-    const sourceKey = rawSourceKey(input.userId, file.filename, input.extract);
+  // Provider multipart uploads are created a few at a time with per-call deadlines, never under a lock (this runs
+  // outside the Idempotency-Key lock too). Single-PUT files need no provider call at all.
+  const plans = files.map(file => {
     const isMultipart = file.unknownSize || (!file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES);
-    const partSize = isMultipart ? MULTIPART_PART_SIZE_BYTES : null;
-    const uploadId = isMultipart
-      ? await createMultipartUpload(sourceKey, file.mimeType)
-      : null;
+    return { file, sourceKey: rawSourceKey(input.userId, file.filename, input.extract), isMultipart, partSize: isMultipart ? MULTIPART_PART_SIZE_BYTES : null };
+  });
+  const opened = await settleBounded(plans, SESSION_UPLOAD_CREATE_CONCURRENCY,
+    plan => plan.isMultipart ? withStorageRetry(() => createMultipartUpload(plan.sourceKey, plan.file.mimeType)) : Promise.resolve(null));
+  const failed = opened.find(result => result.status === "rejected");
+  if (failed) {
+    // Nothing of this session is usable: close the uploads that were opened, then fail as before.
+    const openedIds = opened.flatMap((result, i) => result.status === "fulfilled" && result.value ? [{ key: plans[i]!.sourceKey, uploadId: result.value }] : []);
+    await settleBounded(openedIds, MULTIPART_ABORT_CONCURRENCY, upload => abortMultipartUpload(upload).catch(() => undefined));
+    throw (failed as PromiseRejectedResult).reason;
+  }
+  for (const [i, plan] of plans.entries()) {
+    const { file, sourceKey, isMultipart, partSize } = plan;
+    const uploadId = (opened[i] as PromiseFulfilledResult<string | null>).value;
     const fileId = randomUUID();
 
     await sql`

@@ -17,9 +17,10 @@ const defaultDeps: DirectSessionIdempotencyDeps = {
   getCached: getCachedIdempotentResponse,
   store: storeIdempotentResponse,
   // Session creation opens provider multipart uploads per file under the lock: a capped storage-work holder.
-  // The tenant comes from stored rows (the key's or the user's organization), never the request's orgId.
+  // Database work only (the cache read, recording a creation): a short holder. The tenant comes from stored rows (the
+  // key's or the user's organization), never the request's orgId.
   lock: async (name, run, scope) => withDirectUploadLock(name, run, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
-    { lockClass: "batch", tenant: await principalLockTenant(scope.userId, scope.apiKeyId) }),
+    { tenant: await principalLockTenant(scope.userId, scope.apiKeyId) }),
 };
 
 /**
@@ -101,18 +102,23 @@ export async function createSessionIdempotently<T extends CreatedSession>(args: 
   scope: IdempotencyScope;
   request: unknown;
   create: () => Promise<T>;
+  /** Closes a session this request created but may not hand out (a concurrent request with the same key won). */
+  discard?: (created: T) => Promise<void>;
   /** The session as a client would see it now, or null when it no longer exists. */
   describe: (sessionId: string) => Promise<Omit<T, "rejected"> | null>;
 }, deps: DirectSessionIdempotencyDeps = defaultDeps): Promise<{ body: T; status: 200 | 201; replayed: boolean }> {
   if (!args.key) return { body: await args.create(), status: 201, replayed: false };
   const scoped = scopedIdempotencyKey(args.scope, args.key);
   const requestHash = hashIdempotencyPayload({ scope: args.scope, request: args.request });
-  // The idempotency lock covers only the cache read and a creation. A replay's description takes the session's own
-  // lock, so it runs after this one is released: holding both would need two capped slots for one request (with a
-  // single batch slot per process, a client that lost its response could never replay it).
+  // The Idempotency-Key lock covers only database decisions: reading the cache, and recording a creation. The
+  // creation itself (provider multipart uploads, rows) runs outside it, and a replay's description takes the session's
+  // own lock after this one is released. Two concurrent first requests may both create; the one that records first
+  // wins, and the other's session is discarded and the winner's replayed.
+  type Step = { replay: string; rejected?: unknown[] } | { recorded: T } | { create: true };
+  let created: T | null = null;
   let skipCachedId: string | null = null;
   for (;;) {
-    const step = await deps.lock(`idem:${scoped}`, async (): Promise<{ replay: string; rejected?: unknown[] } | { created: T }> => {
+    const step = await deps.lock(`idem:${scoped}`, async (): Promise<Step> => {
       let cached;
       try {
         cached = await deps.getCached({ idempotencyKey: scoped, routeKey: DIRECT_SESSION_ROUTE_KEY, requestHash });
@@ -126,7 +132,7 @@ export async function createSessionIdempotently<T extends CreatedSession>(args: 
         const rejected = Array.isArray(cached!.body.rejected) ? (cached!.body.rejected as unknown[]) : undefined;
         return { replay: cachedId, ...(rejected ? { rejected } : {}) };
       }
-      const created = await args.create();
+      if (!created) return { create: true };
       await deps.store({
         idempotencyKey: scoped,
         routeKey: DIRECT_SESSION_ROUTE_KEY,
@@ -135,15 +141,22 @@ export async function createSessionIdempotently<T extends CreatedSession>(args: 
         status: 201,
         body: { sessionId: created.sessionId, ...(created.rejected?.length ? { rejected: created.rejected } : {}) },
       });
-      return { created };
+      return { recorded: created };
     }, args.scope);
-    if ("created" in step) return { body: step.created, status: 201 as const, replayed: false };
+    if ("create" in step) { created = await args.create(); continue; }
+    if ("recorded" in step) return { body: step.recorded, status: 201 as const, replayed: false };
+    if (created) {
+      // Another request with this key recorded its session first: ours is never handed out.
+      const discarded = created;
+      created = null;
+      await args.discard?.(discarded).catch(() => console.error("[direct-upload] status=duplicate-session-discard-failed"));
+    }
     // `describe` authorizes the replay (organization, key, allowlist, live access) and signs fresh URLs.
     const described = await args.describe(step.replay);
     if (described) {
       return { body: { ...described, ...(step.rejected?.length ? { rejected: step.rejected } : {}) } as T, status: 200 as const, replayed: true };
     }
-    // The remembered session no longer exists: create a new one for this key (under the lock again).
+    // The remembered session no longer exists: create a new one for this key.
     skipCachedId = step.replay;
   }
 }
