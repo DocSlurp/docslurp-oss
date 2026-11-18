@@ -417,6 +417,45 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
       expect(await runCount()).toBe(before);
     }, 30_000);
 
+    it("carries the route's required scopes into the crawl's checks: losing `web` stops the failover", async () => {
+      // A CLI OAuth token's key row holds the `web` scope the web route required of it.
+      await sql`update api_keys set scopes = ${sql.array(["ingest", "web"])} where id = 'adm-oi'`;
+      const before = await runCount();
+      let providerRequests = 0;
+      const error = await actions.createWebsiteProjectIntake({
+        ...target, startUrl: "https://docs.example.com/", crawlOptions: {}, crawlProjectId: P2, requiredScopes: ["ingest", "web"],
+        crawl: async (beforeProviderAttempt) => {
+          await beforeProviderAttempt();
+          providerRequests += 1;
+          // `web` is withdrawn while the first provider's request runs; `ingest` stays.
+          await sql`update api_keys set scopes = ${sql.array(["ingest"])} where id = 'adm-oi'`;
+          await beforeProviderAttempt();
+          providerRequests += 1;
+          return { pages: [{ url: "https://docs.example.com/results", title: "Results", markdown: "Results beat expectations." }], credits: 0 };
+        },
+      }, ports).then(() => null, (failure: unknown) => failure);
+      expect(error).toMatchObject({ statusCode: 403 });
+      expect(providerRequests).toBe(1);
+      expect(gates.puts).toBe(0);
+      expect(await runCount()).toBe(before);
+    }, 30_000);
+
+    it("a crawl without required scopes beyond `ingest` is unaffected by them", async () => {
+      let providerRequests = 0;
+      // This test organization has no credits, so run admission may refuse on spend later: only the credential checks matter.
+      const outcome = await actions.createWebsiteProjectIntake({
+        ...target, startUrl: "https://docs.example.com/", crawlOptions: {}, crawlProjectId: P2,
+        crawl: async (beforeProviderAttempt) => {
+          await beforeProviderAttempt();
+          providerRequests += 1;
+          return { pages: [{ url: "https://docs.example.com/results", title: "Results", markdown: "Results beat expectations." }], credits: 0 };
+        },
+      }, ports).then(() => null, (failure: unknown) => failure);
+      expect(outcome).not.toMatchObject({ statusCode: 403 });
+      expect(providerRequests).toBe(1);
+      expect(gates.puts).toBe(1);
+    }, 30_000);
+
     it.each(midLoopChanges)("stops writing a crawl's pages when %s: no later page write starts", async (_label, change) => {
       gates.stallPuts = true;
       const pages = ["one", "two", "three"].map(name => ({ url: `https://docs.example.com/${name}`, title: name, markdown: `${name}: results beat expectations` }));

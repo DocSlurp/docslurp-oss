@@ -701,6 +701,33 @@ function isBusyFailure(error: unknown): boolean {
   return error instanceof CliApiError && (error.status === 429 || (error.status === 409 && error.failure.code === "upload_session_busy"));
 }
 
+/** A server answer that names one remote file twice cannot be matched to local bytes: refuse it before anything moves. */
+function assertUniqueRemoteIds(ids: ReadonlyArray<string | undefined>, what: string): void {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (typeof id !== "string" || !id) throw new Error(`Upload ${what} names a file without an id`);
+    if (seen.has(id)) throw new Error(`Upload ${what} names file ${id} more than once`);
+    seen.add(id);
+  }
+}
+
+/**
+ * The one descriptor for the original's id in a refreshed read, checked against the descriptor the local bytes were
+ * matched to (id, mode, size, and request index and client id where the original had them), so bytes never go to
+ * another file's targets.
+ */
+function refreshedDescriptor(files: readonly DirectUploadDescriptor[], original: DirectUploadDescriptor): DirectUploadDescriptor | undefined {
+  const matches = files.filter((file) => file.id === original.id);
+  if (matches.length > 1) throw new Error(`Upload session names file ${original.id} more than once`);
+  const fresh = matches[0];
+  if (!fresh) return undefined;
+  const same = fresh.mode === original.mode && fresh.sizeBytes === original.sizeBytes
+    && (original.index == null || fresh.index === original.index)
+    && (original.clientId == null || fresh.clientId === original.clientId);
+  if (!same) throw new Error(`Upload session describes ${original.filename} differently than before; not sending its bytes`);
+  return fresh;
+}
+
 /**
  * Files a large session's read did not inspect (`inspected: false`): completed in batches of up to 100, so storage
  * decides which still need bytes, then ONE `fileId` read per batch describes those. Only the explicit codes
@@ -717,6 +744,7 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
     if (!done.ok) throw await responseFailure(done);
     const answer = await done.json() as { files?: Array<{ fileId?: string; status?: string; error?: { code?: string; message?: string } }> };
     if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+    assertUniqueRemoteIds(answer.files.map((result) => result.fileId), "completion result");
     const byId = new Map(answer.files.map((result) => [result.fileId, result]));
     const missing: string[] = [];
     for (const file of chunk) {
@@ -732,8 +760,9 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
     const state = await refreshed.json() as DirectSession;
     if (["failed", "aborted", "expired"].includes(String(state.status ?? ""))) throw new Error(`Upload session ${String(state.status)}`);
     for (const id of missing) {
-      const fresh = state.files.find((file) => file.id === id);
-      const name = chunk.find((file) => file.id === id)?.filename ?? id;
+      const original = chunk.find((file) => file.id === id)!;
+      const name = original.filename;
+      const fresh = refreshedDescriptor(state.files, original);
       if (!fresh) throw new Error(`Upload session no longer has ${name}`);
       if (fresh.status === "completed") continue;
       if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
@@ -818,6 +847,10 @@ function sessionCompleter(sessionPath: string, flags: Record<string, string | bo
       for (const item of items) item.resolve();
       return;
     }
+    // One result per file sent, each named once: anything else is not this batch's answer.
+    assertUniqueRemoteIds(answer.files.map((result) => result.fileId), "completion result");
+    const sent = new Set(items.map((item) => fileOf(item.body)));
+    if (answer.files.some((result) => !sent.has(String(result.fileId)))) throw new Error("Upload completion result names a file this call did not send");
     const byId = new Map(answer.files.map((result) => [result.fileId, result]));
     for (const item of items) {
       const result = byId.get(fileOf(item.body));
@@ -887,6 +920,7 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
     const claimed = new Set<number>();
     const completer = sessionCompleter(sessionPath, flags);
     // Match every descriptor before sending anything, so an unknown file fails the upload before any bytes move.
+    assertUniqueRemoteIds(session.files.map((file) => file.id), "session");
     const work = session.files.map((first) => {
       const match = localFileFor(first, files, claimed);
       if (!match) throw new Error(`Upload session returned a file this upload did not send: ${first.filename}`);
@@ -919,7 +953,8 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           // Only this file: on a large session the full read inspects far fewer stored objects (server `fileId` filter).
           const refreshed = await sendWhenSessionFree(() => apiFetchRepeatable(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, flags, {}), flags, async () => "retry");
           if (!refreshed.ok) throw error;
-          const next = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
+          // The refreshed targets must belong to the same file the local bytes were matched to.
+          const next = refreshedDescriptor(((await refreshed.json()) as DirectSession).files, descriptor);
           if (!next) throw error;
           if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
           if (next.status === "failed" || next.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${next.status}`);

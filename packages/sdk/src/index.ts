@@ -1201,6 +1201,33 @@ function isResendableCompletion(error: unknown): boolean {
   return error instanceof DocSlurpApiError && RESEND_COMPLETION_CODES.has(error.code ?? "");
 }
 
+/** A server answer that names one remote file twice cannot be matched to local bytes: refuse it before anything moves. */
+function assertUniqueRemoteIds(ids: ReadonlyArray<string | undefined>, what: string): void {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (typeof id !== "string" || !id) throw new Error(`Upload ${what} names a file without an id`);
+    if (seen.has(id)) throw new Error(`Upload ${what} names file ${id} more than once`);
+    seen.add(id);
+  }
+}
+
+/**
+ * The one descriptor for `id` in a refreshed read, checked against the descriptor the local bytes were matched to: the
+ * same file (id, mode, size, and request index and client id where the original had them). Anything else is refused,
+ * so bytes never go to another file's targets.
+ */
+function refreshedDescriptor(files: readonly DirectUploadDescriptor[], original: DirectUploadDescriptor): DirectUploadDescriptor | undefined {
+  const matches = files.filter((file) => file.id === original.id);
+  if (matches.length > 1) throw new Error(`Upload session names file ${original.id} more than once`);
+  const fresh = matches[0];
+  if (!fresh) return undefined;
+  const same = fresh.mode === original.mode && fresh.sizeBytes === original.sizeBytes
+    && (original.index == null || fresh.index === original.index)
+    && (original.clientId == null || fresh.clientId === original.clientId);
+  if (!same) throw new Error(`Upload session describes ${original.filename} differently than before; not sending its bytes`);
+  return fresh;
+}
+
 /** Puts the upload session's id on an error thrown out of an upload, so a caller can inspect or clean it up. */
 function withSessionId(error: unknown, sessionPath: string): unknown {
   const sessionId = decodeURIComponent(sessionPath.slice(sessionPath.lastIndexOf("/") + 1));
@@ -2604,13 +2631,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         return;
       } catch (error) {
         if (round >= 2 || options.signal?.aborted || !isTransientTransferError(error)) throw error;
-        let refreshed: DirectUploadDescriptor | undefined;
+        let session: UploadSession;
         try {
           await sleep(250 * 2 ** round, options.signal ?? new AbortController().signal);
           // Only this file: a large session's full read inspects far fewer objects.
-          const session = await requestSessionCall<UploadSession>(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, {}, options, true);
-          refreshed = session.files.find((file) => file.id === descriptor.id);
+          session = await requestSessionCall<UploadSession>(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, {}, options, true);
         } catch { throw error; }
+        // The refreshed targets must belong to the same file the local bytes were matched to.
+        const refreshed = refreshedDescriptor(session.files, descriptor);
         if (!refreshed) throw error;
         if (refreshed.status === "completed") return;
         if (refreshed.status === "failed" || refreshed.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${refreshed.status}`);
@@ -2641,6 +2669,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         if (!isLegacyCompletionRefusal(error)) throw error;
       }
       if (answered !== null) {
+        assertUniqueRemoteIds((answered as Answered).map((result) => result.fileId), "completion result");
         const byId = new Map((answered as Answered).map((result) => [result.fileId, result]));
         for (const file of chunk) {
           const result = byId.get(file.id);
@@ -2660,8 +2689,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       const session = await requestSessionCall<UploadSession>(`${sessionPath}?${query}`, {}, options, true);
       if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
       for (const id of missing) {
-        const fresh = session.files.find((file) => file.id === id);
-        const name = chunk.find((file) => file.id === id)?.filename ?? id;
+        const original = chunk.find((file) => file.id === id)!;
+        const name = original.filename;
+        const fresh = refreshedDescriptor(session.files, original);
         if (!fresh) throw new Error(`Upload session no longer has ${name}`);
         if (fresh.status === "completed") continue;
         if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
@@ -2721,7 +2751,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       filename: typeof rejection.index === "number" ? args.names[rejection.index] ?? rejection.filename : rejection.filename,
     }));
     try {
-      // Match every descriptor before sending anything, so an unknown file fails the upload before any bytes move.
+      // Match every descriptor before sending anything, so an unknown or repeated file fails the upload before any bytes move.
+      assertUniqueRemoteIds(session.files.map((descriptor) => descriptor.id), "session");
       const work = session.files.map((descriptor) => {
         const match = sourceForDescriptor(descriptor, sources, claimed);
         if (!match) throw new Error(`Direct upload session returned a file this upload did not send: ${descriptor.filename}`);
@@ -3107,6 +3138,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
               const entries = chunk.map(({ fileId, etag, sizeBytes }) => ({ fileId, ...(etag !== undefined ? { etag } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) }));
               const answer = await requestSessionCall<Partial<CompleteUploadFilesResult>>(path, jsonRequest("POST", { files: entries }), options);
               if (!Array.isArray(answer.files)) throw new Error("Unexpected completion response");
+              // One result per file sent, each named once: anything else is not this batch's answer.
+              assertUniqueRemoteIds(answer.files.map((file) => file.fileId), "completion result");
+              const sent = new Set(chunk.map((file) => file.fileId));
+              if (answer.files.some((file) => !sent.has(file.fileId))) throw new Error("Upload completion result names a file this call did not send");
               results.push(...answer.files);
               sessionComplete = Boolean(answer.sessionComplete);
               continue;

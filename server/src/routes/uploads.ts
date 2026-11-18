@@ -479,12 +479,15 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       const sessionId = c.req.param("sessionId");
       const parsedBody = await parseCompleteBody(c);
       if (parsedBody instanceof Response) return parsedBody;
+      // The caller's own key (REST, or MCP's in-process call with its actor): rechecked before each storage write.
+      const actor = getRequestActor(c);
+      const credentialKeyId = actor.type === "apiKey" ? actor.apiKey.keyId : null;
       if (parsedBody.kind === "batch") {
         const body = parsedBody;
         // Batch: per-file results; only a session-level problem (not found, closed, revoked, busy) fails the request.
         try {
           // A client that disconnects cancels this hold's storage work (fenced, so nothing half-published).
-          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files, signal: c.req.raw.signal });
+          const result = await completeDirectUploadFiles({ sessionId, userId, files: body.files, signal: c.req.raw.signal, credentialKeyId });
           // The last file is in: start ingestion now rather than at the next sweep (after this request's lock is released).
           if (result.sessionComplete) kickDirectUploadReconcile(sessionId);
           return c.json({ ok: result.failedCount === 0, ...result });
@@ -502,6 +505,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           sizeBytes: body.sizeBytes,
           parts: body.parts,
           signal: c.req.raw.signal,
+          credentialKeyId,
         });
         if (completed?.sessionComplete) kickDirectUploadReconcile(sessionId);
       } catch (error) {

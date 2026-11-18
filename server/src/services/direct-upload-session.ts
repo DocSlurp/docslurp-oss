@@ -395,14 +395,24 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
     const isMultipart = file.unknownSize || (!file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES);
     return { file, sourceKey: rawSourceKey(input.userId, file.filename, input.extract), isMultipart, partSize: isMultipart ? MULTIPART_PART_SIZE_BYTES : null };
   });
+  // The creating credential is checked immediately before each multipart initialization (retries included), so a key
+  // revoked during setup opens no further provider upload.
+  const target = { org_id: input.orgId ?? null, project_id: input.projectId ?? null };
   const opened = await settleBounded(plans, SESSION_UPLOAD_CREATE_CONCURRENCY,
-    plan => plan.isMultipart ? withStorageRetry(() => createMultipartUpload(plan.sourceKey, plan.file.mimeType)) : Promise.resolve(null));
+    plan => plan.isMultipart ? withStorageRetry(async () => {
+      await assertCredentialStillPermits(target, input.apiKeyId);
+      return await createMultipartUpload(plan.sourceKey, plan.file.mimeType);
+    }) : Promise.resolve(null));
   const failed = opened.find(result => result.status === "rejected");
   if (failed) {
     // Nothing of this session is usable: close the uploads that were opened, then fail as before.
     const openedIds = opened.flatMap((result, i) => result.status === "fulfilled" && result.value ? [{ key: plans[i]!.sourceKey, uploadId: result.value }] : []);
     await settleBounded(openedIds, MULTIPART_ABORT_CONCURRENCY, upload => abortMultipartUpload(upload).catch(() => undefined));
-    throw (failed as PromiseRejectedResult).reason;
+    const reason = (failed as PromiseRejectedResult).reason;
+    if (reason instanceof ProjectIntakeError && reason.statusCode === 403) {
+      await sql`update upload_sessions set status = 'aborted', updated_at = now() where id = ${sessionId}`;
+    }
+    throw reason;
   }
   for (const [i, plan] of plans.entries()) {
     const { file, sourceKey, isMultipart, partSize } = plan;
@@ -505,11 +515,20 @@ export async function directUploadSessionBelongsToOrganization(sessionId: string
 async function assertMayMintTargets(session: UploadSessionRow, userId: string, credentialKeyId: string | null | undefined): Promise<void> {
   const { assertSessionProjectStillContributable } = await import("./direct-session-idempotency.js");
   await assertSessionProjectStillContributable(session, userId);
+  await assertCredentialStillPermits(session, credentialKeyId);
+}
+
+/**
+ * The request's own API key (or OAuth grant's key), in one snapshot (getLiveIntakeKey): live, owner a member, grant
+ * unrevoked, `ingest`, of the target's organization, with a project allowlist that still covers the target project.
+ * A caller without a key (a browser session) is the user acting on their own access, checked separately.
+ */
+async function assertCredentialStillPermits(target: { org_id: string | null; project_id: string | null }, credentialKeyId: string | null | undefined): Promise<void> {
   if (!credentialKeyId) return;
   const { getLiveIntakeKey } = await import("./api-keys.js");
   const key = await getLiveIntakeKey(credentialKeyId);
-  if (!key || !key.scopes.includes("ingest") || key.orgId !== session.org_id
-    || (key.projectIds.length > 0 && !(session.project_id && key.projectIds.includes(session.project_id)))) {
+  if (!key || !key.scopes.includes("ingest") || key.orgId !== target.org_id
+    || (key.projectIds.length > 0 && !(target.project_id && key.projectIds.includes(target.project_id)))) {
     throw new ProjectIntakeError("API key no longer permits this upload", 403);
   }
 }
@@ -569,9 +588,8 @@ export async function getDirectUploadSessionDescription(
         try { await withStorageRetry(() => getUploadedObjectMetadata(file.source_key, budget.signal), undefined, budget.signal); exists = true; }
         catch (error) { if (!isStorageNotFound(error)) throw error; }
         if (!exists) return;
-        // Sealing an uploaded object is an external dispatch: authorized immediately before it, per file.
-        await assertMayMintTargets(sessionRow, userId, credentialKeyId);
-        await finalizeDirectUploadFile(file, undefined, { signal: budget.signal });
+        // Sealing an uploaded object is an external dispatch: authorized immediately before each write it sends.
+        await finalizeDirectUploadFile(file, undefined, { signal: budget.signal, authorize: () => assertMayMintTargets(sessionRow, userId, credentialKeyId) });
       }, { shouldStart: budget.shouldStart });
       for (const [i, result] of inspected.entries()) {
         if (result.status === "rejected" && result.reason === NOT_STARTED) uninspected.add(open[i]!.id);
@@ -705,16 +723,24 @@ export function uploadStorageUnavailable(error: unknown, context: string): Proje
 }
 
 /** Storage is authoritative: never assemble a caller's unverified part manifest. */
-export async function finalizeDirectUploadFile(file: UploadSessionFileRow, finalSize?: number, options: { signal?: AbortSignal } = {}): Promise<boolean> {
+export async function finalizeDirectUploadFile(file: UploadSessionFileRow, finalSize?: number, options: {
+  signal?: AbortSignal;
+  /**
+   * The caller's authorization, run immediately before each storage write this finalize sends (the sealing copy, the
+   * multipart completion), retries included. A throw sends nothing further. The reconciler passes none: it seals bytes
+   * uploaded through targets signed while their caller was authorized, and no run starts without admission's check.
+   */
+  authorize?: () => Promise<void>;
+} = {}): Promise<boolean> {
   try {
-    return await finalizeDirectUploadFileUnclassified(file, finalSize, options.signal);
+    return await finalizeDirectUploadFileUnclassified(file, finalSize, options.signal, options.authorize);
   } catch (error) {
     if (error instanceof ProjectIntakeError) throw error;
     throw uploadStorageUnavailable(error, `file=${file.id}`);
   }
 }
 
-async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, finalSize: number | undefined, signal: AbortSignal | undefined): Promise<boolean> {
+async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, finalSize: number | undefined, signal: AbortSignal | undefined, authorize: (() => Promise<void>) | undefined): Promise<boolean> {
   if (file.status === "completed") return true;
   if (file.status !== "pending") return false;
   if (file.unknown_size && finalSize === undefined) return false;
@@ -732,7 +758,7 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
     if (!isStorageNotFound(error) && !(error instanceof ProjectIntakeError && error.code === "upload_object_missing")) throw error;
     // A finalizer holding a stale row may find the original already gone because another one published it.
     if (file.upload_mode !== "multipart" || !file.upload_id) return await completedMeanwhile(file);
-    const assembled = await assembleMultipartUpload(file, file.upload_id, signal);
+    const assembled = await assembleMultipartUpload(file, file.upload_id, signal, authorize);
     if (!assembled) return false;
     verified = assembled;
   }
@@ -747,7 +773,7 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
   // check (and after the server hashed them). Seal it: copy exactly the verified version to a key no URL names, and
   // ingest that. The sealed key is derived from the verified version, so a late or repeated copy of a different
   // version can never land on the key that was verified and published.
-  const sourceKey = await sealSingleUpload(file, verified.etag, signal);
+  const sourceKey = await sealSingleUpload(file, verified.etag, signal, authorize);
   // Publish the sealed key and durable cleanup of the original together, fenced on the row still being pending at
   // the original key: of two finalizers (a lost lock connection lets an old one run on), only one publishes.
   // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
@@ -819,7 +845,7 @@ async function discardLosingSeal(losingKey: string, winningKey: string, orgId: s
  * Assembles a multipart upload from storage's own part list. Returns the verified object, or null when the parts are
  * not all there yet. A closed upload (NoSuchUpload, from ListParts or from completion) goes through one recovery path.
  */
-async function assembleMultipartUpload(file: UploadSessionFileRow, uploadId: string, signal: AbortSignal | undefined): Promise<{ etag: string | null } | null> {
+async function assembleMultipartUpload(file: UploadSessionFileRow, uploadId: string, signal: AbortSignal | undefined, authorize?: () => Promise<void>): Promise<{ etag: string | null } | null> {
   let parts: Awaited<ReturnType<typeof listMultipartUploadParts>>;
   try { parts = await withStorageRetry(() => listMultipartUploadParts({ key: file.source_key, uploadId, signal }), undefined, signal); }
   catch (error) {
@@ -827,8 +853,14 @@ async function assembleMultipartUpload(file: UploadSessionFileRow, uploadId: str
     throw error;
   }
   if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return null;
-  try { await withStorageRetry(() => completeMultipartUpload({ key: file.source_key, uploadId, parts, signal }), undefined, signal); }
+  try {
+    await withStorageRetry(async () => {
+      await authorize?.();
+      return await completeMultipartUpload({ key: file.source_key, uploadId, parts, signal });
+    }, undefined, signal);
+  }
   catch (error) {
+    if (error instanceof ProjectIntakeError) throw error;
     if (storageErrorName(error) === "NoSuchUpload") return await recoverClosedMultipart(file, error, signal);
     throw multipartCompletionError(error, file.filename);
   }
@@ -861,12 +893,15 @@ export function sealedSourceKey(file: Pick<UploadSessionFileRow, "id" | "source_
   return `${file.source_key.slice(0, slash)}/sealed-${file.id}-${version}-${name}`;
 }
 
-async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null, signal: AbortSignal | undefined): Promise<string> {
+async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null, signal: AbortSignal | undefined, authorize?: () => Promise<void>): Promise<string> {
   if (!etag) throw new ProjectIntakeError(`Unable to verify the uploaded version of ${file.filename}`, 400);
   const sealed = sealedSourceKey(file, etag);
   try {
     // Idempotent: the same If-Match copy to the same version's key writes the same bytes again.
-    await withStorageRetry(() => copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag, signal }), undefined, signal);
+    await withStorageRetry(async () => {
+      await authorize?.();
+      return await copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag, signal });
+    }, undefined, signal);
   } catch (error) {
     if (storageErrorName(error) === "PreconditionFailed" || (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 412) {
       throw new ProjectIntakeError(`${file.filename} changed while its upload was being completed; upload it again`, 409);
@@ -943,7 +978,7 @@ type FinalizeOutcome = { fileId: string; completed: true } | { fileId: string; c
  * and a file is completed only through `finalizeDirectUploadFile`: verified size, sealed by an If-Match copy or a
  * storage-validated multipart assembly, re-admitted by intake policy. A file's failure never affects the others.
  */
-async function finalizeSessionFiles(sessionId: string, userId: string, entries: readonly CompleteDirectUploadFileEntry[], options: { signal?: AbortSignal } = {}): Promise<{ outcomes: FinalizeOutcome[]; sessionComplete: boolean }> {
+async function finalizeSessionFiles(sessionId: string, userId: string, entries: readonly CompleteDirectUploadFileEntry[], options: { signal?: AbortSignal; credentialKeyId?: string | null } = {}): Promise<{ outcomes: FinalizeOutcome[]; sessionComplete: boolean }> {
   if (entries.length < 1 || entries.length > MAX_DIRECT_UPLOAD_COMPLETE_BATCH) {
     throw new ProjectIntakeError(`Complete between 1 and ${MAX_DIRECT_UPLOAD_COMPLETE_BATCH} files per request`, 400);
   }
@@ -976,7 +1011,10 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
     const settled = await settleBounded(entries, env.directUploadFinalizeConcurrency, async entry => {
       const file = byId.get(entry.fileId);
       if (!file) throw new ProjectIntakeError("Upload file not found", 404);
-      if (!await finalizeDirectUploadFile(file, entry.sizeBytes, { signal: budget.signal })) throw notFinalizedError(file, entry);
+      // An API-key or OAuth caller's key, grant and allowlist are checked immediately before each sealing copy or
+      // multipart completion, like any other dispatch; a browser caller's own access was checked above.
+      const authorize = options.credentialKeyId ? () => assertCredentialStillPermits(session, options.credentialKeyId) : undefined;
+      if (!await finalizeDirectUploadFile(file, entry.sizeBytes, { signal: budget.signal, authorize })) throw notFinalizedError(file, entry);
     }, { shouldStart: budget.shouldStart });
     const outcomes = settled.map((result, i): FinalizeOutcome => result.status === "fulfilled"
       ? { fileId: entries[i]!.fileId, completed: true }
@@ -1000,9 +1038,9 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
 }
 
 /** The single-file `files/complete` body: throws the file's own error, exactly as before batching existed. */
-export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput & { signal?: AbortSignal }): Promise<{ sessionComplete: boolean }> {
-  const { signal, sessionId, userId, ...entry } = input;
-  const { outcomes: [outcome], sessionComplete } = await finalizeSessionFiles(sessionId, userId, [entry], { signal });
+export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput & { signal?: AbortSignal; credentialKeyId?: string | null }): Promise<{ sessionComplete: boolean }> {
+  const { signal, sessionId, userId, credentialKeyId, ...entry } = input;
+  const { outcomes: [outcome], sessionComplete } = await finalizeSessionFiles(sessionId, userId, [entry], { signal, credentialKeyId });
   if (outcome && !outcome.completed) throw outcome.error;
   return { sessionComplete };
 }
@@ -1011,8 +1049,8 @@ export async function completeDirectUploadFile(input: CompleteDirectUploadFileIn
  * The batched `files/complete` body. Good files complete and bad ones are reported per file (with the status code and
  * message the single-file call would have answered); only a session-level problem fails the request.
  */
-export async function completeDirectUploadFiles(input: { sessionId: string; userId: string; files: readonly CompleteDirectUploadFileEntry[]; signal?: AbortSignal }): Promise<{ files: DirectUploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean }> {
-  const { outcomes, sessionComplete } = await finalizeSessionFiles(input.sessionId, input.userId, input.files, { signal: input.signal });
+export async function completeDirectUploadFiles(input: { sessionId: string; userId: string; files: readonly CompleteDirectUploadFileEntry[]; signal?: AbortSignal; credentialKeyId?: string | null }): Promise<{ files: DirectUploadFileCompletion[]; completedCount: number; failedCount: number; sessionComplete: boolean }> {
+  const { outcomes, sessionComplete } = await finalizeSessionFiles(input.sessionId, input.userId, input.files, { signal: input.signal, credentialKeyId: input.credentialKeyId });
   const files = outcomes.map((outcome): DirectUploadFileCompletion => {
     if (outcome.completed) return { fileId: outcome.fileId, status: "completed" };
     if (outcome.error instanceof ProjectIntakeError) {

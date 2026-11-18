@@ -105,13 +105,14 @@ type IntakeCredentialGuard = (resolved?: IntakeAuthTarget) => Promise<void>;
  * accepted) may complete after a revocation; nothing new starts. Run admission repeats the check in its transaction
  * (`principalAtAdmission`), so no run starts and nothing bills.
  */
-function intakeCredentialGuard(apiKeyId: string | null | undefined, initial: IntakeAuthTarget): IntakeCredentialGuard {
+function intakeCredentialGuard(apiKeyId: string | null | undefined, initial: IntakeAuthTarget, requiredScopes: readonly string[] = ["ingest"]): IntakeCredentialGuard {
   let target = initial;
   return async (resolved) => {
     if (resolved) target = resolved;
     if (!apiKeyId) return;
     const key = await getLiveIntakeKey(apiKeyId);
-    if (!key || !(INTAKE_KEY_TYPES as readonly string[]).includes(key.keyType) || !key.scopes.includes("ingest")) throw new IntakeCredentialRefusedError();
+    if (!key || !(INTAKE_KEY_TYPES as readonly string[]).includes(key.keyType) || !key.scopes.includes("ingest")
+      || requiredScopes.some(scope => !key.scopes.includes(scope))) throw new IntakeCredentialRefusedError();
     if (target.orgId && key.orgId !== target.orgId) throw new IntakeCredentialRefusedError();
     if (target.projectId !== undefined && key.projectIds.length > 0 && (!target.projectId || !key.projectIds.includes(target.projectId))) {
       throw new IntakeCredentialRefusedError();
@@ -611,13 +612,18 @@ export async function createWebsiteProjectIntake(
      * unknown). The credential check covers it until the intake resolves its target.
      */
     crawlProjectId?: string | null;
+    /**
+     * Every scope the route required of the caller's key (`ingest`, plus `web` for a CLI OAuth token): the credential
+     * checks before each provider attempt and each write require them all, not just `ingest`.
+     */
+    requiredScopes?: readonly string[];
     crawlOptions: Record<string, unknown>;
     idempotencyKey?: string;
     audit?: ProjectIntakeAudit;
   },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
-  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, crawlProjectId, ...target } = args;
+  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, crawlProjectId, requiredScopes, ...target } = args;
   return await idempotently(
     {
       idempotencyKey,
@@ -634,7 +640,7 @@ export async function createWebsiteProjectIntake(
         where idempotency_key = ${receipt.key} and route_key = ${receipt.route}`;
       const guard = intakeCredentialGuard(args.apiKeyId, {
         orgId: args.orgId ?? null, ...(crawlProjectId !== undefined ? { projectId: crawlProjectId } : {}),
-      });
+      }, requiredScopes ?? ["ingest"]);
       await assertIntakeCredentialLive(guard);
       const crawled = await crawl(() => guard()).catch(refusedAs403);
       const pages = crawled.pages.filter((page) => page.markdown?.trim());

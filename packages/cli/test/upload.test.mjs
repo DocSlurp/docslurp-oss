@@ -557,3 +557,40 @@ test("an upload whose session stays busy past --timeout is kept for the server, 
     assert.match(result.stderr, /s1/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("duplicate remote file ids or a changed refreshed descriptor stop the upload before any bytes move", async () => {
+  const big = (id, extra = {}) => ({ index: 0, clientId: "0", id, filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "single", putUrl: "/storage/0", ...extra });
+  const small = (id, extra = {}) => ({ index: 1, clientId: "1", id, filename: "f1.pdf", mimeType: "application/pdf", sizeBytes: 7, mode: "single", putUrl: "/storage/1", ...extra });
+  const missing = (ids) => ({ body: { files: ids.map((fileId) => ({ fileId, status: "failed", error: { statusCode: 409, code: "upload_object_missing", message: "missing" } })) } });
+  const cases = [
+    ["session descriptors", [big("same"), small("same")], () => ({ body: {} }), () => ({ body: {} })],
+    ["a completion result", [big("a", { inspected: false }), small("b", { inspected: false })],
+      () => ({ body: { files: [{ fileId: "a", status: "completed" }, { fileId: "a", status: "completed" }] } }), () => ({ body: {} })],
+    ["a refreshed read", [big("a", { inspected: false }), small("b")], () => missing(["a"]),
+      () => ({ body: { sessionId: "s1", status: "pending", files: [big("a", { putUrl: "/storage/x" }), big("a", { putUrl: "/storage/y" })] } })],
+    ["a changed refreshed descriptor", [big("a", { inspected: false }), small("b")], () => missing(["a"]),
+      () => ({ body: { sessionId: "s1", status: "pending", files: [big("a", { sizeBytes: 7, putUrl: "/storage/other" })] } })],
+  ];
+  for (const [label, descriptors, complete, refresh] of cases) {
+    const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+    try {
+      const files = await directFiles(dir, 2);
+      const result = await invoke(["upload", ...files], (request, _count, base) => {
+        if (request.url === "/v1/uploads/direct/sessions") {
+          return { status: 201, body: { sessionId: "s1", files: descriptors.map((file) => ({ ...file, putUrl: `${base}${file.putUrl}` })) } };
+        }
+        if (request.url.endsWith("/files/complete")) return complete();
+        if (request.url.includes("?fileId=")) {
+          const answer = refresh();
+          return { body: { ...answer.body, files: (answer.body.files ?? []).map((file) => ({ ...file, putUrl: `${base}${file.putUrl}` })) } };
+        }
+        if (request.url.endsWith("/abort")) return { body: { ok: true } };
+        if (request.url.startsWith("/storage/")) return { headers: { etag: '"e"' }, body: {} };
+        return { status: 404, body: {} };
+      });
+      assert.notEqual(result.code, 0, label);
+      assert.match(result.stderr, /more than once|differently/, label);
+      assert.equal(result.requests.filter((request) => request.url.startsWith("/storage/")).length, 0, `${label}: no bytes sent`);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+});

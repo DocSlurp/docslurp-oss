@@ -385,3 +385,54 @@ test("a session call keeps one deadline across retries and honours a Retry-After
     assert.equal(sent.length, 1);
   } finally { mock.timers.reset(); }
 });
+
+test("duplicate remote file ids are refused before any bytes move: in session descriptors, completion results and refreshed reads", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const single = (index, id, extra = {}) => ({ index, clientId: String(index), id, filename: `f${index}.txt`, mimeType: "text/plain", sizeBytes: 3, mode: "single", putUrl: `https://storage.invalid/${index}`, ...extra });
+  const cases = [
+    // Two descriptors for one remote file id: one file's bytes could land in the other's object.
+    ["session descriptors", { files: [single(0, "same"), single(1, "same")] }, () => json({ error: "unexpected" }, 500), () => json({ error: "unexpected" }, 500)],
+    // The batch answer names one file twice.
+    ["a completion result", { files: [single(0, "a", { inspected: false }), single(1, "b", { inspected: false })] },
+      () => json({ files: [{ fileId: "a", status: "failed", error: { code: "upload_object_missing" } }, { fileId: "a", status: "completed" }] }), () => json({ error: "unexpected" }, 500)],
+    // The refresh read names the missing file twice.
+    ["a refreshed read", { files: [single(0, "a", { inspected: false })] },
+      () => json({ files: [{ fileId: "a", status: "failed", error: { code: "upload_object_missing" } }] }),
+      () => json({ sessionId: "s1", status: "pending", files: [single(0, "a", { putUrl: "https://storage.invalid/x" }), single(0, "a", { putUrl: "https://storage.invalid/y" })] })],
+    // The refresh read describes the file differently (another size) than the one the local bytes were matched to.
+    ["a changed refreshed descriptor", { files: [single(0, "a", { inspected: false })] },
+      () => json({ files: [{ fileId: "a", status: "failed", error: { code: "upload_object_missing" } }] }),
+      () => json({ sessionId: "s1", status: "pending", files: [single(0, "a", { sizeBytes: 999, putUrl: "https://storage.invalid/other" })] })],
+  ];
+  for (const [label, created, complete, refresh] of cases) {
+    const puts = [];
+    let aborts = 0;
+    const fetch = async (url, init = {}) => {
+      const href = String(url);
+      if (href.endsWith("/direct/sessions") && init.method === "POST") return json({ sessionId: "s1", ...created });
+      if (href.endsWith("/files/complete")) return complete();
+      if (href.includes("?fileId=")) return refresh();
+      if (href.endsWith("/abort")) { aborts += 1; return json({ ok: true }); }
+      if (init.method === "PUT") { puts.push(href); return new Response(null, { status: 200 }); }
+      return json({ error: "unexpected" }, 500);
+    };
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+    const blobs = created.files.map(() => new Blob(["abc"]));
+    await assert.rejects(client.upload(blobs, { directUpload: true, filenames: created.files.map((file) => file.filename) }), /more than once|differently/, label);
+    assert.deepEqual(puts, [], `${label}: no bytes sent`);
+    assert.equal(aborts, 1, `${label}: session closed`);
+  }
+});
+
+test("completeUploadFiles refuses a batch answer that names a file twice or one it did not send", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  for (const files of [
+    [{ fileId: "a", status: "completed" }, { fileId: "a", status: "completed" }],
+    [{ fileId: "a", status: "completed" }, { fileId: "other", status: "completed" }],
+  ]) {
+    const fetch = async () => new Response(JSON.stringify({ files, sessionComplete: true }), { headers: { "content-type": "application/json" } });
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+    await assert.rejects(client.completeUploadFiles("s1", [{ fileId: "a" }, { fileId: "b" }]), /more than once|did not send/);
+  }
+});

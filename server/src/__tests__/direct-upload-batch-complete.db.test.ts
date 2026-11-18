@@ -30,6 +30,12 @@ const mocks = vi.hoisted(() => ({
   /** Runs inside each ListParts (a slow provider read during part signing). */
   onListParts: null as null | (() => Promise<void>),
   listParts: 0,
+  /** The parts ListParts reports (default none). */
+  parts: [] as Array<{ partNumber: number; sizeBytes: number; etag: string }>,
+  /** Runs inside each multipart initialization; may throw (a provider failure). */
+  onCreateMultipart: null as null | (() => Promise<void>),
+  multipartCreates: 0,
+  multipartCompletes: 0,
 }));
 vi.mock("../db.js", () => ({ sql: Object.assign(
   (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -74,7 +80,9 @@ vi.mock("../lib/storage.js", async importOriginal => ({
   abortMultipartUpload: async () => {},
   signSingleUploadPut: async ({ key }: { key: string }) => { mocks.putSignatures += 1; return `https://storage.example/${key}`; },
   signMultipartUploadPart: async () => { mocks.partSignatures += 1; return "https://storage.example/part"; },
-  listMultipartUploadParts: async () => { mocks.listParts += 1; if (mocks.onListParts) await mocks.onListParts(); return []; },
+  listMultipartUploadParts: async () => { mocks.listParts += 1; if (mocks.onListParts) await mocks.onListParts(); return mocks.parts; },
+  createMultipartUpload: async () => { mocks.multipartCreates += 1; if (mocks.onCreateMultipart) await mocks.onCreateMultipart(); return `up-${mocks.multipartCreates}`; },
+  completeMultipartUpload: async ({ key }: { key: string }) => { mocks.multipartCompletes += 1; mocks.objects.set(key, { size: 20 * 1024 * 1024, etag: "\"mp\"" }); return {}; },
 }));
 vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
 
@@ -126,6 +134,10 @@ beforeEach(async () => {
   mocks.putSignatures = 0;
   mocks.onListParts = null;
   mocks.listParts = 0;
+  mocks.parts = [];
+  mocks.onCreateMultipart = null;
+  mocks.multipartCreates = 0;
+  mocks.multipartCompletes = 0;
   // A held lock is answered at once here (production waits DOCSLURP_UPLOAD_LOCK_WAIT_MS first).
   (await import("../config.js")).env.directUploadLockWaitMs = 0;
   mocks.heads.length = 0;
@@ -642,6 +654,79 @@ describe("minting targets re-checks the caller under the lock (H2)", () => {
     expect(mocks.putSignatures).toBe(0);
     const created = (await db.query<{ status: string }>("select status from upload_sessions where id <> $1 and id <> $2 and api_key_id = 'k-u'", [SESSION, FOREIGN])).rows;
     expect(created.map(row => row.status)).toEqual(["aborted"]);
+  });
+
+  it("checks the key before each multipart initialization in a fresh create, retries included", async () => {
+    // The first initialization fails transiently after the key is revoked: its retry is refused before it is sent.
+    mocks.onCreateMultipart = async () => {
+      if (mocks.multipartCreates > 1) return;
+      await db.query("update api_keys set revoked_at = now() where id = 'k-u'");
+      throw Object.assign(new Error("slow down"), { name: "SlowDown", $metadata: { httpStatusCode: 503 } });
+    };
+    const { createDirectUploadSession } = await import("../services/direct-upload-session.js");
+    await expect(createDirectUploadSession({ userId: "u", orgId: "o", apiKeyId: "k-u", pipeline: {},
+      files: [{ filename: "results.pdf", mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 }] })).rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.multipartCreates).toBe(1);
+    expect(mocks.putSignatures + mocks.partSignatures).toBe(0);
+  });
+
+  it("opens no provider upload in a fresh create whose key is already revoked", async () => {
+    await db.query("update api_keys set revoked_at = now() where id = 'k-u'");
+    const { createDirectUploadSession } = await import("../services/direct-upload-session.js");
+    await expect(createDirectUploadSession({ userId: "u", orgId: "o", apiKeyId: "k-u", pipeline: {},
+      files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 }, { filename: "b.pdf", mimeType: "application/pdf", sizeBytes: 40 * 1024 * 1024 }] }))
+      .rejects.toMatchObject({ statusCode: 403 });
+    expect(mocks.multipartCreates).toBe(0);
+  });
+
+  it("files/complete from a key caller seals nothing when the key is revoked before the copy", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    mocks.onHead = async () => { await db.query("update api_keys set revoked_at = now() where id = 'k-u'"); };
+    const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "a" }], credentialKeyId: "k-u" });
+    expect(result.files[0]).toMatchObject({ status: "failed", error: { statusCode: 403 } });
+    expect(mocks.copies).toHaveLength(0);
+    expect((await fileRow("a")).status).toBe("pending");
+  });
+
+  it("files/complete from a key caller completes no multipart upload when the allowlist drops the project during ListParts", async () => {
+    await db.query("insert into projects (id, org_id, user_id, name) values ('44444444-4444-4444-8444-444444444444', 'o', 'u', 'Results') on conflict do nothing");
+    await db.query("update upload_sessions set project_id = '44444444-4444-4444-8444-444444444444' where id = $1", [SESSION]);
+    await db.query("update api_keys set project_ids = '{44444444-4444-4444-8444-444444444444}' where id = 'k-u'");
+    await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+      values ('mp', $1, 'big.pdf', 'application/pdf', $2, $3, 'multipart', 'up-1', $4, 'pending')`, [SESSION, 20 * 1024 * 1024, `u/${SESSION}/raw/big.pdf`, 8 * 1024 * 1024]);
+    mocks.parts = [{ partNumber: 1, sizeBytes: 8 * 1024 * 1024, etag: "\"1\"" }, { partNumber: 2, sizeBytes: 8 * 1024 * 1024, etag: "\"2\"" }, { partNumber: 3, sizeBytes: 4 * 1024 * 1024, etag: "\"3\"" }];
+    mocks.onListParts = async () => { await db.query("update api_keys set project_ids = '{33333333-3333-4333-8333-333333333333}' where id = 'k-u'"); };
+    const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "mp" }], credentialKeyId: "k-u" });
+    expect(result.files[0]).toMatchObject({ status: "failed", error: { statusCode: 403 } });
+    expect(mocks.multipartCompletes).toBe(0);
+  });
+
+  it("files/complete from a browser caller (no key) still seals: the user acts on their own access", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    await db.query("update api_keys set revoked_at = now() where id = 'k-u'");
+    const result = await completeDirectUploadFiles({ sessionId: SESSION, userId: "u", files: [{ fileId: "a" }] });
+    expect(result.files[0]).toMatchObject({ status: "completed" });
+    expect(mocks.copies).toHaveLength(1);
+  });
+
+  it("the REST route passes the caller's own key to the finalizer (the path MCP completeUpload takes too)", async () => {
+    await seedFile(SESSION, "a", { size: 10, etag: "\"a\"" });
+    mocks.onHead = async () => { await db.query("update api_keys set revoked_at = now() where id = 'k-u'"); };
+    const { Hono } = await import("hono");
+    const { createUploadsRoutes } = await import("../routes/uploads.js");
+    const { setRequestActor } = await import("../lib/request-actor.js");
+    const apiKey = { keyId: "k-u", orgId: "o", keyType: "server", scopes: ["ingest"], projectIds: [], allowedDomains: [] };
+    const app = new Hono().use("*", async (c, next) => {
+      setRequestActor(c, { type: "apiKey", userId: "u", apiKey } as never);
+      c.set("sessionUser", { id: "u", email: "uploader@example.test", name: "Uploader" } as never);
+      c.set("apiKey", apiKey as never);
+      await next();
+    }).route("/uploads", createUploadsRoutes());
+    const response = await app.request(`/uploads/direct/sessions/${SESSION}/files/complete`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ files: [{ fileId: "a" }] }),
+    });
+    expect(await response.json()).toMatchObject({ ok: false, files: [{ fileId: "a", status: "failed", error: { statusCode: 403 } }] });
+    expect(mocks.copies).toHaveLength(0);
   });
 });
 
