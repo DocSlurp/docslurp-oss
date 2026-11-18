@@ -888,6 +888,10 @@ test("reindex --estimate prices the index change and prints the signature; reind
   assert.deepEqual(JSON.parse(started.requests[0].body), { pipeline: { embedding: { profile: "fastest-local" } }, confirmEstimate: signature });
   assert.match(started.stdout, /Job j1: reindex queued/);
 
+  const all = await invoke(["reindex", "--project", "w", "--embedding-profile", "fastest-local", "--late-chunking", "on", "--late-chunking-window", "3", "--vector-backends", "lancedb,orama", "--contextual-preambles", "off", "--estimate"], () => ({ body: { estimate, lockedSettings: ["embedding"], signature } }));
+  assert.equal(all.code, 0, all.stderr);
+  assert.deepEqual(JSON.parse(all.requests[0].body), { pipeline: { embedding: { profile: "fastest-local", lateChunking: true, lateChunkingWindow: 3 }, contextualChunkPreambles: false, vectorBackends: ["lancedb", "orama"] } });
+
   const rebuild = await invoke(["reindex", "--project", "w"], () => ({ body: { changedSettings: [], runIds: ["r2"], job: { ...job, id: "j2" } } }));
   assert.deepEqual(JSON.parse(rebuild.requests[0].body), {});
 

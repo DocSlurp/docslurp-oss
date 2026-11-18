@@ -425,7 +425,8 @@ describe("PATCH project preferences preserve sparse semantics and refuse unsafe 
     ["budget cleared", { monthlyBudgetCents: 0 }],
     ["retention", { artifactRetentionDays: 30, runRetentionDays: null }],
     ["partial nested pipeline", { pipeline: { summarize: true } }],
-    ["nested embedding profile", { pipeline: { embedding: { profile: "fastest-local" } } }],
+    // The project holds documents, so the index setting needs the re-index confirmation.
+    ["nested embedding profile", { pipeline: { embedding: { profile: "fastest-local" } }, apply: "reindex" }],
     ["indexing mode", { pipeline: { indexingMode: "map" } }],
     ["indexing mode with indexAll", { pipeline: { indexingMode: "full" }, indexAll: true }],
     ["apply new-uploads", { apply: "new-uploads", pipeline: { summarize: true } }],

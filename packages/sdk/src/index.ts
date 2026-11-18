@@ -253,7 +253,7 @@ export type EstimateResponse = {
   /** Upload estimates only: the full quote (ingest, monthly hosting and usage) for the project's settings. */
   quote?: EstimateQuote;
   /** Project and reindex estimates: the locked index settings the change alters (an update needs `apply: "reindex"`). */
-  lockedSettings?: IndexIdentitySetting[];
+  lockedSettings?: ReindexSetting[];
   /** Project and reindex estimates: pass as `confirmEstimate` to refuse stale work. */
   signature?: string;
 };
@@ -309,10 +309,19 @@ export type UpdateProjectInput = JsonObject & {
  */
 export const INDEX_IDENTITY_SETTINGS = ["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"] as const;
 export type IndexIdentitySetting = (typeof INDEX_IDENTITY_SETTINGS)[number];
+/**
+ * Every setting the reindex command takes and a `reindex_required` refusal may name: the index settings plus the vector
+ * switches (`embed`, `indexVectors`), which are locked while vectors were built under another index config.
+ */
+export const REINDEX_SETTINGS = [...INDEX_IDENTITY_SETTINGS, "embed", "indexVectors"] as const;
+export type ReindexSetting = (typeof REINDEX_SETTINGS)[number];
 
-/** `POST /v1/projects/:id/reindex` body. `pipeline` takes only {@link INDEX_IDENTITY_SETTINGS}; omitted, the index is rebuilt as is. */
+/**
+ * `POST /v1/projects/:id/reindex` body. `pipeline` takes only {@link REINDEX_SETTINGS}; omitted, the index is rebuilt
+ * as is, which re-embeds every live document (billed).
+ */
 export type ReindexProjectInput = {
-  pipeline?: Partial<Record<IndexIdentitySetting, unknown>>;
+  pipeline?: Partial<Record<ReindexSetting, unknown>>;
   /** Explicit opt-in to speed-boosted processing for the re-index runs. */
   speedBoost?: boolean;
   /** The `signature` from {@link DocSlurpClient.reindexProjectEstimate} (or a `reindex_required` refusal); stale is 409 `estimate_stale`. */
@@ -321,7 +330,9 @@ export type ReindexProjectInput = {
 export type ReindexProjectResponse = {
   project: ProjectRecord;
   /** Index settings this call changed (empty for a plain rebuild). */
-  changedSettings: IndexIdentitySetting[];
+  changedSettings: ReindexSetting[];
+  /** `queued` / `blocked`: re-index runs exist; `saved`: settings saved, no documents to re-index; `unchanged`: nothing to do. */
+  outcome: "queued" | "blocked" | "saved" | "unchanged";
   impact: ConfigChangeImpact;
   estimate: CostEstimate | null;
   /** The queued re-index runs; empty when the project has no documents to re-index. */
@@ -331,7 +342,7 @@ export type ReindexProjectResponse = {
 
 /** `error.details.reindex` of a 409 `reindex_required`: what the refused change needs. */
 export type ReindexRequiredDetails = {
-  lockedSettings: IndexIdentitySetting[];
+  lockedSettings: ReindexSetting[];
   documents: number;
   pages: number;
   credits: { low: number; high: number } | null;

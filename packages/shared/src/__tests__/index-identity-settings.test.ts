@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  analyzePipelineChange,
+  assertIndexIdentityUnchanged,
+  vectorsReenabled,
   changedIndexIdentitySettings,
   INDEX_IDENTITY_SETTINGS,
   indexConfigHash,
@@ -37,9 +40,36 @@ describe("INDEX_IDENTITY_SETTINGS", () => {
     }
   });
 
-  it("does not lock a setting no enabled stage uses", () => {
+  it("lists an identity change even while embedding is off (re-enabling it later must not apply it silently)", () => {
     const off = withF({ embed: false, indexVectors: false });
-    expect(changedIndexIdentitySettings(off, { ...off, ...alternatives.embedding })).toEqual([]);
+    expect(changedIndexIdentitySettings(off, { ...off, ...alternatives.embedding })).toEqual(["embedding"]);
+  });
+
+  it("ignores changes that leave the index hash alone, and never re-indexes for them", () => {
+    const two = withF({ vectorBackends: ["lancedb", "orama"] });
+    const reordered = withF({ vectorBackends: ["orama", "lancedb"] });
+    expect(changedIndexIdentitySettings(two, reordered)).toEqual([]);
+    expect(analyzePipelineChange(two, reordered, { documents: 1, pages: 1 }).kind).not.toMatch(/^reindex/);
+    // A request option the vectors do not depend on (the embedding task).
+    const task = withF({ embedding: { ...base.embedding, task: "code" } });
+    expect(changedIndexIdentitySettings(base, task)).toEqual([]);
+    expect(analyzePipelineChange(base, task, { documents: 1, pages: 1 }).stages).toEqual([]);
+  });
+
+  it("names the vector switches turned back on", () => {
+    const off = withF({ embed: false, indexVectors: false });
+    expect(vectorsReenabled(off, base)).toEqual(["embed", "indexVectors"]);
+    expect(vectorsReenabled(base, off)).toEqual([]);
+  });
+
+  it("assertIndexIdentityUnchanged refuses identity changes only", () => {
+    expect(() => assertIndexIdentityUnchanged(base, withF(alternatives.chunkOverlap), "test")).toThrow(/chunkOverlap/);
+    expect(() => assertIndexIdentityUnchanged(base, withF({ summarize: true }), "test")).not.toThrow();
+  });
+
+  it("rebuilds the summary tree with the vectors when it is on", () => {
+    const tree = withF({ summaryTree: { enabled: true } });
+    expect(indexRebuildStages(tree)).toEqual(expect.arrayContaining(["embed", "index", "summary-tree"]));
   });
 
   it("rebuilds the embed and index stages", () => {
@@ -52,6 +82,7 @@ describe("reindexProjectSchema", () => {
     expect(reindexProjectSchema.safeParse({ pipeline: { embedding: { profile: "fastest-local" } } }).success).toBe(true);
     expect(reindexProjectSchema.safeParse({}).success).toBe(true);
     expect(reindexProjectSchema.safeParse({ pipeline: { summarize: true } }).success).toBe(false);
+    expect(reindexProjectSchema.safeParse({ pipeline: { embed: true, indexVectors: true } }).success).toBe(true);
     expect(reindexProjectSchema.safeParse({ apply: "new-uploads" }).success).toBe(false);
     expect(reindexProjectSchema.safeParse({ confirmEstimate: "nope" }).success).toBe(false);
   });

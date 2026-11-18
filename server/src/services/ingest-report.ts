@@ -1,4 +1,4 @@
-import { visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
+import { assertIndexIdentityUnchanged, vectorsReenabled, visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   buildByteHistogram,
   classifyIngestFailure,
@@ -1585,6 +1585,14 @@ export async function applyIngestRecommendation(args: RecommendationAction): Pro
   const current = await getProject(args.project.id, args.userId);
   if (!current) throw new IngestReportActionError("Project not found", 404);
   const next = applyRecommendationPatch(current.pipeline, recommendation.patch);
+  // Recommendations never change the index identity; turning vectors back on over vectors built under another index
+  // config is locked like any settings change (409 reindex_required: use the reindex command).
+  assertIndexIdentityUnchanged(current.pipeline, next, "An ingest recommendation");
+  if (vectorsReenabled(current.pipeline, next).length > 0) {
+    const { assertReindexConfirmed, planProjectChange } = await import("./config-change.js");
+    const plan = await planProjectChange({ projectId: args.project.id, userId: args.userId, input: { pipeline: next, apply: "new-uploads" } });
+    if (plan) assertReindexConfirmed(plan);
+  }
   const updated = await updateProject(args.project.id, args.userId, { pipeline: next }, { expectedUpdatedAt: args.project.updatedAt });
   if (!updated) throw new IngestReportActionError("Only project editors can change ingest settings.", 403);
   if (!patchHolds(updated.pipeline, recommendation.patch)) {

@@ -60,6 +60,7 @@ export const API_ERROR_CODES = [
   "settings_reprocess_consent_required",
   "reindex_required",
   "estimate_stale",
+  "privacy_mode_violation",
   "payload_too_large",
   "rate_limited",
   "spend_limit_exceeded",
@@ -185,7 +186,8 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   settings_idempotency_conflict: "This settings request ID was already used with different parameters. Reuse the original request, or start a new intentional publication.",
   settings_reprocess_consent_required: "This change queues existing-document work. Estimate it and explicitly confirm reprocessing before saving.",
   reindex_required: "This change alters how the project's search index is built, and the project already has indexed documents. Nothing was saved. Apply it with the reindex command (POST /v1/projects/{projectId}/reindex) or resend it with apply: \"reindex\" to re-index the existing documents.",
-  estimate_stale: "The re-index work or its price changed since the estimate. Nothing was saved. Estimate again and confirm the new signature.",
+  privacy_mode_violation: "This project's privacy mode doesn't allow that setting. A restricted privacy mode needs local models (a local embedding profile).",
+  estimate_stale: "The re-index work or its price changed since the estimate. Nothing was saved. Estimate again (POST /v1/projects/{projectId}/reindex/estimate or /estimate) and retry with the new signature.",
   payload_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   rate_limited: PUBLIC_ERROR_MESSAGES.rateLimit,
   spend_limit_exceeded: PUBLIC_ERROR_MESSAGES.spendLimit,
@@ -395,8 +397,8 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   return Object.keys(safe).length ? safe : undefined;
 }
 
-/** Index-identity settings (`INDEX_IDENTITY_SETTINGS` in config-change.ts; repeated here so this module stays leaf-level). */
-const LOCKED_INDEX_SETTINGS: ReadonlySet<string> = new Set(["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends"]);
+/** Lockable settings (`REINDEX_SETTINGS` in config-change.ts; repeated here so this module stays leaf-level). */
+const LOCKED_INDEX_SETTINGS: ReadonlySet<string> = new Set(["embedding", "chunkOverlap", "contextualChunkPreambles", "vectorBackends", "embed", "indexVectors"]);
 
 /**
  * A `reindex_required` refusal's `details.reindex`: the locked settings the change altered, the re-index work it

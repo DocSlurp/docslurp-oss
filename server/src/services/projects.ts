@@ -1491,7 +1491,7 @@ export async function listProjectVersions(
       created_at::text
     from audit_log
     where project_id = ${projectId}
-      and action in ('project.created', 'project.updated', 'project.rollback', 'project.cloned')
+      and action = any(${[...PROJECT_VERSION_AUDIT_ACTIONS]})
     order by created_at desc
     limit 50
   `;
@@ -1516,11 +1516,20 @@ export async function listProjectVersions(
     .filter((row): row is ProjectVersionRecord => row !== null);
 }
 
-export async function rollbackProjectVersion(
+/** Audit actions that record a project version (a rollback may only restore one of these). */
+export const PROJECT_VERSION_AUDIT_ACTIONS = ["project.created", "project.updated", "project.rollback", "project.cloned", "project.reindexed"] as const;
+
+/**
+ * Restores a project version's settings through the same planner as PATCH: a version whose index settings differ from
+ * the project's is locked like any other change (409 `reindex_required` unless `apply: "reindex"`), and the restore
+ * queues the re-index it needs. Only version audit rows are restorable.
+ */
+export async function rollbackProjectVersionChange(
   projectId: string,
   userId: string,
-  versionId: string
-): Promise<ProjectRecord> {
+  versionId: string,
+  options: { apply?: "new-uploads" | "reindex"; confirmEstimate?: string; origin?: "app" | "machine" } = {},
+) {
   const access = await assertProjectAccess(projectId, userId);
   if (!canEditProject(access, userId)) {
     throw new ProjectAccessError(403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
@@ -1536,6 +1545,7 @@ export async function rollbackProjectVersion(
     from audit_log
     where id = ${versionId}
       and project_id = ${projectId}
+      and action = any(${[...PROJECT_VERSION_AUDIT_ACTIONS]})
     limit 1
   `;
 
@@ -1548,20 +1558,41 @@ export async function rollbackProjectVersion(
     throw new Error("Project version is missing a rollback snapshot");
   }
 
-  const updated = await updateProject(projectId, userId, {
-    name: snapshot.name,
-    templateKey: snapshot.templateKey,
-    systemPrompt: snapshot.systemPrompt,
-    // A snapshot saved before migration 0151 carries chartExport.enabled/generatorModel (the audit log is never
-    // rewritten): mapped on read so the strict settings schema accepts it.
-    pipeline: upgradeStoredPipelineChartExport(snapshot.pipeline),
+  const { applyProjectChange, assertEstimateCurrent, planProjectChange, reindexTargetSignature } = await import("./config-change.js");
+  const plan = await planProjectChange({
+    projectId,
+    userId,
+    input: {
+      name: snapshot.name,
+      templateKey: snapshot.templateKey,
+      systemPrompt: snapshot.systemPrompt,
+      // A snapshot saved before migration 0151 carries chartExport.enabled/generatorModel (the audit log is never
+      // rewritten): mapped on read so the strict settings schema accepts it.
+      pipeline: upgradeStoredPipelineChartExport(snapshot.pipeline),
+      ...(options.apply ? { apply: options.apply } : {}),
+    } as UpdateProjectInput,
+    origin: options.origin,
   });
-
-  if (!updated) {
+  if (!plan) throw new ProjectAccessError(404, "project_not_found", "Project not found");
+  assertEstimateCurrent(plan, options.confirmEstimate);
+  const applied = await applyProjectChange({
+    plan,
+    userId,
+    ...(options.confirmEstimate !== undefined ? { maxAttempts: 1, expectedTargetSignature: reindexTargetSignature(plan.targets) } : {}),
+  });
+  if (!applied) {
     throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
+  return applied;
+}
 
-  return updated;
+export async function rollbackProjectVersion(
+  projectId: string,
+  userId: string,
+  versionId: string,
+  options: { apply?: "new-uploads" | "reindex"; confirmEstimate?: string } = {},
+): Promise<ProjectRecord> {
+  return (await rollbackProjectVersionChange(projectId, userId, versionId, options)).project;
 }
 
 export async function getProjectCockpit(

@@ -83,6 +83,7 @@ beforeEach(async () => {
   await sql`delete from documents`;
   await sql`delete from project_runs`;
   await sql`delete from api_keys`;
+  await sql`delete from audit_log`;
   await sql`delete from project_members`;
   await sql`delete from project_search_settings`;
   await sql`delete from projects`;
@@ -260,5 +261,95 @@ describe("POST /v1/projects/:id/reindex", () => {
     const response = await send("POST", "/v1/projects/proj-a/reindex", asKey(rawKey), { pipeline: { embedding: { profile: "fastest-local" } } });
     expect(response.status).toBe(200);
     expect(await reindexRuns("proj-a")).toBeGreaterThan(0);
+  });
+});
+
+describe("council fixes", () => {
+  const version = async (action: string, pipeline: unknown) => {
+    const id = randomUUID();
+    await sql`insert into audit_log (id, org_id, user_id, project_id, action, resource_type, resource_id, metadata)
+      values (${id}, 'org-a', 'ua', 'proj-a', ${action}, 'project', 'proj-a',
+        ${sql.json({ snapshot: { name: "A", templateKey: null, systemPrompt: null, pipeline } } as never)})`;
+    return id;
+  };
+  const fastest = { ...defaultPipelineFeatures, embedding: embedding("fastest-local") };
+
+  it("a version rollback that changes the embedding is locked like a PATCH, and confirmed queues the re-index", async () => {
+    const id = await version("project.updated", fastest);
+    const refused = await send("POST", `/v1/projects/proj-a/versions/${id}/rollback`, asUser("ua"), {});
+    expect(refused.status).toBe(409);
+    expect((await refused.json() as { error: { code: string } }).error.code).toBe("reindex_required");
+    expect((await stored("proj-a")).pipeline.embedding.profile).toBe(defaultPipelineFeatures.embedding.profile);
+    expect(await reindexRuns("proj-a")).toBe(0);
+    const confirmed = await send("POST", `/v1/projects/proj-a/versions/${id}/rollback`, asUser("ua"), { apply: "reindex" });
+    expect(confirmed.status).toBe(200);
+    expect((await stored("proj-a")).pipeline.embedding.profile).toBe("fastest-local");
+    expect(await reindexRuns("proj-a")).toBeGreaterThan(0);
+  });
+
+  it("only version audit rows can be rolled back to", async () => {
+    const id = await version("project.search-settings.updated", { ...defaultPipelineFeatures, summarize: true });
+    const response = await send("POST", `/v1/projects/proj-a/versions/${id}/rollback`, asUser("ua"), {});
+    expect(response.status).toBe(400);
+    expect((await stored("proj-a")).pipeline).not.toMatchObject({ summarize: true });
+  });
+
+  it("locks while documents are still in flight, and for archived documents", async () => {
+    await sql`delete from vector_indexes where document_id like 'proj-a-%'`;
+    await sql`update documents set status = 'processing' where project_id = 'proj-a'`;
+    expect((await send("PATCH", "/v1/projects/proj-a", asUser("ua"), embeddingPatch)).status).toBe(409);
+    await sql`update documents set status = 'completed', archived_at = now() where project_id = 'proj-a'`;
+    expect((await send("PATCH", "/v1/projects/proj-a", asUser("ua"), embeddingPatch)).status).toBe(409);
+    // An upload run still queued, before any document row exists.
+    await sql`delete from documents where project_id = 'proj-a'`;
+    await sql`update project_runs set status = 'queued' where id = 'src-proj-a'`;
+    expect((await send("PATCH", "/v1/projects/proj-a", asUser("ua"), embeddingPatch)).status).toBe(409);
+    expect((await stored("proj-a")).pipeline.embedding.profile).toBe(defaultPipelineFeatures.embedding.profile);
+  });
+
+  it("a change that leaves the index hash alone is neither locked nor re-indexed", async () => {
+    const two = { ...defaultPipelineFeatures, vectorBackends: ["lancedb", "orama"] };
+    await sql`update projects set pipeline = ${sql.json(two as never)} where id = 'proj-a'`;
+    const response = await send("PATCH", "/v1/projects/proj-a", asUser("ua"), { pipeline: { ...two, vectorBackends: ["orama", "lancedb"] } });
+    expect(response.status).toBe(200);
+    expect(await reindexRuns("proj-a")).toBe(0);
+  });
+
+  it("closes the embedding-off two-step: the change is locked while embedding is off, and re-enabling over other vectors is locked", async () => {
+    const off = { ...defaultPipelineFeatures, embed: false, indexVectors: false };
+    await sql`update projects set pipeline = ${sql.json(off as never)} where id = 'proj-a'`;
+    const step1 = await send("PATCH", "/v1/projects/proj-a", asUser("ua"), { pipeline: { ...off, embedding: embedding("fastest-local") } });
+    expect(step1.status).toBe(409);
+    // Vectors stamped with another index config, embedding switched off: turning it back on is locked.
+    await sql`update documents set index_config_hash = 'another-config' where project_id = 'proj-a'`;
+    const step2 = await send("PATCH", "/v1/projects/proj-a", asUser("ua"), { pipeline: { ...off, embed: true, indexVectors: true } });
+    expect(step2.status).toBe(409);
+    const body = await step2.json() as { error: { details: { reindex: { lockedSettings: string[] } } } };
+    expect(body.error.details.reindex.lockedSettings).toEqual(["embed", "indexVectors"]);
+    const confirmed = await send("PATCH", "/v1/projects/proj-a", asUser("ua"), { pipeline: { ...off, embed: true, indexVectors: true }, apply: "reindex" });
+    expect(confirmed.status).toBe(200);
+    expect(await reindexRuns("proj-a")).toBeGreaterThan(0);
+  });
+
+  it("refuses confirmEstimate without apply reindex", async () => {
+    const response = await send("PATCH", "/v1/projects/proj-a", asUser("ua"), { ...embeddingPatch, confirmEstimate: "a".repeat(64) });
+    expect(response.status).toBe(400);
+  });
+
+  it("answers a privacy-violating embedding with 400 privacy_mode_violation", async () => {
+    const local = { ...defaultPipelineFeatures, privacyMode: "local-only", embedding: embedding("fastest-local") };
+    await sql`update projects set pipeline = ${sql.json(local as never)} where id = 'proj-empty'`;
+    const response = await send("POST", "/v1/projects/proj-empty/reindex", asUser("ua"), { pipeline: { embedding: { profile: "cheapest-hosted" } } });
+    expect(response.status).toBe(400);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe("privacy_mode_violation");
+  });
+
+  it("says when the command had nothing to re-index", async () => {
+    const unchanged = await (await send("POST", "/v1/projects/proj-empty/reindex", asUser("ua"), {})).json() as { outcome: string; runIds: string[] };
+    expect(unchanged).toMatchObject({ outcome: "unchanged", runIds: [] });
+    const saved = await (await send("POST", "/v1/projects/proj-empty/reindex", asUser("ua"), { pipeline: { embedding: { profile: "fastest-local" } } })).json() as { outcome: string };
+    expect(saved.outcome).toBe("saved");
+    const queued = await (await send("POST", "/v1/projects/proj-a/reindex", asUser("ua"), {})).json() as { outcome: string };
+    expect(queued.outcome).toBe("queued");
   });
 });

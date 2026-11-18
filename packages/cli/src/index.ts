@@ -134,7 +134,7 @@ function usage(): void {
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
-  docslurp reindex [--project <id|slug|name>] [--embedding-profile <profile>] [--chunk-overlap <on|off>] [--contextual-preambles <on|off>] [--confirm <signature>] [--estimate] [--json]
+  docslurp reindex [--project <id|slug|name>] [--embedding-profile <profile>] [--late-chunking <on|off>] [--late-chunking-window <1-6>] [--chunk-overlap <on|off>] [--contextual-preambles <on|off>] [--vector-backends <a,b>] [--confirm <signature>] [--estimate] [--json]
   docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
   docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
   docslurp summary-tree status [--project <id|slug|name>] [--json]
@@ -355,7 +355,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
   "template", "document", "stage-from", "retention-days", "download", "quality", "visuals", "chart-export", "idempotency-key",
   "timeout", "limit", "cursor", "mode", "summary-tree", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
-  "max-cost-cents", "embedding-profile", "chunk-overlap", "contextual-preambles", "confirm",
+  "max-cost-cents", "embedding-profile", "chunk-overlap", "contextual-preambles", "confirm", "late-chunking", "late-chunking-window", "vector-backends",
 ]);
 
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
@@ -1118,7 +1118,21 @@ function onOff(flag: string, value: string | boolean | undefined): boolean | und
 /** The reindex body: the index settings the flags change (none: a plain rebuild) and the confirmed estimate signature. */
 export function reindexBody(flags: Record<string, string | boolean>): { pipeline?: Record<string, unknown>; confirmEstimate?: string } {
   const pipeline: Record<string, unknown> = {};
-  if (typeof flags.embeddingProfile === "string" && flags.embeddingProfile) pipeline.embedding = { profile: flags.embeddingProfile };
+  const embedding: Record<string, unknown> = {};
+  if (typeof flags.embeddingProfile === "string" && flags.embeddingProfile) embedding.profile = flags.embeddingProfile;
+  const late = onOff("late-chunking", flags.lateChunking);
+  if (late !== undefined) embedding.lateChunking = late;
+  if (flags.lateChunkingWindow !== undefined) {
+    const window = Number(flags.lateChunkingWindow);
+    if (!Number.isInteger(window) || window < 1 || window > 6) throw new Error("--late-chunking-window must be a whole number from 1 to 6.");
+    embedding.lateChunkingWindow = window;
+  }
+  if (Object.keys(embedding).length) pipeline.embedding = embedding;
+  if (flags.vectorBackends !== undefined) {
+    const backends = String(flags.vectorBackends).split(",").map((name) => name.trim()).filter(Boolean);
+    if (backends.length === 0) throw new Error("--vector-backends takes a comma-separated list, for example lancedb.");
+    pipeline.vectorBackends = backends;
+  }
   const overlap = onOff("chunk-overlap", flags.chunkOverlap);
   if (overlap !== undefined) pipeline.chunkOverlap = overlap;
   const preambles = onOff("contextual-preambles", flags.contextualPreambles);

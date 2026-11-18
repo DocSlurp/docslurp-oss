@@ -65,7 +65,7 @@ import {
   listProjectVersions,
   restoreProject,
   listProjects,
-  rollbackProjectVersion,
+  rollbackProjectVersionChange,
   updateProject,
   ProjectSettingsUnreadableError,
   ProjectSlugError,
@@ -170,6 +170,9 @@ const cloneProjectSchema = z.object({
 
 const rollbackProjectVersionSchema = z.object({
   note: z.string().trim().min(1).max(240).optional(),
+  /** "reindex" confirms restoring a version whose index settings differ (otherwise 409 `reindex_required`). */
+  apply: z.enum(["new-uploads", "reindex"]).optional(),
+  confirmEstimate: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 
 const projectConfirmationSchema = z.object({
@@ -635,6 +638,32 @@ function configChangeRefusal(c: Context, error: unknown): Response | null {
   return null;
 }
 
+/** `confirmEstimate` confirms a re-index; without `apply: "reindex"` it would silently confirm nothing. */
+function confirmWithoutReindex(c: Context): Response {
+  return apiErrorResponse(c, 400, "invalid_request", "confirmEstimate confirms a re-index: send it with apply: \"reindex\"", { issues: [{ path: ["confirmEstimate"], code: "invalid_value" }] });
+}
+
+/** Starts runs inserted `queued`; the run-start recovery sweeper starts any whose workflow start is not confirmed. */
+async function startQueuedRuns(runIds: readonly string[], userId: string): Promise<void> {
+  for (const runId of runIds) {
+    try {
+      const run = await getRun(runId, userId);
+      if (run) await runLifecycle.start(run);
+    } catch (error) {
+      console.warn(`[config-change] run=${runId} start deferred: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+/** A Zod refusal of the merged pipeline: 400, with `privacy_mode_violation` when the privacy mode rules the value out. */
+function pipelineValidationRefusal(c: Context, error: unknown): Response | null {
+  if (!(error instanceof z.ZodError)) return null;
+  const privacy = error.issues.some((issue) => /privacyMode/.test(issue.message));
+  return apiErrorResponse(c, 400, privacy ? "privacy_mode_violation" : "invalid_request",
+    privacy ? "This project's privacy mode does not allow that setting (a restricted privacy mode needs a local embedding profile)." : "Invalid pipeline settings",
+    { issues: error.issues });
+}
+
 /** The reindex command's body as the PATCH it is equivalent to: the explicit confirmation, plus the speed-boost opt-in. */
 function reindexInput(body: { speedBoost?: boolean }): UpdateProjectInput {
   return { apply: "reindex", ...(body.speedBoost !== undefined ? { speedBoost: body.speedBoost } : {}) };
@@ -937,6 +966,8 @@ export const projectsRoutes = new Hono()
       return c.json(publicProjectView({ recommendationId: body.recommendationId, patch: result.recommendation.patch, pipeline: result.pipeline }, getRequestActor(c)));
     } catch (error) {
       if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      const refused = configChangeRefusal(c, error);
+      if (refused) return refused;
       throw error;
     }
   })
@@ -1445,12 +1476,16 @@ export const projectsRoutes = new Hono()
     async (c) => {
       const userId = c.get("sessionUser").id;
       const input = c.req.valid("json");
+      if (input.confirmEstimate !== undefined && input.apply !== "reindex") return confirmWithoutReindex(c);
       try {
-        const project = await rollbackProjectVersion(
+        const applied = await rollbackProjectVersionChange(
           c.req.param("projectId"),
           userId,
           c.req.param("versionId"),
+          { ...(input.apply ? { apply: input.apply } : {}), ...(input.confirmEstimate ? { confirmEstimate: input.confirmEstimate } : {}), origin: runOriginOf(c) },
         );
+        const project = applied.project;
+        await startQueuedRuns(applied.queuedRunIds, userId);
 
         await appendAuditLog({
           orgId: project.orgId,
@@ -1470,8 +1505,11 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
+        return c.json({ ...publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), ...(applied.job ? { job: applied.job } : {}) });
       } catch (error) {
+        const refused = configChangeRefusal(c, error);
+        if (refused) return refused;
+        if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
         // Access refusals keep their status and code (404 project_not_found, 403 editor_required); the rest is a 400.
         if (error instanceof ProjectAccessError) return apiErrorResponse(c, error.status as 403 | 404, error.code, error.message);
         return apiStatusError(c, 400, reportPublicError(error));
@@ -1585,6 +1623,7 @@ export const projectsRoutes = new Hono()
       }
 
       const input = c.req.valid("json");
+      if (input.confirmEstimate !== undefined && input.apply !== "reindex") return confirmWithoutReindex(c);
       let applied: Awaited<ReturnType<typeof applyProjectChange>>;
       try {
         const plan = await planProjectChange({
@@ -1694,9 +1733,16 @@ export const projectsRoutes = new Hono()
       const gate = await reindexGate(c);
       if (gate instanceof Response) return gate;
       const body = c.req.valid("json");
-      const result = await estimateProjectChange({
-        projectId: gate.project.id, userId: gate.userId, input: reindexInput(body), pipelineOverrides: body.pipeline, rebuildIndex: true, origin: runOriginOf(c),
-      });
+      let result: Awaited<ReturnType<typeof estimateProjectChange>>;
+      try {
+        result = await estimateProjectChange({
+          projectId: gate.project.id, userId: gate.userId, input: reindexInput(body), pipelineOverrides: body.pipeline, rebuildIndex: true, origin: runOriginOf(c),
+        });
+      } catch (error) {
+        const refused = pipelineValidationRefusal(c, error);
+        if (refused) return refused;
+        throw error;
+      }
       if (!result) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       return c.json(result);
     },
@@ -1726,24 +1772,19 @@ export const projectsRoutes = new Hono()
           ...(body.confirmEstimate !== undefined ? { expectedTargetSignature: reindexTargetSignature(plan.targets) } : {}),
         });
       } catch (error) {
-        const refused = configChangeRefusal(c, error);
+        const refused = configChangeRefusal(c, error) ?? pipelineValidationRefusal(c, error);
         if (refused) return refused;
-        if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        // The project (or its documents) changed while the command was saving: nothing was saved, and it is safe to retry.
+        if (error instanceof ConfigConflictError) {
+          return apiErrorResponse(c, 409, "settings_stale", "The project changed while the re-index was being saved. Nothing was saved; estimate again and retry.", { category: error.code });
+        }
         if (error instanceof ProjectSettingsUnreadableError) return apiStatusError(c, 409, error.message, { code: error.code });
         if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
         if (error instanceof SummaryTreeConfigError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "summaryTree" } });
         throw error;
       }
       if (!applied) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-      for (const runId of applied.queuedRunIds) {
-        try {
-          const run = await getRun(runId, userId);
-          if (run) await runLifecycle.start(run);
-        } catch (error) {
-          // The run-start recovery sweeper starts runs whose workflow start was never confirmed.
-          console.warn(`[config-change] run=${runId} start deferred: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
+      await startQueuedRuns(applied.queuedRunIds, userId);
       const project = applied.project;
       const actor = getRequestActor(c);
       await appendAuditLog({
@@ -1757,14 +1798,17 @@ export const projectsRoutes = new Hono()
         ipAddress: requestIp(c),
         metadata: {
           snapshot: createProjectVersionSnapshot(project),
-          changedSettings: applied.plan.identityChanges,
+          changedSettings: [...applied.plan.identityChanges, ...applied.plan.reenabledVectors],
           runIds: applied.job?.runIds ?? [],
           userAgent: requestUserAgent(c),
         },
       });
       return c.json({
         project: publicProjectView((await withCanEdit(c, [project]))[0], actor),
-        changedSettings: applied.plan.identityChanges,
+        changedSettings: [...applied.plan.identityChanges, ...applied.plan.reenabledVectors],
+        // queued / blocked: re-index runs exist; saved: settings saved, no documents to re-index; unchanged: nothing to do.
+        outcome: applied.job ? (applied.queuedRunIds.length > 0 ? "queued" : "blocked")
+          : applied.plan.identityChanges.length > 0 || applied.plan.reenabledVectors.length > 0 ? "saved" : "unchanged",
         impact: applied.plan.impact,
         estimate: applied.plan.estimate,
         runIds: applied.job?.runIds ?? [],
@@ -1965,4 +2009,4 @@ export const projectsRoutes = new Hono()
   );
 
 // Project reads and rename/settings updates (the PATCHes and their estimates require projects:manage).
-acceptApiKeys(projectsRoutes, ["GET /:projectId/settings-publication", "POST /:projectId/settings-publication", "PATCH /:projectId/search-settings", "POST /:projectId/search-settings/estimate", "GET /", "GET /:projectId", "GET /:projectId/tags", "GET /:projectId/state", "GET /:projectId/ingest-report", "POST /:projectId/ingest-report/apply", "POST /:projectId/ingest-report/reprocess", "POST /:projectId/documents/bulk/estimate", "PATCH /:projectId", "POST /:projectId/estimate", "POST /:projectId/full-index", "POST /:projectId/full-index/estimate", "POST /:projectId/indexing-mode/estimate"]);
+acceptApiKeys(projectsRoutes, ["POST /:projectId/reindex", "POST /:projectId/reindex/estimate", "GET /:projectId/settings-publication", "POST /:projectId/settings-publication", "PATCH /:projectId/search-settings", "POST /:projectId/search-settings/estimate", "GET /", "GET /:projectId", "GET /:projectId/tags", "GET /:projectId/state", "GET /:projectId/ingest-report", "POST /:projectId/ingest-report/apply", "POST /:projectId/ingest-report/reprocess", "POST /:projectId/documents/bulk/estimate", "PATCH /:projectId", "POST /:projectId/estimate", "POST /:projectId/full-index", "POST /:projectId/full-index/estimate", "POST /:projectId/indexing-mode/estimate"]);

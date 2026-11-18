@@ -1,13 +1,16 @@
 import { lockProjectConfigurationWrite } from "./project-write-lock.js";
+import { isPolicyTightening } from "./policy-transition.js";
 import { withRunEffective } from "./extraction-settings.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 
 import {
   assertPipelineSpeedBoost,
   changedIndexIdentitySettings,
   indexRebuildStages,
+  vectorsReenabled,
   type IndexIdentitySetting,
+  type ReindexSetting,
   mergePipelineFeatures, type PipelineFeatureOverrides,
   analyzePipelineChange,
   CHART_EXPORT_CHARGING_STAGES,
@@ -124,13 +127,16 @@ export type ProjectChangePlan = {
   estimate: CostEstimate | null;
   /** The project row's `updated_at` when planned; apply re-plans if another change landed since. */
   rowVersion: string | null;
-  /** Index-identity settings this change alters (whether or not the project has documents to lock them). */
+  /** Index-identity settings this change alters, when it changes `indexConfigHash` (whether or not anything locks them). */
   identityChanges: IndexIdentitySetting[];
+  /** Vector switches this change turns back on (`embed`, `indexVectors`). */
+  reenabledVectors: ReindexSetting[];
   /**
-   * The identity changes that are locked because the project has ingested documents: applying them needs
-   * `apply: "reindex"` (the reindex command sets it). Empty when nothing is locked.
+   * The settings locked for this change: identity changes while the project holds indexed, in-flight or archived
+   * documents, or a vector switch turned back on while vectorized documents carry another index config. Applying them
+   * needs `apply: "reindex"` (the reindex command sets it). Empty when nothing is locked.
    */
-  lockedSettings: IndexIdentitySetting[];
+  lockedSettings: ReindexSetting[];
   /** A plain index rebuild was requested (the reindex command): the plan re-indexes even without a settings change. */
   rebuildIndex: boolean;
   /** Identity of the planned work and its price; a confirming caller's `confirmEstimate` must equal it. */
@@ -178,9 +184,15 @@ export function reindexConfirmed(plan: Pick<ProjectChangePlan, "input">): boolea
   return plan.input.apply === "reindex";
 }
 
-/** Refuses a locked identity change the caller did not confirm. Applying a plan calls it; routes may call it earlier. */
+/**
+ * Refuses a locked identity change the caller did not confirm. Applying a plan calls it; routes may call it earlier.
+ * A privacy or PII tightening is left to its own refusal (it is refused over any retained document, which every lock
+ * implies, and confirming a re-index would not lift it).
+ */
 export function assertReindexConfirmed(plan: ProjectChangePlan): void {
-  if (plan.lockedSettings.length > 0 && !reindexConfirmed(plan)) throw new ReindexRequiredError(plan);
+  if (plan.lockedSettings.length > 0 && !reindexConfirmed(plan) && !isPolicyTightening(plan.project.pipeline, plan.nextPipeline)) {
+    throw new ReindexRequiredError(plan);
+  }
 }
 
 /** Refuses a confirmation that priced different work (`confirmEstimate` vs the plan's signature). */
@@ -188,9 +200,22 @@ export function assertEstimateCurrent(plan: ProjectChangePlan, confirmEstimate: 
   if (confirmEstimate !== undefined && confirmEstimate !== plan.signature) throw new EstimateStaleError();
 }
 
+let signatureKey: Buffer | null = null;
+/**
+ * The key estimate signatures are MACed with: the deployment's secret, so a signature (which covers the resolved pipeline,
+ * managed model ids included) cannot be tested offline against guessed values. Without one (local development), a
+ * per-process random key: signatures then hold for this process only.
+ */
+function planSignatureKey(): Buffer {
+  if (signatureKey) return signatureKey;
+  const secret = process.env.SECRETS_ENCRYPTION_KEY?.trim() || process.env.BETTER_AUTH_SECRET?.trim() || process.env.FILE_TOKEN_SECRET?.trim();
+  signatureKey = secret ? createHash("sha256").update(`docslurp:reindex-estimate-signature:${secret}`).digest() : randomBytes(32);
+  return signatureKey;
+}
+
 /** Stable signature of a plan's work: the resulting pipeline, stages, target documents and the price. */
 function planSignature(args: { projectId: string; nextPipeline: PipelineFeatures; stages: readonly string[]; lockedSettings: readonly string[]; targets: readonly ReindexTarget[]; estimate: CostEstimate | null; willReindex: boolean }): string {
-  return createHash("sha256").update(JSON.stringify({
+  return createHmac("sha256", planSignatureKey()).update(JSON.stringify({
     project: args.projectId,
     pipeline: indexConfigHash(indexConfigOf(args.nextPipeline)),
     pipelineState: createHash("sha256").update(stableStringify(args.nextPipeline)).digest("hex"),
@@ -247,11 +272,45 @@ async function loadTargets(
   `;
 }
 
-/** The planning rule for locking identity changes, re-evaluated under the configuration lock. */
+/** The planning rule for locking, re-evaluated under the configuration lock. */
 async function lockingDocumentsExist(client: typeof sql | Tx, plan: ProjectChangePlan): Promise<boolean> {
-  const required = plan.reindex === "required" && plan.hashChanged;
-  const targets = await loadTargets(client, plan.project.id, { hashNot: required ? indexConfigHash(plan.afterConfig) : null, ignoreReindexRuns: required });
-  return targets.length > 0 || await hasVectorizedDocuments(client, plan.project.id);
+  if (plan.hashChanged) return await hasIndexStakes(client, plan.project.id) || await hasVectorizedDocuments(client, plan.project.id);
+  if (plan.reenabledVectors.length > 0) return await hasVectorsOffConfig(client, plan.project.id, indexConfigHash(plan.afterConfig));
+  return false;
+}
+
+/**
+ * Whether the project holds documents an index-identity change would strand: any non-purged current version that is
+ * not failed or cancelled, in every indexing mode (completed, archived, or still queued or processing), or an ingest
+ * run still queued, blocked or processing (runs embed with the pipeline they were created with).
+ */
+async function hasIndexStakes(client: typeof sql | Tx, projectId: string): Promise<boolean> {
+  const db = client as typeof sql;
+  const [row] = await db<{ present: boolean }[]>`
+    select exists (
+      select 1 from documents d
+      where d.project_id = ${projectId} and d.superseded_at is null and d.purged_at is null
+        and d.status not in ('failed', 'cancelled')
+    ) or exists (
+      select 1 from project_runs r
+      where r.project_id = ${projectId} and r.kind <> 'reindex' and r.status in ('queued', 'blocked', 'processing')
+    ) as present
+  `;
+  return Boolean(row?.present);
+}
+
+/** Whether live or archived vectorized documents were stamped with an index config other than `hash`. */
+async function hasVectorsOffConfig(client: typeof sql | Tx, projectId: string, hash: string): Promise<boolean> {
+  const db = client as typeof sql;
+  const [row] = await db<{ present: boolean }[]>`
+    select exists (
+      select 1 from documents d
+      where d.project_id = ${projectId} and d.superseded_at is null and d.purged_at is null and d.status = 'completed'
+        and d.index_config_hash is not null and d.index_config_hash <> ${hash}
+        and exists (select 1 from vector_indexes v where v.document_id = d.id)
+    ) as present
+  `;
+  return Boolean(row?.present);
 }
 
 /** Whether any live vectorized document exists (so an index-config change must be recorded). */
@@ -421,10 +480,16 @@ export async function planProjectChange(args: {
       ignoreReindexRuns: reindex === "required" && hashChanged,
     });
   }
-  const vectorized = (hashChanged || identityChanges.length > 0) && targets.length === 0 ? await hasVectorizedDocuments(sql, project.id) : false;
-  const recordsIndexChange = hashChanged && (targets.length > 0 || vectorized);
-  // Ingested documents lock the identity settings: the targets this change would re-index, or any vectorized document.
-  const lockedSettings = identityChanges.length > 0 && (targets.length > 0 || vectorized) ? identityChanges : [];
+  const reenabledVectors = vectorsReenabled(project.pipeline, nextPipeline);
+  // Indexed, in-flight (their runs embed with the pipeline they were created with) or archived documents lock identity
+  // changes; vectors under another index config lock turning the vector switches back on.
+  const stakes = hashChanged ? await hasIndexStakes(sql, project.id) : false;
+  const staleVectors = !hashChanged && reenabledVectors.length > 0 ? await hasVectorsOffConfig(sql, project.id, indexConfigHash(afterConfig)) : false;
+  const vectorized = hashChanged && targets.length === 0 && !stakes ? await hasVectorizedDocuments(sql, project.id) : false;
+  const recordsIndexChange = hashChanged && (targets.length > 0 || stakes || vectorized);
+  const lockedSettings: ReindexSetting[] = identityChanges.length > 0 && (targets.length > 0 || stakes || vectorized)
+    ? identityChanges
+    : staleVectors ? reenabledVectors : [];
   const pages = targets.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
   const impact: ConfigChangeImpact = reindex
     ? { ...base, stages: compiledStages(nextPipeline, base.stages), documents: targets.length, pages }
@@ -461,7 +526,7 @@ export async function planProjectChange(args: {
     project, input, nextPipeline, impact, reindex,
     willReindex: queues,
     hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion, origin,
-    identityChanges, lockedSettings, rebuildIndex,
+    identityChanges, reenabledVectors, lockedSettings, rebuildIndex,
     signature: planSignature({ projectId: project.id, nextPipeline, stages: impact.stages, lockedSettings, targets, estimate, willReindex: queues }),
   };
 }
@@ -478,7 +543,7 @@ const STALE_PLAN = Symbol("stale-plan");
 export class ConfigConflictError extends Error {
   readonly status = 409 as const;
   readonly code = "config_conflict" as const;
-  constructor() { super("The project changed repeatedly while saving; retry the request."); }
+  constructor(message = "The project changed repeatedly while saving; retry the request.") { super(message); }
 }
 const MAX_REPLANS = 5;
 
@@ -801,7 +866,8 @@ async function applyPlannedChange(args: {
       await lock(tx);
       if (await projectRowVersion(tx, project.id) !== plan.rowVersion) return STALE_PLAN;
       // Planned on a project with nothing to lock: documents finishing since then lock the change, so plan again.
-      if (plan.identityChanges.length > 0 && !reindexConfirmed(plan) && await lockingDocumentsExist(tx, plan)) return STALE_PLAN;
+      if ((plan.identityChanges.length > 0 || plan.reenabledVectors.length > 0) && !reindexConfirmed(plan)
+        && !isPolicyTightening(project.pipeline, plan.nextPipeline) && await lockingDocumentsExist(tx, plan)) return STALE_PLAN;
       await args.authorize?.(tx as unknown as typeof sql);
       const updated = await updateProject(project.id, userId, plan.input, {
         ...args.updateOptions,
@@ -934,8 +1000,8 @@ async function applyPlannedChange(args: {
 export type ProjectEstimateResponse = {
   impact: ConfigChangeImpact;
   estimate: CostEstimate | null;
-  /** Index-identity settings this change alters that are locked (the project has indexed documents): PATCH needs `apply: "reindex"`. */
-  lockedSettings: IndexIdentitySetting[];
+  /** Settings this change alters that are locked (the project has indexed documents): PATCH needs `apply: "reindex"`. */
+  lockedSettings: ReindexSetting[];
   /** Pass as `confirmEstimate` to the reindex command (or a PATCH with `apply: "reindex"`) to refuse stale work. */
   signature: string;
   /** The project's documents under the new configuration, in the `POST /v1/estimate` shape (ingest = this change's work). */
