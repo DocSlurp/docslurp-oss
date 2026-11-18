@@ -10,7 +10,8 @@ import { defaultPipelineFeatures, pageCredits, speedBoostMultiplier } from "@doc
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
-import { claimPages, ensurePageRows } from "../deferred/page-ledger.js";
+import { claimPages, ensurePageRows, MAX_PAGE_ATTEMPTS } from "../deferred/page-ledger.js";
+import { OcrInfrastructureError } from "../ocr/mode.js";
 import { materializePageRange, type PageMaterializerDeps, type PageMaterializerOps } from "../deferred/materialize-pages.js";
 import { Store } from "../db/store.js";
 import type { Document } from "../models.js";
@@ -534,6 +535,31 @@ describe("materializePageRange respects processing quality", () => {
     expect(h.ocrEngineCalls).toEqual([]);
     expect(result.indexed).toEqual([]);
     expect(result.failed.map((f) => f.reason)).toEqual(["credit-limit", "credit-limit", "credit-limit"]);
+  });
+
+  it("fastest: an OCR read that found an empty page is final, never claimed again", async () => {
+    const h = harness({ 1: "" }, {
+      async readPagesWithOcrEngine(_document, pages) {
+        h.ocrEngineCalls.push(pages);
+        return { pages: pages.map((page) => ({ pageNumber: page, text: "   " })), charged: [] };
+      },
+    });
+    const result = await claimAndMaterialize(h.deps, input(h, [1], fastest));
+    expect(result.failed).toEqual([{ page: 1, reason: "empty-page" }]);
+    const state = await db.query<{ state: string; attempts: number }>(
+      `select state, attempts from document_page_states where document_id = 'd1' and page_number = 1`);
+    expect(state.rows[0]!.state).toBe("failed");
+    expect(state.rows[0]!.attempts).toBeGreaterThanOrEqual(MAX_PAGE_ATTEMPTS);
+  });
+
+  it("fastest: an OCR boundary that cannot run is retried, never a permanent kept page", async () => {
+    const h = harness({ 1: "" }, {
+      async readPagesWithOcrEngine() { throw new OcrInfrastructureError("VM capacity"); },
+    });
+    await expect(claimAndMaterialize(h.deps, input(h, [1], fastest))).rejects.toBeInstanceOf(OcrInfrastructureError);
+    const state = await db.query<{ state: string; failure_reason: string | null }>(
+      `select state, failure_reason from document_page_states where document_id = 'd1' and page_number = 1`);
+    expect(state.rows[0]!.failure_reason).not.toBe("kept-as-image");
   });
 
   it("smartest never uses the OCR engine at query time", async () => {

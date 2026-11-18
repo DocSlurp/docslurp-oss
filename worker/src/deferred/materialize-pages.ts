@@ -51,10 +51,13 @@ import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-
 import { DocumentNotFoundError } from "../db/missing-document.js";
 import { billLockedMaterializedPages, lockPageRows } from "../db/page-base-fee.js";
 import { markPages } from "./page-ledger.js";
+import { OcrInfrastructureError } from "../ocr/mode.js";
 import { finalizePageExtracts, logFinalizeOutcome, materializedPageRecords, pageExtractStatements, recordPageExtracts, type PageExtractState } from "../pipeline/page-extracts.js";
 
 /** Failure reason for a page Fast left unread because it has no text layer (kept as its page image). */
 export const KEPT_AS_IMAGE_REASON = "kept-as-image";
+/** A query-time OCR read found no words on the page: final, never claimed again. */
+export const EMPTY_PAGE_REASON = "empty-page";
 /** Pages with fewer non-space characters than this have no usable text layer. */
 export const MIN_TEXT_LAYER_CHARS = 40;
 /** Chunks per embedding call. */
@@ -469,13 +472,15 @@ export async function materializePageRange(
           }
           const text = returned.get(page);
           if (text === undefined) failed.set(page, "ocr-unread");
-          else if (text.replace(/\s+/g, "").length === 0) failed.set(page, "empty-page");
+          else if (text.replace(/\s+/g, "").length === 0) failed.set(page, EMPTY_PAGE_REASON);
           else {
             prepared.set(page, { page, text });
             ocrReads.add(page);
           }
         }
       } catch (error) {
+        // An OCR boundary that could not run (capacity, a timeout) is retried by the activity, never a permanent kept page.
+        if (error instanceof OcrInfrastructureError) throw error;
         const reason = error instanceof Error ? error.message : String(error);
         console.warn(`[materialize] OCR engine read failed for ${documentId} pages ${reading.join(",")}: ${reason.slice(0, 300)}`);
         for (const page of reading) failed.set(page, KEPT_AS_IMAGE_REASON);
@@ -777,7 +782,8 @@ export async function materializePageRange(
         if (!held.has(page) || released.includes(page)) continue;
         byReason.set(reason, [...(byReason.get(reason) ?? []), page]);
       }
-      for (const [reason, group] of byReason) await markPages(client, documentId, group, "failed", { failureReason: reason, claimedBy });
+      // An OCR read that found an empty page is final: re-reading it would only spend VM time for no charge.
+      for (const [reason, group] of byReason) await markPages(client, documentId, group, "failed", { failureReason: reason, claimedBy, ...(reason === EMPTY_PAGE_REASON ? { exhausted: true } : {}) });
       const ownedReleased = released.filter((page) => held.has(page));
       if (ownedReleased.length > 0) await markPages(client, documentId, ownedReleased, "unseen", { claimedBy });
       owned = moved.sort((a, b) => a - b);
