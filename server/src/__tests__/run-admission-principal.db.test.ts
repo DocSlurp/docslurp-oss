@@ -334,6 +334,15 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
       }, ports), () => gates.putStalled, () => { gates.stallPuts = false; gates.releasePut?.(); });
     }, 30_000);
 
+    it("admits server keys only: a client key's bulk upload starts no run (fail closed)", async () => {
+      await sql`update api_keys set key_type = 'client' where id = 'adm-oi'`;
+      const before = await runCount();
+      const error = await actions.createBulkProjectIntake({ ...target, files: [new File(["Results beat expectations."], "r.txt", { type: "text/plain" })] }, ports)
+        .then(() => null, (failure: unknown) => failure);
+      expect(error).toMatchObject({ statusCode: 403 });
+      expect(await runCount()).toBe(before);
+    }, 30_000);
+
     const midLoopChanges: Array<[string, string]> = [
       ["the grant is revoked", "update mcp_oauth_grants set revoked_at = now() where id = 'adm-grant-i'"],
       ["the key expires", "update api_keys set expires_at = now() - interval '1 second' where id = 'adm-oi'"],

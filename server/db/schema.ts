@@ -2352,6 +2352,11 @@ export const uploadSessionFiles = pgTable(
       "btree",
       table.sourceKey.asc().nullsLast().op("text_ops"),
     ),
+    // Open multipart uploads still to abort (migration 0193).
+    index("upload_session_files_pending_multipart_abort_idx").using(
+      "btree",
+      table.sessionId.asc().nullsLast().op("text_ops"),
+    ).where(sql`(upload_id IS NOT NULL) AND (multipart_aborted_at IS NULL)`),
     foreignKey({
       columns: [table.sessionId],
       foreignColumns: [uploadSessions.id],

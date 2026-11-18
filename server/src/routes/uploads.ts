@@ -447,6 +447,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     try {
     // `fileId` (repeatable) narrows a full read to the files a resuming client wants.
     const fileIds = c.req.queries("fileId");
+    // statusOnly reads stored state only; a file filter belongs to the full read.
+    if (fileIds && c.req.query("statusOnly") === "true") return apiStatusError(c, 400, "fileId applies to the full session read, not statusOnly");
     if (fileIds && (fileIds.length > MAX_DESCRIBE_FILE_IDS || fileIds.some(id => !id || id.length > 64))) {
       return apiStatusError(c, 400, `fileId may be given at most ${MAX_DESCRIBE_FILE_IDS} times, each a file id`);
     }
@@ -460,7 +462,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
   .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
     async c => {
-      try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers, c.get("apiKey")?.keyId ?? null)); }
+      try { return c.json(await signDirectUploadParts(c.req.param("sessionId"), c.get("sessionUser").id, c.req.param("fileId"), c.req.valid("json").partNumbers, c.get("apiKey")?.keyId ?? null, c.req.raw.signal)); }
       catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
     })
   .post(

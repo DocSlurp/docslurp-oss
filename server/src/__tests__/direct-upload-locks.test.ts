@@ -137,4 +137,21 @@ describe("lock classes and deadlines", () => {
       for (const lock of [a1, b1]) lock.release();
     } finally { vi.useRealTimers(); }
   });
+
+  it("stops a waiter whose client disconnected instead of letting it wait out its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      setup();
+      const holder = await reserveDirectUploadLockConnection({ lockClass: "batch", tenant: "org-a" });
+      const controller = new AbortController();
+      let failed: unknown = null;
+      const waiting = reserveDirectUploadLockConnection({ lockClass: "batch", tenant: "org-b", deadline: Date.now() + 10_000, signal: controller.signal }).catch(error => { failed = error; });
+      await vi.advanceTimersByTimeAsync(100);
+      controller.abort(new Error("client went away"));
+      await vi.advanceTimersByTimeAsync(0);
+      await waiting;
+      expect(failed).toMatchObject({ message: "client went away" });
+      holder.release();
+    } finally { vi.useRealTimers(); }
+  });
 });

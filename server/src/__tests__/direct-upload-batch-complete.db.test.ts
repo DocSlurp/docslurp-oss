@@ -638,3 +638,33 @@ describe("the fileId filter at the route (boundaries)", () => {
     expect(mocks.heads).toEqual([]);
   });
 });
+
+describe("steer items on the session read", () => {
+  it("never attaches parts to an uninspected multipart file", async () => {
+    const { env } = await import("../config.js");
+    const budget = env.directUploadLockHoldBudgetMs;
+    env.directUploadLockHoldBudgetMs = 1;
+    try {
+      mocks.headDelayMs = 20;
+      for (let i = 0; i < 12; i++) {
+        await db.query(`insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, upload_id, part_size, status)
+          values ($1, $2, 'big.pdf', 'application/pdf', $3, $4, 'multipart', $5, $6, 'pending')`, [`mp${i}`, SESSION, 24 * 1024 * 1024, `u/${SESSION}/raw/mp${i}.pdf`, `up-${i}`, 8 * 1024 * 1024]);
+      }
+      const described = await getDirectUploadSessionDescription(SESSION, "u");
+      const uninspected = (described!.files as Array<Record<string, unknown>>).filter(file => file.inspected === false);
+      expect(uninspected.length).toBeGreaterThan(0);
+      for (const file of uninspected) {
+        expect(file).not.toHaveProperty("pendingParts");
+        expect(file).toMatchObject({ mode: "multipart", transferState: "unknown" });
+      }
+    } finally { env.directUploadLockHoldBudgetMs = budget; }
+  });
+
+  it("refuses fileId together with statusOnly", async () => {
+    const { Hono } = await import("hono");
+    const { createUploadsRoutes } = await import("../routes/uploads.js");
+    const app = new Hono().use("*", async (c, next) => { c.set("sessionUser", { id: "u", email: "uploader@example.test", name: "Uploader" } as never); await next(); })
+      .route("/uploads", createUploadsRoutes());
+    expect((await app.request(`/uploads/direct/sessions/${SESSION}?statusOnly=true&fileId=a`)).status).toBe(400);
+  });
+});

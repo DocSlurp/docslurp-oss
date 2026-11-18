@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { uploadContentIdentitySchema } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
@@ -323,6 +324,8 @@ describe("Direct Upload Session Module", () => {
   it("lets batch and short holders wait like confirm (DOCSLURP_UPLOAD_LOCK_WAIT_MS), and the reconciler not at all", async () => {
     const { env } = await import("../config.js");
     expect(env.directUploadLockWaitMs).toBe(10_000);
+    // The setting is clamped to at most 60 s.
+    expect(readFileSync(new URL("../config.ts", import.meta.url), "utf8")).toContain("Math.min(60_000, Math.max(0, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_WAIT_MS, 10_000)))");
     lockMock.mockReset().mockResolvedValue([{ acquired: true }]);
     for (const lockClass of ["batch", "short"] as const) {
       reservations.length = 0;

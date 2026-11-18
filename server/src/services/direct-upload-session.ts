@@ -251,7 +251,16 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   }
   // Storage is authoritative for which parts arrived: a client that lost a connection resumes from these pendingParts
   // instead of re-sending the whole file. A part counts only at its exact expected size.
-  const stored = file.unknown_size || options.uninspected ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
+  if (options.uninspected) {
+    // Not inspected: no part list and no part URLs. The client completes the file first (its object may already be
+    // assembled) and reads it with ?fileId= for its parts only if the object is reported missing.
+    return {
+      ...fileRef(file), ...inspection, id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes,
+      mode: "multipart" as const, status: file.status, uploadId: file.upload_id, partSize, partCount, unknownSize: Boolean(file.unknown_size),
+      transferState: "unknown" as const, verifiedBytes: null,
+    };
+  }
+  const stored = file.unknown_size ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
   const completed = new Set(stored.map((part) => part.partNumber));
   const pendingParts: Array<{
     partNumber: number;
@@ -553,7 +562,7 @@ export async function getDirectUploadSessionDescription(
       if (error instanceof ProjectIntakeError && (error.code === "intake_reconciliation_required" || error.statusCode === 403)) throw error;
       throw new ProjectIntakeError("Upload storage evidence is unavailable; retry status later", 503, undefined, "upload_storage_unavailable");
     }
-  }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id) });
+  }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id), signal });
 }
 
 /** Confirmed results remain readable after the transfer deadline. */
@@ -574,6 +583,8 @@ export interface DirectUploadLockOptions {
   lockClass?: DirectUploadLockClass;
   /** The tenant the holder counts against (`lockTenant`); required for every class but `reconcile`. */
   tenant?: string;
+  /** The request's abort signal: a waiter whose client disconnected stops waiting. */
+  signal?: AbortSignal;
 }
 
 /** The lock-accounting tenant of a stored session or principal: its organization, else its user. Never a request field. */
@@ -609,7 +620,7 @@ export async function withDirectUploadLock<T>(sessionId: string, run: () => Prom
   for (;;) {
     let reserved: Awaited<ReturnType<typeof reserveDirectUploadLockConnection>>;
     try {
-      reserved = await reserveDirectUploadLockConnection({ lockClass: options.lockClass, tenant: options.tenant, ...(waitMs > 0 ? { deadline } : {}) });
+      reserved = await reserveDirectUploadLockConnection({ lockClass: options.lockClass, tenant: options.tenant, signal: options.signal, ...(waitMs > 0 ? { deadline } : {}) });
     } catch (error) {
       if (error instanceof DirectUploadLockUnavailable) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
       throw error;
@@ -623,7 +634,9 @@ export async function withDirectUploadLock<T>(sessionId: string, run: () => Prom
       }
     } finally { release(); }
     if (Date.now() >= deadline) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
+    options.signal?.throwIfAborted();
     await new Promise(resolve => setTimeout(resolve, Math.min(LOCK_RETRY_INTERVAL_MS, Math.max(1, deadline - Date.now()))));
+    options.signal?.throwIfAborted();
   }
 }
 
@@ -936,7 +949,7 @@ async function finalizeSessionFiles(sessionId: string, userId: string, entries: 
         where id = ${sessionId} and status in ('pending', 'uploading')`;
     }
     return { outcomes, sessionComplete };
-  }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id) });
+  }, undefined, undefined, { lockClass: "batch", tenant: await principalLockTenant(userId, owned.api_key_id), signal: options.signal });
 }
 
 /** The single-file `files/complete` body: throws the file's own error, exactly as before batching existed. */
@@ -969,7 +982,7 @@ export async function completeDirectUploadFiles(input: { sessionId: string; user
 /** How long part signing may spend on provider reads while it holds a short lock connection. */
 export const SIGN_PROVIDER_BUDGET_MS = 2_000;
 
-export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[], credentialKeyId?: string | null) {
+export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[], credentialKeyId?: string | null, requestSignal?: AbortSignal) {
   const owned = await loadDirectUploadSessionRow(sessionId, userId);
   if (!owned) throw new ProjectIntakeError("Upload session not found", 404);
   return withDirectUploadLock(sessionId, async () => {
@@ -1000,7 +1013,7 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
     if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
     return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds: assertUploadSessionActive(session) }) };
   })) };
-  }, undefined, undefined, { tenant: await principalLockTenant(userId, owned.api_key_id) });
+  }, undefined, undefined, { tenant: await principalLockTenant(userId, owned.api_key_id), signal: requestSignal });
 }
 
 async function abortDirectUploadSessionUnlocked(

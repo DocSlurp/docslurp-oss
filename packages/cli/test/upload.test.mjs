@@ -476,3 +476,36 @@ test("parts the session describes without a URL are signed through parts/sign be
     assert.deepEqual(result.requests.filter((request) => request.url.startsWith("/storage/")).map((request) => request.url).sort(), ["/storage/1", "/storage/2", "/storage/3"]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("an uninspected file is completed first and its bytes are sent only when its object is missing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const files = await directFiles(dir, 2); // a 21 MiB multipart file (index 0) and a small single file (index 1)
+    const completedOnce = new Set();
+    const result = await invoke(["upload", ...files], (request, _count, base) => {
+      if (request.url === "/v1/uploads/direct/sessions") {
+        // A large session's replayed read: neither file was inspected.
+        return { status: 201, body: { sessionId: "s1", files: [
+          { index: 0, clientId: "0", id: "f0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: 21 * 1024 * 1024, mode: "multipart", partSize: 8 * 1024 * 1024, inspected: false, transferState: "unknown" },
+          { index: 1, clientId: "1", id: "f1", filename: "f1.pdf", mimeType: "application/pdf", sizeBytes: 7, mode: "single", inspected: false, putUrl: `${base}/storage/stale` },
+        ] } };
+      }
+      if (request.url.endsWith("/files/complete")) {
+        const body = JSON.parse(request.body.toString());
+        const ids = body.files ? body.files.map((file) => file.fileId) : [body.fileId];
+        // f0 is already assembled in storage; f1 has no object until it is sent.
+        if (ids.includes("f1") && !completedOnce.has("f1-sent")) return { status: 409, body: { error: { code: "conflict", message: "Upload parts are incomplete or have incorrect sizes" } } };
+        return body.files ? { body: { ok: true, files: ids.map((fileId) => ({ fileId, status: "completed" })), sessionComplete: true } } : { body: { ok: true } };
+      }
+      if (request.url === "/v1/uploads/direct/sessions/s1?fileId=f1") {
+        return { body: { sessionId: "s1", status: "pending", files: [{ index: 1, clientId: "1", id: "f1", filename: "f1.pdf", mimeType: "application/pdf", sizeBytes: 7, mode: "single", status: "pending", putUrl: `${base}/storage/fresh` }] } };
+      }
+      if (request.url.startsWith("/storage/")) { completedOnce.add("f1-sent"); return { headers: { etag: '"e"' }, body: {} }; }
+      if (request.url.endsWith("/confirm")) return { status: 201, body: intakeResult };
+      return { status: 404, body: {} };
+    }, { killAfterMs: 60_000 });
+    assert.equal(result.code, 0, result.stderr);
+    // The assembled multipart file sent nothing; the missing file was read alone, then sent to its fresh URL.
+    assert.deepEqual(result.requests.filter((request) => request.url.startsWith("/storage/")).map((request) => request.url), ["/storage/fresh"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

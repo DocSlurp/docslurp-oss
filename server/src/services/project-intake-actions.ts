@@ -106,8 +106,8 @@ function credentialRefused(): ProjectIntakeError {
   return new ProjectIntakeError("API key no longer permits this upload", 403);
 }
 
-/** Key types these intake routes accept (server keys, and client keys with `ingest`); admission rechecks the same. */
-const INTAKE_KEY_TYPES = ["server", "client"] as const;
+/** Run admission admits server keys only (fail closed), whatever the intake route accepted before it. */
+const INTAKE_KEY_TYPES = ["server"] as const;
 
 /**
  * Intake that checks its credential before every external dispatch and re-validates the principal inside its run's

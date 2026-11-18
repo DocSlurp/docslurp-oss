@@ -82,12 +82,13 @@ function wake(): void {
   for (const waiter of [...state.waiters]) waiter();
 }
 
-/** Waits for any slot release or the deadline, whichever comes first. */
-function waitForRelease(deadline: number): Promise<void> {
+/** Waits for any slot release, the deadline or the caller's abort (its client went away), whichever comes first. */
+function waitForRelease(deadline: number, signal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
-    const done = () => { clearTimeout(timer); state.waiters.delete(done); resolve(); };
+    const done = () => { clearTimeout(timer); state.waiters.delete(done); signal?.removeEventListener("abort", done); resolve(); };
     const timer = setTimeout(done, Math.max(0, deadline - Date.now()));
     state.waiters.add(done);
+    signal?.addEventListener("abort", done, { once: true });
   });
 }
 
@@ -95,8 +96,9 @@ function sharedInUse(): number {
   return state.batch + state.start + state.intake;
 }
 
-async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, deadline: number): Promise<() => void> {
+async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, deadline: number, signal?: AbortSignal): Promise<() => void> {
   for (;;) {
+    signal?.throwIfAborted();
     const limits = directUploadLockLimits();
     if (lockClass === "short") {
       if (state.short < limits.shortMax && (state.shortByOrg.get(orgKey) ?? 0) < limits.shortPerOrg) return take("short", state.shortByOrg, orgKey);
@@ -112,7 +114,7 @@ async function acquireSlot(lockClass: DirectUploadLockClass, orgKey: string, dea
       if (state[lockClass] < caps[0]! && (byOrg.get(orgKey) ?? 0) < caps[1]!) return take(lockClass, byOrg, orgKey);
     }
     if (Date.now() >= deadline) throw new DirectUploadLockUnavailable();
-    await waitForRelease(deadline);
+    await waitForRelease(deadline, signal);
   }
 }
 
@@ -142,13 +144,15 @@ export async function reserveDirectUploadLockConnection(options: {
    * never exceeded); omitted, the caller waits MIN_LOCK_RESERVE_MS.
    */
   deadline?: number;
+  /** The waiter's own cancellation (its client disconnected): it stops waiting for a slot. */
+  signal?: AbortSignal;
 } = {}): Promise<{ connection: ReservedSql; release: () => void }> {
   if (state.closing) await state.closing;
   const lockClass = options.lockClass ?? "short";
   // Fail closed: a capped holder without a tenant would share (and could exhaust) an anonymous bucket.
   if (lockClass !== "reconcile" && !options.tenant) throw new Error(`Upload lock holder of class ${lockClass} needs a tenant`);
   const deadline = options.deadline ?? Date.now() + MIN_LOCK_RESERVE_MS;
-  const releaseSlot = await acquireSlot(lockClass, options.tenant ?? "", deadline);
+  const releaseSlot = await acquireSlot(lockClass, options.tenant ?? "", deadline, options.signal);
   state.pool ??= createApiPool(env.databaseUrl, { max: directUploadLockLimits().poolMax, applicationName: "docslurp-upload-locks" });
   state.active += 1;
   const done = () => {

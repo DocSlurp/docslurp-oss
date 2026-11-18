@@ -698,11 +698,6 @@ export async function validateApiKey(
 }
 
 /**
- * Liveness and policy of one key by id, for sealed capability tokens issued
- * under it. Skips the type/domain checks: the token holder is not the key.
- * Null when the key is revoked, gone, or its owner left the organization.
- */
-/**
  * A key as authorized right now, in one statement (one snapshot): not revoked, not expired at statement time, its owner
  * still a member of its organization, and no revoked OAuth grant behind it (device login, MCP; a grant can be revoked
  * without its key). Null when any of that fails. Callers check the scope they need on the result.
@@ -719,6 +714,11 @@ export async function getLiveIntakeKey(keyId: string): Promise<Awaited<ReturnTyp
   return row && keyType ? { orgId: row.org_id, keyType, scopes: effectiveKeyScopes(keyType, row.scopes ?? [], row.project_ids ?? []), projectIds: row.project_ids ?? [], materializationPolicy: parseKeyMaterializationPolicy(row.materialization_policy) } : null;
 }
 
+/**
+ * Liveness and policy of one key by id, for sealed capability tokens issued
+ * under it. Skips the type/domain checks: the token holder is not the key.
+ * Null when the key is revoked, gone, or its owner left the organization.
+ */
 export async function getLiveApiKeyById(keyId: string): Promise<{ orgId: string; keyType: ApiKeyType; scopes: string[]; projectIds: string[]; materializationPolicy: Partial<MaterializationPolicy> } | null> {
   const [row] = await sql<ApiKeyRow[]>`
     select * from api_keys

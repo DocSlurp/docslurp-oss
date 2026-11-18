@@ -1184,8 +1184,17 @@ const SESSION_BUSY_ATTEMPTS = 8;
 const SESSION_BUSY_MAX_DELAY_MS = 5_000;
 
 /** The session is held by another request (or the server's reconciler), or the caller is rate limited: wait, repeat. */
-export function isSessionBusyError(error: unknown): error is DocSlurpApiError {
+function isSessionBusyError(error: unknown): error is DocSlurpApiError {
   return error instanceof DocSlurpApiError && (error.status === 429 || (error.status === 409 && error.code === "upload_session_busy"));
+}
+
+/** Puts the upload session's id on an error thrown out of an upload, so a caller can inspect or clean it up. */
+function withSessionId(error: unknown, sessionPath: string): unknown {
+  const sessionId = decodeURIComponent(sessionPath.slice(sessionPath.lastIndexOf("/") + 1));
+  if (error && typeof error === "object" && !("sessionId" in error)) {
+    try { Object.defineProperty(error, "sessionId", { value: sessionId, enumerable: true }); } catch { /* frozen error */ }
+  }
+  return error;
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -1325,6 +1334,8 @@ export type DirectUploadDescriptor = {
   /** A part without `url` (the server signs at most a bounded number per session read; see `partUrlsOmitted`) is signed with parts/sign. */
   pendingParts?: Array<{ partNumber: number; sizeBytes: number; url?: string }>;
   partUrlsOmitted?: boolean;
+  /** False when a large session's read did not check this file's object: complete it first, send bytes only if missing. */
+  inspected?: boolean;
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
@@ -1649,13 +1660,17 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
    * within the call's own deadline. These calls are idempotent, so repeating them is safe.
    */
   async function requestSessionCall<T>(path: string, init: RequestInit, requestOptions: RequestOptions = {}, retryable = false): Promise<T> {
+    // One deadline for the call, all attempts and waits included: each attempt gets only the time that is left.
     const giveUpAt = Date.now() + positiveDuration(requestOptions.timeoutMs ?? defaultTimeoutMs, "timeoutMs");
     for (let attempt = 0; ; attempt++) {
       try {
-        return await request<T>(path, init, requestOptions, retryable);
+        return await request<T>(path, init, { ...requestOptions, timeoutMs: Math.max(1, giveUpAt - Date.now()) }, retryable);
       } catch (error) {
         if (!isSessionBusyError(error) || attempt >= SESSION_BUSY_ATTEMPTS) throw error;
-        const delayMs = Math.min(SESSION_BUSY_MAX_DELAY_MS, Math.max((error.retryAfterSeconds ?? 0) * 1000, 250 * 2 ** attempt));
+        // The server's Retry-After wins (even past the backoff cap) when it fits before the deadline; otherwise the
+        // caller gets the busy answer, Retry-After included.
+        const backoffMs = Math.min(SESSION_BUSY_MAX_DELAY_MS, 250 * 2 ** attempt);
+        const delayMs = Math.max((error.retryAfterSeconds ?? 0) * 1000, backoffMs);
         if (Date.now() + delayMs >= giveUpAt) throw error;
         await sleep(delayMs, requestOptions.signal ?? new AbortController().signal);
       }
@@ -2380,6 +2395,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     let sessionPath: string | undefined;
     const active = new Set<Promise<void>>();
     let failure: unknown;
+    // The size reaches the server only through a successful complete (its end-of-stream record).
+    let finalCompleteSent = false;
+    const streamSizeKnownToServer = false;
     try {
       signal.throwIfAborted();
       const session = await postUploadSession<UploadSession>(`${intakeBase(options)}/direct/sessions`, {
@@ -2436,6 +2454,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       await Promise.all(active);
       if (failure) throw failure;
       parts.sort((a, b) => a.partNumber - b.partNumber);
+      finalCompleteSent = true;
       await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
       transferCompleted = true;
       return await waitUploadSession(sessionPath, transferOptions);
@@ -2443,9 +2462,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       stopped.abort(error);
       close();
       await Promise.all(active);
-      // A session that is only busy is not abandoned: its transferred bytes are kept for a later complete (or for the
-      // server's reconciler), never aborted.
-      if (sessionPath && !transferCompleted && !isSessionBusyError(error)) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      // A stream declares no size, so the server's reconciler can never finish it: unless the final complete itself
+      // was only busy for a file whose size the server knows (never true for a stream), close it (best effort), and
+      // name the session on the error.
+      if (sessionPath && !transferCompleted) {
+        const leaveToServer = finalCompleteSent && isSessionBusyError(error) && streamSizeKnownToServer;
+        if (!leaveToServer) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+        withSessionId(error, sessionPath);
+      }
       throw error;
     } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
@@ -2544,6 +2568,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
   async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions): Promise<void> {
     let descriptor = first;
+    if (descriptor.inspected === false) {
+      // The server did not check this file's object in that read (large session): complete it first, and send bytes
+      // only when its object is reported missing (an assembled multipart upload or a finished PUT is not sent again).
+      try {
+        await requestSessionCall(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id }), options);
+        return;
+      } catch (error) {
+        if (!(error instanceof DocSlurpApiError) || ![400, 409].includes(error.status) || isSessionBusyError(error)) throw error;
+      }
+      // Missing: read this file alone (it is inspected then), for its current targets.
+      const session = await requestSessionCall<UploadSession>(`${sessionPath}?fileId=${encodeURIComponent(descriptor.id)}`, {}, options, true);
+      const fresh = session.files.find((file) => file.id === descriptor.id);
+      if (!fresh) throw new Error(`Upload session no longer has ${descriptor.filename}`);
+      if ((fresh as { status?: string }).status === "completed") return;
+      descriptor = fresh;
+    }
     for (let round = 0; ; round++) {
       try {
         if (descriptor.mode === "single") {
@@ -2628,9 +2668,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         await transferFile(sessionPath, descriptor, match.source.blob, options);
       }
     } catch (error) {
-      // A busy session is not abandoned: the reconciler finalizes what was transferred.
-      if (!isSessionBusyError(error)) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
-      throw error;
+      // No final complete is sent here (the reconciler finalizes known sizes): a failed transfer is closed, best
+      // effort, and the error names the session.
+      await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      throw withSessionId(error, sessionPath);
     }
     // Once bytes have arrived, a status failure must not cancel accepted ingestion.
     const result = await waitUploadSession(sessionPath, options);

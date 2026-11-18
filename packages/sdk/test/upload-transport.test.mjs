@@ -188,8 +188,9 @@ test("session calls wait out a busy session or a rate limit, honouring Retry-Aft
   assert.deepEqual(seen, ["sign", "sign", "sign", "complete", "complete", "batch", "batch", "read", "read"]);
 });
 
-test("a stream upload never aborts its session when the session stays busy", async () => {
+test("a stream upload whose complete stays busy closes its session (the server cannot finish a stream) and names it", async () => {
   const { createDocSlurpClient } = await import("../dist/index.js");
+  const { mock } = await import("node:test");
   const calls = [];
   const fetch = async (url, init = {}) => {
     const href = String(url);
@@ -199,15 +200,25 @@ test("a stream upload never aborts its session when the session stays busy", asy
     }
     if (href.includes("/parts/sign")) return new Response(JSON.stringify({ parts: [{ partNumber: 1, url: "https://storage.invalid/p1" }] }), { headers: { "content-type": "application/json" } });
     if (href.startsWith("https://storage.invalid/")) return new Response(null, { status: 200, headers: { etag: '"e1"' } });
+    if (href.endsWith("/abort")) return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
     // Every complete finds the session busy.
     if (href.endsWith("/files/complete")) return new Response(JSON.stringify({ error: { code: "upload_session_busy", message: "busy" } }), { status: 409, headers: { "content-type": "application/json", "retry-after": "0" } });
     return new Response(JSON.stringify({ error: "unexpected" }), { status: 500, headers: { "content-type": "application/json" } });
   };
-  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
-  async function* chunks() { yield new TextEncoder().encode("abc"); }
-  await assert.rejects(client.upload(chunks(), { filename: "stream.bin", timeoutMs: 60_000 }), (error) => error.status === 409);
-  assert.ok(calls.filter(call => call.endsWith("/files/complete")).length > 1, "the busy complete was retried");
-  assert.equal(calls.some(call => call.endsWith("/abort")), false, "a busy session is never aborted");
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  try {
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+    async function* chunks() { yield new TextEncoder().encode("abc"); }
+    let settled = null;
+    const uploading = client.upload(chunks(), { filename: "stream.bin", timeoutMs: 60_000 }).then(() => { settled = { ok: true }; }, (error) => { settled = { error }; });
+    // Drive the backoff waits on fake time.
+    for (let i = 0; i < 400 && !settled; i++) { await new Promise((resolve) => setImmediate(resolve)); mock.timers.tick(500); }
+    await uploading;
+    assert.equal(settled.error?.status, 409);
+    assert.equal(settled.error.sessionId, "s1");
+    assert.ok(calls.filter(call => call.endsWith("/files/complete")).length > 1, "the busy complete was retried");
+    assert.equal(calls.filter(call => call.endsWith("/abort")).length, 1, "the unfinishable stream session is closed");
+  } finally { mock.timers.reset(); }
 });
 
 test("parts the session describes without a URL are signed through parts/sign before they are sent", async () => {
@@ -237,4 +248,62 @@ test("parts the session describes without a URL are signed through parts/sign be
   assert.deepEqual(JSON.parse(sign[0].body).partNumbers, [2, 3]);
   const puts = calls.filter((call) => call.method === "PUT").map((call) => call.href);
   assert.deepEqual(puts, ["https://storage.invalid/a/1", "https://storage.invalid/signed/2", "https://storage.invalid/signed/3"]);
+});
+
+test("an uninspected file is completed first and sent only when its object is missing", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const calls = [];
+  const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const incomplete = () => json({ error: { code: "conflict", message: "Upload parts are incomplete or have incorrect sizes" } }, 409);
+  const fetch = async (url, init = {}) => {
+    const href = String(url);
+    calls.push({ method: init.method ?? "GET", href, body: init.body ? String(init.body) : "" });
+    if (href.endsWith("/direct/sessions") && init.method === "POST") {
+      // A replayed create on a large session: none of these three files was inspected by the read.
+      return json({ sessionId: "s1", files: [
+        { index: 0, clientId: "0", id: "assembled", filename: "a.bin", mimeType: "application/octet-stream", sizeBytes: 10, mode: "multipart", partSize: 4, partCount: 3, inspected: false, transferState: "unknown" },
+        { index: 1, clientId: "1", id: "stored", filename: "b.txt", mimeType: "text/plain", sizeBytes: 3, mode: "single", inspected: false, putUrl: "https://storage.invalid/b" },
+        { index: 2, clientId: "2", id: "missing", filename: "c.txt", mimeType: "text/plain", sizeBytes: 3, mode: "single", inspected: false, putUrl: "https://storage.invalid/c-stale" },
+      ] }, 200);
+    }
+    if (href.endsWith("/files/complete")) {
+      const { fileId } = JSON.parse(String(init.body));
+      return fileId === "missing" ? incomplete() : json({ ok: true });
+    }
+    if (href.endsWith("?fileId=missing")) {
+      return json({ sessionId: "s1", status: "pending", files: [{ index: 2, clientId: "2", id: "missing", filename: "c.txt", mimeType: "text/plain", sizeBytes: 3, mode: "single", status: "pending", putUrl: "https://storage.invalid/c-fresh" }] });
+    }
+    if (href.startsWith("https://storage.invalid/")) return new Response(null, { status: 200 });
+    if (href.endsWith("?statusOnly=true")) return json({ status: "completed", result: { run: { id: "r1" }, project: { id: "p1" }, documents: [] } });
+    return json({ error: "unexpected" }, 500);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  await client.upload([new Blob(["0123456789"]), new Blob(["abc"]), new Blob(["xyz"])], { directUpload: true, filenames: ["a.bin", "b.txt", "c.txt"] });
+  // The assembled multipart file and the stored single file send no bytes; the missing one is read alone, then sent.
+  assert.deepEqual(calls.filter((call) => call.method === "PUT").map((call) => call.href), ["https://storage.invalid/c-fresh"]);
+  assert.equal(calls.filter((call) => call.href.endsWith("/files/complete")).length, 3);
+});
+
+test("a session call keeps one deadline across retries and honours a Retry-After above the backoff cap when it fits", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const { mock } = await import("node:test");
+  const sent = [];
+  const fetch = async () => {
+    sent.push(Date.now());
+    if (sent.length === 1) return new Response(JSON.stringify({ error: { code: "upload_session_busy", message: "busy" } }), { status: 409, headers: { "content-type": "application/json", "retry-after": "8" } });
+    return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
+  };
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  try {
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+    let done = false;
+    const call = client.completeUploadFile("s1", { fileId: "f1" }, { timeoutMs: 20_000 }).then((value) => { done = true; return value; });
+    for (let i = 0; i < 100 && !done; i++) { await new Promise((resolve) => setImmediate(resolve)); mock.timers.tick(500); }
+    assert.deepEqual(await call, { ok: true });
+    assert.ok(sent[1] - sent[0] >= 8_000, `waited the server's 8 s (${sent[1] - sent[0]} ms)`);
+    // A Retry-After that does not fit before the deadline ends the call with the busy answer.
+    sent.length = 0;
+    await assert.rejects(client.completeUploadFile("s1", { fileId: "f1" }, { timeoutMs: 5_000 }), (error) => error.status === 409 && error.retryAfterSeconds === 8);
+    assert.equal(sent.length, 1);
+  } finally { mock.timers.reset(); }
 });
