@@ -22,6 +22,7 @@ import {
   signMultipartUploadPart,
   signSingleUploadPut,
 } from "../lib/storage.js";
+import { MAX_SINGLE_PUT_BYTES, MAX_URL_TTL_SECONDS, partSizeAt, planDirectUpload } from "../lib/upload-transfer-policy.js";
 import {
   admitIntakeFile,
   allRejectedError,
@@ -34,9 +35,10 @@ import {
   type ProjectIntakeItem,
 } from "./project-intake.js";
 
-const SIGNED_UPLOAD_TTL_SECONDS = 900;
-const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
-const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
+/** Lifetime of one signed PUT or part URL, never longer than its session (UPLOAD_URL_TTL_SECONDS, default 3 h). */
+export const SIGNED_UPLOAD_TTL_SECONDS = env.uploadTransfer.urlTtlSeconds;
+/** Part size recorded before part sizes were stored per file. Every current row stores its own. */
+const LEGACY_PART_SIZE_BYTES = 8 * 1024 * 1024;
 
 export interface DirectUploadSessionFileInput {
   /** The client's own id for this file; echoed on the session's file and on a rejection so clients never match by filename. */
@@ -209,7 +211,7 @@ async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: n
     throw error;
   }
   return parts.filter((part) => part.partNumber <= partCount
-    && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
+    && part.sizeBytes === partSizeAt(part.partNumber, file.size_bytes, partSize));
 }
 
 /** The most multipart part URLs one session description signs; the bounded parts/sign endpoint signs the rest. */
@@ -239,12 +241,13 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
       putUrl: await signSingleUploadPut({
         key: file.source_key,
         contentType: file.mime_type,
+        contentLength: file.size_bytes,
         expiresInSeconds: remainingTtl(),
       }),
     };
   }
 
-  const partSize = file.part_size ?? MULTIPART_PART_SIZE_BYTES;
+  const partSize = file.part_size ?? LEGACY_PART_SIZE_BYTES;
   const partCount = file.unknown_size ? 0 : toDirectUploadPartCount(file.size_bytes, partSize);
   if (!file.upload_id) {
     throw new Error(`Multipart session missing upload id for ${file.id}`);
@@ -274,9 +277,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     if (completed.has(partNumber)) {
       continue;
     }
-    const offset = (partNumber - 1) * partSize;
-    const remaining = Math.max(0, file.size_bytes - offset);
-    const sizeBytes = Math.min(partSize, remaining);
+    const sizeBytes = partSizeAt(partNumber, file.size_bytes, partSize);
     const budget = options.partUrls;
     if (budget && (budget.remaining <= 0 || budget.signal?.aborted)) {
       partUrlsOmitted = true;
@@ -287,10 +288,12 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     pendingParts.push({
       partNumber,
       sizeBytes,
+      // Bound to the part's exact size: storage refuses any other body length.
       url: await signMultipartUploadPart({
         key: file.source_key,
         uploadId: file.upload_id,
         partNumber,
+        contentLength: sizeBytes,
         expiresInSeconds: remainingTtl(),
       }),
     });
@@ -313,7 +316,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     pendingParts,
     completedParts: stored,
     transferState: file.unknown_size || stored.length ? "incomplete" as const : "missing" as const,
-    verifiedBytes: file.unknown_size ? null : stored.reduce((sum, part) => sum + Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize), 0),
+    verifiedBytes: file.unknown_size ? null : stored.reduce((sum, part) => sum + partSizeAt(part.partNumber, file.size_bytes, partSize), 0),
   };
 }
 
@@ -328,7 +331,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
   const files: Array<DirectUploadSessionFileInput & { index: number; unknownSize: boolean; sizeBytes: number; filename: string; mimeType: string }> = [];
   input.files.forEach((file, index) => {
     try {
-      if (file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > 5 * 1024 ** 3)) {
+      if (file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > MAX_SINGLE_PUT_BYTES)) {
         throw new ProjectIntakeError("Single-part uploads cannot exceed 5 GiB", 413);
       }
       files.push({
@@ -391,74 +394,56 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
 
   // Provider multipart uploads are created a few at a time with per-call deadlines, never under a lock (this runs
   // outside the Idempotency-Key lock too). Single-PUT files need no provider call at all.
-  const plans = files.map(file => {
-    const isMultipart = file.unknownSize || (!file.singlePart && file.sizeBytes >= MULTIPART_THRESHOLD_BYTES);
-    return { file, sourceKey: rawSourceKey(input.userId, file.filename, input.extract), isMultipart, partSize: isMultipart ? MULTIPART_PART_SIZE_BYTES : null };
-  });
+  const plans = files.map(file => ({
+    file,
+    sourceKey: rawSourceKey(input.userId, file.filename, input.extract),
+    ...planDirectUpload({ sizeBytes: file.unknownSize ? undefined : file.sizeBytes, singlePart: file.singlePart }, env.uploadTransfer),
+  }));
   // The creating credential is checked immediately before each multipart initialization (retries included), so a key
   // revoked during setup opens no further provider upload.
   const target = { org_id: input.orgId ?? null, project_id: input.projectId ?? null };
   const opened = await settleBounded(plans, SESSION_UPLOAD_CREATE_CONCURRENCY,
-    plan => plan.isMultipart ? withStorageRetry(async () => {
+    plan => plan.mode === "multipart" ? withStorageRetry(async () => {
       await assertCredentialStillPermits(target, input.apiKeyId);
       return await createMultipartUpload(plan.sourceKey, plan.file.mimeType);
     }) : Promise.resolve(null));
+  const openedIds = opened.flatMap((result, i) => result.status === "fulfilled" && result.value ? [{ key: plans[i]!.sourceKey, uploadId: result.value }] : []);
+  const closeOpened = () => settleBounded(openedIds, MULTIPART_ABORT_CONCURRENCY, upload => abortMultipartUpload(upload).catch(() => undefined));
   const failed = opened.find(result => result.status === "rejected");
   if (failed) {
     // Nothing of this session is usable: close the uploads that were opened, then fail as before.
-    const openedIds = opened.flatMap((result, i) => result.status === "fulfilled" && result.value ? [{ key: plans[i]!.sourceKey, uploadId: result.value }] : []);
-    await settleBounded(openedIds, MULTIPART_ABORT_CONCURRENCY, upload => abortMultipartUpload(upload).catch(() => undefined));
+    await closeOpened();
     const reason = (failed as PromiseRejectedResult).reason;
     if (reason instanceof ProjectIntakeError && reason.statusCode === 403) {
       await sql`update upload_sessions set status = 'aborted', updated_at = now() where id = ${sessionId}`;
     }
     throw reason;
   }
-  for (const [i, plan] of plans.entries()) {
-    const { file, sourceKey, isMultipart, partSize } = plan;
-    const uploadId = (opened[i] as PromiseFulfilledResult<string | null>).value;
-    const fileId = randomUUID();
-
-    await sql`
-      insert into upload_session_files (
-        id,
-        session_id,
-        filename,
-        mime_type,
-        size_bytes,
-        source_key,
-        upload_mode,
-        upload_id,
-        part_size,
-        status,
-        sha256,
-        canonical_id,
-        source_path,
-        unknown_size,
-        request_index,
-        client_id,
-        content_identity
-      )
-      values (
-        ${fileId},
-        ${sessionId},
-        ${file.filename},
-        ${file.mimeType},
-        ${file.sizeBytes},
-        ${sourceKey},
-        ${isMultipart ? "multipart" : "single"},
-        ${uploadId},
-        ${partSize},
-        'pending',
-        ${file.sha256 ?? null},
-        ${file.canonicalId ?? null},
-        ${normalizeUploadPath(file.path)},
-        ${file.unknownSize},
-        ${file.index},
-        ${file.clientId ?? null},
-        ${file.identity ? sql.json(file.identity) : null}
-      )
-    `;
+  // Every file in one insert. If it fails, no row would lead cleanup to the uploads just opened: close them.
+  const rows = plans.map((plan, i) => ({
+    id: randomUUID(),
+    session_id: sessionId,
+    filename: plan.file.filename,
+    mime_type: plan.file.mimeType,
+    size_bytes: plan.file.sizeBytes,
+    source_key: plan.sourceKey,
+    upload_mode: plan.mode,
+    upload_id: (opened[i] as PromiseFulfilledResult<string | null>).value,
+    part_size: plan.partSize,
+    status: "pending",
+    sha256: plan.file.sha256 ?? null,
+    canonical_id: plan.file.canonicalId ?? null,
+    source_path: normalizeUploadPath(plan.file.path),
+    unknown_size: plan.file.unknownSize,
+    request_index: plan.file.index,
+    client_id: plan.file.clientId ?? null,
+    content_identity: plan.file.identity ? sql.json(plan.file.identity) : null,
+  }));
+  try {
+    await sql`insert into upload_session_files ${sql(rows)}`;
+  } catch (error) {
+    await closeOpened();
+    throw error;
   }
 
   await sql`update upload_sessions set status = 'pending', next_reconcile_at = now() where id = ${sessionId}`;
@@ -791,7 +776,7 @@ async function finalizeDirectUploadFileUnclassified(file: UploadSessionFileRow, 
   const sourceKey = await sealSingleUpload(file, verified.etag, signal, authorize);
   // Publish the sealed key and durable cleanup of the original together, fenced on the row still being pending at
   // the original key: of two finalizers (a lost lock connection lets an old one run on), only one publishes.
-  // Wait a day beyond completion for the 15-minute PUT authorization and in-flight writes.
+  // Wait a day beyond completion: longer than any PUT URL can stay valid (MAX_URL_TTL_SECONDS) and in-flight writes.
   const published = await sql<{ id: string; source_key: string }[]>`with target as (
       select s.org_id from upload_sessions s join upload_session_files f on f.session_id = s.id
       where f.id = ${file.id} and s.id = ${file.session_id} and f.status = 'pending' and f.source_key = ${file.source_key}
@@ -867,7 +852,7 @@ async function assembleMultipartUpload(file: UploadSessionFileRow, uploadId: str
     if (storageErrorName(error) === "NoSuchUpload") return await recoverClosedMultipart(file, error, signal);
     throw error;
   }
-  if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return null;
+  if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? LEGACY_PART_SIZE_BYTES)) return null;
   try {
     await withStorageRetry(async () => {
       await authorize?.();
@@ -1114,17 +1099,20 @@ export async function signDirectUploadParts(sessionId: string, userId: string, f
     requestSignal?.throwIfAborted();
     throw new ProjectIntakeError("Upload storage evidence is unavailable", 503, undefined, "upload_storage_unavailable");
   }
-  const maxPart = Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES)));
+  const partSize = file.part_size ?? LEGACY_PART_SIZE_BYTES;
+  const maxPart = Math.max(1, Math.ceil(env.maxUploadBytes / partSize));
   for (const partNumber of partNumbers) {
-    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > maxPart || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
+    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > maxPart || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, partSize))) throw new ProjectIntakeError("Invalid part number", 400);
   }
   const expiresInSeconds = assertUploadSessionActive(session);
   // Immediately before signing, after every provider read: the credential still permits it, the client is still
   // there and the budget has not run out. Nothing but the signing itself follows the check.
   await assertMayMintTargets(session, userId, credentialKeyId);
   assertMaySignNow(signal, requestSignal);
+  // A known-size file's part is bound to its exact size. A stream's parts are not known until it ends; its layout is
+  // checked against the final size at completion.
   return { parts: await Promise.all(partNumbers.map(async partNumber =>
-    ({ partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, expiresInSeconds }) }))) };
+    ({ partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber, contentLength: file.unknown_size ? undefined : partSizeAt(partNumber, file.size_bytes, partSize), expiresInSeconds }) }))) };
   }, undefined, undefined, { tenant: await principalLockTenant(userId, owned.api_key_id), signal: requestSignal });
 }
 
@@ -1321,12 +1309,14 @@ function multipartCompletionError(error: unknown, filename: string): unknown {
 /**
  * Records an aborted or failed session's cleanup; database only, so it may run under the session lock. Its open
  * multipart uploads are left for abortAbandonedMultipartUploads (they are the files with an upload id and no
- * multipart_aborted_at). Raw objects are deleted by the storage cleanup queue after outstanding signed PUTs expire.
+ * multipart_aborted_at). Raw objects are deleted by the storage cleanup queue after outstanding signed PUTs expire:
+ * the longest any URL can live (MAX_URL_TTL_SECONDS), not the current setting, since URLs signed under a longer
+ * UPLOAD_URL_TTL_SECONDS (or by another host) are still valid.
  */
 export async function queueAbandonedDirectUploadCleanup(sessionId: string): Promise<void> {
   await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason, not_before)
     select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
-      jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'
+      jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + make_interval(secs => ${MAX_URL_TTL_SECONDS + 60})
     from upload_sessions s join upload_session_files f on f.session_id = s.id
     where s.id = ${sessionId} and s.status in ('aborted', 'failed')
     group by s.id

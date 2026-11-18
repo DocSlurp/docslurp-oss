@@ -119,7 +119,8 @@ test("a failed part resumes from the server's pendingParts instead of re-sending
     return json({ error: "unexpected" }, 500);
   };
   const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
-  await client.upload(new Blob(["0123456789"]), { directUpload: true, filename: "ten.txt" });
+  // One slot: after part 2 fails, part 3 never starts on its stale URL.
+  await client.upload(new Blob(["0123456789"]), { directUpload: true, filename: "ten.txt", transferConcurrency: 1 });
   assert.ok(part2Failures >= 3, "part 2 exhausted its own retries first");
   assert.equal(calls.filter((call) => call.endsWith("storage.invalid/a/1")).length, 1);
   assert.ok(calls.includes("PUT https://storage.invalid/b/2"));
@@ -127,6 +128,38 @@ test("a failed part resumes from the server's pendingParts instead of re-sending
   assert.ok(!calls.includes("PUT https://storage.invalid/a/3"));
 });
 
+
+test("parts and files go up in parallel, never more than transferConcurrency at once", async () => {
+  let active = 0;
+  let peak = 0;
+  const puts = [];
+  const parts = Array.from({ length: 5 }, (_, i) => ({ partNumber: i + 1, sizeBytes: 2, url: `https://storage.invalid/big/${i + 1}` }));
+  const fetch = async (url, init = {}) => {
+    const href = String(url);
+    if (href.endsWith("/direct/sessions") && init.method === "POST") {
+      return json({ sessionId: "s1", files: [
+        { index: 0, clientId: "0", id: "f0", filename: "big.txt", mimeType: "text/plain", sizeBytes: 10, mode: "multipart", partSize: 2, pendingParts: parts },
+        { index: 1, clientId: "1", id: "f1", filename: "small.txt", mimeType: "text/plain", sizeBytes: 2, mode: "single", putUrl: "https://storage.invalid/small" },
+      ] }, 201);
+    }
+    if (href.startsWith("https://storage.invalid/")) {
+      active++; peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      puts.push([href, await init.body.text()]);
+      active--;
+      return new Response(null, { status: 200, headers: { etag: `"${href}"` } });
+    }
+    if (href.endsWith("?statusOnly=true")) return json({ status: "completed", result: uploadResult });
+    return json({ error: "unexpected" }, 500);
+  };
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch });
+  await client.upload({ files: [{ data: new Blob(["0123456789"]), filename: "big.txt" }, { data: new Blob(["ab"]), filename: "small.txt" }] }, { transferConcurrency: 3 });
+  assert.equal(peak, 3);
+  assert.equal(puts.length, 6);
+  // Each part carries exactly its own byte range.
+  assert.deepEqual(puts.filter(([href]) => href.includes("/big/")).sort().map(([, body]) => body), ["01", "23", "45", "67", "89"]);
+  await assert.rejects(client.upload(new Blob(["x"]), { transferConcurrency: 0 }), /transferConcurrency/);
+});
 
 test("a coded in-flight 409 is retried with the same key until the first request's session comes back", async () => {
   const api = server();
