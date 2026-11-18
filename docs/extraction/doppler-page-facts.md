@@ -70,6 +70,16 @@ In every mode the facts never size a charge: page-equivalent billing reads page 
 walker measured. `use` does let valid facts steer routing where no walker facts exist, as layout facts do: a page the
 facts show without words can be read by OCR or vision for the project that asked for it, billed by the host's page count.
 
+The one opt-in exception is `DOCSLURP_PAGE_FACTS_RASTER_SIZES=on` (default off): a rendered page's size, which bounds its
+raster and bills its area, may then come from the facts' `geometry` instead of a sandboxed `pdfinfo`
+(`worker/src/pipeline/pdf-page-sizes.ts`). `geometry` is Poppler's clipped CropBox, the box `pdfinfo` prints and
+`pdftoppm -cropbox` renders: on an axis where the CropBox is larger than the MediaBox it takes the MediaBox's span, then
+the two are intersected (so a larger, offset CropBox measures as the MediaBox, not the intersection); UserUnit is ignored
+by all three. A page is taken only when the facts' 0.01 pt rounding cannot change its area equivalents (US Letter and
+Tabloid sit on a boundary and go to `pdfinfo`), its side is within 1–14,400 pt, and neither the page nor the document has
+a failure, lock or rebuilt cross-reference table. The sizes are stored bound to the source hash the facts measured.
+`worker/src/test/fixtures/page-box-equivalence.json` records the comparison on crafted page-box PDFs.
+
 ## Routing evidence
 
 The sandboxed PDF route runs none of the host's Poppler probes: page facts' `pdfimages -list` and `pdftotext`, page triage's
