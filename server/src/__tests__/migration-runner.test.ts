@@ -59,6 +59,10 @@ describe("migration file names", () => {
     expect(migrationNameProblem("20261340T1443_bad_month.sql")).toMatch(/not a real UTC date/);
     expect(migrationNameProblem("20261118T2460_bad_time.sql")).toMatch(/not a real UTC date/);
     expect(migrationNameProblem("20261118_no_time.sql")).toMatch(/expected YYYYMMDDTHHMM/);
+    // A stamp before the cutover would sort among or before the numbered files.
+    expect(migrationNameProblem("01500101T0000_ancient.sql")).toMatch(/timestamps start at 20261118T0000/);
+    expect(migrationNameProblem("20261117T2359_day_before.sql")).toMatch(/timestamps start at/);
+    expect(migrationNameProblem(FIRST.replace(/_.*/, "_renamed.sql"))).toMatch(/numbered names are frozen/);
     expect(migrationNameProblem("20261118T1443_Upper.sql")).toMatch(/expected YYYYMMDDTHHMM/);
   });
 
@@ -179,6 +183,97 @@ describe("applyMigrationFiles", () => {
     ]);
     // Once the ledger has rows the setting does nothing.
     expect((await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, env: { MIGRATION_ASSUME_APPLIED_THROUGH: FIRST } })).applied).toEqual([]);
+  });
+
+  const DRIZZLE = `create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null, created_at bigint);`;
+
+  it("refuses a ledger lost after the cutover instead of mapping Drizzle again and re-running newer migrations", async () => {
+    await db.exec(`${DRIZZLE} create table documents (id int); create table counter (n int);
+      insert into drizzle.__drizzle_migrations (hash, created_at) values ('h0', ${LEGACY_MIGRATIONS[0]![1]});`);
+    write(FIRST, "create table documents (id int);");
+    write("20261118T1443_count.sql", "insert into counter values (1);"); // not idempotent: a re-run would show
+    await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet });
+    await db.exec(`truncate ${LEDGER_TABLE}`);
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/no record of applied migrations/);
+    await db.exec("drop schema docslurp_migrations cascade");
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/no record of applied migrations/);
+    expect((await db.query<{ n: number }>("select count(*)::int as n from counter")).rows[0]!.n).toBe(1);
+    // The operator says what the schema contains; nothing runs again.
+    expect((await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, env: { MIGRATION_ASSUME_APPLIED_THROUGH: "20261118T1443_count.sql" } })).applied).toEqual([]);
+    expect((await db.query<{ n: number }>("select count(*)::int as n from counter")).rows[0]!.n).toBe(1);
+  });
+
+  it("refuses a Drizzle ledger whose newest stamp it does not know, instead of mapping everything or nothing", async () => {
+    write(FIRST, "create table documents (id int);");
+    for (const stamp of [LEGACY_MIGRATIONS.at(-1)![1] + 1_000_000, LEGACY_MIGRATIONS[0]![1] + 1]) {
+      await db.exec(`drop schema if exists drizzle cascade; drop table if exists documents; ${DRIZZLE} create table documents (id int);
+        insert into drizzle.__drizzle_migrations (hash, created_at) values ('h', ${stamp});`);
+      await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/not a known migration stamp/);
+      expect(await ledger()).toEqual([]);
+    }
+    expect((await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, env: { MIGRATION_ASSUME_APPLIED_THROUGH: FIRST } })).applied).toEqual([]);
+    expect(await ledger()).toEqual([{ filename: FIRST, source: "assumed" }]);
+  });
+
+  it("refuses a ledger someone else owns or has attached code to", async () => {
+    write("20261118T1443_new.sql", "create table if not exists fresh (id int);");
+    await db.exec(`create role intruder; create schema docslurp_migrations authorization intruder;
+      create table docslurp_migrations.applied (filename text primary key, sha256 text not null, applied_at timestamptz not null default now(), source text not null default 'runner');
+      alter table docslurp_migrations.applied owner to intruder;`);
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/refusing the migration ledger docslurp_migrations\.applied: its schema is not owned by the migration owner; it is not owned by the migration owner/);
+    await db.exec(`drop schema docslurp_migrations cascade; create schema docslurp_migrations;
+      create table docslurp_migrations.applied (filename text primary key, sha256 text not null, applied_at timestamptz not null default now(), source text not null default 'runner');
+      create function public.swallow() returns trigger language plpgsql as $$ begin return null; end $$;
+      create trigger swallow before insert on docslurp_migrations.applied for each row execute function public.swallow();`);
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/it has triggers/);
+    await db.exec(`drop trigger swallow on docslurp_migrations.applied; alter table docslurp_migrations.applied enable row level security;`);
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/row-level security/);
+    await db.exec(`drop schema docslurp_migrations cascade; create schema docslurp_migrations; create view docslurp_migrations.applied as select 'x'::text as filename, ''::text as sha256, now() as applied_at, ''::text as source;`);
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/refusing the migration ledger/);
+    // The Drizzle ledger is trusted on the same terms before it is read or written.
+    await db.exec(`drop schema docslurp_migrations cascade; ${DRIZZLE} alter table drizzle.__drizzle_migrations owner to intruder;`);
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/refusing the migration ledger drizzle\.__drizzle_migrations/);
+    expect(await tables()).not.toContain("fresh");
+  });
+
+  it("refuses a migration that ends its transaction or changes role, and records nothing for it", async () => {
+    write("20261118T1443_commits.sql", "create table if not exists half (id int);--> statement-breakpoint\ncommit;--> statement-breakpoint\ncreate table if not exists rest (id int);");
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/ended its transaction/);
+    expect(await ledger()).toEqual([]);
+    write("20261118T1443_commits.sql", "create role other_actor;--> statement-breakpoint\nset role other_actor;");
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/changed the session role/);
+    await db.exec("reset role");
+    expect(await ledger()).toEqual([]);
+  });
+
+  it("skips a file another migrator recorded after this one listed it", async () => {
+    write("20261118T1443_new.sql", "create table fresh (id int);"); // would fail if run twice
+    const racing = { async query(text: string, params?: unknown[]) {
+      // The other migrator finishes the file just before this one starts its transaction.
+      if (text === "begin") await db.exec(`create table if not exists fresh (id int); insert into ${LEDGER_TABLE} (filename, sha256) values ('20261118T1443_new.sql', 'theirs') on conflict do nothing`);
+      return client.query(text, params);
+    } };
+    const lines: string[] = [];
+    const result = await applyMigrationFiles(racing, { migrationsFolder: dir, ...quiet, log: (line) => lines.push(line) });
+    expect(result.applied).toEqual([]);
+    expect(lines.join("\n")).toMatch(/recorded by another migrator; skipped/);
+  });
+
+  it("atomic mode applies the pending set all or nothing", async () => {
+    write("20261118T0900_ok.sql", "create table if not exists ok (id int);");
+    write("20261118T1000_bad.sql", "select * from missing_table;");
+    const error = await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, atomic: true }).catch((caught) => caught);
+    expect(error.message).toMatch(/20261118T1000_bad\.sql failed/);
+    expect(error.appliedFiles).toEqual([]);
+    expect(await tables()).toEqual([]);
+    expect(await ledger()).toEqual([]);
+    write("20261118T1000_bad.sql", "create table if not exists fixed (id int);");
+    expect((await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, atomic: true })).applied).toEqual(["20261118T0900_ok.sql", "20261118T1000_bad.sql"]);
+    // Per file, the failure reports what was committed before it (the caller reconciles grants for those).
+    write("20261118T1100_bad_again.sql", "select * from missing_table;");
+    write("20261118T1050_fine.sql", "create table if not exists fine (id int);");
+    const partial = await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet }).catch((caught) => caught);
+    expect(partial.appliedFiles).toEqual(["20261118T1050_fine.sql"]);
   });
 
   it("bounds lock waits and retries a file that timed out waiting for a lock", async () => {

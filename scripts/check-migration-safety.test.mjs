@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { GRANDFATHERED_THROUGH_IDX, LAST_NUMBERED_MIGRATION, checkMigrationIdempotency, checkMigrationName, checkMigrationSql, checkMigrations, migrationFiles, stripDollarQuoted, stripSqlNoise } from './check-migration-safety.mjs';
+import { FIRST_TIMESTAMP, GRANDFATHERED_THROUGH_IDX, NUMBERED_MIGRATIONS, checkMigrationIdempotency, checkMigrationSession, checkMigrationName, checkMigrationSql, checkMigrations, migrationFiles, stripDollarQuoted, stripSqlNoise } from './check-migration-safety.mjs';
 
 const rules = (sql) => checkMigrationSql(sql).findings.map((finding) => finding.rule);
 const idempotencyRules = (sql) => checkMigrationIdempotency(sql).findings.map((finding) => finding.rule);
@@ -50,10 +50,11 @@ test('only migrations after the grandfathered index are enforced', () => {
   try {
     const old = GRANDFATHERED_THROUGH_IDX;
     // The index is the file's position in apply order, so fill the positions before it.
-    for (let idx = 0; idx < old; idx += 1) writeFileSync(join(dir, `${String(idx).padStart(4, '0')}_filler.sql`), 'SELECT 1;');
+    const tag = (idx) => NUMBERED_MIGRATIONS[idx].replace(/\.sql$/, '');
+    for (let idx = 0; idx < old; idx += 1) writeFileSync(join(dir, `${tag(idx)}.sql`), 'SELECT 1;');
     const entries = [
-      { idx: old, tag: `${String(old).padStart(4, '0')}_old` },
-      { idx: old + 1, tag: `${String(old + 1).padStart(4, '0')}_contract` },
+      { idx: old, tag: tag(old) },
+      { idx: old + 1, tag: tag(old + 1) },
       { idx: old + 2, tag: '20261118T1443_acked' },
     ];
     writeFileSync(join(dir, `${entries[0].tag}.sql`), 'DROP TABLE IF EXISTS legacy;');
@@ -131,13 +132,14 @@ test('an idempotent-migration marker with a reason acknowledges a migration, in 
   const sql = '-- idempotent-migration: the plan is empty once applied\nINSERT INTO backup SELECT * FROM plan;';
   assert.equal(checkMigrationIdempotency(sql).acknowledged, true);
   assert.equal(checkMigrationIdempotency('-- idempotent-migration:\nINSERT INTO backup SELECT * FROM plan;').acknowledged, false);
+  const [OLD, ACKED] = NUMBERED_MIGRATIONS;
   const dir = mkdtempSync(join(tmpdir(), 'docslurp-migration-idempotency-'));
   try {
-    writeFileSync(join(dir, '0000_old.sql'), 'CREATE TABLE runs (id text);');
-    writeFileSync(join(dir, '0001_acked.sql'), sql);
+    writeFileSync(join(dir, OLD), 'CREATE TABLE runs (id text);');
+    writeFileSync(join(dir, ACKED), sql);
     const { problems, acknowledged } = checkMigrations(dir);
-    assert.deepEqual(problems.map((problem) => [problem.file, problem.kind, problem.rule, problem.line]), [['0000_old.sql', 'idempotency', 'create-without-if-not-exists', 1]]);
-    assert.deepEqual(acknowledged.map((item) => [item.file, item.kind]), [['0001_acked.sql', 'non-idempotent']]);
+    assert.deepEqual(problems.map((problem) => [problem.file, problem.kind, problem.rule, problem.line]), [[OLD, 'idempotency', 'create-without-if-not-exists', 1]]);
+    assert.deepEqual(acknowledged.map((item) => [item.file, item.kind]), [[ACKED, 'non-idempotent']]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -145,13 +147,20 @@ test('the repository migrations pass the gate', () => {
   const dir = new URL('../server/db/migrations/', import.meta.url).pathname;
   assert.ok(readdirSync(dir).length > 0);
   assert.ok(migrationFiles(dir).length >= 193);
-  assert.deepEqual(checkMigrations(dir).problems, []);
+  assert.deepEqual(checkMigrations(dir, { requireNumbered: true }).problems, []);
 });
 
 test('numbered names are frozen and new migrations carry a real UTC timestamp', () => {
   assert.equal(checkMigrationName('0200_project_runs_finished_at.sql'), null);
   assert.equal(checkMigrationName('20261118T1443_hot_query_indexes.sql'), null);
-  assert.match(checkMigrationName(`${String(LAST_NUMBERED_MIGRATION + 1).padStart(4, '0')}_next.sql`), /numbered names are frozen/);
+  assert.match(checkMigrationName('0201_next.sql'), /numbered names are frozen/);
+  // A free number inside the old range and a renamed numbered file are refused too.
+  assert.equal(NUMBERED_MIGRATIONS.includes('0149_gap.sql'), false);
+  assert.match(checkMigrationName('0149_gap.sql'), /numbered names are frozen/);
+  assert.match(checkMigrationName('0200_renamed.sql'), /numbered names are frozen/);
+  // A stamp before the cutover would sort among or before the numbered files.
+  assert.match(checkMigrationName('01500101T0000_old.sql'), new RegExp(`timestamps start at ${FIRST_TIMESTAMP}`));
+  assert.match(checkMigrationName('20261117T2359_day_before.sql'), /timestamps start at/);
   assert.match(checkMigrationName('20261332T1443_bad_date.sql'), /not a real UTC date/);
   assert.match(checkMigrationName('20261118T1443-dashes.sql'), /expected YYYYMMDDTHHMM/);
   const dir = mkdtempSync(join(tmpdir(), 'docslurp-migration-names-'));
@@ -159,7 +168,25 @@ test('numbered names are frozen and new migrations carry a real UTC timestamp', 
     writeFileSync(join(dir, '0201_numbered.sql'), 'SELECT 1;');
     writeFileSync(join(dir, '20261118T1443_ok.sql'), 'SELECT 1;');
     assert.deepEqual(checkMigrations(dir).problems.map((problem) => [problem.file, problem.kind]), [['0201_numbered.sql', 'name']]);
+    // The repository gate also requires every frozen numbered file to be present.
+    assert.equal(checkMigrations(dir, { requireNumbered: true }).problems.filter((problem) => problem.rule === 'numbered-migration-missing').length, NUMBERED_MIGRATIONS.length);
     // Apply order is name order: numbered files first, then timestamps.
     assert.deepEqual(migrationFiles(dir), ['0201_numbered.sql', '20261118T1443_ok.sql']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('refuses transaction control, role changes and session-level settings outside function bodies', () => {
+  const sessionRules = (sql) => checkMigrationSession(sql).map((finding) => finding.rule);
+  assert.deepEqual(sessionRules('CREATE TABLE IF NOT EXISTS a (id int);\nCOMMIT;\nCREATE TABLE IF NOT EXISTS b (id int);'), ['transaction-control']);
+  assert.deepEqual(sessionRules('BEGIN;\nSELECT 1;\nROLLBACK;'), ['transaction-control', 'transaction-control']);
+  assert.deepEqual(sessionRules('SELECT 1; START TRANSACTION ISOLATION LEVEL SERIALIZABLE;'), ['transaction-control']);
+  assert.deepEqual(sessionRules('SET ROLE docslurp_app;'), ['role-change']);
+  assert.deepEqual(sessionRules('RESET ROLE;\nSET SESSION AUTHORIZATION other;'), ['role-change', 'role-change']);
+  assert.deepEqual(sessionRules('SET search_path = evil, public;'), ['session-search-path']);
+  assert.deepEqual(sessionRules("SELECT set_config('search_path', 'evil', false);"), ['session-search-path']);
+  // Allowed: transaction-local settings, plpgsql blocks (BEGIN ... END inside a dollar-quoted body), comments and literals.
+  assert.deepEqual(sessionRules("SET LOCAL lock_timeout = '10s';\nSET LOCAL search_path = public;\nSELECT set_config('docslurp.x', '1', true);"), []);
+  assert.deepEqual(sessionRules('DO $$ BEGIN PERFORM 1; END $$;\nCREATE OR REPLACE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $fn$ BEGIN RETURN; END; $fn$;'), []);
+  assert.deepEqual(sessionRules("-- commit;\nSELECT 'rollback;';\nALTER TABLE t ADD COLUMN IF NOT EXISTS begin_at timestamptz;\nCREATE INDEX IF NOT EXISTS t_end ON t (end_at);"), []);
+  assert.deepEqual(sessionRules('CREATE OR REPLACE FUNCTION h() RETURNS int LANGUAGE sql SET search_path = public AS $$ SELECT 1 $$;'), []);
 });

@@ -25,11 +25,12 @@ function tagsOnBase(): string[] | null {
 }
 
 describe("migrations added by this branch", () => {
-  it("apply on top of main's schema, in the order an existing database runs them", async () => {
+  it("apply on top of main's schema, in the order an existing database runs them", async (ctx) => {
     const base = tagsOnBase();
     // CI fetches the base ref for this test (ci.yml); it must not quietly turn itself off there.
     if (base === null && process.env.CI) throw new Error(`${BASE_REF} is not available: fetch it before running the worker tests`);
-    if (base === null) return;
+    // Locally without the ref: shown as skipped, never as passed.
+    if (base === null) return ctx.skip();
     const onBase = new Set(base);
     const tags = readMigrationTags();
     const added = tags.filter((tag) => !onBase.has(tag));

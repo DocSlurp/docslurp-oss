@@ -58,8 +58,8 @@ export function loadShippedMigrations(starts: string[] = [process.cwd(), dirname
   if (cachedShipped !== undefined) return cachedShipped;
   for (const start of starts) {
     for (let dir = start; ; dir = dirname(dir)) {
-      // `server/db/...` from the repo root (the bundled app runs from /app); `db/...` from server/.
-      const folder = ["server/db/migrations", "db/migrations"]
+      // `server/db/...` from the repo root; `db/...` from server/; `core/server/db/...` when a host application nests this repository.
+      const folder = ["server/db/migrations", "db/migrations", "core/server/db/migrations"]
         .map((relativePath) => resolve(dir, relativePath))
         .find((candidate) => existsSync(resolve(candidate, "0000_current_schema.sql")));
       if (folder) {

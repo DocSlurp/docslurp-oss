@@ -53,12 +53,21 @@ migration advisory lock on one direct owner connection and runs `server/db/migra
   retried `MIGRATION_LOCK_RETRIES` times (3) when the wait times out or deadlocks, so a migration blocked by a long
   transaction fails fast instead of queueing the site behind it.
 - **Databases migrated by Drizzle** (every database before this runner) are mapped once, on the first run: the files the
-  Drizzle ledger counted as applied are recorded by name and not re-run. `drizzle.__drizzle_migrations` is kept, and stays
-  current for the numbered files, so a rollback to the previous release still reads its schema as applied.
+  Drizzle ledger counted as applied are recorded by name and not re-run. The mapping refuses a ledger whose newest stamp
+  it does not know. `drizzle.__drizzle_migrations` is kept, marked as mapped, and stays current for the numbered files,
+  so a rollback to the previous release still reads its schema as applied. A database first created by this runner has
+  no Drizzle ledger: it cannot be rolled back to a release that used Drizzle's migrator.
+- **The ledgers are trusted only when the migration owner owns them** (schema and table) and they are plain tables with
+  no triggers, rules, row-level security or inheritance. Anything else stops the run before a migration is applied.
+- **A migration cannot end its transaction or change role.** The CI gate refuses `BEGIN`, `COMMIT`, `ROLLBACK`,
+  `SET ROLE` and session-level `SET search_path` in a migration, and the runner checks both after each file.
+- **The generation cutover (0112) stays all or nothing.** A database from before it is upgraded in one transaction, as
+  before, because its downtime barrier is verified once for that run.
+- **Grants.** Role grants are reconciled after the run, and also after a failed run that committed some files.
 - **Changed files.** An applied file whose contents no longer match the recorded hash is reported with a warning and
   never re-run. Put the change in a new migration.
-- **A lost ledger** is refused, not replayed: see `MIGRATION_ASSUME_APPLIED_THROUGH` in
-  [configuration](self-host/configuration.md).
+- **A lost ledger** is refused, not replayed and not mapped from Drizzle a second time: see
+  `MIGRATION_ASSUME_APPLIED_THROUGH` in [configuration](self-host/configuration.md). Unset it once the run succeeds.
 
 Readiness (`/ready`), the `migrations-not-at-head` alert and `predeploy-check.mjs` compare the files a build ships with
 the ledger file by file. The application and worker roles can read the ledger and cannot write it.

@@ -17,7 +17,7 @@ COPY packages/sdk/package.json ./packages/sdk/
 COPY server/package.json ./server/
 # server declares @docslurp/worker only as a test dependency; its manifest is needed to resolve the project.
 COPY worker/package.json ./worker/
-# Root (drizzle-kit for migrations) plus the server and its project dependencies; the worker's own
+# Root (what the migration runner needs) plus the server and its project dependencies; the worker's own
 # dependencies are not installed.
 RUN NODE_ENV=development pnpm install --frozen-lockfile --filter docslurp --filter '@docslurp/server...' --filter '!@docslurp/worker'
 COPY packages/shared ./packages/shared

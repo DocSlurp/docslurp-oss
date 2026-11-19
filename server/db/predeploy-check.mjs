@@ -256,6 +256,15 @@ export async function collectReport(client, { migrationFiles, acceptedPiiPattern
     ? await q("select max(created_at)::text as newest from drizzle.__drizzle_migrations")
     : [{ newest: null }];
   const pending = pendingMigrations(migrationFiles, { applied, newestDrizzleCreatedAt: newest });
+  // Tables without any record of how they got there: the runner refuses this database instead of replaying history.
+  const [{ has_tables: hasTables }] = await q("select to_regclass('public.documents') is not null as has_tables");
+  if (hasTables && pending.length === migrationFiles.length) {
+    sections.push(section("Migration ledger: missing", "blocker", [
+      "The database has tables but no record of applied migrations (docslurp_migrations.applied is empty or absent and no",
+      "Drizzle ledger maps to it). migrate.mjs will refuse. Restore the ledger, or set MIGRATION_ASSUME_APPLIED_THROUGH to the",
+      "newest migration file the schema already contains (docs/self-host/configuration.md).",
+    ]));
+  }
   const longTx = await q(
     `select pid, state, extract(epoch from now() - xact_start)::int as seconds, left(regexp_replace(query, '\\s+', ' ', 'g'), 80) as query
      from pg_stat_activity

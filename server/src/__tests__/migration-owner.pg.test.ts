@@ -93,6 +93,20 @@ it.skipIf(!url)("keeps a closed pre-generation database on one superuser session
     // The previous release reads the Drizzle ledger: it stays current for the numbered files.
     expect((await c.query("select count(*)::int n, max(created_at)::text newest from drizzle.__drizzle_migrations")).rows[0])
       .toEqual({ n: LEGACY_MIGRATIONS.length, newest: String(LEGACY_MIGRATIONS.at(-1)![1]) });
+    // A rollback: the previous release's Drizzle migrator, given every numbered file, finds nothing to apply
+    // (a replay would fail at 0000 on this schema) and leaves the schema as it is.
+    const previous = mkdtempSync(resolve(tmpdir(), "previous-release-")); mkdirSync(resolve(previous, "meta"));
+    try {
+      const all = { version: "7", dialect: "postgresql", entries: LEGACY_MIGRATIONS.map(([file, when], idx) => ({ idx, version: "7", when, tag: file.replace(/\.sql$/, ""), breakpoints: true })) };
+      writeFileSync(resolve(previous, "meta/_journal.json"), JSON.stringify(all));
+      for (const [file] of LEGACY_MIGRATIONS) copyFileSync(resolve(folder, file), resolve(previous, file));
+      const shape = "select count(*)::int n from information_schema.columns where table_schema = 'public'";
+      const before = (await c.query(shape)).rows[0].n;
+      await c.query(`set role ${owner}`);
+      try { await migrate(drizzle(c), { migrationsFolder: previous }); } finally { await c.query("reset role"); }
+      expect((await c.query(shape)).rows[0].n).toBe(before);
+      expect((await c.query("select count(*)::int n from drizzle.__drizzle_migrations")).rows[0].n).toBe(LEGACY_MIGRATIONS.length);
+    } finally { rmSync(previous, { recursive: true }); }
     // Runtime roles read the ledger and can never write it or create beside it.
     const access = (await c.query(`select has_table_privilege('docslurp_app', 'docslurp_migrations.applied', 'select') as reads,
       has_table_privilege('docslurp_app', 'docslurp_migrations.applied', 'insert, update, delete, truncate') as writes,

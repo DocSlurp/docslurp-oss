@@ -312,8 +312,8 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       }
     }
     if (migrationsTable) {
-      // worker/src/db/worker-capabilities.ts reports the newest applied
-      // migration (schema_applied_when) so the API can gate on schema skew.
+      // Workers of the previous release read the Drizzle ledger for schema_applied_when; keep the grant until
+      // none remain. Current workers read docslurp_migrations.applied (below).
       statements.push(
         `grant usage on schema drizzle to ${worker}`,
         `grant select on drizzle.__drizzle_migrations to ${worker}`,

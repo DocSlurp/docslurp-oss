@@ -9,7 +9,7 @@ import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 // databases; it never imports server code (see scripts/lib/server-boundary.mjs).
 const migrationsDir = fileURLToPath(new URL("../../../server/db/migrations/", import.meta.url));
 
-const MIGRATION_NAME = /^(?:\d{4}|\d{8}T\d{4})_[a-z0-9][a-z0-9_]*$/;
+const MIGRATION_NAME = /^(?:\d{4}|2\d{7}T\d{4})_[a-z0-9][a-z0-9_]*$/;
 
 /**
  * The migration tags (file names without .sql) in the order they apply: plain name order, the numbered files before
