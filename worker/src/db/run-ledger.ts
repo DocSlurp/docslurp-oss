@@ -1011,7 +1011,7 @@ export class PostgresRunLedger implements CheckpointStore {
     for (const commit of afterCommit) commit();
   }
 
-  private async settleLateUsage(state: WorkflowState, owner: ExecutionOwner): Promise<void> {
+  async settleLateUsage(state: WorkflowState, owner: ExecutionOwner): Promise<void> {
     // Settle real usage without applying the obsolete progress snapshot.
     const batch = state.usageLedger.checkpoint();
     if (batch.events.length) {
@@ -1228,6 +1228,60 @@ export class PostgresRunLedger implements CheckpointStore {
   }
 
   /** Marks a run stage processing and checkpoints run progress in the same transaction. */
+  /** One budget decision for the vision stage, including its distributed tasks and retries. */
+  async admitVisionStageSpend(state: WorkflowState, owner: ExecutionOwner): Promise<void> {
+    const capCents = state.run.pipeline.maxCostCents;
+    if (capCents == null || capCents <= 0) return;
+    if (owner.runId !== state.run.id || owner.orgId !== state.run.orgId || owner.projectId !== state.run.projectId) {
+      throw new StaleExecutionError();
+    }
+    const generation = owner.executionGeneration ?? null;
+    const result = await this.sql.begin(async tx => {
+      await assertPlanningOwnership(tx, owner);
+      const [row] = await tx<{ spent_cents: number | string; admitted: boolean }[]>`
+        select r.spent_cents, exists (
+          select 1 from project_run_stage_states s where s.run_id = r.id and s.stage_name = 'vision-extract'
+            and s.status <> 'completed' and s.stats ? 'visionSpendAdmission'
+            and (s.stats->'visionSpendAdmission'->>'generation') is not distinct from ${generation}::text
+        ) as admitted
+        from project_runs r where r.id = ${owner.runId}
+      `;
+      if (!row) throw new StaleExecutionError();
+      const spentCents = Number(row.spent_cents);
+      if (row.admitted) return { admitted: true, spentCents };
+      const stageStartCents = spentCents + state.usageLedger.pendingBillableCents;
+      if (!Number.isFinite(stageStartCents) || stageStartCents >= capCents) return { admitted: false, spentCents };
+      const persisted = await tx`
+        insert into project_run_stage_states (run_id, stage_name, status, attempts, stats, started_at, updated_at)
+        values (${owner.runId}, 'vision-extract', 'processing', 0,
+          jsonb_build_object('visionSpendAdmission', jsonb_build_object(
+            'generation', ${generation}::text, 'spentCents', ${stageStartCents}::numeric, 'capCents', ${capCents}::numeric
+          )), now(), now())
+        on conflict (run_id, stage_name) do update
+        set stats = coalesce(project_run_stage_states.stats, '{}'::jsonb) || excluded.stats
+        where project_run_stage_states.status <> 'completed'
+        returning run_id
+      `;
+      return { admitted: persisted.length === 1, spentCents };
+    });
+    state.run.spentCents = result.spentCents;
+    state.visionStageSpendAdmitted = result.admitted;
+  }
+
+  /** Page tasks can use an existing admission only. A stale generation cannot open a new one. */
+  async visionStageSpendAdmission(owner: ExecutionOwner): Promise<"admitted" | "paused" | "denied"> {
+    const [row] = await this.sql<{ paused: boolean }[]>`
+      select coalesce(r.control_state, '') in ('paused', 'pause_requested') as paused
+      from project_run_stage_states s join project_runs r on r.id = s.run_id
+      where r.id = ${owner.runId} and r.org_id = ${owner.orgId} and r.project_id = ${owner.projectId}
+        and r.execution_generation is not distinct from ${owner.executionGeneration ?? null}
+        and r.status = 'processing' and coalesce(r.control_state, '') not in ('cancelled', 'cancel_requested', 'dead-letter')
+        and s.stage_name = 'vision-extract' and s.status = 'processing' and s.stats ? 'visionSpendAdmission'
+        and (s.stats->'visionSpendAdmission'->>'generation') is not distinct from ${owner.executionGeneration ?? null}::text
+    `;
+    return row ? (row.paused ? "paused" : "admitted") : "denied";
+  }
+
   async startRunStage(state: WorkflowState, stage: string, owner?: ExecutionOwner): Promise<void> {
     state.setRunStage({
       runId: state.run.id,

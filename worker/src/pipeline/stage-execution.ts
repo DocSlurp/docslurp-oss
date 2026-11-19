@@ -1,3 +1,4 @@
+import { StaleExecutionError } from "../db/execution-ownership.js";
 import { resolvedRunModels } from "./resolved-models.js";
 import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
@@ -35,6 +36,7 @@ import {
 } from "./local-compute-cost.js";
 import { hasFailedDocumentStage } from "./document-health.js";
 import { WorkflowState, type Stage } from "./pipeline.js";
+import { runSpentCents } from "./checkpoints.js";
 import { PageBasis } from "./page-basis.js";
 import { pageRangeExecutorIsolated, pagesInRanges, resolveShardPageRanges } from "./page-ranges.js";
 import { recordShardTiming } from "./shard-calibration.js";
@@ -80,6 +82,7 @@ export type StageExecutionStore = Pick<
   | "pageBasisLedger"
   | "markRunMilestone"
 > & {
+  admitVisionStageSpend?: Store["admitVisionStageSpend"];
   readonly pageTasks: Pick<Store["pageTasks"], "completed">;
   readonly notifications: Pick<Store["notifications"], "triggerRunEmails">;
   /** Whether every live worker advertises `capability` (Store.fleetAdvertises): a run's billing rules are pinned from it. */
@@ -518,6 +521,10 @@ export function createStageExecution(deps: {
       state.stage = stageName;
       state.refreshStats();
 
+      if (stageName === "vision-extract" && !shard) {
+        await store.admitVisionStageSpend?.(state, { runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
+      }
+
       // startRunStage checkpoints progress in the same transaction.
       if (shard) {
         // The unsharded pass owns the stage checkpoint; a shard only does documents.
@@ -628,6 +635,11 @@ export function createStageExecution(deps: {
         documents: documents.length,
         artifacts: Object.keys(state.artifacts).length,
         durationMs,
+        ...(state.visionStageSpendAdmitted ? {
+          runCostCapCents: state.run.pipeline.maxCostCents,
+          runBilledSpendCents: runSpentCents(state),
+          runCostCapOverrunCents: Math.max(0, runSpentCents(state) - (state.run.pipeline.maxCostCents ?? 0)),
+        } : {}),
         adaptiveTuning: {
           docConcurrency: tuning.docConcurrency,
           maxDocConcurrency: tuning.maxDocConcurrency,
@@ -679,6 +691,7 @@ export function createStageExecution(deps: {
         ...(completion?.preloaded ? { preloaded: completion.preloaded } : {}),
       };
     } catch (caught) {
+      if (caught instanceof StaleExecutionError) throw caught;
       // A stall abort surfaces as whatever the stage threw on abort; report the hang itself. A
       // command teardown failure (thrown, or latched on this activity and swallowed by the stage)
       // wins over both: it must end the activity as a non-retryable teardown, never a retry.

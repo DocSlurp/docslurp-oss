@@ -87,6 +87,7 @@ export function runSpentCents(state: WorkflowState): number {
 }
 
 export function isCostCapExceeded(state: WorkflowState): boolean {
+  if (state.stage === "vision-extract" && state.visionStageSpendAdmitted) return false;
   const cap = state.run.pipeline.maxCostCents;
   if (cap === null || cap === undefined || cap <= 0) {
     return false;

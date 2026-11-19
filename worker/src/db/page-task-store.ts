@@ -1,4 +1,4 @@
-import { assertPlanningOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
+import { assertExecutionOwnership, assertPlanningOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { noteRunPageStage } from "../pipeline/run-milestones.js";
 import { randomUUID } from "node:crypto";
 import type { Sql, JSONValue } from "postgres";
@@ -47,24 +47,29 @@ export class PageTaskStore {
           payload: this.sql.json(stripTaskFlags(task) as unknown as JSONValue),
         })), "run_id", "document_id", "page_number", "payload")}
           on conflict (run_id, document_id, page_number) do update set payload = excluded.payload
-          where page_work_tasks.payload is null`;
+          where page_work_tasks.payload is null or
+          (excluded.payload ? 'spendAdmissionGeneration'
+            and page_work_tasks.payload->'spendAdmissionGeneration'
+              is distinct from excluded.payload->'spendAdmissionGeneration')`;
       }
     }
     progress?.(tasks.length);
     const runId = tasks[0]?.runId;
-    return runId ? this.countWithPayload(runId) : 0;
+    return runId ? this.countWithPayload(runId, tasks[0]?.spendAdmissionGeneration) : 0;
   }
 
-  async countWithPayload(runId: string): Promise<number> {
+  async countWithPayload(runId: string, generation?: string | null): Promise<number> {
     const [row] = await this.sql<{ total: number }[]>`
-      select count(*)::int as total from page_work_tasks where run_id = ${runId} and payload is not null`;
+      select count(*)::int as total from page_work_tasks where run_id = ${runId} and payload is not null
+        ${generation === undefined ? this.sql`` : this.sql`and payload->'spendAdmissionGeneration' = ${this.sql.json(generation)}::jsonb`}`;
     return Number(row?.total ?? 0);
   }
 
   /** Stable order (document, page) so offsets name the same batch on every replay and retry. */
-  async loadBatch(runId: string, offset: number, limit: number): Promise<VisionPageTask[]> {
+  async loadBatch(runId: string, offset: number, limit: number, generation?: string | null): Promise<VisionPageTask[]> {
     const rows = await this.sql<{ payload: VisionPageTask }[]>`
       select payload from page_work_tasks where run_id = ${runId} and payload is not null
+        ${generation === undefined ? this.sql`` : this.sql`and payload->'spendAdmissionGeneration' = ${this.sql.json(generation)}::jsonb`}
       order by document_id, page_number offset ${Math.max(0, offset)} limit ${Math.max(1, limit)}`;
     return rows.map(row => row.payload);
   }
@@ -74,12 +79,24 @@ export class PageTaskStore {
     return new Map<string, unknown>(rows.map(row => [`${row.document_id}:${row.page_number}`, row.result]));
   }
 
+  private executionPredicate(task: VisionPageTask) {
+    if (task.spendAdmissionGeneration === undefined) return this.sql``;
+    return this.sql`and exists (select 1 from project_runs r where r.id = page_work_tasks.run_id
+      and r.execution_generation is not distinct from ${task.spendAdmissionGeneration})`;
+  }
+
+  async release(task: VisionPageTask, lease: string): Promise<void> {
+    await this.sql`update page_work_tasks set status='queued', lease_id=null, lease_expires_at=null
+      where run_id=${task.runId} and document_id=${task.documentId} and page_number=${task.pageNumber}
+        and lease_id=${lease} and status='processing'`;
+  }
+
   async claim(task: VisionPageTask, workerId: string) {
     const lease = randomUUID();
     const rows = await this.sql`update page_work_tasks set status='processing', lease_id=${lease},
       lease_expires_at=now()+interval '3 minutes', worker_id=${workerId}, attempts=attempts+1, started_at=coalesce(started_at,now())
       where run_id=${task.runId} and document_id=${task.documentId} and page_number=${task.pageNumber}
-        and status!='completed' and (lease_expires_at is null or lease_expires_at < now()) returning lease_id`;
+        and status!='completed' and (lease_expires_at is null or lease_expires_at < now()) ${this.executionPredicate(task)} returning lease_id`;
     if (rows.length) return lease;
     const completed = await this.completed(task.runId);
     if (completed.has(`${task.documentId}:${task.pageNumber}`)) return null;
@@ -89,7 +106,7 @@ export class PageTaskStore {
   async renew(task: VisionPageTask, lease: string) {
     const rows = await this.sql`update page_work_tasks set lease_expires_at=now()+interval '3 minutes'
       where run_id=${task.runId} and document_id=${task.documentId} and page_number=${task.pageNumber}
-        and lease_id=${lease} and status='processing' returning lease_id`;
+        and lease_id=${lease} and status='processing' ${this.executionPredicate(task)} returning lease_id`;
     if (!rows.length) throw new Error("Page task lease lost");
   }
 
@@ -107,6 +124,10 @@ export class PageTaskStore {
       leaseConsumed = false;
       leaseObservation = null;
       const client = tx as unknown as Sql<Record<string, unknown>>;
+      if (task.spendAdmissionGeneration !== undefined) {
+        await assertExecutionOwnership(tx, { runId: task.runId, orgId: state.run.orgId!, projectId: state.run.projectId!,
+          executionGeneration: task.spendAdmissionGeneration ?? undefined });
+      }
       const rows = await client`select lease_id, status from page_work_tasks
         where run_id=${task.runId} and document_id=${task.documentId} and page_number=${task.pageNumber} for update`;
       if (rows[0]?.lease_id !== lease || rows[0]?.status !== 'processing') throw new Error("Page task lease lost before checkpoint");

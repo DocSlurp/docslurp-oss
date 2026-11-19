@@ -183,6 +183,18 @@ describe("isCostCapExceeded", () => {
     expect(isCostCapExceeded(state)).toBe(true);
   });
 
+  it("allows an admitted vision stage to finish and enforces the cap in the next stage", () => {
+    const state = makeState({
+      pipeline: { ...defaultPipelineFeatures, maxCostCents: 10 },
+      spentCents: 15,
+    });
+    state.visionStageSpendAdmitted = true;
+    state.stage = "vision-extract";
+    expect(isCostCapExceeded(state)).toBe(false);
+    state.stage = "embed";
+    expect(isCostCapExceeded(state)).toBe(true);
+  });
+
   it("returns true when total cost exceeds the cap", () => {
     const state = makeState({
       pipeline: { ...defaultPipelineFeatures, maxCostCents: 10 },
