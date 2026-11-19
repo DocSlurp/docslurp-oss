@@ -531,7 +531,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     const facts = sharded
       ? { ...(level.run ?? { manifestResumes: 0, complete: false, resumable: false, deadlineMs: null }), sourceSha256: shardState!.source, settingsSha256: null, lastCutPage: shardState!.cut }
       : level.run;
-    const leveled = await tx`
+    const leveled = await tx<{ markdown_complete: boolean }[]>`
       insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status,
         images_exit_code, manifest_version, doppler_build, manifest_key, manifest_sha256, source_sha256, settings_sha256, resumes,
         last_cut_page, deadline_ms, assets_total, assets_extracted, assets_not_extracted, assets_unlinked, assets_resumable,
@@ -559,12 +559,12 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
           folder_bytes = ${folderBytes === null ? tx`document_extraction_levels.folder_bytes` : tx`excluded.folder_bytes`},
           asset_bytes = excluded.asset_bytes, gaps = excluded.gaps, shards = excluded.shards, assets_current = true, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
-      returning 1`;
+      returning markdown_complete`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
     // Billed bytes: stored figure files of this run plus the folder's own files.
     await tx`update document_extraction_levels set asset_bytes = ${totals!.bytes}::bigint + folder_bytes
       where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
-    if (!resuming && write.level.markdownComplete) await queueOldFigureFolders(tx, write.scope, oldFolders);
+    if (!resuming && leveled[0]!.markdown_complete) await queueOldFigureFolders(tx, write.scope, oldFolders);
     await queueFigureResume(tx, write.scope, resuming);
     return { upserted, removed, resumes };
   });

@@ -546,6 +546,20 @@ describe("the write waits for the checkpoint (MEDIUM-4)", () => {
     await expect(markFigureLevelMarkdownComplete(sql, { ...A, orgId: B.orgId })).rejects.toBeInstanceOf(DocumentAssetLedgerError);
   });
 
+  it("queues previous figure files when a full figure write follows the Markdown mark", async () => {
+    const target = `ua/run-a/doppler/${A.documentId}/`;
+    await sql`delete from storage_cleanup_queue where org_id = ${A.orgId} and target = ${target}`;
+    await writeDocumentAssetLedger(sql, await figureWrite(A));
+    const scope = { ...A, runId: "run-a-new" };
+    await sql`update documents set run_id = ${scope.runId} where id = ${scope.documentId}`;
+    await markFigureLevelMarkdownComplete(sql, scope);
+    const write = await figureWrite(scope);
+    await writeDocumentAssetLedger(sql, { ...write, level: { ...write.level, markdownComplete: false } });
+    expect(await level(scope.documentId)).toMatchObject({ markdown_complete: true });
+    const cleanup = await sql`select target from storage_cleanup_queue where org_id = ${scope.orgId} and payload->>'runId' = ${scope.runId}`;
+    expect(cleanup).toContainEqual({ target });
+  });
+
   it("a stale run's queued write is logged as stale-write and writes nothing", async () => {
     const write = await inMemory(await figureWrite(A));
     await sql`update documents set run_id = 'run-a-new' where id = 'doc-a'`;
