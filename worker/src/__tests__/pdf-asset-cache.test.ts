@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Document } from "../models.js";
 import {
@@ -46,6 +46,7 @@ function makeDocument(): Document {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -180,7 +181,15 @@ describe("PdfRasterCache", () => {
     await sourceCache.clear();
   });
 
-  it.each([1, 2, 3])("reuses requested raster pages with %i-digit Poppler filenames", async (digits) => {
+  it.each([
+    { digits: 1, failure: null },
+    { digits: 2, failure: null },
+    { digits: 3, failure: null },
+    { digits: 1, failure: "missing" },
+    { digits: 1, failure: "malformed" },
+    { digits: 1, failure: "cancelled" },
+  ])("renders bounded pairs (digits=$digits, failure=$failure)", async ({ digits, failure }) => {
+    const controller = new AbortController();
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -207,14 +216,31 @@ describe("PdfRasterCache", () => {
         if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
         const [prefix, firstText, lastText] = plan.args;
         for (let page = Number(firstText); page <= Number(lastText); page += 1) {
-          await writeFile(`${prefix}-${String(page).padStart(digits, "0")}.png`, `page ${page}`);
+          if (page === 3 && failure === "missing") continue;
+          const header = Buffer.alloc(24);
+          header.writeUInt32BE(0x89504e47);
+          header.write("IHDR", 12);
+          header.writeUInt32BE(1200, 16);
+          header.writeUInt32BE(page === 3 && failure === "malformed" ? 4000 : 1600, 20);
+          await writeFile(`${prefix}-${String(page).padStart(digits, "0")}.png`, header);
         }
+        if (failure === "cancelled") controller.abort(new Error("test cancelled"));
         return { stdout: "", stderr: "" };
       },
     };
     const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache);
 
+    vi.stubEnv("DOCSLURP_PDF_RASTER_BATCHING", "on");
+    if (failure) {
+      await expect(cache.renderSelectedPages({
+        document: makeDocument(), runId: "run-1", pageNumbers: [2, 3], signal: controller.signal,
+      })).rejects.toThrow();
+      expect(ranges).toEqual([[2, 3]]);
+      expect(artifacts.size).toBe(0);
+      await sourceCache.clear();
+      return;
+    }
     const first = await cache.renderSelectedPages({
       document: makeDocument(),
       runId: "run-1",
@@ -227,13 +253,13 @@ describe("PdfRasterCache", () => {
     });
 
     // Lanes create their own directories first, so they reach the planner in any order.
-    expect(ranges.sort((a, b) => a[0] - b[0])).toEqual([[2, 2], [3, 3], [5, 5]]);
+    expect(ranges.sort((a, b) => a[0] - b[0])).toEqual([[2, 3], [5, 5]]);
     expect(first.map((page) => page.pageNumber)).toEqual([2, 3, 5]);
     expect(first.every((page) => !page.cacheHit)).toBe(true);
     expect(second.every((page) => page.cacheHit)).toBe(true);
     expect(artifacts.size).toBe(3);
-    expect(first.map((page) => page.sizeBytes)).toEqual([6, 6, 6]);
-    expect(second.map((page) => page.sizeBytes)).toEqual([6, 6, 6]);
+    expect(first.map((page) => page.sizeBytes)).toEqual([24, 24, 24]);
+    expect(second.map((page) => page.sizeBytes)).toEqual([24, 24, 24]);
     await sourceCache.clear();
   });
 

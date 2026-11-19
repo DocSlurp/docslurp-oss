@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { assertParseSourceDecided } from "../lib/parse-source.js";
 import { createReadStream } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -23,6 +23,7 @@ import { pushPerfMetric } from "../lib/perf-context.js";
 import { isCommandTeardownError } from "../sandbox/teardown.js";
 import { SourceIntegrityError, verifyStagedSource } from "../sandbox/source-integrity.js";
 import { registerReadOnlySource, unregisterReadOnlySource } from "../sandbox/paths.js";
+import { readPngFileFacts } from "../lib/page-image-evidence.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
@@ -505,8 +506,8 @@ export class PdfRasterCache {
         : [];
       const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
       try {
-        // One pdfinfo call per contiguous run sizes the pages to render; each page then renders in its own pdftoppm
-        // call, a few at a time. Lanes share one abort signal: the first failure aborts every in-flight sibling
+        // One pdfinfo call per contiguous range sizes the selected pages; bounded same-size batches share a pdftoppm
+        // call. Lanes share one abort signal: the first failure aborts every in-flight sibling
         // command, the lanes drain, and nothing is uploaded after it. Every command also takes a process-wide slot.
         const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
         const sizes = new Map<number, { widthPt: number; heightPt: number }>();
@@ -519,37 +520,65 @@ export class PdfRasterCache {
           const size = sizes.get(pageNumber)!;
           return { pageNumber, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) };
         }));
-        await runLanes(pdftoppmPages, lanes, args.signal, async (selectedPage, signal) => {
-          const size = sizes.get(selectedPage)!;
+        const batchAdjacent = process.env.DOCSLURP_PDF_RASTER_BATCHING === "on";
+        const batches: Array<{ first: number; last: number; dpi: number; edge: number }> = [];
+        for (const pageNumber of pdftoppmPages) {
+          const size = sizes.get(pageNumber)!;
           const renderDpi = longEdgeCappedDpi(size.widthPt, size.heightPt, dpi, maxLongEdgePx);
-          // Each command writes only to its own directory and reads the source read-only: concurrent
-          // lanes share no writable path (so no socket or file to meet on), and one lane cannot touch
-          // another's output.
+          const edge = longEdgeCappedEdge(size.widthPt, size.heightPt, renderDpi, maxLongEdgePx);
+          const previous = batches.at(-1);
+          // At most two ordinary pages per command. Keep large renders single, with the existing edge and slot limits.
+          if (batchAdjacent && previous && previous.first === previous.last && previous.last + 1 === pageNumber &&
+              previous.dpi === renderDpi && previous.edge === edge && edge * edge * 8 <= 32 * 1024 * 1024) {
+            previous.last = pageNumber;
+          } else {
+            batches.push({ first: pageNumber, last: pageNumber, dpi: renderDpi, edge });
+          }
+        }
+        await runLanes(batches, lanes, args.signal, async (batch, signal) => {
+          // Each process reads the source read-only and writes only into its own bounded output directory.
           const laneDir = await mkdtemp(path.join(scratch, "docslurp-page-"));
-          const prefix = path.join(laneDir, `page-${selectedPage}-${selectedPage}`);
+          const stem = `page-${batch.first}-${batch.last}`;
           const rendered = await this.runner.renderPdfPageRange(
-            source.path,
-            prefix,
-            selectedPage,
-            selectedPage,
-            renderDpi,
-            longEdgeCappedEdge(size.widthPt, size.heightPt, renderDpi, maxLongEdgePx),
+            source.path, path.join(laneDir, stem), batch.first, batch.last, batch.dpi, batch.edge,
           );
           if (!rendered.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
-          const plan = { ...rendered, readOnlyInputs: true };
-          await this.rasterSlots.run(signal, () => this.runner.run(plan, signal));
+          const paired = batch.first !== batch.last;
+          const pairOutputLimit = 36 * 1024 * 1024;
+          await this.rasterSlots.run(signal, () => this.runner.run({
+            ...rendered, readOnlyInputs: true, ...(paired ? { maxOutputBytes: pairOutputLimit } : {}),
+          }, signal));
 
-          const stem = `${path.basename(prefix)}-`;
-          const filename = (await readdir(laneDir)).find((candidate) => {
-            if (!candidate.startsWith(stem)) return false;
-            const suffix = candidate.slice(stem.length).match(/^(\d+)\.png$/);
-            return suffix !== null && Number(suffix[1]) === selectedPage;
-          });
-          if (!filename) throw new Error(`pdftoppm did not produce page ${selectedPage}`);
-          const bytes = await readFile(path.join(laneDir, filename));
-          signal.throwIfAborted();
-          await this.storage.putBytes(keys.get(selectedPage)!, bytes, "image/png");
-          generated.set(selectedPage, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+          const files = new Map<number, string>();
+          for (const filename of await readdir(laneDir)) {
+            if (!filename.startsWith(`${stem}-`)) continue;
+            const suffix = filename.slice(stem.length + 1).match(/^(\d+)\.png$/);
+            if (!suffix) continue;
+            const pageNumber = Number(suffix[1]);
+            if (files.has(pageNumber)) throw new Error(`pdftoppm produced duplicate output for page ${pageNumber}`);
+            files.set(pageNumber, filename);
+          }
+          if (paired && files.size !== 2) throw new Error("pdftoppm did not produce exactly two pages");
+          let pairBytes = 0;
+          for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
+            const filename = files.get(pageNumber);
+            if (!filename) throw new Error(`pdftoppm did not produce page ${pageNumber}`);
+            if (!paired) continue;
+            signal.throwIfAborted();
+            const file = path.join(laneDir, filename);
+            if (!(await lstat(file)).isFile()) throw new Error("Invalid raster output file");
+            const { sizeBytes, widthPx, heightPx } = await readPngFileFacts(file);
+            pairBytes += sizeBytes;
+            if (pairBytes > pairOutputLimit || !widthPx || !heightPx || Math.max(widthPx, heightPx) > batch.edge) {
+              throw new Error(`Invalid raster output for page ${pageNumber}`);
+            }
+          }
+          for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
+            const bytes = await readFile(path.join(laneDir, files.get(pageNumber)!));
+            signal.throwIfAborted();
+            await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
+            generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+          }
         });
         const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
         if (unrendered.length > 0) throw new Error(`pdftoppm did not render pages ${unrendered.join(",")}`);
