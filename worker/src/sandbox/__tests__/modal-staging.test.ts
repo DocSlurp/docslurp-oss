@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
+import { CommandRunner, resolveVenvBin, stageClamDefinitions } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
 import { buildModalUsageEvent, buildScannerSnapshot, createModalProvider, modalVmIdleSeconds, modalVmParkSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
+import { CLAM_VOLUME_MOUNT } from "../providers/modal/clam-definition-volume.js";
 import { jobRootsChanged, modalScannerRegions, ScannerSnapshotCache } from "../providers/modal/scanner.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
 import { SandboxConfigError, SandboxInfrastructureError, SandboxOutputError, SandboxRunError } from "../types.js";
@@ -295,6 +296,9 @@ const controlOf = (argv: string[]) => (isKill(argv) ? argv[4] : argv[5]);
 function fakeSdk(
   opts: {
     createFails?: boolean;
+    clamVolumeUnavailable?: boolean;
+    clamVolumeMountMissing?: boolean;
+    clamVolumeVerificationExit?: number;
     createGate?: Promise<void>;
     exec?: (command: string[], control: string, vm: number) => Promise<FakeProcess>;
     onKill?: (control: string) => void;
@@ -441,6 +445,7 @@ function fakeSdk(
     },
     exec: async (argv: string[], params?: { timeoutMs?: number }, vm = 1) => {
       if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", opts.hardeningFails ? 3 : 0); }
+      if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-clam-volume")) return finished("", opts.clamVolumeVerificationExit ?? 0);
       // Scanner snapshot build (root): job-root listings, daemon setup, start, version, self-test.
       if (argv[0] === "python3" && argv[3]?.includes("out.append('absent '")) {
         state.jobRootListings++;
@@ -525,6 +530,10 @@ function fakeSdk(
     ModalClient: class {
       apps = { fromName: async () => { if (opts.lookupDelayMs) await new Promise((resolve) => setTimeout(resolve, opts.lookupDelayMs)); return {}; } };
       images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
+      volumes = { fromName: async (name: string) => {
+        if (opts.clamVolumeUnavailable) throw new ModalNotFound(`no volume named ${name}`);
+        return { withMountOptions: (mount: unknown) => ({ name, mount }) };
+      } };
       secrets = { fromName: async (name: string) => ({ secret: name }) };
       sandboxes = {
         fromName: async (_app: string, name: string) => {
@@ -544,6 +553,9 @@ function fakeSdk(
         create: async (_app: unknown, _image: unknown, options: unknown) => {
           state.createOptions.push(options);
           await opts.createGate;
+          if (opts.clamVolumeMountMissing && Object.keys((options as { volumes?: object }).volumes ?? {}).length) {
+            throw new ModalNotFound("no signature generation");
+          }
           if (opts.createFails) throw new Error("no capacity");
           const vm = state.createOptions.length;
           if (opts.createFailsFrom !== undefined && vm >= opts.createFailsFrom) throw new Error("no capacity");
@@ -793,6 +805,62 @@ describe("modal provider session lifecycle", () => {
     expect((theirs as SandboxInfrastructureError).afterCommand).toBe(false);
     await opened.close();
   });
+
+  it.each(["verified", "mismatch", "unavailable", "mount-missing", "writable"] as const)(
+    "uses only confirmed read-only matching ClamAV definitions (%s)",
+    async (condition) => {
+      const source = await mkdtemp(path.join(tmpdir(), "docslurp-clam-volume-test-"));
+      await writeFile(path.join(source, "daily.cvd"), "defs");
+      vi.stubEnv("DOCSLURP_CLAMAV_DB_DIR", source);
+      const definitions = await stageClamDefinitions(source);
+      try {
+        const { sdk, state } = fakeSdk({
+          clamVolumeUnavailable: condition === "unavailable",
+          clamVolumeMountMissing: condition === "mount-missing",
+          clamVolumeVerificationExit: condition === "writable" ? 2 : condition === "mismatch" ? 1 : 0,
+        });
+        const provider = createModalProvider(async () => sdk);
+        const opening = provider.openSession({ ...config, clamDefinitionsVolume: "clam-reference" }, { activityId: "a" });
+        if (condition === "writable") {
+          await expect(opening).rejects.toThrow(/ClamAV volume is not confirmed read-only/);
+          expect(state.commands).toHaveLength(0);
+          expect(state.terminate).toBe(1);
+          return;
+        }
+
+        const session = await opening;
+        try {
+          const file = definitions.files[0]!;
+          await expect(session.run!({
+            ...command, args: ["--database", file], inputPaths: [file], readOnlyAssetDir: definitions.dir,
+          })).resolves.toMatchObject({ exitCode: 0 });
+          const mounted = condition !== "unavailable";
+          expect(state.createOptions[0]).toMatchObject({
+            includeOidcIdentityToken: false, env: {}, secrets: [], cloudBucketMounts: {}, blockNetwork: true,
+            volumes: mounted ? {
+              [CLAM_VOLUME_MOUNT]: { name: "clam-reference", mount: { readOnly: true, subPath: definitions.hash } },
+            } : {},
+          });
+          if (condition === "mount-missing") {
+            expect(state.createOptions).toHaveLength(2);
+            expect(state.createOptions[1]).toMatchObject({ volumes: {} });
+          }
+          const expected = condition === "verified" ? CLAM_VOLUME_MOUNT : `/opt/docslurp-assets/${path.basename(definitions.dir)}`;
+          expect(state.commands.at(-1)).toEqual(["/usr/bin/true", "--database", `${expected}/daily.cvd`]);
+          expect(state.rootWrites.filter((file) => file.endsWith("/daily.cvd"))).toEqual(
+            condition === "verified" ? [] : [`${expected}/daily.cvd`],
+          );
+        } finally {
+          await session.close();
+        }
+      } finally {
+        vi.unstubAllEnvs();
+        await definitions.release();
+        await rm(definitions.dir, { recursive: true, force: true });
+        await rm(source, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("a stuck asset write times out, strikes no one and frees the worker's staging slot (council X #5)", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "docslurp-x5-"));

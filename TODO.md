@@ -136,11 +136,9 @@ See [the stage notes](docs/document-summaries.md#summary-tree-section-summaries-
 
 ## ClamAV definitions in parser VMs (2026-11-06)
 
-- [ ] Each parser VM spends 11–12 s staging the ClamAV definitions, and staging is serialized per worker (council W #7), so VM
-  starts queue behind it (real-Modal W run). Evaluate a parser image with the definitions baked in (rebuilt and re-pinned on
-  each signature update) or a Modal Volume holding them, either with the same freshness check the VM runs today (signature
-  date within `maxSignatureAgeHours`, failing closed). Measure VM start time and memory against today's per-VM staging
-  before choosing.
+- [ ] [#299](https://github.com/DocSlurp/docslurp-oss/issues/299) Verify generation publishing,
+  read-only volume staging and its fallback on Modal. Measure startup, signature staging, worker memory, and three
+  concurrent VM starts. Automate publication and retirement after verifying the operator path.
 
 ## Error recovery audit (2026-10-28)
 

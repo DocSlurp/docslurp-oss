@@ -22,7 +22,7 @@ import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/share
 import { recordPoolServed } from "../lib/capability-pools.js";
 import { isDevelopmentEnvironment, poolMemberForBackend, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -2741,21 +2741,29 @@ export async function stageClamDefinitions(directory: string): Promise<StagedCla
   }
   const previous = stagedDefinitions;
   const staging = (async () => {
-    const hash = createHash("sha256");
-    for (const name of names) {
-      hash.update(`${name}\0`);
-      for await (const chunk of createReadStream(path.join(directory, name))) hash.update(chunk as Buffer);
-    }
-    const digest = hash.digest("hex");
-    const dir = await mkdtemp(path.join(tmpdir(), `docslurp-clam-definitions-${digest.slice(0, 32)}-`));
+    const temporary = await mkdtemp(path.join(tmpdir(), "docslurp-clam-definitions-preparing-"));
+    let dir: string;
+    let digest: string;
     try {
-      await chmod(dir, 0o700);
+      await chmod(temporary, 0o700);
+      const hash = createHash("sha256");
+      let copiedBytes = 0;
       for (const name of names) {
-        await copyFile(path.join(directory, name), path.join(dir, name));
-        await chmod(path.join(dir, name), 0o444);
+        const staged = path.join(temporary, name);
+        await copyFile(path.join(directory, name), staged);
+        await chmod(staged, 0o444);
+        const info = await stat(staged);
+        copiedBytes += info.size;
+        if (copiedBytes > 512 * 1024 * 1024) throw new Error("ClamAV signature assets exceed transfer limit");
+        hash.update(`${name}\0${info.size}\0`);
+        for await (const chunk of createReadStream(staged)) hash.update(chunk as Buffer);
       }
+      digest = hash.digest("hex");
+      const suffix = temporary.slice(-6);
+      dir = path.join(tmpdir(), `docslurp-clam-definitions-${digest}-${suffix}`);
+      await rename(temporary, dir);
     } catch (error) {
-      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      await rm(temporary, { recursive: true, force: true }).catch(() => {});
       throw error;
     }
     stagedDefinitionUse.set(dir, { refs: 0, retired: false });
