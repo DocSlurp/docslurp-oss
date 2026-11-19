@@ -54,6 +54,7 @@ import { guardedVisionCall } from "../lib/guarded-vision-call.js";
 import { loadRunState } from "../pipeline/stage-execution.js";
 import { PdfRasterCache, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { CommandRunner } from "../tools/runner.js";
+import { PAGE_ROUTE_PLAN_SLOT } from "../routing/runtime.js";
 import type { ProjectRun } from "../models.js";
 import type { Config } from "../config.js";
 import type { Document } from "../models.js";
@@ -308,6 +309,7 @@ async function pageStage(args: {
   render?: { sizeBytes: number; widthPx: number | null; heightPx: number | null };
   /** Bytes of each downloaded render (default: not a PNG). */
   file?: Buffer;
+  config?: Partial<Config>;
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "vision-guard-test-"));
   const rasters = {
@@ -317,6 +319,8 @@ async function pageStage(args: {
     }))),
   };
   const storage = {
+    bucket: "bucket",
+    getJson: vi.fn(async (_key: string): Promise<unknown> => undefined),
     downloadToTempFile: async (key: string) => {
       const dir = await mkdtemp(path.join(scratch, "page-"));
       const file = path.join(dir, `page-${key.split("/")[1]}.png`);
@@ -339,13 +343,13 @@ async function pageStage(args: {
         route: { runtime: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter", model: MODEL, billing: "openrouter" },
     };
   });
-  const stage = new VisionExtractStage({} as never, storage as never, CFG, rasters as never);
+  const stage = new VisionExtractStage({} as never, storage as never, { ...CFG, ...args.config }, rasters as never);
   const document = { id: "doc", userId: "user-1", filename: "upload.pdf", mimeType: "application/pdf", pageCount: args.pages } as Document;
   const extract = (stage as unknown as {
     extractVisionPagesFromCache(...a: unknown[]): Promise<Array<{ pageNumber: number; text: string }>>;
   }).extractVisionPagesFromCache.bind(stage);
   return {
-    stage, document, rasters, scratch,
+    stage, document, rasters, scratch, storage,
     run: (state: WorkflowState, hints: LegacyPageHints, skips: Map<number, VisionPageSkip>) =>
       extract(state, document, VISION, Array.from({ length: args.pages }, (_, index) => index + 1), undefined, undefined,
         undefined, false, { hints, skips }),
@@ -464,6 +468,20 @@ describe("vision page loop under the guard", () => {
     const skips = new Map<number, VisionPageSkip>();
     expect(await harness.run(assembled, noHints, skips)).toEqual([]);
     expect(skips.get(1)).toEqual({ pageNumber: 1, outcome: "rejected", fallbackText: true });
+  });
+
+  it.each(["classification", PAGE_ROUTE_PLAN_SLOT] as const)("refuses page selection if stored %s cannot be read", async (slot) => {
+    const harness = await pageStage({ pages: 2, answer: () => ({ text: "unexpected read" }), config: { pageRouterMode: "active" } });
+    scratch = harness.scratch;
+    const state = runState({ quality: "auto", ladder: { maxRung: "intelligent" }, pageRouter: { mode: "active", marginFloor: 0 } });
+    state.documents.push(harness.document);
+    state.artifactLedger.recordDocument(harness.document.id, slot, "s3://bucket/routing.json");
+    harness.storage.getJson.mockRejectedValueOnce(new Error("Storage unavailable"));
+
+    await expect(harness.stage.planPageTasks(state)).rejects.toThrow("Storage unavailable");
+    expect(harness.storage.getJson).toHaveBeenCalledWith("routing.json");
+    expect(visionRuntime.execute).not.toHaveBeenCalled();
+    expect(ledgerOf(state).inspect("run-1", "org-1").runAttempts).toBe(0);
   });
 
   // Council (encoding-read cap): a resumed shard's payload before version 2 has no purpose; the run's plan data decides.

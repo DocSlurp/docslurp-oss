@@ -155,6 +155,8 @@ describe("PostgresVisionAttemptBackend", () => {
     // Region requests of a budgeted page take the region bound (4 here) and its distinct-page budget.
     for (let n = 0; n < 4; n += 1) expect(await admit(resumed, 2, "encoding-read", { scope: "region", documentPageLimit: 2 })).toBeNull();
     expect(await admit(resumed, 2, "encoding-read", { scope: "region", documentPageLimit: 2 })).toBe("page-attempt-limit");
+    // The same durable counter limits a later whole-page fallback on the budgeted page.
+    expect(await admit(resumed, 2, "encoding-read", { documentPageLimit: 2 })).toBe("page-attempt-limit");
     expect(await admit(resumed, 3, "encoding-read", { scope: "region", documentPageLimit: 2 })).toBe("document-page-limit");
   });
 

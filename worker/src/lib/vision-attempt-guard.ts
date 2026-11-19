@@ -91,8 +91,9 @@ export interface VisionAttemptTarget {
   documentAttemptLimit?: number;
   /**
    * `region`: a routed region request of a budgeted page (purpose `table-rescue` or `encoding-read`). It counts toward the
-   * purpose's distinct-page budget like a whole-page read, but takes the region bound (`regionAttempts`) on its own row and
-   * not the shared whole-page ceiling. Default: `region` for purpose `region`, else `page`.
+   * purpose's distinct-page budget like a whole-page read, but takes the region bound (`regionAttempts`) using that
+   * purpose's counter. A later whole-page fallback counts the prior regions toward its lower ceiling.
+   * Default: `region` for purpose `region`, else `page`.
    */
   scope?: "page" | "region";
 }

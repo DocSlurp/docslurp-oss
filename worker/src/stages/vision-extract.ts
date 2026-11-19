@@ -916,7 +916,7 @@ export class VisionExtractStage implements Stage {
     /** The document's Auto ladder plan (auto quality on the triage path): each page's rung and why. */
     ladder?: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] };
   }> {
-    const routing = await this.loadAdaptiveRouting(state, document.id);
+    const routing = await this.loadAdaptiveRouting(state, document.id, { strict: true });
     const routingV2 = resolveRunRoutingV2(state);
     let selectedPages = selectLegacyVisionPages(routing?.pages ?? [], { routingV2 });
     let score = 0;
@@ -1193,10 +1193,11 @@ export class VisionExtractStage implements Stage {
   private async loadRoutedExecution(
     state: WorkflowState,
     document: import("../models.js").Document,
+    options = { strict: true },
   ): Promise<{ plan: RoutePlan; execution: RoutedExecution; catalog: ReturnType<typeof buildRuntimeCatalog>["allTargets"] } | null> {
     // Fast reads no page at all; Fastest never runs routed targets (some are vision models): its pages take the ladder path.
     if (ladderForbidsVision(state.run.pipeline) || !qualityAllowsPageReading(state.run.pipeline.quality)) return null;
-    const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg);
+    const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg, options);
     if (!plan) return null;
     const catalog = buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).allTargets;
     const execution = groupAssignmentsByTarget(plan, catalog);
@@ -2471,7 +2472,7 @@ export class VisionExtractStage implements Stage {
     session: ChartExportSession,
     signal: AbortSignal | undefined,
   ): Promise<ChartExportPassInput> {
-    const routed = await this.loadRoutedExecution(state, document).catch(() => null);
+    const routed = await this.loadRoutedExecution(state, document, { strict: false }).catch(() => null);
     // Without routed vision, any stored plan (shadow included) still names the chart and diagram pages.
     const routedPlan = routed?.plan ?? await storedRoutePlan(this.storage, state.artifactLedger, document.id);
     const adaptive = routedPlan ? null : await this.loadAdaptiveRouting(state, document.id);

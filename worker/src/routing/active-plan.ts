@@ -23,8 +23,8 @@ export function assertCompleteActivePlan(plan: RoutePlan): void {
 
 /**
  * The document's stored RoutePlan, only when the page router is effectively `active` and the
- * plan was written in active mode. Everything else (off, shadow, no plan, unreadable plan)
- * returns null so callers keep the legacy path byte-for-byte.
+ * plan was written in active mode. Off, shadow and absent plans return null.
+ * Callers selecting paid reads use strict mode so an unreadable plan cannot drop its budgets.
  */
 export async function loadActiveRoutePlan(
   state: WorkflowState,
