@@ -29,6 +29,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { directDatabaseUrl, INDEX_NAME } from "./folded-search-index.mjs";
+import { legacyAppliedFiles, listMigrationFiles, pendingMigrationFiles } from "./migration-runner.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ONE_ORG_MIGRATION = path.join(here, "migrations", "0127_one_org_per_user.sql");
@@ -45,9 +46,14 @@ const INDEX_BUILD_MS_PER_ROW = 0.8;
 const gb = (bytes) => `${(Number(bytes) / 1024 ** 3).toFixed(2)} GiB`;
 const minutes = (ms) => `${(ms / 60_000).toFixed(1)} min`;
 
-/** Pure: the pending journal entries given the newest applied migration timestamp (drizzle compares `when` to created_at). */
-export function pendingMigrations(journal, newestAppliedMs) {
-  return (journal.entries ?? []).filter((entry) => entry.when > newestAppliedMs).map((entry) => entry.tag);
+/**
+ * Pure: the migration files (names without .sql) the runner would apply. `applied` is the ledger's file names, or null
+ * for a database the runner has not migrated yet; it then maps the Drizzle ledger (`newestDrizzleCreatedAt`, null when
+ * there is none) exactly as the runner's one-time bootstrap does.
+ */
+export function pendingMigrations(files, { applied = null, newestDrizzleCreatedAt = null } = {}) {
+  const done = applied ?? (newestDrizzleCreatedAt === null ? [] : legacyAppliedFiles(newestDrizzleCreatedAt));
+  return pendingMigrationFiles(files, done).map((file) => file.replace(/\.sql$/, ""));
 }
 
 /** Pure: a report section is { title, level: "ok" | "warn" | "blocker", lines[] }. */
@@ -226,7 +232,7 @@ async function oneOrgSection(q, { plan, promotions, ownerless: ownerlessSql, ack
   );
 }
 
-export async function collectReport(client, { journal, acceptedPiiPatterns, extractorIds, oneOrgMigrationSql, ack0127 = null, redact = false }) {
+export async function collectReport(client, { migrationFiles, acceptedPiiPatterns, extractorIds, oneOrgMigrationSql, ack0127 = null, redact = false }) {
   oneOrgMigrationSql ??= readFileSync(ONE_ORG_MIGRATION, "utf8");
   extractorIds ??= knownExtractorIds(await loadBuiltInExtractorIds());
   const sections = [];
@@ -241,11 +247,15 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
 
   // 1. Migrations and long transactions.
   // A failed statement would abort the read-only transaction, so the table is looked up, not tried.
-  const [{ has_table: hasMigrationsTable }] = await q("select to_regclass('drizzle.__drizzle_migrations') is not null as has_table");
-  const [{ newest }] = hasMigrationsTable
-    ? await q("select coalesce(max(created_at), 0)::bigint as newest from drizzle.__drizzle_migrations")
-    : [{ newest: 0 }];
-  const pending = pendingMigrations(journal, Number(newest));
+  const [{ has_ledger: hasLedger, has_table: hasDrizzleLedger }] = await q(
+    "select to_regclass('docslurp_migrations.applied') is not null as has_ledger, to_regclass('drizzle.__drizzle_migrations') is not null as has_table");
+  let applied = hasLedger ? (await q("select filename from docslurp_migrations.applied")).map((row) => row.filename) : null;
+  // An empty ledger beside a Drizzle one is a database the runner has not mapped yet.
+  if (applied?.length === 0 && hasDrizzleLedger) applied = null;
+  const [{ newest }] = applied === null && hasDrizzleLedger
+    ? await q("select max(created_at)::text as newest from drizzle.__drizzle_migrations")
+    : [{ newest: null }];
+  const pending = pendingMigrations(migrationFiles, { applied, newestDrizzleCreatedAt: newest });
   const longTx = await q(
     `select pid, state, extract(epoch from now() - xact_start)::int as seconds, left(regexp_replace(query, '\\s+', ' ', 'g'), 80) as query
      from pg_stat_activity
@@ -542,7 +552,7 @@ export function redactOutput(argv, isTTY) {
 async function main() {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is required");
-  const journal = JSON.parse(readFileSync(path.join(here, "migrations", "meta", "_journal.json"), "utf8"));
+  const migrationFiles = listMigrationFiles(path.join(here, "migrations"));
   const acceptedPiiPatterns = await loadAcceptedPiiPatterns();
   const extractorIds = knownExtractorIds(await loadBuiltInExtractorIds());
   const ack0127 = process.argv.find((arg) => arg.startsWith("--ack-0127="))?.slice("--ack-0127=".length) ?? null;
@@ -554,7 +564,7 @@ async function main() {
   try {
     await client.query("begin read only");
     await client.query("set local statement_timeout = '30s'");
-    const sections = await collectReport(client, { journal, acceptedPiiPatterns, extractorIds, ack0127, redact });
+    const sections = await collectReport(client, { migrationFiles, acceptedPiiPatterns, extractorIds, ack0127, redact });
     if (redact) console.error("[predeploy-check] redacted output (ids only, no emails or organization names); run with --no-redact in an owner's terminal for the full list");
     await client.query("rollback");
     console.log(process.argv.includes("--json") ? JSON.stringify(sections, null, 2) : render(sections));

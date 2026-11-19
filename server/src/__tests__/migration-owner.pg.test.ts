@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
+import { LEGACY_MIGRATIONS } from "../../db/migration-runner.mjs";
 import { applyOwnedMigrations } from "../../db/owned-migrations.mjs";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -34,8 +35,8 @@ beforeAll(async () => {
       create role docslurp_realtime_publisher nologin noinherit; end if; end $$;
     grant docslurp_realtime_publisher to ${owner}`);
   scratch = mkdtempSync(resolve(tmpdir(), "owner-migration-")); mkdirSync(resolve(scratch, "meta"));
-  const journal = JSON.parse(readFileSync(resolve(folder, "meta/_journal.json"), "utf8"));
-  journal.entries = journal.entries.filter((e: { idx: number }) => e.idx < 112);
+  // "Old" databases are Drizzle-migrated, as production was before the runner: migrate.mjs then maps that ledger.
+  const journal = { version: "7", dialect: "postgresql", entries: LEGACY_MIGRATIONS.slice(0, 112).map(([file, when], idx) => ({ idx, version: "7", when, tag: file.replace(/\.sql$/, ""), breakpoints: true })) };
   writeFileSync(resolve(scratch, "meta/_journal.json"), JSON.stringify(journal));
   for (const entry of journal.entries) copyFileSync(resolve(folder, `${entry.tag}.sql`), resolve(scratch, `${entry.tag}.sql`));
 });
@@ -81,7 +82,7 @@ it.skipIf(!url)("keeps a closed pre-generation database on one superuser session
     await applyOwnedMigrations(c, { migrationsFolder: folder, env: attested });
     expect((await c.query("select pg_backend_pid() as pid")).rows[0].pid).toBe(pid);
     expect((await c.query("select count(*)::int n from pg_stat_activity where datname=current_database()")).rows[0].n).toBe(1);
-    const { rows } = await c.query("select distinct tableowner from pg_tables where schemaname in ('public','drizzle','docslurp_mastra')");
+    const { rows } = await c.query("select distinct tableowner from pg_tables where schemaname in ('public','drizzle','docslurp_migrations','docslurp_mastra')");
     expect(rows).toEqual([{ tableowner: owner }]);
     const defaults = await c.query(`select a.privilege_type from pg_default_acl d,
       lateral aclexplode(d.defaclacl) a where d.defaclrole=$1::regrole
@@ -130,7 +131,7 @@ it.skipIf(!url)("rejects wrong owners and unsafe identifiers before creating the
     for (const candidate of [outsider, 'bad"; RESET ROLE;--', "x".repeat(64)]) {
       await expect(applyOwnedMigrations(c, { migrationsFolder: folder, env: { MIGRATION_OWNER_ROLE: candidate } })).rejects.toThrow(/owner/);
     }
-    expect((await c.query("select to_regclass('drizzle.__drizzle_migrations') as ledger")).rows[0].ledger).toBeNull();
+    expect((await c.query("select to_regclass('docslurp_migrations.applied') as ledger, to_regnamespace('docslurp_migrations') as ledger_schema")).rows[0]).toEqual({ ledger: null, ledger_schema: null });
     await c.query(`set session authorization ${outsider}`);
     await expect(applyOwnedMigrations(c, { migrationsFolder: folder, env: {} })).rejects.toThrow(/cannot run migrations/);
   } finally { await c.end(); }

@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createMigratedDatabase, serveOnRandomPort, startMigratedPostgres } from "@docslurp/worker/testing";
 
 import { INDEX_NAME, buildSettings, directDatabaseUrl, ensureFoldedIndex, indexState } from "../../db/folded-search-index.mjs";
+import { LEGACY_MIGRATIONS, listMigrationFiles } from "../../db/migration-runner.mjs";
 import { collectReport, knownExtractorIds, pendingMigrations, render, SUPPORTED_VECTOR_BACKENDS } from "../../db/predeploy-check.mjs";
 
 /**
@@ -64,12 +66,16 @@ describe("folded-search-index", () => {
 });
 
 describe("predeploy-check", () => {
-  const journal = JSON.parse(readFileSync(new URL("../../db/migrations/meta/_journal.json", import.meta.url), "utf8"));
+  const migrationFiles = listMigrationFiles(fileURLToPath(new URL("../../db/migrations/", import.meta.url)));
 
-  it("lists the migrations newer than the newest applied one", () => {
-    const last = journal.entries.at(-1);
-    expect(pendingMigrations(journal, last.when)).toEqual([]);
-    expect(pendingMigrations(journal, journal.entries.at(-6).when)).toHaveLength(5);
+  it("lists the migrations the runner would apply", () => {
+    expect(pendingMigrations(migrationFiles, { applied: migrationFiles })).toEqual([]);
+    // Per file: a migration missing from the middle is pending, whatever is applied after it.
+    expect(pendingMigrations(migrationFiles, { applied: migrationFiles.filter((file) => file !== migrationFiles[5]) })).toEqual([migrationFiles[5]!.replace(/\.sql$/, "")]);
+    // A database Drizzle migrated and the runner has not: mapped through the frozen stamps.
+    expect(pendingMigrations(migrationFiles, { applied: null, newestDrizzleCreatedAt: LEGACY_MIGRATIONS.at(-6)![1] }))
+      .toEqual(LEGACY_MIGRATIONS.slice(-5).map(([file]) => file.replace(/\.sql$/, "")));
+    expect(pendingMigrations(migrationFiles, { applied: null, newestDrizzleCreatedAt: null })).toHaveLength(migrationFiles.length);
   });
 
   it("reports blockers and warnings from seeded rows of an unmigrated database and changes nothing", async () => {
@@ -102,7 +108,7 @@ describe("predeploy-check", () => {
       const { RETIRED_EXTRACTOR_IDS } = await import("@docslurp/shared");
       const extractorIds = knownExtractorIds([...builtInDocumentExtractorDescriptors.map((entry) => entry.id), ...RETIRED_EXTRACTOR_IDS], { DOCSLURP_EXTRACTOR_ID_ALIASES: "aliased-old:vm-pdf" });
       await oldClient.query("begin read only");
-      const sections = await collectReport(oldClient, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options, extractorIds });
+      const sections = await collectReport(oldClient, { migrationFiles, acceptedPiiPatterns: piiPatternTypeSchema.options, extractorIds });
       await oldClient.query("rollback");
       expect((await oldClient.query(counts)).rows).toEqual(before.rows);
 
@@ -135,8 +141,9 @@ describe("predeploy-check", () => {
       expect(byTitle("Runs in flight").title).toContain("Runs in flight: 2 (");
       expect(byTitle("Runs in flight").title).toContain("v2=1");
       expect(byTitle("Runs in flight").title).toContain("(none)=1");
-      // The harness applies the SQL files without drizzle's bookkeeping table, so every journal entry reads as pending.
-      expect(byTitle("Migrations").title).toContain(`${journal.entries.length} pending`);
+      // The harness records what it applied in the runner's ledger: everything from 0125 on is pending.
+      const from = migrationFiles.findIndex((file) => file.endsWith("_tenant_scoped_keys_and_webhooks.sql"));
+      expect(byTitle("Migrations").title).toContain(`${migrationFiles.length - from} pending (${migrationFiles[from]!.replace(/\.sql$/, "")} .. `);
       expect(render(sections)).toContain("[BLOCKER] Stored pipelines");
     } finally {
       await oldClient.end();
@@ -148,7 +155,7 @@ describe("predeploy-check", () => {
   it("reports 0125 and 0127 as done on a migrated database", async () => {
     const { piiPatternTypeSchema } = await import("@docslurp/shared");
     await client.query("begin read only");
-    const sections = await collectReport(client, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options });
+    const sections = await collectReport(client, { migrationFiles, acceptedPiiPatterns: piiPatternTypeSchema.options });
     await client.query("rollback");
     const byTitle = (prefix: string) => sections.find((section: { title: string }) => section.title.startsWith(prefix))!;
     expect(byTitle("api_keys").level).toBe("ok");
@@ -162,7 +169,7 @@ describe("predeploy-check", () => {
     const report = async () => {
       await client.query("begin read only");
       try {
-        const sections = await collectReport(client, { journal, acceptedPiiPatterns: shared.piiPatternTypeSchema.options });
+        const sections = await collectReport(client, { migrationFiles, acceptedPiiPatterns: shared.piiPatternTypeSchema.options });
         return sections.find((section: { title: string }) => section.title.startsWith("Stored pipelines naming a vector backend"))!;
       } finally {
         await client.query("rollback");
@@ -186,7 +193,7 @@ describe("predeploy-check", () => {
     const report = async () => {
       await client.query("begin read only");
       try {
-        const sections = await collectReport(client, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options });
+        const sections = await collectReport(client, { migrationFiles, acceptedPiiPatterns: piiPatternTypeSchema.options });
         return sections.find((section: { title: string }) => section.title.startsWith("Pricing-provider state"))!;
       } finally {
         await client.query("rollback");

@@ -1,5 +1,4 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { applyMigrationFiles } from "./migration-runner.mjs";
 import { assertGenerationRollout } from "./generation-rollout.mjs";
 import { assertMigrationOwner, reconcileRoleGrants } from "./roles.mjs";
 import { migratePostgis } from "./migrate-postgis.mjs";
@@ -32,7 +31,7 @@ export async function applyOwnedMigrations(client, { migrationsFolder, env = pro
     // interpolation and no membership or privilege grants to runtime roles.
     await client.query(`SET ROLE "${owner}"`);
     await assertMigrationOwner(client);
-    await migrate(drizzle(client), { migrationsFolder });
+    await applyMigrationFiles(client, { migrationsFolder, env });
     if (env.POSTGIS_MIGRATIONS === "1") await migratePostgis(client);
     await reconcileRoleGrants(client);
   } finally {

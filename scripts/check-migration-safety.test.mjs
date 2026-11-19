@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { GRANDFATHERED_THROUGH_IDX, checkMigrationIdempotency, checkMigrationSql, checkMigrations, stripDollarQuoted, stripSqlNoise } from './check-migration-safety.mjs';
+import { GRANDFATHERED_THROUGH_IDX, LAST_NUMBERED_MIGRATION, checkMigrationIdempotency, checkMigrationName, checkMigrationSql, checkMigrations, migrationFiles, stripDollarQuoted, stripSqlNoise } from './check-migration-safety.mjs';
 
 const rules = (sql) => checkMigrationSql(sql).findings.map((finding) => finding.rule);
 const idempotencyRules = (sql) => checkMigrationIdempotency(sql).findings.map((finding) => finding.rule);
@@ -48,14 +48,14 @@ test('a marker with a reason acknowledges a contract migration', () => {
 test('only migrations after the grandfathered index are enforced', () => {
   const dir = mkdtempSync(join(tmpdir(), 'docslurp-migration-safety-'));
   try {
-    mkdirSync(join(dir, 'meta'));
     const old = GRANDFATHERED_THROUGH_IDX;
+    // The index is the file's position in apply order, so fill the positions before it.
+    for (let idx = 0; idx < old; idx += 1) writeFileSync(join(dir, `${String(idx).padStart(4, '0')}_filler.sql`), 'SELECT 1;');
     const entries = [
       { idx: old, tag: `${String(old).padStart(4, '0')}_old` },
       { idx: old + 1, tag: `${String(old + 1).padStart(4, '0')}_contract` },
-      { idx: old + 2, tag: `${String(old + 2).padStart(4, '0')}_acked` },
+      { idx: old + 2, tag: '20261118T1443_acked' },
     ];
-    writeFileSync(join(dir, 'meta/_journal.json'), JSON.stringify({ entries }));
     writeFileSync(join(dir, `${entries[0].tag}.sql`), 'DROP TABLE IF EXISTS legacy;');
     writeFileSync(join(dir, `${entries[1].tag}.sql`), 'ALTER TABLE runs\n  DROP COLUMN IF EXISTS legacy;');
     writeFileSync(join(dir, `${entries[2].tag}.sql`), '-- destructive-migration: unused since 0033\nDROP TABLE IF EXISTS legacy2;');
@@ -133,9 +133,6 @@ test('an idempotent-migration marker with a reason acknowledges a migration, in 
   assert.equal(checkMigrationIdempotency('-- idempotent-migration:\nINSERT INTO backup SELECT * FROM plan;').acknowledged, false);
   const dir = mkdtempSync(join(tmpdir(), 'docslurp-migration-idempotency-'));
   try {
-    mkdirSync(join(dir, 'meta'));
-    const entries = [{ idx: 0, tag: '0000_old' }, { idx: 1, tag: '0001_acked' }];
-    writeFileSync(join(dir, 'meta/_journal.json'), JSON.stringify({ entries }));
     writeFileSync(join(dir, '0000_old.sql'), 'CREATE TABLE runs (id text);');
     writeFileSync(join(dir, '0001_acked.sql'), sql);
     const { problems, acknowledged } = checkMigrations(dir);
@@ -147,6 +144,22 @@ test('an idempotent-migration marker with a reason acknowledges a migration, in 
 test('the repository migrations pass the gate', () => {
   const dir = new URL('../server/db/migrations/', import.meta.url).pathname;
   assert.ok(readdirSync(dir).length > 0);
-  assert.ok(JSON.parse(readFileSync(join(dir, 'meta/_journal.json'), 'utf8')).entries.length > 0);
+  assert.ok(migrationFiles(dir).length >= 193);
   assert.deepEqual(checkMigrations(dir).problems, []);
+});
+
+test('numbered names are frozen and new migrations carry a real UTC timestamp', () => {
+  assert.equal(checkMigrationName('0200_project_runs_finished_at.sql'), null);
+  assert.equal(checkMigrationName('20261118T1443_hot_query_indexes.sql'), null);
+  assert.match(checkMigrationName(`${String(LAST_NUMBERED_MIGRATION + 1).padStart(4, '0')}_next.sql`), /numbered names are frozen/);
+  assert.match(checkMigrationName('20261332T1443_bad_date.sql'), /not a real UTC date/);
+  assert.match(checkMigrationName('20261118T1443-dashes.sql'), /expected YYYYMMDDTHHMM/);
+  const dir = mkdtempSync(join(tmpdir(), 'docslurp-migration-names-'));
+  try {
+    writeFileSync(join(dir, '0201_numbered.sql'), 'SELECT 1;');
+    writeFileSync(join(dir, '20261118T1443_ok.sql'), 'SELECT 1;');
+    assert.deepEqual(checkMigrations(dir).problems.map((problem) => [problem.file, problem.kind]), [['0201_numbered.sql', 'name']]);
+    // Apply order is name order: numbered files first, then timestamps.
+    assert.deepEqual(migrationFiles(dir), ['0201_numbered.sql', '20261118T1443_ok.sql']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

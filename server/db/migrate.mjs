@@ -1,5 +1,6 @@
 // The one way to create or update the database schema: apply server/db/migrations
-// with Drizzle on the same locked connection. Used by the Fly release command, the compose `migrate`
+// with our runner (migration-runner.mjs: every unrecorded file, in name order, one
+// transaction per file) on the same locked connection. Used by the Fly release command, the compose `migrate`
 // service, and API startup (RUN_STARTUP_MIGRATIONS). A session advisory lock
 // serializes concurrent migrators (several app instances, release + app), so
 // two processes never apply the same migration at once.
@@ -7,7 +8,6 @@ import path from "node:path";
 import { applyOwnedMigrations } from "./owned-migrations.mjs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
 import { migrationFailureDetail } from "./migration-error.mjs";
 
 const MIGRATION_LOCK_KEY = 7_142_771_001; // arbitrary, stable app-wide key
@@ -35,23 +35,6 @@ const databaseUrl = directDatabaseUrl(pooledUrl);
 const LOCK_WAIT_MS = Number.parseInt(process.env.MIGRATION_LOCK_WAIT_MS ?? "", 10) || 240_000;
 
 const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-// drizzle-kit applies only journal entries whose `when` is later than the
-// newest migration a database has recorded, so an entry stamped earlier than
-// its predecessor (e.g. from a long-lived branch) would be skipped silently on
-// existing databases. Refuse to migrate instead. Same rule as
-// worker/src/test/migrated-db.ts, which tests the journal in CI.
-const journal = JSON.parse(readFileSync(path.join(repoRoot, "server/db/migrations/meta/_journal.json"), "utf8"));
-const journalProblems = journal.entries.flatMap((entry, position) => {
-  const previous = journal.entries[position - 1];
-  return [
-    ...(entry.idx === position ? [] : [`${entry.tag}: idx ${entry.idx}, expected ${position}`]),
-    ...(!previous || entry.when > previous.when ? [] : [`${entry.tag}: when ${entry.when} is not after ${previous.tag} (${previous.when})`]),
-  ];
-});
-if (journalProblems.length > 0) {
-  throw new Error(`[migrate] server/db/migrations/meta/_journal.json is out of order; restamp the new entry later than the last one:\n${journalProblems.join("\n")}`);
-}
 
 const require = createRequire(import.meta.url);
 const { Client } = require("pg");

@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { applyRemainingMigrations, createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
 
+import { listMigrationFiles } from "../../db/migration-runner.mjs";
 import { collectReport, oneOrgPlanSql, redactOutput } from "../../db/predeploy-check.mjs";
 
 /**
@@ -14,7 +16,7 @@ import { collectReport, oneOrgPlanSql, redactOutput } from "../../db/predeploy-c
  */
 const MIGRATION = "one_org_per_user";
 const migrationSql = readFileSync(new URL("../../db/migrations/0127_one_org_per_user.sql", import.meta.url), "utf8");
-const journal = JSON.parse(readFileSync(new URL("../../db/migrations/meta/_journal.json", import.meta.url), "utf8"));
+const migrationFiles = listMigrationFiles(fileURLToPath(new URL("../../db/migrations/", import.meta.url)));
 type Removal = { org_id: string; user_id: string; reason: string };
 type Promotion = { org_id: string; user_id: string; previous_role: string };
 let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
@@ -98,7 +100,7 @@ beforeAll(async () => {
     const { piiPatternTypeSchema } = await import("@docslurp/shared");
     const run = async (ack0127: string | null, redact = false) => {
       await client.query("begin read only");
-      const sections = await collectReport(client, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options, ack0127, redact });
+      const sections = await collectReport(client, { migrationFiles, acceptedPiiPatterns: piiPatternTypeSchema.options, ack0127, redact });
       await client.query("rollback");
       return sections.find((s: { title: string }) => s.title.startsWith("Memberships beyond one per user"))!;
     };

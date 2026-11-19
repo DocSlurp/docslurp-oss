@@ -11,7 +11,11 @@
 //
 //   -- destructive-migration: column unused since <release/commit>; contract step of <expand migration>
 //
-// Migrations up to GRANDFATHERED_THROUGH_IDX predate this rule and are skipped.
+// The first GRANDFATHERED_THROUGH_IDX + 1 migrations (in apply order) predate this rule and are skipped.
+//
+// File names are checked too: the numbered NNNN_ files are frozen at LAST_NUMBERED_MIGRATION, and every newer
+// migration is named with a UTC timestamp, YYYYMMDDTHHMM_name.sql (pnpm db:new <name>), so two branches never
+// collide on a number. There is no journal: server/db/migration-runner.mjs applies every unrecorded file.
 //
 // Every migration must also be idempotent: running it a second time is a no-op
 // with the same end state (worker/src/test/migrations-idempotent.test.ts runs
@@ -27,11 +31,39 @@
 // second run is a no-op for a reason the gate cannot see says so:
 //
 //   -- idempotent-migration: <why a second run changes nothing>
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const GRANDFATHERED_THROUGH_IDX = 32;
+/** The newest numbered migration; server/db/legacy-migrations.json lists them all. */
+export const LAST_NUMBERED_MIGRATION = 200;
+const NUMBERED_NAME = /^(\d{4})_[a-z0-9][a-z0-9_]*\.sql$/;
+const TIMESTAMP_NAME = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})_[a-z0-9][a-z0-9_]*\.sql$/;
+
+/** Pure: why a migration file name is not acceptable, or null. Same rule as server/db/migration-runner.mjs. */
+export function checkMigrationName(file) {
+  const numbered = NUMBERED_NAME.exec(file);
+  if (numbered) {
+    return Number(numbered[1]) <= LAST_NUMBERED_MIGRATION ? null
+      : 'numbered names are frozen; name new migrations with a UTC timestamp (pnpm db:new <name>)';
+  }
+  const stamp = TIMESTAMP_NAME.exec(file);
+  if (!stamp) return 'expected YYYYMMDDTHHMM_snake_case_name.sql (pnpm db:new <name>)';
+  const [year, month, day, hour, minute] = stamp.slice(1).map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute));
+  const real = date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+    && date.getUTCHours() === hour && date.getUTCMinutes() === minute;
+  return real ? null : 'the timestamp is not a real UTC date and time';
+}
+
+/** Migration files in apply order (plain name order). */
+export function migrationFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.sql'))
+    .map((entry) => entry.name)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
 export const MARKER = /--[ \t]*destructive-migration:[ \t]*(\S.*)$/im;
 export const IDEMPOTENT_MARKER = /--[ \t]*idempotent-migration:[ \t]*(\S.*)$/im;
 
@@ -162,11 +194,11 @@ export function checkMigrationSql(sql) {
 }
 
 export function checkMigrations(dir) {
-  const journal = JSON.parse(readFileSync(join(dir, 'meta/_journal.json'), 'utf8'));
   const problems = [];
   const acknowledged = [];
-  for (const entry of journal.entries ?? []) {
-    const file = `${entry.tag}.sql`;
+  for (const [idx, file] of migrationFiles(dir).entries()) {
+    const name = checkMigrationName(file);
+    if (name) problems.push({ file, kind: 'name', rule: 'migration-file-name', line: 1, text: file, why: name });
     const sql = readFileSync(join(dir, file), 'utf8');
     const idempotency = checkMigrationIdempotency(sql);
     if (idempotency.acknowledged) {
@@ -174,7 +206,7 @@ export function checkMigrations(dir) {
     } else {
       for (const finding of idempotency.findings) problems.push({ file, kind: 'idempotency', ...finding });
     }
-    if (entry.idx <= GRANDFATHERED_THROUGH_IDX) continue;
+    if (idx <= GRANDFATHERED_THROUGH_IDX) continue;
     const result = checkMigrationSql(sql);
     if (result.findings.length === 0) continue;
     if (result.acknowledged) {
@@ -193,6 +225,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     console.log(`[migration-safety] ${item.file}: ${item.findings.length} ${item.kind} statement(s) acknowledged: ${item.reason}`);
   }
   for (const problem of problems) {
+    if (problem.kind === 'name') {
+      console.error(`::error file=server/db/migrations/${problem.file},line=1::${problem.rule}: ${problem.why}.`);
+      continue;
+    }
     if (problem.kind === 'idempotency') {
       console.error(`::error file=server/db/migrations/${problem.file},line=${problem.line}::${problem.rule}: "${problem.text}" ${problem.why}. ` +
         'Every migration must be safe to run twice; if this one is for a reason the check cannot see, add ' +

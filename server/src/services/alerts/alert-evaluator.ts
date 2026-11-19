@@ -1,5 +1,5 @@
 import { withBackgroundSpan } from "@docslurp/shared/observability";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,27 +48,32 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-let cachedJournal: MigrationSnapshot["journal"] | null | undefined;
+let cachedShipped: string[] | null | undefined;
 
-/** server/db/migrations/meta/_journal.json shipped with this build, or null when absent. */
-export function loadMigrationJournal(starts: string[] = [process.cwd(), dirname(fileURLToPath(import.meta.url))]): MigrationSnapshot["journal"] | null {
-  if (cachedJournal !== undefined) return cachedJournal;
+/**
+ * The migration files (server/db/migrations/*.sql) shipped with this build, in apply order, or null when the folder
+ * is absent. Same listing as server/db/migration-runner.mjs, which owns the naming rules.
+ */
+export function loadShippedMigrations(starts: string[] = [process.cwd(), dirname(fileURLToPath(import.meta.url))]): string[] | null {
+  if (cachedShipped !== undefined) return cachedShipped;
   for (const start of starts) {
     for (let dir = start; ; dir = dirname(dir)) {
       // `server/db/...` from the repo root (the bundled app runs from /app); `db/...` from server/.
-      const path = ["server/db/migrations/meta/_journal.json", "db/migrations/meta/_journal.json"]
+      const folder = ["server/db/migrations", "db/migrations"]
         .map((relativePath) => resolve(dir, relativePath))
-        .find((candidate) => existsSync(candidate));
-      if (path) {
-        const parsed = JSON.parse(readFileSync(path, "utf8")) as { entries?: Array<{ tag: string; when: number }> };
-        cachedJournal = (parsed.entries ?? []).map((entry) => ({ tag: entry.tag, when: Number(entry.when) }));
-        return cachedJournal;
+        .find((candidate) => existsSync(resolve(candidate, "0000_current_schema.sql")));
+      if (folder) {
+        cachedShipped = readdirSync(folder, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
+          .map((entry) => entry.name)
+          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        return cachedShipped;
       }
       if (dirname(dir) === dir) break;
     }
   }
-  cachedJournal = null;
-  return null;
+  cachedShipped = null;
+  return cachedShipped;
 }
 
 /** Expired extracts not yet deleted; extract-deletion-stuck fires on errors or long overdue rows. */
@@ -130,19 +135,15 @@ export async function readQueueSnapshot(): Promise<QueueSnapshot> {
   };
 }
 
+/** The file names recorded in the runner's ledger (docslurp_migrations.applied). */
+export const APPLIED_MIGRATIONS_SQL = "select filename from docslurp_migrations.applied";
+
 async function readMigrationSnapshot(): Promise<MigrationSnapshot | null> {
-  const journal = loadMigrationJournal();
-  if (!journal) return null;
+  const shipped = loadShippedMigrations();
+  if (!shipped) return null;
   try {
-    // drizzle-kit migrate records each applied migration with created_at = journal `when`.
-    const [row] = await sql<{ applied: number; latest: string | number | null }[]>`
-      select count(*)::int as applied, max(created_at) as latest from drizzle.__drizzle_migrations
-    `;
-    return {
-      appliedCount: Number(row?.applied ?? 0),
-      latestAppliedWhen: row?.latest === null || row?.latest === undefined ? null : Number(row.latest),
-      journal,
-    };
+    const rows = await sql.unsafe<{ filename: string }[]>(APPLIED_MIGRATIONS_SQL);
+    return { applied: rows.map((row) => row.filename), shipped };
   } catch (error) {
     console.warn(`[alert] migration state unavailable: ${errorMessage(error)}`);
     return null;
