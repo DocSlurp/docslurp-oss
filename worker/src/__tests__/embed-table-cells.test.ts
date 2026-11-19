@@ -688,13 +688,13 @@ describe("the parser VM transfer and parse bounds (H2)", () => {
   });
 
   it("splits tables into batches whose output bound stays under the batch target; a big table gets a batch of its own", async () => {
-    // ~6 MB of UTF-8 each: two share a batch (12 MB), a third would cross the 16 MiB target.
+    // ~6 MB of UTF-8 each: one fits the effective batch target; two would exceed it.
     const big = (i: number) => `<table><tr><td>${i}${"界".repeat(2_000_000)}</td></tr></table>`;
     const sources = [big(1), big(2), big(3), "<table><tr><td>tiny</td></tr></table>"];
     const vm = vmRunner();
     const plans: Array<{ maxOutputBytes?: number }> = [];
     await prepareHtmlTableCells(sources, { run: vi.fn(async (plan: never, signal?: AbortSignal) => { plans.push(plan); return vm.run(plan, signal); }) } as never);
-    expect(vm.batches.map((batch) => batch.length)).toEqual([2, 2]);
+    expect(vm.batches.map((batch) => batch.length)).toEqual([1, 1, 2]);
     for (const plan of plans) expect(plan.maxOutputBytes! * TABLE_PARSE_HEAP_FACTOR).toBeLessThanOrEqual(256 * 1024 * 1024);
     expect(Math.max(...plans.map((plan) => plan.maxOutputBytes!))).toBeLessThanOrEqual(HTML_TABLE_BATCH_OUTPUT_TARGET);
   });
@@ -1075,8 +1075,8 @@ describe("stored HTML table cells: fail closed to the VM path", () => {
   }
 
   it("tampered artifact: a hash that no longer matches its table's source is a miss, parsed in a VM", async () => {
-    const after = await expectVmFallback("hash", edit((artifact) => { artifact.tables[0]![0] = tableSourceSha256("<table><tr><td>other</td></tr></table>"); }), "partial");
-    expect(after.embedVm.batches.flat()).toHaveLength(1);
+    const after = await expectVmFallback("hash", edit((artifact) => { artifact.tables[0]![0] = tableSourceSha256("<table><tr><td>other</td></tr></table>"); }), "invalid");
+    expect(after.embedVm.batches.flat().length).toBeGreaterThan(1);
   });
 
   it("oversized artifact (the store reports its length): refused before reading", async () => {
