@@ -21,7 +21,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { once } from "node:events";
-import {
+import { ladderForbidsVision,
   DOCUMENT_FAILURE_MARKERS,
   defaultDocumentExtractionConfig,
   isProviderCallAllowed,
@@ -128,6 +128,8 @@ import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { routingFactsWithDopplerFacts } from "../lib/page-evidence-doppler.js";
 import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { pageLayoutFactsFromDopplerFacts, withEncodingRoutes } from "../lib/page-evidence-doppler.js";
+import { sandboxedPdfPageFactsMathRead } from "../extractors/sandboxed-pdf-page-facts.js";
 import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
 import { documentCostStats } from "../lib/document-cost-stats.js";
 import { DOPPLER_FACTS_EVIDENCE_SOURCE, checkDopplerFactsEvidence, pageFactRowsFromCheckedFacts, pageImageEvidenceFromCheckedFacts } from "../lib/doppler-page-facts-evidence.js";
@@ -1051,9 +1053,10 @@ export class ExtractMarkdownStage implements Stage {
                   }
                   // Layout facts (image placement, tables) for evidence routing: collected in the parser sandbox for host-probed
                   // PDFs, or returned by the PDF VM from the same job that wrote the winning Markdown. Never host-probed otherwise.
+                  const vmLayoutFacts = factsEvidence?.layoutFacts ?? winningCandidate.layoutFacts;
                   const pageLayoutFactsUri = !isPdf || !resolveRunRoutingV2(state) ? null
                     : hostPdfProbes === "ran" ? await this.recordPageLayoutFacts(document, tempFile, winningText, state, signal)
-                    : winningCandidate.layoutFacts ? await this.storePageLayoutFacts(document, state, winningCandidate.layoutFacts, winningCandidate.layoutFactsSource ?? "vm-pdf")
+                    : vmLayoutFacts ? await this.storePageLayoutFacts(document, state, vmLayoutFacts, winningCandidate.layoutFactsSource ?? "vm-pdf")
                     : null;
                   if (pageLayoutFactsUri) {
                     state.artifactLedger.recordDocument(document.id, "page-layout-facts", pageLayoutFactsUri);
@@ -1891,13 +1894,16 @@ export class ExtractMarkdownStage implements Stage {
     candidate: ExtractedCandidate,
     winningText: string,
     modelReadPages: ReadonlySet<number> = new Set(),
-  ): Promise<{ pageImageEvidenceUri: string | null; stats: Record<string, unknown> }> {
+  ): Promise<{ pageImageEvidenceUri: string | null; layoutFacts?: ExtractedCandidate["layoutFacts"]; stats: Record<string, unknown> }> {
     const skipped = (reason: string) => {
       console.log(`[doppler-page-facts] document=${document.id} evidence=skipped reason=${reason}`);
       return { pageImageEvidenceUri: null, stats: { status: "skipped", reason } };
     };
     const mode = dopplerPageFactsMode();
-    if (mode !== "use") return skipped(`mode-${mode}`);
+    const smartestRouting = mode === "store" && ladderSkipsOcr(state.run.pipeline)
+      && state.run.pipeline.visionFallback && resolveRunRoutingV2(state)
+      && process.env.DOCSLURP_SMARTEST_PDF_ROUTING === "on";
+    if (mode !== "use" && !smartestRouting) return skipped(`mode-${mode}`);
     if (candidate.label !== VM_PDF_EXTRACTOR_ID || !candidate.pageFacts) return skipped("no-facts");
     // The host's own measured count; never coerced: without one, facts have nothing to be checked against.
     const pageCount = document.pageCount;
@@ -1915,8 +1921,10 @@ export class ExtractMarkdownStage implements Stage {
     try {
       if (!state.run.pipeline.visionFallback) evidenceReason = "vision-fallback-off";
       else {
-        const pages = pageImageEvidenceFromCheckedFacts(check.checked);
-        if (pages) {
+        const fastest = ladderForbidsVision(state.run.pipeline);
+        const pages = pageImageEvidenceFromCheckedFacts(check.checked)
+          ?.filter((page) => !fastest || !ocrPages.has(page.pageNumber));
+        if (pages?.length) {
           pageImageEvidenceUri = await this.storePageImageEvidence(document, state, pages, DOPPLER_FACTS_EVIDENCE_SOURCE);
           evidencePages = pages.length;
         }
@@ -1929,11 +1937,18 @@ export class ExtractMarkdownStage implements Stage {
     // A run without a page billing pin bills pages with no text bytes and an image as scans at completion: facts rows would
     // raise its charge, so it keeps going without them.
     const legacyBilling = runBillsScansAtCompletion(state);
-    const rows = legacyBilling ? [] : pageFactRowsFromCheckedFacts(check.checked, { documentId: document.id, runId: state.run.id });
+    const rows = legacyBilling || mode !== "use" ? [] : pageFactRowsFromCheckedFacts(check.checked, { documentId: document.id, runId: state.run.id });
     await recordPageFacts(state, rows);
     console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${legacyBilling ? " rows-skipped=legacy-billing" : ""}`);
+    const mathRead = candidate.plan.sandboxedPdf ? sandboxedPdfPageFactsMathRead(candidate.plan.sandboxedPdf) : false;
+    const layoutFacts = smartestRouting
+      ? candidate.layoutFacts
+        ? withEncodingRoutes(candidate.layoutFacts, check.checked.facts, { mathRead }).layout
+        : pageLayoutFactsFromDopplerFacts(check.checked.facts, { mathRead })
+      : undefined;
     return {
       pageImageEvidenceUri,
+      layoutFacts,
       stats: {
         status: "built", pages: pageCount, evidencePages, rows: rows.length,
         ...(evidenceReason ? { evidenceSkipped: evidenceReason } : {}), ...(legacyBilling ? { rowsSkipped: "legacy-billing" } : {}),

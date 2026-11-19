@@ -5,19 +5,21 @@ import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
 
-import { defaultPipelineFeatures, normalizeStoredPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, normalizeStoredPipelineFeatures, type AdaptiveRoutingDecisionSurface } from "@docslurp/shared";
 
 import { acceptSandboxedPdfResult, type SandboxedPdfJob } from "../extractors/plugins.js";
 import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
 import type { Document, ProjectRun } from "../models.js";
 import { MemoryPageBasisLedger } from "../pipeline/page-basis-memory.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
+import { ClassifyRouteStage, ENCODING_MATH_READ_SIGNAL, selectLegacyVisionPages } from "../stages/classify-route.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { PRODUCER_MARKER, docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
 import { OCR_PAGE_CLASS_SLOT } from "../pipeline/ocr-page-class.js";
 import { PAGE_BILLING_RULES_SLOT } from "../db/page-base-fee.js";
 import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
+import { DOPPLER_MATH_FLAGS, dopplerFlagBit } from "../lib/doppler-encoding-facts.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
 
 function parseFacts(raw: string, pageCount: number) {
@@ -74,6 +76,9 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
     },
   }) as unknown as CommandRunner;
   const storage = {
+    bucket: "test",
+    getJson: async (key: string) => json.get(key),
+    getBytes: async (key: string) => bytes.get(key) ?? Buffer.alloc(0),
     uri: (key: string) => `s3://test/${key}`,
     putBytes: async (key: string, data: Uint8Array) => { if (failPutBytes) throw new Error("storage down"); bytes.set(key, Buffer.from(data)); },
     putJson: async (key: string, value: unknown) => { json.set(key, value); },
@@ -105,7 +110,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
     ...calls.filter((name) => /^pdf|pageText|extractText|ocrPdf|images|info|render|rasteri[sz]e/i.test(name)),
     ...commands.filter((command) => !command.sandboxedPdf).map((command) => command.binary),
   ];
-  return { stage, state, ledger, calls, commands, json, bytes, failBytes: () => { failPutBytes = true; }, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
+  return { stage, state, ledger, calls, commands, json, bytes, storage, failBytes: () => { failPutBytes = true; }, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
 }
 
 describe("the sandboxed PDF route on the worker host", () => {
@@ -497,6 +502,49 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
         { documentId: "doc-1", runId: "run-1", pageNumber: 3, textBytes: 8, wordCount: 8, imageCount: 1, factsSource: "doppler-facts" },
       ]);
       expect(checkpoint?.stats).toMatchObject({ hostPdfProbes: "skipped-sandboxed-route", dopplerFactsEvidence: { status: "built", pages: 3, evidencePages: 1, rows: 3 } });
+    } finally { await h.cleanup(); }
+  });
+
+  it.each([
+    { mode: "store", pilot: "off", maxRung: "intelligent", alreadyRead: false, textDisagrees: false, selected: [] },
+    { mode: "store", pilot: "on", maxRung: "intelligent", alreadyRead: false, textDisagrees: false, selected: [2, 3] },
+    { mode: "store", pilot: "on", maxRung: "intelligent", alreadyRead: false, textDisagrees: true, selected: [] },
+    { mode: "store", pilot: "on", maxRung: "ocr", alreadyRead: false, textDisagrees: false, selected: [] },
+    { mode: "use", pilot: "off", maxRung: "ocr", alreadyRead: false, textDisagrees: false, selected: [2] },
+    { mode: "use", pilot: "off", maxRung: "ocr", alreadyRead: true, textDisagrees: false, selected: [] },
+    { mode: "use", pilot: "off", maxRung: "intelligent", alreadyRead: false, textDisagrees: false, selected: [2, 3] },
+  ] as const)("routes validated VM facts ($mode, $maxRung, OCR already returned: $alreadyRead)", async ({ mode, pilot, maxRung, alreadyRead, textDisagrees, selected }) => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+    vi.stubEnv("DOCSLURP_ENCODING_FACTS_ROUTING", "on");
+    vi.stubEnv("DOCSLURP_SMARTEST_PDF_ROUTING", pilot);
+    const scan = scanPage(2);
+    const text = { ...(scan.text as Record<string, unknown>), charCount: 0, invisibleCharCount: 0, wordCount: 0,
+      invisibleWordCount: 0, textLayer: "none", textCoverage: 0, textOverImageRatio: 0, invisibleOverFullPageImage: false };
+    const native = "A plain paragraph with usable native words on this page. ".repeat(12);
+    const pageTwo = alreadyRead || textDisagrees ? native : "![Page image](page.png)";
+    const h = await pinned({
+      markdown: `${native}\f${pageTwo}\f${native}`,
+      pageFacts: jsonl([
+        docLine(),
+        textPage(1),
+        { ...scan, text },
+        textPage(3, { mathBits: dopplerFlagBit(DOPPLER_MATH_FLAGS, "type3-bitmap-font"), tableBits: 0, encodingCounts: 0 }),
+        runLine(),
+      ]),
+      ...(alreadyRead ? { ocrPages: [2] } : {}),
+    });
+    h.state.run.pipeline.quality = "auto";
+    h.state.run.pipeline.ladder = { maxRung };
+    try {
+      await h.stage.run(h.state);
+      await new ClassifyRouteStage(h.storage as never).run(h.state);
+      const surface = [...h.json.entries()].find(([key]) => key.endsWith("/classify/doc-1.json"))?.[1] as
+        AdaptiveRoutingDecisionSurface;
+      expect(surface.pages[2]?.ocrDecision?.signals.includes(ENCODING_MATH_READ_SIGNAL) ?? false)
+        .toBe((selected as readonly number[]).includes(3));
+      expect(selectLegacyVisionPages(surface.pages, { routingV2: true })).toEqual(selected);
+      expect(h.hostPdf()).toEqual([]);
     } finally { await h.cleanup(); }
   });
 

@@ -4,6 +4,7 @@ import {
   BLANK_PAGE_SIGNAL,
   DRAWN_CONTENT_SIGNAL,
   GARBLED_TEXT_LAYER_SIGNAL,
+  ladderForbidsVision,
   PAGE_RASTER_ROUTING,
   SPARSE_FULL_PAGE_IMAGE_SIGNAL,
   STAMPED_RASTER_SIGNAL,
@@ -131,6 +132,8 @@ export class ClassifyRouteStage implements Stage {
             ...(pageLayout ? { pageLayout } : {}),
             tableScans,
             routingV2,
+            // Encoding-only rescues are for Vision. Fastest keeps its raster/OCR policy.
+            encodingRouting: !ladderForbidsVision(state.run.pipeline) && readEncodingFactsRouting(),
           });
 
           await this.storage.putJson(key, surface);
