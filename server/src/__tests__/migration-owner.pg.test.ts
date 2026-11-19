@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
-import { LEGACY_MIGRATIONS } from "../../db/migration-runner.mjs";
+import { LEGACY_MIGRATIONS, listMigrationFiles } from "../../db/migration-runner.mjs";
 import { applyOwnedMigrations } from "../../db/owned-migrations.mjs";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -84,6 +84,21 @@ it.skipIf(!url)("keeps a closed pre-generation database on one superuser session
     expect((await c.query("select count(*)::int n from pg_stat_activity where datname=current_database()")).rows[0].n).toBe(1);
     const { rows } = await c.query("select distinct tableowner from pg_tables where schemaname in ('public','drizzle','docslurp_migrations','docslurp_mastra')");
     expect(rows).toEqual([{ tableowner: owner }]);
+    // The fixture was migrated by Drizzle through the first 112 files: those are mapped, not re-run; the rest ran.
+    const ledger = (await c.query("select source, count(*)::int n, max(filename) newest from docslurp_migrations.applied group by source order by source")).rows;
+    expect(ledger).toEqual([
+      { source: "drizzle", n: 112, newest: LEGACY_MIGRATIONS[111]![0] },
+      { source: "runner", n: listMigrationFiles(folder).length - 112, newest: listMigrationFiles(folder).at(-1) },
+    ]);
+    // The previous release reads the Drizzle ledger: it stays current for the numbered files.
+    expect((await c.query("select count(*)::int n, max(created_at)::text newest from drizzle.__drizzle_migrations")).rows[0])
+      .toEqual({ n: LEGACY_MIGRATIONS.length, newest: String(LEGACY_MIGRATIONS.at(-1)![1]) });
+    // Runtime roles read the ledger and can never write it or create beside it.
+    const access = (await c.query(`select has_table_privilege('docslurp_app', 'docslurp_migrations.applied', 'select') as reads,
+      has_table_privilege('docslurp_app', 'docslurp_migrations.applied', 'insert, update, delete, truncate') as writes,
+      has_schema_privilege('docslurp_app', 'docslurp_migrations', 'create') as creates,
+      has_table_privilege('public', 'docslurp_migrations.applied', 'select') as public_reads`)).rows[0];
+    expect(access).toEqual({ reads: true, writes: false, creates: false, public_reads: false });
     const defaults = await c.query(`select a.privilege_type from pg_default_acl d,
       lateral aclexplode(d.defaclacl) a where d.defaclrole=$1::regrole
       and d.defaclnamespace='public'::regnamespace and d.defaclobjtype='r'

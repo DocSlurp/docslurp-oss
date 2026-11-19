@@ -135,6 +135,40 @@ async function bootstrapFromDrizzle(client, { migrationsFolder, log }) {
 }
 
 /**
+ * A database that has the schema but no record of how it got there (the ledger was dropped or restored empty, and
+ * there is no Drizzle ledger to map). Replaying history is not an option: early migrations do not apply to the
+ * current schema (tables they alter were since renamed or dropped). Refuse, unless the operator states which
+ * migrations the schema already contains with MIGRATION_ASSUME_APPLIED_THROUGH=<file name>: every file up to and
+ * including it is recorded as applied without running, and the rest run normally.
+ */
+async function recoverLostLedger(client, { files, env, log }) {
+  const { rows: [{ lost }] } = await client.query(
+    `select to_regclass('public.documents') is not null and not exists (select 1 from ${LEDGER_TABLE}) as lost`);
+  const through = env.MIGRATION_ASSUME_APPLIED_THROUGH?.trim();
+  if (!lost) {
+    if (through) log("[migrate] MIGRATION_ASSUME_APPLIED_THROUGH ignored: the migration ledger is not empty");
+    return;
+  }
+  if (!through) {
+    throw new Error("the database has tables but no record of applied migrations (docslurp_migrations.applied is empty and there is no Drizzle ledger). "
+      + "Restore the ledger, or set MIGRATION_ASSUME_APPLIED_THROUGH=<newest migration file the schema already contains> to record those as applied without running them.");
+  }
+  if (!files.includes(through)) throw new Error(`MIGRATION_ASSUME_APPLIED_THROUGH=${JSON.stringify(through)} is not a migration file in this build`);
+  const assumed = files.filter((file) => file <= through);
+  await client.query("begin");
+  try {
+    for (const file of assumed) {
+      await client.query(`insert into ${LEDGER_TABLE} (filename, sha256, source) values ($1, '', 'assumed') on conflict (filename) do nothing`, [file]);
+    }
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  }
+  log(`[migrate] recorded ${assumed.length} migration(s) through ${through} as applied without running them (MIGRATION_ASSUME_APPLIED_THROUGH)`);
+}
+
+/**
  * Keep the old Drizzle ledger current for legacy files, so the previous release (which reads it for readiness and
  * skew) still sees its schema as applied during a rollout or after a rollback. Timestamp-named files postdate every
  * release that reads it. Runs inside the file's transaction.
@@ -158,7 +192,6 @@ async function applyFile(client, { file, sql, hash, lockTimeoutMs, mirror }) {
     for (const statement of sql.split(STATEMENT_BREAKPOINT)) {
       if (statement.trim()) await client.query(statement);
     }
-    // Statements above may have changed lock_timeout or the role for this transaction; the ledger write is ours.
     await client.query(
       `insert into ${LEDGER_TABLE} (filename, sha256) values ($1, $2)
        on conflict (filename) do update set sha256 = excluded.sha256, applied_at = now(), source = 'runner'`,
@@ -189,6 +222,7 @@ export async function applyMigrationFiles(client, {
   const files = listMigrationFiles(migrationsFolder);
   await ensureLedger(client);
   await bootstrapFromDrizzle(client, { migrationsFolder, log });
+  await recoverLostLedger(client, { files, env, log });
   const mirror = await drizzleLedgerExists(client);
 
   const { rows } = await client.query(`select filename, sha256 from ${LEDGER_TABLE}`);

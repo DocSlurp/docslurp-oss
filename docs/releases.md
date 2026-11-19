@@ -36,6 +36,33 @@ Migration 0112 requires coordinated downtime, not a rolling release. Follow the
 [enforced migration preconditions and drain procedure](generation-rollout.md)
 before deploying a fleet that uses execution generations.
 
+## How migrations are applied
+
+`node server/db/migrate.mjs` (the release command, the Compose `migrate` service and `RUN_STARTUP_MIGRATIONS`) takes the
+migration advisory lock on one direct owner connection and runs `server/db/migration-runner.mjs`:
+
+- **Files, not a journal.** Every `*.sql` file in `server/db/migrations` that the database has not recorded in
+  `docslurp_migrations.applied` (by file name) is applied, in name order. The numbered `NNNN_` files are frozen; new ones
+  are `YYYYMMDDTHHMM_name.sql` in UTC (`pnpm db:new <name>`) and sort after them. A migration that merges after a
+  later-named one was already applied still runs, and the log says so.
+- **One transaction per file.** A lock a migration takes is released when that file commits. A failure rolls back that
+  file only: the files before it stay applied and recorded, and a re-run continues from the failed file. Because of this
+  every migration must be safe to run twice and must keep the previous release working (the expand/contract gate,
+  `scripts/check-migration-safety.mjs`, and `worker/src/__tests__/migrations-idempotent.test.ts`).
+- **Bounded lock waits.** Each file starts with `lock_timeout` set to `MIGRATION_STATEMENT_LOCK_TIMEOUT_MS` (15 s) and is
+  retried `MIGRATION_LOCK_RETRIES` times (3) when the wait times out or deadlocks, so a migration blocked by a long
+  transaction fails fast instead of queueing the site behind it.
+- **Databases migrated by Drizzle** (every database before this runner) are mapped once, on the first run: the files the
+  Drizzle ledger counted as applied are recorded by name and not re-run. `drizzle.__drizzle_migrations` is kept, and stays
+  current for the numbered files, so a rollback to the previous release still reads its schema as applied.
+- **Changed files.** An applied file whose contents no longer match the recorded hash is reported with a warning and
+  never re-run. Put the change in a new migration.
+- **A lost ledger** is refused, not replayed: see `MIGRATION_ASSUME_APPLIED_THROUGH` in
+  [configuration](self-host/configuration.md).
+
+Readiness (`/ready`), the `migrations-not-at-head` alert and `predeploy-check.mjs` compare the files a build ships with
+the ledger file by file. The application and worker roles can read the ledger and cannot write it.
+
 ## Migrations 0121-0127
 
 These migrations ship in one release. 0125 and 0127 delete rows (pre-release data: webhooks and API keys without exactly one

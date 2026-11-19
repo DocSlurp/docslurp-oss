@@ -164,6 +164,23 @@ describe("applyMigrationFiles", () => {
     expect(lines.join("\n")).toMatch(/1 migration\(s\) this build does not ship/);
   });
 
+  it("refuses a database with tables and no ledger instead of replaying history, until told what it contains", async () => {
+    write(FIRST, "create table documents (id int);"); // not re-runnable: a replay would fail here
+    write(SECOND, "create table if not exists b (id int);");
+    write("20261118T1443_new.sql", "create table if not exists fresh (id int);");
+    await db.exec("create table documents (id int); create table b (id int);");
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet })).rejects.toThrow(/no record of applied migrations/);
+    expect(await tables()).toEqual(["b", "documents"]);
+    await expect(applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, env: { MIGRATION_ASSUME_APPLIED_THROUGH: "0999_nope.sql" } })).rejects.toThrow(/not a migration file/);
+    const result = await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, env: { MIGRATION_ASSUME_APPLIED_THROUGH: SECOND } });
+    expect(result.applied).toEqual(["20261118T1443_new.sql"]);
+    expect(await ledger()).toEqual([
+      { filename: FIRST, source: "assumed" }, { filename: SECOND, source: "assumed" }, { filename: "20261118T1443_new.sql", source: "runner" },
+    ]);
+    // Once the ledger has rows the setting does nothing.
+    expect((await applyMigrationFiles(client, { migrationsFolder: dir, ...quiet, env: { MIGRATION_ASSUME_APPLIED_THROUGH: FIRST } })).applied).toEqual([]);
+  });
+
   it("bounds lock waits and retries a file that timed out waiting for a lock", async () => {
     write("20261118T1443_new.sql", "create table if not exists fresh (id int);");
     let failures = 2;
