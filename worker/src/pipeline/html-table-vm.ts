@@ -14,6 +14,7 @@ import { SandboxOutputLimitError } from "../sandbox/types.js";
 export type PreparedHtmlTableCells = Map<string, HtmlTableCell[] | null>;
 const cellsContext = new AsyncLocalStorage<PreparedHtmlTableCells>();
 export function preparedHtmlTableCells(source: string): HtmlTableCell[] | null | undefined { return cellsContext.getStore()?.get(source); }
+export function hasPreparedHtmlTableContext(): boolean { return cellsContext.getStore() !== undefined; }
 const DOCUMENT_MAX_TABLES = 1024;
 const DOCUMENT_MAX_SOURCE_CHARS = 32 * 1024 * 1024;
 const DOCUMENT_MAX_CELLS = 256_000;
@@ -43,7 +44,7 @@ export function assertHtmlTableCells(cells: unknown): asserts cells is HtmlTable
   }
 }
 /** A whole-document limit on tables' cells (as opposed to one malformed table). */
-export class HtmlTableBudgetError extends Error {
+class HtmlTableBudgetError extends Error {
   constructor(message: string) { super(message); this.name = "HtmlTableBudgetError"; }
 }
 /** Whole-document budgets, applied to every table's cells whether they come from the VM or a stored result. */
@@ -51,13 +52,40 @@ function documentBudget() {
   let chars = 0, cellCount = 0;
   return (cells: HtmlTableCell[] | null) => {
     if (cells === null) return;
-    cellCount += cells.length; if (cellCount > DOCUMENT_MAX_CELLS) throw new HtmlTableBudgetError("HTML table document cell count exceeds limit");
-    for (const cell of cells) { chars += cell.value.length; if (chars > DOCUMENT_MAX_TEXT_CHARS) throw new HtmlTableBudgetError("HTML table text exceeds limit"); }
+    if (cellCount + cells.length > DOCUMENT_MAX_CELLS) throw new HtmlTableBudgetError("HTML table document cell count exceeds limit");
+    const textChars = cells.reduce((total, cell) => total + cell.value.length, 0);
+    if (chars + textChars > DOCUMENT_MAX_TEXT_CHARS) throw new HtmlTableBudgetError("HTML table text exceeds limit");
+    cellCount += cells.length;
+    chars += textChars;
   };
 }
 /** The whole-document budgets, for readers of stored cells that reject an over-budget artifact up front. */
 export const HTML_TABLE_DOCUMENT_LIMITS = { tables: DOCUMENT_MAX_TABLES, cells: DOCUMENT_MAX_CELLS, textChars: DOCUMENT_MAX_TEXT_CHARS } as const;
+// Retained decoded records must not block acquisition of the transient parse budget. A full retention budget
+// degrades the excess tables to source text instead of letting readers deadlock while they hold earlier batches.
+const TABLE_RETENTION_BYTES = 64 * 1024 * 1024;
+let retainedTableBytes = 0;
+
+export class TableCellRetention {
+  private bytes = 0;
+
+  retain(cells: HtmlTableCell[] | null): boolean {
+    const bytes = cells?.reduce((total, cell) => total + 192 + 2 * (cell.label.length + cell.value.length), 0) ?? 0;
+    if (retainedTableBytes + bytes > TABLE_RETENTION_BYTES) return false;
+    this.bytes += bytes;
+    retainedTableBytes += bytes;
+    return true;
+  }
+
+  release(): void {
+    retainedTableBytes -= this.bytes;
+    this.bytes = 0;
+  }
+}
+
 export interface PrepareHtmlTablesOptions {
+  /** Retain newly parsed cells until their consumer finishes. Cached cells already have their own reservation. */
+  retention?: TableCellRetention;
   /**
    * Cells already parsed in a parser VM for some of these sources (an earlier stage's stored result, validated by the
    * caller against the source it was looked up by). They are re-checked here like VM output; only the rest go to a VM.
@@ -151,9 +179,9 @@ export function htmlTableMaxOutputBytes(env: NodeJS.ProcessEnv = process.env): n
 }
 /**
  * Worker-budget bytes held per byte of a result being parsed: the transferred bytes (1), the decoded string (at most
- * 2), and JSON.parse's heap for shapes the pre-scan admits (measured at most 12 per input byte, test "worst-case heap").
+ * 2), and headroom for JSON.parse's heap on the shapes admitted by the pre-scan, including short records.
  */
-export const TABLE_PARSE_HEAP_FACTOR = 15;
+export const TABLE_PARSE_HEAP_FACTOR = 32;
 /**
  * The per-table output cap in effect: DOCSLURP_HTML_TABLE_MAX_OUTPUT_BYTES, lowered so one table's reservation
  * (cap × TABLE_PARSE_HEAP_FACTOR) fits the worker budget. Part of the stored cells' identity (tableCellsGeneration).
@@ -167,8 +195,7 @@ export function effectiveHtmlTableBatchTarget(): number {
 }
 
 /**
- * Worker-wide budget for table-parse results in flight (DOCSLURP_HTML_TABLE_PARSE_MEMORY_BYTES, default 256 MiB, which
- * holds one worst-case 16 MiB batch at TABLE_PARSE_HEAP_FACTOR): a batch reserves its output cap × that factor before
+ * Worker-wide budget for table-parse results in flight (DOCSLURP_HTML_TABLE_PARSE_MEMORY_BYTES, default 256 MiB): a batch reserves its output cap × that factor before
  * its output is staged and releases it once decoded. A document parses one batch at a time, so it holds at most one
  * reservation; concurrent documents queue FIFO. Caps are fitted to the budget (effectiveHtmlTableOutputCap), so no
  * reservation is larger than the whole budget (one that is, is refused).
@@ -224,15 +251,15 @@ function isOutputLimit(error: unknown): boolean {
 
 /** Parse the document's HTML tables into flat typed records in the parser VM (no host parsing). Returns them by source. */
 export async function prepareHtmlTableCells(sources: string[], runner: Pick<CommandRunner, "run">, signal?: AbortSignal, options: PrepareHtmlTablesOptions = {}): Promise<{ prepared: PreparedHtmlTableCells; vmTables: number; cachedTables: number; vmCommands: number; overCap: number }> {
-  if (!options.cached?.size) return await prepareOnce(sources, runner, signal, {});
+  if (!options.cached?.size) return await prepareOnce(sources, runner, signal, { retention: options.retention });
   try {
     return await prepareOnce(sources, runner, signal, options);
   } catch (error) {
-    // Stored cells must never cost the document its tables: when they push it over a whole-document budget, drop every
-    // stored cell and parse all tables in the VM once, exactly as without them (which fails the same way if it must).
+    // When stored cells push the document over its budget, parse the selected tables again in source order.
     if (!(error instanceof HtmlTableBudgetError) || signal?.aborted) throw error;
+    options.retention?.release();
     console.warn(`[table-cells] stored cells exceed the document budget (${error.message}); parsing every table in a VM`);
-    return await prepareOnce(sources, runner, signal, {});
+    return await prepareOnce(sources, runner, signal, { retention: options.retention });
   }
 }
 
@@ -264,9 +291,18 @@ function planBatches(misses: string[], tableCap: number, batchTarget: number, me
 }
 
 async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">, signal: AbortSignal | undefined, options: PrepareHtmlTablesOptions): Promise<{ prepared: PreparedHtmlTableCells; vmTables: number; cachedTables: number; vmCommands: number; overCap: number }> {
-  const unique = vmTableSources(sources);
-  if (unique.length > DOCUMENT_MAX_TABLES) throw new Error("HTML table count exceeds VM limit");
-  if (unique.reduce((total, source) => total + source.length, 0) > DOCUMENT_MAX_SOURCE_CHARS) throw new Error("HTML table document source exceeds limit");
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  let sourceChars = 0;
+  for (const raw of sources) {
+    if (unique.length === DOCUMENT_MAX_TABLES) break;
+    const source = raw.trim();
+    if (!/^<table(?=\s|>|$)/i.test(source) || source.length > HTML_TABLE_MAX_SOURCE_CHARS || seen.has(source)) continue;
+    if (sourceChars + source.length > DOCUMENT_MAX_SOURCE_CHARS) continue;
+    sourceChars += source.length;
+    seen.add(source);
+    unique.push(source);
+  }
   const prepared: PreparedHtmlTableCells = new Map();
   const charge = documentBudget();
   const misses: string[] = [];
@@ -278,6 +314,7 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
     prepared.set(source, cells);
   }
   let vmCommands = 0, overCap = 0;
+  let documentBudgetExceeded = false;
   if (misses.length) {
     // Every batch's transfer cap times TABLE_PARSE_HEAP_FACTOR fits the worker budget, so each reservation is the
     // whole cost of the batch, never clamped: a table over the effective cap is null (below), several share a batch
@@ -288,16 +325,16 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
     const batches = planBatches(misses, tableCap, effectiveHtmlTableBatchTarget(), memo);
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-tables-"));
     try {
-      // One batch at a time (main's order): each is charged to the document budget as it decodes, so the first that
-      // crosses stops the document there, and a document holds at most one worker-budget reservation.
+      // One batch at a time in source order, with at most one transient worker-budget reservation per document.
       for (let index = 0; index < batches.length; index++) {
         signal?.throwIfAborted();
+        if (documentBudgetExceeded) break;
         const batch = batches[index]!;
         const release = await budget.reserve(batch.cap * TABLE_PARSE_HEAP_FACTOR, signal);
         try {
           // Each batch stages into its own directories: its input, and an output directory holding only its result
           // file (the command's only writable path), so no batch sees or downloads another's files.
-          const input = path.join(dir, `in-${index}`, "tables.json"), outputDir = path.join(dir, `out-${index}`), output = path.join(outputDir, "cells.json");
+          const input = path.join(dir, `in-${index}`, "tables.json"), outputDir = path.join(dir, `docslurp-out-${index}`), output = path.join(outputDir, "cells.json");
           await mkdir(path.dirname(input), { mode: 0o700 });
           await mkdir(outputDir, { mode: 0o700 });
           await writeFile(input, JSON.stringify(batch.sources), { mode: 0o600 });
@@ -306,7 +343,10 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
           try {
             // The output may not exceed what these tables can produce (or the per-table cap): enforced while it is
             // transferred out of the VM (SandboxLimits.maxOutputBytes) and again here, before it is read.
-            await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "table-cells.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000, maxOutputBytes: batch.cap }, signal);
+            const args = [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "table-cells.mjs"), input, output];
+            if (batch.single) args.push(String(batch.cap));
+            const command = await runner.run({ binary: "node", args, available: true, readOnlyInputs: true, timeoutMs: 60_000, maxOutputBytes: batch.cap }, signal);
+            if (batch.single && command.stderr.trim() === "[table-cells] output over single-table limit") overCap++;
             if ((await stat(output)).size > batch.cap) throw new Error("HTML table result exceeds limit");
             text = await readFile(output, "utf8");
           } catch (error) {
@@ -330,11 +370,22 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
           text = null;
           if (!Array.isArray(result) || result.length !== batch.sources.length) throw new Error("invalid HTML table result");
           for (const cells of result as unknown[]) assertHtmlTableCells(cells);
-          // Charged as soon as it decodes: what this document retains never exceeds its cell and text budgets, and
-          // the first batch that crosses them stops the document (HtmlTableBudgetError, the over-budget path).
+          // Keep only the cells that fit. Chunking uses source text for tables omitted by the budget.
           for (let i = 0; i < batch.sources.length; i++) {
             const cells = (result[i] ?? null) as HtmlTableCell[] | null;
-            charge(cells);
+            try {
+              charge(cells);
+            } catch (error) {
+              if (!(error instanceof HtmlTableBudgetError) || options.cached?.size) throw error;
+              documentBudgetExceeded = true;
+              console.warn(`[table-cells] ${error.message}; remaining tables chunked as source text`);
+              break;
+            }
+            if (options.retention && !options.retention.retain(cells)) {
+              documentBudgetExceeded = true;
+              console.warn("[table-cells] worker retention budget exhausted; remaining tables chunked as source text");
+              break;
+            }
             prepared.set(batch.sources[i]!, cells);
           }
         } finally {
@@ -348,6 +399,11 @@ async function prepareOnce(sources: string[], runner: Pick<CommandRunner, "run">
 /** Prepare flat typed records in the VM, then keep synchronous chunking scoped to this document. */
 export async function withPreparedHtmlTables<T>(sources: string[], runner: Pick<CommandRunner, "run">, fn: () => T, signal?: AbortSignal, options: PrepareHtmlTablesOptions = {}): Promise<T> {
   if (!vmOnlyParsing()) return fn();
-  const { prepared } = await prepareHtmlTableCells(sources, runner, signal, options);
-  return cellsContext.run(prepared, fn);
+  const retention = new TableCellRetention();
+  try {
+    const { prepared } = await prepareHtmlTableCells(sources, runner, signal, { ...options, retention });
+    return await cellsContext.run(prepared, fn);
+  } finally {
+    retention.release();
+  }
 }

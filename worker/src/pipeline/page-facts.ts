@@ -31,7 +31,10 @@ export interface VisionPageOutcome {
     | "no-attempt-ledger"
     | "route-overrun"
     | "overrun-unreconciled"
-    /** A per-document page budget (OCR escalation); vision page reads never set one. */
+    /**
+     * A per-document distinct-page budget: OCR escalation, and the vision page reads one capped signal family authorized
+     * (`table-rescue`, tableLeakPageCap; `encoding-read`, encodingReadPageCap). An ordinary page read sets none.
+     */
     | "document-page-limit"
     /** A per-document attempt budget (OCR escalation); vision page reads never set one. */
     | "document-attempt-limit"

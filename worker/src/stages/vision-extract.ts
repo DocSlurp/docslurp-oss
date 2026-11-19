@@ -64,7 +64,7 @@ import {
   type CanonicalReconciliationDecision,
 } from "../lib/canonical-reconciliation.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
-import { DRAWN_CONTENT_SIGNAL, selectLegacyVisionPages, TABLE_LEAK_ONLY_SIGNAL } from "./classify-route.js";
+import { DRAWN_CONTENT_SIGNAL, encodingReadPageCap, readBudgetOf, selectLegacyVisionPages, stricterReadBudget } from "./classify-route.js";
 import { inkCheckVerdict, readPngFileFacts } from "../lib/page-image-evidence.js";
 import {
   findVisionGuardStop,
@@ -174,6 +174,12 @@ export interface LegacyPageHints {
    */
   tableRescuePages?: ReadonlySet<number>;
   /**
+   * Pages authorized by extractor encoding facts alone (ENCODING_READ_ONLY_SIGNAL): read under the guard's durable
+   * `encoding-read` budget of encodingReadPageCap(pages) distinct pages per document. classify-route's cap holds for one
+   * routing decision; this one holds across activity retries, worker restarts and re-routed facts that nominate other pages.
+   */
+  encodingReadPages?: ReadonlySet<number>;
+  /**
    * Pages page triage routed as figure- or chart-bearing (`chart-or-figure`, `image-heavy`): the vision page reader, an
    * OCR specialist that skips image insets, leaves them to the hosted route (vision-page-reader.ts).
    */
@@ -198,18 +204,101 @@ export function legacyPageHints(pages: Array<{ pageNumber: number; textDensitySc
   const fallbackTextPages = new Set<number>();
   const vmOcrPages = new Set<number>();
   const tableRescuePages = new Set<number>();
+  const encodingReadPages = new Set<number>();
   const figurePages = new Set<number>();
   for (const page of pages) {
     if (page.route === "chart-or-figure" || page.route === "image-heavy") figurePages.add(page.pageNumber);
-    if (page.ocrDecision?.signals.includes(TABLE_LEAK_ONLY_SIGNAL)) tableRescuePages.add(page.pageNumber);
+    // A read the encodings alone authorized takes their budget, even where a table-leak signal also rides on it.
+    const budget = readBudgetOf(page);
+    if (budget === "encoding-read") encodingReadPages.add(page.pageNumber);
+    else if (budget === "table-rescue") tableRescuePages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(DRAWN_CONTENT_SIGNAL)) inkCheckPages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(MIXED_SCAN_IMAGE_SIGNAL)) vmOcrPages.add(page.pageNumber);
     if (page.textDensityScore >= USABLE_FALLBACK_DENSITY && !page.signals.includes("garbled-text")) {
       fallbackTextPages.add(page.pageNumber);
     }
   }
-  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages, figurePages, triaged: true };
+  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages, encodingReadPages, figurePages, triaged: true };
 }
+
+/**
+ * The guard purpose and durable per-document page budget a page read is admitted under: `encoding-read`
+ * (encodingReadPageCap) for a read extractor encoding facts alone authorized, `table-rescue` (tableLeakPageCap) for one
+ * table-leak signals alone authorized, else an ordinary `page` read.
+ */
+export function budgetedReadPurpose(hints: Pick<LegacyPageHints, "tableRescuePages" | "encodingReadPages">, pageNumber: number, pageCount: number):
+  [VisionAttemptPurpose, Pick<VisionAttemptTarget, "documentPageLimit">] {
+  if (hints.encodingReadPages?.has(pageNumber)) return ["encoding-read", { documentPageLimit: encodingReadPageCap(pageCount) }];
+  if (hints.tableRescuePages?.has(pageNumber)) return ["table-rescue", { documentPageLimit: tableLeakPageCap(pageCount) }];
+  return ["page", {}];
+}
+
+/**
+ * A routed region request of a page: its own `region` bound, or, for a budgeted page, the page's budget purpose with the
+ * region scope, so region reads of an encoding-only page count toward the same distinct-page budget as whole-page reads.
+ */
+export function budgetedRegionTarget(hints: Pick<LegacyPageHints, "tableRescuePages" | "encodingReadPages">, pageNumber: number, pageCount: number):
+  [VisionAttemptPurpose, Pick<VisionAttemptTarget, "documentPageLimit" | "scope">] {
+  const [purpose, limits] = budgetedReadPurpose(hints, pageNumber, pageCount);
+  return purpose === "page" ? ["region", {}] : [purpose, { ...limits, scope: "region" }];
+}
+
+/** Budget hints from a page -> budget map (route plan assignments, a resolved page task). */
+export function budgetHints(budgets: ReadonlyMap<number, "encoding-read" | "table-rescue">): Pick<LegacyPageHints, "tableRescuePages" | "encodingReadPages"> {
+  const pagesOf = (budget: string) => new Set([...budgets].filter(([, value]) => value === budget).map(([page]) => page));
+  return { encodingReadPages: pagesOf("encoding-read"), tableRescuePages: pagesOf("table-rescue") };
+}
+
+/** The budget of each page: the stricter of what triage hints and the route plan's stamped assignments say. */
+export function mergedReadBudgets(
+  hints: Pick<LegacyPageHints, "tableRescuePages" | "encodingReadPages"> | null,
+  assignments: ReadonlyArray<{ pageNumber: number; readBudget?: "encoding-read" | "table-rescue" }> = [],
+): Map<number, "encoding-read" | "table-rescue"> {
+  const budgets = new Map<number, "encoding-read" | "table-rescue">();
+  const add = (page: number, budget: "encoding-read" | "table-rescue" | null | undefined) => {
+    const merged = stricterReadBudget(budgets.get(page), budget);
+    if (merged) budgets.set(page, merged);
+  };
+  for (const page of hints?.encodingReadPages ?? []) add(page, "encoding-read");
+  for (const page of hints?.tableRescuePages ?? []) add(page, "table-rescue");
+  for (const assignment of assignments) add(assignment.pageNumber, assignment.readBudget);
+  return budgets;
+}
+
+/** The budgeted purpose a fanned-out page task carries (absent for an ordinary page read). */
+export function taskReadPurpose(hints: Pick<LegacyPageHints, "tableRescuePages" | "encodingReadPages">, pageNumber: number):
+  Pick<import("../temporal/shared.js").VisionPageTask, "readPurpose"> {
+  if (hints.encodingReadPages?.has(pageNumber)) return { readPurpose: "encoding-read" };
+  if (hints.tableRescuePages?.has(pageNumber)) return { readPurpose: "table-rescue" };
+  return {};
+}
+
+/**
+ * A fanned-out page task's hints: what planPageTasks recorded on the task (VisionPageTask), including the budgeted purpose,
+ * so the page is admitted as the document's own run would admit it (budgetedReadPurpose).
+ */
+export function pageTaskHints(
+  task: Pick<import("../temporal/shared.js").VisionPageTask, "pageNumber" | "inkCheck" | "fallbackText" | "vmOcr" | "readPurpose" | "payloadVersion">,
+  trusted: "encoding-read" | "table-rescue" | null = null,
+): LegacyPageHints {
+  const page = (flag: boolean | undefined) => new Set(flag ? [task.pageNumber] : []);
+  // A payload before version 2 carries no purpose: only the trusted plan data decides. A v2 payload's purpose is kept
+  // only to make the read stricter, never to make it an ordinary read.
+  const purpose = stricterReadBudget(trusted, (task.payloadVersion ?? 1) >= VISION_PAGE_TASK_PAYLOAD_VERSION ? task.readPurpose : null);
+  return {
+    inkCheckPages: page(task.inkCheck),
+    fallbackTextPages: page(task.fallbackText),
+    vmOcrPages: page(task.vmOcr),
+    tableRescuePages: page(purpose === "table-rescue"),
+    encodingReadPages: page(purpose === "encoding-read"),
+  };
+}
+
+/** The page task payload version that carries `readPurpose` (VisionPageTask.payloadVersion). */
+export const VISION_PAGE_TASK_PAYLOAD_VERSION = 2;
+
+/** Per worker process: each document's page budgets from its trusted plan data (page tasks, runPageTask), by run and document. */
+const TASK_READ_BUDGETS = new Map<string, Promise<Map<number, "encoding-read" | "table-rescue">>>();
 
 /** Errors whose vision attempt `recordFailedVisionAttempt` already recorded (once per call). */
 const recordedVisionErrors = new WeakSet<object>();
@@ -255,6 +344,8 @@ export class VisionExtractStage implements Stage {
         for (const group of routed.execution.groups) {
           for (const page of group.pages) groupsByPage.set(page, [...(groupsByPage.get(page) ?? []), group]);
         }
+        // The budget each routed page's read is admitted under: the plan's stamped assignments and page triage, stricter wins.
+        const budgets = await this.documentReadBudgets(state, document, routed.plan);
         const fanOut = [...groupsByPage.entries()]
           .filter(([page, groups]) => groups.length === 1 && !routed.execution.fallbackPages.includes(page))
           .sort(([a], [b]) => a - b);
@@ -269,6 +360,8 @@ export class VisionExtractStage implements Stage {
             pageNumber,
             pageCount: fanOut.length,
             vision: visionConfigForModel(vision, group!.modelUri),
+            payloadVersion: VISION_PAGE_TASK_PAYLOAD_VERSION,
+            ...(budgets.get(pageNumber) ? { readPurpose: budgets.get(pageNumber)! } : {}),
           });
         }
         continue;
@@ -290,6 +383,9 @@ export class VisionExtractStage implements Stage {
           ...(routing.hints.inkCheckPages.has(pageNumber) ? { inkCheck: true } : {}),
           ...(routing.hints.fallbackTextPages.has(pageNumber) ? { fallbackText: true } : {}),
           ...(routing.hints.vmOcrPages?.has(pageNumber) ? { vmOcr: true } : {}),
+          // The budgeted purpose travels with the task (payload version 2); runPageTask checks it against the plan data.
+          payloadVersion: VISION_PAGE_TASK_PAYLOAD_VERSION,
+          ...taskReadPurpose(routing.hints, pageNumber),
         });
       }
     }
@@ -301,11 +397,14 @@ export class VisionExtractStage implements Stage {
     const document = state.documents.find((doc) => doc.id === task.documentId);
     if (!document) throw new Error("Page task document is not part of run");
     const skips = new Map<number, VisionPageSkip>();
-    const hints: LegacyPageHints = {
-      inkCheckPages: new Set(task.inkCheck ? [task.pageNumber] : []),
-      fallbackTextPages: new Set(task.fallbackText ? [task.pageNumber] : []),
-      vmOcrPages: new Set(task.vmOcr ? [task.pageNumber] : []),
-    };
+    // The purpose comes from the run's own plan data (page triage and the route plan), never from the payload alone: a task
+    // persisted before payload version 2, or one whose payload says less, is admitted as the plan says (fail closed).
+    const trusted = (await this.taskReadBudgets(state, document)).get(task.pageNumber) ?? null;
+    const hints = pageTaskHints(task, trusted);
+    if (task.readPurpose && task.readPurpose !== trusted && (task.payloadVersion ?? 1) >= VISION_PAGE_TASK_PAYLOAD_VERSION) {
+      console.warn(`[vision-extract] page task purpose differs from the plan document=${document.id} page=${task.pageNumber} ` +
+        `payload=${task.readPurpose} plan=${trusted ?? "page"}; admitting the stricter`);
+    }
     // Defense in depth: page tasks come from the ladder plan (planPageTasks); a page outside this run's plan for the
     // document is not read. Without a pin yet (planning does not persist the ledger) the plan is made again here, from the
     // same stored inputs, once per document and worker process (fail closed: never "no pin, so allowed").
@@ -318,6 +417,47 @@ export class VisionExtractStage implements Stage {
     // An optional fail-open result is also a checkpoint; do not repeatedly call the provider. A
     // skipped page stores why, never model text.
     return outputs[0] ?? skips.get(task.pageNumber) ?? null;
+  }
+
+  /** The document's page budgets from its trusted plan data, once per run, document and worker process. */
+  private taskReadBudgets(state: WorkflowState, document: import("../models.js").Document): Promise<Map<number, "encoding-read" | "table-rescue">> {
+    const key = `${state.run.id}\u0000${document.id}`;
+    let budgets = TASK_READ_BUDGETS.get(key);
+    if (!budgets) {
+      budgets = (async () => {
+        const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg, { strict: true });
+        const { budgets: loaded, complete } = await this.loadDocumentReadBudgets(state, document, plan);
+        // Reading without its persisted budget could charge the wrong allowance. Let the activity retry the load.
+        if (!complete) throw new Error("Could not read the persisted vision budgets");
+        return loaded;
+      })();
+      TASK_READ_BUDGETS.set(key, budgets);
+      // A failed load is not cached: the next task tries again.
+      budgets.catch(() => TASK_READ_BUDGETS.delete(key));
+      if (TASK_READ_BUDGETS.size > 1_000) TASK_READ_BUDGETS.delete(TASK_READ_BUDGETS.keys().next().value!);
+    }
+    return budgets;
+  }
+
+  /**
+   * Each page's read budget for this document: page triage (the persisted classification, readBudgetOf) and, when the run
+   * executes a route plan, the plan's stamped assignments; the stricter wins.
+   */
+  private async documentReadBudgets(state: WorkflowState, document: import("../models.js").Document, plan: RoutePlan | null): Promise<Map<number, "encoding-read" | "table-rescue">> {
+    const { budgets, complete } = await this.loadDocumentReadBudgets(state, document, plan);
+    if (!complete) throw new Error("Could not read the persisted vision budgets");
+    return budgets;
+  }
+
+  /** documentReadBudgets, and whether the triage it read was complete (no classification, or one that parsed). */
+  private async loadDocumentReadBudgets(state: WorkflowState, document: import("../models.js").Document, plan: RoutePlan | null):
+    Promise<{ budgets: Map<number, "encoding-read" | "table-rescue">; complete: boolean }> {
+    try {
+      const adaptive = await this.loadAdaptiveRouting(state, document.id, { strict: true });
+      return { budgets: mergedReadBudgets(adaptive ? legacyPageHints(adaptive.pages) : null, plan?.assignments ?? []), complete: true };
+    } catch {
+      return { budgets: new Map(), complete: false };
+    }
   }
 
   /** Pages this run's ladder plan lets vision read in the document: the pinned plan, else a fresh plan (cached). */
@@ -776,7 +916,7 @@ export class VisionExtractStage implements Stage {
     /** The document's Auto ladder plan (auto quality on the triage path): each page's rung and why. */
     ladder?: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] };
   }> {
-    const routing = await this.loadAdaptiveRouting(state, document.id);
+    const routing = await this.loadAdaptiveRouting(state, document.id, { strict: true });
     const routingV2 = resolveRunRoutingV2(state);
     let selectedPages = selectLegacyVisionPages(routing?.pages ?? [], { routingV2 });
     let score = 0;
@@ -1053,10 +1193,11 @@ export class VisionExtractStage implements Stage {
   private async loadRoutedExecution(
     state: WorkflowState,
     document: import("../models.js").Document,
+    options = { strict: true },
   ): Promise<{ plan: RoutePlan; execution: RoutedExecution; catalog: ReturnType<typeof buildRuntimeCatalog>["allTargets"] } | null> {
     // Fast reads no page at all; Fastest never runs routed targets (some are vision models): its pages take the ladder path.
     if (ladderForbidsVision(state.run.pipeline) || !qualityAllowsPageReading(state.run.pipeline.quality)) return null;
-    const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg);
+    const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg, options);
     if (!plan) return null;
     const catalog = buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).allTargets;
     const execution = groupAssignmentsByTarget(plan, catalog);
@@ -1097,10 +1238,14 @@ export class VisionExtractStage implements Stage {
   ): Promise<RoutedVisionResult> {
     const allow = (vision: VisionConfig) => allowHostedCall(state, visionCall(resolveVisionRoute(vision)), [document.id]);
     // Routed plans choose pixels themselves (no ink check); triage still says which pages keep usable text.
-    const adaptive = await this.loadAdaptiveRouting(state, document.id).catch(() => null);
+    const adaptive = await this.loadAdaptiveRouting(state, document.id, { strict: true });
+    const triage = adaptive ? legacyPageHints(adaptive.pages) : null;
+    const pageCount = maxInt(1, document.pageCount);
     const hints: LegacyPageHints = {
       inkCheckPages: new Set(),
-      fallbackTextPages: adaptive ? legacyPageHints(adaptive.pages).fallbackTextPages : new Set(),
+      fallbackTextPages: triage ? triage.fallbackTextPages : new Set(),
+      // Budgeted pages keep their durable budget on every routed read: groups, fallbacks and executor regions.
+      ...budgetHints(mergedReadBudgets(triage, routed.plan.assignments)),
     };
     /** Why a page's executor call gave nothing; kept only if the page ends with no output at all. */
     const executorOutcomes = new Map<number, VisionPageSkip>();
@@ -1127,8 +1272,8 @@ export class VisionExtractStage implements Stage {
           allow,
           callVision: async (vision, image, abort) => {
             try {
-              // Routed regions have their own per-page request bound.
-              return await this.callVisionOnImage(state, document, vision, image, abort, undefined, "region");
+              // Routed regions have their own per-page request bound; a budgeted page's regions also count toward its budget.
+              return await this.callVisionOnImage(state, document, vision, image, abort, undefined, ...budgetedRegionTarget(hints, image.pageNumber, pageCount));
             } catch (error) {
               noteExecutorFailure(image.pageNumber, error);
               throw error;
@@ -1536,8 +1681,7 @@ export class VisionExtractStage implements Stage {
             widthPx: image.widthPx, heightPx: image.heightPx },
           signal,
           usageSink,
-          hints.tableRescuePages?.has(page.pageNumber) ? "table-rescue" : "page",
-          hints.tableRescuePages?.has(page.pageNumber) ? { documentPageLimit: tableLeakPageCap(maxInt(1, document.pageCount)) } : {},
+          ...budgetedReadPurpose(hints, page.pageNumber, maxInt(1, document.pageCount)),
         );
         const result = { inputTokens: output.inputTokens, outputTokens: output.outputTokens, latencyMs: output.latencyMs };
         await emitDocumentPageProgress(
@@ -1607,12 +1751,13 @@ export class VisionExtractStage implements Stage {
 
   /**
    * The pages of `pages` the vision page reader may read for this run and document (vision-page-reader.ts): a PDF with page
-   * triage, pages not routed as figures or charts, not drawn-content (ink-checked) and not table rescue. Empty when the
-   * run's reads stay hosted.
+   * triage, pages not routed as figures or charts, not drawn-content (ink-checked), not table rescue and not an encoding
+   * read (both keep their durable budget on the hosted route). Empty when the run's reads stay hosted.
    */
   private pageReaderCandidates(state: WorkflowState, document: import("../models.js").Document, vision: VisionConfig, pages: readonly number[], hints: LegacyPageHints): number[] {
     if (document.mimeType !== "application/pdf" || !hints.triaged || !visionPageReaderFor(state, vision)) return [];
-    return pages.filter((page) => !hints.inkCheckPages.has(page) && !hints.tableRescuePages?.has(page) && !hints.figurePages?.has(page));
+    return pages.filter((page) => !hints.inkCheckPages.has(page) && !hints.tableRescuePages?.has(page) && !hints.encodingReadPages?.has(page) &&
+      !hints.figurePages?.has(page));
   }
 
   /**
@@ -1820,7 +1965,7 @@ export class VisionExtractStage implements Stage {
     signal?: AbortSignal,
     usageSink?: (event: UsageEvent | null, pageNumber: number) => void,
     purpose: VisionAttemptPurpose = "page",
-    limits: Pick<VisionAttemptTarget, "documentPageLimit" | "documentAttemptLimit"> = {},
+    limits: Pick<VisionAttemptTarget, "documentPageLimit" | "documentAttemptLimit" | "scope"> = {},
   ): Promise<VisionPageOutput> {
     const imagePath = image.imagePath;
     const page = { mimeType: image.mimeType, pageNumber: image.pageNumber, artifactUri: image.artifactUri ?? "" };
@@ -2080,6 +2225,7 @@ export class VisionExtractStage implements Stage {
   private async loadAdaptiveRouting(
     state: WorkflowState,
     documentId: string,
+    options?: { strict?: boolean },
   ): Promise<Extract<ReturnType<typeof adaptiveRoutingDecisionSurfaceSchema.parse>, { status: "ready" }> | null> {
     const artifactUri = state.artifactLedger.readDocument(documentId, "classification");
     if (!artifactUri) {
@@ -2089,6 +2235,7 @@ export class VisionExtractStage implements Stage {
     try {
       const key = keyFromStorageUri(artifactUri, this.storage.bucket);
       if (!key) {
+        if (options?.strict) throw new Error("Invalid classification artifact reference");
         return null;
       }
 
@@ -2096,7 +2243,8 @@ export class VisionExtractStage implements Stage {
         await this.storage.getJson(key),
       );
       return payload.status === "ready" ? payload : null;
-    } catch {
+    } catch (error) {
+      if (options?.strict) throw error;
       return null;
     }
   }
@@ -2324,7 +2472,7 @@ export class VisionExtractStage implements Stage {
     session: ChartExportSession,
     signal: AbortSignal | undefined,
   ): Promise<ChartExportPassInput> {
-    const routed = await this.loadRoutedExecution(state, document).catch(() => null);
+    const routed = await this.loadRoutedExecution(state, document, { strict: false }).catch(() => null);
     // Without routed vision, any stored plan (shadow included) still names the chart and diagram pages.
     const routedPlan = routed?.plan ?? await storedRoutePlan(this.storage, state.artifactLedger, document.id);
     const adaptive = routedPlan ? null : await this.loadAdaptiveRouting(state, document.id);

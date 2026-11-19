@@ -73,8 +73,9 @@ describe("predeploy-check", () => {
     // Per file: a migration missing from the middle is pending, whatever is applied after it.
     expect(pendingMigrations(migrationFiles, { applied: migrationFiles.filter((file) => file !== migrationFiles[5]) })).toEqual([migrationFiles[5]!.replace(/\.sql$/, "")]);
     // A database Drizzle migrated and the runner has not: mapped through the frozen stamps.
+    const appliedByDrizzle = new Set(LEGACY_MIGRATIONS.slice(0, -5).map(([file]) => file));
     expect(pendingMigrations(migrationFiles, { applied: null, newestDrizzleCreatedAt: LEGACY_MIGRATIONS.at(-6)![1] }))
-      .toEqual(LEGACY_MIGRATIONS.slice(-5).map(([file]) => file.replace(/\.sql$/, "")));
+      .toEqual(migrationFiles.filter((file) => !appliedByDrizzle.has(file)).map((file) => file.replace(/\.sql$/, "")));
     expect(pendingMigrations(migrationFiles, { applied: null, newestDrizzleCreatedAt: null })).toHaveLength(migrationFiles.length);
   });
 

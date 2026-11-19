@@ -1,6 +1,6 @@
 import { HTML_TABLE_MAX_SOURCE_CHARS, HTML_TABLE_MAX_TAGS } from "./html-table-limits.js";
 import { readTableCells } from "./table-cells-guest.js";
-import { preparedHtmlTableCells } from "./html-table-vm.js";
+import { hasPreparedHtmlTableContext, preparedHtmlTableCells } from "./html-table-vm.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 type Record = { label: string; value: string; header?: boolean };
@@ -95,8 +95,8 @@ function readCells(source: string): Record[] | null {
   if (source.length > HTML_TABLE_MAX_SOURCE_CHARS || (source.match(/</g)?.length ?? 0) > HTML_TABLE_MAX_TAGS) return null;
   if (vmOnlyParsing()) {
     const cells = preparedHtmlTableCells(source.trim());
-    if (cells === undefined) throw new Error("HTML table parsing requires parser VM precomputation");
-    return cells;
+    if (cells === undefined && !hasPreparedHtmlTableContext()) throw new Error("HTML table parsing requires parser VM precomputation");
+    return cells ?? null;
   }
   return readTableCells(source);
 }

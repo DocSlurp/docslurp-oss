@@ -1,4 +1,4 @@
-import { hasVmHtmlTableWork, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
+import { hasVmHtmlTableWork, TableCellRetention, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
 import { embedHtmlTableSources, readTableCellsArtifact, reportUnknownGuest, tableCellsArtifactKey, tableCellsCacheActive, tableCellsGeneration, tableCellsGuestVersion, type TableCellsLookup } from "../pipeline/html-table-cells-cache.js";
 import { recordDocumentMilestone } from "../pipeline/run-milestones.js";
 import { createHash } from "node:crypto";
@@ -188,59 +188,7 @@ export class EmbedStage implements Stage {
           // order when there is nothing to wait on.
           const tableSources = embedHtmlTableSources(extracted);
           let tableCells: TableCellsLookup | undefined;
-          // Never on a PII-policy run (tableCellsCacheActive): stored cells predate pii-detect's redaction or block.
-          if (hasVmHtmlTableWork(tableSources) && tableCellsCacheActive(state.run.pipeline) && document.runId === state.run.id) {
-            const lookupStarted = Date.now();
-            const guest = tableCellsGuestVersion();
-            if (guest.version === null) reportUnknownGuest(guest.reason);
-            tableCells = await readTableCellsArtifact({
-              storage: this.storage,
-              key: tableCellsArtifactKey(state.run, document),
-              runId: state.run.id,
-              documentId: document.id,
-              // Bound to exactly what embed read: an artifact written for other content (an older write landing late) is refused.
-              generation: tableCellsGeneration(tableSources),
-              guestVersion: guest.version,
-              sources: tableSources,
-              signal,
-            });
-            const reason = "reason" in tableCells ? tableCells.reason : null;
-            // `stale` (written for other table sources, e.g. a late older write) is expected and logged at info.
-            (tableCells.status === "invalid" || tableCells.status === "unavailable" ? console.warn : console.log)(
-              `[table-cells] embed document=${document.id} status=${tableCells.status} hits=${tableCells.hits} ` +
-                `misses=${tableCells.misses}${reason ? ` reason=${reason}` : ""} ms=${Date.now() - lookupStarted}`,
-            );
-            state.pendingPerformance.push({
-              documentId: document.id,
-              scope: "document",
-              stageName: this.name,
-              metric: "table-cells-reuse",
-              value: tableCells.hits,
-              unit: "table",
-              tags: ["document", "tables"],
-              metadata: { status: tableCells.status, hits: tableCells.hits, misses: tableCells.misses, ...(reason ? { reason } : {}), lookupMs: Date.now() - lookupStarted },
-            });
-          }
-          const tableVmWork = hasVmHtmlTableWork(tableSources) && (tableCells === undefined || tableCells.misses > 0);
-          const preambleMode = embedPreambleMode();
-          const startContextEarly = preambleMode === "concurrent"
-            || (preambleMode === "auto" && tableVmWork);
-          if (preamblesEnabled && startContextEarly) {
-            await lookupReusableContext();
-            contextTask = resolveDocumentContext({
-              textGeneration: state.run.pipeline.textGeneration,
-              privacyMode: state.run.pipeline.privacyMode,
-              documentTitle: document.filename,
-              documentText: extracted.text,
-              config: this.config,
-              signal,
-              reusedDocumentContext,
-            });
-            // It never rejects today; guard the macrotask turn below anyway so a
-            // future rejection cannot surface as unhandled before it is awaited.
-            contextTask.catch(() => undefined);
-            await new Promise<void>((resolve) => setImmediate(resolve));
-          }
+          const cachedCellRetention = new TableCellRetention();
           let contextRecorded = false;
           const recordContextUsage = (context: DocumentContext, chunkCount: number, extra: Record<string, unknown> = {}) => {
             contextRecorded = true;
@@ -279,6 +227,60 @@ export class EmbedStage implements Stage {
           let existingUri: string | undefined;
           let prepFailed = true;
           try {
+            // Never on a PII-policy run (tableCellsCacheActive): stored cells predate pii-detect's redaction or block.
+            if (hasVmHtmlTableWork(tableSources) && tableCellsCacheActive(state.run.pipeline) && document.runId === state.run.id) {
+              const lookupStarted = Date.now();
+              const guest = tableCellsGuestVersion();
+              if (guest.version === null) reportUnknownGuest(guest.reason);
+              tableCells = await readTableCellsArtifact({
+                storage: this.storage,
+                key: tableCellsArtifactKey(state.run, document),
+                runId: state.run.id,
+                documentId: document.id,
+                // Bound to exactly what embed read: an artifact written for other content (an older write landing late) is refused.
+                generation: tableCellsGeneration(tableSources),
+                guestVersion: guest.version,
+                sources: tableSources,
+                retention: cachedCellRetention,
+                signal,
+              });
+              const reason = "reason" in tableCells ? tableCells.reason : null;
+              // `stale` (written for other table sources, e.g. a late older write) is expected and logged at info.
+              (tableCells.status === "invalid" || tableCells.status === "unavailable" ? console.warn : console.log)(
+                `[table-cells] embed document=${document.id} status=${tableCells.status} hits=${tableCells.hits} ` +
+                  `misses=${tableCells.misses}${reason ? ` reason=${reason}` : ""} ms=${Date.now() - lookupStarted}`,
+              );
+              state.pendingPerformance.push({
+                documentId: document.id,
+                scope: "document",
+                stageName: this.name,
+                metric: "table-cells-reuse",
+                value: tableCells.hits,
+                unit: "table",
+                tags: ["document", "tables"],
+                metadata: { status: tableCells.status, hits: tableCells.hits, misses: tableCells.misses, ...(reason ? { reason } : {}), lookupMs: Date.now() - lookupStarted },
+              });
+            }
+            const tableVmWork = hasVmHtmlTableWork(tableSources) && (tableCells === undefined || tableCells.misses > 0);
+            const preambleMode = embedPreambleMode();
+            const startContextEarly = preambleMode === "concurrent"
+              || (preambleMode === "auto" && tableVmWork);
+            if (preamblesEnabled && startContextEarly) {
+              await lookupReusableContext();
+              contextTask = resolveDocumentContext({
+                textGeneration: state.run.pipeline.textGeneration,
+                privacyMode: state.run.pipeline.privacyMode,
+                documentTitle: document.filename,
+                documentText: extracted.text,
+                config: this.config,
+                signal,
+                reusedDocumentContext,
+              });
+              // It never rejects today; guard the macrotask turn below anyway so a
+              // future rejection cannot surface as unhandled before it is awaited.
+              contextTask.catch(() => undefined);
+              await new Promise<void>((resolve) => setImmediate(resolve));
+            }
             chunkDrafts = await withPreparedHtmlTables(tableSources, this.runner, async () => extracted.canonicalDocument
               ? buildCanonicalChunksFromDocument(extracted.canonicalDocument, document.filename, {
                   chunkOverlap: state.run.pipeline.chunkOverlap,
@@ -301,6 +303,8 @@ export class EmbedStage implements Stage {
             existingUri = checkDedup(state, contentHash, artifactSlot);
             prepFailed = false;
           } finally {
+            tableCells?.cached.clear();
+            cachedCellRetention.release();
             // A summary call already started is paid for even when this
             // document stops here (an in-run duplicate or a chunking error).
             if (contextTask && (prepFailed || existingUri)) {

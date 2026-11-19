@@ -22,7 +22,7 @@ describe("ClamAV definitions staging", () => {
     const first = await stageClamDefinitions(source);
     const again = await stageClamDefinitions(source);
     expect(again.dir).toBe(first.dir);
-    expect(path.basename(first.dir)).toMatch(/^docslurp-clam-definitions-[0-9a-f]{32}-[A-Za-z0-9]{6}$/);
+    expect(path.basename(first.dir)).toMatch(/^docslurp-clam-definitions-[0-9a-f]{64}-[A-Za-z0-9]{6}$/);
     expect((await stat(first.dir)).mode & 0o777).toBe(0o700);
     expect((await readdir(first.dir)).sort()).toEqual(["daily.cvd", "main.cvd"]);
     expect((await stat(first.files[0]!)).mode & 0o777).toBe(0o444);

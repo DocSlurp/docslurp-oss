@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { pricing } from "@docslurp/shared";
 
+import { CLAM_VOLUME_MOUNT, stagedClamDirectoryHash, verifyClamVolume } from "./clam-definition-volume.js";
 import { boundedVmStream } from "./transfer.js";
 import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
@@ -83,6 +84,8 @@ export interface ModalConfig {
   assetWriteDeadlineMs?: number;
   /** Tests only: when an unconfirmed creation's token is released at the latest (default: lifetime plus margins). */
   unconfirmedBackstopMs?: number;
+  /** Optional Modal Volume of prepublished ClamAV definitions, keyed by their full content hash. */
+  clamDefinitionsVolume?: string;
   /** Regions scanner snapshot VMs run in (modalScannerRegions). */
   scannerRegions?: string[];
 }
@@ -187,6 +190,7 @@ interface ParkedVm {
   commandCount: number;
   /** Read-only asset directories already staged in the VM, by name. */
   assetDirs: Map<string, string>;
+  mountedClamHash?: string;
   parkedAt: number;
   timer: NodeJS.Timeout;
   sdk: ModalSdk;
@@ -229,6 +233,10 @@ const configSchema: SandboxConfigSchema = {
       description:
         "Name of a Modal Secret holding REGISTRY_USERNAME and REGISTRY_PASSWORD, for pulling a private image.",
       env: "DOCSLURP_MODAL_REGISTRY_SECRET",
+    },
+    clamDefinitionsVolume: {
+      type: "string", description: "Modal Volume of prepublished ClamAV signatures, mounted read-only by hash.",
+      env: "DOCSLURP_MODAL_CLAM_DEFINITIONS_VOLUME",
     },
     cpu: { type: "number", description: "Requested CPU cores per sandbox.", default: 2, env: "DOCSLURP_MODAL_CPU" },
     memoryMb: {
@@ -762,7 +770,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
   let draining = false;
 
   function parkedShape(config: ModalConfig): string {
-    return JSON.stringify([config.app, config.imageId ?? config.image, config.cpu, config.memoryMb, config.sessionTimeoutSeconds, config.tokenId]);
+    return JSON.stringify([config.app, config.imageId ?? config.image, config.cpu, config.memoryMb, config.sessionTimeoutSeconds, config.tokenId, config.clamDefinitionsVolume]);
   }
 
   /** A parked VM is adopted only while at least this much of its Modal lifetime remains. */
@@ -991,6 +999,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let parkedAway = false;
         /** Read-only asset directories staged in this VM, by name (carried with it when it is parked). */
         const stagedAssets = new Map<string, string>();
+        let mountedClamHash: string | undefined;
         /**
          * When Modal's create call returned (council V #1): the VM's own lifetime limit started no later than this, so a VM
          * whose terminate is unconfirmed is gone by lifetimeStart + sessionTimeoutSeconds (+ margin). Metering starts at
@@ -1066,6 +1075,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           createRequestedAt = entry.createRequestedAt;
           lane.accountedAt = Date.now();
           commandCount = entry.commandCount;
+          mountedClamHash = entry.mountedClamHash;
           for (const [name, dir] of entry.assetDirs) { stagedAssets.set(name, dir); assetDirs.set(name, Promise.resolve(dir)); }
           // Wiped above; the first command wipes once more before staging (defense in depth).
           keptFor = PARKED_WIPE;
@@ -1096,7 +1106,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           recordTail(now);
           holdsToken = false;
           parkVm({ sandboxId: sandbox.sandboxId, shape: parkedShape(config), lifetimeStart: lifetimeStart!, createRequestedAt: createRequestedAt ?? lifetimeStart!,
-            commandCount, assetDirs: new Map(stagedAssets), parkedAt: now, sdk, config }, vmBudget, parkMs);
+            commandCount, assetDirs: new Map(stagedAssets), mountedClamHash, parkedAt: now, sdk, config }, vmBudget, parkMs);
           console.log(`[parser-sandbox] provider=modal status=vm-parked activity=${context.activityId} lane=${lane.id}`);
           return true;
         }
@@ -1224,24 +1234,46 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             const app = scanner ? undefined : await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
             const registrySecret = !scanner && config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
             const image = scanner ? undefined : config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
+            let clamMount: { hash: string; volume: import("modal").Volume } | undefined;
+            if (!scanner && !context.unmetered && config.clamDefinitionsVolume) {
+              try {
+                const { stageClamDefinitions, resolveMalwareScanPolicy } = await import("../../../tools/runner.js");
+                const definitions = await stageClamDefinitions(resolveMalwareScanPolicy().databaseDirectory);
+                const hash = definitions.hash;
+                await definitions.release();
+                const volume = await withDeadline(client.volumes.fromName(config.clamDefinitionsVolume), 10_000);
+                clamMount = { hash, volume: volume.withMountOptions({ readOnly: true, subPath: `/${hash}` }) };
+              } catch (error) {
+                console.warn(`[parser-sandbox] provider=modal status=clam-volume-unavailable; staging signatures per VM: ${safeMessage(config, error)}`);
+              }
+            }
+            if (closed || lane.dead) throw new Error("parser VM session closed during creation");
             createRequestedAt = Date.now();
+            const createPlainVm = () => client.sandboxes.create(app!, image!, {
+              name,
+              runtime: "vm",
+              command: [...PARSER_VM_IDLE_COMMAND],
+              includeOidcIdentityToken: false,
+              env: {}, secrets: [], volumes: clamMount ? { [CLAM_VOLUME_MOUNT]: clamMount.volume } : {}, cloudBucketMounts: {},
+              cpu: config.cpu, cpuLimit: config.cpu,
+              memoryMiB: config.memoryMb, memoryLimitMiB: config.memoryMb,
+              timeoutMs: config.sessionTimeoutSeconds * 1000,
+              blockNetwork: true,
+            });
             const create = (scanner
               ? client.sandboxes.experimentalFromSnapshot(await scannerSnapshot!, { name }).catch((error: unknown) => {
                 // A snapshot that no longer restores (expired, region gone) is rebuilt by the next scan.
                 scannerSnapshots.forget(scannerKey!, scannerSnapshot);
                 throw error;
               })
-              : client.sandboxes.create(app!, image!, {
-              name,
-              runtime: "vm",
-              command: [...PARSER_VM_IDLE_COMMAND],
-              includeOidcIdentityToken: false,
-              env: {}, secrets: [], volumes: {}, cloudBucketMounts: {},
-              cpu: config.cpu, cpuLimit: config.cpu,
-              memoryMiB: config.memoryMb, memoryLimitMiB: config.memoryMb,
-              timeoutMs: config.sessionTimeoutSeconds * 1000,
-              blockNetwork: true,
-            })).then(async (created) => {
+              : createPlainVm().catch((error: unknown) => {
+                // Only an explicit missing-resource rejection is safe to retry. An ambiguous create failure goes
+                // through the existing orphan teardown and cannot start another VM under this worker token.
+                if (!clamMount || closed || lane.dead || typeof sdk.NotFoundError !== "function" || !(error instanceof sdk.NotFoundError)) throw error;
+                clamMount = undefined;
+                console.warn("[parser-sandbox] provider=modal status=clam-volume-mount-missing; staging signatures per VM");
+                return createPlainVm();
+              })).then(async (created) => {
               lifetimeStart = Date.now();
               // Billing starts when Modal's create returns, as Modal bills it (real-Modal M1: metering from the request
               // overstated 4-9 s VMs by about a second each). Capacity accounting is unchanged: the token is held from the
@@ -1281,6 +1313,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               // them (scanner.ts); the restored VM is that state, byte for byte.
               staging = new SessionStaging(buildRemoteFs(sdk, opened));
               return;
+            }
+            if (clamMount) {
+              const verified = await withDeadline(verifyClamVolume(opened, clamMount.hash), 65_000);
+              if (verified) {
+                mountedClamHash = clamMount.hash;
+                console.log(`[parser-sandbox] provider=modal status=clam-volume-verified signature_set=${clamMount.hash.slice(0, 16)}`);
+              } else {
+                console.warn("[parser-sandbox] provider=modal status=clam-volume-content-mismatch; staging signatures per VM");
+              }
             }
             // As root, once: the image's runtime root-owned, then nothing outside scratch writable by the parser user
             // (council W #1), or this VM runs nothing.
@@ -1508,6 +1549,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         function ensureAssetDir(hostDir: string): Promise<string> {
           const name = path.basename(hostDir);
           if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return Promise.reject(new Error("invalid read-only asset directory name"));
+          if (mountedClamHash && stagedClamDirectoryHash(name) === mountedClamHash) return Promise.resolve(CLAM_VOLUME_MOUNT);
           let staged = assetDirs.get(name);
           if (!staged) {
             // One VM at a time per worker reads the definitions into memory, file by file (council W #7).

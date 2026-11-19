@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -249,13 +250,21 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
   });
 
-  it("a first-pass placeholder (a host-only mark on the job) stores nothing and queues no ledger write", async () => {
+  it("a first-pass placeholder (a host-only mark on the job) queues only the committed Markdown mark", async () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
     const out = await runStage(async () => ({ figures: { status: "failed", reason: "figures-stored-by-first-pass" } }), {}, { markServed: true });
     expect(out.stageState?.status).toBe("completed");
     expect(out.stageState?.stats?.dopplerFigures).toBeUndefined();
-    expect(out.pending).toBeUndefined();
+    expect(out.pending).toMatchObject({ markdownOnly: true, levelOnly: true, assets: [] });
+    const markdownKey = `u/r/markdown/${DOC_ID}.vm-pdf.md`;
+    const bytes = out.objects.get(markdownKey)!.bytes;
+    expect(out.stageState?.stats?.extractorOutputs).toMatchObject({
+      source: "first-pass",
+      markdown: { uri: `s3://test/${markdownKey}`, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") },
+      publishedMarkdownUri: `s3://test/${markdownKey}`,
+      pageFacts: { status: "not-requested", artifact: null },
+    });
   });
 
   it("LOW-6: a provider reason that starts with `first-pass:` is an ordinary failure and still writes the failed level", async () => {

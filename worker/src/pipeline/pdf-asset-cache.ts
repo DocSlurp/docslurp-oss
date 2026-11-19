@@ -26,6 +26,21 @@ import { registerReadOnlySource, unregisterReadOnlySource } from "../sandbox/pat
 import { readPngFileFacts } from "../lib/page-image-evidence.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
+import {
+  pageSizeBinding,
+  pageSizeBlocks,
+  pageSizesArtifactKey,
+  pageSizesArtifactMaxBytes,
+  parsePageSizesArtifact,
+  pdfPageSizeMemo,
+  readPageSizeReuse,
+  serializePageSizes,
+  sharedBlockMeasurement,
+  type PageSizeBinding,
+  type PdfPageSize,
+  type PdfPageSizeMemo,
+} from "./pdf-page-sizes.js";
+
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
 /**
@@ -49,6 +64,10 @@ export interface RasterCacheOptions {
   pdftoppmConcurrency?: number;
   /** Process-wide limiter for sandboxed raster commands (default `sandboxedRasterSlots()`). */
   rasterSlots?: Semaphore;
+  /** Overrides the process-wide memo for measured pdfinfo sizes. */
+  pageSizeMemo?: PdfPageSizeMemo;
+  /** Overrides DOCSLURP_RASTER_PAGE_SIZE_REUSE. */
+  pageSizeReuse?: boolean;
 }
 
 /** Hard ceiling for `PDF_PDFTOPPM_CONCURRENCY`: each lane is a sandboxed process holding a full-page bitmap. */
@@ -313,7 +332,7 @@ export interface RasterPageArtifact {
   customerOriginal?: boolean;
 }
 
-type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
+type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri"> & Partial<Pick<ArtifactStore, "getBytes">>;
 type RasterRunner = Pick<CommandRunner, "renderPdfPageRange" | "pdfPageSizes" | "run">;
 
 /**
@@ -405,6 +424,124 @@ export class PdfRasterCache {
 
   private get rasterSlots(): Semaphore {
     return this.options.rasterSlots ?? sandboxedRasterSlots();
+  }
+
+  /**
+   * Sizes of `pages` of `source`: the process memo, then the run's stored pdfinfo sizes, then one sandboxed pdfinfo
+   * per aligned block of the pages still unknown. Reuse binds the run, document and staged source hash. Missing
+   * measurements and disabled reuse fall back to pdfinfo over the selected ranges. The returned callback persists
+   * measurements after authorization and successful rendering.
+   */
+  private async measurePageSizes(
+    document: Document,
+    runId: string,
+    source: CachedPdfSource,
+    pages: number[],
+    lanes: number,
+    signal: AbortSignal | undefined,
+  ): Promise<{ sizes: Map<number, PdfPageSize>; store: () => Promise<void> }> {
+    const sizes = new Map<number, PdfPageSize>();
+    let store = async () => {};
+    if (pages.length === 0) return { sizes, store };
+    const reuse = this.options.pageSizeReuse ?? readPageSizeReuse();
+    const binding = reuse && pages.every((page) => page <= document.pageCount) ? pageSizeBinding(document, runId, source.sha256) : null;
+    const memo = this.options.pageSizeMemo ?? pdfPageSizeMemo();
+    const counts = { memo: 0, artifact: 0, pdfinfo: 0, calls: 0 };
+    const missing = () => pages.filter((page) => !sizes.has(page));
+    const take = (found: ReadonlyMap<number, PdfPageSize>, counter: "memo" | "artifact") => {
+      for (const [page, size] of found) {
+        if (sizes.has(page)) continue;
+        sizes.set(page, size);
+        counts[counter] += 1;
+      }
+    };
+    if (binding) {
+      take(memo.get(binding, pages), "memo");
+      const wanted = missing();
+      if (wanted.length > 0) {
+        const stored = await this.readStoredPageSizes(document.id, binding);
+        if (stored) {
+          memo.set(binding, stored);
+          take(memo.get(binding, wanted), "artifact");
+        }
+      }
+    }
+    const unmeasured = missing();
+    if (unmeasured.length > 0) {
+      // With a binding, whole aligned blocks: a later stage's pages are then usually already known.
+      const measured = new Map<number, PdfPageSize>();
+      if (binding) {
+        await runLanes(pageSizeBlocks(unmeasured, binding.pageCount), lanes, signal, async (range, laneSignal) => {
+          try {
+            const result = await sharedBlockMeasurement(binding, range, laneSignal, () => {
+              counts.calls += 1;
+              return this.pdfPageSizes(source.path, range.first, range.last, laneSignal);
+            });
+            for (const [page, size] of result) measured.set(page, size);
+          } catch (error) {
+            if (laneSignal.aborted || isCommandTeardownError(error)) throw error;
+            // A larger probe can fail where the original selected range succeeds.
+          }
+        });
+      }
+      const remaining = unmeasured.filter((page) => !measured.has(page));
+      await runLanes(contiguousPageRanges(remaining), lanes, signal, async (range, laneSignal) => {
+        counts.calls += 1;
+        for (const [page, size] of await this.pdfPageSizes(source.path, range.first, range.last, laneSignal)) measured.set(page, size);
+      });
+      for (const page of unmeasured) {
+        const size = measured.get(page);
+        if (size) {
+          sizes.set(page, size);
+          counts.pdfinfo += 1;
+        }
+      }
+      if (binding && counts.calls > 0) {
+        memo.set(binding, measured);
+        store = () => this.writeStoredPageSizes(document.id, binding, memo.all(binding));
+      }
+    }
+    console.log(
+      `[raster-page-sizes] document=${document.id} pages=${pages.length} memo=${counts.memo} artifact=${counts.artifact} ` +
+        `pdfinfo=${counts.pdfinfo} pdfinfo_calls=${counts.calls} reuse=${binding ? "on" : "off"}`,
+    );
+    pushPerfMetric({ metric: "raster-page-size-pdfinfo-calls", value: counts.calls, unit: "count", tags: ["raster", "page-sizes"] });
+    return { sizes, store };
+  }
+
+  /** The run's stored sizes for this exact source, or null (absent, unreadable or refused). */
+  private async readStoredPageSizes(documentId: string, binding: PageSizeBinding): Promise<Map<number, PdfPageSize> | null> {
+    if (!this.storage.getBytes) return null;
+    const key = pageSizesArtifactKey(binding);
+    let bytes: Buffer;
+    try {
+      bytes = await this.storage.getBytes(key, { maxBytes: pageSizesArtifactMaxBytes(binding.pageCount) });
+    } catch (error) {
+      if (isCommandTeardownError(error)) throw error;
+      const name = error instanceof Error ? error.name : "unknown";
+      const status = (error as { $metadata?: { httpStatusCode?: number } } | null)?.$metadata?.httpStatusCode;
+      if (name !== "NoSuchKey" && name !== "NotFound" && status !== 404) {
+        console.warn(`[raster-page-sizes] document=${documentId} source=pdfinfo status=read-failed error=${name}`);
+      }
+      return null;
+    }
+    const parsed = parsePageSizesArtifact(bytes, binding);
+    if (!parsed.ok) {
+      console.warn(`[raster-page-sizes] document=${documentId} source=pdfinfo status=refused reason=${parsed.reason}`);
+      return null;
+    }
+    return parsed.sizes;
+  }
+
+  /** Store every pdfinfo size known for this source (best effort: a failed write only costs a later pdfinfo). */
+  private async writeStoredPageSizes(documentId: string, binding: PageSizeBinding, sizes: ReadonlyMap<number, PdfPageSize>): Promise<void> {
+    if (sizes.size === 0 || !this.storage.getBytes) return;
+    try {
+      await this.storage.putBytes(pageSizesArtifactKey(binding), serializePageSizes(binding, sizes), "application/json");
+    } catch (error) {
+      if (isCommandTeardownError(error)) throw error;
+      console.warn(`[raster-page-sizes] document=${documentId} source=pdfinfo status=store-failed error=${error instanceof Error ? error.name : "unknown"}`);
+    }
   }
 
   async renderSelectedPages(args: {
@@ -506,14 +643,9 @@ export class PdfRasterCache {
         : [];
       const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
       try {
-        // One pdfinfo call per contiguous range sizes the selected pages; bounded same-size batches share a pdftoppm
-        // call. Lanes share one abort signal: the first failure aborts every in-flight sibling
-        // command, the lanes drain, and nothing is uploaded after it. Every command also takes a process-wide slot.
+        // Reused pdfinfo measurements size the selected pages before bounded same-size render batches.
         const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
-        const sizes = new Map<number, { widthPt: number; heightPt: number }>();
-        await runLanes(contiguousPageRanges(pdftoppmPages), lanes, args.signal, async (range, signal) => {
-          for (const [pageNumber, size] of await this.pdfPageSizes(source.path, range.first, range.last, signal)) sizes.set(pageNumber, size);
-        });
+        const { sizes, store: storePageSizes } = await this.measurePageSizes(args.document, args.runId, source, pdftoppmPages, lanes, args.signal);
         if (pdftoppmPages.some((pageNumber) => !sizes.has(pageNumber))) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
         // Each page's area from its size, measured and authorized before anything renders or is cached.
         await recordRenderedPageAreas(args.runId, args.document, pdftoppmPages.map((pageNumber) => {
@@ -582,6 +714,8 @@ export class PdfRasterCache {
         });
         const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
         if (unrendered.length > 0) throw new Error(`pdftoppm did not render pages ${unrendered.join(",")}`);
+        args.signal?.throwIfAborted();
+        await storePageSizes();
       } finally {
         await rm(scratch, { recursive: true, force: true });
       }

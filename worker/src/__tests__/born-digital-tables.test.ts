@@ -195,19 +195,14 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
       expect(route(markdown).route).not.toBe("table-heavy");
     });
 
-    it("the wrapped-cell grid is an HTML table that keeps every word, one row per wrapped line (DocSlurp/doppler#56)", () => {
-      // What production emits (`--stream --html`) for a 3x4 grid of drawn rectangles whose cells hold a wrapped sentence.
+    it("keeps all wrapped prose within its original HTML table cell", () => {
+      // The VM guest streams HTML for a 3-column, 4-row grid with wrapped text in each cell.
       const source = readFileSync(path.resolve("testdata/pdf-fixtures/doppler-md-html/routing-table-large-coverage.pdf.md"), "utf8");
       const { markdown } = repairMarkdownTables(source);
-      const rows = htmlRows(markdown);
-      expect(rows.every((cells) => cells.length === 3)).toBe(true);
-      // Each cell label starts a row, and the wrapped lines follow as rows of their own (until doppler#56 joins them).
-      const labels = rows.filter((cells) => cells.every((cell) => /^Row \d column \d$/.test(cell)));
-      expect(labels.map((cells) => cells[0])).toEqual(["Row 1 column 1", "Row 2 column 1", "Row 3 column 1", "Row 4 column 1"]);
-      expect(rows).toHaveLength(4 * 7);
-      const words = (text: string) => text.replace(/<[^>]+>/g, " ").split(/\s+/).filter(Boolean).length;
       const sentence = "Survey area north of the harbour, measured in the spring and checked again in the autumn season by the field team on site. Records kept at the desk.";
-      expect(words(rows.flat().join(" "))).toBe(12 * (4 + words(sentence)));
+      expect(htmlRows(markdown)).toEqual(
+        [1, 2, 3, 4].map((row) => [1, 2, 3].map((column) => `Row ${row} column ${column} ${sentence}`)),
+      );
     });
 
     it("a clean HTML financial statement is left exactly as extracted", () => {
