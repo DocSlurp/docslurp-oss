@@ -838,7 +838,7 @@ describe("modal provider session lifecycle", () => {
           expect(state.createOptions[0]).toMatchObject({
             includeOidcIdentityToken: false, env: {}, secrets: [], cloudBucketMounts: {}, blockNetwork: true,
             volumes: mounted ? {
-              [CLAM_VOLUME_MOUNT]: { name: "clam-reference", mount: { readOnly: true, subPath: definitions.hash } },
+              [CLAM_VOLUME_MOUNT]: { name: "clam-reference", mount: { readOnly: true, subPath: `/${definitions.hash}` } },
             } : {},
           });
           if (condition === "mount-missing") {

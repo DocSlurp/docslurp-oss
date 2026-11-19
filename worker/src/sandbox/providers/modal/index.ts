@@ -1242,7 +1242,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
                 const hash = definitions.hash;
                 await definitions.release();
                 const volume = await withDeadline(client.volumes.fromName(config.clamDefinitionsVolume), 10_000);
-                clamMount = { hash, volume: volume.withMountOptions({ readOnly: true, subPath: hash }) };
+                clamMount = { hash, volume: volume.withMountOptions({ readOnly: true, subPath: `/${hash}` }) };
               } catch (error) {
                 console.warn(`[parser-sandbox] provider=modal status=clam-volume-unavailable; staging signatures per VM: ${safeMessage(config, error)}`);
               }
