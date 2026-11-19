@@ -255,7 +255,7 @@ describe("Doppler figures in the extraction stage", () => {
     const out = await runStage(async () => ({ figures: { status: "failed", reason: "figures-stored-by-first-pass" } }), {}, { markServed: true });
     expect(out.stageState?.status).toBe("completed");
     expect(out.stageState?.stats?.dopplerFigures).toBeUndefined();
-    expect(out.pending).toBeUndefined();
+    expect(out.pending).toMatchObject({ markdownOnly: true, levelOnly: true, assets: [] });
   });
 
   it("LOW-6: a provider reason that starts with `first-pass:` is an ordinary failure and still writes the failed level", async () => {

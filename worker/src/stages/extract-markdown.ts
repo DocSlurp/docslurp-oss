@@ -6,7 +6,7 @@ import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import { DOPPLER_PAGE_FACTS_SLOT, DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFolderKey, dopplerSourcePointer, DOPPLER_MARKDOWN_SLOT, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
-import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
+import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForMarkdownCommitted, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfGridSettlement, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfLayoutWalkerUnknown, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
@@ -3262,7 +3262,7 @@ export class ExtractMarkdownStage implements Stage {
    * Whenever this stage commits a document's Markdown and no figure step queued the document's asset ledger (figures off,
    * another extractor won, not a PDF, no VM, a deduplicated copy), queue the level with no assets: `disabled` when figures
    * are off for the run, else `none`. Older rows and a stale resumable state leave the queue with this checkpoint. A
-   * document the first pass converts with figures on is left to the first pass's own figure step.
+   * document the first pass converts with figures on only needs to mark its committed Markdown here.
    */
   /** Documents whose figures (and ledger) the first pass owns in this attempt: a served placeholder. */
   private readonly firstPassLedger = new Set<string>();
@@ -3278,13 +3278,16 @@ export class ExtractMarkdownStage implements Stage {
       this.firstPassLedger.delete(key);
       throw error;
     }
-    if (this.firstPassLedger.delete(key)) return result;
+    const firstPassOwnsFigures = this.firstPassLedger.delete(key);
     if (state.pendingAssetLedger.has(document.id)) return result;
     // Figures for this run: the deploy flag, the provider, and the project not opted out (`figures: false`). A project
     // that opted out gets `disabled` for every document, first-pass ones included (the batch asked for no figures), so
     // an earlier resumable level leaves the resume queue and no new figure storage accrues.
     const figuresOn = figuresEnabled(state.run.pipeline as { figures?: boolean | null }, process.env) && !!sandboxedPdfProvider()?.figures;
-    if (figuresOn && firstPassServesDocument(state.run.id, document.id)) return result;
+    if (firstPassOwnsFigures || (figuresOn && firstPassServesDocument(state.run.id, document.id))) {
+      queueAssetLedger(state, document.id, ledgerWriteForMarkdownCommitted());
+      return result;
+    }
     queueAssetLedger(state, document.id, ledgerWriteForNoFigures(figuresOn ? "none" : "disabled"));
     return result;
   }

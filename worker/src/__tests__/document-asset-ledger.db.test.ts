@@ -10,8 +10,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DocumentAsset } from "@docslurp/shared";
 
 import {
-  DOCUMENT_ASSET_RESUME_CAP, DOCUMENT_ASSET_RESUME_TOTAL_CAP, DocumentAssetLedgerError, flushAssetLedger, ledgerWriteForFailedFigures, ledgerWriteForNoFigures,
-  ledgerWriteForStoredFigures, listResumableDocuments, writeDocumentAssetLedger,
+  DOCUMENT_ASSET_RESUME_CAP, DOCUMENT_ASSET_RESUME_TOTAL_CAP, DocumentAssetLedgerError, flushAssetLedger, ledgerWriteForFailedFigures, ledgerWriteForMarkdownCommitted, ledgerWriteForNoFigures,
+  ledgerWriteForStoredFigures, listResumableDocuments, markFigureLevelMarkdownComplete, writeDocumentAssetLedger, writeFigureLevel,
   type DocumentAssetLedgerScope, type DocumentAssetLedgerWrite, type LedgerAsset, type PendingAssetLedgerWrite,
 } from "../db/document-asset-ledger.js";
 import { Store } from "../db/store.js";
@@ -530,6 +530,20 @@ describe("the write waits for the checkpoint (MEDIUM-4)", () => {
     state.artifactLedger.readDocument = () => "s3://b/ua/run-a/doc-a.md";
     await flushAssetLedger(state, (w) => writeDocumentAssetLedger(sql, w));
     expect(await level("doc-a")).toMatchObject({ markdown_complete: true });
+  });
+
+  it.each([true, false])("first-pass figure writes preserve committed Markdown in either order (%s)", async (figuresFirst) => {
+    const figures = () => writeFigureLevel(sql, { scope: A, markdownComplete: false, imagesStatus: "failed" });
+    const state = {
+      run: { id: A.runId, orgId: A.orgId, projectId: A.projectId },
+      pendingAssetLedger: new Map([[A.documentId, ledgerWriteForMarkdownCommitted()]]),
+      artifactLedger: { readDocument: () => "s3://b/ua/run-a/doc-a.md" },
+    };
+    if (figuresFirst) await figures();
+    expect((await flushAssetLedger(state, (write) => writeDocumentAssetLedger(sql, write))).get(A.documentId)).toBe("written");
+    if (!figuresFirst) await figures();
+    expect(await level(A.documentId)).toMatchObject({ markdown_complete: true, images_status: "failed" });
+    await expect(markFigureLevelMarkdownComplete(sql, { ...A, orgId: B.orgId })).rejects.toBeInstanceOf(DocumentAssetLedgerError);
   });
 
   it("a stale run's queued write is logged as stale-write and writes nothing", async () => {
