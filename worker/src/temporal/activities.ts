@@ -436,7 +436,8 @@ export function createActivities(deps: ActivityDependencies) {
                 break;
               }
               current = stageName;
-              const output = await execution.runStage({ stageName, runId: input.runId, totalStages: input.totalStages, artifacts }, {
+              const output = await execution.runStage({ stageName, runId: input.runId, totalStages: input.totalStages, artifacts,
+                executionGeneration: input.executionGeneration }, {
                 signal: context.cancellationSignal,
                 heartbeat: (details) => context.heartbeat(details),
                 attempt: context.info.attempt,

@@ -226,6 +226,7 @@ export interface PipelineWorkflowInput {
 
 /** Several consecutive light stages run back to back in one activity. */
 export interface StageGroupInput {
+  executionGeneration?: string;
   stageNames: string[];
   runId: string;
   totalStages: number;
