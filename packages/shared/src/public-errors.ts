@@ -78,7 +78,7 @@ export function publicDiagnostics(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value).flatMap(([key, item]) => {
     if (/stack|exception|traceback|stderr|stdout|debug|raw.?response|provider.?response/i.test(key)) return [];
     // Internal extractor routing (engine versions, rollout state, attempt order) stays operator-only.
-    if (/^(nativePdf|extractorOrder|extractorAttempts|secondaryExtractor|retryStrategy)$/.test(key)) return [];
+    if (/^(nativePdf|extractorOrder|extractorAttempts|extractorOutputs|secondaryExtractor|retryStrategy)$/.test(key)) return [];
     if (/error|failure|warning|reason|message|detail/i.test(key)) {
       if (item == null || item === false || item === "") return [[key, item]];
       if (typeof item === "number" || typeof item === "boolean") return [[key, item]];
