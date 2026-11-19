@@ -1,3 +1,4 @@
+import { StaleExecutionError } from "../db/execution-ownership.js";
 import { countFirstPassPages, firstPassPipeline, planFirstPass, runFirstPassBatch } from "../pipeline/first-pass.js";
 import { RunPolicyError } from "../lib/document-failure.js";
 import { UnfundedPagesError } from "../pipeline/page-basis.js";
@@ -306,6 +307,8 @@ export function createActivities(deps: ActivityDependencies) {
       return withPlanningProgress(context.cancellationSignal, (details) => context.heartbeat(details), async (progress) => {
         const state = await loadRunState(store, input.runId, { totalStages: input.totalStages });
         progress("planning");
+        state.executionGeneration = input.executionGeneration;
+        await store.admitVisionStageSpend(state, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
         const tasks = await stage.planPageTasks(state, context.cancellationSignal, progress);
         progress("starting-stage", tasks.length);
         if (tasks.length) {
@@ -328,18 +331,21 @@ export function createActivities(deps: ActivityDependencies) {
       return withPlanningProgress(context.cancellationSignal, (details) => context.heartbeat(details), async (progress) => {
         const state = await loadRunState(store, input.runId, { totalStages: input.totalStages });
         progress("planning");
+        state.executionGeneration = input.executionGeneration;
+        await store.admitVisionStageSpend(state, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
         const tasks = await stage.planPageTasks(state, context.cancellationSignal, progress);
         progress("starting-stage", tasks.length);
         if (!tasks.length) return { total: 0 };
         state.stage = "vision-extract";
         await store.startRunStage(state, state.stage, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
         const total = await store.pageTasks.enqueueWithPayload(tasks, (offset) => progress("persisting", offset), { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
-        return { total };
+        const spendAdmissionGeneration = tasks[0]?.spendAdmissionGeneration;
+        return { total, ...(spendAdmissionGeneration === undefined ? {} : { spendAdmissionGeneration }) };
       });
     },
 
-    async loadVisionPageBatch(input: { runId: string; offset: number; limit: number }): Promise<VisionPageTask[]> {
-      return store.pageTasks.loadBatch(input.runId, input.offset, Math.min(2_000, input.limit));
+    async loadVisionPageBatch(input: { runId: string; offset: number; limit: number; spendAdmissionGeneration?: string | null }): Promise<VisionPageTask[]> {
+      return store.pageTasks.loadBatch(input.runId, input.offset, Math.min(2_000, input.limit), input.spendAdmissionGeneration);
     },
 
     async runVisionPageTask(task: VisionPageTask, allocationFraction = 1): Promise<UsageSummary> {
@@ -604,6 +610,21 @@ export function createActivities(deps: ActivityDependencies) {
       if (!(stage instanceof VisionExtractStage)) throw new Error("Vision stage unavailable");
       const context = Context.current();
       const workerId = workerIdentity();
+      // Page work needs source metadata, not the whole run's checkpoint/history scan.
+      // Leave state.store unset: never flush a stale run snapshot over other pages.
+      const loadState = () => loadRunState(store, task.runId, { hydrate: false });
+      const cappedState = task.spendAdmissionGeneration === undefined ? undefined : await loadState();
+      const owner = cappedState && {
+        runId: task.runId, orgId: cappedState.run.orgId!, projectId: cappedState.run.projectId!,
+        executionGeneration: task.spendAdmissionGeneration ?? undefined,
+      };
+      const checkAdmission = async () => {
+        if (!owner) return;
+        const admission = await store.visionStageSpendAdmission(owner);
+        if (admission === "paused") throw new UnfundedPagesError("Vision stage paused for credits", true, 0, 0);
+        if (admission !== "admitted") throw new StaleExecutionError();
+      };
+      await checkAdmission();
       let lease = await store.pageTasks.claim(task, workerId);
       while (lease === "busy") {
         context.heartbeat({ waitingForLease: true });
@@ -613,6 +634,7 @@ export function createActivities(deps: ActivityDependencies) {
           context.cancellationSignal.addEventListener("abort", cancel, { once: true });
           if (context.cancellationSignal.aborted) cancel();
         });
+        await checkAdmission();
         lease = await store.pageTasks.claim(task, workerId);
       }
       if (!lease) {
@@ -622,10 +644,9 @@ export function createActivities(deps: ActivityDependencies) {
       }
       const ownedLease = lease;
       const pageStartedAt = Date.now();
-      // Page work needs source metadata, not the whole run's checkpoint/history scan.
-      // Leave state.store unset: never flush a stale run snapshot over other pages.
-      const state = await loadRunState(store, task.runId, { hydrate: false });
+      const state = cappedState ?? await loadState();
       state.stage = "vision-extract";
+      state.visionStageSpendAdmitted = Boolean(cappedState);
       const controller = new AbortController();
       const abort = () => controller.abort(context.cancellationSignal.reason);
       context.cancellationSignal.addEventListener("abort", abort, { once: true });
@@ -648,6 +669,7 @@ export function createActivities(deps: ActivityDependencies) {
       };
       console.log(`[page-task] run=${task.runId} document=${task.documentId} page=${task.pageNumber} worker=${workerId} started`);
       try {
+        await checkAdmission();
         const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
           () => runWithPrivacyAuditScope({ projectId: state.run.projectId ?? null, runId: task.runId, documentId: task.documentId },
             () => stage.runPageTask(state, task, controller.signal)));
@@ -661,9 +683,17 @@ export function createActivities(deps: ActivityDependencies) {
         return state.usageLedger.totals();
       } catch (error) {
         recordPageCompute();
-        await store.pageTasks.finish(task, ownedLease, state, null, true).catch(checkpointError => {
-          console.error(`[page-task] failed checkpoint: ${String(checkpointError)}`);
-        });
+        try {
+          if (error instanceof StaleExecutionError) throw error;
+          await store.pageTasks.finish(task, ownedLease, state, null, true);
+        } catch (checkpointError) {
+          if (owner && checkpointError instanceof StaleExecutionError) {
+            await store.settleLateUsage(state, owner);
+            await store.pageTasks.release(task, ownedLease);
+          } else {
+            console.error(`[page-task] failed checkpoint: ${String(checkpointError)}`);
+          }
+        }
         throw error;
       } finally {
         clearInterval(timer);

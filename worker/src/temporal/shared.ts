@@ -310,11 +310,13 @@ export interface VisionPageBatchInput {
   pageBundleSize: number;
   slotGate: boolean;
   activityTaskQueue?: string;
+  spendAdmissionGeneration?: string | null;
 }
 
 export interface VisionPageBatchPlan {
   /** Page tasks stored for the run (page_work_tasks rows with a payload). */
   total: number;
+  spendAdmissionGeneration?: string | null;
 }
 
 /** Temporal ApplicationFailure type for "org (or fleet) has no free worker slot". */
@@ -348,6 +350,8 @@ export interface VisionPageTask {
   fallbackText?: boolean;
   /** A scan beside native text: read by the VM OCR engine (DOCSLURP_OCR_MODE=vm), never a hosted vision model. */
   vmOcr?: boolean;
+  /** The execution that admitted a capped vision stage. */
+  spendAdmissionGeneration?: string | null;
   /**
    * A read only table-leak signals (`table-rescue`) or extractor encoding facts (`encoding-read`) authorized: admitted under the
    * guard's durable per-document page budget for that purpose (vision-extract budgetedReadPurpose). Absent: a page read.

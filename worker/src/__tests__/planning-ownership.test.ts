@@ -51,6 +51,21 @@ describe("planning ownership", () => {
     expect(await store.pageTasks.loadBatch("r1", 0, 101)).toEqual(tasks);
   });
 
+  it("refreshes child-batch payloads for a new capped execution and retains completed pages", async () => {
+    const owner = { runId: "r1", orgId: "o1", projectId: "w", executionGeneration: "A" };
+    const tasks = [1, 2].map(pageNumber => ({
+      runId: "r1", documentId: "d1", pageNumber, spendAdmissionGeneration: "A",
+    } as import("../temporal/shared.js").VisionPageTask));
+    expect(await store.pageTasks.enqueueWithPayload(tasks, undefined, owner)).toBe(2);
+    await db.exec("update project_runs set execution_generation = 'B' where id = 'r1'");
+    expect(await store.pageTasks.claim(tasks[1]!, "stale")).toBe("busy");
+    const next = tasks.map(task => ({ ...task, spendAdmissionGeneration: "B" }));
+    expect(await store.pageTasks.enqueueWithPayload(next, undefined, { ...owner, executionGeneration: "B" })).toBe(2);
+    expect(await store.pageTasks.loadBatch("r1", 0, 10, "A")).toEqual([]);
+    expect(await store.pageTasks.loadBatch("r1", 0, 10, "B")).toEqual(next);
+    expect((await store.pageTasks.completed("r1")).get("d1:1")).toEqual({ text: "done" });
+  });
+
   it("settles billed receipts once while rejecting stale planner progress", async () => {
     await db.exec("update project_runs set execution_generation = 'A' where id = 'r1'");
     const state = await loadRunState(store, "r1", { hydrate: false });
@@ -70,6 +85,43 @@ describe("planning ownership", () => {
       expect(Number((await db.query<{ credits: string }>("select sum(credits) as credits from credit_debits_pending where run_id = 'r1'")).rows[0]!.credits)).toBe(2);
       expect(state.usageLedger.checkpoint().events).toHaveLength(0);
     }
+  });
+
+  it("checks the cap before vision starts and preserves the same generation's admission after overrun", async () => {
+    await db.exec("update project_runs set execution_generation = 'budget', spent_cents = 10 where id = 'r1'");
+    const owner = { runId: "r1", orgId: "o1", projectId: "w", executionGeneration: "budget" };
+    const state = await loadRunState(store, "r1", { hydrate: false });
+    state.run.pipeline.maxCostCents = 10;
+
+    await store.admitVisionStageSpend(state, owner);
+    expect(state.visionStageSpendAdmitted).toBe(false);
+    expect(await store.visionStageSpendAdmission(owner)).toBe("denied");
+
+    state.run.pipeline.maxCostCents = 11;
+    await store.admitVisionStageSpend(state, owner);
+    expect(state.visionStageSpendAdmitted).toBe(true);
+    expect(await store.visionStageSpendAdmission(owner)).toBe("admitted");
+    expect(await store.visionStageSpendAdmission({ ...owner, orgId: "other" })).toBe("denied");
+    expect(await store.visionStageSpendAdmission({ ...owner, executionGeneration: "stale" })).toBe("denied");
+    await expect(store.admitVisionStageSpend(state, { ...owner, orgId: "other" })).rejects.toThrow("ownership");
+    await db.exec("update project_runs set control_state = 'pause_requested' where id = 'r1'");
+    expect(await store.visionStageSpendAdmission(owner)).toBe("paused");
+    await db.exec("update project_runs set control_state = null where id = 'r1'");
+
+    await db.exec("update project_runs set spent_cents = 15 where id = 'r1'");
+    const retry = await loadRunState(store, "r1", { hydrate: false });
+    retry.run.pipeline.maxCostCents = 11;
+    await store.admitVisionStageSpend(retry, owner);
+    expect(retry.visionStageSpendAdmitted).toBe(true);
+    expect(retry.run.spentCents).toBe(15);
+
+    await db.exec("update project_runs set execution_generation = 'next' where id = 'r1'");
+    const next = await loadRunState(store, "r1", { hydrate: false });
+    next.run.pipeline.maxCostCents = 11;
+    await store.admitVisionStageSpend(next, { ...owner, executionGeneration: "next" });
+    expect(next.visionStageSpendAdmitted).toBe(false);
+    expect(await store.visionStageSpendAdmission(owner)).toBe("denied");
+    await db.exec("delete from project_run_stage_states where run_id = 'r1' and stage_name = 'vision-extract'");
   });
 
   it("rejects stale generations and terminal owners without changing persisted progress", { timeout: 60000 }, async () => {

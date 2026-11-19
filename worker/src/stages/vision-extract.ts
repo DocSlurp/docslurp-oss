@@ -322,8 +322,7 @@ export class VisionExtractStage implements Stage {
     const checkpoint = () => { signal?.throwIfAborted(); progress?.("planning-pages", tasks.length); };
     const tasks: import("../temporal/shared.js").VisionPageTask[] = [];
     checkpoint();
-    // Budget-capped runs retain sequential admission, rather than oversubscribing a cap.
-    if (!state.run.pipeline.visionFallback || (state.run.pipeline.maxCostCents ?? 0) > 0) return tasks;
+    if (!state.run.pipeline.visionFallback || isSequentialCappedVision(state)) return tasks;
     // Fast never reads a page; pages without a text layer were kept as page images (render-images).
     if (!qualityAllowsPageReading(state.run.pipeline.quality)) return tasks;
     if (!(await this.visionAllowed(state))) return tasks;
@@ -372,7 +371,11 @@ export class VisionExtractStage implements Stage {
       // Pages the vision page reader will read are not fanned out: run() reads them in batched reader jobs (one job per
       // page would pay the reader's admission and reservation per page). The document's other pages still fan out.
       const readerPages = new Set(await this.plannedReaderPages(state, document, vision, routing.selectedPages, routing.hints));
-      const pages = [...routing.selectedPages].filter((page) => !readerPages.has(page)).sort((a, b) => a - b);
+      // The document pass batches mixed-scan OCR into VM jobs. Single-page tasks cannot share that dispatch.
+      const batchOcr = resolveOcrMode() === "vm" || (resolveOcrMode() === "local" && ladderForbidsVision(state.run.pipeline));
+      const pages = [...routing.selectedPages].filter((page) =>
+        !readerPages.has(page) && !(batchOcr && routing.hints.vmOcrPages?.has(page)),
+      ).sort((a, b) => a - b);
       for (const pageNumber of pages) {
         if (tasks.length % 100 === 0) {
           await new Promise<void>((resolve) => setImmediate(resolve));
@@ -390,7 +393,11 @@ export class VisionExtractStage implements Stage {
       }
     }
     checkpoint();
-    return tasks.length > 1 ? tasks : [];
+    if (tasks.length <= 1) return [];
+    if (state.visionStageSpendAdmitted) {
+      return tasks.map(task => ({ ...task, spendAdmissionGeneration: state.executionGeneration ?? null }));
+    }
+    return tasks;
   }
 
   async runPageTask(state: WorkflowState, task: import("../temporal/shared.js").VisionPageTask, signal?: AbortSignal) {
@@ -508,7 +515,7 @@ export class VisionExtractStage implements Stage {
 
     await runDocuments(
       healthyDocuments(state),
-      (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency,
+      isSequentialCappedVision(state) ? 1 : state.docConcurrency,
       async (document) => {
         if (isCostCapExceeded(state)) {
           console.log(
@@ -1491,7 +1498,7 @@ export class VisionExtractStage implements Stage {
       const started = Date.now();
       let result: Awaited<ReturnType<typeof ocrDocument>>;
       try {
-        result = await ocrDocument({ checkpointStorage: this.storage, runner: this.runner, state, documentId: document.id, source, kind: "pdf", pages: batch, hostedReader,
+        result = await ocrDocument({ checkpointStorage: this.storage, runner: this.runner, state, documentId: document.id, source, kind: "pdf", pages: batch, pdfShape: "mixed", hostedReader,
           stage: this.name, ...(signal ? { signal } : {}) });
       } catch (error) {
         if (signal?.aborted || error instanceof OcrInfrastructureError) throw error;
@@ -1562,7 +1569,7 @@ export class VisionExtractStage implements Stage {
     // records the completed page's charge before the next admission. A single
     // admitted page can cross the cap; the rest of a long scan cannot follow it.
     // run() also serializes documents, and planPageTasks disables page fanout.
-    if ((state.run.pipeline.maxCostCents ?? 0) > 0) {
+    if (isSequentialCappedVision(state)) {
       if (isCostCapExceeded(state)) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
       if (missing.length > 1) {
         for (const pageNumber of missing) {
@@ -2256,7 +2263,7 @@ export class VisionExtractStage implements Stage {
    */
   private async runChartExportOnly(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const freeInline = freeInlineMode(state.run.pipeline);
-    await runDocuments(healthyDocuments(state), (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency, async (document) => {
+    await runDocuments(healthyDocuments(state), isSequentialCappedVision(state) ? 1 : state.docConcurrency, async (document) => {
       if (freeInline && !this.freeInlineHasWork(state, document)) {
         console.log(`[extract-debug] stage=${this.name} document=${document.id} chart-export-skipped=free-no-signal`);
         return;
@@ -2800,6 +2807,10 @@ export function shouldFailOpenVisionError(error: unknown): boolean {
     "incorrect_api_key",
     "billing",
   ].some((needle) => message.includes(needle));
+}
+
+function isSequentialCappedVision(state: WorkflowState): boolean {
+  return !state.visionStageSpendAdmitted && (state.run.pipeline.maxCostCents ?? 0) > 0;
 }
 
 function toError(error: unknown): Error {

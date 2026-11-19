@@ -124,6 +124,8 @@ export interface VectorIndex {
 export class WorkflowState {
   /** Expected generation from activity intent, not a fresh database row. */
   executionGeneration?: string | null;
+  /** Persisted admission for the current execution's vision stage. */
+  visionStageSpendAdmitted = false;
   run: ProjectRun;
   documents: Document[];
   stage: string;

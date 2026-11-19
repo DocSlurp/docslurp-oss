@@ -467,6 +467,7 @@ export async function documentPipeline(
               runId: input.runId, offset: index * batchSize, limit: batchSize,
               pageConcurrency: childConcurrency, pageBundleSize: Math.max(1, Math.min(8, input.pageBundleSize ?? 1)),
               slotGate: input.slotGate === true,
+              ...(plan.spendAdmissionGeneration === undefined ? {} : { spendAdmissionGeneration: plan.spendAdmissionGeneration }),
               ...(input.activityTaskQueue ? { activityTaskQueue: input.activityTaskQueue } : {}),
             };
             const workflowId = `${idPrefix}-${index}`;
@@ -743,7 +744,10 @@ export async function visionPageBatch(input: VisionPageBatchInput): Promise<Usag
   setHandler(usageQuery, () => usage);
 
   const activities = scalingActivityProxies(input.activityTaskQueue);
-  const tasks = await activities.quick.loadVisionPageBatch({ runId: input.runId, offset: input.offset, limit: input.limit });
+  const tasks = await activities.quick.loadVisionPageBatch({
+    runId: input.runId, offset: input.offset, limit: input.limit,
+    ...(input.spendAdmissionGeneration === undefined ? {} : { spendAdmissionGeneration: input.spendAdmissionGeneration }),
+  });
   const bundleSize = Math.max(1, Math.min(8, input.pageBundleSize));
   const bundles = bundlePageTasks(tasks.map((task) => (input.slotGate ? { ...task, slotGate: true } : task)), bundleSize);
   await runPageFanOut({
