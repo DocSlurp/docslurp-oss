@@ -122,6 +122,14 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
     const page = route(broken);
     expect(page.route).toBe("table-heavy");
     expect(page.ocrDecision).toMatchObject({ authorized: true, signals: expect.arrayContaining([TABLE_UNRELIABLE_SIGNAL, "table:mostly-empty-cells"]) });
+
+    const nativeOnly = buildAdaptiveRoutingDecisionSurface({
+      documentId: "doc", filename: "table.pdf", text: broken, pageCount: 1,
+      evidence: { source: "canonical-document", artifactUri: "test:table" },
+      routingV2: true, tableRescue: false,
+    }).pages[0];
+    expect(nativeOnly?.route).toBe("table-heavy");
+    expect(nativeOnly?.ocrDecision?.authorized ?? false).toBe(false);
   });
 
   describe("with Doppler's encodings (d317bea): a text-layer table bit is geometry, not the converter's verdict", () => {

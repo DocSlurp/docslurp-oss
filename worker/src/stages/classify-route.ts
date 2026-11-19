@@ -134,6 +134,7 @@ export class ClassifyRouteStage implements Stage {
             routingV2,
             // Encoding-only rescues are for Vision. Fastest keeps its raster/OCR policy.
             encodingRouting: !ladderForbidsVision(state.run.pipeline) && readEncodingFactsRouting(),
+            tableRescue: !ladderForbidsVision(state.run.pipeline),
           });
 
           await this.storage.putJson(key, surface);
@@ -394,6 +395,8 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
    * DOCSLURP_ENCODING_FACTS_ROUTING setting (routing/flags.ts readEncodingFactsRouting).
    */
   encodingRouting?: boolean;
+  /** Native table repair can request a model read only when the pipeline permits vision. */
+  tableRescue?: boolean;
   /**
    * The parser VM's scans of the page texts' HTML tables (ClassifyRouteStage). Omitted, the tables are scanned
    * in-process, which the service profile refuses on the host.
@@ -586,7 +589,7 @@ function buildEvidencePages(
     // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
     // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
     // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
-    const tableSignals = !ocrDecision.authorized && aligned !== null
+    const tableSignals = args.tableRescue !== false && !ocrDecision.authorized && aligned !== null
       ? tableReliability(text, TABLE_LEAK, tableScanOf(text, args.tableScans)).filter((signal) => page.route === "table-heavy" || TABLE_LEAK_SIGNALS.has(signal))
       : [];
     if (tableSignals.length > 0) {
