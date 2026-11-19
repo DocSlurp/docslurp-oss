@@ -466,6 +466,63 @@ describe("vision page loop under the guard", () => {
     expect(skips.get(1)).toEqual({ pageNumber: 1, outcome: "rejected", fallbackText: true });
   });
 
+  // Council (encoding-read cap): a resumed shard's payload before version 2 has no purpose; the run's plan data decides.
+  it("page tasks take their read budget from the plan data, whatever the payload says (legacy, v2, mismatched)", async () => {
+    const harness = await pageStage({ pages: 5, answer: (page) => ({ text: `page ${page}` }) });
+    scratch = harness.scratch;
+    const state = runState();
+    Object.assign(state, { run: { ...state.run, id: "run-budget-plan" } });
+    state.documents.push(harness.document);
+    // The plan data: every page is an encoding-only read (encodingReadPageCap(5) = 3).
+    const budgets = vi.spyOn(harness.stage as unknown as { loadDocumentReadBudgets(): Promise<unknown> }, "loadDocumentReadBudgets")
+      .mockResolvedValue({ budgets: new Map([1, 2, 3, 4, 5].map((page) => [page, "encoding-read"])), complete: true });
+    const task = (pageNumber: number, extra: Record<string, unknown> = {}) =>
+      harness.stage.runPageTask(state, { runId: "run-budget-plan", documentId: "doc", pageNumber, pageCount: 5, vision: VISION as never, ...extra });
+    // Legacy payloads (no version, no purpose), a v2 payload that claims an ordinary read, and one with the right purpose.
+    const results = [await task(1), await task(2, { payloadVersion: 2 }), await task(3, { payloadVersion: 2, readPurpose: "encoding-read" }), await task(4), await task(5, { payloadVersion: 2 })];
+    expect(results.slice(0, 3).map((result) => (result as { text?: string }).text)).toEqual(["page 1", "page 2", "page 3"]);
+    expect(results.slice(3)).toEqual([
+      { pageNumber: 4, outcome: "document-page-limit", fallbackText: false },
+      { pageNumber: 5, outcome: "document-page-limit", fallbackText: false },
+    ]);
+    // Loaded once per run and document in this process.
+    expect(budgets).toHaveBeenCalledTimes(1);
+  });
+
+  it("an incomplete plan-data load is not reused: the next page task loads again", async () => {
+    const harness = await pageStage({ pages: 2, answer: (page) => ({ text: `page ${page}` }) });
+    scratch = harness.scratch;
+    const state = runState();
+    Object.assign(state, { run: { ...state.run, id: "run-budget-retry" } });
+    state.documents.push(harness.document);
+    const load = vi.spyOn(harness.stage as unknown as { loadDocumentReadBudgets(): Promise<unknown> }, "loadDocumentReadBudgets")
+      .mockResolvedValueOnce({ budgets: new Map(), complete: false })
+      .mockResolvedValue({ budgets: new Map(), complete: true });
+    const run = (pageNumber: number) =>
+      harness.stage.runPageTask(state, { runId: "run-budget-retry", documentId: "doc", pageNumber, pageCount: 2, vision: VISION as never });
+    await expect(run(1)).rejects.toThrow("Could not read the persisted vision budgets");
+    expect(ledgerOf(state).inspect("run-budget-retry", "org-1").runAttempts).toBe(0);
+    await run(2);
+    await run(2);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("a v2 payload's purpose only makes a read stricter: a budget the plan does not know still applies", async () => {
+    const harness = await pageStage({ pages: 6, answer: (page) => ({ text: `page ${page}` }) });
+    scratch = harness.scratch;
+    const fresh = runState();
+    Object.assign(fresh, { run: { ...fresh.run, id: "run-budget-payload" } });
+    fresh.documents.push(harness.document);
+    vi.spyOn(harness.stage as unknown as { loadDocumentReadBudgets(): Promise<unknown> }, "loadDocumentReadBudgets").mockResolvedValue({ budgets: new Map(), complete: true });
+    const task = (pageNumber: number) => harness.stage.runPageTask(fresh, {
+      runId: "run-budget-payload", documentId: "doc", pageNumber, pageCount: 6, vision: VISION as never, payloadVersion: 2, readPurpose: "encoding-read",
+    });
+    const outcomes = [];
+    for (const page of [1, 2, 3, 4]) outcomes.push(await task(page));
+    // encodingReadPageCap(6) = 3: the fourth page is refused under the payload's budget.
+    expect(outcomes.map((result) => (result as { outcome?: string }).outcome ?? "read")).toEqual(["read", "read", "read", "document-page-limit"]);
+  });
+
   it("records a rejected page once and counts both of its requests failed and uncharged", async () => {
     const harness = await pageStage({ pages: 3, answer: () => rejection(undefined, 2) });
     scratch = harness.scratch;

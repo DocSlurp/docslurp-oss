@@ -31,6 +31,7 @@ export async function loadActiveRoutePlan(
   storage: Pick<ArtifactStore, "bucket" | "getJson">,
   documentId: string,
   cfg: Pick<Config, "pageRouterMode"> | undefined,
+  options?: { strict?: boolean },
 ): Promise<RoutePlan | null> {
   if (effectivePageRouterMode(state, cfg) !== "active") return null;
   // An Auto ladder limit (pipeline.ladder) plans every page read from page triage; a router plan would read pages outside
@@ -39,13 +40,18 @@ export async function loadActiveRoutePlan(
   assertSupportedActiveMargin((state.run.pipeline.pageRouter ?? defaultPageRouterConfig).marginFloor);
   const uri = state.artifactLedger.readDocument(documentId, PAGE_ROUTE_PLAN_SLOT);
   const key = uri ? keyFromStorageUri(uri, storage.bucket) : null;
-  if (!key) return null;
+  if (!key) {
+    if (options?.strict && uri) throw new Error("Invalid route plan artifact reference");
+    return null;
+  }
   let plan: RoutePlan | null;
   try {
     plan = parseRoutePlan(await storage.getJson<unknown>(key));
-  } catch {
+  } catch (error) {
+    if (options?.strict) throw error;
     return null;
   }
+  if (!plan && options?.strict) throw new Error("Invalid route plan artifact");
   if (!plan || plan.mode !== "active") return null;
   assertCompleteActivePlan(plan);
   return plan;
