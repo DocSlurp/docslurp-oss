@@ -579,11 +579,11 @@ function isLostResponse(error: unknown): boolean {
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 /** The server's coded 409 for a request whose Idempotency-Key is still being processed. */
-async function isInFlightConflict(response: Response): Promise<boolean> {
+async function isInFlightConflict(response: Response, retryBulkBusy: boolean): Promise<boolean> {
   try {
     const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
     const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
-    return code === "idempotency_in_flight" || code === "upload_session_busy";
+    return code === "idempotency_in_flight" || (retryBulkBusy && code === "upload_session_busy");
   } catch {
     return false;
   }
@@ -602,7 +602,7 @@ async function apiFetchRepeatable(pathname: string, flags: Record<string, string
   for (let attempt = 0; ; attempt++) {
     try {
       const response = await apiFetch(pathname, flags, init, timeoutMs);
-      if (response.status === 409 && await isInFlightConflict(response)) {
+      if (response.status === 409 && await isInFlightConflict(response, pathname.endsWith("/bulk"))) {
         const wait = Math.min(2_000, 250 * 2 ** inFlight++);
         if (Date.now() + wait < giveUpAt) {
           await response.body?.cancel();

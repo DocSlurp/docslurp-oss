@@ -130,6 +130,28 @@ describe("lock classes and deadlines", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("ends a cancelled intake while the pool is still reserving its connection", async () => {
+    setup();
+    const reserving = Promise.withResolvers<{ release: () => void }>();
+    const entered = Promise.withResolvers<void>();
+    const lateRelease = vi.fn();
+    mocks.reserve.mockImplementationOnce(() => {
+      entered.resolve();
+      return reserving.promise;
+    });
+    const controller = new AbortController();
+    const pending = reserveDirectUploadLockConnection({
+      lockClass: "intake", tenant: "org-x", deadline: Date.now() + 30_000, signal: controller.signal,
+    });
+    const cancelled = expect(pending).rejects.toThrow("client went away");
+    await entered.promise;
+    controller.abort(new Error("client went away"));
+    await cancelled;
+    expect(lateRelease).not.toHaveBeenCalled();
+    reserving.resolve({ release: lateRelease });
+    await vi.waitFor(() => expect(lateRelease).toHaveBeenCalledOnce());
+  });
+
   it("keeps a caller's explicit deadline exactly, and requires a tenant for capped classes", async () => {
     vi.useFakeTimers();
     try {

@@ -703,7 +703,7 @@ export async function principalLockTenant(userId: string, apiKeyId?: string | nu
 /**
  * Cross-process serialization: the dedicated connection owns the lock until release. A held lock answers 409
  * `upload_session_busy` at once, or after `waitMs` of retries; so does a saturated lock pool, on the caller's deadline.
- * A caller's own `busyCode` describes only a held lock; a saturated pool is always `upload_session_busy`.
+ * For bulk intake, a saturated pool is reported separately from a held idempotency lock.
  * A waiting caller releases its lock connection between tries: the pool must stay free for the holder and other sessions.
  */
 export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage: string | undefined, busyCode: ProjectIntakeErrorCode | undefined, options: DirectUploadLockOptions): Promise<T> {
@@ -723,9 +723,9 @@ export async function withDirectUploadLock<T>(sessionId: string, run: () => Prom
       // No slot or connection in time is a capacity refusal, whatever the caller's own busy code means: it never
       // claims another request holds this caller's key or session.
       if (error instanceof DirectUploadLockUnavailable) {
-        throw busyCode === "upload_session_busy"
-          ? new ProjectIntakeError(busyMessage, 409, undefined, busyCode)
-          : new ProjectIntakeError("Uploads are busy; retry shortly", 409, undefined, "upload_session_busy");
+        throw options.lockClass === "intake"
+          ? new ProjectIntakeError("Uploads are busy; retry shortly", 409, undefined, "upload_session_busy")
+          : new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
       }
       throw error;
     }

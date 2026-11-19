@@ -144,7 +144,7 @@ export async function reserveDirectUploadLockConnection(options: {
    * never exceeded); omitted, the caller waits MIN_LOCK_RESERVE_MS.
    */
   deadline?: number;
-  /** The waiter's own cancellation (its client disconnected): it stops waiting for a slot. */
+  /** The waiter's own cancellation (its client disconnected): it stops waiting for a slot or connection. */
   signal?: AbortSignal;
 } = {}): Promise<{ connection: ReservedSql; release: () => void }> {
   if (state.closing) await state.closing;
@@ -161,21 +161,34 @@ export async function reserveDirectUploadLockConnection(options: {
     if (state.active === 0) for (const resolve of state.drained.splice(0)) resolve();
   };
   const reserving = state.pool.sql.reserve();
+  let abandoned = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now())); });
+  const signal = options.signal;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<null>(resolve => {
+    onAbort = () => resolve(null);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
   try {
-    const connection = await Promise.race([reserving, expired]);
+    const connection = await Promise.race([reserving, expired, aborted]);
     if (!connection) {
-      // The pool is saturated: give up on schedule, and hand back the connection if it arrives later.
+      // Keep the slot charged until the pool settles. Hand back a connection that arrives after the caller left.
+      abandoned = true;
       void reserving.then(late => late.release(), () => {}).finally(done);
+      signal?.throwIfAborted();
       throw new DirectUploadLockUnavailable();
     }
     let released = false;
     return { connection, release: () => { if (!released) { released = true; connection.release(); done(); } } };
   } catch (error) {
-    if (!(error instanceof DirectUploadLockUnavailable)) done();
+    if (!abandoned) done();
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 export async function closeDirectUploadLockPool(): Promise<void> {
