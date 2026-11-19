@@ -1,3 +1,4 @@
+import { env } from "../config.js";
 import { intakeReceiptContext } from "./intake-receipt-context.js";
 import { deprecatedPipelineFields, markDeprecatedFields } from "../lib/deprecation.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, VISUALS_UNAVAILABLE_CODE } from "@docslurp/shared";
@@ -440,7 +441,9 @@ async function idempotently(
   }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight",
   // Holds its Idempotency-Key lock for the whole request (crawl, fetch, storage writes, run creation) so a concurrent
   // repeat is refused rather than run twice: its own capped class, so it never takes a run-start slot.
-  { lockClass: "intake", tenant: await principalLockTenant(args.userId, args.apiKeyId) });
+  // Other tenants' intakes are waited out (the slots are few and each is held for seconds), so simultaneous uploads
+  // queue; a repeat of this key that arrives while the first is running waits too, then replays its response.
+  { lockClass: "intake", tenant: await principalLockTenant(args.userId, args.apiKeyId), waitMs: env.directUploadLockIntakeWaitMs });
 }
 
 /**

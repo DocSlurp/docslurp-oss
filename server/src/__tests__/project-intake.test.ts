@@ -335,6 +335,33 @@ describe("Project Intake", () => {
       expect([...fakes.objects.keys()].sort()).toEqual(fakes.runs[0]!.files.map((file) => file.sourceKey).sort());
     });
 
+    it("refuses an empty file per file (bytes, stream or already stored) and takes the rest", async () => {
+      const fakes = createProjectIntakeFakes();
+      const result = await intakeIntoProject(request({ items: [
+        bytesItem("ok.txt"),
+        bytesItem("empty.pdf", "", "application/pdf"),
+        { filename: "empty-stream.txt", mimeType: "text/plain", content: { stream: Readable.from([]), contentLength: 12 } },
+        { filename: "empty-stored.txt", content: { storedKey: "existing/empty.txt", verifiedSizeBytes: 0 } },
+      ] }), fakes.ports);
+      expect(result?.documents.map((document) => document.filename)).toEqual(["ok.txt"]);
+      expect(result?.rejected).toEqual([
+        { filename: "empty.pdf", statusCode: 400, code: "rejected", message: "empty.pdf is empty (0 bytes)" },
+        { filename: "empty-stream.txt", statusCode: 400, code: "rejected", message: "empty-stream.txt is empty (0 bytes)" },
+        { filename: "empty-stored.txt", statusCode: 400, code: "rejected", message: "empty-stored.txt is empty (0 bytes)" },
+      ]);
+      // Only the accepted file reached run admission, and no empty object stays in storage.
+      expect(fakes.runs[0]!.files.map((file) => file.filename)).toEqual(["ok.txt"]);
+      expect([...fakes.objects.keys()]).toEqual([fakes.runs[0]!.files[0]!.sourceKey]);
+    });
+
+    it("answers 400 and creates nothing when the only file is empty", async () => {
+      const fakes = createProjectIntakeFakes();
+      const error = await rejection(intakeIntoProject(request({ items: [bytesItem("empty.pdf", "", "application/pdf")] }), fakes.ports));
+      expect(error.statusCode).toBe(400);
+      expect(fakes.runs).toHaveLength(0);
+      expect(fakes.objects.size).toBe(0);
+    });
+
     it("still fails, naming every file, when nothing is accepted", async () => {
       const fakes = createProjectIntakeFakes();
       const error = await rejection(intakeIntoProject(

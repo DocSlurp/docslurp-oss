@@ -644,9 +644,12 @@ async function storeItem(
     if (request.extract && !content.storedKey.startsWith(`${request.extract.storagePrefix}/`)) {
       throw new ProjectIntakeError(`${admitted.filename} was not uploaded for this extract`, 400);
     }
+    if (content.verifiedSizeBytes === 0) throw emptyFileError(admitted.filename);
     return stored(content.storedKey, content.verifiedSizeBytes);
   }
 
+  // An empty file has nothing to extract and no size to admit: refused per file, before anything is written.
+  if ("bytes" in content && content.bytes.byteLength === 0) throw emptyFileError(admitted.filename);
   const key = rawSourceKey(request.userId, admitted.filename, request.extract);
   // Never write for a credential that no longer permits it (checked per write, not once per request).
   await request.authorizeExternalWork?.();
@@ -675,7 +678,16 @@ async function storeItem(
   } finally {
     body.destroy();
   }
+  if (measuredBytes === 0) {
+    // The stream turned out empty: its object goes at once (`written` also covers it if the whole intake fails).
+    await storage.remove(key).catch(() => undefined);
+    throw emptyFileError(admitted.filename);
+  }
   return stored(key, measuredBytes);
+}
+
+function emptyFileError(filename: string): ProjectIntakeError {
+  return new ProjectIntakeError(`${filename} is empty (0 bytes)`, 400);
 }
 
 /**

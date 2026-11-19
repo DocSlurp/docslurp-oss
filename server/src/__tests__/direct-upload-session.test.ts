@@ -15,8 +15,10 @@ const copyUploadedObject = vi.hoisted(() => vi.fn(async () => ({ etag: "sealed-e
 /** Rows passed to the `sql(rows)` insert helper (a plain array, unlike a tagged template's strings). */
 const insertedRows = () => sqlMock.mock.calls.filter(([first]) => Array.isArray(first) && !("raw" in first)).flatMap(([rows]) => rows as Array<Record<string, unknown>>);
 const reservations = vi.hoisted(() => [] as Array<{ lockClass?: string; tenant?: string; deadline?: number }>);
-vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async (options: { lockClass?: string; tenant?: string; deadline?: number } = {}) => {
+const lockPool = vi.hoisted(() => ({ saturated: false, Unavailable: class DirectUploadLockUnavailable extends Error {} }));
+vi.mock("../lib/direct-upload-locks.js", () => ({ DirectUploadLockUnavailable: lockPool.Unavailable, reserveDirectUploadLockConnection: async (options: { lockClass?: string; tenant?: string; deadline?: number } = {}) => {
   reservations.push(options);
+  if (lockPool.saturated) throw new lockPool.Unavailable();
   return { connection: lockMock, release: lockMock.release };
 } }));
 vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signMultipartUploadPart, signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
@@ -376,6 +378,24 @@ describe("Direct Upload Session Module", () => {
     await expect(withDirectUploadLock("session-1", work, undefined, undefined, { waitMs: 0, tenant: "org:org-1" })).rejects.toMatchObject({statusCode:409,code:"upload_session_busy"});
     expect(work).not.toHaveBeenCalled();
     expect(lockMock.release).toHaveBeenCalled();
+  });
+
+  it("answers a saturated pool as upload_session_busy, never with the caller's own held-lock code", async () => {
+    const work = vi.fn();
+    lockPool.saturated = true;
+    try {
+      // An idempotent intake names its held-lock code; no slot in time is not a claim about its key.
+      await expect(withDirectUploadLock("intake:bulk:key", work, "still being processed", "idempotency_in_flight", { lockClass: "intake", tenant: "org:org-1", waitMs: 50 }))
+        .rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy", message: "Uploads are busy; retry shortly" });
+      await expect(withDirectUploadLock("session-1", work, undefined, undefined, { tenant: "org:org-1", waitMs: 0 }))
+        .rejects.toMatchObject({ statusCode: 409, code: "upload_session_busy" });
+    } finally { lockPool.saturated = false; }
+    // A held key lock still reports the key as in flight.
+    lockMock.mockReset().mockResolvedValue([{ acquired: false }]);
+    await expect(withDirectUploadLock("intake:bulk:key", work, "still being processed", "idempotency_in_flight", { lockClass: "intake", tenant: "org:org-1", waitMs: 0 }))
+      .rejects.toMatchObject({ statusCode: 409, code: "idempotency_in_flight" });
+    expect(work).not.toHaveBeenCalled();
+    lockMock.mockReset().mockResolvedValue([{ acquired: true }]);
   });
 
   it("lets batch and short holders wait like confirm (DOCSLURP_UPLOAD_LOCK_WAIT_MS), and the reconciler not at all", async () => {

@@ -84,6 +84,32 @@ describe("lock classes and deadlines", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("queues simultaneous intakes from five organizations through the one intake slot instead of refusing them", async () => {
+    vi.useFakeTimers();
+    try {
+      setup();
+      const order: string[] = [];
+      // Each intake waits up to 30 s for the slot (the intake default) and holds it for 5 s.
+      const intakes = ["a", "b", "c", "d", "e"].map(async org => {
+        const lock = await reserveDirectUploadLockConnection({ lockClass: "intake", tenant: `org-${org}`, deadline: Date.now() + 30_000 });
+        order.push(org);
+        await new Promise(resolve => setTimeout(resolve, 5_000));
+        lock.release();
+      });
+      await vi.advanceTimersByTimeAsync(26_000);
+      await Promise.all(intakes);
+      expect(order.sort()).toEqual(["a", "b", "c", "d", "e"]);
+      // A sixth that cannot be served within its wait is refused on schedule, and one tenant never holds two.
+      const holder = await reserveDirectUploadLockConnection({ lockClass: "intake", tenant: "org-a" });
+      let refused = false;
+      const late = reserveDirectUploadLockConnection({ lockClass: "intake", tenant: "org-b", deadline: Date.now() + 1_000 }).catch(() => { refused = true; });
+      await vi.advanceTimersByTimeAsync(1_100);
+      await late;
+      expect(refused).toBe(true);
+      holder.release();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("gives up on a saturated pool on schedule and hands back a connection that arrives late", async () => {
     vi.useFakeTimers();
     try {

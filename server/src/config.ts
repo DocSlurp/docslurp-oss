@@ -294,6 +294,13 @@ export const env = {
    * most 60 s). A waiter whose client disconnects stops waiting.
    */
   directUploadLockWaitMs: uploadLockWaitMs(process.env.DOCSLURP_UPLOAD_LOCK_WAIT_MS),
+  /**
+   * How long an idempotent intake (bulk, URL or website) waits for an intake slot, a connection and its
+   * Idempotency-Key lock before answering 409 (default 30 s, at most 120 s). Its body is already received, so waiting
+   * costs memory only; a waiter whose client disconnects stops waiting. Many tenants uploading at once queue here
+   * instead of being refused.
+   */
+  directUploadLockIntakeWaitMs: Math.min(120_000, Math.max(0, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_INTAKE_WAIT_MS, 30_000))),
   /** Hard cap on one lock hold's storage work: in-flight calls are cancelled after it (default 30 s). */
   directUploadLockHoldMaxMs: Math.max(1_000, readNumber(process.env.DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS, 30_000)),
   /**
