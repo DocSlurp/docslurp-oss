@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { LEGACY_MIGRATIONS } from "../../db/migration-runner.mjs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 /**
@@ -24,7 +25,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  */
 const url = process.env.TEST_DATABASE_URL;
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const journal = JSON.parse(readFileSync(new URL("../../db/migrations/meta/_journal.json", import.meta.url), "utf8"));
+// The upgrade fixture is a database Drizzle migrated (as production was before the runner), so migrate.mjs also maps its ledger.
+const journal = { version: "7", dialect: "postgresql", entries: LEGACY_MIGRATIONS.slice(0, 127).map(([file, when], idx) => ({ idx, version: "7", when, tag: file.replace(/\.sql$/, ""), breakpoints: true })) };
 const fixtureName = `one_org_upgrade_${process.pid}`;
 let fixtureUrl: string;
 let admin: pg.Client;
@@ -64,9 +66,8 @@ describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through mig
     await client.connect();
     scratch = mkdtempSync(join(tmpdir(), "one-org-upgrade-"));
     mkdirSync(join(scratch, "meta"));
-    const entries = journal.entries.filter((entry: { idx: number }) => entry.idx < 127);
-    writeFileSync(join(scratch, "meta/_journal.json"), JSON.stringify({ ...journal, entries }));
-    for (const entry of entries) copyFileSync(join(root, "server/db/migrations", `${entry.tag}.sql`), join(scratch, `${entry.tag}.sql`));
+    writeFileSync(join(scratch, "meta/_journal.json"), JSON.stringify(journal));
+    for (const entry of journal.entries) copyFileSync(join(root, "server/db/migrations", `${entry.tag}.sql`), join(scratch, `${entry.tag}.sql`));
     await migrate(drizzle(client), { migrationsFolder: scratch });
     await client.query(`
       insert into "user"(id, name, email) values

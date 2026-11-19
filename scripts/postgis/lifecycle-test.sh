@@ -21,8 +21,8 @@ done
 python - "$root" > "$scratch/migrations.sql" <<'PY'
 import json,sys,pathlib
 r=pathlib.Path(sys.argv[1]).parents[1]/'server/db/migrations'
-for entry in json.loads((r/'meta/_journal.json').read_text())['entries']:
- print('BEGIN;');print((r/(entry['tag']+'.sql')).read_text());print('COMMIT;')
+for path in sorted(r.glob('*.sql'), key=lambda p: p.name):
+ print('BEGIN;');print(path.read_text());print('COMMIT;')
 print('CREATE EXTENSION IF NOT EXISTS postgis;')
 for name in json.loads((r/'postgis/journal.json').read_text()):print((r/'postgis'/name).read_text())
 PY

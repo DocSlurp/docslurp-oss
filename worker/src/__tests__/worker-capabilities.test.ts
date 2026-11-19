@@ -141,7 +141,7 @@ describe("WorkerCapabilityRegistry", () => {
       (strings: TemplateStringsArray) => {
         const text = strings.join("?");
         statements.push(text);
-        if (text.includes("drizzle.__drizzle_migrations")) return Promise.resolve([{ latest: null }]);
+        if (text.includes("docslurp_migrations.applied")) return Promise.resolve([{ latest: null }]);
         if (text.includes("capabilities, config")) return Promise.reject(Object.assign(new Error('column "config" does not exist'), { code: "42703" }));
         return Promise.resolve([]);
       },

@@ -247,11 +247,13 @@ export function quoteIdent(name) {
  * The statements that bring grants in schema public to the declared state, for
  * the roles in `present` (role names that exist). Pure: `relations` are the
  * public relation names that exist, `sequences` maps a sequence name to the
- * table that owns it. `migrationsTable` says drizzle.__drizzle_migrations exists.
+ * table that owns it. `migrationsTable` says drizzle.__drizzle_migrations exists
+ * (kept current for the previous release); `migrationLedger` says
+ * docslurp_migrations.applied (migration-runner.mjs) exists.
  * `columns` (table -> column names), when given, drops worker column grants for
  * columns that do not exist yet.
  */
-export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false, nativeSchema = false, columns: existingColumns = null }) {
+export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false, migrationLedger = false, nativeSchema = false, columns: existingColumns = null }) {
   const statements = [];
   const has = (role) => present.includes(role);
   const ownerIdent = quoteIdent(owner);
@@ -310,8 +312,8 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       }
     }
     if (migrationsTable) {
-      // worker/src/db/worker-capabilities.ts reports the newest applied
-      // migration (schema_applied_when) so the API can gate on schema skew.
+      // Workers of the previous release read the Drizzle ledger for schema_applied_when; keep the grant until
+      // none remain. Current workers read docslurp_migrations.applied (below).
       statements.push(
         `grant usage on schema drizzle to ${worker}`,
         `grant select on drizzle.__drizzle_migrations to ${worker}`,
@@ -357,6 +359,20 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       statements.push(`revoke all on public.pricing_provider_state from ${quoteIdent(role)}`,
         `grant select on public.pricing_provider_state to ${quoteIdent(role)}`,
         `revoke all on function public.pricing_state_raise(text, bigint) from ${quoteIdent(role)}`);
+    }
+  }
+  if (migrationLedger) {
+    // The applied-migration ledger: file names and hashes, no tenant data. The API reads it for readiness and the
+    // migrations alert, the worker for schema skew. Read-only for both: only the owner records a migration.
+    statements.push("revoke all on schema docslurp_migrations from public",
+      "revoke all on all tables in schema docslurp_migrations from public");
+    for (const role of [roles.app, roles.worker].filter(has)) {
+      statements.push(
+        `revoke all on schema docslurp_migrations from ${quoteIdent(role)}`,
+        `revoke all on all tables in schema docslurp_migrations from ${quoteIdent(role)}`,
+        `grant usage on schema docslurp_migrations to ${quoteIdent(role)}`,
+        `grant select on docslurp_migrations.applied to ${quoteIdent(role)}`,
+      );
     }
   }
   if (nativeSchema) {
@@ -425,11 +441,13 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
       and not (p.oid = any (array(select to_regprocedure(a) from unnest($1::text[]) a where to_regprocedure(a) is not null)))`,
     [RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
   const { rows: [{ migrations }] } = await client.query("select to_regclass('drizzle.__drizzle_migrations') is not null as migrations");
+  const { rows: [{ ledger }] } = await client.query("select to_regclass('docslurp_migrations.applied') is not null as ledger");
   const { rows: [{ native }] } = await client.query("select to_regnamespace('docslurp_mastra') is not null as native");
   const statements = roleGrantStatements({
     nativeSchema: native === true,
     owner,
     migrationsTable: migrations === true,
+    migrationLedger: ledger === true,
     roles,
     present,
     relations: relationRows.map((row) => row.relname),

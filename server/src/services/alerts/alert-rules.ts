@@ -44,12 +44,27 @@ export interface TaskQueuePollerSnapshot {
   pollers: Array<{ identity: string; lastAccessMs: number | null }>;
 }
 
+/**
+ * Pure: compare the applied migrations with the files this build ships. Pending is decided per file (a migration
+ * that merged late is pending even when a later-named one is applied); `unknown` are applied files this build does
+ * not ship, which means the schema is ahead of the code. Names are without ".sql".
+ */
+export function migrationState(snapshot: { applied: string[]; shipped: string[] }): { pending: string[]; unknown: string[]; head: string | null } {
+  const tag = (file: string) => file.replace(/\.sql$/, "");
+  const applied = new Set(snapshot.applied);
+  const shipped = new Set(snapshot.shipped);
+  return {
+    pending: snapshot.shipped.filter((file) => !applied.has(file)).map(tag),
+    unknown: snapshot.applied.filter((file) => !shipped.has(file)).sort().map(tag),
+    head: snapshot.shipped.length > 0 ? tag(snapshot.shipped[snapshot.shipped.length - 1]!) : null,
+  };
+}
+
 export interface MigrationSnapshot {
-  appliedCount: number;
-  /** Journal `when` of the newest applied migration (drizzle created_at). */
-  latestAppliedWhen: number | null;
-  /** Migrations shipped with this build, in journal order. */
-  journal: Array<{ tag: string; when: number }>;
+  /** File names recorded in docslurp_migrations.applied. */
+  applied: string[];
+  /** Migration files shipped with this build, in apply order. */
+  shipped: string[];
 }
 
 export interface QueueSnapshot {
@@ -246,27 +261,24 @@ export function evaluateAlertRules(
     }
 
     if (db.migrations) {
-      const { journal, latestAppliedWhen, appliedCount } = db.migrations;
-      const head = journal[journal.length - 1];
+      const { pending, unknown: unshipped, head } = migrationState(db.migrations);
       if (!head) {
-        checks.push(unknown("migrations-not-at-head", "migration journal is empty"));
+        checks.push(unknown("migrations-not-at-head", "this build ships no migrations"));
       } else {
-        const applied = latestAppliedWhen ?? 0;
-        const pending = journal.filter((entry) => entry.when > applied);
-        const ahead = applied > head.when;
+        const ahead = unshipped.length > 0;
         checks.push(check(
           "migrations-not-at-head",
           pending.length > 0 || ahead,
           "critical",
-          ahead
-            ? "Database schema is ahead of the running code (rolled back past a migration?)"
-            : pending.length > 0
-              ? `${pending.length} migration(s) not applied; head is ${head.tag}`
-              : `Schema at head ${head.tag}`,
+          pending.length > 0
+            ? `${pending.length} migration(s) not applied; head is ${head}`
+            : ahead
+              ? "Database schema is ahead of the running code (rolled back past a migration?)"
+              : `Schema at head ${head}`,
           {
-            head: head.tag,
-            appliedCount,
-            pending: pending.map((entry) => entry.tag).join(",") || null,
+            head,
+            appliedCount: db.migrations.applied.length,
+            pending: pending.slice(0, 20).join(",") || null,
             schemaAheadOfCode: ahead,
           },
         ));

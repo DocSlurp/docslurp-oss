@@ -1,30 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { applyRemainingMigrations, createMigratedDatabase, migrationNameProblems, readMigrationTags } from "../test/migrated-db.js";
 
-import { applyRemainingMigrations, createMigratedDatabase, migrationJournalProblems, readMigrationJournal } from "../test/migrated-db.js";
-
-describe("server/db/migrations journal", () => {
-  it("has contiguous idx values, strictly increasing when stamps and a file per entry", () => {
-    const journal = readMigrationJournal();
-    expect(migrationJournalProblems(journal)).toEqual([]);
-    for (const entry of journal) {
-      expect(existsSync(fileURLToPath(new URL(`../../../server/db/migrations/${entry.tag}.sql`, import.meta.url))), entry.tag).toBe(true);
-    }
+describe("server/db/migrations file names", () => {
+  it("are numbered (frozen) or UTC-timestamped, and apply in name order", () => {
+    const tags = readMigrationTags();
+    expect(migrationNameProblems(tags)).toEqual([]);
+    expect(tags[0]).toBe("0000_current_schema");
+    expect([...tags].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))).toEqual(tags);
   });
 
-  it("flags entries drizzle-kit would skip or misnumber", () => {
-    expect(migrationJournalProblems([
-      { idx: 0, when: 100, tag: "0000_a" },
-      { idx: 1, when: 300, tag: "0001_b" },
-      { idx: 2, when: 200, tag: "0002_older_stamp" },
-      { idx: 4, when: 400, tag: "0004_gap" },
-      { idx: 4, when: 400, tag: "0005_same_stamp" },
-    ])).toEqual([
-      "0002_older_stamp: when 200 is not after 0001_b (300)",
-      "0004_gap: idx 4, expected 3",
-      "0005_same_stamp: when 400 is not after 0004_gap (400)",
+  it("flags names the runner would refuse", () => {
+    expect(migrationNameProblems(["0001_ok", "20261118T1443_ok", "2026-11-18_dashes", "20261118T1443_Upper", "notes"])).toEqual([
+      "2026-11-18_dashes: expected NNNN_name (frozen) or YYYYMMDDTHHMM_name",
+      "20261118T1443_Upper: expected NNNN_name (frozen) or YYYYMMDDTHHMM_name",
+      "notes: expected NNNN_name (frozen) or YYYYMMDDTHHMM_name",
     ]);
   });
 });

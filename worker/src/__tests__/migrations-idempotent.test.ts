@@ -2,14 +2,14 @@ import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { applyMigration, readMigrationJournal } from "../test/migrated-db.js";
+import { applyMigration, readMigrationTags } from "../test/migrated-db.js";
 
 // Every migration must be safe to run twice in a row: the second run must
 // succeed and leave the schema and row counts exactly as the first run left
 // them (AGENTS.md; scripts/check-migration-safety.mjs flags the usual causes
-// statically). drizzle-kit never re-runs an applied migration on its own, but a
-// half-recorded run, a restored journal or a manual re-apply must not break a
-// database or apply a backfill twice.
+// statically). The runner never re-runs a recorded migration on its own, but a
+// lost or restored ledger or a manual re-apply must not break a database or
+// apply a backfill twice.
 
 const SCHEMAS = `n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'`;
 
@@ -55,7 +55,7 @@ describe("migrations are idempotent", () => {
 
   it("every migration succeeds when run a second time and changes nothing", async () => {
     const problems: string[] = [];
-    for (const { tag } of readMigrationJournal()) {
+    for (const tag of readMigrationTags()) {
       await applyMigration(db, tag);
       const once = await fingerprint(db);
       try {

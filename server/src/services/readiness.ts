@@ -33,7 +33,8 @@ import { searchLimiterStats } from "../search/search-limiter.js";
 import { sharedDbProbe } from "./db-probe.js";
 import { headStorageBucket } from "../lib/storage.js";
 import { describeTemporalNamespace } from "../lib/temporal.js";
-import { loadMigrationJournal } from "./alerts/alert-evaluator.js";
+import { APPLIED_MIGRATIONS_SQL, loadShippedMigrations } from "./alerts/alert-evaluator.js";
+import { migrationState } from "./alerts/alert-rules.js";
 
 export type ReadinessCheckName = "database" | "pool" | "migrations" | "storage" | "temporal";
 
@@ -76,22 +77,17 @@ function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 300);
 }
 
-/** Pure: compare the applied migrations with the journal this build ships. */
-export function migrationReadiness(input: {
-  journal: Array<{ tag: string; when: number }> | null;
-  latestAppliedWhen: number | null;
-}): ProbeResult {
-  if (!input.journal) return { ok: true, detail: "migration journal not shipped with this build; skipped" };
-  const head = input.journal[input.journal.length - 1];
-  if (!head) return { ok: true, detail: "migration journal is empty" };
-  const applied = input.latestAppliedWhen ?? 0;
-  const pending = input.journal.filter((entry) => entry.when > applied);
+/** Pure: compare the applied migrations with the files this build ships. */
+export function migrationReadiness(input: { shipped: string[] | null; applied: string[] }): ProbeResult {
+  if (!input.shipped) return { ok: true, detail: "migration files not shipped with this build; skipped" };
+  const { pending, unknown, head } = migrationState({ shipped: input.shipped, applied: input.applied });
+  if (!head) return { ok: true, detail: "this build ships no migrations" };
   if (pending.length > 0) {
-    return { ok: false, detail: `${pending.length} migration(s) not applied; code expects ${head.tag}` };
+    return { ok: false, detail: `${pending.length} migration(s) not applied (first ${pending[0]}); code expects ${head}` };
   }
-  return applied > head.when
-    ? { ok: true, detail: `schema is ahead of this build (head ${head.tag}); expected during a rollback` }
-    : { ok: true, detail: `schema at ${head.tag}` };
+  return unknown.length > 0
+    ? { ok: true, detail: `schema is ahead of this build (head ${head}); expected during a rollback` }
+    : { ok: true, detail: `schema at ${head}` };
 }
 
 export const defaultReadinessProbes: ReadinessProbes = {
@@ -116,13 +112,10 @@ export const defaultReadinessProbes: ReadinessProbes = {
     }
   },
   async migrations() {
-    const journal = loadMigrationJournal();
-    if (!journal) return migrationReadiness({ journal: null, latestAppliedWhen: null });
-    const [row] = await sharedDbProbe().query(readinessTimeoutMs(), (sql) => sql<{ latest: string | number | null }[]>`
-      select max(created_at) as latest from drizzle.__drizzle_migrations
-    `);
-    const latest = row?.latest === null || row?.latest === undefined ? null : Number(row.latest);
-    return migrationReadiness({ journal, latestAppliedWhen: latest });
+    const shipped = loadShippedMigrations();
+    if (!shipped) return migrationReadiness({ shipped: null, applied: [] });
+    const rows = await sharedDbProbe().query(readinessTimeoutMs(), (sql) => sql.unsafe<{ filename: string }[]>(APPLIED_MIGRATIONS_SQL));
+    return migrationReadiness({ shipped, applied: rows.map((row) => row.filename) });
   },
   async storage(signal) {
     await headStorageBucket(signal);
