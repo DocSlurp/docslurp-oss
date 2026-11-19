@@ -3,7 +3,7 @@
   "description": "Doppler's Markdown for the routing-eval fixtures: the PDF extractor's output the eval routes on (doppler-md evidence). Regenerate with Doppler built from the pinned commit: pdftotext -q -bbox-layout -wordmeta -rules -compact-layout FILE - | doppler-md (what pdftomarkdown runs). Each fixture also has its -bbox-layout -rules XHTML (.xhtml): the word boxes and ruling lines the layout walker reads.",
   "doppler": {
     "repository": "https://github.com/DocSlurp/doppler",
-    "commit": "e1200cb9d12d95cac71ff902e9a18a6932aa8cd0"
+    "commit": "d908bbc4365ca7b71a268485bfe1b1919c308ef4"
   },
   "files": {
     "academic-latex-ligatures.pdf.md": {

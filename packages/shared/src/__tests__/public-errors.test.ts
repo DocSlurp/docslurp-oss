@@ -68,5 +68,6 @@ it("keeps internal extractor routing and engine details operator-only", () => {
     extractorAttempts: { attempted: ["kreuzberg"], unavailable: [] },
     secondaryExtractor: null,
     retryStrategy: "default",
+    extractorOutputs: { publishedMarkdownUri: "s3://internal/run/document.md" },
   })).toEqual({ strategy: "kreuzberg-solo", extractor: "kreuzberg", extractionMs: 120 });
 });

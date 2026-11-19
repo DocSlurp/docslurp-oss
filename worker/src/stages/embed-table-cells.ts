@@ -10,7 +10,7 @@
 import type { CanonicalDocument } from "@docslurp/shared";
 import type { Document } from "../models.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { hasVmHtmlTableWork, HTML_TABLE_DOCUMENT_LIMITS, prepareHtmlTableCells, vmTableSources } from "../pipeline/html-table-vm.js";
+import { hasVmHtmlTableWork, HTML_TABLE_DOCUMENT_LIMITS, prepareHtmlTableCells, TableCellRetention, vmTableSources } from "../pipeline/html-table-vm.js";
 import {
   embedHtmlTableSources,
   reportUnknownGuest,
@@ -106,9 +106,10 @@ export async function storeEmbedTableCells(args: {
   // The deadline covers the VM command and the upload (the signal reaches the storage request).
   const deadline = AbortSignal.timeout(args.deadlineMs ?? STORE_TABLE_CELLS_DEADLINE_MS);
   const signal = args.signal ? AbortSignal.any([args.signal, deadline]) : deadline;
+  const retention = new TableCellRetention();
   try {
     // Always a fresh artifact for this generation: every table is parsed now, nothing carried over from an earlier write.
-    const { prepared, vmTables, vmCommands } = await prepareHtmlTableCells(sources, args.runner, signal);
+    const { prepared, vmTables, vmCommands } = await prepareHtmlTableCells(sources, args.runner, signal, { retention });
     signal.throwIfAborted();
     const written = await writeTableCellsArtifact({
       storage: args.storage, key: tableCellsArtifactKey(args.run, args.document), runId: args.run.id, documentId: args.document.id,
@@ -123,5 +124,7 @@ export async function storeEmbedTableCells(args: {
     const message = deadline.aborted ? `deadline of ${args.deadlineMs ?? STORE_TABLE_CELLS_DEADLINE_MS} ms exceeded` : diagnostic(error);
     console.warn(`[table-cells] not stored stage=${args.stage} document=${args.document.id}; embed parses its tables in a VM: ${message}`);
     return { status: "failed", error: message, ms: Date.now() - started };
+  } finally {
+    retention.release();
   }
 }

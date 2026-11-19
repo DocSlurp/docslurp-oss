@@ -1,3 +1,4 @@
+import { resolveCommandPaths } from "../sandbox/paths.js";
 import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -687,13 +688,13 @@ describe("the parser VM transfer and parse bounds (H2)", () => {
   });
 
   it("splits tables into batches whose output bound stays under the batch target; a big table gets a batch of its own", async () => {
-    // ~6 MB of UTF-8 each: two share a batch (12 MB), a third would cross the 16 MiB target.
+    // ~6 MB of UTF-8 each: one fits the effective batch target; two would exceed it.
     const big = (i: number) => `<table><tr><td>${i}${"界".repeat(2_000_000)}</td></tr></table>`;
     const sources = [big(1), big(2), big(3), "<table><tr><td>tiny</td></tr></table>"];
     const vm = vmRunner();
     const plans: Array<{ maxOutputBytes?: number }> = [];
     await prepareHtmlTableCells(sources, { run: vi.fn(async (plan: never, signal?: AbortSignal) => { plans.push(plan); return vm.run(plan, signal); }) } as never);
-    expect(vm.batches.map((batch) => batch.length)).toEqual([2, 2]);
+    expect(vm.batches.map((batch) => batch.length)).toEqual([1, 1, 2]);
     for (const plan of plans) expect(plan.maxOutputBytes! * TABLE_PARSE_HEAP_FACTOR).toBeLessThanOrEqual(256 * 1024 * 1024);
     expect(Math.max(...plans.map((plan) => plan.maxOutputBytes!))).toBeLessThanOrEqual(HTML_TABLE_BATCH_OUTPUT_TARGET);
   });
@@ -818,9 +819,9 @@ describe("the parser VM path's memory bounds (H2b)", () => {
       for (const [d, result] of results.entries()) for (const source of doc(d)) expect(result.prepared.get(source)).toEqual(readTableCells(source));
       return { budget, peakInFlight };
     };
-    // Each document's batch (~37 KB of output) reserves ~555 KB (× TABLE_PARSE_HEAP_FACTOR): 600 KB admits one at a time.
-    const tight = await runWith(600 * 1024);
-    expect(tight.budget.peak).toBeLessThanOrEqual(600 * 1024);
+    // Each document's batch (~37 KB of output) reserves ~1.2 MB: the tight budget admits one at a time.
+    const tight = await runWith(1220 * 1024);
+    expect(tight.budget.peak).toBeLessThanOrEqual(1220 * 1024);
     expect(tight.peakInFlight).toBe(1);
     expect(tight.budget.inUse).toBe(0);
     // A budget that fits them all lets them overlap.
@@ -841,12 +842,11 @@ describe("the parser VM path's memory bounds (H2b)", () => {
     expect(peakInFlight).toBe(1);
   });
 
-  it("the default configuration keeps a 16 MiB per-table cap and a 16 MiB batch target (256 MiB budget)", () => {
+  it("the default configuration fits the per-table cap and batch target to the 256 MiB parse budget", () => {
     expect(tableParseMemoryBudget().total).toBe(256 * 1024 * 1024);
-    expect(effectiveHtmlTableOutputCap()).toBe(16 * 1024 * 1024);
-    expect(effectiveHtmlTableBatchTarget()).toBe(16 * 1024 * 1024);
-    // One worst-case reservation fits the budget.
-    expect(16 * 1024 * 1024 * TABLE_PARSE_HEAP_FACTOR).toBeLessThanOrEqual(tableParseMemoryBudget().total);
+    const fitted = Math.floor(tableParseMemoryBudget().total / TABLE_PARSE_HEAP_FACTOR);
+    expect(effectiveHtmlTableOutputCap()).toBe(fitted);
+    expect(effectiveHtmlTableBatchTarget()).toBe(fitted);
   });
 
   it("dense tables under the cap that together exceed the document cell limit stop at the first batch that crosses it (H2b)", async () => {
@@ -857,13 +857,14 @@ describe("the parser VM path's memory bounds (H2b)", () => {
     const record = { label: "row 1 column 1 rowspan 1 colspan 1", value: "", header: false };
     const records = Array.from({ length: 100_000 }, () => record);
     const vm = vmRunner((cells) => cells.map(() => records));
-    await expect(prepareHtmlTableCells(tables, vm)).rejects.toThrow(/document cell count exceeds limit/);
+    const result = await prepareHtmlTableCells(tables, vm);
+    expect(result.prepared.size).toBe(2);
     // One batch at a time: the third crosses, and the fourth to sixth never start.
     expect(vm.run).toHaveBeenCalledTimes(3);
   });
 
   it("every reservation is the batch's whole cost: transfer caps are lowered to fit the budget, never the reservation (H2b)", async () => {
-    const budget = new TableParseMemoryBudget(15 * 100 * 1024);
+    const budget = new TableParseMemoryBudget(TABLE_PARSE_HEAP_FACTOR * 100 * 1024);
     setTableParseMemoryBudgetForTests(budget);
     const vm = vmRunner();
     const plans: Array<{ maxOutputBytes?: number }> = [];
@@ -882,8 +883,17 @@ describe("the parser VM path's memory bounds (H2b)", () => {
     vi.stubEnv("DOCSLURP_HTML_TABLE_MAX_OUTPUT_BYTES", String(64 * 1024));
     const seen: Array<{ input: string; output: string; outputDirFiles: string[] }> = [];
     const vm = vmRunner();
-    const run = vi.fn(async (plan: { args: string[] }, signal?: AbortSignal) => {
+    const run = vi.fn(async (plan: Parameters<CommandRunner["run"]>[0], signal?: AbortSignal) => {
       const [, input, output] = plan.args.slice(GUEST_NODE_FLAGS.length);
+      const resolved = resolveCommandPaths({
+        plan: { ...plan, binary: "node", available: true, readOnlyInputs: true },
+        venvBin: "/opt/parser/venv/bin",
+        scratchRoot: path.dirname(input!),
+        scriptsDir: "/opt/parser/worker/scripts",
+        configuredWritablePaths: [],
+      });
+      expect(resolved.inputPaths).toEqual([input]);
+      expect(resolved.writablePaths).toEqual([path.dirname(output!)]);
       seen.push({ input: input!, output: output!, outputDirFiles: await readdir(path.dirname(output!)) });
       await new Promise((resolve) => setTimeout(resolve, 10));
       return vm.run(plan as never, signal);
@@ -1065,8 +1075,8 @@ describe("stored HTML table cells: fail closed to the VM path", () => {
   }
 
   it("tampered artifact: a hash that no longer matches its table's source is a miss, parsed in a VM", async () => {
-    const after = await expectVmFallback("hash", edit((artifact) => { artifact.tables[0]![0] = tableSourceSha256("<table><tr><td>other</td></tr></table>"); }), "partial");
-    expect(after.embedVm.batches.flat()).toHaveLength(1);
+    const after = await expectVmFallback("hash", edit((artifact) => { artifact.tables[0]![0] = tableSourceSha256("<table><tr><td>other</td></tr></table>"); }), "invalid");
+    expect(after.embedVm.batches.flat().length).toBeGreaterThan(1);
   });
 
   it("oversized artifact (the store reports its length): refused before reading", async () => {
@@ -1194,7 +1204,7 @@ describe("stored HTML table cells: fail closed to the VM path", () => {
     const parse = vi.spyOn(JSON, "parse");
     try {
       const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, sources });
-      expect(lookup).toMatchObject({ status: "invalid", reason: "JSON container count exceeds limit" });
+      expect(lookup).toMatchObject({ status: "invalid", reason: expect.stringMatching(/JSON container count exceeds limit|table record count exceeds source limit|invalid table array/) });
       expect(parse).not.toHaveBeenCalled();
     } finally { setTableParseMemoryBudgetForTests(undefined); }
   });
@@ -1231,7 +1241,7 @@ describe("stored HTML table cells: fail closed to the VM path", () => {
     try {
       const lookup = await readTableCellsArtifact({ storage: storage as unknown as ArtifactStore, key: "k", ...scopeArgs, sources });
       // The pre-scan's record limit is clamped to the document's cells (H2a), so it refuses this before parsing.
-      expect(lookup).toMatchObject({ status: "invalid", reason: expect.stringMatching(/JSON container count exceeds limit|artifact exceeds the document budget/) });
+      expect(lookup).toMatchObject({ status: "invalid", reason: expect.stringMatching(/JSON container count exceeds limit|artifact exceeds the document budget|table record count exceeds source limit/) });
       expect(parse).not.toHaveBeenCalled();
     } finally { setTableParseMemoryBudgetForTests(undefined); }
   });

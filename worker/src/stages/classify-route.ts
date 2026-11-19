@@ -390,7 +390,7 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   /** Legacy vision routing v2 (lib/vision-routing-v2.ts). Off reproduces v1 routing. */
   routingV2?: boolean;
   /**
-   * Read Doppler's math and table encoding facts (`pageLayout` pages' `encodings`) in evidence routing. Omitted: the
+   * Read extractor math and table encoding facts (`pageLayout` pages' `encodings`) in evidence routing. Omitted: the
    * DOCSLURP_ENCODING_FACTS_ROUTING setting (routing/flags.ts readEncodingFactsRouting).
    */
   encodingRouting?: boolean;
@@ -519,7 +519,7 @@ function buildEvidencePages(
     const classify = (withEncodings: PageEncodingRoute | null) =>
       classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, encodings: withEncodings, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
     const page = classify(encodings);
-    // The page as it is without Doppler's encodings: what a capped encoding read falls back to (capEncodingReadPages).
+    // The page as it is without extractor encoding facts: what a capped encoding read falls back to (capEncodingReadPages).
     const pageWithoutEncodings = encodings ? classify(null) : page;
     const complexity = args.structuredComplexity?.get(pageNumber);
     const imageEvidence = evidence?.get(pageNumber);
@@ -559,14 +559,20 @@ function buildEvidencePages(
           ],
         }
       : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
-    // Doppler's encodings may add a read (never remove one): a read of their own, or a table-unreliable read on a table
+    // extractor encoding facts may add a read (never remove one): a read of their own, or a table-unreliable read on a table
     // route only they added. Either is capped per document (capEncodingReadPages); a capped page is the page as it is
     // without the encodings (its route, hint and decision), so it neither reads nor carries their vision-rescue hint.
     const withEncoding = encodingReadDecision(baseDecision, encodings);
     const finished = finishEvidencePage(page, withEncoding);
     if (!encodings) return finished;
     const declined = finishEvidencePage(pageWithoutEncodings, baseDecision);
-    if (finished.ocrDecision?.authorized !== true || declined.ocrDecision?.authorized === true) return finished;
+    // A read the page has without the encodings is independent of them only when it is not itself capped: a leak-only
+    // table read (UNCAPPED, capTableLeakPages) is a capped selection, not an authorization. Treating it as independent let
+    // a page whose encodings turned a leak-only read into a table-route read escape both caps.
+    // Such a page is an encoding read; if the encoding cap drops it, it falls back to the leak-only read, which the table
+    // cap then counts.
+    const declinedIndependent = declined.ocrDecision?.authorized === true && (declined as { [UNCAPPED]?: unknown })[UNCAPPED] === undefined;
+    if (finished.ocrDecision?.authorized !== true || declinedIndependent) return finished;
     return {
       ...finished,
       [ENCODING_UNCAPPED]: {
@@ -617,7 +623,7 @@ const UNCAPPED = Symbol("table-leak-uncapped");
 const ENCODING_UNCAPPED = Symbol("encoding-read-uncapped");
 
 /**
- * At most encodingReadPageCap(pageCount) pages of a document are read because Doppler's encodings alone asked for it
+ * At most encodingReadPageCap(pageCount) pages of a document are read because extractor encoding facts alone asked for it
  * (math only a read recovers, tables drawn as outlines): pages with no native text first, then the most unreadable math
  * glyphs, then page order. The rest keep the decision they had without the encodings (signal `encoding-read-capped`);
  * the capped pages are logged.
@@ -637,17 +643,44 @@ function capEncodingReadPages(pages: AdaptivePageRoutingEntry[], pageCount: numb
   }
   return (pages as Capped[]).map((page, index) => {
     const { [ENCODING_UNCAPPED]: uncapped, ...kept } = page;
-    return dropped.has(index) && uncapped ? uncapped.page : kept;
+    if (!uncapped) return kept;
+    if (dropped.has(index)) return uncapped.page;
+    // The read exists only because of the encodings: say so on the decision, so execution admits it under the guard's
+    // durable `encoding-read` budget (vision-extract legacyPageHints) and not as an ordinary page read. This cap holds for one
+    // routing decision; the guard's holds across retries, restarts and re-routed facts.
+    return kept.ocrDecision ? { ...kept, ocrDecision: { ...kept.ocrDecision, signals: [...kept.ocrDecision.signals, ENCODING_READ_ONLY_SIGNAL] } } : kept;
   });
 }
 
-/** Pages a document may have read on Doppler's encodings alone: the table-leak cap's shape (TABLE_LEAK_PAGE_CAP). */
+/** Pages a document may have read on extractor encoding facts alone: the table-leak cap's shape (TABLE_LEAK_PAGE_CAP). */
 export function encodingReadPageCap(pageCount: number): number {
   return tableLeakPageCap(pageCount);
 }
 
 /** Signals of encoding routing (Doppler math and table encoding facts, DOCSLURP_ENCODING_FACTS_ROUTING). */
 export const ENCODING_READ_CAPPED_SIGNAL = "encoding-read-capped";
+/** On a read extractor encoding facts alone authorized (and the per-document cap kept): read under the guard's `encoding-read` budget. */
+export const ENCODING_READ_ONLY_SIGNAL = "encoding-read-only";
+
+/**
+ * The durable budget a triaged page's read is admitted under, from its routing decision: `encoding-read` for a read the
+ * encodings alone authorized (ENCODING_READ_ONLY_SIGNAL), `table-rescue` for one table-leak signals alone authorized
+ * (TABLE_LEAK_ONLY_SIGNAL), else none (an ordinary page read). The one rule for triage hints, route plans and page tasks.
+ */
+export function readBudgetOf(page: { ocrDecision?: { authorized?: boolean; signals: readonly string[] } | null }): "encoding-read" | "table-rescue" | null {
+  const signals = page.ocrDecision?.signals ?? [];
+  // The direct authorization signals also identify this budget in artifacts written before the explicit stamp.
+  if (signals.includes(ENCODING_READ_ONLY_SIGNAL) ||
+      signals.includes(ENCODING_MATH_READ_SIGNAL) ||
+      signals.includes(ENCODING_TABLE_READ_SIGNAL)) return "encoding-read";
+  if (signals.includes(TABLE_LEAK_ONLY_SIGNAL)) return "table-rescue";
+  return null;
+}
+
+/** The stricter of two budgets: an encoding read over a table rescue over none. */
+export function stricterReadBudget(a: "encoding-read" | "table-rescue" | null | undefined, b: "encoding-read" | "table-rescue" | null | undefined): "encoding-read" | "table-rescue" | null {
+  return a === "encoding-read" || b === "encoding-read" ? "encoding-read" : a === "table-rescue" || b === "table-rescue" ? "table-rescue" : null;
+}
 export const ENCODING_MATH_GRID_SIGNAL = "encoding-math-grid";
 export const ENCODING_RASTER_TABLE_SIGNAL = "encoding-table-raster-candidate";
 export const ENCODING_MATH_READ_SIGNAL = "ocr-authorized:encoding-math-unreadable";
@@ -660,13 +693,13 @@ function encodingTableSignal(encodings: PageEncodingRoute): string {
 }
 
 /**
- * The page-image decision with Doppler's encoding facts added (evidence routing; `encodings` only when encoding routing is
+ * The page-image decision with extractor encoding facts added (evidence routing; `encodings` only when encoding routing is
  * on and the page's encodings are known). Facts can add a read, never remove one:
  * - math only a read recovers (raster strips, glyph outlines, Type 3 bitmap fonts; unmapped math glyphs when the run did
  *   not read math and the page has no TeX or MathML source): the page is read;
  * - a table drawn as glyph outlines: the page is read;
  * - a raster image shaped like a table is a candidate only (charts and logos match too): a signal, no read.
- * Executors read whole pages here; Doppler's math regions (full level) are not yet a read scope.
+ * Executors read whole pages here; extractor math regions (full level) are not yet a read scope.
  */
 export function encodingReadDecision(decision: AdaptiveOcrDecision, encodings: PageEncodingRoute | null): AdaptiveOcrDecision {
   if (!encodings || decision.authorized) return decision;
@@ -1143,7 +1176,7 @@ const ALIGNED_TABLE_MIN_ROWS = 3;
  * (shared isTableHeavy). Tables are the extractor's own (pipe and HTML tables), rows a layout-preserving extractor or OCR
  * kept aligned, the known ruled grids (a drawn table the extractor flattened still counts by its rows), and, when known,
  * the layout walker's tables with their coverage. Never words that name a table ("total", "amount"). Unknown grids take the
- * table path; Doppler's encodings only add a table.
+ * table path; extractor encoding facts only add a table.
  */
 function pageTable(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null; tableScan?: HtmlTableScan | null; encodings: PageEncodingRoute | null; pageNumber: number }): PageTableDecision {
   const textRows: PageTable[] = [];
@@ -1216,7 +1249,7 @@ export function classifyAdaptivePage(
   } = {},
 ): AdaptivePageRoutingEntry {
   const routingV2 = options.routingV2 === true;
-  // Doppler's encodings only ADD table routes and reads (council #467): they never settle an unknown grid as "no table" and
+  // Extractor encoding facts only add table routes and reads (council #467): they never settle an unknown grid as "no table" and
   // never take a grid out of the table count. A ruled table of notation (T/F cells) can read as `math-grid` alone, and a
   // table of prose cells has no table bit at all.
   const encodings = options.encodings ?? null;
@@ -1311,7 +1344,7 @@ export function classifyAdaptivePage(
     signals.push(encodingTableSignal(encodings!));
   } else if (table.reason === "grids-unknown") {
     // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
-    // path, never a guessed "no table" a document could steer its own pages into. Doppler's encodings never change that;
+    // path, never a guessed "no table" a document could steer its own pages into. Extractor encoding facts never change that;
     // a text-layer table bit only names the encoding (`encoding-table:*`).
     route = "table-heavy";
     extractorHint = "layout-aware";

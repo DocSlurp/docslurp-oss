@@ -33,6 +33,16 @@ describe.skipIf(!built)("table-cells.mjs guest script", () => {
     expect(JSON.stringify(result[0])).toContain("Northwind");
   });
 
+  it("returns a bounded fallback when a valid single table exceeds the output cap", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-tables-test-"));
+    const input = path.join(dir, "tables.json");
+    const output = path.join(dir, "out-0", "cells.json");
+    await writeFile(input, JSON.stringify([`<table><tr><td>${"Project notes ".repeat(30)}</td></tr></table>`]));
+    const result = await run(process.execPath, [script, input, output, "128"]);
+    expect(JSON.parse(await readFile(output, "utf8"))).toEqual([null]);
+    expect(result.stderr).toContain("output over single-table limit");
+  });
+
   it("still refuses an invalid batch without writing output", async () => {
     dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-tables-test-"));
     const input = path.join(dir, "in-0", "tables.json"), output = path.join(dir, "out-0", "cells.json");
