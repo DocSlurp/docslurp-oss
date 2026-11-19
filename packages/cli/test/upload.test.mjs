@@ -415,6 +415,27 @@ test("a coded in-flight 409 on session create is retried with the same key inste
   }
 });
 
+test("a busy bulk upload retries with the same idempotency key", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
+  try {
+    const file = join(dir, "a.pdf");
+    await writeFile(file, "%PDF-1.7\n");
+    let attempts = 0;
+    const result = await invoke(["upload", file], (request) => {
+      if (request.url !== "/v1/uploads/bulk") return { status: 404, body: {} };
+      if (++attempts === 1) return { status: 409, headers: { "retry-after": "0" }, body: { error: { code: "upload_session_busy" } } };
+      return { status: 201, body: intakeResult };
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const requests = result.requests.filter((request) => request.url === "/v1/uploads/bulk");
+    assert.equal(requests.length, 2);
+    assert.ok(requests[0].headers["idempotency-key"]);
+    assert.equal(requests[0].headers["idempotency-key"], requests[1].headers["idempotency-key"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("any other 409 on session create is reported at once, without a retry", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));
   try {

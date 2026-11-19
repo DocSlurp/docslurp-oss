@@ -131,6 +131,7 @@ function createWebRoutes(surface: WebSurface) {
           return { pages: crawled.pages, credits: crawled.usage.credits };
         },
         idempotencyKey: c.req.header("Idempotency-Key")?.trim(),
+        signal: c.req.raw.signal,
         audit: { ipAddress: requestIp(c), userAgent: requestUserAgent(c) },
       });
       if (result.idempotencyReplayed) c.header("Idempotency-Replayed", "true");

@@ -301,6 +301,7 @@ export function projectIntakeErrorResponse(
   c: Context,
   error: unknown,
 ): Response | null {
+  if (c.req.raw.signal.aborted && error === c.req.raw.signal.reason) return new Response(null, { status: CLIENT_CLOSED_REQUEST });
   if (error instanceof ReservedCanonicalIdError) return reservedCanonicalIdResponse(c);
   // Fast (or a refused privacy policy) with visual indexing, from the request's overrides (run-creation.ts).
   if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
@@ -638,6 +639,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         tags: parseFormDocumentTags(body.tags),
         paths,
         idempotencyKey,
+        signal: c.req.raw.signal,
         contentLength: c.req.header("content-length"),
         audit: {
           ipAddress: requestIp(c),
@@ -690,6 +692,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           urls: body.urls.map((entry) => typeof entry === "string" ? entry : entry.url),
           canonicalIds: body.urls.map((entry) => typeof entry === "string" ? null : entry.canonicalId ?? null),
           idempotencyKey,
+          signal: c.req.raw.signal,
           audit: {
             ipAddress: requestIp(c),
             userAgent: requestUserAgent(c),

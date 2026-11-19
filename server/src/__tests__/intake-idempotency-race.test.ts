@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-const state = vi.hoisted(() => ({ durable: null as null | Record<string, unknown>, preRunFault: false, persistReceipt: false, cacheFailure: false, stableFailure: false, rich: false, locks: new Set<string>(), cache: new Map<string, { status: number; body: Record<string, unknown> }>(), executions: 0, access: true, contribute: true, keyLive: true, keyProjects: [] as string[], keyScopes: ["ingest"] as string[] }));
+const state = vi.hoisted(() => ({ waitForLock: undefined as (() => Promise<void>) | undefined, durable: null as null | Record<string, unknown>, preRunFault: false, persistReceipt: false, cacheFailure: false, stableFailure: false, rich: false, locks: new Set<string>(), cache: new Map<string, { status: number; body: Record<string, unknown> }>(), executions: 0, access: true, contribute: true, keyLive: true, keyProjects: [] as string[], keyScopes: ["ingest"] as string[] }));
 vi.mock("../db.js", () => ({ sql: Object.assign(async (parts: TemplateStringsArray, ...values: unknown[]) => {
   const query = parts.join("?");
   if (query.includes("set stable_result")) {
@@ -29,7 +29,9 @@ vi.mock("../services/direct-upload-session.js", () => ({
   principalLockTenant: async () => "org:o",
   lockTenant: (orgId: string | null, userId: string) => orgId ? `org:${orgId}` : `user:${userId}`,
   loadDirectUploadSessionRow: async () => ({ status: "completed", org_id: "o", api_key_id: "key-a", result: { payload: { project: { id: "p" }, run: { id: "r" }, documents: [] }, status: 201 } }),
-  withDirectUploadLock: async (name: string, run: () => Promise<unknown>) => {
+  withDirectUploadLock: async (name: string, run: () => Promise<unknown>, _message: string, _code: string, options: { signal?: AbortSignal }) => {
+    await state.waitForLock?.();
+    options?.signal?.throwIfAborted();
     if (state.locks.has(name)) throw Object.assign(new Error("in flight"), { statusCode: 409 });
     state.locks.add(name);
     try { return await run(); } finally { state.locks.delete(name); }
@@ -65,7 +67,7 @@ vi.mock("../services/project-intake.js", async (original) => ({
 }));
 const { createBulkProjectIntake } = await import("../services/project-intake-actions.js");
 const args = { userId: "u", orgId: "o", project: "p", idempotencyKey: "same", files: [new File(["hello"], "a.txt", { type: "text/plain" })] };
-beforeEach(() => { state.rich = false; state.stableFailure = false; state.preRunFault = false; state.durable = null; state.persistReceipt = true; state.cacheFailure = false; state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
+beforeEach(() => { state.waitForLock = undefined; state.rich = false; state.stableFailure = false; state.preRunFault = false; state.durable = null; state.persistReceipt = true; state.cacheFailure = false; state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
 it("executes exactly one concurrent same-key intake and replays after completion", async () => {
   const results = await Promise.allSettled(Array.from({ length: 8 }, () => createBulkProjectIntake(args)));
   expect(state.executions).toBe(1);
@@ -108,6 +110,36 @@ it.each(["revoked", "project", "scope"])("rechecks current API key policy: %s", 
 it("refuses a cached payload whose resolved project now belongs to another org", async () => {
   await createBulkProjectIntake({ ...args, orgId: "other" });
   await expect(createBulkProjectIntake({ ...args, orgId: "other" })).rejects.toMatchObject({ statusCode: 403 });
+});
+
+it("starts no bulk intake when the HTTP client disconnects while waiting for the lock", async () => {
+  const { Hono } = await import("hono");
+  const { withTestSession } = await import("./helpers/session-app.js");
+  const { createUploadsRoutes } = await import("../routes/uploads.js");
+  const app = withTestSession(new Hono(), { id: "u", name: "U", email: "u@example.test" });
+  app.route("/uploads", createUploadsRoutes());
+  const body = new FormData();
+  body.set("project", "p");
+  body.set("orgId", "o");
+  body.append("files", new File(["hello"], "a.txt", { type: "text/plain" }));
+  const reachedLock = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  state.waitForLock = () => {
+    reachedLock.resolve();
+    return release.promise;
+  };
+  const controller = new AbortController();
+  const response = app.request("/uploads/bulk", {
+    method: "POST",
+    headers: { "Idempotency-Key": "http-abort" },
+    body,
+    signal: controller.signal,
+  });
+  await reachedLock.promise;
+  controller.abort();
+  release.resolve();
+  expect((await response).status).toBe(499);
+  expect(state.executions).toBe(0);
 });
 
 it("denies a bulk HTTP replay after live contribution access is revoked", async () => {
