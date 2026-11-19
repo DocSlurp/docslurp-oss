@@ -282,6 +282,9 @@ export async function collectReport(client, { migrationFiles, acceptedPiiPattern
         ]
       : ["No transaction older than 30 s."],
   ));
+  // Pending is decided per file, so it need not be the contiguous range the title suggests (a migration that merged
+  // late sits between applied ones). Tools that gate on what will run read this list, one name per item.
+  if (pending.length > 0) sections.at(-1).lines.push(`Pending migrations: ${pending.join(", ")}`);
 
   // 2. documents, document_chunks and the folded index.
   const [docs] = await q(

@@ -144,6 +144,7 @@ describe("predeploy-check", () => {
       // The harness records what it applied in the runner's ledger: everything from 0125 on is pending.
       const from = migrationFiles.findIndex((file) => file.endsWith("_tenant_scoped_keys_and_webhooks.sql"));
       expect(byTitle("Migrations").title).toContain(`${migrationFiles.length - from} pending (${migrationFiles[from]!.replace(/\.sql$/, "")} .. `);
+      expect(byTitle("Migrations").lines.at(-1)).toBe(`Pending migrations: ${migrationFiles.slice(from).map((file) => file.replace(/\.sql$/, "")).join(", ")}`);
       expect(render(sections)).toContain("[BLOCKER] Stored pipelines");
     } finally {
       await oldClient.end();
