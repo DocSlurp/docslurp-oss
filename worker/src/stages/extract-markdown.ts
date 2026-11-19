@@ -1072,9 +1072,11 @@ export class ExtractMarkdownStage implements Stage {
                   // from what the strict reader kept: never the guest's bytes, so no producer, creator or lang. Recorded as a
                   // document artifact slot, so the file proxy's artifact and PII checks apply. Only in store and use modes (off
                   // never parses facts, so none arrive here).
-                  if (isPdf && winningCandidate.pageFacts) {
-                    const pageFactsUri = await this.storeDopplerPageFactsFile(document, state.run.id, winningCandidate.pageFacts);
-                    if (pageFactsUri) state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_SLOT, pageFactsUri);
+                  const storedPageFacts = isPdf && winningCandidate.pageFacts
+                    ? await this.storeDopplerPageFactsFile(document, state.run.id, winningCandidate.pageFacts)
+                    : null;
+                  if (storedPageFacts) {
+                    state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_SLOT, storedPageFacts.uri);
                   }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
@@ -1251,10 +1253,25 @@ export class ExtractMarkdownStage implements Stage {
                   const tableCells = await this.storeTableCellsForEmbed(state, document, {
                     markdown: winningText, canonicalDocument: parserAwareCanonicalDocument, needsVision,
                   }, signal);
+                  const pdfJob = winningCandidate.plan.sandboxedPdf;
+                  const extractorOutputs = pdfJob ? {
+                    extractor: winningCandidate.label,
+                    source: firstPassServesDocument(state.run.id, document.id) || firstPassOwned ? "first-pass" : "sandbox",
+                    markdown: await this.describeExtractorMarkdown(winningCandidate, signal),
+                    publishedMarkdownUri: artifactUri,
+                    pageFacts: {
+                      status: storedPageFacts ? "stored" : winningCandidate.pageFacts ? "store-failed" : pdfJob.pageFacts ? "unavailable" : "not-requested",
+                      artifact: storedPageFacts,
+                      summary: winningCandidate.pageFacts?.summary ?? null,
+                    },
+                    layoutFacts: pageLayoutFactsUri ? { uri: pageLayoutFactsUri, pages: vmLayoutFacts?.size ?? null } : null,
+                    ocrPages: winningCandidate.ocrPages?.length ?? null,
+                  } : null;
                   const completedResult: DocumentStageResult = {
                     artifactUri,
                     stats: {
                       tableCells,
+                      ...(extractorOutputs ? { extractorOutputs } : {}),
                       // What later stages read: a first-pass checkpoint after this one runs again only if it changed (C1).
                       markdownSha256: createHash("sha256").update(winningText).digest("hex"),
                       strategy,
@@ -1846,6 +1863,26 @@ export class ExtractMarkdownStage implements Stage {
     return this.storage.uri(key);
   }
 
+  private async describeExtractorMarkdown(
+    candidate: ExtractedCandidate,
+    signal?: AbortSignal,
+  ): Promise<{ uri: string; sha256: string | null; bytes: number | null }> {
+    const hash = createHash("sha256");
+    let bytes = 0;
+    try {
+      for await (const chunk of createReadStream(candidate.tempTextPath, { signal })) {
+        hash.update(chunk);
+        bytes += chunk.byteLength;
+      }
+    } catch (error) {
+      rethrowIfTeardown(error);
+      if (signal?.aborted) throw signal.reason ?? error;
+      console.warn("[extract-markdown] output fingerprint unavailable");
+      return { uri: candidate.textUri, sha256: null, bytes: null };
+    }
+    return { uri: candidate.textUri, sha256: hash.digest("hex"), bytes };
+  }
+
   /**
    * Write the validated page facts as `<artifact root>/doppler/<document>/images/page-facts.jsonl` (dopplerFolderKey, the
    * document's own tenant-scoped root). Best effort: a failed write leaves no slot, and routing keeps its database rows.
@@ -1854,13 +1891,13 @@ export class ExtractMarkdownStage implements Stage {
     document: import("../models.js").Document,
     runId: string,
     facts: import("../lib/doppler-page-facts.js").DopplerPageFactsDocument,
-  ): Promise<string | null> {
+  ): Promise<{ uri: string; sha256: string; bytes: number } | null> {
     const key = dopplerFolderKey(document, runId, "pageFacts");
     try {
       const body = Buffer.from(dopplerPageFactsJsonl(facts), "utf8");
       await this.storage.putBytes(key, body, "text/plain; charset=utf-8");
       console.log(`[extract-debug] document=${document.id} dopplerPageFacts pages=${facts.summary.pagesKnown} failed=${facts.summary.pagesFailed} dropped=${facts.summary.linesDropped} complete=${facts.summary.complete} bytes=${body.byteLength}`);
-      return this.storage.uri(key);
+      return { uri: this.storage.uri(key), sha256: createHash("sha256").update(body).digest("hex"), bytes: body.byteLength };
     } catch (error) {
       rethrowIfTeardown(error);
       console.warn(`[extract-markdown] page facts not stored document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
