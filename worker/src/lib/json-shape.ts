@@ -12,6 +12,8 @@ export interface JsonShapeLimits {
   maxScalars?: number;
   /** Longest string, in characters of its JSON text (escapes included). */
   maxStringLength?: number;
+  /** Optional parser-specific checks before JSON.parse allocates any container. */
+  onContainer?: (depth: number, start: number, kind: number) => void;
 }
 
 export function assertJsonShape(text: string, limits: JsonShapeLimits): void {
@@ -33,6 +35,7 @@ export function assertJsonShape(text: string, limits: JsonShapeLimits): void {
     } else if (c === 91 || c === 123) {
       if (++depth > limits.maxDepth) throw new Error("JSON nesting exceeds limit");
       if (++containers > limits.maxContainers) throw new Error("JSON container count exceeds limit");
+      limits.onContainer?.(depth, i, c);
     } else if (c === 93 || c === 125) depth--;
     else if (c === 45 || (c >= 48 && c <= 57) || c === 116 || c === 102 || c === 110) {
       // A number or literal: one scalar, then skip the rest of its token.

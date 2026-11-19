@@ -16,6 +16,7 @@ import type { CanonicalDocument } from "@docslurp/shared";
 import { htmlTableSources } from "./chunking.js";
 import { assertHtmlTableCells, effectiveHtmlTableOutputCap, HTML_TABLE_DOCUMENT_LIMITS, htmlTableCellTagCount, htmlTableValueBound, TABLE_PARSE_HEAP_FACTOR, tableParseMemoryBudget, vmTableSources, type HtmlTableStatsMemo, type PreparedHtmlTableCells } from "./html-table-vm.js";
 import { HTML_TABLE_MAX_CELLS, HTML_TABLE_MAX_SOURCE_CHARS } from "./html-table-limits.js";
+import type { TableCellRetention } from "./html-table-vm.js";
 import { assertJsonShape } from "../lib/json-shape.js";
 import type { HtmlTableCell } from "./table-cells-guest.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
@@ -261,14 +262,16 @@ function isStorageNotFound(error: unknown): boolean {
 }
 
 /** The limits a stored artifact for these tables must fit, from their structure alone (never from the artifact). */
-interface ReadBudget { bytes: number; tables: number; containers: number; scalars: number; longestString: number }
+interface ReadBudget { bytes: number; tables: number; containers: number; scalars: number; longestString: number; recordsBySha: ReadonlyMap<string, number> }
 function readBudget(unique: string[]): ReadBudget {
   const memo: HtmlTableStatsMemo = new Map();
   // Records the artifact may hold: one per cell tag, but never more than a table's or the document's cell limit, so a
   // tag-heavy source cannot raise the pre-scan's container and scalar limits past what decoding would accept.
-  const tags = Math.min(HTML_TABLE_DOCUMENT_LIMITS.cells, unique.reduce((total, source) => total + Math.min(HTML_TABLE_MAX_CELLS, htmlTableCellTagCount(source, memo)), 0));
+  const recordsBySha = new Map(unique.map((source) => [tableSourceSha256(source), Math.min(HTML_TABLE_MAX_CELLS, htmlTableCellTagCount(source, memo))]));
+  const tags = Math.min(HTML_TABLE_DOCUMENT_LIMITS.cells, [...recordsBySha.values()].reduce((total, count) => total + count, 0));
   return {
     bytes: tableCellsByteCap(unique, memo),
+    recordsBySha,
     tables: unique.length,
     // { tables [ [sha, [ [cell] ] ] ] }: the object, the tables list, a pair and a records list per table, one per record.
     containers: 2 + 2 * unique.length + tags,
@@ -357,7 +360,24 @@ function staleGeneration(actual: Buffer, expected: Buffer): boolean {
  */
 function parseArtifact(body: string, scope: TableCellsScope, budget: ReadBudget): Map<string, HtmlTableCell[] | null> {
   if (!body.endsWith(FOOTER)) throw new Error("artifact truncated");
-  assertJsonShape(body, { maxDepth: 5, maxContainers: budget.containers, maxScalars: budget.scalars, maxStringLength: budget.longestString });
+  let remainingRecords = 0;
+  const seen = new Set<string>();
+  assertJsonShape(body, {
+    maxDepth: 5, maxContainers: budget.containers, maxScalars: budget.scalars, maxStringLength: budget.longestString,
+    onContainer(depth, start, kind) {
+      if (depth > 1 && kind !== 91) throw new Error("invalid table array");
+      if (depth === 3) {
+        // Artifacts written by this worker have compact entries and a fixed-width hash.
+        const hash = body.slice(start + 2, start + 66);
+        if (body[start + 1] !== '"' || body.slice(start + 66, start + 68) !== '",'
+          || !budget.recordsBySha.has(hash) || seen.has(hash)) throw new Error("invalid table hash");
+        seen.add(hash);
+        remainingRecords = budget.recordsBySha.get(hash)!;
+      } else if (depth === 5 && --remainingRecords < 0) {
+        throw new Error("table record count exceeds source limit");
+      }
+    },
+  });
   const raw = JSON.parse(body) as unknown;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("not an object");
   const value = raw as Record<string, unknown>;
@@ -392,6 +412,7 @@ export async function readTableCellsArtifact(args: {
   generation: string;
   guestVersion: string | null;
   sources: string[];
+  retention?: TableCellRetention;
   signal?: AbortSignal;
 }): Promise<TableCellsLookup> {
   const unique = vmTableSources(args.sources);
@@ -425,7 +446,9 @@ export async function readTableCellsArtifact(args: {
     const cached = new Map<string, HtmlTableCell[] | null>();
     for (const source of unique) {
       const sha = tableSourceSha256(source);
-      if (bySha.has(sha)) cached.set(source, bySha.get(sha) ?? null);
+      if (!bySha.has(sha)) continue;
+      const cells = bySha.get(sha) ?? null;
+      if (!args.retention || args.retention.retain(cells)) cached.set(source, cells);
     }
     const hits = cached.size;
     return { status: hits === unique.length ? "hit" : "partial", cached, hits, misses: unique.length - hits };
