@@ -300,7 +300,7 @@ describe("PdfRasterCache", () => {
       },
     };
     const sourceCache = new PdfSourceCache(sourceStorage as any);
-    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 3 });
+    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { pdftoppmConcurrency: 3, pageSizeReuse: false });
     const pages = await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 20 }, runId: "run-1", pageNumbers: [9, 2, 4, 7, 5, 11] });
 
     expect(calls.filter((call) => call.startsWith("pdfinfo")).sort()).toEqual(["pdfinfo:11", "pdfinfo:2", "pdfinfo:5", "pdfinfo:7", "pdfinfo:9"]);
@@ -626,7 +626,7 @@ describe("PdfRasterCache", () => {
     await sourceCache.clear();
   });
 
-  it("sizes distant selected pages with one pdfinfo call each, not one call over their span", async () => {
+  it("sizes distant selected pages in separate bounded pdfinfo blocks", async () => {
     const sourceStorage = {
       async downloadToTempFile(_key: string, pattern: string) {
         const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
@@ -650,7 +650,7 @@ describe("PdfRasterCache", () => {
     const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache, { rasterSlots: new Semaphore(4) });
     await cache.renderSelectedPages({ document: { ...makeDocument(), pageCount: 40_000 }, runId: "run-1", pageNumbers: [1, 2, 3, 40_000] });
-    expect(sized.sort((a, b) => a[0] - b[0])).toEqual([[1, 3], [40_000, 40_000]]);
+    expect(sized.sort((a, b) => a[0] - b[0])).toEqual([[1, 4_096], [36_865, 40_000]]);
     await sourceCache.clear();
   });
 
