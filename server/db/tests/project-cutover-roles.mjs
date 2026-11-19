@@ -3,13 +3,12 @@
 // projects_function_owner; provision projects_acl_reader separately.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm } from "node:fs/promises";
+import { mkdtemp, copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { applyMigrationFiles, listMigrationFiles } from "../migration-runner.mjs";
 import { migratePostgis } from "../migrate-postgis.mjs";
 
 const raw = process.env.PROJECT_CUTOVER_DATABASE_URL;
@@ -21,13 +20,11 @@ const scratch = await mkdtemp(join(tmpdir(), "project-cutover-roles-"));
 const client = new pg.Client({ connectionString: raw });
 await client.connect();
 try {
-  const journal = JSON.parse(await readFile(join(source, "meta/_journal.json"), "utf8"));
-  const stop = journal.entries.findIndex(entry => entry.tag === "0132_projects");
+  const files = listMigrationFiles(source);
+  const stop = files.indexOf("0132_projects.sql");
   assert.ok(stop > 0);
-  await mkdir(join(scratch, "meta"));
-  await writeFile(join(scratch, "meta/_journal.json"), JSON.stringify({ ...journal, entries: journal.entries.slice(0, stop) }));
-  for (const entry of journal.entries.slice(0, stop)) await copyFile(join(source, `${entry.tag}.sql`), join(scratch, `${entry.tag}.sql`));
-  await migrate(drizzle(client), { migrationsFolder: scratch });
+  for (const file of files.slice(0, stop)) await copyFile(join(source, file), join(scratch, file));
+  await applyMigrationFiles(client, { migrationsFolder: scratch });
   if (process.env.PROJECT_CUTOVER_POSTGIS === "1") await migratePostgis(client);
   await client.query(`
     GRANT USAGE,CREATE ON SCHEMA public TO projects_function_owner;
@@ -55,7 +52,7 @@ try {
   if (process.env.PROJECT_CUTOVER_DELEGATED_ACL === "1") {
     await client.query("SET ROLE projects_acl_reader; GRANT EXECUTE ON FUNCTION org_spend_status(text,text,numeric) TO projects_acl_recipient; RESET ROLE");
     const delegated = await snapshot();
-    await assert.rejects(migrate(drizzle(client), { migrationsFolder: source }), error => {
+    await assert.rejects(applyMigrationFiles(client, { migrationsFolder: source }), error => {
       const cause = error.cause ?? error;
       return cause.code === "P0001" && cause.message.startsWith("Projects migration refuses delegated grants on org_spend_status");
     });
@@ -64,7 +61,7 @@ try {
     await client.query("SET ROLE projects_acl_reader; REVOKE EXECUTE ON FUNCTION org_spend_status(text,text,numeric) FROM projects_acl_recipient; RESET ROLE");
     console.log("PASS: delegated ACL chain refuses and rolls back without changing owner, grantor, grants or historical schema");
   }
-  await migrate(drizzle(client), { migrationsFolder: source });
+  await applyMigrationFiles(client, { migrationsFolder: source });
   if (process.env.PROJECT_CUTOVER_POSTGIS === "1") {
     await migratePostgis(client);
     const columns = (await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='geo_projection_generations'")).rows.map(row => row.column_name);

@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   createMigratedDatabase,
-  migrationJournalProblems,
-  readMigrationJournal,
+  migrationNameProblems,
+  readMigrationTags,
 } from "../test/migrated-db.js";
 
 // Reference mirror of the version-key algorithm in the global constraints.
@@ -68,8 +68,8 @@ describe("migration 0065 versions, retention and config jobs", () => {
     await db?.close();
   });
 
-  it("keeps the journal consistent", () => {
-    expect(migrationJournalProblems(readMigrationJournal())).toEqual([]);
+  it("keeps migration file names valid", () => {
+    expect(migrationNameProblems(readMigrationTags())).toEqual([]);
   });
 
   it("applies column defaults", async () => {

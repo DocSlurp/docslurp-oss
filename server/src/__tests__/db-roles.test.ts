@@ -90,6 +90,19 @@ describe("worker table classification", () => {
 });
 
 describe("worker role", () => {
+  it("lets the app and the worker read the applied-migration ledger and refuses every write to it", async () => {
+    for (const role of [app, worker]) {
+      expect(await denied(role, "select filename from docslurp_migrations.applied")).toBe(false);
+      for (const statement of [
+        "insert into docslurp_migrations.applied (filename, sha256) values ('20990101T0000_forged.sql', '')",
+        "update docslurp_migrations.applied set sha256 = 'forged'",
+        "delete from docslurp_migrations.applied",
+        "truncate docslurp_migrations.applied",
+        "create table docslurp_migrations.shadow (id int)",
+      ]) expect(await denied(role, statement), `${role}: ${statement}`).toBe(true);
+    }
+  });
+
   it("refuses worker access to settings publication receipts while the app can read them", async () => {
     for (const statement of ["select * from public.project_settings_publications", "insert into public.project_settings_publications default values", "update public.project_settings_publications set request_hash='forged'", "delete from public.project_settings_publications"]) {
       expect(await denied(worker, statement)).toBe(true);

@@ -1,6 +1,7 @@
 import { Client } from "pg";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { LEGACY_MIGRATIONS } from "../../db/migration-runner.mjs";
 import { reconcileRoleGrants } from "../../db/roles.mjs";
 import { startRevisionMaintenance, revisionMaintenanceMetrics } from "./revision-maintenance.js";
 
@@ -40,10 +41,9 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
   try {
     await migration.connect();
     const dir = new URL("../../db/migrations/", import.meta.url);
-    const entries = JSON.parse(readFileSync(new URL("meta/_journal.json", dir), "utf8")).entries as Array<{ idx: number; tag: string }>;
-    for (const entry of entries.filter(e => e.idx < 120)) {
+    for (const [file] of LEGACY_MIGRATIONS.slice(0, 120)) {
       await migration.query("begin");
-      await migration.query(readFileSync(new URL(`${entry.tag}.sql`, dir), "utf8"));
+      await migration.query(readFileSync(new URL(file, dir), "utf8"));
       await migration.query("commit");
     }
     // Bootstrap the historical grant policy before the project rename.

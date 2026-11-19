@@ -2,10 +2,10 @@
 import type { QueryClient } from "./folded-search-index.mjs";
 export type ReportLevel = "ok" | "warn" | "blocker";
 export type ReportSection = { title: string; level: ReportLevel; lines: string[] };
-export type MigrationJournal = { entries?: Array<{ tag: string; when: number }> };
 /** Vector backends this build writes (shared SUPPORTED_VECTOR_BACKENDS; pinned by rollout-ops-scripts.db.test.ts). */
 export declare const SUPPORTED_VECTOR_BACKENDS: readonly string[];
-export declare function pendingMigrations(journal: MigrationJournal, newestAppliedMs: number): string[];
+/** Pending migration names (no .sql). `applied` null means "not migrated by the runner yet": the Drizzle ledger is mapped instead. */
+export declare function pendingMigrations(files: readonly string[], state?: { applied?: readonly string[] | null; newestDrizzleCreatedAt?: number | string | null }): string[];
 export declare function section(title: string, level: ReportLevel, lines: string[]): ReportSection;
 export declare function render(sections: ReportSection[]): string;
 /** 0127's plan, promotion and acknowledgement queries, read from the migration. `ack` selects funded_removals, promotions, member_promotions and hash; `ownerless` the organizations 0127 refuses to leave ownerless. */
@@ -16,7 +16,8 @@ export declare function knownExtractorIds(builtInIds: readonly string[], env?: R
 export declare function collectReport(
   client: QueryClient,
   options: {
-    journal: MigrationJournal;
+    /** listMigrationFiles(server/db/migrations). */
+    migrationFiles: readonly string[];
     acceptedPiiPatterns: readonly string[];
     /** Defaults to the built-in ids plus DOCSLURP_EXTRACTOR_ID_ALIASES keys. */
     extractorIds?: readonly string[];

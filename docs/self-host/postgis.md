@@ -43,9 +43,9 @@ CREATE EXTENSION postgis;
 SELECT postgis_full_version();
 ```
 
-`server/db/migrate.mjs` runs the ordinary Drizzle journal under an advisory lock;
-`worker/src/test/migrated-db.ts` applies every entry to PGlite, with pgcrypto only.
-An unconditional geometry column or CREATE EXTENSION in that journal would break
+`server/db/migrate.mjs` applies the ordinary migrations (`server/db/migrations/*.sql`) under an advisory lock;
+`worker/src/test/migrated-db.ts` applies every file to PGlite, with pgcrypto only.
+An unconditional geometry column or CREATE EXTENSION among them would break
 ordinary installations. A conditional DO block is also wrong: Drizzle would mark
 it applied on a non-geo database and never install it when capability appears.
 

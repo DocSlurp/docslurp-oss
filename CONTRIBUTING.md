@@ -56,7 +56,7 @@ The web dashboard is not part of this repository, so there is no `pnpm dev` UI h
 
 Tests that need third-party PDFs fetch them on first use with `pnpm fixtures:fetch` into the gitignored `.cache/`; never commit them.
 
-Database schema changes go only through `server/db/migrations` (`pnpm db:generate`, or a hand-written `NNNN_name.sql` plus its `meta/_journal.json` entry). Tests build their databases by applying the migrations in order.
+Database schema changes go only through `server/db/migrations`: run `pnpm db:new <name>` and write the SQL in the `YYYYMMDDTHHMM_<name>.sql` file it creates (UTC). There is no journal to edit and no number to pick, so two branches never collide; the runner (`server/db/migration-runner.mjs`) applies every file a database has not recorded, in name order, one transaction per file. Tests build their databases by applying the migrations in order.
 
 ### Real Postgres and Redis tests
 

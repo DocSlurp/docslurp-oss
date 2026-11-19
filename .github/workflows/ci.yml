@@ -61,6 +61,10 @@ jobs:
           node-version-file: .nvmrc
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
+      # worker/src/__tests__/migrations-late-merge.test.ts applies this branch's new migrations on top of main's schema.
+      - name: Fetch main for the late-merge migration test
+        if: matrix.worker-tools
+        run: git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
       - name: Install worker test tools
         if: matrix.worker-tools
         timeout-minutes: 12

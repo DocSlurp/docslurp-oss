@@ -31,7 +31,7 @@
     "typecheck": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/sdk build && pnpm --filter @docslurp/contrib-search-compat build && pnpm -r typecheck",
     "docs:check": "node scripts/check-docs-links.mjs && node scripts/check-docs-mermaid.mjs",
     "env:check": "node scripts/check-env.mjs",
-    "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "db:new": "node scripts/new-migration.mjs",
     "db:introspect": "drizzle-kit introspect --config=drizzle.config.ts",
     "db:migrate": "node server/db/migrate.mjs",
     "db:folded-index": "node server/db/folded-search-index.mjs",

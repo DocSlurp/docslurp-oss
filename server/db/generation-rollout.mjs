@@ -1,4 +1,5 @@
 // This gate deliberately requires downtime; it is not a fleet capability probe.
+/** Resolves true when this run is the pre-generation cutover (the barrier was required and holds), false otherwise. */
 export async function assertGenerationRollout(client, env = process.env) {
   const { rows: [schema] } = await client.query(`select
     (to_regclass('public.project_runs') is not null or to_regclass('public.workspace_runs') is not null) as existing,
@@ -8,8 +9,8 @@ export async function assertGenerationRollout(client, env = process.env) {
       and table_name in ('project_runs','workspace_runs') and column_name = 'execution_generation') as migrated`);
   if (!schema) throw new Error("Generation rollout refused: schema probe returned no result");
   if (schema.legacy && schema.current) throw new Error("Generation rollout refused: ambiguous old and new project schemas");
-  if (!schema.existing && !schema.migrated) return; // fresh installation
-  if (schema.migrated) return;
+  if (!schema.existing && !schema.migrated) return false; // fresh installation
+  if (schema.migrated) return false;
   const refuse = (reason) => { throw new Error(`Generation rollout refused: ${reason}. See docs/generation-rollout.md`); };
   if (env.GENERATION_ROLLOUT_DRAINED !== 'all-executions-and-activities-stopped') {
     refuse('operator drain attestation missing');
@@ -27,4 +28,6 @@ export async function assertGenerationRollout(client, env = process.env) {
   const { rows: [runs] } = await client.query(`select exists(select 1 from ${schema.legacy ? "workspace_runs" : "project_runs"}
     where status is null or status not in ('completed', 'failed', 'cancelled')) as unfinished`);
   if (!runs || runs.unfinished) refuse('unfinished SQL runs remain (including queued recovery and paused runs)');
+  // The cutover was checked for this run only: the caller must apply it as a unit.
+  return true;
 }

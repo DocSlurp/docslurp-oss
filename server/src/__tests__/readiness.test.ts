@@ -47,11 +47,13 @@ describe("readiness", () => {
   });
 
   it("fails migrations only when the code expects unapplied migrations", () => {
-    const journal = [{ tag: "0000_init", when: 100 }, { tag: "0001_next", when: 200 }];
-    expect(migrationReadiness({ journal, latestAppliedWhen: 200 }).ok).toBe(true);
-    expect(migrationReadiness({ journal, latestAppliedWhen: 100 })).toMatchObject({ ok: false, detail: expect.stringContaining("1 migration(s) not applied") });
+    const shipped = ["0000_init.sql", "0001_next.sql"];
+    expect(migrationReadiness({ shipped, applied: [...shipped] })).toMatchObject({ ok: true, detail: "schema at 0001_next" });
+    expect(migrationReadiness({ shipped, applied: ["0000_init.sql"] })).toMatchObject({ ok: false, detail: expect.stringContaining("1 migration(s) not applied") });
+    // Pending is per file: a late-merged migration counts even when a later-named one is applied.
+    expect(migrationReadiness({ shipped, applied: ["0001_next.sql"] })).toMatchObject({ ok: false, detail: expect.stringContaining("first 0000_init") });
     // A rolled-back image runs against a newer (expanded) schema: still ready.
-    expect(migrationReadiness({ journal, latestAppliedWhen: 300 })).toMatchObject({ ok: true, detail: expect.stringContaining("ahead") });
-    expect(migrationReadiness({ journal: null, latestAppliedWhen: null }).ok).toBe(true);
+    expect(migrationReadiness({ shipped, applied: [...shipped, "20270101T0000_later.sql"] })).toMatchObject({ ok: true, detail: expect.stringContaining("ahead") });
+    expect(migrationReadiness({ shipped: null, applied: [] }).ok).toBe(true);
   });
 });

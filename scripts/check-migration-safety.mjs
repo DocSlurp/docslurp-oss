@@ -11,7 +11,11 @@
 //
 //   -- destructive-migration: column unused since <release/commit>; contract step of <expand migration>
 //
-// Migrations up to GRANDFATHERED_THROUGH_IDX predate this rule and are skipped.
+// The first GRANDFATHERED_THROUGH_IDX + 1 migrations (in apply order) predate this rule and are skipped.
+//
+// File names are checked too: the numbered NNNN_ files are frozen (server/db/legacy-migrations.json), and every newer
+// migration is named with a UTC timestamp, YYYYMMDDTHHMM_name.sql (pnpm db:new <name>), so two branches never
+// collide on a number. There is no journal: server/db/migration-runner.mjs applies every unrecorded file.
 //
 // Every migration must also be idempotent: running it a second time is a no-op
 // with the same end state (worker/src/test/migrations-idempotent.test.ts runs
@@ -27,11 +31,45 @@
 // second run is a no-op for a reason the gate cannot see says so:
 //
 //   -- idempotent-migration: <why a second run changes nothing>
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const GRANDFATHERED_THROUGH_IDX = 32;
+/** The numbered migrations, frozen: the same list server/db/migration-runner.mjs accepts. */
+export const NUMBERED_MIGRATIONS = Object.freeze(
+  JSON.parse(readFileSync(new URL('../server/db/legacy-migrations.json', import.meta.url), 'utf8')).map(([file]) => file),
+);
+const NUMBERED = new Set(NUMBERED_MIGRATIONS);
+/** Timestamps start the day numbered names were frozen, so one can never sort among the numbered files. */
+export const FIRST_TIMESTAMP = '20261118T0000';
+const NUMBERED_NAME = /^(\d{4})_[a-z0-9][a-z0-9_]*\.sql$/;
+const TIMESTAMP_NAME = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})_[a-z0-9][a-z0-9_]*\.sql$/;
+
+/** Pure: why a migration file name is not acceptable, or null. Same rule as server/db/migration-runner.mjs. */
+export function checkMigrationName(file) {
+  const numbered = NUMBERED_NAME.exec(file);
+  if (numbered) {
+    return NUMBERED.has(file) ? null
+      : 'numbered names are frozen; name new migrations with a UTC timestamp (pnpm db:new <name>)';
+  }
+  const stamp = TIMESTAMP_NAME.exec(file);
+  if (!stamp) return 'expected YYYYMMDDTHHMM_snake_case_name.sql (pnpm db:new <name>)';
+  const [year, month, day, hour, minute] = stamp.slice(1).map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day, hour, minute));
+  const real = date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+    && date.getUTCHours() === hour && date.getUTCMinutes() === minute;
+  if (!real) return 'the timestamp is not a real UTC date and time';
+  return file.slice(0, 13) >= FIRST_TIMESTAMP ? null : `timestamps start at ${FIRST_TIMESTAMP}`;
+}
+
+/** Migration files in apply order (plain name order). */
+export function migrationFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.sql'))
+    .map((entry) => entry.name)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
 export const MARKER = /--[ \t]*destructive-migration:[ \t]*(\S.*)$/im;
 export const IDEMPOTENT_MARKER = /--[ \t]*idempotent-migration:[ \t]*(\S.*)$/im;
 
@@ -43,6 +81,39 @@ const RULES = [
   { id: 'set-not-null', pattern: /\bset\s+not\s+null\b/gi, why: 'release N-1 may still insert NULLs' },
   { id: 'truncate', pattern: /\btruncate\b/gi, why: 'deletes rows' },
 ];
+
+// The runner gives each file one transaction and one role, and records the file in that transaction. A file that
+// ends the transaction or changes the role leaves a half-applied or unrecorded migration, or runs the files after
+// it as someone else. Checked outside dollar-quoted bodies, in every migration; there is no marker to waive it.
+const SESSION_RULES = [
+  { id: 'transaction-control', pattern: /^(?:begin|start\s+transaction|commit|end|rollback|abort|savepoint|release|prepare\s+transaction)\b/i, why: 'the runner owns the transaction: a migration must not begin, commit or roll one back' },
+  { id: 'role-change', pattern: /^(?:set\s+(?:session\s+|local\s+)?role|reset\s+role|set\s+(?:session\s+|local\s+)?session\s+authorization|reset\s+session\s+authorization|reset\s+all)\b/i, why: 'a migration runs as the migration owner and must not change the role' },
+  { id: 'session-search-path', pattern: /^(?:set\s+(?:session\s+)?search_path|reset\s+search_path)\b/i, why: 'a session-level setting outlives the file; use SET LOCAL' },
+];
+const SESSION_SET_CONFIG = /\bset_config\s*\(\s*'[^']*'\s*,[^;]*,\s*false\s*\)/gi;
+
+/**
+ * Pure: transaction, role and session-setting statements a migration must not contain. Only whole statements count:
+ * `SET search_path` as a function attribute (CREATE FUNCTION ... SET search_path = ...) is not a session change.
+ */
+export function checkMigrationSession(sql) {
+  const body = stripDollarQuoted(stripSqlNoise(sql)).replaceAll('--> statement-breakpoint', ';');
+  const lineAt = (index) => body.slice(0, index).split('\n').length;
+  const findings = [];
+  let offset = 0;
+  for (const statement of body.split(';')) {
+    const start = offset + statement.search(/\S/);
+    const text = statement.trim();
+    for (const rule of SESSION_RULES) {
+      if (text && rule.pattern.test(text)) findings.push({ rule: rule.id, line: lineAt(start), text: text.replace(/\s+/g, ' ').slice(0, 80), why: rule.why });
+    }
+    offset += statement.length + 1;
+  }
+  for (const match of body.matchAll(SESSION_SET_CONFIG)) {
+    findings.push({ rule: 'session-search-path', line: lineAt(match.index), text: match[0].replace(/\s+/g, ' ').slice(0, 80), why: 'a session-level setting outlives the file; use set_config(..., true)' });
+  }
+  return findings.sort((a, b) => a.line - b.line);
+}
 
 const NOT_EXISTS = String.raw`(?!if\s+not\s+exists\b)`;
 const IDEMPOTENCY_RULES = [
@@ -161,20 +232,21 @@ export function checkMigrationSql(sql) {
   return { findings, acknowledged: Boolean(marker?.[1]?.trim()), reason: marker?.[1]?.trim() ?? null };
 }
 
-export function checkMigrations(dir) {
-  const journal = JSON.parse(readFileSync(join(dir, 'meta/_journal.json'), 'utf8'));
+export function checkMigrations(dir, { requireNumbered = false } = {}) {
   const problems = [];
   const acknowledged = [];
-  for (const entry of journal.entries ?? []) {
-    const file = `${entry.tag}.sql`;
+  for (const [idx, file] of migrationFiles(dir).entries()) {
+    const name = checkMigrationName(file);
+    if (name) problems.push({ file, kind: 'name', rule: 'migration-file-name', line: 1, text: file, why: name });
     const sql = readFileSync(join(dir, file), 'utf8');
+    for (const finding of checkMigrationSession(sql)) problems.push({ file, kind: 'session', ...finding });
     const idempotency = checkMigrationIdempotency(sql);
     if (idempotency.acknowledged) {
       if (idempotency.findings.length) acknowledged.push({ file, kind: 'non-idempotent', reason: idempotency.reason, findings: idempotency.findings });
     } else {
       for (const finding of idempotency.findings) problems.push({ file, kind: 'idempotency', ...finding });
     }
-    if (entry.idx <= GRANDFATHERED_THROUGH_IDX) continue;
+    if (idx <= GRANDFATHERED_THROUGH_IDX) continue;
     const result = checkMigrationSql(sql);
     if (result.findings.length === 0) continue;
     if (result.acknowledged) {
@@ -183,16 +255,31 @@ export function checkMigrations(dir) {
     }
     for (const finding of result.findings) problems.push({ file, kind: 'destructive', ...finding });
   }
+  if (requireNumbered) {
+    // A numbered file that was deleted or renamed would be re-created under a new name and run again.
+    const present = new Set(migrationFiles(dir));
+    for (const file of NUMBERED_MIGRATIONS) {
+      if (!present.has(file)) problems.push({ file, kind: 'name', rule: 'numbered-migration-missing', line: 1, text: file, why: 'a frozen numbered migration is missing; never delete or rename one' });
+    }
+  }
   return { problems, acknowledged };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const dir = process.argv[2] ?? fileURLToPath(new URL('../server/db/migrations/', import.meta.url));
-  const { problems, acknowledged } = checkMigrations(dir);
+  const { problems, acknowledged } = checkMigrations(dir, { requireNumbered: !process.argv[2] });
   for (const item of acknowledged) {
     console.log(`[migration-safety] ${item.file}: ${item.findings.length} ${item.kind} statement(s) acknowledged: ${item.reason}`);
   }
   for (const problem of problems) {
+    if (problem.kind === 'name') {
+      console.error(`::error file=server/db/migrations/${problem.file},line=1::${problem.rule}: ${problem.why}.`);
+      continue;
+    }
+    if (problem.kind === 'session') {
+      console.error(`::error file=server/db/migrations/${problem.file},line=${problem.line}::${problem.rule}: "${problem.text}" ${problem.why}.`);
+      continue;
+    }
     if (problem.kind === 'idempotency') {
       console.error(`::error file=server/db/migrations/${problem.file},line=${problem.line}::${problem.rule}: "${problem.text}" ${problem.why}. ` +
         'Every migration must be safe to run twice; if this one is for a reason the check cannot see, add ' +

@@ -136,12 +136,12 @@ export class WorkerCapabilityRegistry {
 
   private schemaCache: { when: number | null; at: number } | null = null;
 
-  /** Newest applied migration (drizzle journal `when`), re-read every 5 minutes. */
+  /** When the newest migration was applied (epoch ms, from the runner's ledger), re-read every 5 minutes. */
   private async schemaAppliedWhen(): Promise<number | null> {
     const now = Date.now();
     if (this.schemaCache && now - this.schemaCache.at < 5 * 60_000) return this.schemaCache.when;
     const rows = await this.options.sql<{ latest: string | number | null }[]>`
-      select max(created_at) as latest from drizzle.__drizzle_migrations
+      select (extract(epoch from max(applied_at)) * 1000)::bigint as latest from docslurp_migrations.applied
     `.catch(() => null);
     const latest = rows?.[0]?.latest;
     const when = latest === null || latest === undefined ? null : Number(latest);

@@ -1,6 +1,8 @@
 import postgres from "postgres";
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { listMigrationFiles } from "../../db/migration-runner.mjs";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 let sql: postgres.Sql;
@@ -15,11 +17,10 @@ beforeAll(async () => {
   sql = postgres(external ?? db!.url, { max: external ? 4 : 1, prepare: false, onnotice: () => {} });
   const [existing] = external ? await sql`select to_regclass('project_recommendation_visits') as relation` : [];
   if (external && !existing?.relation) {
-    // Dedicated disposable DB only: apply the actual migration journal, never an ad-hoc schema.
+    // Dedicated disposable DB only: apply the actual migration files, never an ad-hoc schema.
     const base = new URL("../../db/migrations/", import.meta.url);
-    const journal = JSON.parse(readFileSync(new URL("meta/_journal.json", base), "utf8"));
-    for (const entry of journal.entries) await sql.begin(async tx => {
-      for (const statement of readFileSync(new URL(`${entry.tag}.sql`, base), "utf8").split("--> statement-breakpoint")) {
+    for (const file of listMigrationFiles(fileURLToPath(base))) await sql.begin(async tx => {
+      for (const statement of readFileSync(new URL(file, base), "utf8").split("--> statement-breakpoint")) {
         if (statement.trim()) await tx.unsafe(statement);
       }
     });

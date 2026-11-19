@@ -20,10 +20,7 @@ type Observation = Parameters<typeof evaluateAlertRules>[0];
 type Check = ReturnType<typeof evaluateAlertRules>[number];
 
 const NOW = 1_800_000_000_000;
-const journal = [
-  { tag: "0000_init", when: 100 },
-  { tag: "0001_next", when: 200 },
-];
+const shipped = ["0000_init.sql", "0001_next.sql"];
 
 function healthy(overrides: Partial<Observation> = {}): Observation {
   return {
@@ -31,7 +28,7 @@ function healthy(overrides: Partial<Observation> = {}): Observation {
     database: {
       ok: true,
       queue: { queueDepth: 0, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: null },
-      migrations: { appliedCount: 2, latestAppliedWhen: 200, journal },
+      migrations: { applied: [...shipped], shipped },
     },
     temporal: { ok: true, queues: [{ name: "docslurp-pipeline", type: "activity", pollers: [{ identity: "docslurp-worker-m1-10", lastAccessMs: NOW - 1_000 }] }] },
     http: { total: 100, errors5xx: 0, windowMs: 300_000 },
@@ -70,7 +67,7 @@ describe("alert rules", () => {
       database: {
         ok: true,
         queue: { queueDepth: 3, processingRuns: 1, staleLeases: 2, oldestQueuedRunAgeSeconds: 1_200 },
-        migrations: { appliedCount: 2, latestAppliedWhen: 200, journal },
+        migrations: { applied: [...shipped], shipped },
       },
       temporal: { ok: true, queues: [{ name: "docslurp-pipeline", type: "activity", pollers: [{ identity: "old", lastAccessMs: NOW - 600_000 }] }] },
     }), DEFAULT_ALERT_THRESHOLDS);
@@ -79,7 +76,7 @@ describe("alert rules", () => {
 
   it("warns on processing runs that stopped making progress, and stays silent when the count was not collected", () => {
     const queue = { queueDepth: 0, processingRuns: 2, staleLeases: 0, oldestQueuedRunAgeSeconds: null };
-    const migrations = { appliedCount: 2, latestAppliedWhen: 200, journal };
+    const migrations = { applied: [...shipped], shipped };
     const stalled = evaluateAlertRules(healthy({ database: { ok: true, queue: { ...queue, stalledRuns: 1 }, migrations } }), DEFAULT_ALERT_THRESHOLDS);
     expect(firing(stalled)).toEqual(["processing-run-stalled"]);
     expect(byId(stalled, "processing-run-stalled")).toMatchObject({ severity: "warning", details: { stalledRuns: 1, thresholdSeconds: 1_800 } });
@@ -100,16 +97,22 @@ describe("alert rules", () => {
 
   it("detects pending migrations and a schema ahead of the code", () => {
     const pending = evaluateAlertRules(healthy({
-      database: { ok: true, queue: { queueDepth: 0, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: null }, migrations: { appliedCount: 1, latestAppliedWhen: 100, journal } },
+      database: { ok: true, queue: { queueDepth: 0, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: null }, migrations: { applied: ["0000_init.sql"], shipped } },
     }), DEFAULT_ALERT_THRESHOLDS);
     const check = byId(pending, "migrations-not-at-head");
     expect(check.state).toBe("firing");
     expect(check.state === "firing" && check.details.pending).toBe("0001_next");
 
     const ahead = byId(evaluateAlertRules(healthy({
-      database: { ok: true, queue: { queueDepth: 0, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: null }, migrations: { appliedCount: 3, latestAppliedWhen: 300, journal } },
+      database: { ok: true, queue: { queueDepth: 0, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: null }, migrations: { applied: [...shipped, "20270101T0000_later.sql"], shipped } },
     }), DEFAULT_ALERT_THRESHOLDS), "migrations-not-at-head");
     expect(ahead.state === "firing" && ahead.details.schemaAheadOfCode).toBe(true);
+
+    // A migration that merged late is pending although a later-named one is applied.
+    const late = byId(evaluateAlertRules(healthy({
+      database: { ok: true, queue: { queueDepth: 0, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: null }, migrations: { applied: ["0001_next.sql"], shipped } },
+    }), DEFAULT_ALERT_THRESHOLDS), "migrations-not-at-head");
+    expect(late.state === "firing" && late.details.pending).toBe("0000_init");
   });
 
   it("marks dependent checks unknown when Temporal or the database is down", () => {
@@ -247,7 +250,7 @@ describe("alert evaluator", () => {
     const deps = {
       tryLease: vi.fn(async () => true),
       readQueue: vi.fn(async (): Promise<QueueSnapshot> => ({ queueDepth: 2, processingRuns: 0, staleLeases: 0, oldestQueuedRunAgeSeconds: 5_000 })),
-      readMigrations: vi.fn(async () => ({ appliedCount: 2, latestAppliedWhen: 200, journal })),
+      readMigrations: vi.fn(async () => ({ applied: [...shipped], shipped })),
       readTemporal: vi.fn(async () => ({ ok: true as const, queues: [{ name: "q", type: "activity" as const, pollers: [{ identity: "docslurp-worker-m1-1", lastAccessMs: now }] }] })),
       readHttp: vi.fn(() => ({ total: 0, errors5xx: 0 })),
       deliver: vi.fn(async (notification: { status: string; id: string }) => { delivered.push({ status: notification.status, id: notification.id }); }),
