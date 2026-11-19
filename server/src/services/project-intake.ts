@@ -680,7 +680,11 @@ async function storeItem(
   }
   if (measuredBytes === 0) {
     // The stream turned out empty: its object goes at once (`written` also covers it if the whole intake fails).
-    await storage.remove(key).catch(() => undefined);
+    await storage.remove(key).catch(async () => {
+      await storage.remove(key).catch(() => {
+        console.error("[intake] could not remove an empty streamed source object after retry");
+      });
+    });
     throw emptyFileError(admitted.filename);
   }
   return stored(key, measuredBytes);

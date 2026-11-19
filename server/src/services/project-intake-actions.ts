@@ -344,9 +344,10 @@ export async function liveDirectUploadAdmission(
 
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
-  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null; urls?: readonly string[] },
+  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null; urls?: readonly string[]; signal?: AbortSignal },
   run: () => Promise<ProjectIntakeActionResult>,
 ): Promise<ProjectIntakeActionResult> {
+  args.signal?.throwIfAborted();
   if (!args.idempotencyKey) return await run();
   // Clients choose their keys, so two tenants will pick the same one: the cache key is scoped to organization and user.
   const idempotencyKey = scopedIdempotencyKey({ orgId: args.orgId, userId: args.userId, apiKeyId: args.apiKeyId, project: args.project }, args.idempotencyKey);
@@ -443,7 +444,7 @@ async function idempotently(
   // repeat is refused rather than run twice: its own capped class, so it never takes a run-start slot.
   // Other tenants' intakes are waited out (the slots are few and each is held for seconds), so simultaneous uploads
   // queue; a repeat of this key that arrives while the first is running waits too, then replays its response.
-  { lockClass: "intake", tenant: await principalLockTenant(args.userId, args.apiKeyId), waitMs: env.directUploadLockIntakeWaitMs });
+  { lockClass: "intake", tenant: await principalLockTenant(args.userId, args.apiKeyId), waitMs: env.directUploadLockIntakeWaitMs, signal: args.signal });
 }
 
 /**
@@ -611,6 +612,7 @@ export async function createBulkProjectIntake(
     /** Folder paths aligned with `files`. */
     paths?: string[];
     idempotencyKey?: string;
+    signal?: AbortSignal;
     contentLength?: string | null;
     audit?: ProjectIntakeAudit;
   },
@@ -634,7 +636,7 @@ export async function createBulkProjectIntake(
       bytes: Buffer.from(await file.arrayBuffer()),
     })),
   );
-  const { files: _files, canonicalIds: _canonicalIds, paths: _paths, idempotencyKey, contentLength: _length, audit, ...target } = args;
+  const { files: _files, canonicalIds: _canonicalIds, paths: _paths, idempotencyKey, contentLength: _length, audit, signal, ...target } = args;
   // The extract is created per request, so it is not part of the request's identity.
   const { extract: _extract, ...hashedTarget } = target;
   const requestHash = hashIdempotencyPayload({
@@ -651,7 +653,7 @@ export async function createBulkProjectIntake(
   });
 
   return await idempotently(
-    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId, apiKeyId: args.apiKeyId, project: args.project },
+    { idempotencyKey, signal, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId, apiKeyId: args.apiKeyId, project: args.project },
     async () => {
       const guard = intakeCredentialGuard(args.apiKeyId, { orgId: args.orgId ?? null });
       await assertIntakeCredentialLive(guard);
@@ -677,15 +679,17 @@ export async function createRemoteUrlProjectIntake(
     /** Aligned with `urls`; missing entries default to the URL itself. */
     canonicalIds?: Array<string | null>;
     idempotencyKey?: string;
+    signal?: AbortSignal;
     audit?: ProjectIntakeAudit;
   },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
-  const { idempotencyKey, audit, canonicalIds, ...target } = args;
+  const { idempotencyKey, audit, canonicalIds, signal, ...target } = args;
   const { extract: _extract, ...hashedTarget } = target;
   return await idempotently(
     {
       idempotencyKey,
+      signal,
       routeKey: target.extract ? "extracts.url" : "uploads.url",
       // A legacy receipt's replay re-derives its title from these (host only).
       urls: args.urls,
@@ -759,14 +763,16 @@ export async function createWebsiteProjectIntake(
     requiredScopes?: readonly string[];
     crawlOptions: Record<string, unknown>;
     idempotencyKey?: string;
+    signal?: AbortSignal;
     audit?: ProjectIntakeAudit;
   },
   ports: ProjectIntakePorts = projectIntakePorts,
 ): Promise<ProjectIntakeActionResult> {
-  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, crawlProjectId, requiredScopes, ...target } = args;
+  const { idempotencyKey, audit, crawl, crawlOptions, startUrl, crawlProjectId, requiredScopes, signal, ...target } = args;
   return await idempotently(
     {
       idempotencyKey,
+      signal,
       routeKey: "web.ingest",
       requestHash: hashIdempotencyPayload({ ...target, startUrl, crawlOptions, idempotencyKey }),
       userId: args.userId,

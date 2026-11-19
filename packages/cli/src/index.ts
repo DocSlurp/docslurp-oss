@@ -583,7 +583,7 @@ async function isInFlightConflict(response: Response): Promise<boolean> {
   try {
     const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
     const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
-    return code === "idempotency_in_flight";
+    return code === "idempotency_in_flight" || code === "upload_session_busy";
   } catch {
     return false;
   }

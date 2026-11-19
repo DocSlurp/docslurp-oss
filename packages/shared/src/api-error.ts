@@ -205,7 +205,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   idempotency_in_flight: "A request with this Idempotency-Key is still being processed. Retry shortly with the same key.",
   idempotency_key_reused: "This Idempotency-Key was already used for a different request or credential. Use a new key for a different request.",
   upload_session_closed: "The upload session for this Idempotency-Key can no longer take files (failed or aborted). Create a new session with a new Idempotency-Key.",
-  upload_session_busy: "The upload session is being finalized by another request. Retry the same request shortly.",
+  upload_session_busy: "Uploads are busy. Retry the same request shortly.",
   upload_object_missing: "No stored object was found for this file. Upload its bytes to the file's upload target, then complete it again.",
   upload_parts_incomplete: "This file's uploaded parts are missing or have the wrong size. Upload the missing parts, then complete it again.",
   file_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
