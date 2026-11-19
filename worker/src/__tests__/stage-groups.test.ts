@@ -87,7 +87,13 @@ describe("workflow stage groups (groupableStages)", () => {
     ]);
 
     calls = [];
-    await documentPipeline({ ...production, stageOrder: defaultOrder, groupableStages: [...pipelineStageOrder] });
+    await documentPipeline({ ...production, stageOrder: defaultOrder, groupableStages: [...pipelineStageOrder],
+      executionGeneration: "generation-1" });
+    const owner = { runId: production.runId, executionGeneration: "generation-1" };
+    expect(mocks.activities.prepareVisionPageBatches).toHaveBeenCalledWith(expect.objectContaining(owner));
+    expect(mocks.activities.runPipelineStages).toHaveBeenCalledWith(expect.objectContaining({
+      ...owner, stageNames: ["vision-extract", "embed", "index"],
+    }));
     expect(calls).toEqual([
       "initPipelineRun",
       "runPipelineStages:quarantine+format-detect+to-canonical+format-tooling+normalize+pdf-tooling+split-pages+extract-markdown+classify-route+render-images",

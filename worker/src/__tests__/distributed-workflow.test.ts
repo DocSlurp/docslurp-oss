@@ -54,6 +54,14 @@ describe("page workflow scheduling", () => {
     expect(mocks.activities.runVisionPageBundle).toHaveBeenCalledTimes(5);
     expect(mocks.activities.runVisionPageTask).not.toHaveBeenCalled();
   });
+  it("passes the owned run generation to vision reconciliation", async () => {
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ["vision-extract"],
+      pageConcurrency: 4, executionGeneration: "generation-1" });
+    const owner = expect.objectContaining({ runId: "run", executionGeneration: "generation-1" });
+    expect(mocks.activities.prepareVisionPageTasks).toHaveBeenCalledWith(owner);
+    expect(mocks.activities.runPipelineStage).toHaveBeenCalledWith(owner);
+  });
+
   it("does not change activity commands for old workflow input", async()=>{
     await documentPipeline({runId:"old",pipeline:{} as never,stageOrder:["vision-extract"]});
     expect(mocks.activities.prepareVisionPageTasks).not.toHaveBeenCalled();

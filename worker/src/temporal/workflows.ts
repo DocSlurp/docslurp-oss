@@ -634,6 +634,7 @@ export async function documentPipeline(
           runId: input.runId,
           totalStages: stageOrder.length,
           artifacts,
+          ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
           // Stop between stages on a pause request; the loop resumes at the next stage.
           yieldToControl: true,
           ...(input.slotGate ? { slotGate: true } : {}),
@@ -660,6 +661,7 @@ export async function documentPipeline(
         runId: input.runId,
         totalStages: stageOrder.length,
         artifacts,
+        ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
         ...(input.slotGate ? { slotGate: true } : {}),
         ...firstPassFlag,
       };
