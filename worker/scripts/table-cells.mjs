@@ -9,5 +9,6 @@ if (!Array.isArray(tables) || tables.length > 64 || tables.some(s => typeof s !=
 const result = JSON.stringify(tables.map(readTableCells));
 if (Buffer.byteLength(result) > 64 * 1024 * 1024) throw new Error("HTML table result exceeds limit");
 // A remote VM receives only the staged input files, so the batch's empty output directory does not exist there yet.
-await mkdir(path.dirname(output), { recursive: true, mode: 0o700 });
+// Only that one directory, never its ancestors: a missing temporary project is a failure, not something to build.
+await mkdir(path.dirname(output), { mode: 0o700 }).catch((error) => { if (error?.code !== "EEXIST") throw error; });
 await writeFile(output, result, { mode: 0o600 });
