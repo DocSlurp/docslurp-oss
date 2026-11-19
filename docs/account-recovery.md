@@ -94,3 +94,13 @@ Better Auth's limiter never applies to server-side `auth.api` calls. Every DocSl
 - breached passwords at every entry point, plus lookup failure and timeout, including that a hung lookup is aborted;
 - per-recipient limits with and without an account, indirect sends, and the refund on delivery failure;
 - budget atomicity under concurrency, and endpoint limit coverage.
+
+## Delayed delivery and resend policy
+
+Rotation is intentional: a code lasts up to twelve hours from issuance, but use or a newer request invalidates it sooner. An earlier email arriving after a resend does not remain usable. Delivery order is not issuance order; the last email to arrive is not necessarily the valid one. This policy improves delayed delivery only when there has been no intervening issuance. It does not implement same-code resending.
+
+Better Auth 1.7.14's `tryReuseOTP` requires recoverable storage and updates expiry to twelve hours from each resend. Enabling encrypted storage and `resendStrategy: "reuse"` alone is therefore insufficient. A future reuse implementation needs fixed original expiry, preserved attempts, atomic consumption and cross-process serialization of issuance, resend and verification. Exhausted or consumed codes must never be resurrected.
+
+Native hashed six-digit codes are not resistant to offline enumeration after a database disclosure: Better Auth uses unkeyed SHA-256. Recoverable authenticated encryption has different key-management risks; neither storage choice substitutes for bounded lifetime and online attempt controls.
+
+Sensitive-account email proofs use a separate user/session/email/purpose-bound HMAC. Their controls are five attempts per code, a sixty-second per-session send cooldown, and production native limits of three sends and five checks per IP per minute. They do not share the native Email OTP per-recipient budgets above.

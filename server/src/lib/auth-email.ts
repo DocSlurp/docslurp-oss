@@ -12,8 +12,9 @@ export type DeliveryGuard = <T extends { email: string }>(send: (data: T) => Pro
 /**
  * Emailed codes (verification, sign-in, password reset, sensitive-account
  * proof) last 12 hours: mail can arrive hours late and we don't control the
- * delay. Guessing stays bounded regardless of lifetime: a code burns after
- * five wrong guesses, and each address gets ten code checks per 15 minutes.
+ * delay. Native Email OTP codes allow five wrong guesses, with a shared
+ * ten-checks-per-address budget per 15 minutes. Sensitive-account proofs
+ * instead have session-bound attempts/cooldowns and native per-IP limits.
  * A resend issues a new code; only the newest one works.
  */
 export const EMAIL_CODE_SECONDS = 12 * 60 * 60;
@@ -74,14 +75,14 @@ export function renderAuthCodeEmail(otp: string, type?: string): { subject: stri
   const reset = type === "forget-password";
   const subject = reset ? `${code} is your DocSlurp password reset code` : `${code} is your DocSlurp code`;
   const note = reset
-    ? "Use it to choose a new password. It expires in 12 hours. If you didn't ask to reset your password, ignore this email; your password hasn't changed."
-    : "It expires in 12 hours. If you didn't ask for it, ignore this email.";
+    ? "Use it to choose a new password. It is valid for up to 12 hours, unless used or replaced by another code request. If you didn't ask to reset your password, ignore this email; your password hasn't changed."
+    : "It is valid for up to 12 hours, unless used or replaced by another code request. If you didn't ask for it, ignore this email.";
   const lead = reset ? "Your DocSlurp password reset code" : "Your DocSlurp code";
   const text = `${lead}:\n\n${code}\n\n${note}\n`;
   const html = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${subject}</title></head>
 <body style="margin:0;padding:0;background:#f4f5f7;">
-<div style="display:none;max-height:0;overflow:hidden;">${code} expires in 12 hours.</div>
+<div style="display:none;max-height:0;overflow:hidden;">${code} is valid for up to 12 hours, unless used or replaced.</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;"><tr><td align="center" style="padding:40px 16px;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:440px;background:#ffffff;border-radius:16px;border-top:4px solid #14b8a6;">
 <tr><td style="padding:28px 32px 4px;font-family:${SANS};font-size:15px;font-weight:700;color:#0f172a;">DocSlurp</td></tr>
