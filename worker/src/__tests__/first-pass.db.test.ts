@@ -21,6 +21,7 @@ import { SourceIntegrityError } from "../sandbox/source-integrity.js";
 import {
   countFirstPassPages, firstPassDefersPageCount, firstPassPipeline, firstPassResultGlyphs, planFirstPass, primeFirstPassResults, resetFirstPassResultsForTest, runFirstPassBatch, serveFirstPassResult,
 } from "../pipeline/first-pass.js";
+import { firstPassDefersScanFill } from "../pipeline/first-pass.js";
 import { recordedVerdictGate, setFirstPassPublishGate } from "../pipeline/first-pass-gate.js";
 
 let db: PGlite;
@@ -352,6 +353,53 @@ describe("first pass", () => {
     const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
     expect(result.extracted).toEqual(["d0"]);
     expect(await docStage("d0", "extract-markdown")).toBe("completed");
+    expect(await docStage("d0", "embed")).toBeUndefined();
+    expect(await searchable()).toEqual({ d0: false, d1: true, d2: true });
+  });
+
+  it.each([false, true])("handles Auto scan-fill deferral with PII policy enabled=%s", async (enabled) => {
+    await seed({ quality: "auto", ladder: { maxRung: "ocr" }, visionFallback: true, piiPolicy: { enabled, mode: "block", patterns: ["ssn"] } });
+    script = async (_job, emit) => { await emit(textEvent(0, 2, 0)); await emit(textEvent(1)); await emit(textEvent(2)); };
+    const runtime = deps();
+    const seenDeferrals = new Set<string>();
+    const result = await runFirstPassBatch({
+      ...runtime,
+      runStage: async (stage, ids, signal) => {
+        if (stage === "extract-markdown") {
+          for (const id of ids) if (firstPassDefersScanFill("r1", id)) seenDeferrals.add(id);
+        }
+        return runtime.runStage(stage, ids, signal);
+      },
+    }, { runId: "r1", documentIds: DOCS });
+    expect([...seenDeferrals]).toEqual(enabled ? [] : ["d0"]);
+    expect(result.extracted).toEqual(["d0"]);
+    expect(await searchable()).toEqual({ d0: false, d1: true, d2: true });
+    expect(firstPassDefersScanFill("r1", "d0")).toBe(false);
+  });
+
+  it("withholds a previously deferred scan when a batch retry lacks layout facts", async () => {
+    await seed({ quality: "auto", ladder: { maxRung: "ocr" }, afterFirstPass: "none" });
+    script = async (_job, emit) => {
+      const event = textEvent(0, 2);
+      await emit({ ...event, result: { exitCode: 0, stdout: "", stderr: "" } });
+      await emit(textEvent(1));
+      await emit(textEvent(2));
+    };
+    const runtime = deps();
+    const result = await runFirstPassBatch({
+      ...runtime,
+      runStage: async (stage, ids, signal) => {
+        const usage = await runtime.runStage(stage, ids, signal);
+        if (stage === "extract-markdown" && ids.includes("d0")) {
+          // Simulate the durable extract checkpoint from the interrupted batch.
+          await db.query(`update document_run_stage_states
+            set stats = coalesce(stats, '{}'::jsonb) || '{"firstPassScanFillDeferred":true}'::jsonb
+            where document_id = 'd0' and stage_name = 'extract-markdown'`);
+        }
+        return usage;
+      },
+    }, { runId: "r1", documentIds: DOCS });
+    expect(result.extracted).toEqual(["d0"]);
     expect(await docStage("d0", "embed")).toBeUndefined();
     expect(await searchable()).toEqual({ d0: false, d1: true, d2: true });
   });

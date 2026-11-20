@@ -134,6 +134,7 @@ interface CachedResult {
    * run's (walker-parity fields and grids stripped, unmapped math glyphs the math reader's), never as a plain run's.
    */
   glyphs?: boolean;
+  deferScanFill?: boolean;
   /** Figures are stored by the first pass itself after the batch; extract-markdown never waits for them. */
 }
 const results = new Map<string, CachedResult>();
@@ -167,13 +168,18 @@ export function firstPassServesDocument(runId: string, documentId: string): bool
   return results.has(key(runId, documentId));
 }
 
+/** Only a provisional result already withheld from indexing may leave its OCR to the ordinary stage. */
+export function firstPassDefersScanFill(runId: string, documentId: string): boolean {
+  return results.get(key(runId, documentId))?.deferScanFill === true;
+}
+
 export function resetFirstPassResultsForTest(): void {
   results.clear();
 }
 
 /** Test hook: the batch converted this document (firstPassServesDocument is true); nothing is served from it. */
-export function markFirstPassDocumentForTest(runId: string, documentId: string): void {
-  results.set(key(runId, documentId), { markdownPath: "", result: {} as SandboxedPdfResult });
+export function markFirstPassDocumentForTest(runId: string, documentId: string, deferScanFill = false): void {
+  results.set(key(runId, documentId), { markdownPath: "", result: {} as SandboxedPdfResult, deferScanFill });
 }
 
 // ── Planning ──
@@ -371,8 +377,15 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
         const publishable: string[] = [];
         for (const id of ids) {
           const stages = fresh.documentStages.get(id);
-          if (stages?.get("extract-markdown")?.status !== "completed") continue;
-          if (pipeline.piiPolicy?.enabled && stages.get("pii-detect")?.status !== "completed") continue;
+          const extractedStage = stages?.get("extract-markdown");
+          if (extractedStage?.status !== "completed") continue;
+          // A retried batch can lose its layout hints and skip an already-complete provisional stage.
+          if ((extractedStage.stats as { firstPassScanFillDeferred?: boolean } | undefined)?.firstPassScanFillDeferred &&
+              !extractOnly.has(id)) {
+            extracted.push(id);
+            extractOnly.add(id);
+          }
+          if (pipeline.piiPolicy?.enabled && stages?.get("pii-detect")?.status !== "completed") continue;
           if (!(await firstPassPublishGate().awaitClean({ state: fresh, documentId: id, quarantineEnabled: deps.quarantineEnabled, signal: batch.signal }))) continue;
           cleared.add(id);
           if (extractOnly.has(id)) continue;
@@ -435,11 +448,18 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       await recordBatchPageCount(state, document, event.pages, event.processedPages);
       // Page facts go on as the validated canonical lines (never the guest's raw bytes), to be accepted again when served.
       const resentFacts = pageFactsForResend(batchFileJob(job, event.index)!);
-      const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) }, ...(job.options.math ? { glyphs: true } : {}) };
+      const needsLaterRead = pipeline.quality !== "fast" &&
+        textlessPages(sandboxedPdfLayoutFacts(batchFileJob(job, event.index)!), event.processedPages ?? event.pages) > 0;
+      const cached: CachedResult = {
+        markdownPath: file.output,
+        result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) },
+        ...(job.options.math ? { glyphs: true } : {}),
+        ...(needsLaterRead && persistResults && pipeline.ladder.maxRung === "ocr" && !pipeline.piiPolicy.enabled ? { deferScanFill: true } : {}),
+      };
       if (persistResults) await persistBatchResult(deps.storage, state, document, cached);
       results.set(key(input.runId, file.documentId), cached);
       cachedKeys.push(key(input.runId, file.documentId));
-      if (pipeline.quality !== "fast" && textlessPages(sandboxedPdfLayoutFacts(batchFileJob(job, event.index)!), event.processedPages ?? event.pages) > 0) {
+      if (needsLaterRead) {
         // The text layer misses pages the project reads (OCR or vision): extract now (served from the batch), embed after
         // the stage loop reads them. Fast quality reads the text layer only, so its documents are embedded now.
         extracted.push(file.documentId);

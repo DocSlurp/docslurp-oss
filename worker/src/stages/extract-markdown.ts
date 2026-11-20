@@ -1,7 +1,7 @@
 import { providerCostEvidence } from "../extractors/plugins.js";
 import { FIGURE_CHARTS_SCHEMA, FIGURE_CHARTS_SLOT, figureChartsHaveWork, figureChartsObjectName, figureChartsRequest, takeFigureCharts, validateFigureCharts, type TakenFigureCharts } from "../chart-export/figure-charts.js";
 import { createHash } from "node:crypto";
-import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults, readMarkdownSlotBytes } from "../pipeline/first-pass.js";
+import { committedDocumentUris, countDeferredPdfPages, firstPassDefersScanFill, firstPassServesDocument, primeFirstPassResults, readMarkdownSlotBytes } from "../pipeline/first-pass.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
@@ -742,7 +742,8 @@ export class ExtractMarkdownStage implements Stage {
                   // text-layer extractors never OCR. The engine charges each page it reads.
                   const sourceLexical = new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? [])
                     .map((text, index) => [index + 1, winningCandidate.ocrPages?.includes(index + 1) ? null : ocrPageHasWords(text)] as const));
-                  const scanFill = isPdf && qualityAllowsPageReading(pageQuality) && !skipOcr
+                  const deferScanFill = state.firstPassShard && firstPassDefersScanFill(state.run.id, document.id);
+                  const scanFill = isPdf && qualityAllowsPageReading(pageQuality) && !skipOcr && !deferScanFill
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash,
                       ...(ladderPolicy.ladder.active ? { ladderBudget: ladderPolicy.aboveFastBudget } : {}) }, signal)
                     : null;
@@ -1277,6 +1278,7 @@ export class ExtractMarkdownStage implements Stage {
                       strategy,
                       similarity,
                       needsVision,
+                      ...(deferScanFill ? { firstPassScanFillDeferred: true } : {}),
                       textlessFallback,
                       plausibilityScore,
                       // Fast kept the image unread on purpose: its empty text is not a low-quality extraction to retry.
