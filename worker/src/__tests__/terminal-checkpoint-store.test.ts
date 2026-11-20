@@ -83,17 +83,19 @@ describe("initialization execution fence", () => {
     expect(token).toBeTruthy();
     await withStore(async store => {
       const stale = await loadRunState(store, id);
-      await store.updateProgress(stale, { executionGeneration: token });
+      await store.updateProgress(stale, { executionGeneration: token, shardDemand: 4 });
       await store.updateProgress(stale, { executionGeneration: token });
       await db.query("update project_runs set status='failed' where id=$1", [id]);
-      await expect(store.updateProgress(stale, { executionGeneration: token })).rejects.toThrow("ownership");
+      await expect(store.updateProgress(stale, { executionGeneration: token, shardDemand: 8 })).rejects.toThrow("ownership");
       await db.query("update project_runs set status='queued', control_state='cancel_requested' where id=$1", [id]);
-      await expect(store.updateProgress(stale, { executionGeneration: token })).rejects.toThrow("ownership");
+      await expect(store.updateProgress(stale, { executionGeneration: token, shardDemand: 8 })).rejects.toThrow("ownership");
       await db.query("update project_runs set control_state=null, execution_generation=gen_random_uuid()::text where id=$1", [id]);
-      await expect(store.updateProgress(stale, { executionGeneration: token })).rejects.toThrow("ownership");
+      await expect(store.updateProgress(stale, { executionGeneration: token, shardDemand: 8 })).rejects.toThrow("ownership");
       await expect(store.updateProgress(stale, {})).rejects.toThrow("ownership");
-      const row = (await db.query<{ status: string }>("select status from project_runs where id=$1", [id])).rows[0];
-      expect(row?.status).toBe("queued");
+      const row = (await db.query<{ status: string; shard_demand: number }>(
+        "select status, shard_demand from project_runs where id=$1", [id],
+      )).rows[0];
+      expect(row).toMatchObject({ status: "queued", shard_demand: 4 });
     });
   });
 });

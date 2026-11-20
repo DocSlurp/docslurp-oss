@@ -1,3 +1,4 @@
+import { planDocumentShards, quarantineShardOptions } from "../temporal/document-shards.js";
 import { StaleExecutionError } from "../db/execution-ownership.js";
 import { resolvedRunModels } from "./resolved-models.js";
 import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
@@ -280,7 +281,15 @@ export function createStageExecution(deps: {
     state.run.status = "processing";
     state.totalStages = input.totalStages;
     state.refreshStats();
-    await store.updateProgress(state, { executionGeneration: input.executionGeneration });
+    const documentIds = documents.map((document) => document.id);
+    const documentPages = documents.map((document) => Math.max(1, document.pageCount || 1));
+    const initialQuarantineDemand = input.initialQuarantineSharding
+      ? planDocumentShards(documentIds, documentPages, quarantineShardOptions(input.initialQuarantineSharding)).length
+      : 0;
+    await store.updateProgress(state, {
+      executionGeneration: input.executionGeneration,
+      ...(initialQuarantineDemand > 1 ? { shardDemand: initialQuarantineDemand } : {}),
+    });
 
     // Log cost forecast
     const forecast = forecastRunCost(documents, state.run.pipeline);
@@ -326,9 +335,10 @@ export function createStageExecution(deps: {
     );
 
     return {
-      documentIds: documents.map((d) => d.id),
+      documentIds,
       artifacts: { ...state.artifacts },
-      documentPages: documents.map((d) => Math.max(1, d.pageCount || 1)),
+      documentPages,
+      ...(initialQuarantineDemand > 1 ? { initialQuarantineDemand } : {}),
       documentMimeTypes: documents.map((d) => d.mimeType ?? ""),
     };
   }
