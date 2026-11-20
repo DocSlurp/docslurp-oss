@@ -187,20 +187,22 @@ export async function orgSpendBlock(client: Client, scope: { orgId: string; proj
  * What a run may still reserve for paid side work (a media job, a capacity lease), read under the admission lock the
  * caller holds. `allowed` is entitlement and budgets; `headroom` is available credits minus the leases other runs
  * hold (this run's own lease is what its spend draws from) minus the running-job floor. A billing-exempt
- * organization is never refused for credits (`exempt`).
+ * organization is never refused for credits (`exempt`). Decide with `covers(needed)`: a headroom that is not a
+ * number covers nothing.
  */
 export async function runSpendHeadroom(
   client: Client,
   scope: { orgId: string; projectId: string; runId: string },
-): Promise<{ allowed: boolean; headroom: number; exempt: boolean }> {
+): Promise<{ allowed: boolean; headroom: number; exempt: boolean; covers(needed: number): boolean }> {
   const [status] = await client<{ funded: boolean | null; available: number; leased: number; project_in_org: boolean; org_budget_paused: boolean; project_budget_paused: boolean }[]>`
     select s.*, org_outstanding_credit_leases(${scope.orgId}, 'run', ${scope.runId}) as leased
     from org_spend_status(${scope.orgId}, ${scope.projectId}, 0) s`;
-  return {
-    allowed: Boolean(status?.project_in_org) && !status!.org_budget_paused && !status!.project_budget_paused,
-    headroom: status ? Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) : 0,
-    exempt: isBillingExemptOrg(scope.orgId),
-  };
+  // Entitlement and budgets come from the shared rule; only its credit test is replaced by the headroom below.
+  const stop = spendBlockCode(status ? { ...status, org_id: scope.orgId } : status);
+  const allowed = stop === null || stop === "credit_exhausted";
+  const headroom = status ? Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) : Number.NaN;
+  const exempt = isBillingExemptOrg(scope.orgId);
+  return { allowed, headroom, exempt, covers: (needed) => allowed && (exempt || headroom >= needed) };
 }
 
 /**

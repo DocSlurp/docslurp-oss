@@ -46,6 +46,17 @@ describe("worker spend owners", () => {
     expect(owners).toEqual(["packages/shared/src/spend-rule.ts"]);
   });
 
+  it("reads a run's spend headroom only after taking the organization's admission lock", () => {
+    const readers = filesMatching(workerSrc, /\brunSpendHeadroom\(/).filter((file) => file !== OWNER);
+    expect(readers).toEqual(["media/capacity/store.ts", "media/journal.ts"]);
+    for (const file of readers) {
+      const text = readFileSync(join(workerSrc, file), "utf8");
+      const lock = text.indexOf("lockOrgAdmission(");
+      expect(lock, `${file} must take the admission lock`).toBeGreaterThanOrEqual(0);
+      expect(text.indexOf("runSpendHeadroom("), `${file} reads spend before its lock`).toBeGreaterThan(lock);
+    }
+  });
+
   it("checks more than nothing", () => {
     expect(sourceFiles(workerSrc).length).toBeGreaterThan(300);
   });

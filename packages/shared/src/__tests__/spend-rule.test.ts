@@ -48,6 +48,30 @@ describe("spend rule", () => {
     expect(spendRuleCode(status({ funded: null, available: -25 }), "running", config)).toBeNull();
   });
 
+  it("fails closed on anything it cannot weigh", () => {
+    for (const kind of ["job", "interactive", "running"] as const) {
+      expect(spendRuleCode(status({ available: Number.NaN }), kind, config)).toBe("credit_exhausted");
+      expect(spendRuleCode(status({ projectInOrg: undefined as never }), kind, config)).toBe("plan_not_entitled");
+      // No organization id is not an exempt organization.
+      expect(spendRuleCode(status({ orgId: undefined, available: -1000 }), kind, config)).toBe("credit_exhausted");
+      expect(spendRuleCode(status({ orgId: "", available: -1000 }), kind, config)).toBe("credit_exhausted");
+    }
+    for (const kind of ["job", "interactive"] as const) {
+      expect(spendRuleCode(status({ reserved: undefined }), kind, config)).toBe("credit_exhausted");
+      expect(spendRuleCode(status({ reserved: Number.NaN }), kind, config)).toBe("credit_exhausted");
+    }
+    // Unknown grant history may not overdraw; unknown funding gets the starter reserve and overdraft, never the funded one.
+    for (const hasCreditGrants of [null, undefined]) {
+      expect(spendRuleCode(status({ hasCreditGrants, available: 0 }), "interactive", config)).toBe("credit_exhausted");
+    }
+    for (const funded of [null, undefined]) {
+      expect(spendRuleCode(status({ funded, available: -20 }), "interactive", config)).toBe("credit_exhausted");
+      expect(spendRuleCode(status({ funded, available: -19.99 }), "interactive", config)).toBeNull();
+      expect(spendRuleCode(status({ funded, available: 20 }), "job", config)).toBe("credit_exhausted");
+      expect(spendRuleCode(status({ funded, available: 20.01 }), "job", config)).toBeNull();
+    }
+  });
+
   it("a billing-exempt organization is never refused for credits, but budgets and entitlement still stop it", () => {
     const previous = process.env.BILLING_EXEMPT_ORG_IDS;
     process.env.BILLING_EXEMPT_ORG_IDS = "house";

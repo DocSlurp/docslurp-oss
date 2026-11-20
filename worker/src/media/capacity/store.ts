@@ -40,7 +40,7 @@ export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
           select org_id, run_id, case when usage_settled then greatest(reserve_cents-coalesce(charged_cost_cents,cost_cents,0),0) else greatest(reserve_cents,coalesce(charged_cost_cents,cost_cents,0)) end
             from remote_media_jobs where usage_settled = false or cost_state = 'disputed'
         ) reservations`;
-      if (!spend.allowed || (spend.headroom < reserved * 100 + Number(pending.org_reserved) && !spend.exempt)) throw new Error("Capacity spend admission denied");
+      if (!spend.covers(reserved * 100 + Number(pending.org_reserved))) throw new Error("Capacity spend admission denied");
       const [run] = await tx<{ spent: number }[]>`select spent_cents as spent from project_runs
         where id = ${args.scope.runId} and org_id = ${args.scope.orgId} and project_id = ${args.scope.projectId}
         and coalesce(control_state, '') not in ('paused','pause_requested','cancelled','cancel_requested','dead-letter')`;

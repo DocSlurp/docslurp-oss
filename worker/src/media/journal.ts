@@ -84,7 +84,7 @@ export class PostgresMediaJournal implements MediaJournal {
         where org_id = ${args.scope.orgId} and (usage_settled = false or cost_state = 'disputed')), 0) +
       coalesce((select sum((case when status='deleted' then fixed_reserve_usd else reserved_usd end) * 100) from remote_capacity_leases
         where scope->>'orgId' = ${args.scope.orgId} and (status <> 'deleted' or fixed_reserve_usd > 0)), 0) as reserved`;
-    if (!spend.allowed || (spend.headroom < args.reserveCents + Number(pending.reserved) && !spend.exempt)) throw new Error("Media spend admission denied");
+    if (!spend.covers(args.reserveCents + Number(pending.reserved))) throw new Error("Media spend admission denied");
   }
   async complete(id: string, resultKey: string, costCents: number, pricingMismatch = false, accounting?: MediaAccounting, chargedCostCents = costCents) {
     await this.sql`update remote_media_jobs set status = 'completed', result_key = ${resultKey}, cost_cents = ${costCents}, charged_cost_cents = ${chargedCostCents}, pricing_uncertain = ${pricingMismatch}, accounting = ${accounting ? this.sql.json(accounting as unknown as JSONValue) : null}, cost_state = ${accounting?.state ?? 'estimated'}, updated_at = now()

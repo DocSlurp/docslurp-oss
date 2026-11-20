@@ -22,6 +22,8 @@ import {
  *  - `interactive`: chat and search. It may carry a small negative balance: available - reserved > -overdraft.
  *  - `running`: work already admitted. It may use the chat reserve and finish below zero, down to the running-job
  *    floor, and ignores other runs' reservations: available >= floor.
+ *
+ * Fails closed: a balance or reservation that is not a finite number is refused for credits, never read as enough.
  */
 export type SpendRuleCode = "plan_not_entitled" | "project_budget_paused" | "org_budget_paused" | "credit_exhausted";
 
@@ -34,7 +36,7 @@ export interface SpendRuleStatus {
   /** Received credits at least once; only such organizations may overdraw interactively. */
   hasCreditGrants?: boolean | null;
   available: number;
-  /** Credits other in-flight work holds. Ignored for `running`. */
+  /** Credits other in-flight work holds. Required for `job` and `interactive`; ignored for `running`. */
   reserved?: number;
   projectInOrg: boolean;
   projectBudgetPaused: boolean;
@@ -51,16 +53,18 @@ export function spendRuleCode(
   if (status.projectBudgetPaused) return "project_budget_paused";
   if (status.orgBudgetPaused) return "org_budget_paused";
   if (isBillingExemptOrg(status.orgId)) return null;
-  const reserved = status.reserved ?? 0;
+  // Every test below is written as "allowed only when the comparison holds", so NaN refuses.
   if (kind === "running") {
     const floor = status.funded === undefined ? 0 : runningJobCreditFloor(config);
-    return status.available < floor ? "credit_exhausted" : null;
+    return status.available >= floor ? null : "credit_exhausted";
   }
+  // New work and interactive calls count what other in-flight work holds: an unknown reservation is not zero.
+  const spendable = status.available - (status.reserved ?? Number.NaN);
   if (kind === "interactive") {
     const overdraft = chatCreditOverdraft(status.funded === true, status.hasCreditGrants === true, config);
-    return status.available - reserved > -overdraft ? null : "credit_exhausted";
+    return spendable > -overdraft ? null : "credit_exhausted";
   }
-  return status.available - reserved - chatCreditReserve(status.funded === true, config) > 0 ? null : "credit_exhausted";
+  return spendable - chatCreditReserve(status.funded === true, config) > 0 ? null : "credit_exhausted";
 }
 
 /**
