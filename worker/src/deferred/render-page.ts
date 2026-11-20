@@ -5,7 +5,7 @@ import type { RenderDocumentPageInput } from "@docslurp/shared";
 import { pageImagesOnSql, pageRenderSlot, pageRenderDpi, pageRenderWorkflowId, isBillingEnforced } from "@docslurp/shared";
 import type { Store } from "../db/store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
-import { spendBlockCode } from "../db/spend-check.js";
+import { orgSpendBlock } from "../db/spend-check.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { buildAllocatedResourceObservation, buildLocalComputeUsageEvent, resolveWorkerDeploymentProfile } from "../pipeline/local-compute-cost.js";
@@ -49,8 +49,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
     return;
   }
   if (isBillingEnforced()) {
-    const [budget] = await sql<{ funded: boolean; available: number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }[]>`select * from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
-    if (spendBlockCode(budget ? { ...budget, org_id: row.org_id } : undefined)) throw new Error("Page rendering spend is blocked");
+    if (await orgSpendBlock(sql, { orgId: row.org_id, projectId: row.project_id })) throw new Error("Page rendering spend is blocked");
   }
   const started = Date.now();
   const sources = new PdfSourceCache(deps.storage);

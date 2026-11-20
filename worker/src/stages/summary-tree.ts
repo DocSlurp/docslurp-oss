@@ -208,7 +208,7 @@ export interface SummaryTreeDocumentRun {
   /** A named reason hosted calls are not allowed for this project (privacy mode), or null. */
   hostedCallRefusal?: () => Promise<string | null>;
   /**
-   * Replaces the organization balance check (the default reads `org_spend_status`). Like the default, it is asked
+   * Replaces the organization balance check (the default reads the organization's spend status). Like the default, it is asked
    * before the first model call and again before every commit window of the build.
    */
   spendRefusal?: () => Promise<string | null>;
