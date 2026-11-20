@@ -6,6 +6,10 @@ Domain terms used across the server, worker and SDKs.
 
 Admitting, materialising, publishing and starting a Run as one step. A Run is either fully created (published, then started or deferred) or it does not exist. Callers describe the Run's sources (new files, or new versions of existing Documents); they never write Documents or sequence publish/start themselves.
 
+## Run admission
+
+The decision that a Run may become spendable work, and everything that must be true when it is made: the organization's admission lock is held, the Run belongs to that organization and project, the spend rule passes with the Run's own reservation counted, and the Run holds its first credit lease, all in the transaction that inserts or re-queues it. Run creation, retry, resume and recover, re-index and full-index batches, blocked and spend-paused runs and on-demand page runs are each admitted through it; none of them takes the lock, reads spend or grants a lease themselves. A refusal leaves nothing behind, or leaves the Run saved as blocked when its caller's own change must still commit.
+
 ## Page evidence
 
 What is known, and what is not, about one page of a document, and the routing decisions that follow from it. Doppler's page facts, the layout walker and the native probe each measure pages; their adapters turn a page into page evidence once, applying the shared rules (page-size bounds, furniture, the low-confidence and truncation downgrades, which source's grids stand). Every quantity is known or unknown, and unknown is never read as zero, "no table" or "no image": a page whose ruled grids are unknown takes the table path, and a low-confidence page keeps only its size. Consumers (classify-route, the v2 router, cost stats, chart-export) read decisions from page evidence; they never re-decide a fact from a source themselves.

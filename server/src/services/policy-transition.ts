@@ -1,6 +1,7 @@
 import { PIPELINE_FIELD_IMPACT, type PipelineFeatures, type ProjectRecord } from "@docslurp/shared";
 import { HTTPException } from "hono/http-exception";
 import type { sql } from "../db.js";
+import { lockOrgAdmission } from "./billing/admission-lock.js";
 
 export class PolicyTransitionUnavailableError extends HTTPException {
   readonly code = "policy_publication_unavailable";
@@ -23,7 +24,7 @@ export function isPolicyTightening(current: PipelineFeatures, next: PipelineFeat
 export async function assertPolicyTransitionAllowed(client: typeof sql, current: ProjectRecord, next: PipelineFeatures) {
   if (!isPolicyTightening(current.pipeline, next)) return;
   // Admission takes the organization spend lock before the project row lock. Keep that order.
-  await client`select pg_advisory_xact_lock(spend_admission_lock_key(${current.orgId}))`;
+  await lockOrgAdmission(client, current.orgId);
   const [project] = await client`select id from projects where id=${current.id} and org_id=${current.orgId} for update`;
   if (!project) throw new PolicyTransitionUnavailableError();
   const [retained] = await client`select

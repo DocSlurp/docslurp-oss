@@ -3,7 +3,8 @@ import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { apiPool, sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelinePause, signalPipelineResume } from "../lib/temporal.js";
 import { RUN_EVENTS_CHANNEL } from "./run-event-hub.js";
-import { loadSpendStatus, runAdmissionReserveCredits, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
+import { spendGuardsSkipped } from "./billing/spend-guard.js";
+import { lockOrgAdmission, pausedRunSpendBlock } from "./run-admission.js";
 import { creditLeasesEnabled, grantRunCreditLease } from "./billing/credit-leases.js";
 import { fleetSupports, taskQueueForOrgKey } from "./worker-fleet.js";
 import { restoreRunMonthlyCapacity } from "./run-monthly-readmission.js";
@@ -89,7 +90,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       const client = tx as unknown as SqlClient;
       // Admission always locks org before run. Serializing only the run lets
       // two paused runs reuse the same available capacity.
-      await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${candidate.org_id}))`;
+      await lockOrgAdmission(tx, candidate.org_id);
       await tx`select pg_advisory_xact_lock(90105, hashtext(${runId}))`;
       const [row] = await tx<PausedRunRow[]>`
         select id, org_id, project_id, user_id, pause_reason from project_runs
@@ -111,9 +112,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
           console.error(`[spend-paused-runs] run=${row.id} measured_owed_read_failed=true pause_preserved=true: ${error instanceof Error ? error.message : String(error)}`);
           throw error;
         }
-        const status = await loadSpendStatus(row.org_id, row.project_id, { client, reusingRunId: row.id, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() });
-        // The owed credits are held like credits in-flight runs hold: the run resumes only when what is left after them may spend.
-        const reason = spendBlockReason(status && owed > 0 ? { ...status, reserved: status.reserved + owed } : status);
+        const reason = await pausedRunSpendBlock(tx, { runId: row.id, orgId: row.org_id, projectId: row.project_id }, { leases, owedCredits: owed });
         if (reason) {
           blockedReason = reason.code;
           // Restoration must roll back together with the refused pause/lease.

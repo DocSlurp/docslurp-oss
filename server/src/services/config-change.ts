@@ -47,8 +47,8 @@ import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./project-indexing-mode.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
-import { admissionBlock, requireRunCreditLease, isSpendBlockedError, spendBlockJobReason, spendGuardsSkipped } from "./billing/spend-guard.js";
-import { creditLeasesEnabled } from "./billing/credit-leases.js";
+import { isSpendBlockedError, spendBlockJobReason } from "./billing/spend-guard.js";
+import { admitRunInTransaction } from "./run-admission.js";
 import { getProjectAccess, canEditProject } from "./organizations.js";
 import {
   jobStatusForMutation,
@@ -639,12 +639,6 @@ export async function createReindexRuns(args: {
     // check for the whole job would over-admit large projects. This is the same spend decision `assertCanSpend` makes
     // (loadSpendStatus), so a `models` batch passes the same admission as run creation; it blocks the run instead of
     // throwing, because the settings change itself is saved in this transaction.
-    let batchBlockedReason = args.blockedReason;
-    if (!batchBlockedReason) {
-      const block = await admissionBlock(tx, project.orgId, project.id, { speedBoost: batch.pipeline.speedBoost });
-      if (block) batchBlockedReason = spendBlockJobReason(block.code);
-    }
-    const status = batchBlockedReason ? "blocked" : "queued";
     const runId = index === 0 ? jobId : randomUUID();
     const pages = batch.docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
     if (batch.docs.some(doc => !Number.isFinite(doc.billing_pages ?? doc.page_count) || (doc.billing_pages ?? doc.page_count ?? 0) <= 0)) throw new Error("Monthly admission requires known positive page counts");
@@ -655,6 +649,10 @@ export async function createReindexRuns(args: {
       })) },
     }).current.estimatedCost.maxCents);
     const stats = { job: { id: jobId, ...args.meta } };
+    const { blockedReason: batchBlockedReason } = await admitRunInTransaction(tx, {
+      runId, orgId: project.orgId, projectId: project.id, speedBoost: batch.pipeline.speedBoost,
+    }, async (batchBlockedReason) => {
+    const status = batchBlockedReason ? "blocked" : "queued";
     await tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, blocked_reason, job_id, priority, stage,
         total_documents, processed_documents, pages_total, pages_processed, input_cost_cents, output_cost_cents, pipeline, stats,
@@ -683,21 +681,8 @@ export async function createReindexRuns(args: {
           ${effectiveIndexingMode("full")}, ${doc.id})
       `;
     }
+    }, { refusal: "block", blockedReason: args.blockedReason });
     documents += batch.docs.length;
-    if (!batchBlockedReason && creditLeasesEnabled() && !spendGuardsSkipped()) {
-      try {
-        await tx.savepoint(async (sp) => {
-          await requireRunCreditLease(sp, { runId, orgId: project.orgId, projectId: project.id });
-        });
-      } catch (error) {
-        // Save the requested configuration and document manifests, but never
-        // publish queued work whose mandatory lease was refused or uncertain.
-        batchBlockedReason = "credits";
-        await tx`update project_runs set status = 'blocked', blocked_reason = 'credits'
-          where id = ${runId} and org_id = ${project.orgId} and project_id = ${project.id}`;
-        console.warn(`[credit-leases] run=${runId} admission blocked: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
     if (batchBlockedReason) blockedReason ??= batchBlockedReason;
     else queuedRunIds.push(runId);
     runIds.push(runId);

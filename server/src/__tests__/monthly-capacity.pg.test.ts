@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 describe.skipIf(!process.env.TEST_DATABASE_URL)("durable monthly admission (real PostgreSQL)", () => {
 let sql: postgres.Sql;
 let guard: typeof import("../services/billing/spend-guard.js");
+let admission: typeof import("../services/run-admission.js");
 beforeAll(async () => {
  const url=process.env.TEST_DATABASE_URL;
  if (!url || new URL(url).hostname!=="127.0.0.1") throw new Error("Requires isolated loopback TEST_DATABASE_URL");
@@ -12,6 +13,7 @@ beforeAll(async () => {
  for (let repeat=0;repeat<2;repeat++) await sql.unsafe(await readFile(new URL("../../db/migrations/0175_monthly_admission_receipts.sql",import.meta.url),"utf8"));
  vi.doMock("../db.js",()=>({sql}));
  guard=await import("../services/billing/spend-guard.js");
+ admission = await import("../services/run-admission.js");
  await sql`insert into "user"(id,name,email) values('capacity-u','U','capacity@example.test')`;
  await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents,monthly_budget_cents) values('capacity-o','O','capacity-o','capacity-u',1000,10)`;
  await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents) values('capacity-project-org','O','capacity-project-org','capacity-u',1000)`;
@@ -19,7 +21,7 @@ beforeAll(async () => {
  await sql`insert into projects(id,org_id,user_id,name,monthly_budget_cents) values('capacity-p','capacity-o','capacity-u','P',10)`;
 });
 afterAll(async()=>{await sql?.end();});
-const insert=(id:string)=>guard.admitRunSpend("capacity-o","capacity-p",tx=>tx`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
+const insert=(id:string)=>admission.admitRunSpend("capacity-o","capacity-p",tx=>tx`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
  values(${id},'capacity-o','capacity-p','capacity-u','bulk-upload','queued','queued','{}',6)`,{leaseRunId:id});
 it("serializes real pending work across five connections and releases failure capacity",async()=>{
  const results=await Promise.allSettled(Array.from({length:8},(_,i)=>insert(`capacity-${i}`)));
@@ -55,11 +57,11 @@ it("binds receipt atomically and survives an absent response cache",async()=>{
 });
 
 it("enforces a project cap independently and refuses a foreign billing scope",async()=>{
- const results=await Promise.allSettled(Array.from({length:8},(_,i)=>guard.admitRunSpend('capacity-project-org','capacity-project-only',tx=>tx`
+ const results=await Promise.allSettled(Array.from({length:8},(_,i)=>admission.admitRunSpend('capacity-project-org','capacity-project-only',tx=>tx`
  insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
  values(${`capacity-project-${i}`},'capacity-project-org','capacity-project-only','capacity-u','bulk-upload','queued','queued','{}',6)`)));
  expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
- await expect(guard.admitRunSpend('capacity-o','capacity-project-only',async()=>{})).rejects.toMatchObject({code:'plan_not_entitled'});
+ await expect(admission.admitRunSpend('capacity-o','capacity-project-only',async()=>{})).rejects.toMatchObject({code:'plan_not_entitled'});
 });
 
 it("production materialization reserves pending workflow capacity across five connections", async () => {

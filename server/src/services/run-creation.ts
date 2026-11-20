@@ -31,12 +31,12 @@ import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
 import {
-  admitRunSpend,
   loadSpendStatus,
   assertCanSpend,
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
+import { admitRunSpend, lockOrgAdmission } from "./run-admission.js";
 import { canContributeToProject, canEditProject, getProjectAccess, getProjectAccessWithPipeline } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
@@ -423,7 +423,7 @@ export async function enforceLiveBudgetCaps(
 ): Promise<void> {
   if (process.env.NODE_ENV === "development" && SKIP_RUN_BUDGET_GUARDS_IN_DEV) return;
   await defaultSql.begin(async tx => {
-    await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
+    await lockOrgAdmission(tx, orgId);
     const status = await loadSpendStatus(orgId, projectId, { client: tx });
     if (!status?.projectInOrg) throw new RunCreationBlockedError("Project not found", 402, "plan_not_entitled");
     if (status.projectBudgetPaused) throw new RunCreationBlockedError("This project has reached its monthly budget cap", 402, "project_budget_paused");

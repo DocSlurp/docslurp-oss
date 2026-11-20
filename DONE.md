@@ -1,3 +1,13 @@
+## Run admission is one module (2026-11-19)
+
+No behaviour change. Seven paths admitted a run, each sequencing the organization's admission lock, the spend decision and the run's first credit lease itself: run creation, retry, operator resume and recover, re-index batches, full-index batches, blocked runs, spend-paused runs and on-demand page runs.
+
+- `server/src/services/run-admission.ts` owns that sequence behind five entry points (`admitRunSpend`, `admitRunInTransaction`, `admitBlockedRun`, `pausedRunSpendBlock`, `admitOnDemandRun`); `billing/admission-lock.ts` is the only file that names the lock key, and the twelve places that took the lock by hand call `lockOrgAdmission`.
+- `billing/spend-guard.ts` keeps the spend rule and the interactive checks; the lease primitive and the in-transaction admission decision are no longer exported from it.
+- `run-admission-owners.test.ts` fails when a file outside the listed four inserts `project_runs`, when the lock key is named elsewhere, or when the lease primitive is used outside the module.
+- `run-admission-leases.db.test.ts` covers the new entry points: one of two concurrent transactions admitted on a balance that covers one, a refused lease never leaving a queued run, and refusals for a run named under another organization or project.
+- `GLOSSARY.md`: Run admission.
+
 ## Activity feeds read active plus recently finished runs by index (2026-11-18)
 
 - Migration 0200: `project_runs.finished_at`, stamped by a trigger when a run reaches completed or failed (cleared if it becomes active again), so it changes once per finish, never on heartbeats; partial indexes `project_runs_project_finished_idx (project_id, finished_at)`, `project_runs_org_finished_idx (org_id, finished_at)` and `project_runs_org_blocked_idx (org_id, updated_at) WHERE blocked`. Runs finished in the last day are backfilled; older finished history no longer fills the realtime list (accepted). The migration holds ACCESS EXCLUSIVE on project_runs until commit (one migrator transaction): about as long as the index builds.

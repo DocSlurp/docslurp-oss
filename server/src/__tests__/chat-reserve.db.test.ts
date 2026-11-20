@@ -11,6 +11,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let guard: typeof import("../services/billing/spend-guard.js");
+let admission: typeof import("../services/run-admission.js");
 let leases: typeof import("../services/billing/credit-leases.js");
 
 beforeAll(async () => {
@@ -32,6 +33,7 @@ beforeAll(async () => {
   vi.doMock("../lib/temporal.js", () => ({ signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn() }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   guard = await import("../services/billing/spend-guard.js");
+  admission = await import("../services/run-admission.js");
   leases = await import("../services/billing/credit-leases.js");
 }, 120_000);
 
@@ -63,7 +65,7 @@ const balance = (credits: number, account: "starter" | "funded" = "starter") =>
   sql`update organizations set credit_balance_cents = ${credits}, funded_at = ${account === "funded" ? new Date() : null} where id = 'o1'`;
 
 async function admit(id: string) {
-  return await guard.admitRunSpend("o1", "w", (tx) => tx`
+  return await admission.admitRunSpend("o1", "w", (tx) => tx`
     insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
     values (100, ${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
     returning id
@@ -246,7 +248,7 @@ describe("Speed boost admission", () => {
     try {
       await balance(103);
       const insert = vi.fn();
-      await expect(guard.admitRunSpend("o1", "w", insert, { speedBoost: true })).rejects.toMatchObject({code:"credit_exhausted"});
+      await expect(admission.admitRunSpend("o1", "w", insert, { speedBoost: true })).rejects.toMatchObject({code:"credit_exhausted"});
       expect(insert).not.toHaveBeenCalled();
       await expect(admit("ordinary-run")).resolves.toBeDefined();
     } finally { process.env.WORKER_CREDIT_LEASES = "on"; }
