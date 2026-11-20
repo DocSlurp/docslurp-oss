@@ -53,7 +53,7 @@ const marked = (runId: string) => client`
 describe("retry and the early keyword marker", () => {
   it("lifts the marker of a failed Run's unfinished Documents, keeping those whose embed completed", async () => {
     const lifecycle = createRunLifecycle({ sql, startWorkflow: vi.fn(async () => {}), failureThreshold: 2 });
-    const outcome = await lifecycle.retry({ id: "run-failed", status: "failed", pipeline: defaultPipelineFeatures });
+    const outcome = await lifecycle.retryWithoutAdmission({ id: "run-failed", status: "failed", pipeline: defaultPipelineFeatures });
     expect(outcome).toMatchObject({ status: "resumed" });
     expect(await marked("run-failed")).toEqual([
       { id: "f-done", marked: true },
@@ -64,7 +64,7 @@ describe("retry and the early keyword marker", () => {
 
   it("lifts the marker of a completed Run's failed Documents on retry, leaving completed ones", async () => {
     const lifecycle = createRunLifecycle({ sql, startWorkflow: vi.fn(async () => {}), failureThreshold: 2 });
-    const outcome = await lifecycle.retry({ id: "run-partial", status: "completed", pipeline: defaultPipelineFeatures });
+    const outcome = await lifecycle.retryWithoutAdmission({ id: "run-partial", status: "completed", pipeline: defaultPipelineFeatures });
     expect(outcome).toMatchObject({ status: "resumed" });
     expect(await marked("run-partial")).toEqual([
       { id: "p-done", marked: true },

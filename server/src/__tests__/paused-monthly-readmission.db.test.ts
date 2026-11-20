@@ -7,6 +7,7 @@ const url = process.env.TEST_DATABASE_URL;
 describe.skipIf(!url)("measured paused monthly readmission (PostgreSQL)", () => {
   let sql: postgres.Sql;
   let guard: typeof import("../services/billing/spend-guard.js");
+  let admission: typeof import("../services/run-admission.js");
   let funding: typeof import("../services/spend-paused-runs.js");
   let lifecycle: ReturnType<typeof import("../services/run-lifecycle.js").createRunLifecycle>;
   let buildRunProcessingPreview: typeof import("../services/run-processing-preview.js").buildRunProcessingPreview;
@@ -26,6 +27,7 @@ describe.skipIf(!url)("measured paused monthly readmission (PostgreSQL)", () => 
     ({ buildRunProcessingPreview } = await import("../services/run-processing-preview.js"));
     const { createRunLifecycle } = await import("../services/run-lifecycle.js");
     guard = await import("../services/billing/spend-guard.js");
+    admission = await import("../services/run-admission.js");
     funding = await import("../services/spend-paused-runs.js");
     lifecycle = createRunLifecycle({ sql: sql as unknown as SqlClient, startWorkflow: vi.fn(), failureThreshold: 3 });
     await sql`insert into "user"(id,name,email) values('paused-u','Paused','paused@example.test') on conflict do nothing`;
@@ -57,7 +59,7 @@ describe.skipIf(!url)("measured paused monthly readmission (PostgreSQL)", () => 
   }
   async function resume(path: string, boost = false) {
     if (path === "funding") return funding.resumeSpendPausedRunOutcome("paused-r", { sql: sql as unknown as SqlClient, signals });
-    return guard.admitRunSpend("paused-o", "paused-p", tx => lifecycle.control({
+    return admission.admitRunSpend("paused-o", "paused-p", tx => lifecycle.control({
       id: "paused-r", status: "processing", priority: 0, controlState: "paused", error: null,
     }, { action: "resume" }, tx), { readmission: true, leaseRunId: "paused-r", speedBoost: boost });
   }
@@ -123,7 +125,7 @@ describe.skipIf(!url)("measured paused monthly readmission (PostgreSQL)", () => 
       await seed(path);
       if (scope === "organization") await sql`update organizations set monthly_budget_cents=${forecast()} where id='paused-o'`;
       else await sql`update projects set monthly_budget_cents=${forecast()} where id='paused-p'`;
-      const outcomes = await Promise.allSettled([resume(path), guard.admitRunSpend("paused-o", "paused-p", tx => tx`
+      const outcomes = await Promise.allSettled([resume(path), admission.admitRunSpend("paused-o", "paused-p", tx => tx`
         insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
         values('new-r','paused-o','paused-p','paused-u','upload','queued','queued','{}',${forecast()})`)]);
       const [run] = await sql`select control_state from project_runs where id='paused-r'`;
@@ -159,7 +161,7 @@ describe.skipIf(!url)("measured paused monthly readmission (PostgreSQL)", () => 
   });
   it("refuses a wrong tenant before changing active coverage or pause", async () => {
     await seed("operator");
-    await expect(guard.admitRunSpend("other-o", "paused-p", tx => lifecycle.control({ id: "paused-r", status: "processing",
+    await expect(admission.admitRunSpend("other-o", "paused-p", tx => lifecycle.control({ id: "paused-r", status: "processing",
       priority: 0, controlState: "paused", error: null }, { action: "resume" }, tx),
     { readmission: true, leaseRunId: "paused-r", speedBoost: false })).rejects.toMatchObject({ code: "plan_not_entitled" });
     expect((await sql`select control_state,monthly_reservation_cents::float8 as cents from project_runs where id='paused-r'`)[0])
@@ -173,7 +175,7 @@ describe.skipIf(!url)("measured paused monthly readmission (PostgreSQL)", () => 
     const cap = scope === "exact" ? forecast(true) : forecast() + 1;
     if (scope === "organization") await sql`update organizations set monthly_budget_cents=${cap} where id='paused-o'`;
     else await sql`update projects set monthly_budget_cents=${cap} where id='paused-p'`;
-    const retry = () => guard.admitRunSpend("paused-o", "paused-p", tx => lifecycle.prepareRetry({
+    const retry = () => admission.admitRunSpend("paused-o", "paused-p", tx => lifecycle.prepareRetry({
       id: "paused-r", status: "failed", pipeline: { ...pipeline, speedBoost: true },
     }, tx), { readmission: true, leaseRunId: "paused-r", speedBoost: true });
     if (scope === "exact") {

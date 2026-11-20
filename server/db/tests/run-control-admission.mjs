@@ -12,7 +12,7 @@ if (process.env.TEST_DATABASE_URL) {
   const url = new URL(process.env.TEST_DATABASE_URL);
   const sql = postgres(url.toString(), { max: 4 });
   const { createRunLifecycle } = await import('../../src/services/run-lifecycle.ts');
-  const { requireRunCreditLease } = await import('../../src/services/billing/spend-guard.ts');
+  const { requireRunCreditLease } = await import('../../src/services/run-admission.ts');
   const { defaultPipelineFeatures } = await import('@docslurp/shared');
   const id = `admission-${randomUUID()}`;
   const lifecycle = createRunLifecycle({ sql, startWorkflow: async () => { throw Error('unexpected publication'); }, failureThreshold: 3,

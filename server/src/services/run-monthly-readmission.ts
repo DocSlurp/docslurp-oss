@@ -1,5 +1,6 @@
 import type { TransactionSql } from "postgres";
 import { countedPagesForForecast, type PipelineFeatures } from "@docslurp/shared";
+import { lockOrgAdmission } from "./billing/admission-lock.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { remainingMaterializationForecast } from "./materialization-capacity.js";
 
@@ -10,7 +11,7 @@ type ReadmissionRun = { id: string; kind: string; org_id: string; project_id: st
 export async function lockRunReadmission(tx: TransactionSql, runId: string): Promise<void> {
   const [scope] = await tx`select org_id, project_id from project_runs where id=${runId}`;
   if (!scope) return;
-  await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.org_id}))`;
+  await lockOrgAdmission(tx, scope.org_id);
   const [locked] = await tx`select id from project_runs where id=${runId} and org_id=${scope.org_id} and project_id=${scope.project_id} for update`;
   if (!locked) throw new Error("Run billing scope changed during readmission");
 }

@@ -9,6 +9,7 @@ describe.skipIf(!url)("source-bound materialization monthly readmission (Postgre
   let create: typeof import("../search/deferred/materialize-client.js").defaultMaterializeDeps.createRun;
   let funding: typeof import("../services/spend-paused-runs.js");
   let guard: typeof import("../services/billing/spend-guard.js");
+  let admission: typeof import("../services/run-admission.js");
   let lifecycle: ReturnType<typeof import("../services/run-lifecycle.js").createRunLifecycle>;
   const signals = { pause: vi.fn(async () => {}), resume: vi.fn(async () => {}) };
   const pages = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -23,6 +24,7 @@ describe.skipIf(!url)("source-bound materialization monthly readmission (Postgre
     ({ defaultMaterializeDeps: { createRun: create } } = await import("../search/deferred/materialize-client.js"));
     funding = await import("../services/spend-paused-runs.js");
     guard = await import("../services/billing/spend-guard.js");
+    admission = await import("../services/run-admission.js");
     const { createRunLifecycle } = await import("../services/run-lifecycle.js");
     lifecycle = createRunLifecycle({ sql: sql as unknown as SqlClient, startWorkflow: vi.fn(), failureThreshold: 3 });
     await sql`insert into "user"(id,name,email) values('mat-u','Materialize','materialize@example.test') on conflict do nothing`;
@@ -54,7 +56,7 @@ describe.skipIf(!url)("source-bound materialization monthly readmission (Postgre
   }
   async function resume(path: string, boost = false) {
     if (path === "funding") return funding.sweepSpendPausedRuns({ sql: sql as unknown as SqlClient, signals, orgId: "mat-o" });
-    return guard.admitRunSpend("mat-o", "mat-p", tx => lifecycle.control({ id, status: "processing", controlState: "paused", priority: 0, error: null },
+    return admission.admitRunSpend("mat-o", "mat-p", tx => lifecycle.control({ id, status: "processing", controlState: "paused", priority: 0, error: null },
       { action: "resume" }, tx), { readmission: true, leaseRunId: id, speedBoost: boost });
   }
   async function refused(path: string, boost = false) {
@@ -132,7 +134,7 @@ describe.skipIf(!url)("source-bound materialization monthly readmission (Postgre
     it(`${path} serializes replenishment against new capacity`, async () => {
       await seed(path, false, 2);
       await sql`update organizations set monthly_budget_cents=2 where id='mat-o'`;
-      await Promise.allSettled([resume(path), guard.admitRunSpend("mat-o", "mat-p", tx => tx`
+      await Promise.allSettled([resume(path), admission.admitRunSpend("mat-o", "mat-p", tx => tx`
         insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
         values('mat-new','mat-o','mat-p','mat-u','upload','queued','queued','{}',2)`)]);
       const [run] = await sql`select control_state from project_runs where id=${id}`;
