@@ -103,7 +103,7 @@ it("activates Fast VM image options through stage.run, anchors the Markdown and 
     const runner={sandboxedPdfMarkdown:async(input:string,output:string)=>({binary:"test-vm",args:[],available:true,sandboxedPdf:{input,output}}),run};
     const stage=new ExtractMarkdownStage(runner as any,storage as any,{} as any);
     const internals=stage as any;
-    internals.sources={get:async()=>({path:sourcePath,sha256:"a".repeat(64)})};
+    internals.sources={acquire:async()=>({path:sourcePath,release: async () => {}, sha256:"a".repeat(64)})};
     internals.recordSourcePageFacts=async()=>undefined;
     internals.recordPageImageEvidence=async()=>null;
     const doc={id:"d",userId:"u",runId:"r",filename:"source.pdf",mimeType:"application/pdf",sourceKey:"u/source.pdf",status:"processing",extractionMode:"hybrid",pageCount:3,createdAt:new Date(),updatedAt:new Date()};

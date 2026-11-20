@@ -42,7 +42,7 @@ async function source(filename: string, bytes: Buffer): Promise<string> {
 function stageFor(sourcePath: string, c: (typeof cases)[number]) {
   const stage = new ExtractMarkdownStage({} as never, {} as never, {} as never);
   const internals = stage as any;
-  internals.sources = { get: async () => ({ path: sourcePath, sha256: "sha-doc-1" }) };
+  internals.sources = { acquire: async () => ({ path: sourcePath, release: async () => {}, sha256: "sha-doc-1" }) };
   internals.recordSourcePageFacts = async () => undefined;
   const planExtractors = vi.fn(async () => null);
   const extractCandidate = vi.fn(async () => { throw new Error("no extractor may run"); });

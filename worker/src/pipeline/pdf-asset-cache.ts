@@ -189,7 +189,13 @@ interface SourceEntry {
   path: string;
   sha256: string;
   sizeBytes: number;
+}
+
+interface SourceCacheEntry {
+  source: Promise<SourceEntry>;
   lastAccess: number;
+  borrowers: number;
+  retired: boolean;
 }
 
 type SourceStorage = Pick<ArtifactStore, "downloadToTempFile">;
@@ -210,7 +216,7 @@ function sourceCacheKey(document: Pick<Document, "userId" | "runId" | "sourceKey
  * the same source independently inside one worker process.
  */
 export class PdfSourceCache {
-  private readonly entries = new Map<string, Promise<SourceEntry>>();
+  private readonly entries = new Map<string, SourceCacheEntry>();
 
   constructor(
     private readonly storage: SourceStorage,
@@ -222,68 +228,79 @@ export class PdfSourceCache {
    * may serve another document or version with the same key). On a mismatch the entry is dropped and
    * the document refused (SourceIntegrityError). The file is a read-only source for every command
    * (sandbox/paths.ts registerReadOnlySource): activities sharing it can neither write it nor share
-   * its directory.
+   * its directory. Use acquire() when the caller needs the path to survive concurrent eviction.
    */
   async get(document: Document): Promise<CachedPdfSource> {
-    // No parse decision from this build's quarantine: refused before a byte is fetched (lib/parse-source.ts).
+    const { release, ...source } = await this.borrow(document);
+    await release(false);
+    return source;
+  }
+
+  /** Keep a staged source registered and on disk until the last in-flight reader releases it. */
+  async acquire(document: Document): Promise<CachedPdfSource & { release: () => Promise<void> }> {
+    return this.borrow(document);
+  }
+
+  private async borrow(document: Document): Promise<CachedPdfSource & { release: (trim?: boolean) => Promise<void> }> {
     assertParseSourceDecided(document);
-    const { entry, cacheHit } = await this.entry(document);
-    try {
-      verifyStagedSource(document, entry.sha256);
-    } catch (error) {
-      if (error instanceof SourceIntegrityError) await this.drop(sourceCacheKey(document));
-      throw error;
-    }
-    return { ...entry, cacheHit };
-  }
-
-  private async entry(document: Document): Promise<{ entry: SourceEntry; cacheHit: boolean }> {
     const key = sourceCacheKey(document);
-    const existing = this.entries.get(key);
-    if (existing) {
-      const entry = await existing;
-      entry.lastAccess = Date.now();
-      return { entry, cacheHit: true };
+    let entry = this.entries.get(key);
+    const cacheHit = entry !== undefined;
+    if (!entry) {
+      const evicted = this.evictIdle(1);
+      entry = { source: evicted.then(() => this.download(document)), lastAccess: Date.now(), borrowers: 0, retired: false };
+      this.entries.set(key, entry);
     }
-
-    await this.evictIfNeeded();
-    const raced = this.entries.get(key);
-    if (raced) {
-      const entry = await raced;
-      entry.lastAccess = Date.now();
-      return { entry, cacheHit: true };
-    }
-    const pending = this.download(document);
-    this.entries.set(key, pending);
+    entry.lastAccess = Date.now();
+    entry.borrowers += 1;
+    const held = entry;
+    let released = false;
+    const release = async (trim = true) => {
+      if (released) return;
+      released = true;
+      held.borrowers -= 1;
+      if (held.retired) {
+        if (held.borrowers === 0) await this.cleanup(held);
+      } else if (trim) {
+        await this.evictIdle();
+      }
+    };
     try {
-      return { entry: await pending, cacheHit: false };
+      const source = await held.source.catch((error: unknown) => {
+        if (this.entries.get(key) === held) this.entries.delete(key);
+        throw error;
+      });
+      verifyStagedSource(document, source.sha256);
+      await this.evictIdle();
+      return { ...source, cacheHit, release };
     } catch (error) {
-      this.entries.delete(key);
+      if (error instanceof SourceIntegrityError && this.entries.get(key) === held) {
+        this.entries.delete(key);
+        held.retired = true;
+      }
+      await release();
       throw error;
-    }
-  }
-
-  private async drop(sourceKey: string): Promise<void> {
-    const pending = this.entries.get(sourceKey);
-    if (!pending) return;
-    this.entries.delete(sourceKey);
-    const entry = await pending.catch(() => null);
-    if (entry) {
-      unregisterReadOnlySource(entry.path);
-      await cleanupTempFile(entry.path);
     }
   }
 
   async clear(): Promise<void> {
     const entries = [...this.entries.values()];
     this.entries.clear();
-    await Promise.all(entries.map(async (pending) => {
-      const entry = await pending.catch(() => null);
-      if (entry) {
-        unregisterReadOnlySource(entry.path);
-        await cleanupTempFile(entry.path);
-      }
+    await Promise.all(entries.map(async (entry) => {
+      entry.retired = true;
+      if (entry.borrowers === 0) await this.cleanup(entry);
     }));
+  }
+
+  private async cleanup(entry: SourceCacheEntry): Promise<void> {
+    const source = await entry.source.catch(() => null);
+    if (!source) return;
+    try {
+      await cleanupTempFile(source.path);
+      unregisterReadOnlySource(source.path);
+    } catch {
+      console.warn("[pdf-source-cache] failed to remove staged source");
+    }
   }
 
   private async download(document: Document): Promise<SourceEntry> {
@@ -291,24 +308,26 @@ export class PdfSourceCache {
       document.sourceKey,
       trustedTempDownloadPattern("docslurp-source-cache-", document),
     );
-    const [sha256, fileStat] = await Promise.all([hashFile(filePath), stat(filePath)]);
-    registerReadOnlySource(filePath);
-    return { path: filePath, sha256, sizeBytes: fileStat.size, lastAccess: Date.now() };
+    try {
+      const [sha256, fileStat] = await Promise.all([hashFile(filePath), stat(filePath)]);
+      registerReadOnlySource(filePath);
+      return { path: filePath, sha256, sizeBytes: fileStat.size };
+    } catch (error) {
+      await cleanupTempFile(filePath).catch(() => console.warn("[pdf-source-cache] failed to remove incomplete staged source"));
+      throw error;
+    }
   }
 
-  private async evictIfNeeded(): Promise<void> {
-    if (this.entries.size < Math.max(1, this.maxEntries)) return;
-    const resolved = await Promise.all([...this.entries.entries()].map(async ([key, pending]) => ({
-      key,
-      entry: await pending.catch(() => null),
-    })));
-    const oldest = resolved
-      .filter((candidate): candidate is { key: string; entry: SourceEntry } => candidate.entry !== null)
-      .sort((left, right) => left.entry.lastAccess - right.entry.lastAccess)[0];
-    if (!oldest) return;
-    this.entries.delete(oldest.key);
-    unregisterReadOnlySource(oldest.entry.path);
-    await cleanupTempFile(oldest.entry.path);
+  private async evictIdle(incoming = 0): Promise<void> {
+    // Active readers can temporarily exceed the idle cache budget.
+    const excess = this.entries.size + incoming - Math.max(1, this.maxEntries);
+    if (excess <= 0) return;
+    const idle = [...this.entries]
+      .filter(([, entry]) => entry.borrowers === 0)
+      .sort(([, left], [, right]) => left.lastAccess - right.lastAccess)
+      .slice(0, excess);
+    for (const [key] of idle) this.entries.delete(key);
+    await Promise.all(idle.map(([, entry]) => this.cleanup(entry)));
   }
 }
 
