@@ -34,7 +34,7 @@ export const OPEN_PLANNING = {
  * Plan facts the database already enforces (core migrations seed the starter grant and the org worker ceilings), so
  * the open default reports the same values rather than contradict the schema.
  */
-const OPEN_WORKER_SLOTS = { starter: 50, funded: 250 } as const;
+const OPEN_WORKER_SLOTS = { starter: 128, funded: 250 } as const;
 const OPEN_STARTER_CREDITS = 100;
 
 function nonNegative(value: number | null | undefined): number {
