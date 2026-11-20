@@ -2,7 +2,7 @@
 
 No behaviour change. Seven paths admitted a run, each sequencing the organization's admission lock, the spend decision and the run's first credit lease itself: run creation, retry, operator resume and recover, re-index batches, full-index batches, blocked runs, spend-paused runs and on-demand page runs.
 
-- `server/src/services/run-admission.ts` owns that sequence behind five entry points (`admitRunSpend`, `admitRunInTransaction`, `admitBlockedRun`, `pausedRunSpendBlock`, `admitOnDemandRun`); `billing/admission-lock.ts` is the only file that names the lock key, and the twelve places that took the lock by hand call `lockOrgAdmission`.
+- `server/src/services/run-admission.ts` owns that sequence behind five entry points (`admitRunSpend`, `admitRunInTransaction`, `admitBlockedRun`, `pausedRunSpendBlock`, `admitOnDemandRun`); `billing/admission-lock.ts` is the only file that names the lock key, and the ten places that took the lock by hand call `lockOrgAdmission`.
 - `billing/spend-guard.ts` keeps the spend rule and the interactive checks; the lease primitive and the in-transaction admission decision are no longer exported from it.
 - `run-admission-owners.test.ts` fails when a file outside the listed four inserts `project_runs`, when the lock key is named elsewhere, or when the lease primitive is used outside the module.
 - `run-admission-leases.db.test.ts` covers the new entry points: one of two concurrent transactions admitted on a balance that covers one, a refused lease never leaving a queued run, and refusals for a run named under another organization or project.
