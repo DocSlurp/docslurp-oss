@@ -49,16 +49,16 @@ function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTar
   return { newProject: false, project: resolveProject(flags) };
 }
 
-const QUALITY_LEVELS = ["fastest", "smartest"] as const;
+const QUALITY_LEVELS = ["fastest", "auto", "smartest"] as const;
 type Quality = (typeof QUALITY_LEVELS)[number];
 /** Deprecated `--quality` words and their replacements (still accepted during the window, with a note on stderr). */
 const LEGACY_QUALITY: Readonly<Record<string, { quality: Quality; readScans?: false }>> = {
-  balanced: { quality: "fastest" }, smart: { quality: "smartest" },
-  fast: { quality: "fastest", readScans: false }, auto: { quality: "fastest" }, good: { quality: "smartest" },
+  balanced: { quality: "auto" }, smart: { quality: "smartest" },
+  fast: { quality: "fastest", readScans: false }, good: { quality: "smartest" },
 };
 
 /**
- * `--quality fastest|smartest` (or a deprecated word) and `--no-read-scans` as a pipeline override, or {} when the
+ * `--quality fastest|auto|smartest` (or a deprecated word) and `--no-read-scans` as a pipeline override, or {} when the
  * project setting applies.
  */
 export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: Quality; readScans?: false } } {
@@ -70,9 +70,17 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
     console.error(`Note: --quality ${raw} is deprecated; use --quality ${legacy.quality}${legacy.readScans === false ? " --no-read-scans" : ""}.`);
     return { pipeline: { ...legacy, ...readScans } };
   }
-  if (!(QUALITY_LEVELS as readonly string[]).includes(raw)) throw new Error("--quality must be fastest or smartest.");
+  if (!(QUALITY_LEVELS as readonly string[]).includes(raw)) throw new Error("--quality must be fastest, auto or smartest.");
   if (raw === "smartest" && flags.noReadScans === true) throw new Error("--no-read-scans works with --quality fastest only (Smartest always reads scans).");
   return { pipeline: { quality: raw as Quality, ...readScans } };
+}
+
+/** The estimate endpoint uses pricing-profile IDs rather than ingestion presets. */
+function resolveQuoteQuality(flags: Record<string, string | boolean>): { quality: "fast" | "fastest" | "smartest" } | undefined {
+  const intake = resolveQualityPipeline(flags).pipeline;
+  if (!intake) return undefined;
+  if (intake.readScans === false || intake.quality === "fastest") return { quality: "fast" };
+  return { quality: intake.quality === "smartest" ? "smartest" : "fastest" };
 }
 
 const VISUALS_LEVELS = ["none", "figures", "charts", "charts-ai"] as const;
@@ -135,15 +143,15 @@ export function printDeprecationWarnings(body: unknown): void {
 
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fastest|smartest>] [--no-read-scans] [--indexing <full|on-demand|visual>] [--visuals <none|figures|charts|charts-ai>] [--months <n>] [--json]
-  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch] [--api-url <url>]
+  docslurp estimate <files...> [--quality <fastest|auto|smartest>] [--no-read-scans] [--indexing <full|on-demand|visual>] [--visuals <none|figures|charts|charts-ai>] [--months <n>] [--json]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|auto|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|auto|smartest>] [--no-read-scans] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reindex [--project <id|slug|name>] [--embedding-profile <profile>] [--late-chunking <on|off>] [--late-chunking-window <1-6>] [--chunk-overlap <on|off>] [--contextual-preambles <on|off>] [--vector-backends <a,b>] [--confirm <signature>] [--estimate] [--json]
-  docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|smartest>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
+  docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|auto|smartest>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
   docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
   docslurp summary-tree status [--project <id|slug|name>] [--json]
   docslurp summary-tree cancel <jobId> [--project <id|slug|name>] [--json]
@@ -1066,7 +1074,7 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
     const target = resolveIntakeTarget(flags);
     const estimateFiles = await profiledEstimateFiles(files);
     const visuals = resolveVisualsFlag(flags);
-    const qualitySettings = resolveQualityPipeline(flags).pipeline;
+    const qualitySettings = resolveQuoteQuality(flags);
     await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(qualitySettings ? { settings: qualitySettings } : {}) }, flags);
     return;
   }
@@ -1209,9 +1217,8 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
     return;
   }
   const settings: Record<string, unknown> = {};
-  const qualitySettings = resolveQualityPipeline(flags).pipeline;
-  if (qualitySettings?.quality) settings.quality = qualitySettings.quality;
-  if (qualitySettings?.readScans === false) settings.readScans = false;
+  const qualitySettings = resolveQuoteQuality(flags);
+  if (qualitySettings) settings.quality = qualitySettings.quality;
   if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
   if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
   const visuals = resolveVisualsFlag(flags);
@@ -1576,7 +1583,7 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     const files = await urlEstimateFiles(urls);
     const target = resolveIntakeTarget(flags);
     const visuals = resolveVisualsFlag(flags);
-    const qualitySettings = resolveQualityPipeline(flags).pipeline;
+    const qualitySettings = resolveQuoteQuality(flags);
     await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(qualitySettings ? { settings: qualitySettings } : {}) }, flags);
     return;
   }

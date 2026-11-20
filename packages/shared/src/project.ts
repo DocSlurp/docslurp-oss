@@ -1,7 +1,7 @@
 import { CHAT_TIERS } from "./project-chat-models.js";
 import { geoPredicateSchema } from "./geo.js";
 import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema, type ChartExportTier } from "./chart-export.js";
-import { chartTierForVisuals, normalizeQualityLevel, qualityLevelSchema, visualsLevelSchema, type VisualsLevel } from "./extraction-config.js";
+import { chartTierForVisuals, normalizeQualityLevel, qualityLevelSchema, qualityPresetSchema, visualsLevelSchema, type VisualsLevel } from "./extraction-config.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
@@ -957,7 +957,7 @@ export const CHART_EXPORT_OVERRIDE_DESCRIPTION =
 
 /** One description for a per-request `quality` on every machine surface (MCP tools, SDK and CLI docs). No prices: estimates quote them. */
 export const QUALITY_OVERRIDE_DESCRIPTION =
-  "Processing quality for this request: fastest (the default) reads each file with its native reader and sends only scanned pages and images to OCR, never to a vision model (with readScans: false they are kept as page images, not searchable); smartest reads each file with its native reader and sends scans, images and hard math, layouts or fonts to a vision model. Omit for the project's setting. balanced, smart, fast, auto and good are deprecated aliases. smartest above the project's quality needs project editor rights (or an API key with the pipeline:billed-features scope); a quality the project's privacy mode or the deployment rules out is refused with 400 quality_unavailable.";
+  "Processing quality for this request: fastest (the default) reads native text. auto also OCRs scanned pages and images, with vision disabled. smartest uses vision for scans, images and hard pages. Omit for the project's setting. balanced, smart, fast and good are deprecated aliases. smartest above the project's quality needs project editor rights (or an API key with the pipeline:billed-features scope); a quality the project's privacy mode or the deployment rules out is refused with 400 quality_unavailable.";
 
 /** One description for a per-request `visuals` on every machine surface. */
 export const VISUALS_OVERRIDE_DESCRIPTION =
@@ -973,11 +973,11 @@ export const reprocessRunSchema = z
   .object({
     speedBoost: z.boolean().optional(),
     /**
-     * Quality for this reprocess (`fastest` | `smartest`; `balanced` / `smart` deprecated). Omitted: the source run's
+     * Quality for this reprocess (`fastest` | `auto` | `smartest`; `balanced` / `smart` deprecated). Omitted: the source run's
      * quality, capped at the project's now. `smartest` above the project's quality needs editor rights (or an API key
      * with pipeline:billed-features).
      */
-    quality: z.preprocess((value) => normalizeQualityLevel(value) ?? value, qualityLevelSchema).optional(),
+    quality: z.preprocess((value) => value === "balanced" ? "auto" : normalizeQualityLevel(value) ?? value, qualityPresetSchema).optional(),
     /** Visuals for this reprocess (`none` | `figures` | `charts` | `charts-ai`); replaces the deprecated `chartExport`. */
     visuals: visualsLevelSchema.optional(),
     /** @deprecated Use `visuals`. */

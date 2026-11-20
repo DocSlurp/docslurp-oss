@@ -86,7 +86,8 @@ describe("mapping table (design 3.2)", () => {
 
 describe("input conversion (R0 writes the legacy shape)", () => {
   it("maps the levels (and the deprecated aliases) onto auto plus the ladder's highest rung", () => {
-    expect(applyExtractionConfigInput({ quality: "fastest" })).toEqual({ quality: "auto", ladder: { maxRung: "ocr" } });
+    expect(applyExtractionConfigInput({ quality: "fastest" })).toEqual({ quality: "auto", ladder: { maxRung: "fast" } });
+    expect(applyExtractionConfigInput({ quality: "auto" })).toEqual({ quality: "auto", ladder: { maxRung: "ocr" } });
     expect(applyExtractionConfigInput({ quality: "fastest", readScans: false })).toEqual({ quality: "auto", ladder: { maxRung: "fast" } });
     expect(applyExtractionConfigInput({ readScans: false })).toEqual({ quality: "auto", ladder: { maxRung: "fast" } });
     expect(applyExtractionConfigInput({ quality: "smartest" })).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true });
@@ -126,7 +127,7 @@ describe("input conversion (R0 writes the legacy shape)", () => {
   });
 
   it("the override schema converts, rejects bad values and conflicts", () => {
-    expect(pipelineFeatureOverridesSchema.parse({ quality: "fastest", visuals: "charts" })).toEqual({ quality: "auto", ladder: { maxRung: "ocr" }, figures: true, chartExport: { tier: "free" } });
+    expect(pipelineFeatureOverridesSchema.parse({ quality: "fastest", visuals: "charts" })).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, figures: true, chartExport: { tier: "free" } });
     expect(pipelineFeatureOverridesSchema.safeParse({ visuals: "everything" }).success).toBe(false);
     // A per-request override cannot reset visuals to the default (it merges onto the project).
     expect(pipelineFeatureOverridesSchema.safeParse({ visuals: null }).success).toBe(false);
@@ -162,9 +163,9 @@ describe("input conversion (R0 writes the legacy shape)", () => {
 
   it("names deprecated fields", () => {
     const fields = deprecatedExtractionFields({ quality: "auto", visionFallback: true, figures: false, chartExport: { tier: "free" } }, "pipeline.").map(w => w.field);
-    expect(fields).toEqual(['pipeline.quality: "auto"', "pipeline.visionFallback", "pipeline.figures", "pipeline.chartExport.tier"]);
+    expect(fields).toEqual(["pipeline.visionFallback", "pipeline.figures", "pipeline.chartExport.tier"]);
     expect(deprecatedExtractionFields({ quality: "fastest", visuals: "charts" })).toEqual([]);
-    expect(deprecatedExtractionFields({ quality: "balanced" }).map(w => w.replacement)).toEqual(['quality: "fastest"']);
+    expect(deprecatedExtractionFields({ quality: "balanced" }).map(w => w.replacement)).toEqual(['quality: "auto"']);
     expect(deprecatedExtractionFields({ quality: "fast" }).map(w => w.replacement)).toEqual(['quality: "fastest", readScans: false']);
   });
 });

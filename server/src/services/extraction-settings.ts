@@ -132,8 +132,8 @@ export async function resolveRunExtraction<T extends PipelineFeatures>(args: Run
   }
   let next: T = pipeline;
   if (result.quality !== runQuality) {
-    // Lowered from smartest: the run reads as Fastest (the ladder's ocr rung, its share caps kept).
-    const fields = pipelineFieldsForQuality(result.quality, { ladder: next.ladder });
+    // Lowered from Smartest to the OCR rung while keeping the ladder share caps.
+    const fields = pipelineFieldsForQuality(result.quality, { readScans: true, ladder: next.ladder });
     next = { ...next, quality: fields.quality, ladder: fields.ladder as T["ladder"], ...(fields.visionFallback ? { visionFallback: true } : {}) };
   }
   if (result.visuals !== runVisuals) next = lowerVisuals(next, result.visuals);
