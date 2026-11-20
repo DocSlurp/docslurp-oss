@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ activities: {} as Record<string, any>, queues: [] as Array<string | undefined> }));
+const mocks = vi.hoisted(() => ({ activities: {} as Record<string, any>, queues: [] as Array<string | undefined>, earlyQuarantineDemand: false }));
 vi.mock("@temporalio/workflow", () => ({
   proxyActivities: (options: { taskQueue?: string }) => {
     mocks.queues.push(options.taskQueue);
@@ -12,7 +12,7 @@ vi.mock("@temporalio/workflow", () => ({
     static nonRetryable(message: string) { return new Error(message); }
   },
   setHandler: vi.fn(), condition: async () => {}, sleep: async () => {}, rootCause: (e: unknown) => e,
-  patched: () => false,
+  patched: (id: string) => id === "publish-quarantine-demand-during-init-v1" && mocks.earlyQuarantineDemand,
   workflowInfo: () => ({ workflowId: "run-run", runId: "temporal-run" }),
 }));
 import { planDocumentShards } from "../temporal/document-shards.js";
@@ -52,6 +52,7 @@ describe("planDocumentShards", () => {
 describe("document-sharded workflow stages", () => {
   beforeEach(() => {
     mocks.queues.length = 0;
+    mocks.earlyQuarantineDemand = false;
     for (const key of Object.keys(mocks.activities)) delete mocks.activities[key];
     Object.assign(mocks.activities, {
       initPipelineRun: vi.fn(async () => ({ artifacts: {}, documentIds: ids(6), documentPages: [1, 1, 1, 1, 1, 1] })),
@@ -64,6 +65,20 @@ describe("document-sharded workflow stages", () => {
 
   const sharded = { runId: "run", pipeline: {} as never, slotGate: true,
     documentSharding: { minDocsPerShard: 1, maxShards: 3 }, activityTaskQueue: "acts" };
+
+  it.each([undefined, 2, 3])("skips the demand activity only when init confirms the shard count (%s)", async (initialQuarantineDemand) => {
+    mocks.earlyQuarantineDemand = true;
+    mocks.activities.initPipelineRun.mockResolvedValue({
+      artifacts: {}, documentIds: ids(6), documentPages: [1, 1, 1, 1, 1, 1], initialQuarantineDemand,
+    });
+    const documentSharding = { ...sharded.documentSharding, quarantine: true };
+    await documentPipeline({ ...sharded, documentSharding, stageOrder: ["quarantine"] });
+    expect(mocks.activities.initPipelineRun).toHaveBeenCalledWith(expect.objectContaining({
+      initialQuarantineSharding: documentSharding,
+    }));
+    expect(mocks.activities.setRunShardDemand).toHaveBeenCalledTimes(initialQuarantineDemand === 3 ? 0 : 1);
+    expect(mocks.activities.runPipelineStageShard).toHaveBeenCalledTimes(3);
+  });
 
   it.each([undefined, 1])("uses only a recorded quarantine threshold (%s)", async (quarantineMinPagesPerShard) => {
     await documentPipeline({ ...sharded, documentSharding: {

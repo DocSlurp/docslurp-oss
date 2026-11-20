@@ -53,11 +53,14 @@ export interface InitRunInput {
   executionGeneration?: string;
   runId: string;
   totalStages: number;
+  initialQuarantineSharding?: DocumentShardingInput;
 }
 
 export interface InitRunOutput {
   documentIds: string[];
   artifacts: Record<string, string>;
+  /** Shard demand committed by init, if the worker supports publishing it early. */
+  initialQuarantineDemand?: number;
   /** Page count per entry of documentIds (absent on older histories). */
   documentPages?: number[];
   /** MIME type per entry of documentIds (absent on older histories). */

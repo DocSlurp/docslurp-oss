@@ -51,3 +51,13 @@ export function planDocumentShards(
     .sort((a, b) => b.pages - a.pages)
     .map((shard) => shard.ids);
 }
+
+/** Quarantine may shard before any trustworthy page count exists. */
+export function quarantineShardOptions(
+  options: DocumentShardPlanOptions & { quarantineMinPagesPerShard?: number },
+): DocumentShardPlanOptions {
+  return {
+    ...options,
+    minPagesPerShard: options.quarantineMinPagesPerShard ?? options.minPagesPerShard,
+  };
+}
