@@ -16,7 +16,7 @@ import { acceptChatRunDependency } from "../../services/chat-run-dependencies.js
 import { sql } from "../../db.js";
 import { startMaterializeWorkflow } from "../../lib/temporal.js";
 import { canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
-import { admitOnDemandRun, lockOrgAdmission } from "../../services/run-admission.js";
+import { admitOnDemandRun } from "../../services/run-admission.js";
 import { enforceLiveBudgetCaps } from "../../services/run-creation.js";
 import { storedSummaryTree, withProjectSummaryTree } from "../../services/run-summary-tree.js";
 import { createMaterializationPlan, materializationForecast } from "../../services/materialization-capacity.js";
@@ -87,7 +87,8 @@ export const defaultMaterializeDeps: MaterializeDeps = {
       throw new Error("Invalid bounded materialization workload");
     }
     return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
-    await lockOrgAdmission(tx, args.orgId);
+    // Run admission takes the organization's lock, then reads the plan and the pipeline under it, then decides spend.
+    await admitOnDemandRun(tx as import("postgres").TransactionSql, { orgId: args.orgId, projectId: args.projectId }, { prepare: async () => {
     const plan = await createMaterializationPlan(tx as import("postgres").TransactionSql, args);
     // The run carries the source document's pipeline (its ingest run, else the project's), so the
     // worker applies the same PII policy, privacy mode and embedding model as the original ingest.
@@ -119,12 +120,13 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     );
     const origin = source?.origin === "app" ? "app" : "machine";
     const reservationCents = materializationForecast(plan.pages.length, maxCredits * speedBoostMultiplier(pipeline.speedBoost), pipeline.speedBoost === true);
-    await admitOnDemandRun(tx as import("postgres").TransactionSql, { orgId: args.orgId, projectId: args.projectId }, () => tx`
+    return { plan, pipeline, origin, reservationCents };
+    }, insert: ({ plan, pipeline, origin, reservationCents }) => tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin, stats, monthly_reservation_cents)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',
              ${args.documents}, ${args.pages}, ${tx.json(withRunEffective(pipeline) as never)}, now(),
              now() + interval '15 minutes', now(), null, ${origin}, ${tx.json({ materialization: plan })}, ${reservationCents})
-    `);
+    ` });
     return { runId: id, value: id };
     });
   },

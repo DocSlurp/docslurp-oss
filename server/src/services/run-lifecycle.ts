@@ -415,8 +415,11 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
    * Runs whose start was deferred get their workflow (re)started. Completed
    * Runs retry only their failed Documents; a clean completed Run, and a
    * processing Run, are left alone.
+   *
+   * No spend decision and no credit lease: for tests of the transitions only. Production retries go through
+   * `retryRun` (runs.ts), which runs `prepareRetry` inside run admission (run-admission-owners.test.ts).
    */
-  async function retry(run: RunLifecycleRun & { status: RunStatus }): Promise<RunRetryOutcome> {
+  async function retryWithoutAdmission(run: RunLifecycleRun & { status: RunStatus }): Promise<RunRetryOutcome> {
     if (run.status === "failed") {
       const resumed = await resumeFailed(run.id);
       if (!resumed) return { status: "not-retryable" };
@@ -540,10 +543,10 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     input: { action: RunControlAction; priority?: number },
     transaction?: TransactionSql,
   ): Promise<string | null> {
+    // Resume and recover put a run back to work: they spend, so they run only inside the admission transaction
+    // (`controlRun` in runs.ts passes the one `admitRunSpend` opened). There is no unadmitted form.
     if (!transaction && (input.action === "recover" || input.action === "resume")) {
-      const changed = await sql.begin(tx => control(run, input, tx));
-      if (changed && input.action === "resume") await signals.resume(run.id).catch(() => {});
-      return changed;
+      throw new Error(`Run ${input.action} requires the run-admission transaction`);
     }
     if (transaction && (input.action === "recover" || input.action === "resume")) await lockRunReadmission(transaction, run.id);
     const query = transaction ?? sql;
@@ -648,7 +651,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     return row?.id ?? null;
   }
 
-  return { start, retry, prepareRetry, fail, control, signalResume: signals.resume };
+  return { start, retryWithoutAdmission, prepareRetry, fail, control, signalResume: signals.resume };
 }
 
 export type RunLifecycle = ReturnType<typeof createRunLifecycle>;

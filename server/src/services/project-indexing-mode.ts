@@ -316,6 +316,10 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       // The same spend decision as assertCanSpend (loadSpendStatus), under the admission lock: a `models` batch is refused
       // here exactly as run creation would refuse it.
       const runId = randomUUID();
+      // Refused exactly as run creation would refuse it; the run holds its own lease before another batch can pass.
+      const { value: runPipeline } = await admitRunInTransaction(tx, {
+        runId, orgId: prepared.orgId, projectId: prepared.projectId, speedBoost: batch.pipeline.speedBoost === true,
+      }, async () => {
       const pages = docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
       // A direct insert, so the same managed-model resolution as runCreation.create: model values in the pipeline
       // are dropped and only the project's explicit admin overrides apply.
@@ -327,10 +331,6 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
           pages: Math.max(1, doc.billing_pages ?? doc.page_count ?? 1),
         })) },
       }).current.estimatedCost.maxCents);
-      // Refused exactly as run creation would refuse it; the run holds its own lease before another batch can pass.
-      await admitRunInTransaction(tx, {
-        runId, orgId: prepared.orgId, projectId: prepared.projectId, speedBoost: batch.pipeline.speedBoost === true,
-      }, async () => {
       await tx`
         insert into project_runs (id, org_id, user_id, project_id, kind, status, priority, stage,
           total_documents, processed_documents, pages_total, pages_processed, pipeline,
@@ -355,6 +355,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
             ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${batch.mode}, ${doc.id})
         `;
       }
+      return runPipeline;
       }, { refusal: "throw" });
       result.runIds.push(runId);
       result.pipelines.set(runId, withRunEffective(runPipeline));

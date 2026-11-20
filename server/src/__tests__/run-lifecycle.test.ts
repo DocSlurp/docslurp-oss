@@ -75,19 +75,19 @@ describe("Run Lifecycle start", () => {
 describe("Run Lifecycle retry", () => {
   it("restarts a deferred queued Run's workflow", async () => {
     const startWorkflow = vi.fn(async () => {});
-    const outcome = await lifecycle(startWorkflow).retry({ ...run, status: "queued" });
+    const outcome = await lifecycle(startWorkflow).retryWithoutAdmission({ ...run, status: "queued" });
     expect(outcome).toEqual({ status: "restarted", start: { status: "started" } });
     expect(startWorkflow).toHaveBeenCalledWith("run-1", defaultPipelineFeatures, { restartExisting: true, executionGeneration: "generation-1" });
   });
 
   it("reports deferral when a queued Run still cannot reach Temporal", async () => {
-    const outcome = await lifecycle(vi.fn(async () => { throw temporalDown; })).retry({ ...run, status: "queued" });
+    const outcome = await lifecycle(vi.fn(async () => { throw temporalDown; })).retryWithoutAdmission({ ...run, status: "queued" });
     expect(outcome).toEqual({ status: "restarted", start: { status: "deferred", reason: TEMPORAL_DEFERRED_RUN_MESSAGE } });
   });
 
   it.each(["processing"] as const)("leaves a %s Run alone", async (status) => {
     const startWorkflow = vi.fn(async () => {});
-    await expect(lifecycle(startWorkflow).retry({ ...run, status })).resolves.toEqual({ status: "not-retryable" });
+    await expect(lifecycle(startWorkflow).retryWithoutAdmission({ ...run, status })).resolves.toEqual({ status: "not-retryable" });
     expect(startWorkflow).not.toHaveBeenCalled();
   });
 });

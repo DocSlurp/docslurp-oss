@@ -641,6 +641,11 @@ export async function createReindexRuns(args: {
     // throwing, because the settings change itself is saved in this transaction.
     const runId = index === 0 ? jobId : randomUUID();
     const pages = batch.docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
+    const stats = { job: { id: jobId, ...args.meta } };
+    const { blockedReason: batchBlockedReason } = await admitRunInTransaction(tx, {
+      runId, orgId: project.orgId, projectId: project.id, speedBoost: batch.pipeline.speedBoost,
+    }, async (batchBlockedReason) => {
+    const status = batchBlockedReason ? "blocked" : "queued";
     if (batch.docs.some(doc => !Number.isFinite(doc.billing_pages ?? doc.page_count) || (doc.billing_pages ?? doc.page_count ?? 0) <= 0)) throw new Error("Monthly admission requires known positive page counts");
     const reservation = Math.max(1, buildRunProcessingPreview({
       request: { project: project.id, pipeline: batch.pipeline, speedBoost: batch.pipeline.speedBoost === true, urls: [], files: batch.docs.map(doc => ({
@@ -648,11 +653,6 @@ export async function createReindexRuns(args: {
         pages: Math.max(1, doc.billing_pages ?? doc.page_count ?? 1),
       })) },
     }).current.estimatedCost.maxCents);
-    const stats = { job: { id: jobId, ...args.meta } };
-    const { blockedReason: batchBlockedReason } = await admitRunInTransaction(tx, {
-      runId, orgId: project.orgId, projectId: project.id, speedBoost: batch.pipeline.speedBoost,
-    }, async (batchBlockedReason) => {
-    const status = batchBlockedReason ? "blocked" : "queued";
     await tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, blocked_reason, job_id, priority, stage,
         total_documents, processed_documents, pages_total, pages_processed, input_cost_cents, output_cost_cents, pipeline, stats,

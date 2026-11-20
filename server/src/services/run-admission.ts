@@ -19,16 +19,18 @@ import { fleetSupportsNow, taskQueueForOrgKey } from "./worker-fleet.js";
 
 /**
  * Run admission: the one module through which a Run becomes spendable work. Every path that queues a run, or puts
- * an existing run back to work, goes through one of the entry points here:
+ * an existing run back to work, takes its lock and its spend decision from one of the entry points here:
  *
  *  - `admitRunSpend`: a new run (run creation), or with `readmission` an existing run (retry, operator resume and
  *    recover), in a transaction this module owns.
  *  - `admitRunInTransaction`: a run created inside the caller's transaction (re-index and full-index batches).
  *  - `admitBlockedRun`: a re-index run saved as `blocked`, once its organization may spend again.
- *  - `pausedRunSpendBlock`: the spend decision for a run the worker paused mid-run.
+ *  - `pausedRunSpendBlock`: the spend decision for a run the worker paused mid-run. That path
+ *    (spend-paused-runs.ts) clears the pause and grants the lease itself, because it keeps the lease's own refusal
+ *    reason for the pause.
  *  - `admitOnDemandRun`: an on-demand page run started by a query, under the interactive rule.
  *
- * It owns the order of the steps: the organization's admission lock (billing/admission-lock.ts) first, then the
+ * It owns the order of the steps in the server: the organization's admission lock (billing/admission-lock.ts) first, then the
  * run's own scope check, the spend decision with the per-run reservation, the caller's insert or transition, and the
  * run's first credit lease, all in one transaction, so concurrent admissions cannot pass on one balance and a
  * refusal leaves nothing behind. The spend rule itself is billing/spend-guard.ts over `org_spend_status()`.
@@ -78,6 +80,8 @@ export async function admitRunSpend<T>(
   // grants the lease at its first checkpoint.
   const leases = guarded && creditLeasesEnabled()
     && fleetSupportsNow("billing.credit-leases", taskQueueForOrgKey(orgId).taskQueue);
+  // With leases the lease is the run's reservation (`runReserveCredits` is 0 below), so an admission that names no
+  // run holds nothing. Every caller in the server names its run (run-admission-owners.test.ts); a boosted one must.
   if (leases && multiplier > 1 && !options.leaseRunId?.trim()) {
     throw new Error("Boosted run admission requires a lease run ID");
   }
@@ -203,6 +207,13 @@ export async function admitRunInTransaction<T>(
     if (block) blockedReason = spendBlockJobReason(block.code);
   }
   const value = await create(blockedReason);
+  // `create` is the caller's code: confirm it wrote this run, in this organization and project, in the state it was
+  // told to. A queued run under another id would otherwise keep no lease, and a blocked one would start.
+  const [written] = await tx<{ status: string }[]>`
+    select status from project_runs where id = ${run.runId} and org_id = ${run.orgId} and project_id = ${run.projectId}`;
+  if (written?.status !== (blockedReason ? "blocked" : "queued")) {
+    throw new Error(`Run admission expected run ${run.runId} to be ${blockedReason ? "blocked" : "queued"} after its insert`);
+  }
   if (blockedReason || !creditLeasesEnabled() || spendGuardsSkipped()) return { value, blockedReason };
   const lease = { runId: run.runId, orgId: run.orgId, projectId: run.projectId };
   // A queued run must hold its own validated lease before another batch can pass.
@@ -218,8 +229,9 @@ export async function admitRunInTransaction<T>(
     // Keep the caller's change and the document manifest, but never publish queued work whose mandatory lease was
     // refused or uncertain.
     blockedReason = "credits";
-    await tx`update project_runs set status = 'blocked', blocked_reason = 'credits'
-      where id = ${run.runId} and org_id = ${run.orgId} and project_id = ${run.projectId}`;
+    const [blocked] = await tx<{ id: string }[]>`update project_runs set status = 'blocked', blocked_reason = 'credits'
+      where id = ${run.runId} and org_id = ${run.orgId} and project_id = ${run.projectId} returning id`;
+    if (!blocked) throw error;
     console.warn(`[credit-leases] run=${run.runId} admission blocked: ${error instanceof Error ? error.message : String(error)}`);
   }
   return { value, blockedReason };
@@ -277,17 +289,19 @@ export async function pausedRunSpendBlock(
 }
 
 /**
- * Admission for an on-demand page run a query starts, inside the caller's transaction: these runs are part of an
- * interactive call, so they pass the interactive spend rule (no hold of their own) under the organization's
- * admission lock, then `insert` writes the run. A caller that reads what it inserts first (its page plan) takes
- * `lockOrgAdmission` before those reads. Throws SpendBlockedError when the organization may not spend.
+ * Admission for an on-demand page run a query starts, inside the caller's transaction. These runs are part of an
+ * interactive call, so they pass the interactive spend rule (no hold of their own). The organization's admission
+ * lock is taken first; `prepare` then reads what the run will hold (its page plan, its pipeline) under that lock,
+ * and `insert` writes the run only after the spend decision. Throws SpendBlockedError when the organization may not
+ * spend, with nothing inserted.
  */
-export async function admitOnDemandRun<T>(
+export async function admitOnDemandRun<P, T>(
   tx: TransactionSql,
   scope: { orgId: string; projectId: string },
-  insert: () => Promise<T>,
+  steps: { prepare: () => Promise<P>; insert: (prepared: P) => Promise<T> },
 ): Promise<T> {
-  // The interactive spend check takes the organization's admission lock itself before it reads spend.
+  await lockOrgAdmission(tx, scope.orgId);
+  const prepared = await steps.prepare();
   await assertCanSpend(scope.orgId, scope.projectId, { client: tx, kind: "interactive", hold: false });
-  return await insert();
+  return await steps.insert(prepared);
 }

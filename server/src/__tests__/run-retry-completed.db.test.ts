@@ -53,7 +53,7 @@ describe("retrying a completed Run", () => {
     await client`update project_runs set creation_ready_at = now()`;
     const [before] = await client`select execution_generation from project_runs where id = 'run-c'`;
 
-    const outcome = await lifecycle.retry({ id: "run-c", status: "completed", pipeline });
+    const outcome = await lifecycle.retryWithoutAdmission({ id: "run-c", status: "completed", pipeline });
     expect(outcome).toEqual({ status: "resumed", start: { status: "started" } });
     const [run] = await client`select status, stage, processed_documents, stats, execution_generation from project_runs where id = 'run-c'`;
     expect(run!.execution_generation).toEqual(expect.any(String));
@@ -71,14 +71,14 @@ describe("retrying a completed Run", () => {
     expect(await client`select stage_name from project_run_stage_states where run_id = 'run-c'`).toEqual([{ stage_name: "normalize" }]);
 
     // A second retry (the Run is queued now, not completed) is not a completed-Run retry.
-    expect(await lifecycle.retry({ id: "run-c", status: "completed", pipeline })).toEqual({ status: "not-retryable" });
+    expect(await lifecycle.retryWithoutAdmission({ id: "run-c", status: "completed", pipeline })).toEqual({ status: "not-retryable" });
     expect(startWorkflow).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a clean completed Run", async () => {
     const startWorkflow = vi.fn(async () => {});
     const lifecycle = createRunLifecycle({ sql, startWorkflow, failureThreshold: 2 });
-    expect(await lifecycle.retry({ id: "run-d", status: "completed", pipeline: defaultPipelineFeatures })).toEqual({ status: "not-retryable" });
+    expect(await lifecycle.retryWithoutAdmission({ id: "run-d", status: "completed", pipeline: defaultPipelineFeatures })).toEqual({ status: "not-retryable" });
     expect(startWorkflow).not.toHaveBeenCalled();
     expect(await client`select status from project_runs where id = 'run-d'`).toEqual([{ status: "completed" }]);
   });

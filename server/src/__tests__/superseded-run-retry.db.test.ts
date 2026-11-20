@@ -41,7 +41,7 @@ describe("retired documents stay outside run retries", () => {
     await doc('retry-c-cancelled', 'retry-failed', 'cancelled');
     await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status)
       values ('retry-failed', 'retry-b-history', 'embed', 'failed'), ('retry-failed', 'retry-c-cancelled', 'embed', 'failed')`;
-    expect((await lifecycle().retry({ id: 'retry-failed', status: 'failed', pipeline: defaultPipelineFeatures })).status).toBe('resumed');
+    expect((await lifecycle().retryWithoutAdmission({ id: 'retry-failed', status: 'failed', pipeline: defaultPipelineFeatures })).status).toBe('resumed');
     expect(await statuses('retry-failed')).toEqual([
       { id: 'retry-a-current', status: 'queued' }, { id: 'retry-b-history', status: 'failed' }, { id: 'retry-c-cancelled', status: 'cancelled' },
     ]);
@@ -51,7 +51,7 @@ describe("retired documents stay outside run retries", () => {
   it("does not restart a completed run whose only failed documents are superseded", async () => {
     await run('retry-completed', 'completed');
     await doc('only-history', 'retry-completed', 'failed', true);
-    expect(await lifecycle().retry({ id: 'retry-completed', status: 'completed', pipeline: defaultPipelineFeatures }))
+    expect(await lifecycle().retryWithoutAdmission({ id: 'retry-completed', status: 'completed', pipeline: defaultPipelineFeatures }))
       .toEqual({ status: 'not-retryable' });
   });
 

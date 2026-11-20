@@ -226,6 +226,23 @@ describe("runs admitted inside the caller's transaction", () => {
     expect(await leases("tx-ok")).toHaveLength(1);
   });
 
+  it("takes a lease for a run without speed boost too", async () => {
+    await sql.begin(tx => admission.admitRunInTransaction(tx, { ...scope("tx-base"), speedBoost: false }, async () => {
+      await tx`insert into project_runs(monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+        values (100, 'tx-base', 'admission-org', 'admission-user', 'admission-w1', 'reindex', 'queued', 'queued', ${tx.json({})})`;
+    }, { refusal: "throw" }));
+    expect(await sql`select id from credit_leases where holder_id = 'tx-base' and status = 'active'`).toHaveLength(1);
+  });
+
+  it("refuses a callback that wrote a different run or ignored the reason it was handed", async () => {
+    await expect(sql.begin(tx => admission.admitRunInTransaction(tx, scope("tx-named"), () => insertRun(tx, "tx-other", null), { refusal: "block" })))
+      .rejects.toThrow("expected run tx-named to be queued");
+    await sql`update organizations set credit_balance_cents = 100 where id = 'admission-org'`;
+    await expect(sql.begin(tx => admission.admitRunInTransaction(tx, scope("tx-ignored"), () => insertRun(tx, "tx-ignored", null), { refusal: "block" })))
+      .rejects.toThrow("expected run tx-ignored to be blocked");
+    expect(await sql`select id from project_runs where id in ('tx-other', 'tx-ignored')`).toHaveLength(0);
+  });
+
   it("refuses by throwing before the run is created, or by saving it blocked", async () => {
     await sql`update organizations set credit_balance_cents = 100 where id = 'admission-org'`;
     const create = vi.fn(async () => undefined);
@@ -238,6 +255,8 @@ describe("runs admitted inside the caller's transaction", () => {
   });
 
   it("reads no spend when the whole job is already blocked", async () => {
+    // A balance that would refuse with `credits`: the stored reason stays the job's own.
+    await sql`update organizations set credit_balance_cents = 100 where id = 'admission-org'`;
     await expect(sql.begin(tx => admission.admitRunInTransaction(tx, scope("tx-job"), reason => insertRun(tx, "tx-job", reason),
       { refusal: "block", blockedReason: "budget" }))).resolves.toMatchObject({ blockedReason: "budget" });
     expect(await runStatus("tx-job")).toMatchObject({ status: "blocked", blocked_reason: "budget" });
@@ -298,7 +317,8 @@ describe("blocked runs", () => {
     expect(await sql`select id from credit_leases where holder_id = 'blocked-refused'`).toHaveLength(0);
   });
 
-  it("never queues a run named under another organization or project", async () => {
+  it.each(["on", "off"])("never queues a run named under another organization or project (leases %s)", async leasesSwitch => {
+    vi.stubEnv("WORKER_CREDIT_LEASES", leasesSwitch);
     const run = await blocked("blocked-foreign");
     await expect(admission.admitBlockedRun(sql as never, { ...run, orgId: "wrong-org" })).resolves.toBe(false);
     await expect(admission.admitBlockedRun(sql as never, { ...run, projectId: "admission-w2" })).resolves.toBe(false);
@@ -309,13 +329,23 @@ describe("blocked runs", () => {
 
 describe("on-demand page runs", () => {
   it("inserts under the interactive rule and refuses a project outside the organization", async () => {
-    const insert = vi.fn(async () => "inserted");
-    await expect(sql.begin(tx => admission.admitOnDemandRun(tx, { orgId: "admission-org", projectId: "admission-w1" }, insert))).resolves.toBe("inserted");
-    insert.mockClear();
-    await expect(sql.begin(tx => admission.admitOnDemandRun(tx, { orgId: "wrong-org", projectId: "admission-w1" }, insert)))
+    const order: string[] = [];
+    const steps = (tx: postgres.TransactionSql) => ({
+      // The plan is read under the organization's admission lock, which this transaction must already hold.
+      prepare: async () => {
+        const [held] = await tx`select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()`;
+        order.push(held!.n > 0 ? "prepare under lock" : "prepare without lock");
+        return "plan";
+      },
+      insert: async (plan: string) => { order.push(`insert ${plan}`); return "inserted"; },
+    });
+    await expect(sql.begin(tx => admission.admitOnDemandRun(tx, { orgId: "admission-org", projectId: "admission-w1" }, steps(tx)))).resolves.toBe("inserted");
+    expect(order).toEqual(["prepare under lock", "insert plan"]);
+    order.length = 0;
+    await expect(sql.begin(tx => admission.admitOnDemandRun(tx, { orgId: "wrong-org", projectId: "admission-w1" }, steps(tx))))
       .rejects.toMatchObject({ code: "plan_not_entitled" });
-    await expect(sql.begin(tx => admission.admitOnDemandRun(tx, { orgId: "admission-org", projectId: "not-a-project" }, insert)))
+    await expect(sql.begin(tx => admission.admitOnDemandRun(tx, { orgId: "admission-org", projectId: "not-a-project" }, steps(tx))))
       .rejects.toMatchObject({ code: "plan_not_entitled" });
-    expect(insert).not.toHaveBeenCalled();
+    expect(order.filter(step => step.startsWith("insert"))).toEqual([]);
   });
 });
