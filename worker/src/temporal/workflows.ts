@@ -36,7 +36,7 @@ import type { MaterializePagesInput } from "@docslurp/shared";
 import type { Activities } from "./activities.js";
 import { mergeMaterializeResults, splitMaterializeRanges, type MaterializeResult } from "./materialize-ranges.js";
 import { bundlePageTasks, createAdmissionBudget, runPageFanOut, slotBackoffMs } from "./page-fanout.js";
-import { planDocumentShards } from "./document-shards.js";
+import { planDocumentShards, quarantineShardOptions } from "./document-shards.js";
 import { planStageGroupEnd } from "./stage-groups.js";
 import { resolvePipelineWorkflowStageOrder } from "./pipeline-workflow-plan.js";
 import {
@@ -282,11 +282,18 @@ export async function documentPipeline(
   const cleanupInit = patched("pipeline-init-lifecycle-v1");
   let initialized = false;
   try {
+    // Opt in on new histories. A worker from the previous release ignores the
+    // new input and omits the receipt, so the separate demand activity still runs.
+    const initialQuarantineSharding = scaling && stageOrder[0] === "quarantine"
+      && input.documentSharding?.quarantine && patched("publish-quarantine-demand-during-init-v1")
+      ? input.documentSharding
+      : undefined;
     // Initialize the run: load docs, set processing status
     const initResult = await (scaling?.quick ?? quickActivities).initPipelineRun({
       ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
       runId: input.runId,
       totalStages: stageOrder.length,
+      ...(initialQuarantineSharding ? { initialQuarantineSharding } : {}),
     });
     initialized = true;
     let artifacts = initResult.artifacts;
@@ -304,9 +311,7 @@ export async function documentPipeline(
       return planDocumentShards(
         picked.map((index) => initResult.documentIds[index]!),
         initResult.documentPages ? picked.map((index) => initResult.documentPages![index]!) : undefined,
-        stageName === "quarantine" && sharding.quarantineMinPagesPerShard !== undefined
-          ? { ...sharding, minPagesPerShard: sharding.quarantineMinPagesPerShard }
-          : sharding,
+        stageName === "quarantine" ? quarantineShardOptions(sharding) : sharding,
       );
     };
     // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).
@@ -586,7 +591,12 @@ export async function documentPipeline(
         const shards = shardPlan(stageName);
         if (shards.length > 1) {
           const shardActivities = shardActivityProxies(input.activityTaskQueue);
-          await scaling.quick.setRunShardDemand({ runId: input.runId, shards: shards.length });
+          const demandAlreadyPublished = stageName === "quarantine"
+            && initialQuarantineSharding !== undefined
+            && initResult.initialQuarantineDemand === shards.length;
+          if (!demandAlreadyPublished) {
+            await scaling.quick.setRunShardDemand({ runId: input.runId, shards: shards.length });
+          }
           await runPageFanOut({
             beforeDispatch: admit,
             bundles: shards.map((documentIds, shardIndex) => ({ documentIds, shardIndex })),

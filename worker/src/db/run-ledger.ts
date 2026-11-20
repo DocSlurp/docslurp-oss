@@ -559,14 +559,16 @@ export class PostgresRunLedger implements CheckpointStore {
     `;
   }
 
-  async updateProgress(state: WorkflowState, init?: { executionGeneration?: string }): Promise<void> {
+  async updateProgress(state: WorkflowState, init?: { executionGeneration?: string; shardDemand?: number }): Promise<void> {
     if (init) {
       // Init has no paid usage to settle. Refuse the entire write when obsolete,
       // terminal, or cancelled, rather than allowing a late snapshot to revive it.
       const [row] = await this.sql<{ id: string }[]>`
         update project_runs set status = 'processing',
           stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
-          artifacts = ${this.toJson(state.artifacts)}::jsonb, updated_at = now()
+          artifacts = ${this.toJson(state.artifacts)}::jsonb,
+          shard_demand = coalesce(${init.shardDemand ?? null}, shard_demand),
+          updated_at = now()
         where id = ${state.run.id} and org_id = ${state.run.orgId ?? null}
           and project_id = ${state.run.projectId ?? null}
           and execution_generation is not distinct from ${init.executionGeneration ?? null}
