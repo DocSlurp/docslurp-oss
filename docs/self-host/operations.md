@@ -577,3 +577,18 @@ scopes, records production query policy, and exits nonzero if either scope misse
 recall@10 or regresses more than one percentage point. Its output stays local; do not publish
 customer vectors/identifiers. `vector-index-cold.ts` measures process-cold local read bytes;
 these are neither physical I/O nor a production S3 latency measurement.
+
+### Query embedding failover
+
+Set `SEARCH_EMBEDDING_FAILOVER=deepinfra-bge-m3-to-local` on the API and
+durable chat executor to enable an ordered pool for standard-privacy search
+using the native DeepInfra BGE-M3 index. DeepInfra is primary. A missing key,
+timeout, rate limit or retryable upstream failure can use local Xenova BGE-M3
+with CLS pooling and 1,024 normalized dimensions. Other embedding spaces
+and privacy modes retain their configured route. Ingestion keeps using its
+configured model.
+
+Before enabling the pool, provision the local model cache and verify ranking
+parity on representative queries against your existing index. The local model
+needs CPU and memory on each process that serves search. The pool is off by
+default. Unset the variable to disable it.

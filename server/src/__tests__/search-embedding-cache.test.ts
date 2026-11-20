@@ -156,3 +156,27 @@ describe("query embedding through the search planner", () => {
     expect(embedConfiguredText).toHaveBeenCalledTimes(2);
   });
 });
+
+it("uses the CLS BGE-M3 fallback only for standard search after a retryable primary failure", async () => {
+  const { APICallError } = await import("ai");
+  const { embedQuery, queryEmbeddingFallback } = await import("../search/session-planner.js");
+  const embedding = { ...defaultEmbeddingConfig, modelUri: "llm://deepinfra/BAAI/bge-m3", dimensions: undefined };
+  const usage = { record: vi.fn(), recordDiagnostic: vi.fn() } as unknown as Parameters<typeof embedQuery>[2];
+  const failure = new APICallError({ message: "unavailable", url: "https://example.invalid", requestBodyValues: {}, statusCode: 503 });
+  const vector = Array.from({ length: 1024 }, (_, index) => index === 0 ? 1 : 0);
+  vi.stubEnv("DEEPINFRA_API_KEY", "test");
+  vi.stubEnv("SEARCH_EMBEDDING_FAILOVER", "deepinfra-bge-m3-to-local");
+  try {
+    embedConfiguredText.mockReset().mockRejectedValueOnce(failure).mockResolvedValueOnce({ embedding: vector, usage: { inputTokens: 1 } });
+    await expect(embedQuery("test query", embedding, usage, "standard")).resolves.toEqual(vector);
+    expect(embedConfiguredText.mock.calls.map(([args]) => args.provider)).toEqual(["deepinfra", "transformers.js"]);
+    expect(embedConfiguredText.mock.calls[1]?.[0]).toMatchObject({ modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls", apiKey: undefined });
+    expect(queryEmbeddingFallback({ ...embedding, normalize: false }, "standard")).toBeNull();
+    expect(queryEmbeddingFallback(embedding, "strict-privacy")).toBeNull();
+    embedConfiguredText.mockReset().mockRejectedValueOnce(new Error("invalid response"));
+    await expect(embedQuery("test query", embedding, usage, "standard")).rejects.toThrow("invalid response");
+    expect(embedConfiguredText).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});

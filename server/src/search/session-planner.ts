@@ -1,6 +1,8 @@
+import { APICallError } from "ai";
+import { currentSearchSignal } from "./query-bounds.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
-import { embeddingRequestConfig, isPrivacyModeViolation, resolveEmbeddingRoute, type EmbeddingConfig } from "@docslurp/shared";
+import { embeddingRequestConfig, isPrivacyModeViolation, resolveEmbeddingRoute, validateHostedEmbeddingVector, type EmbeddingConfig } from "@docslurp/shared";
 import {
   embedConfiguredText,
   generateOpenRouterText,
@@ -422,6 +424,17 @@ export function queryEmbeddingApiKey(route: { runtime: string; provider: string 
         : route.provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
 }
 
+export function queryEmbeddingFallback(embedding: EmbeddingConfig, privacyMode: PrivacyMode): EmbeddingConfig | null {
+  if (process.env.SEARCH_EMBEDDING_FAILOVER !== "deepinfra-bge-m3-to-local"
+    || privacyMode !== "standard"
+    || embedding.modelUri !== "llm://deepinfra/BAAI/bge-m3"
+    || embedding.dimensions !== undefined || embedding.normalize === false || embedding.lateChunking) return null;
+  return {
+    ...embedding, target: "local",
+    modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls", normalize: true,
+  };
+}
+
 export async function embedQuery(
   query: string,
   embedding: EmbeddingConfig,
@@ -430,6 +443,43 @@ export async function embedQuery(
   /** Strict-privacy audit attribution for private embedding routes. */
   auditProjectId?: string | null,
   orgId?: string,
+): Promise<number[] | null> {
+  const fallback = queryEmbeddingFallback(embedding, privacyMode);
+  const signal = currentSearchSignal();
+  signal?.throwIfAborted();
+  const primaryTimeout = fallback ? AbortSignal.timeout(3_000) : undefined;
+  const primarySignal = primaryTimeout && signal ? AbortSignal.any([primaryTimeout, signal]) : primaryTimeout ?? signal;
+  const primary = resolveEmbeddingRoute(embedding);
+  let vector: number[] | null;
+  try {
+    vector = fallback && !queryEmbeddingApiKey(primary) ? null
+      : await embedQueryRoute(query, embedding, usage, privacyMode, auditProjectId, orgId, primarySignal);
+  } catch (error) {
+    signal?.throwIfAborted();
+    const retryable = primaryTimeout?.aborted || (APICallError.isInstance(error)
+      && (error.statusCode === undefined || error.statusCode === 408 || error.statusCode === 429
+        || (error.statusCode >= 500 && error.statusCode <= 599)));
+    if (!fallback || !retryable) throw error;
+    vector = null;
+  }
+  if (vector || !fallback) return vector;
+  signal?.throwIfAborted();
+  usage.recordDiagnostic("embeddingFailover", { from: "deepinfra", to: "transformers.js" });
+  const local = await embedQueryRoute(query, fallback, usage, privacyMode, auditProjectId, orgId, signal, true);
+  signal?.throwIfAborted();
+  if (!local) throw new Error("No query embedding available from the configured failover pool");
+  return local;
+}
+
+async function embedQueryRoute(
+  query: string,
+  embedding: EmbeddingConfig,
+  usage: SearchSessionJournal,
+  privacyMode: PrivacyMode,
+  auditProjectId?: string | null,
+  orgId?: string,
+  signal?: AbortSignal,
+  validateNativeVector = false,
 ): Promise<number[] | null> {
   const route = resolveEmbeddingRoute(embedding);
   const { model, provider, runtime, dimensions, requestedDimensions, baseUrl } = route;
@@ -463,7 +513,7 @@ export async function embedQuery(
     }
     if (cached) {
       console.info(`[search-cache] embedding hit model=${model} privacy=${privacyMode} entries=${cache.size}`);
-      return cached.slice();
+      return validateNativeVector ? validateHostedEmbeddingVector(cached, dimensions, false) : cached.slice();
     }
   }
   const apiKey = queryEmbeddingApiKey(route);
@@ -480,10 +530,11 @@ export async function embedQuery(
     };
     const result = await embedConfiguredText({
       value: query,
+      signal,
       runtime,
       provider,
       model,
-      dimensions,
+      dimensions: validateNativeVector ? undefined : dimensions,
       requestedDimensions,
       normalize,
       apiKey,
@@ -510,8 +561,10 @@ export async function embedQuery(
       inputTokens: result.usage.inputTokens,
       logOutputTokens: false,
     });
-    if (cacheKey) cache.set(cacheKey, result.embedding.slice());
-    return result.embedding;
+    const vector = validateNativeVector
+      ? validateHostedEmbeddingVector(result.embedding, dimensions, false) : result.embedding;
+    if (cacheKey) cache.set(cacheKey, vector.slice());
+    return vector;
   } catch (error) {
     if (METERED_EMBEDDING_PROVIDERS.has(provider)) throw error;
     return null;
