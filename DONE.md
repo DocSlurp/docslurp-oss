@@ -1,3 +1,10 @@
+## API background tasks start and stop from one list (2026-11-19)
+
+- `server/src/services/background-tasks.ts`: the API's timers, refreshers, pools and LISTEN subscriptions are one ordered list. What starts is exactly what stops; `server.ts` no longer keeps a start sequence in `ensureApiStartup` and a second, hand-kept stop list. A stop that fails is logged by task name and the rest still stop.
+- `registerApiBackgroundTask` (from `server.ts`) lets the embedding host add its own task before startup; registering after startup throws, because that task would never run.
+- `registerMaintenanceSweep` adds a host-owned sweep to every maintenance pass. The built-in sweeps are unchanged.
+- No task was added, removed or retimed. The only observable difference is the log line for a failed unsubscribe (`[webhook-outbox] stop failed: ...`, formerly `unlisten failed`).
+
 ## Run admission is one module (2026-11-19)
 
 No behaviour change. Seven paths admitted a run, each sequencing the organization's admission lock, the spend decision and the run's first credit lease itself: run creation, retry, operator resume and recover, re-index batches, full-index batches, blocked runs, spend-paused runs and on-demand page runs.

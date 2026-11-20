@@ -35,7 +35,9 @@ const MAINTENANCE_SWEEP_INTERVAL_MS = Math.max(
   ),
 );
 
-const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
+export type MaintenanceSweep = [name: string, run: () => Promise<unknown>];
+
+const sweeps: MaintenanceSweep[] = [
   ["stale-queued-run-sweep", sweepStaleQueuedRuns],
   ["connector-sync-recovery", sweepInterruptedConnectorSyncs],
   // Fallback for missed NOTIFYs (listener reconnects, API restarts).
@@ -75,6 +77,22 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["project-activity-stats-drift", () => sweepProjectActivityStatsDrift()],
 ];
 
+/**
+ * Adds a sweep to every later pass, or replaces the one registered under its name. For upkeep owned outside this
+ * package (the embedding host's own billing or operations sweeps); built-in sweeps belong in the list above. Each
+ * sweep must be idempotent across instances, as every API instance runs it.
+ */
+export function registerMaintenanceSweep(name: string, run: () => Promise<unknown>): void {
+  const existing = sweeps.findIndex(([candidate]) => candidate === name);
+  if (existing >= 0) sweeps[existing] = [name, run];
+  else sweeps.push([name, run]);
+}
+
+/** The names of the sweeps a pass runs, in order. */
+export function maintenanceSweepNames(): string[] {
+  return sweeps.map(([name]) => name);
+}
+
 let timer: ReturnType<typeof setInterval> | null = null;
 
 /**
@@ -90,7 +108,7 @@ export function isMaintenanceSweepEnabled(): boolean {
  * One pass over every sweep. Each sweep is isolated: a rejection (ECONNRESET) or a
  * synchronous throw in one neither skips the others nor stops the next tick.
  */
-export function runMaintenanceSweepsOnce(list: ReadonlyArray<[name: string, run: () => Promise<unknown>]> = sweeps): void {
+export function runMaintenanceSweepsOnce(list: ReadonlyArray<MaintenanceSweep> = sweeps): void {
   for (const [name, run] of list) {
     Promise.resolve()
       .then(() => withBackgroundSpan(`maintenance.${name}`, run))
