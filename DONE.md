@@ -7,6 +7,12 @@ No behaviour change. The API decided "may this organization spend" in `spendBloc
 - `worker/src/db/spend-check.ts` is the only worker file that reads `org_spend_status()` or names the admission lock. Figure resumes, page renders, media jobs and capacity leases go through `orgSpendRefusal`, `orgSpendBlock`, `runSpendHeadroom` and `lockOrgAdmission`.
 - `spend-rule.test.ts` is the rule's table; `worker/src/__tests__/spend-owners.test.ts` fails on a second reader, a second lock site or a second copy of the switch.
 - Not folded in: the predicates that ask whether the deployment bills at all (`isBillingEnforced`, `isMeteringEnforced`, `isStorageBillingEnabled`, `isStripeConfigured`, `isSelfHostedDeployment`). They answer different questions and are keyed on the payment provider.
+## API background tasks start and stop from one list (2026-11-19)
+
+- `server/src/services/background-tasks.ts`: the API's timers, refreshers, pools and LISTEN subscriptions are one ordered list. What starts is exactly what stops; `server.ts` no longer keeps a start sequence in `ensureApiStartup` and a second, hand-kept stop list. A stop that fails is logged by task name and the rest still stop.
+- `registerApiBackgroundTask` (from `server.ts`) lets the embedding host add its own task before startup; registering after startup throws, because that task would never run.
+- `registerMaintenanceSweep` adds a host-owned sweep to every maintenance pass. The built-in sweeps are unchanged.
+- No task was added, removed or retimed. The only observable difference is the log line for a failed unsubscribe (`[webhook-outbox] stop failed: ...`, formerly `unlisten failed`).
 
 ## Run admission is one module (2026-11-19)
 

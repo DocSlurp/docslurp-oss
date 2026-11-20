@@ -103,7 +103,7 @@ import { startMaintenanceSweeper, stopMaintenanceSweeper } from "./services/main
 import { startAlertEvaluator, stopAlertEvaluator } from "./services/alerts/alert-evaluator.js";
 import { startWorkerFleetRefresher, stopWorkerFleetRefresher } from "./services/worker-fleet.js";
 import { startRunStartRecovery, stopRunStartRecovery } from "./services/run-start-recovery.js";
-import { startWithRetry, type StartWithRetry } from "./lib/start-with-retry.js";
+import { createBackgroundTasks, subscriptionTask } from "./services/background-tasks.js";
 import { startWebhookOutboxListener, stopWebhookOutboxListener } from "./services/webhooks.js";
 import { startOrgSpendChangedListener, stopOrgSpendChangedListener } from "./services/spend-paused-runs.js";
 import { replaceProcessTask } from "./lib/process-singleton.js";
@@ -301,30 +301,43 @@ function shouldRunStartupMigrations(): boolean {
 }
 
 let startupPromise: Promise<void> | null = null;
-let stopRevisionMaintenance: (() => Promise<void>) | undefined;
-// LISTEN subscriptions retry until their dependency returns (lib/start-with-retry.ts).
-let listenerStarts: StartWithRetry[] = [];
+/**
+ * Every background task of this process, in start order; stopping walks the same list (services/background-tasks.ts).
+ * The embedding host adds its own with `registerApiBackgroundTask` before the API starts.
+ */
+const apiBackgroundTasks = createBackgroundTasks([
+  { name: "revision-maintenance", start: () => startRevisionMaintenance(env.databaseUrl) },
+  { name: "maintenance-sweeper", start: () => { startMaintenanceSweeper(); }, stop: stopMaintenanceSweeper },
+  {
+    name: "direct-upload-reconciler",
+    start: () => { startDirectUploadReconciler(); },
+    stop: async () => { await stopDirectUploadReconciler(); await closeDirectUploadLockPool(); },
+  },
+  // Opened on first use by request paths; closed with the tasks so a dev module reload does not leak it.
+  { name: "auth-lookup-pool", start: () => {}, stop: closeAuthLookupPool },
+  // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
+  { name: "live-model-prices", start: () => { startLiveModelPriceRefresh(); } },
+  // Per-endpoint prices for the automatic-call margin gate (chat failover candidates).
+  { name: "automatic-call-prices", start: () => { startAutomaticCallPriceRefresh(PROJECT_CHAT_FAILOVER_MODELS); } },
+  // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.
+  { name: "alert-evaluator", start: () => { startAlertEvaluator(); }, stop: stopAlertEvaluator },
+  // Apply workers' pending credit debits to org pools every few seconds.
+  { name: "credit-debit-flusher", start: () => { startCreditDebitFlusher(); }, stop: stopCreditDebitFlusher },
+  // Start queued runs whose workflow start was deferred or lost (also at boot).
+  { name: "run-start-recovery", start: () => { startRunStartRecovery(); }, stop: stopRunStartRecovery },
+  // Worker capability handshake: keep the fleet view warm for gated flags (services/worker-fleet.ts).
+  { name: "worker-fleet-refresher", start: () => { startWorkerFleetRefresher(); }, stop: stopWorkerFleetRefresher },
+  // LISTEN subscriptions retry until their dependency returns; the maintenance sweep covers the gap.
+  subscriptionTask("webhook-outbox", startWebhookOutboxListener, stopWebhookOutboxListener),
+  // Top-ups, auto-recharge, budget/plan changes and released leases resume
+  // spend-paused runs at once (the maintenance sweep is the fallback).
+  subscriptionTask("spend-paused-runs", startOrgSpendChangedListener, stopOrgSpendChangedListener),
+  // Restart the machine when the DB pool hangs on dead sockets (services/db-watchdog.ts).
+  { name: "db-watchdog", start: () => { if (process.env.NODE_ENV === "production") startDbWatchdog(); } },
+]);
 
-/** Stops this module instance's timers and LISTEN subscription. */
-async function stopApiBackgroundTasks(): Promise<void> {
-  await stopRevisionMaintenance?.();
-  for (const pending of listenerStarts) pending.stop();
-  listenerStarts = [];
-  stopMaintenanceSweeper();
-  await stopDirectUploadReconciler();
-  await closeDirectUploadLockPool();
-  await closeAuthLookupPool();
-  stopAlertEvaluator();
-  stopCreditDebitFlusher();
-  stopRunStartRecovery();
-  stopWorkerFleetRefresher();
-  await stopWebhookOutboxListener().catch((error: unknown) => {
-    console.error(`[webhook-outbox] unlisten failed: ${error instanceof Error ? error.message : String(error)}`);
-  });
-  await stopOrgSpendChangedListener().catch((error: unknown) => {
-    console.error(`[spend-paused-runs] unlisten failed: ${error instanceof Error ? error.message : String(error)}`);
-  });
-}
+/** Adds a background task of the embedding host (start and stop with the API's own). Call before `ensureApiStartup`. */
+export const registerApiBackgroundTask = apiBackgroundTasks.register;
 
 const awaitSearchBootWarm = createBootWarmGate((signal) => warmRecentSearchIndexes({ signal }));
 
@@ -372,31 +385,8 @@ export function ensureApiStartup(): Promise<void> {
       });
       // After a dev module reload, stop the previous instance's tasks first:
       // they would keep running (and querying) alongside the new ones.
-      await replaceProcessTask("api-background-tasks", stopApiBackgroundTasks)?.();
-      stopRevisionMaintenance = startRevisionMaintenance(env.databaseUrl);
-      startMaintenanceSweeper();
-      startDirectUploadReconciler();
-      // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
-      startLiveModelPriceRefresh();
-      // Per-endpoint prices for the automatic-call margin gate (chat failover candidates).
-      startAutomaticCallPriceRefresh(PROJECT_CHAT_FAILOVER_MODELS);
-      // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.
-      startAlertEvaluator();
-      // Apply workers' pending credit debits to org pools every few seconds.
-      startCreditDebitFlusher();
-      // Start queued runs whose workflow start was deferred or lost (also at boot).
-      startRunStartRecovery();
-      // Worker capability handshake: keep the fleet view warm for gated flags (services/worker-fleet.ts).
-      startWorkerFleetRefresher();
-      // Not awaited: a database that is down at boot must not block startup, and the
-      // listener keeps retrying with backoff while the maintenance sweep covers the gap.
-      listenerStarts.push(startWithRetry("webhook-outbox", startWebhookOutboxListener));
-      // Top-ups, auto-recharge, budget/plan changes and released leases resume
-      // spend-paused runs at once (the maintenance sweep is the fallback).
-      listenerStarts.push(startWithRetry("spend-paused-runs", startOrgSpendChangedListener));
-
-      // Restart the machine when the DB pool hangs on dead sockets (services/db-watchdog.ts).
-      if (process.env.NODE_ENV === "production") startDbWatchdog();
+      await replaceProcessTask("api-background-tasks", apiBackgroundTasks.stop)?.();
+      apiBackgroundTasks.start();
 
       // Load the local query-embedding model in the background so the first
       // search after a deploy or machine start doesn't pay the cold load (~29 s).
