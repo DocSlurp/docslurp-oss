@@ -434,7 +434,8 @@ export function queryEmbeddingPool(embedding: EmbeddingConfig, privacyMode: Priv
   const setting = process.env.SEARCH_EMBEDDING?.trim();
   if (!setting || privacyMode !== "standard" || embedding.dimensions !== undefined
     || embedding.normalize === false || embedding.lateChunking
-    || ![...BGE_M3_ROUTES.values()].includes(embedding.modelUri)) return [];
+    || (embedding.modelUri !== "llm://deepinfra/BAAI/bge-m3"
+      && embedding.modelUri !== "llm://openrouter/baai/bge-m3")) return [];
 
   const routes = setting.split(",").map(uri => {
     const modelUri = BGE_M3_ROUTES.get(uri.trim());
