@@ -1,6 +1,5 @@
 import { sql as defaultSql, type SqlClient } from "../db.js";
-import { admissionBlock, requireRunCreditLease, spendGuardsSkipped } from "./billing/spend-guard.js";
-import { creditLeasesEnabled } from "./billing/credit-leases.js";
+import { admitBlockedRun } from "./run-admission.js";
 
 /**
  * Blocked jobs: config-change re-index runs saved as `status = 'blocked'` because spend admission refused them
@@ -21,31 +20,7 @@ export async function resumeBlockedRuns(
   let resumed = 0;
   let stillBlocked = 0;
   for (const row of rows) {
-    const admitted = await sql.begin(async (tx) => {
-      const block = await admissionBlock(tx, row.org_id, row.project_id, { speedBoost: row.speed_boost });
-      if (block) return false;
-      try {
-        return await tx.savepoint(async (sp) => {
-          const [updated] = await sp<{ id: string }[]>`
-            update project_runs
-            set status = 'queued', blocked_reason = null, workflow_started_at = null, workflow_start_next_at = null,
-                updated_at = now()
-            where id = ${row.id} and org_id = ${row.org_id} and project_id = ${row.project_id}
-              and status = 'blocked' and control_state is null
-            returning id
-          `;
-          if (!updated) return false;
-          if (creditLeasesEnabled() && !spendGuardsSkipped()) {
-            await requireRunCreditLease(sp, { runId: row.id, orgId: row.org_id, projectId: row.project_id });
-          }
-          return true;
-        });
-      } catch (error) {
-        // Roll back both the queued transition and any partial lease write.
-        console.warn(`[blocked-runs] run=${row.id} remains blocked: ${error instanceof Error ? error.message : String(error)}`);
-        return false;
-      }
-    });
+    const admitted = await admitBlockedRun(sql, { id: row.id, orgId: row.org_id, projectId: row.project_id, speedBoost: row.speed_boost });
     if (admitted) resumed += 1;
     else stillBlocked += 1;
   }

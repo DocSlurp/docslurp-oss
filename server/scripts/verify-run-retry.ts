@@ -27,7 +27,7 @@ try {
     insert into usage_events values('run',0.012345); insert into credit_ledger values('run',-0.012345);
   `);
   const lifecycle = createRunLifecycle({ sql: sql as unknown as SqlClient, startWorkflow: async () => {}, failureThreshold: 3 });
-  const retry = (status: "failed" | "processing") => lifecycle.retry({ id: "run", status, pipeline: defaultPipelineFeatures });
+  const retry = (status: "failed" | "processing") => lifecycle.retryWithoutAdmission({ id: "run", status, pipeline: defaultPipelineFeatures });
   const results = await Promise.all([retry("failed"), retry("failed")]);
   assert.equal(results.filter((outcome) => outcome.status === "resumed").length, 1);
   const [run] = await sql`select * from project_runs`;

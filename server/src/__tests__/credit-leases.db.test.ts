@@ -11,6 +11,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let guard: typeof import("../services/billing/spend-guard.js");
+let admission: typeof import("../services/run-admission.js");
 let paused: typeof import("../services/spend-paused-runs.js");
 let leases: typeof import("../services/billing/credit-leases.js");
 
@@ -33,6 +34,7 @@ beforeAll(async () => {
   vi.doMock("../lib/temporal.js", () => ({ signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn() }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   guard = await import("../services/billing/spend-guard.js");
+  admission = await import("../services/run-admission.js");
   paused = await import("../services/spend-paused-runs.js");
   leases = await import("../services/billing/credit-leases.js");
 }, 120_000);
@@ -59,7 +61,7 @@ beforeEach(async () => {
 });
 
 async function admit(id: string) {
-  return await guard.admitRunSpend("o1", "w", (tx) => tx`
+  return await admission.admitRunSpend("o1", "w", (tx) => tx`
     insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
     values (100, ${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
     returning id

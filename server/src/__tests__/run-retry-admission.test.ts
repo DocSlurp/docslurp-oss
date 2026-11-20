@@ -9,7 +9,7 @@ vi.mock("../services/organizations.js",()=>({listAccessibleProjectIds:async()=>[
 vi.mock("../services/run-records.js",async original=>({...await original<object>(),mapProjectRun:()=>mocks.run}));
 vi.mock("../services/usage-attribution.js",async original=>({...await original<object>(),runUsageCostSummaries:async()=>new Map()}));
 vi.mock("../services/run-lifecycle.js",async original=>({...await original<object>(),runLifecycle:{prepareRetry:mocks.prepare,start:mocks.start}}));
-vi.mock("../services/billing/spend-guard.js",async original=>({...await original<object>(),admitRunSpend:mocks.admit}));
+vi.mock("../services/run-admission.js",async original=>({...await original<object>(),admitRunSpend:mocks.admit}));
 const { retryRun } = await import("../services/runs.js");
 beforeEach(()=>{
   vi.clearAllMocks();

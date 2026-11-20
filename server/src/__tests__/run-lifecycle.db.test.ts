@@ -161,7 +161,7 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
 
       const [original] = await sql`select execution_generation from project_runs where id = ${runId}`;
       const startWorkflow = vi.fn(async () => {});
-      const outcome = await lifecycle(sql, startWorkflow).retry({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
+      const outcome = await lifecycle(sql, startWorkflow).retryWithoutAdmission({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
 
       expect(outcome).toEqual({ status: "resumed", start: { status: "started" } });
       const [retried] = await sql`select execution_generation from project_runs where id = ${runId}`;
@@ -179,7 +179,7 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
       ]);
 
       // A concurrent retry that lost the race does not restart again.
-      const again = await lifecycle(sql, startWorkflow).retry({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
+      const again = await lifecycle(sql, startWorkflow).retryWithoutAdmission({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
       expect(again).toEqual({ status: "not-retryable" });
       expect(startWorkflow).toHaveBeenCalledTimes(1);
     });

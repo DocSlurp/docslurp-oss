@@ -27,7 +27,7 @@ vi.mock("../lib/network-security.js", async importOriginal => ({
 
 describe.skipIf(!databaseUrl)("run admission revalidates its principal under the spend lock", () => {
   let sql: typeof import("../db.js").sql;
-  let admitRunSpend: typeof import("../services/billing/spend-guard.js").admitRunSpend;
+  let admitRunSpend: typeof import("../services/run-admission.js").admitRunSpend;
   let runCreation: typeof import("../services/run-creation.js");
   const clients: Client[] = [];
   async function connect(): Promise<Client> {
@@ -50,7 +50,7 @@ describe.skipIf(!databaseUrl)("run admission revalidates its principal under the
   beforeAll(async () => {
     process.env.DATABASE_URL = databaseUrl;
     ({ sql } = await import("../db.js"));
-    ({ admitRunSpend } = await import("../services/billing/spend-guard.js"));
+    ({ admitRunSpend } = await import("../services/run-admission.js"));
     runCreation = await import("../services/run-creation.js");
     await sql`insert into "user" (id, name, email) values ('adm-u', 'Admission', 'adm-u@example.test') on conflict do nothing`;
     await sql`insert into organizations (id, name, slug, created_by_user_id) values ('adm-o', 'Org', 'adm-o', 'adm-u') on conflict do nothing`;

@@ -56,10 +56,8 @@ import {
   type ProjectAccess,
 } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import {
-  admitRunSpend,
-  SpendBlockedError,
-} from "./billing/spend-guard.js";
+import { SpendBlockedError } from "./billing/spend-guard.js";
+import { admitRunSpend } from "./run-admission.js";
 import { resumeSpendPausedRunOutcome } from "./spend-paused-runs.js";
 import {
   runUsageCostSummaries,

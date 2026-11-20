@@ -5,6 +5,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let guard: typeof import("../services/billing/spend-guard.js");
+let admission: typeof import("../services/run-admission.js");
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
   stop = pg.stop;
@@ -16,12 +17,13 @@ beforeAll(async () => {
   await sql`insert into projects (id,org_id,user_id,name,monthly_budget_cents)
     values ('p','o','u','P',1), ('other-p','other','u','Other',1)`;
   guard = await import("../services/billing/spend-guard.js");
+  admission = await import("../services/run-admission.js");
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
 it("rechecks live attributed spend during serialized run admissions and interactive materialization", async () => {
   const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) =>
-    guard.admitRunSpend("o", "p", async (tx) => {
+    admission.admitRunSpend("o", "p", async (tx) => {
       await tx`insert into project_runs (id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
         values (${`run-${i}`},'o','p','u','bulk-upload','queued','queued','{}',1)`;
       await tx`insert into usage_events (id,user_id,org_id,project_id,metric,provider,model,unit,amount,cost_cents)

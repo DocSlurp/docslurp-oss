@@ -1,4 +1,5 @@
 import type { sql } from "../db.js";
+import { lockOrgAdmission } from "./billing/admission-lock.js";
 
 /** Settings may admit work after saving, even when privacy/PII does not change.
  * Acquire spend before any project UPDATE/row lock, matching active intake's
@@ -7,5 +8,5 @@ import type { sql } from "../db.js";
  */
 export async function lockProjectConfigurationWrite(client: typeof sql, projectId: string, orgId: string): Promise<void> {
   await client`select pg_advisory_xact_lock(hashtextextended(${`config-change:${projectId}`}, 0))`;
-  await client`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
+  await lockOrgAdmission(client, orgId);
 }

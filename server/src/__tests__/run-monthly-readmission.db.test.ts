@@ -7,12 +7,14 @@ import type { SqlClient } from "../db.js";
 const url = process.env.TEST_DATABASE_URL;
 let sql: postgres.Sql;
 let guard: typeof import("../services/billing/spend-guard.js");
+let admission: typeof import("../services/run-admission.js");
 let lifecycle: ReturnType<typeof createRunLifecycle>;
 beforeAll(async () => {
   if (!url) return;
   sql = postgres(url, { max: 5, prepare: false });
   vi.doMock("../db.js", () => ({ sql }));
   guard = await import("../services/billing/spend-guard.js");
+  admission = await import("../services/run-admission.js");
   lifecycle = createRunLifecycle({ sql: sql as unknown as SqlClient, startWorkflow: vi.fn(), failureThreshold: 3 });
   await sql`insert into "user"(id,name,email) values('readmit-u','Readmit','readmit@example.test')`;
   await sql`insert into organizations(id,name,created_by_user_id,credit_balance_cents) values('readmit-o','Readmit','readmit-u',10000)`;
@@ -26,7 +28,7 @@ async function seed(id: string, size: number) {
   await sql`insert into documents(id,org_id,project_id,user_id,run_id,filename,mime_type,source_key,status,file_size)
     values(${id},'readmit-o','readmit-p','readmit-u',${id},'a.txt','text/plain','synthetic','failed',${size})`;
 }
-const retry = (id: string, org = 'readmit-o') => guard.admitRunSpend(org,'readmit-p',tx => lifecycle.prepareRetry({id,pipeline:defaultPipelineFeatures,status:'failed'},tx),{readmission:true,leaseRunId:id,speedBoost:false});
+const retry = (id: string, org = 'readmit-o') => admission.admitRunSpend(org,'readmit-p',tx => lifecycle.prepareRetry({id,pipeline:defaultPipelineFeatures,status:'failed'},tx),{readmission:true,leaseRunId:id,speedBoost:false});
 it.skipIf(!url)("restores zero capacity from measured work", async () => {
   await seed('restore',1000);
   await sql`insert into usage_events(id,user_id,org_id,project_id,run_id,metric,provider,model,unit,amount,cost_cents)
@@ -66,7 +68,7 @@ it.skipIf(!url)("forecasts only failed documents when retrying a completed run",
   await sql`update project_runs set status='completed' where id='partial'`;
   await sql`insert into documents(id,org_id,project_id,user_id,run_id,filename,mime_type,source_key,status,file_size)
     values('not-retried','readmit-o','readmit-p','readmit-u','partial','unrelated.txt','text/plain','synthetic','queued',0)`;
-  await expect(guard.admitRunSpend('readmit-o','readmit-p',tx => lifecycle.prepareRetry({id:'partial',pipeline:defaultPipelineFeatures,status:'completed'},tx),
+  await expect(admission.admitRunSpend('readmit-o','readmit-p',tx => lifecycle.prepareRetry({id:'partial',pipeline:defaultPipelineFeatures,status:'completed'},tx),
     {readmission:true,leaseRunId:'partial',speedBoost:false})).resolves.toBe('resumed');
   expect((await sql`select status from documents where id='not-retried'`)[0]!.status).toBe('queued');
 });

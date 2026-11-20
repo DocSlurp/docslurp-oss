@@ -29,8 +29,9 @@ import {
 import { sql } from "../db.js";
 import { nextVersionNumber } from "./version-number.js";
 import type { RequestActor } from "../lib/request-actor.js";
-import { admissionBlock, requireRunCreditLease, spendGuardsSkipped, SpendBlockedError } from "./billing/spend-guard.js";
-import { creditLeasesEnabled } from "./billing/credit-leases.js";
+import type { TransactionSql } from "postgres";
+import { SpendBlockedError } from "./billing/spend-guard.js";
+import { admitRunInTransaction, lockOrgAdmission } from "./run-admission.js";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
@@ -277,14 +278,14 @@ async function validateBatches(batches: RunBatch[]): Promise<void> {
  * per-project lock, re-checking in-flight work inside it so concurrent or
  * repeated requests cannot double-spend. All-or-nothing.
  */
-export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string, origin: RunOrigin = "machine", transaction?: Parameters<typeof admissionBlock>[0]): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
+export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string, origin: RunOrigin = "machine", transaction?: TransactionSql): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
   const result = { runIds: [] as string[], pipelines: new Map<string, PipelineFeatures>() };
   if (prepared.batches.length === 0) return result;
   for (const batch of prepared.batches) assertPipelineSpeedBoost(batch.pipeline);
   if (!transaction) await enforceLiveBudgetCaps(prepared.projectId, prepared.orgId);
-  const commit = async (tx: Parameters<typeof admissionBlock>[0]) => {
+  const commit = async (tx: TransactionSql) => {
     // Lock organization before project, matching other admission paths.
-    await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${prepared.orgId}))`;
+    await lockOrgAdmission(tx, prepared.orgId);
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.projectId}`}, 0))`;
     const [managedRow] = await tx<{ managed: unknown }[]>`select managed_models -> 'pipeline' as managed from projects where id = ${prepared.projectId}`;
     const managedOverrides = parseManagedPipelineOverrides(managedRow?.managed, `project ${prepared.projectId}`);
@@ -314,9 +315,11 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       if (docs.length === 0) continue;
       // The same spend decision as assertCanSpend (loadSpendStatus), under the admission lock: a `models` batch is refused
       // here exactly as run creation would refuse it.
-      const block = await admissionBlock(tx, prepared.orgId, prepared.projectId, { speedBoost: batch.pipeline.speedBoost === true });
-      if (block) throw new SpendBlockedError(block.message, block.code);
       const runId = randomUUID();
+      // Refused exactly as run creation would refuse it; the run holds its own lease before another batch can pass.
+      const { value: runPipeline } = await admitRunInTransaction(tx, {
+        runId, orgId: prepared.orgId, projectId: prepared.projectId, speedBoost: batch.pipeline.speedBoost === true,
+      }, async () => {
       const pages = docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
       // A direct insert, so the same managed-model resolution as runCreation.create: model values in the pipeline
       // are dropped and only the project's explicit admin overrides apply.
@@ -352,10 +355,8 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
             ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${batch.mode}, ${doc.id})
         `;
       }
-      // A queued run must hold its own validated lease before another batch can pass.
-      if (!spendGuardsSkipped() && creditLeasesEnabled()) {
-        await requireRunCreditLease(tx, { runId, orgId: prepared.orgId, projectId: prepared.projectId });
-      }
+      return runPipeline;
+      }, { refusal: "throw" });
       result.runIds.push(runId);
       result.pipelines.set(runId, withRunEffective(runPipeline));
     }

@@ -17,8 +17,7 @@ import {
 
 import { currentChatTurn } from "../../lib/chat-turn-context.js";
 import { sql, type SqlClient } from "../../db.js";
-import { creditLeaseConfig, creditLeasesEnabled, grantRunCreditLease } from "./credit-leases.js";
-import { fleetSupportsNow, taskQueueForOrgKey } from "../worker-fleet.js";
+import { lockOrgAdmission } from "./admission-lock.js";
 
 /**
  * Spend admission (security gap G-08): the one check every model-calling path
@@ -320,7 +319,7 @@ async function spendDecision(
   const client = options.client as SqlClient;
   const [scope] = await client`select coalesce(${orgId ?? null}::text,
     (select org_id from projects where id = ${projectId ?? null})) as org_id`;
-  if (scope?.org_id) await client`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.org_id}))`;
+  if (scope?.org_id) await lockOrgAdmission(client, scope.org_id);
   const kind = options.kind ?? "job";
   const current = currentChatTurn();
   speedBoostMultiplier(options.speedBoost);
@@ -337,150 +336,11 @@ async function spendDecision(
       chatReserveCredits: status ? chatCreditReserve(status.funded, config) : 0 } } : null;
 }
 
-/** A queued run with mandatory leases must own usable credit in this transaction. */
-export async function requireRunCreditLease(
-  tx: TransactionSql,
-  run: { runId: string; orgId: string; projectId: string },
-): Promise<void> {
-  const grant = await grantRunCreditLease(tx, run);
-  if (!grant || grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
-    throw new SpendBlockedError("Run admission could not acquire a usable credit lease", "credit_exhausted");
-  }
-}
-
-/**
- * Run admission: serialise the org's admissions on an advisory lock, check
- * spend with the per-run reservation, and call `admit` (which must insert the
- * run with the same client) inside that transaction. Readmission callbacks run
- * first under the org and scoped run locks: they must throw for an ineligible
- * no-op and must never publish external signals. Refusal rolls their writes back.
- */
-export async function admitRunSpend<T>(
-  orgId: string,
-  projectId: string,
-  admit: (client: TransactionSql) => Promise<T>,
-  options: {
-    leaseRunId?: string; speedBoost?: boolean; readmission?: boolean;
-    /**
-     * Runs first in the admission transaction, right after the organization's admission lock is held and before any
-     * spend is read or reserved: re-validates the principal against rows it locks, so an authorization change that
-     * committed while this admission waited for the lock refuses it. Throwing rolls everything back.
-     */
-    authorize?: (client: TransactionSql) => Promise<void>;
-  } = {},
-): Promise<T> {
-  const multiplier = speedBoostMultiplier(options.speedBoost);
-  const guarded = !spendGuardsSkipped();
-  // Leases need every worker that may run the job to consume them
-  // (services/worker-fleet.ts). Admission is a request path, so it reads the
-  // cached fleet view; unknown keeps the per-run reservation, and the worker
-  // grants the lease at its first checkpoint.
-  const leases = guarded && creditLeasesEnabled()
-    && fleetSupportsNow("billing.credit-leases", taskQueueForOrgKey(orgId).taskQueue);
-  if (leases && multiplier > 1 && !options.leaseRunId?.trim()) {
-    throw new Error("Boosted run admission requires a lease run ID");
-  }
-  return (await sql.begin(async (tx) => {
-    if (guarded || options.readmission) {
-      await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
-    }
-    if (options.authorize) await options.authorize(tx);
-    // Verify the persisted tenant scope before allowing the transactional
-    // lifecycle callback to touch an existing run.
-    let admitted: T;
-    let ownReservation = 0;
-    if (options.readmission) {
-      const [existing] = await tx`
-        select pipeline from project_runs where id = ${options.leaseRunId ?? ""}
-          and org_id = ${orgId} and project_id = ${projectId} for update
-      `;
-      if (!existing) throw new SpendBlockedError("Run does not belong to this project", "plan_not_entitled");
-      if ((existing.pipeline?.speedBoost === true) !== (options.speedBoost === true)) {
-        throw new SpendBlockedError("Run mode cannot change during readmission", "plan_not_entitled");
-      }
-      // Eligibility and its writes are atomic with admission; a no-op throws
-      // before billing and a spend refusal rolls every write back.
-      admitted = await admit(tx);
-      const [reservation] = leases ? await tx`
-        select coalesce(sum(greatest(granted-consumed,0)),0) as amount from credit_leases
-        where holder_kind='run' and holder_id=${options.leaseRunId!}
-          and org_id=${orgId} and project_id=${projectId}
-          and status='active' and expires_at>now() and not credit_exempt
-      ` : await tx`
-        select case when pipeline->'speedBoost'='true'::jsonb
-          then greatest(0, ${runAdmissionReserveCredits()} * 4 - spent_cents)
-          else greatest(0, ${runAdmissionReserveCredits()} - (input_cost_cents+output_cost_cents)) end as amount
-        from project_runs where id=${options.leaseRunId!}
-          and org_id=${orgId} and project_id=${projectId} and status in ('queued','processing')
-          and coalesce(control_state, '') not in ('paused', 'cancelled', 'cancel_requested', 'dead-letter')
-      `;
-      ownReservation = Number(reservation?.amount ?? 0);
-    }
-    if (guarded) {
-      const status = await loadSpendStatus(orgId, projectId, {
-        client: tx, reusingRunId: options.readmission ? options.leaseRunId : undefined,
-        // Leases replace the per-run reservation: `reserved` holds them all.
-        runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
-      });
-      // Existing runs reserve their own immutable multiplier in SQL. Reserve the
-      // new boosted run before insertion; base admissions retain their prior rule.
-      const requiredReserve = multiplier > 1
-        ? (leases ? creditLeaseConfig().minCredits : runAdmissionReserveCredits()) * multiplier
-        : 0;
-      const checked = status ? {
-        ...status,
-        reserved: options.readmission
-          // Lease acquisition below validates the existing lease or funds a new
-          // one. Only this verified run's live reservation is reusable.
-          ? Math.max(0, status.reserved - ownReservation) + (leases ? 0 : requiredReserve)
-          : status.reserved + requiredReserve,
-      } : null;
-      const reason = spendBlockReason(checked);
-      if (reason) throw new SpendBlockedError(reason.message, reason.code, status?.autoTopUpOn === true, { spendKind: "job",
-        availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
-        chatReserveCredits: status ? chatCreditReserve(status.funded) : 0 });
-    }
-    if (!options.readmission) admitted = await admit(tx);
-    // Failure aborts this transaction, including the queued run and any partial
-    // lease writes. A worker checkpoint cannot repair unreserved admission.
-    if (leases && options.leaseRunId) {
-      await requireRunCreditLease(tx, { runId: options.leaseRunId, orgId, projectId });
-    }
-    return admitted!;
-  }).catch((error: unknown) => {
-    const code = (error as { code?: string }).code;
-    if (code === "P4021" || code === "P4022") throw new SpendBlockedError("Monthly budget capacity is reserved by pending work", code === "P4021" ? "org_budget_paused" : "project_budget_paused");
-    throw error;
-  })) as T;
-}
-
 /** Why a spend block should be shown to users: `credits`, `budget` or `policy`. */
 export function spendBlockJobReason(code: SpendBlockedCode): "credits" | "budget" | "policy" {
   if (code === "project_budget_paused" || code === "org_budget_paused") return "budget";
   if (code === "plan_not_entitled") return "policy";
   return "credits";
-}
-
-/**
- * Admission check for work created inside the caller's transaction (config-change jobs): takes the
- * org's admission lock and reports why the org may not spend, or null. Unlike `admitRunSpend` it never
- * throws, so the caller can still save its own change and insert the work as `blocked`.
- */
-export async function admissionBlock(
-  tx: TransactionSql,
-  orgId: string,
-  projectId: string,
-  options: { speedBoost?: boolean } = {},
-): Promise<{ code: SpendBlockedCode; message: string } | null> {
-  if (spendGuardsSkipped()) return null;
-  await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
-  const multiplier = speedBoostMultiplier(options.speedBoost);
-  const leases = creditLeasesEnabled();
-  const status = await loadSpendStatus(orgId, projectId, {
-    client: tx, runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
-  });
-  return spendBlockReason(status && multiplier > 1 ? { ...status, reserved: status.reserved
-    + (leases ? creditLeaseConfig().minCredits : runAdmissionReserveCredits()) * multiplier } : status);
 }
 
 /** JSON 402 body for a blocked spend, with billing links on hosted deployments. */
