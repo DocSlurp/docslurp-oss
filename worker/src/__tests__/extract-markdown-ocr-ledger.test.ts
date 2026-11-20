@@ -75,7 +75,7 @@ async function harness(args: {
   const internals = stage as any;
   const sourcePath = path.join(scratch, args.format === "image" ? "scan.png" : "scan.pdf");
   await writeFile(sourcePath, "bytes");
-  internals.sources = { get: async () => ({ path: sourcePath, sha256: "sha-doc-1" }) };
+  internals.sources = { acquire: async () => ({ path: sourcePath, release: async () => {}, sha256: "sha-doc-1" }) };
   internals.recordSourcePageFacts = async () => undefined;
   internals.buildParserArtifacts = async () => [];
   internals.recordPageImageEvidence = async () => null;

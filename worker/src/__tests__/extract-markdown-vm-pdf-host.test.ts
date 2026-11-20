@@ -89,7 +89,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   const internals = stage as any;
   const sourcePath = path.join(scratch, "scan.pdf");
   await writeFile(sourcePath, "%PDF-1.7 bytes");
-  internals.sources = { get: async () => ({ path: sourcePath, sha256: "sha-doc-1" }) };
+  internals.sources = { acquire: async () => ({ path: sourcePath, release: async () => {}, sha256: "sha-doc-1" }) };
   internals.enrichOfficeStructure = async ({ document }: { document: unknown }) => document;
   const document = {
     id: "doc-1", userId: "user-1", runId: "run-1", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "raw/scan",
