@@ -686,9 +686,11 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.checkpoint()?.status).toBe("completed");
       expect(h.jobs).toHaveLength(0);
       expect(h.richIds()).toEqual([]);
+      expect(h.checkpoint()?.stats).toMatchObject({ firstPassScanFillDeferred: true });
 
       resetFirstPassResultsForTest();
       h.state.firstPassShard = false;
+      h.state.firstPassExtractionDiffers = false;
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
       expect(h.jobs.map(job => job.pages)).toEqual([[2, 3]]);

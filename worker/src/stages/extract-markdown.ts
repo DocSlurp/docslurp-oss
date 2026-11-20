@@ -459,7 +459,8 @@ export class ExtractMarkdownStage implements Stage {
 
               try {
                 const contentHash = cachedSource.sha256;
-                const existingUri = checkDedup(state, contentHash, artifactSlot, document.id);
+                const deferScanFill = state.firstPassShard && firstPassDefersScanFill(state.run.id, document.id);
+                const existingUri = deferScanFill ? null : checkDedup(state, contentHash, artifactSlot, document.id);
                 if (existingUri) {
                   const inheritedFailures = state.artifactLedger.read(`${OCR_FAILED_PAGES_KEY}:${contentHash}`);
                   if (inheritedFailures) state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, inheritedFailures);
@@ -742,7 +743,6 @@ export class ExtractMarkdownStage implements Stage {
                   // text-layer extractors never OCR. The engine charges each page it reads.
                   const sourceLexical = new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? [])
                     .map((text, index) => [index + 1, winningCandidate.ocrPages?.includes(index + 1) ? null : ocrPageHasWords(text)] as const));
-                  const deferScanFill = state.firstPassShard && firstPassDefersScanFill(state.run.id, document.id);
                   const scanFill = isPdf && qualityAllowsPageReading(pageQuality) && !skipOcr && !deferScanFill
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash,
                       ...(ladderPolicy.ladder.active ? { ladderBudget: ladderPolicy.aboveFastBudget } : {}) }, signal)
@@ -1039,7 +1039,7 @@ export class ExtractMarkdownStage implements Stage {
                     format, isPdf, winningText, candidate: winningCandidate, sourcePath: tempFile,
                     sandboxedRoute: hostPdfProbes === "skipped-sandboxed-route",
                   }, signal);
-                  registerHash(state, contentHash, artifactUri, document.id);
+                  if (!deferScanFill) registerHash(state, contentHash, artifactUri, document.id);
 
                   for (const parserArtifact of parserArtifacts) {
                     state.artifactLedger.recordDocument(

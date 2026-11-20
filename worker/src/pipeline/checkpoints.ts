@@ -269,7 +269,10 @@ export function firstPassCheckpointStale(
   if (state.firstPassShard) return false;
   const stamp = (checkpoint.stats as Record<string, unknown> | undefined)?.[FIRST_PASS_CHECKPOINT] as { markdown?: unknown } | undefined;
   if (!stamp || typeof stamp !== "object") return false;
-  if (stageName === "extract-markdown") return state.firstPassExtractionDiffers === true;
+  if (stageName === "extract-markdown") {
+    return state.firstPassExtractionDiffers === true ||
+      (checkpoint.stats as { firstPassScanFillDeferred?: unknown }).firstPassScanFillDeferred === true;
+  }
   if (!FIRST_PASS_CONTENT_STAGES.has(stageName)) return false;
   // extract-markdown ran again in the loop: stale when its Markdown differs from what this stage read (or is unknown).
   const extracted = (state.documentStage(documentId, "extract-markdown")?.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null;

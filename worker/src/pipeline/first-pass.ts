@@ -653,7 +653,7 @@ export async function primeFirstPassResults(state: WorkflowState, storage: Pick<
     for (const k of primed) results.delete(k);
     for (const dir of dirs) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   };
-  if (!state.firstPassRun || state.firstPassShard || !state.firstPassExtractionDiffers) return release;
+  if (!state.firstPassRun || state.firstPassShard) return release;
   try {
     for (const document of state.documents) {
       if (signal?.aborted) break;
