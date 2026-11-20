@@ -56,7 +56,7 @@ import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { documentParseSource } from "../db/document-records.js";
 import { isUnscannedParseSourceKey } from "../lib/parse-source.js";
 import { SourceRefusalError, stageSourceFile } from "../sandbox/source-integrity.js";
-import { spendBlockCode, spendCheckConfig } from "../db/spend-check.js";
+import { orgSpendRefusal } from "../db/spend-check.js";
 import {
   DopplerFigureRejection, disposeDopplerFigureSet, dopplerFolderKey, downloadDopplerImagesDir, readDopplerFigureDir, storeDopplerFigureIndex,
   storeDopplerFigures, storeDopplerFolderManifests, type DopplerFigureSet, type DopplerFigureStorage, type DopplerFolderReader,
@@ -215,9 +215,7 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
       const spent = resumeBudgetBlock(row, env);
       if (spent) { await block(tx as unknown as Client, row, spent, budgetDetail(row, env)); continue; }
       // A resume adds billable stored bytes: never for an organization that may not spend now (re-queued later).
-      const [spend] = await tx<Array<{ funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }>>`
-        select funded, available, project_budget_paused, org_budget_paused, project_in_org from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
-      if (spendCheckConfig().enabled && spendBlockCode(spend ? { ...spend, org_id: row.org_id } : spend)) {
+      if (await orgSpendRefusal(tx as unknown as Client, { orgId: row.org_id, projectId: row.project_id })) {
         await tx`update document_extraction_levels set resume_after = now() + interval '1 hour' where document_id = ${row.document_id} and org_id = ${row.org_id}`;
         console.log(`[doppler-figures] resume deferred doc=${row.document_id} reason=spend-paused`);
         recordFigureTelemetry("resume.deferred", 1, { reason: "spend-paused" });

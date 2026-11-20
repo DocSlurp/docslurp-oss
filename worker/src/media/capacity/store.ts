@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import { isBillingExemptOrg } from "@docslurp/shared";
-import { jobCreditReserve } from "../../db/chat-reserve.js";
+import { lockOrgAdmission, runSpendHeadroom } from "../../db/spend-check.js";
 import { WorkflowState } from "../../pipeline/pipeline.js";
 import type { ProjectRun } from "../../models.js";
 import { debitRunUsageCredits, persistRunUsageEvents } from "../../db/usage-event-store.js";
@@ -28,12 +27,10 @@ export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
         coalesce(sum(reserved_usd) filter (where created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC' or status <> 'deleted'), 0) as reserved
         from remote_capacity_leases`;
       if (usage.active >= args.maxConcurrent || Number(usage.reserved) + reserved > args.budgetUsd) throw new Error("Capacity fleet budget or concurrency exhausted");
-      await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${args.scope.orgId}))`;
+      await lockOrgAdmission(tx as unknown as Sql<Record<string, unknown>>, args.scope.orgId);
       // Credit leases other runs hold (migration 0052) are spoken for, and the
       // chat reserve (0053) is not for jobs.
-      const [status] = await tx<{ funded: boolean | null; available: number; leased: number; project_in_org: boolean; org_budget_paused: boolean; project_budget_paused: boolean }[]>`
-        select s.*, org_outstanding_credit_leases(${args.scope.orgId}, 'run', ${args.scope.runId}) as leased
-        from org_spend_status(${args.scope.orgId}, ${args.scope.projectId}, 0) s`;
+      const spend = await runSpendHeadroom(tx as unknown as Sql<Record<string, unknown>>, args.scope);
       const [pending] = await tx<{ org_reserved: number; run_reserved: number }[]>`select
         coalesce(sum(cents) filter (where org = ${args.scope.orgId}), 0) as org_reserved,
         coalesce(sum(cents) filter (where run = ${args.scope.runId}), 0) as run_reserved from (
@@ -43,8 +40,7 @@ export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
           select org_id, run_id, case when usage_settled then greatest(reserve_cents-coalesce(charged_cost_cents,cost_cents,0),0) else greatest(reserve_cents,coalesce(charged_cost_cents,cost_cents,0)) end
             from remote_media_jobs where usage_settled = false or cost_state = 'disputed'
         ) reservations`;
-      if (!status?.project_in_org || status.org_budget_paused || status.project_budget_paused ||
-        (Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) < reserved * 100 + Number(pending.org_reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Capacity spend admission denied");
+      if (!spend.allowed || (spend.headroom < reserved * 100 + Number(pending.org_reserved) && !spend.exempt)) throw new Error("Capacity spend admission denied");
       const [run] = await tx<{ spent: number }[]>`select spent_cents as spent from project_runs
         where id = ${args.scope.runId} and org_id = ${args.scope.orgId} and project_id = ${args.scope.projectId}
         and coalesce(control_state, '') not in ('paused','pause_requested','cancelled','cancel_requested','dead-letter')`;

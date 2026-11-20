@@ -19,6 +19,7 @@ export * from "./quality.js";
 export * from "./auto-ladder.js";
 export * from "./credit-leases.js";
 export * from "./chat-reserve.js";
+export * from "./spend-rule.js";
 export * from "./rate-limits.js";
 // duplicate export removed (was listed twice in original)
 export * from "./extraction.js";

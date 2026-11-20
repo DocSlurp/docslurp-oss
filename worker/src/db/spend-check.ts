@@ -1,10 +1,10 @@
 import { Context } from "@temporalio/activity";
 import type { Sql } from "postgres";
 
-import { isBillingExemptOrg } from "@docslurp/shared";
+import { isBillingExemptOrg, spendGuardsSkipped, spendRuleCode, type SpendRuleCode } from "@docslurp/shared";
 
 import { WORKFLOW_ID_PREFIX } from "../temporal/shared.js";
-import { jobCreditReserve } from "./chat-reserve.js";
+import { chatReserveConfig, jobCreditReserve } from "./chat-reserve.js";
 import { RUN_EVENTS_CHANNEL } from "./run-event-store.js";
 
 /**
@@ -56,9 +56,8 @@ export interface SpendCheckConfig {
 }
 
 export function resolveSpendCheckConfig(env: NodeJS.ProcessEnv = process.env): SpendCheckConfig {
-  const devSkip = env.NODE_ENV === "development" && env.SKIP_RUN_BUDGET_GUARDS_IN_DEV !== "false";
   return {
-    enabled: !devSkip && env.WORKER_SPEND_CHECK !== "off",
+    enabled: !spendGuardsSkipped(env) && env.WORKER_SPEND_CHECK !== "off",
     pages: readNumberEnv("WORKER_SPEND_CHECK_PAGES", 25, env),
     credits: readNumberEnv("WORKER_SPEND_CHECK_CREDITS", 10, env),
   };
@@ -132,26 +131,76 @@ const BLOCK_MESSAGES: Record<string, string> = {
   plan_not_entitled: "Paused: this project has no billing organization.",
 };
 
-/**
- * The block code for a status row, mirroring app billing/spend-guard.ts
- * spendBlockReason (kind "job", minus reservations), except that work already
- * running is measured against the running-job floor (negative) instead of the
- * chat reserve that admission uses.
- */
-export function spendBlockCode(row: {
-  org_id?: string | null;
-  funded?: boolean | null;
-  available: number | string;
+/** One `org_spend_status()` row, as the worker reads it. */
+export interface OrgSpendRow {
+  funded: boolean | null;
+  available: string | number;
   project_budget_paused: boolean;
   org_budget_paused: boolean;
   project_in_org: boolean;
-} | undefined): string | null {
-  if (!row || !row.project_in_org) return "plan_not_entitled";
-  if (row.project_budget_paused) return "project_budget_paused";
-  if (row.org_budget_paused) return "org_budget_paused";
-  // House orgs (BILLING_EXEMPT_ORG_IDS) are metered but never credit-gated.
-  const reserve = row.funded === undefined ? 0 : jobCreditReserve(row.funded);
-  return Number(row.available) < reserve && !isBillingExemptOrg(row.org_id) ? "credit_exhausted" : null;
+}
+
+/**
+ * The block code for a status row: the shared spend rule (`spendRuleCode`, packages/shared/src/spend-rule.ts) for
+ * work that is already running, measured against the running-job floor (negative) instead of the chat reserve that
+ * admission uses, and without other runs' reservations.
+ */
+export function spendBlockCode(row: (Omit<OrgSpendRow, "funded"> & { org_id?: string | null; funded?: boolean | null }) | undefined): SpendRuleCode | null {
+  return spendRuleCode(row && {
+    orgId: row.org_id,
+    funded: row.funded,
+    available: Number(row.available),
+    projectInOrg: row.project_in_org,
+    projectBudgetPaused: row.project_budget_paused,
+    orgBudgetPaused: row.org_budget_paused,
+  }, "running", chatReserveConfig());
+}
+
+/**
+ * The organization's spend-admission lock, held to the end of the transaction: the same lock the API's run admission
+ * takes, so worker-side admissions (media jobs, capacity leases, video) serialize with it. The only place the worker
+ * names the lock key (spend-owners.test.ts).
+ */
+export async function lockOrgAdmission(tx: Client, orgId: string): Promise<void> {
+  await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
+}
+
+/** Reads the organization's spend status for a project. The only place the worker reads `org_spend_status()`. */
+async function readOrgSpend(client: Client, scope: { orgId: string; projectId?: string | null }): Promise<OrgSpendRow | undefined> {
+  const [row] = await client<OrgSpendRow[]>`
+    select funded, available, project_budget_paused, org_budget_paused, project_in_org
+    from org_spend_status(${scope.orgId}, ${scope.projectId ?? null}::text, 0)
+  `;
+  return row;
+}
+
+/**
+ * Why the organization may not spend on running work for a project right now, or null when it may. Ungated and
+ * read-only: callers that honour the spend-check switch use `orgSpendRefusal`. A failed read throws.
+ */
+export async function orgSpendBlock(client: Client, scope: { orgId: string; projectId?: string | null }): Promise<SpendRuleCode | null> {
+  const row = await readOrgSpend(client, scope);
+  return spendBlockCode(row ? { ...row, org_id: scope.orgId } : row);
+}
+
+/**
+ * What a run may still reserve for paid side work (a media job, a capacity lease), read under the admission lock the
+ * caller holds. `allowed` is entitlement and budgets; `headroom` is available credits minus the leases other runs
+ * hold (this run's own lease is what its spend draws from) minus the running-job floor. A billing-exempt
+ * organization is never refused for credits (`exempt`).
+ */
+export async function runSpendHeadroom(
+  client: Client,
+  scope: { orgId: string; projectId: string; runId: string },
+): Promise<{ allowed: boolean; headroom: number; exempt: boolean }> {
+  const [status] = await client<{ funded: boolean | null; available: number; leased: number; project_in_org: boolean; org_budget_paused: boolean; project_budget_paused: boolean }[]>`
+    select s.*, org_outstanding_credit_leases(${scope.orgId}, 'run', ${scope.runId}) as leased
+    from org_spend_status(${scope.orgId}, ${scope.projectId}, 0) s`;
+  return {
+    allowed: Boolean(status?.project_in_org) && !status!.org_budget_paused && !status!.project_budget_paused,
+    headroom: status ? Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) : 0,
+    exempt: isBillingExemptOrg(scope.orgId),
+  };
 }
 
 /**
@@ -162,16 +211,7 @@ export function spendBlockCode(row: {
 export async function orgSpendRefusal(client: Client, scope: { orgId: string | null; projectId?: string | null }): Promise<string | null> {
   if (!spendCheckConfig().enabled) return null;
   if (!scope.orgId) return "plan_not_entitled";
-  const [row] = await client<{
-    funded: boolean | null;
-    available: string | number;
-    project_budget_paused: boolean;
-    org_budget_paused: boolean;
-    project_in_org: boolean;
-  }[]>`
-    select funded, available, project_budget_paused, org_budget_paused, project_in_org
-    from org_spend_status(${scope.orgId}, ${scope.projectId ?? null}::text, 0)
-  `;
+  const row = await readOrgSpend(client, { orgId: scope.orgId, projectId: scope.projectId });
   return spendBlockCode(row ? { ...row, org_id: scope.orgId } : row);
 }
 
@@ -188,16 +228,7 @@ export async function enforceRunSpend(
 ): Promise<SpendCheckResult> {
   if (!spendCheckConfig().enabled || !run.orgId) return { blocked: false, paused: false };
   try {
-    const [row] = await client<{
-      funded: boolean | null;
-      available: string | number;
-      project_budget_paused: boolean;
-      org_budget_paused: boolean;
-      project_in_org: boolean;
-    }[]>`
-      select funded, available, project_budget_paused, org_budget_paused, project_in_org
-      from org_spend_status(${run.orgId}, ${run.projectId ?? null}::text, 0)
-    `;
+    const row = await readOrgSpend(client, { orgId: run.orgId, projectId: run.projectId });
     const reason = spendBlockCode(row ? { ...row, org_id: run.orgId } : row);
     if (!reason) return { blocked: false, paused: false };
     return await pauseRunForSpend(client, run, reason, trigger, Number(row?.available ?? 0));
@@ -238,16 +269,7 @@ export async function enforceRunSpendForCharge(
   if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to check a ${credits.toFixed(2)}-credit charge against`);
   let result: SpendCheckResult;
   try {
-    const [row] = await client<{
-      funded: boolean | null;
-      available: string | number;
-      project_budget_paused: boolean;
-      org_budget_paused: boolean;
-      project_in_org: boolean;
-    }[]>`
-      select funded, available, project_budget_paused, org_budget_paused, project_in_org
-      from org_spend_status(${run.orgId}, ${run.projectId ?? null}::text, 0)
-    `;
+    const row = await readOrgSpend(client, { orgId: run.orgId, projectId: run.projectId });
     const available = Number(row?.available ?? 0) - credits;
     const reason = spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row);
     if (!reason) return { blocked: false, paused: false };
@@ -277,12 +299,9 @@ export async function largestFundedCharge(
 ): Promise<number> {
   if (!spendCheckConfig().enabled) return max;
   if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to size a charge against`);
-  let row: { funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean } | undefined;
+  let row: OrgSpendRow | undefined;
   try {
-    [row] = await client<NonNullable<typeof row>[]>`
-      select funded, available, project_budget_paused, org_budget_paused, project_in_org
-      from org_spend_status(${run.orgId}, ${run.projectId ?? null}::text, 0)
-    `;
+    row = await readOrgSpend(client, { orgId: run.orgId, projectId: run.projectId });
   } catch (error) {
     pushSpendCheckFailure(run, "check-failed");
     throw new SpendCheckUnavailableError("balance read for sizing a charge failed", { cause: error });

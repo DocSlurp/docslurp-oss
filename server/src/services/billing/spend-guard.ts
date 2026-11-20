@@ -12,6 +12,8 @@ import {
   chatCreditReserve,
   isBillingExemptOrg,
   resolveChatCreditReserveConfig,
+  spendGuardsSkipped,
+  spendRuleCode,
   type ChatCreditReserveConfig,
 } from "@docslurp/shared";
 
@@ -113,10 +115,8 @@ export function runAdmissionReserveCredits(): number {
   return readNumberEnv("RUN_ADMISSION_RESERVE_CREDITS", 1);
 }
 
-/** Local development skips spend guards unless SKIP_RUN_BUDGET_GUARDS_IN_DEV=false. */
-export function spendGuardsSkipped(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.NODE_ENV === "development" && env.SKIP_RUN_BUDGET_GUARDS_IN_DEV !== "false";
-}
+/** Local development skips spend guards unless SKIP_RUN_BUDGET_GUARDS_IN_DEV=false (the shared switch). */
+export { spendGuardsSkipped };
 
 export async function loadSpendStatus(
   orgId: string | null | undefined,
@@ -170,43 +170,42 @@ export async function loadSpendStatus(
   };
 }
 
-/** Why `status` may not spend, or null when it may. */
+/**
+ * Why `status` may not spend, or null when it may. The decision is the shared spend rule (`spendRuleCode`,
+ * packages/shared/src/spend-rule.ts), which the worker's checks on running work use too; this adds the message.
+ */
 export function spendBlockReason(
   status: SpendStatus | null,
   kind: SpendKind = "job",
   config: ChatCreditReserveConfig = resolveChatCreditReserveConfig(),
 ): { code: SpendBlockedCode; message: string } | null {
+  const code = spendRuleCode(status, kind, config);
+  if (!code) return null;
   // Entitlement: a billing org that owns the project. Nothing else gates AI
   // features: starter orgs spend their starter credits like anyone else.
-  if (!status || !status.projectInOrg) {
-    return {
-      code: "plan_not_entitled",
-      message: "This project has no billing organization, so it cannot run AI processing.",
-    };
+  if (code === "plan_not_entitled" || !status) {
+    return { code: "plan_not_entitled", message: "This project has no billing organization, so it cannot run AI processing." };
   }
-  if (status.projectBudgetPaused) {
+  if (code === "project_budget_paused") {
     return {
-      code: "project_budget_paused",
+      code,
       message:
         "This project has reached its monthly budget cap and AI processing is paused. " +
         "Increase the budget in project settings to resume.",
     };
   }
-  if (status.orgBudgetPaused) {
+  if (code === "org_budget_paused") {
     return {
-      code: "org_budget_paused",
+      code,
       message:
         "This organization has reached its monthly budget cap and AI processing is paused. " +
         "Increase the org budget to resume.",
     };
   }
-  // House orgs (BILLING_EXEMPT_ORG_IDS) are metered but never credit-gated.
-  if (isBillingExemptOrg(status.orgId)) return null;
   if (kind === "interactive") {
     const overdraft = chatCreditOverdraft(status.funded, status.hasCreditGrants === true, config);
-    if (status.available - status.reserved > -overdraft) return null;
     return {
-      code: "credit_exhausted",
+      code,
       message:
         `Out of credits (balance: ${status.available.toFixed(2)}` +
         (overdraft > 0 ? `, chat may go ${overdraft.toFixed(2)} below zero` : "") +
@@ -214,10 +213,8 @@ export function spendBlockReason(
     };
   }
   const reserve = chatCreditReserve(status.funded, config);
-  const spendable = status.available - status.reserved - reserve;
-  if (spendable > 0) return null;
   return {
-    code: "credit_exhausted",
+    code,
     message:
       `Out of credits for processing (available: ${status.available.toFixed(2)}` +
       (status.reserved > 0 ? `, held by in-flight runs: ${status.reserved.toFixed(2)}` : "") +

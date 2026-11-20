@@ -1,3 +1,13 @@
+## The spend rule is decided in one place (2026-11-19)
+
+No behaviour change. The API decided "may this organization spend" in `spendBlockReason`, the worker in its own `spendBlockCode`, and four more worker files read `org_spend_status()` themselves; the dev skip was written three times.
+
+- `packages/shared/src/spend-rule.ts`: `spendRuleCode(status, kind)` is the one decision over an `org_spend_status()` row, for new work (`job`), chat and search (`interactive`) and work already running (`running`). `spendGuardsSkipped` is the one switch that turns it off (local development).
+- The API's `spendBlockReason` and the worker's `spendBlockCode` call it; the API adds the message.
+- `worker/src/db/spend-check.ts` is the only worker file that reads `org_spend_status()` or names the admission lock. Figure resumes, page renders, media jobs and capacity leases go through `orgSpendRefusal`, `orgSpendBlock`, `runSpendHeadroom` and `lockOrgAdmission`.
+- `spend-rule.test.ts` is the rule's table; `worker/src/__tests__/spend-owners.test.ts` fails on a second reader, a second lock site or a second copy of the switch.
+- Not folded in: the predicates that ask whether the deployment bills at all (`isBillingEnforced`, `isMeteringEnforced`, `isStorageBillingEnabled`, `isStripeConfigured`, `isSelfHostedDeployment`). They answer different questions and are keyed on the payment provider.
+
 ## Run admission is one module (2026-11-19)
 
 No behaviour change. Seven paths admitted a run, each sequencing the organization's admission lock, the spend decision and the run's first credit lease itself: run creation, retry, operator resume and recover, re-index batches, full-index batches, blocked runs, spend-paused runs and on-demand page runs.

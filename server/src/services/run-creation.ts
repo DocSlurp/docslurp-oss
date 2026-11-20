@@ -3,7 +3,7 @@ import { boundLockWaits, withLockRetry as retryOnLockConflict } from "../lib/loc
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { stampRunModelMode, chartExportModelsAllowed, clampRunLadder, qualityLevelOfPipeline, readStoredPipelineSettings, strictestStoredPipelineFeatures, stripLegacyVisionModel, stripManagedPipelineFields, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled } from "@docslurp/shared";
+import { stampRunModelMode, chartExportModelsAllowed, clampRunLadder, qualityLevelOfPipeline, readStoredPipelineSettings, strictestStoredPipelineFeatures, stripLegacyVisionModel, stripManagedPipelineFields, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type ResolvedChartExportConfig, type RunOrigin, switchDisabled, spendGuardsSkipped } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import { resolveRunExtraction } from "./extraction-settings.js";
 import {
@@ -200,9 +200,6 @@ function platformRunPipeline<T extends PipelineFeatures>(pipeline: T): T {
   // DOCSLURP_DISABLE=router (or `ai`) lowers the platform mode to off (switches only lower).
   return withPlatformPageRouterMode(pipeline, parsed.success && !switchDisabled(process.env, "router") ? parsed.data : "off");
 }
-
-const SKIP_RUN_BUDGET_GUARDS_IN_DEV =
-  process.env.SKIP_RUN_BUDGET_GUARDS_IN_DEV !== "false";
 
 /** A run blocked by spend admission (402); see billing/spend-guard.ts. */
 export class RunCreationBlockedError extends SpendBlockedError {
@@ -421,7 +418,7 @@ export async function enforceLiveBudgetCaps(
   projectId: string,
   orgId: string,
 ): Promise<void> {
-  if (process.env.NODE_ENV === "development" && SKIP_RUN_BUDGET_GUARDS_IN_DEV) return;
+  if (spendGuardsSkipped()) return;
   await defaultSql.begin(async tx => {
     await lockOrgAdmission(tx, orgId);
     const status = await loadSpendStatus(orgId, projectId, { client: tx });
