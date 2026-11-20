@@ -477,8 +477,8 @@ export function createActivities(deps: ActivityDependencies) {
     },
 
     /** Shards still pending for the stage the workflow is fanning out; the autoscaler reads it. */
-    async setRunShardDemand(input: { runId: string; shards: number }): Promise<void> {
-      await store.setRunShardDemand(input.runId, input.shards);
+    async setRunShardDemand(input: { runId: string; shards: number; executionGeneration?: string | null }): Promise<void> {
+      await store.setRunShardDemand(input.runId, input.shards, input.executionGeneration);
     },
 
     /**

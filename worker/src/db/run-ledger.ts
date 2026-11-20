@@ -1218,13 +1218,22 @@ export class PostgresRunLedger implements CheckpointStore {
   }
 
   /** Shards still pending for the run's current stage (the autoscaler turns them into machines). */
-  async setRunShardDemand(runId: string, shards: number): Promise<void> {
-    await this.sql`update project_runs set shard_demand = ${Math.max(0, Math.floor(shards))} where id = ${runId}`;
+  async setRunShardDemand(runId: string, shards: number, executionGeneration?: string | null): Promise<void> {
+    const demand = Math.max(0, Math.floor(shards));
+    if (executionGeneration === undefined) {
+      await this.sql`update project_runs set shard_demand = ${demand} where id = ${runId}`;
+      return;
+    }
+    await this.sql`
+      update project_runs set shard_demand = ${demand}
+      where id = ${runId} and status = 'processing'
+        and execution_generation is not distinct from ${executionGeneration}
+    `;
   }
 
-  /** A shard's final checkpoint, then one shard less of fleet demand. */
+  /** Checkpoint a shard and release its demand. First-pass batches own demand across multiple stages. */
   async finishShard(state: WorkflowState): Promise<void> {
-    await this.writeProgress(state, (client) => [
+    await this.writeProgress(state, state.firstPassShard ? undefined : (client) => [
       client`update project_runs set shard_demand = greatest(0, shard_demand - 1) where id = ${state.run.id}`,
     ]);
   }

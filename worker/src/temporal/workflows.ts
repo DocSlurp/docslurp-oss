@@ -343,10 +343,16 @@ export async function documentPipeline(
       const planned = plan.batches.reduce((sum, batch) => sum + batch.length, 0);
       let indexed = 0;
       let unfinished = 0;
+      const concurrency = Math.max(1, Math.min(plan.batches.length, input.firstPass!.maxParallelBatches));
+      const publishDemand = concurrency > 1 && patched("publish-first-pass-shard-demand-v1");
+      const setDemand = (shards: number) => scaling!.quick.setRunShardDemand({
+        runId: input.runId, shards, executionGeneration: input.executionGeneration ?? null,
+      });
+      if (publishDemand) await setDemand(concurrency);
       await runPageFanOut({
         beforeDispatch: admit,
         bundles: plan.batches.map((documentIds, batchIndex) => ({ documentIds, batchIndex })),
-        concurrency: Math.max(1, Math.min(plan.batches.length, input.firstPass!.maxParallelBatches)),
+        concurrency,
         run: async ({ documentIds, batchIndex }) => {
           try {
             const out = await scaling!.longRunning.runFirstPassBatch({
@@ -378,7 +384,11 @@ export async function documentPipeline(
         random: () => Math.random(),
         isPaused: () => paused,
         isCancelled: () => cancelled,
+      }).catch(async (error) => {
+        if (publishDemand) await CancellationScope.nonCancellable(() => setDemand(0).catch(() => {}));
+        throw error;
       });
+      if (publishDemand) await setDemand(0);
       if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
       // Finished only when every document of the run was in a batch and every one of them was indexed.
       return plan.coversRun === true && unfinished === 0 && indexed === planned;

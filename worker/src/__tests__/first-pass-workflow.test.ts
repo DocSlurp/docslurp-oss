@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ activities: {} as Record<string, any>, calls: [] as string[], cancel: undefined as undefined | (() => void) }));
+const mocks = vi.hoisted(() => ({ activities: {} as Record<string, any>, calls: [] as string[], publishDemand: false, cancel: undefined as undefined | (() => void) }));
 vi.mock("@temporalio/workflow", async () => ({
   ActivityFailure: (await import("@temporalio/common")).ActivityFailure,
   sleep: async () => {},
-  patched: () => false,
+  patched: (id: string) => id === "publish-first-pass-shard-demand-v1" && mocks.publishDemand,
   proxyActivities: () => new Proxy({}, { get: (_, key: string) => (...args: unknown[]) => { mocks.calls.push(key); return mocks.activities[key](...args); } }),
   defineQuery: (name: string) => name, defineSignal: (name: string) => name,
   CancellationScope: { nonCancellable: async (fn: () => Promise<unknown>) => fn() },
@@ -26,12 +26,14 @@ function stageNames() {
 
 beforeEach(() => {
   mocks.calls = [];
+  mocks.publishDemand = false;
   mocks.cancel = undefined;
   mocks.activities = {
     initPipelineRun: vi.fn(async () => ({ artifacts: {}, documentIds: ["a", "b", "c"] })),
     runPipelineStage: vi.fn(async () => ({ artifacts: {}, usage: zero })),
     completePipelineRun: vi.fn(async () => ({})),
     failPipelineRun: vi.fn(async () => {}),
+    setRunShardDemand: vi.fn(async () => {}),
     planFirstPass: vi.fn(async () => ({ batches: [["a"], ["b"], ["c"]], coversRun: true })),
     runPipelineStages: vi.fn(async ({ stageNames }: { stageNames: string[] }) => ({ artifacts: {}, usage: zero, stagesRun: stageNames.length })),
     runFirstPassBatch: vi.fn(async ({ documentIds }: { documentIds: string[] }) => ({ usage: { ...zero, costCents: 1 }, indexed: documentIds, extracted: [], handedBack: [], timings: {} })),
@@ -49,7 +51,8 @@ describe("first pass in the pipeline workflow", () => {
       return { usage: zero, indexed: documentIds, extracted: [], handedBack: [], timings: {} };
     });
     await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 2, afterFirstPass: "auto" } });
-    const order = mocks.calls.filter((c) => c !== "setRunShardDemand");
+    const order = mocks.calls;
+    expect(mocks.activities.setRunShardDemand).not.toHaveBeenCalled();
     expect(order.slice(0, 4)).toEqual(["initPipelineRun", "runPipelineStage", "runPipelineStage", "planFirstPass"]);
     expect(stageNames()).toEqual(["quarantine", "format-detect", "extract-markdown", "embed", "index"]);
     expect(mocks.activities.runFirstPassBatch).toHaveBeenCalledTimes(3);
@@ -58,6 +61,28 @@ describe("first pass in the pipeline workflow", () => {
     expect(order.at(-1)).toBe("completePipelineRun");
     // Format-detect and the following stages know the run recorded the first pass.
     expect(mocks.activities.runPipelineStage.mock.calls.every(([input]: [{ firstPass?: boolean }]) => input.firstPass === true)).toBe(true);
+  });
+
+  it("publishes the parallel batch limit and clears demand before continuing the stage loop", async () => {
+    mocks.publishDemand = true;
+    await documentPipeline({ runId: "run", executionGeneration: "gen", pipeline: {} as never, stageOrder: ORDER,
+      slotGate: true, firstPass: { maxParallelBatches: 2, afterFirstPass: "auto" } });
+    expect(mocks.activities.setRunShardDemand.mock.calls).toEqual([
+      [{ runId: "run", shards: 2, executionGeneration: "gen" }],
+      [{ runId: "run", shards: 0, executionGeneration: "gen" }],
+    ]);
+    const order = mocks.calls;
+    expect(order.slice(3, 10)).toEqual([
+      "planFirstPass", "setRunShardDemand", "runFirstPassBatch", "runFirstPassBatch", "runFirstPassBatch",
+      "setRunShardDemand", "runPipelineStage",
+    ]);
+  });
+
+  it("does not publish extra demand for a single lane", async () => {
+    mocks.publishDemand = true;
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true,
+      firstPass: { maxParallelBatches: 1, afterFirstPass: "none" } });
+    expect(mocks.activities.setRunShardDemand).not.toHaveBeenCalled();
   });
 
   it("a recorded stage group ends at format-detect so the first pass runs before extraction", async () => {
@@ -122,11 +147,17 @@ describe("first pass in the pipeline workflow", () => {
   it("a run-policy stop (credits) in a batch stops the run: no handback, no count, no stage loop", async () => {
     const { ApplicationFailure } = await import("@temporalio/common");
     const { FIRST_PASS_RUN_POLICY_FAILURE } = await import("../temporal/shared.js");
+    mocks.publishDemand = true;
     mocks.activities.runFirstPassBatch.mockImplementationOnce(async () => {
       throw ApplicationFailure.create({ type: FIRST_PASS_RUN_POLICY_FAILURE, message: "Credits do not cover the measured pages; run paused", nonRetryable: true });
     });
-    await expect(documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 1, afterFirstPass: "none" } }))
+    await expect(documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 2, afterFirstPass: "none" } }))
       .rejects.toThrow("Credits do not cover");
+    expect(mocks.activities.setRunShardDemand.mock.calls).toEqual([
+      [{ runId: "run", shards: 2, executionGeneration: null }],
+      [{ runId: "run", shards: 0, executionGeneration: null }],
+    ]);
+    expect(mocks.calls.indexOf("failPipelineRun")).toBeGreaterThan(mocks.calls.lastIndexOf("setRunShardDemand"));
     expect(mocks.activities.countFirstPassPages).not.toHaveBeenCalled();
     expect(stageNames()).toEqual(["quarantine", "format-detect"]);
     expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
