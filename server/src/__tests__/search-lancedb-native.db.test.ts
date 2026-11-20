@@ -471,10 +471,11 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
 
 it("retrieves a cited result from the primary index using a fallback query vector", async () => {
   const model = "BAAI/bge-m3";
-  const pipeline = normalizePipelineFeatures({ embedding: { modelUri: "llm://deepinfra/BAAI/bge-m3" } });
+  const settings = { embedding: { modelUri: "llm://deepinfra/BAAI/bge-m3" } };
+  const pipeline = normalizePipelineFeatures(settings);
   const hash = indexConfigHash(indexConfigOf(pipeline));
   const originalHash = indexConfigHash(indexConfigOf(normalizePipelineFeatures(null)));
-  await sql`update projects set pipeline=${sql.json(pipeline)} where id='w'`;
+  await sql`update projects set pipeline=${sql.json(settings)} where id='w'`;
   await sql`update documents set index_config_hash=${hash} where project_id='w'`;
   await sql`update vector_indexes set embedding_model=${model} where document_id in (select id from documents where project_id='w')`;
   vi.stubEnv("SEARCH_EMBEDDING_FAILOVER", "deepinfra-bge-m3-to-local");
