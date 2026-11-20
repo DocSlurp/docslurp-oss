@@ -5,7 +5,7 @@ import { recordUsageEvent } from "../lib/ai-usage.js";
 import type { SearchOptions } from "../services/search.js";
 import { embeddingCache } from "./embedding-cache.js";
 import { searchLanceDbNativeEnabled } from "./eligible-documents.js";
-import { METERED_EMBEDDING_PROVIDERS, queryEmbeddingApiKey, queryEmbeddingCacheKey } from "./session-planner.js";
+import { METERED_EMBEDDING_PROVIDERS, queryEmbeddingApiKey, queryEmbeddingCacheKey, queryEmbeddingPool } from "./session-planner.js";
 import { loadSearchProjectContext } from "./session-setup.js";
 import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
 import { effectiveSearchMode } from "./search-mode.js";
@@ -53,6 +53,7 @@ export async function prefetchBatchQueryEmbeddings(
       const context = await loadSearchProjectContext(projectId, userId, group[0]!.scope);
       const { pipeline } = context.indexing;
       const privacyMode = pipeline.privacyMode;
+      if (queryEmbeddingPool(pipeline.embedding, privacyMode).length) return;
       const orgId = context.scope.orgId;
       const cache = embeddingCache();
       const texts = new Map<string, string>();

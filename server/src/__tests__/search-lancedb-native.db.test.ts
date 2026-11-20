@@ -20,8 +20,10 @@ const TEST_SEARCH_SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null 
  * warm search includes one recipe read, one generation-compatibility summary and bounded hit checks; tables
  * without an FTS index fall back to Postgres FTS.
  */
+const embed = vi.hoisted(() => vi.fn());
 vi.mock("../lib/ai.js", async (original) => ({
   ...await original<typeof import("../lib/ai.js")>(),
+  embedConfiguredText: embed,
   resolveOpenRouterApiKey: () => undefined,
   generateOpenRouterText: () => { throw new Error("Unexpected inference"); },
 }));
@@ -61,8 +63,8 @@ const chunks: ChunkSeed[] = [];
  * but hold nulls); `evolved: false` is a table written before the hydration
  * columns existed.
  */
-async function writeLanceTable(options: { hydrated: boolean; fts: boolean; evolved?: boolean }): Promise<void> {
-  const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", "w", route.model, DIM);
+async function writeLanceTable(options: { hydrated: boolean; fts: boolean; evolved?: boolean; model?: string }): Promise<void> {
+  const location = VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", "w", options.model ?? route.model, DIM);
   const db = await lancedb.connect(location.uri);
   if ((await db.tableNames()).includes(location.table)) await db.dropTable(location.table);
   const rows = chunks.map((chunk) => ({
@@ -465,4 +467,30 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     }
   });
 
+});
+
+it("retrieves a cited result from the primary index using a fallback query vector", async () => {
+  const model = "BAAI/bge-m3";
+  const settings = { embedding: { modelUri: "llm://deepinfra/BAAI/bge-m3" } };
+  const pipeline = normalizePipelineFeatures(settings);
+  const hash = indexConfigHash(indexConfigOf(pipeline));
+  const originalHash = indexConfigHash(indexConfigOf(normalizePipelineFeatures(null)));
+  await sql`update projects set pipeline=${sql.json(settings)} where id='w'`;
+  await sql`update documents set index_config_hash=${hash} where project_id='w'`;
+  await sql`update vector_indexes set embedding_model=${model} where document_id in (select id from documents where project_id='w')`;
+  vi.stubEnv("SEARCH_EMBEDDING", "llm://deepinfra.com/BAAI/bge-m3,llm://transformers.js/Xenova/bge-m3?pooling=cls");
+  vi.stubEnv("DEEPINFRA_API_KEY", "");
+  try {
+    await writeLanceTable({ hydrated: true, fts: true, model });
+    embed.mockResolvedValueOnce({ embedding: near("doc3-5"), usage: { inputTokens: 1 } });
+    const response = await run(true, "qqqzzz", {});
+    expect(embed).toHaveBeenCalledWith(expect.objectContaining({ provider: "transformers.js", apiKey: undefined }));
+    expect(response.results[0]?.citation.documentId).toBe("doc3");
+  } finally {
+    vi.stubEnv("SEARCH_EMBEDDING", "");
+    embed.mockReset();
+    await sql`update vector_indexes set embedding_model=${route.model} where document_id in (select id from documents where project_id='w')`;
+    await sql`update documents set index_config_hash=${originalHash} where project_id='w'`;
+    await sql`update projects set pipeline=default where id='w'`;
+  }
 });
