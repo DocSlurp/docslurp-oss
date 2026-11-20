@@ -424,15 +424,27 @@ export function queryEmbeddingApiKey(route: { runtime: string; provider: string 
         : route.provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
 }
 
-export function queryEmbeddingFallback(embedding: EmbeddingConfig, privacyMode: PrivacyMode): EmbeddingConfig | null {
-  if (process.env.SEARCH_EMBEDDING_FAILOVER !== "deepinfra-bge-m3-to-local"
-    || privacyMode !== "standard"
-    || embedding.modelUri !== "llm://deepinfra/BAAI/bge-m3"
-    || embedding.dimensions !== undefined || embedding.normalize === false || embedding.lateChunking) return null;
-  return {
-    ...embedding, target: "local",
-    modelUri: "llm://transformers.js/Xenova/bge-m3?pooling=cls", normalize: true,
-  };
+const BGE_M3_ROUTES = new Map([
+  ["llm://openrouter.ai/baai/bge-m3", "llm://openrouter/baai/bge-m3"],
+  ["llm://deepinfra.com/BAAI/bge-m3", "llm://deepinfra/BAAI/bge-m3"],
+  ["llm://transformers.js/Xenova/bge-m3?pooling=cls", "llm://transformers.js/Xenova/bge-m3?pooling=cls"],
+]);
+
+export function queryEmbeddingPool(embedding: EmbeddingConfig, privacyMode: PrivacyMode): EmbeddingConfig[] {
+  const setting = process.env.SEARCH_EMBEDDING?.trim();
+  if (!setting || privacyMode !== "standard" || embedding.dimensions !== undefined
+    || embedding.normalize === false || embedding.lateChunking
+    || ![...BGE_M3_ROUTES.values()].includes(embedding.modelUri)) return [];
+
+  const routes = setting.split(",").map(uri => {
+    const modelUri = BGE_M3_ROUTES.get(uri.trim());
+    if (!modelUri) throw new Error("SEARCH_EMBEDDING contains an unsupported BGE-M3 route");
+    return modelUri;
+  });
+  return [...new Set(routes)].map(modelUri => ({
+    ...embedding, modelUri, normalize: true,
+    target: modelUri.startsWith("llm://transformers.js/") ? "local" : "hosted",
+  }));
 }
 
 export async function embedQuery(
@@ -440,35 +452,38 @@ export async function embedQuery(
   embedding: EmbeddingConfig,
   usage: SearchSessionJournal,
   privacyMode: PrivacyMode,
-  /** Strict-privacy audit attribution for private embedding routes. */
   auditProjectId?: string | null,
   orgId?: string,
 ): Promise<number[] | null> {
-  const fallback = queryEmbeddingFallback(embedding, privacyMode);
+  const pool = queryEmbeddingPool(embedding, privacyMode);
   const signal = currentSearchSignal();
   signal?.throwIfAborted();
-  const primaryTimeout = fallback ? AbortSignal.timeout(3_000) : undefined;
-  const primarySignal = primaryTimeout && signal ? AbortSignal.any([primaryTimeout, signal]) : primaryTimeout ?? signal;
-  const primary = resolveEmbeddingRoute(embedding);
-  let vector: number[] | null;
-  try {
-    vector = fallback && !queryEmbeddingApiKey(primary) ? null
-      : await embedQueryRoute(query, embedding, usage, privacyMode, auditProjectId, orgId, primarySignal);
-  } catch (error) {
+  if (!pool.length) return embedQueryRoute(query, embedding, usage, privacyMode, auditProjectId, orgId, signal);
+
+  let lastError: unknown;
+  for (const candidate of pool) {
     signal?.throwIfAborted();
-    const retryable = primaryTimeout?.aborted || (APICallError.isInstance(error)
-      && (error.statusCode === undefined || error.statusCode === 408 || error.statusCode === 429
-        || (error.statusCode >= 500 && error.statusCode <= 599)));
-    if (!fallback || !retryable) throw error;
-    vector = null;
+    const route = resolveEmbeddingRoute(candidate);
+    if (route.runtime === "remote" && !queryEmbeddingApiKey(route)) continue;
+    const timeout = route.runtime === "remote" ? AbortSignal.timeout(3_000) : undefined;
+    const attemptSignal = timeout && signal ? AbortSignal.any([timeout, signal]) : timeout ?? signal;
+    try {
+      const vector = await embedQueryRoute(query, candidate, usage, privacyMode, auditProjectId, orgId, attemptSignal, route.runtime === "local");
+      signal?.throwIfAborted();
+      if (vector) {
+        usage.recordDiagnostic("embeddingPool", { provider: route.provider });
+        return vector;
+      }
+    } catch (error) {
+      signal?.throwIfAborted();
+      const retryable = timeout?.aborted || (APICallError.isInstance(error)
+        && (error.statusCode === undefined || error.statusCode === 408 || error.statusCode === 429
+          || (error.statusCode >= 500 && error.statusCode <= 599)));
+      if (!retryable) throw error;
+      lastError = error;
+    }
   }
-  if (vector || !fallback) return vector;
-  signal?.throwIfAborted();
-  usage.recordDiagnostic("embeddingFailover", { from: "deepinfra", to: "transformers.js" });
-  const local = await embedQueryRoute(query, fallback, usage, privacyMode, auditProjectId, orgId, signal, true);
-  signal?.throwIfAborted();
-  if (!local) throw new Error("No query embedding available from the configured failover pool");
-  return local;
+  throw lastError ?? new Error("No query embedding available from SEARCH_EMBEDDING");
 }
 
 async function embedQueryRoute(

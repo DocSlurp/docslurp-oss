@@ -478,7 +478,7 @@ it("retrieves a cited result from the primary index using a fallback query vecto
   await sql`update projects set pipeline=${sql.json(settings)} where id='w'`;
   await sql`update documents set index_config_hash=${hash} where project_id='w'`;
   await sql`update vector_indexes set embedding_model=${model} where document_id in (select id from documents where project_id='w')`;
-  vi.stubEnv("SEARCH_EMBEDDING_FAILOVER", "deepinfra-bge-m3-to-local");
+  vi.stubEnv("SEARCH_EMBEDDING", "llm://deepinfra.com/BAAI/bge-m3,llm://transformers.js/Xenova/bge-m3?pooling=cls");
   vi.stubEnv("DEEPINFRA_API_KEY", "");
   try {
     await writeLanceTable({ hydrated: true, fts: true, model });
@@ -487,7 +487,7 @@ it("retrieves a cited result from the primary index using a fallback query vecto
     expect(embed).toHaveBeenCalledWith(expect.objectContaining({ provider: "transformers.js", apiKey: undefined }));
     expect(response.results[0]?.citation.documentId).toBe("doc3");
   } finally {
-    vi.stubEnv("SEARCH_EMBEDDING_FAILOVER", "");
+    vi.stubEnv("SEARCH_EMBEDDING", "");
     embed.mockReset();
     await sql`update vector_indexes set embedding_model=${route.model} where document_id in (select id from documents where project_id='w')`;
     await sql`update documents set index_config_hash=${originalHash} where project_id='w'`;

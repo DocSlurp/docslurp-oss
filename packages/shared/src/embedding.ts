@@ -324,6 +324,7 @@ const embeddingModelEntries = [
   ["llm://openrouter/perplexity/pplx-embed-v1-0.6b", "Perplexity Embed 0.6B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-0.6b", 1024, 128, false, ["hosted", "open-weights", "cost"]],
   ["llm://openrouter/perplexity/pplx-embed-v1-4b", "Perplexity Embed 4B (OpenRouter)", "hosted", "remote", "openrouter", "perplexity/pplx-embed-v1-4b", 2560, 128, false, ["hosted", "open-weights", "quality"]],
   ["llm://deepinfra/BAAI/bge-m3", "DeepInfra BGE-M3", "hosted", "remote", "deepinfra", "BAAI/bge-m3", 1024, 64, false, ["hosted", "multilingual", "quality"]],
+  ["llm://openrouter/baai/bge-m3", "OpenRouter BGE-M3", "hosted", "remote", "openrouter", "baai/bge-m3", 1024, 64, false, ["hosted", "multilingual", "quality"]],
   ["llm://openai/text-embedding-3-small", "OpenAI text-embedding-3-small", "hosted", "remote", "openai", "text-embedding-3-small", 1536, 64, true, ["hosted", "managed", "cost"]],
   ["llm://onnx/onnx-community/embeddinggemma-300m-ONNX", "EmbeddingGemma 300M ONNX", "local", "local", "onnx", "onnx-community/embeddinggemma-300m-ONNX", 768, 16, false, ["local", "onnx", "small"]],
   ["llm://huggingface/jinaai/jina-embeddings-v2-base-code", "Jina v2 Code", "local", "local", "huggingface", "jinaai/jina-embeddings-v2-base-code", 768, 16, false, ["local", "code"]],
@@ -358,6 +359,7 @@ export type EmbeddingPooling = z.infer<typeof embeddingPoolingSchema>;
 /** Pooling hosted providers apply (they ignore any pooling option): DeepInfra serves bge-m3 CLS-pooled. */
 const HOSTED_EMBEDDING_POOLING: Record<string, EmbeddingPooling> = {
   "llm://deepinfra/BAAI/bge-m3": "cls",
+  "llm://openrouter/baai/bge-m3": "cls",
 };
 
 /** The catalog key of an embedding route: the URI without its query (`?pooling=cls`). */
