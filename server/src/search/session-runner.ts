@@ -1,3 +1,7 @@
+import { raceAbort } from "../services/chat-turn-deadline.js";
+import { dedupeSearchHitsByFilename } from "../services/search-controls.js";
+import { distinctEvidence, preserveCompoundEvidence, splitCompoundQuestion, weakerSubquestion } from "./compound-followup.js";
+import { currentSearchSignal, withSearchSignal } from "./query-bounds.js";
 import { parseSelfQuerySyntax } from "./self-query.js";
 import { recordPipelineTelemetry } from "@docslurp/shared/observability";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
@@ -9,7 +13,7 @@ import {
   createEvidenceRetrievalAdapters,
   retrieveEvidence,
 } from "./retrieval-adapters.js";
-import { annotateEvidenceRelevance, embeddingPipelineId, resolveMinScore } from "./relevance.js";
+import { annotateEvidenceRelevance, applyRelevanceFloor, embeddingPipelineId, resolveMinScore } from "./relevance.js";
 import { scopeEvidenceKey, vectorScopeSignal, type ScopeSignal } from "./scope-relevance.js";
 import type { SearchSetup } from "./session-setup.js";
 import {
@@ -253,6 +257,15 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       const runTree = Boolean(treePlan?.run && adapters.summaryTreeSearch && adapters.parallelRetrieval);
       let scopeSignal: ScopeSignal | null = null;
       const strongEvidenceKeys = new Set<string>();
+      const compound = process.env.DOCSLURP_COMPOUND_FOLLOWUP === "on"
+        && effectiveOptions.searchMode !== "keyword"
+        && effectiveOptions.resultOrder !== "prompt"
+        && effectiveOptions.candidateDepth === undefined
+        && !effectiveOptions.useMmr
+        && !effectiveOptions.keywordQueries?.length
+        && !runTree
+        ? splitCompoundQuestion(retrievalQuery)
+        : null;
       const response = await executeSearchSessionRetrieval({
         query,
         retrievalQuery,
@@ -337,6 +350,41 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
           // Locator-ranked chunks go first so fusion keeps their stage label.
           return deferredResult && deferredResult.chunks.length > 0 ? [deferredResult.chunks, ...lists] : lists;
         },
+        ...(compound ? {
+          followUp: (baseline: SearchChunk[]) => timePhase("compoundFollowUp", async () => {
+            const filename = (hit: SearchChunk) => hit.filename || hit.documentId;
+            const dedupe = projectSettings?.dedupeByFilename;
+            const visible = dedupe ? dedupeSearchHitsByFilename(baseline, filename) : baseline;
+            if (visible.length < 2) return null;
+            const query = weakerSubquestion(compound, visible);
+            const requestSignal = currentSearchSignal();
+            const deadline = AbortSignal.timeout(150);
+            const signal = requestSignal ? AbortSignal.any([requestSignal, deadline]) : deadline;
+            requestSignal?.throwIfAborted();
+            try {
+              const hits = await raceAbort(withSearchSignal(signal, () => adapters.textSearch({
+                query, userId, options: { ...effectiveOptions, limit: 30 },
+              })), signal);
+              requestSignal?.throwIfAborted();
+              if (deadline.aborted) {
+                session.recordDiagnostic("compoundFollowUp", { outcome: "deadline" });
+                return null;
+              }
+              const [annotated = []] = annotateEvidenceRelevance([{ adapter: "lexical", chunks: hits }], { query });
+              const candidate = applyRelevanceFloor(annotated, resolveMinScore(effectiveOptions.minScore)).kept
+                .find((hit) => visible.every((existing) => distinctEvidence(existing, hit))
+                  && (!dedupe || dedupeSearchHitsByFilename([...visible, hit], filename).length === visible.length + 1));
+              const selected = candidate ? preserveCompoundEvidence(compound, visible, candidate) : null;
+              if (selected && candidate) strongEvidenceKeys.add(scopeEvidenceKey(candidate));
+              session.recordDiagnostic("compoundFollowUp", { outcome: selected ? "accepted" : candidate ? "refused" : "empty" });
+              return selected;
+            } catch {
+              requestSignal?.throwIfAborted();
+              session.recordDiagnostic("compoundFollowUp", { outcome: deadline.aborted ? "deadline" : "failed" });
+              return null;
+            }
+          }),
+        } : {}),
         buildAvailability: (chunks) =>
           adapters.buildAvailability(chunks, effectiveOptions),
         effectiveQuery,
