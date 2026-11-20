@@ -1,3 +1,10 @@
+## API background tasks start and stop from one list (2026-11-19)
+
+- `server/src/services/background-tasks.ts`: the API's timers, refreshers, pools and LISTEN subscriptions are one ordered list. What starts is exactly what stops; `server.ts` no longer keeps a start sequence in `ensureApiStartup` and a second, hand-kept stop list. A stop that fails is logged by task name and the rest still stop.
+- `registerApiBackgroundTask` (from `server.ts`) lets the embedding host add its own task before startup; registering after startup throws, because that task would never run.
+- `registerMaintenanceSweep` adds a host-owned sweep to every maintenance pass. The built-in sweeps are unchanged.
+- No task was added, removed or retimed. The only observable difference is the log line for a failed unsubscribe (`[webhook-outbox] stop failed: ...`, formerly `unlisten failed`).
+
 ## Activity feeds read active plus recently finished runs by index (2026-11-18)
 
 - Migration 0200: `project_runs.finished_at`, stamped by a trigger when a run reaches completed or failed (cleared if it becomes active again), so it changes once per finish, never on heartbeats; partial indexes `project_runs_project_finished_idx (project_id, finished_at)`, `project_runs_org_finished_idx (org_id, finished_at)` and `project_runs_org_blocked_idx (org_id, updated_at) WHERE blocked`. Runs finished in the last day are backfilled; older finished history no longer fills the realtime list (accepted). The migration holds ACCESS EXCLUSIVE on project_runs until commit (one migrator transaction): about as long as the index builds.
