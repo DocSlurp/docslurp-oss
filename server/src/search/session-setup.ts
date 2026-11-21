@@ -473,14 +473,14 @@ export async function loadSearchAvailability(args: {
       left join page_stage on page_stage.document_id = docs.id
     )
     select
-      count(distinct docs.id)::int as total_documents,
-      count(distinct docs.id) filter (where docs.fully_indexed)::int as indexed_documents,
-      count(distinct docs.id) filter (where docs.page_indexed)::int as page_indexed_documents,
-      count(distinct docs.id) filter (where docs.page_only)::int as page_only_documents,
-      count(distinct docs.id) filter (where docs.keyword_only)::int as keyword_only_documents,
+      count(distinct docs.id)::double precision as total_documents,
+      count(distinct docs.id) filter (where docs.fully_indexed)::double precision as indexed_documents,
+      count(distinct docs.id) filter (where docs.page_indexed)::double precision as page_indexed_documents,
+      count(distinct docs.id) filter (where docs.page_only)::double precision as page_only_documents,
+      count(distinct docs.id) filter (where docs.keyword_only)::double precision as keyword_only_documents,
       count(distinct docs.id) filter (
         where docs.fully_indexed or docs.keyword_only or docs.page_only
-      )::int as searchable_documents,
+      )::double precision as searchable_documents,
       count(distinct docs.id) filter (
         where coalesce(docs.status, '') not in ('completed', 'failed', 'cancelled')
           and (
@@ -490,7 +490,7 @@ export async function loadSearchAvailability(args: {
               and coalesce(docs.lease_expires_at, to_timestamp(0)) >= now()
             )
           )
-      )::int as in_progress_documents,
+      )::double precision as in_progress_documents,
       count(distinct docs.id) filter (
         where coalesce(docs.status, '') = 'failed'
           or docs.run_status = 'failed'
@@ -498,8 +498,8 @@ export async function loadSearchAvailability(args: {
             docs.run_status = 'processing'
             and coalesce(docs.lease_expires_at, to_timestamp(0)) < now()
           )
-      )::int as failed_documents,
-      coalesce(sum(docs.page_count), 0)::int as total_pages,
+      )::double precision as failed_documents,
+      coalesce(sum(docs.page_count), 0)::double precision as total_pages,
       -- Chunk-searchable documents cover every page; page-only ones the pages stored so far.
       coalesce(sum(
         case
@@ -507,8 +507,8 @@ export async function loadSearchAvailability(args: {
           when docs.page_only then docs.stored_pages
           else 0
         end
-      ), 0)::int as searchable_pages,
-      coalesce(sum(docs.chunk_count) filter (where docs.fully_indexed or docs.keyword_only), 0)::int as indexed_chunk_count,
+      ), 0)::double precision as searchable_pages,
+      coalesce(sum(docs.chunk_count) filter (where docs.fully_indexed or docs.keyword_only), 0)::double precision as indexed_chunk_count,
       (select count(*) from scoped_runs where status = 'queued')::int as queued_runs,
       (
         select count(*) from scoped_runs

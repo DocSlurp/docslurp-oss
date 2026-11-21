@@ -38,10 +38,10 @@ export type ProjectRunRow = {
   dead_lettered_at?: string | Date | null;
   dead_letter_reason?: string | null;
   stage: string;
-  total_documents: number;
-  processed_documents: number;
-  pages_total: number;
-  pages_processed: number;
+  total_documents: number | string;
+  processed_documents: number | string;
+  pages_total: number | string;
+  pages_processed: number | string;
   pipeline: PipelineFeatures;
   stats: Record<string, unknown> | null;
   artifacts: Record<string, string> | null;
@@ -148,10 +148,10 @@ export function mapProjectRun(row: ProjectRunRow, cost?: Pick<RunUsageCostSummar
     pauseReason: ["credit_exhausted", "project_budget_paused", "org_budget_paused", "plan_not_entitled"].includes(row.pause_reason ?? "") ? row.pause_reason : null,
     controlRequestedAt: serializeOptionalTimestamp(row.control_requested_at),
     stage: toPublicRunRowStage(row.stage, row.status, row.id),
-    totalDocuments: row.total_documents,
-    processedDocuments: row.processed_documents,
-    pagesTotal: row.pages_total,
-    pagesProcessed: row.pages_processed,
+    totalDocuments: Number(row.total_documents),
+    processedDocuments: Number(row.processed_documents),
+    pagesTotal: Number(row.pages_total),
+    pagesProcessed: Number(row.pages_processed),
     failedDocuments: failedDocumentsOf(jsonRecord(row.stats)),
     costCents: cost?.costCents ?? 0,
     computeEstimated: cost?.computeEstimated ?? false,

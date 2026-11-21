@@ -61,10 +61,10 @@ type ProjectRunRow = {
   kind: string;
   status: string;
   stage: string;
-  total_documents: number;
-  processed_documents: number;
-  pages_total: number;
-  pages_processed: number;
+  total_documents: number | string;
+  processed_documents: number | string;
+  pages_total: number | string;
+  pages_processed: number | string;
   spent_cents: number | string;
   pipeline: Partial<ProjectRun["pipeline"]> | null;
   stats: JsonMap | null;
@@ -730,7 +730,7 @@ export class PostgresRunLedger implements CheckpointStore {
           : spendCounterSql(
             client,
             state.run.id,
-            shard ? client`0` : client`greatest(0, ${state.run.pagesProcessed}::int - spend_prev.pages_processed)`,
+            shard ? client`0` : client`greatest(0, ${state.run.pagesProcessed}::bigint - spend_prev.pages_processed)`,
             batchCredits,
           );
         // A late activity may settle paid usage after another actor terminates
@@ -1926,10 +1926,10 @@ export class PostgresRunLedger implements CheckpointStore {
     // The first-pickup stamp also records the run's resolved models (same row, same once-only condition), so
     // recording them costs no extra statement.
     const models = extra?.resolvedModels && Object.keys(extra.resolvedModels).length > 0 ? extra.resolvedModels : null;
-    const [row] = await this.sql<{ seconds: number; pages: number }[]>`
+    const [row] = await this.sql<{ seconds: number; pages: string }[]>`
       update project_runs set ${column} = now()${models ? this.sql`, resolved_models = coalesce(resolved_models, ${this.sql.json(models as never)})` : this.sql``}
       where id = ${runId} and ${column} is null
-      returning extract(epoch from (now() - created_at))::float8 as seconds, coalesce(pages_total, 0)::int as pages
+      returning extract(epoch from (now() - created_at))::float8 as seconds, coalesce(pages_total, 0)::bigint as pages
     `;
     return row ? { seconds: Math.max(0, Number(row.seconds)), pages: Number(row.pages) } : null;
   }
@@ -2160,10 +2160,10 @@ function mapRun(row: ProjectRunRow): ProjectRun {
     kind: row.kind,
     status: row.status,
     stage: row.stage,
-    totalDocuments: row.total_documents,
-    processedDocuments: row.processed_documents,
-    pagesTotal: row.pages_total,
-    pagesProcessed: row.pages_processed,
+    totalDocuments: Number(row.total_documents),
+    processedDocuments: Number(row.processed_documents),
+    pagesTotal: Number(row.pages_total),
+    pagesProcessed: Number(row.pages_processed),
     spentCents: Number(row.spent_cents ?? 0) || 0,
     // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings, and so
     // does the operator's private model map (DOCSLURP_MODEL_MODE, DOCSLURP_PRIVATE_*_MODEL) where hosted models are not allowed.

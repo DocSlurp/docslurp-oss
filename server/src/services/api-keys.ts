@@ -352,7 +352,7 @@ export async function listApiKeys(userId: string): Promise<ApiKey[]> {
           and u.minute_bucket >= date_trunc('minute', now())
       ), 0) as requests_last_minute,
       coalesce((
-        select sum(u.page_count)::int
+        select sum(u.page_count)::double precision
         from api_key_usage u
         where u.key_id = k.id
           and u.minute_bucket >= date_trunc('day', now())
@@ -388,7 +388,7 @@ export async function listOrganizationApiKeys(orgId: string, userId: string): Pr
           and u.minute_bucket >= date_trunc('minute', now())
       ), 0) as requests_last_minute,
       coalesce((
-        select sum(u.page_count)::int
+        select sum(u.page_count)::double precision
         from api_key_usage u
         where u.key_id = k.id
           and u.minute_bucket >= date_trunc('day', now())

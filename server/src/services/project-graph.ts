@@ -64,8 +64,8 @@ type GraphJobRow = {
   documents_processed: number;
   documents_failed: number;
   windows_processed: number;
-  input_tokens: number;
-  output_tokens: number;
+  input_tokens: number | string;
+  output_tokens: number | string;
   cost_cents: string | number;
   error: string | null;
   cancel_requested_at: Date | null;
@@ -114,8 +114,8 @@ export function mapGraphJob(row: GraphJobRow, now = Date.now()): GraphJob {
     documentsProcessed: row.documents_processed,
     documentsFailed: row.documents_failed,
     windowsProcessed: row.windows_processed,
-    inputTokens: row.input_tokens,
-    outputTokens: row.output_tokens,
+    inputTokens: Number(row.input_tokens),
+    outputTokens: Number(row.output_tokens),
     costCents: Number(row.cost_cents),
     etaSeconds,
     error: graphJobPublicError(row.status, row.error),
@@ -157,8 +157,8 @@ async function requireProject(projectRef: string, userId: string, edit: boolean)
 /** Observed tokens and seconds per window for documents built with `configHash`. */
 async function calibrationFor(project: ProjectRecord, configHash: string): Promise<GraphBuildCalibration | null> {
   const [row] = await sql<{ windows: number; input: number; output: number; ms: number }[]>`
-    select coalesce(sum(windows), 0)::int as windows, coalesce(sum(input_tokens), 0)::int as input,
-      coalesce(sum(output_tokens), 0)::int as output, coalesce(sum(duration_ms), 0)::int as ms
+    select coalesce(sum(windows), 0)::double precision as windows, coalesce(sum(input_tokens), 0)::double precision as input,
+      coalesce(sum(output_tokens), 0)::double precision as output, coalesce(sum(duration_ms), 0)::double precision as ms
     from (
       select s.windows, s.input_tokens, s.output_tokens, s.duration_ms
       from kg_document_state s

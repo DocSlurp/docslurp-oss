@@ -97,7 +97,7 @@ type RunRow = {
   user_id: string;
   status: ProjectRun["status"];
   stage: ProjectRun["stage"];
-  total_documents: number;
+  total_documents: number | string;
   pipeline: PipelineFeatures;
   artifacts: Record<string, string> | null;
   updated_at: string | Date;
@@ -1294,7 +1294,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
         outputTokens: parseAggregateInt(runUsageRow?.output_tokens),
         costCents: runCost?.costCents ?? 0,
         computeEstimated: runCost?.computeEstimated ?? false,
-        totalDocuments: Math.max(1, run.total_documents),
+        totalDocuments: Math.max(1, Number(run.total_documents)),
         events: parseAggregateInt(runUsageRow?.events)
       }
     : null;
@@ -1924,7 +1924,7 @@ export async function getRealtimeViewerPayload(documentId: string, userId: strin
     where document_id=${documentId} and run_id=${row.run_id} order by stage_name limit 65` : [];
   if (stages.length > 64) throw new Error("snapshot_too_large");
   const [run] = row.run_id ? await sql<{
-    id: string; project_id: string; stage: string; status: string; updated_at: string; total_documents: number;
+    id: string; project_id: string; stage: string; status: string; updated_at: string; total_documents: number | string;
   }[]>`select id,project_id,stage,status,updated_at::text,total_documents from project_runs
     where id=${row.run_id} and project_id=${row.project_id} and org_id=${row.org_id}` : [];
   const [pages] = await sql<{ pages: number; chunks: number }[]>`select
@@ -1935,7 +1935,7 @@ export async function getRealtimeViewerPayload(documentId: string, userId: strin
   const runCost = run ? summarizeRunUsageCost((await runUsageCostTotals(run.id))[0]) : null;
   const fullRunUsage = run && runUsage && runCost ? {
     ...runUsage, costCents: runCost.costCents, computeEstimated: runCost.computeEstimated,
-    totalDocuments: Math.max(1,run.total_documents),
+    totalDocuments: Math.max(1, Number(run.total_documents)),
   } : null;
   const basis = documentUsage.events > 0 ? "document-events" : fullRunUsage ? "run-average" : "none";
   const estimatedDocument = basis === "document-events" ? {

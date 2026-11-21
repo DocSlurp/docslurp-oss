@@ -5,7 +5,7 @@ import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { remainingMaterializationForecast } from "./materialization-capacity.js";
 
 type ReadmissionRun = { id: string; kind: string; org_id: string; project_id: string; status: string;
-  pipeline: PipelineFeatures; stats: unknown; total_documents: number; pages_total: number };
+  pipeline: PipelineFeatures; stats: unknown; total_documents: number | string; pages_total: number | string };
 
 /** Organization before run: a reactivation must not invert admission's lock order. */
 export async function lockRunReadmission(tx: TransactionSql, runId: string): Promise<void> {

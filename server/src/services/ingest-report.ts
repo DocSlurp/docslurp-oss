@@ -1487,7 +1487,7 @@ export async function loadIngestReport(args: {
 
   const runIds = [...new Set(docRows.map((row) => row.run_id).filter((id): id is string => Boolean(id)))];
   const [runRows, cost] = await Promise.all([
-    runIds.length === 0 ? Promise.resolve([]) : client<{ id: string; status: string; pages_processed: number; duration_ms: string | number; caps_applied: unknown }[]>`
+    runIds.length === 0 ? Promise.resolve([]) : client<{ id: string; status: string; pages_processed: number | string; duration_ms: string | number; caps_applied: unknown }[]>`
       select r.id, r.status, greatest(r.pages_processed, 0) as pages_processed, r.pipeline -> 'effective' -> 'capsApplied' as caps_applied,
         greatest(extract(epoch from (r.updated_at - r.created_at)) * 1000, 0) as duration_ms
       from project_runs r

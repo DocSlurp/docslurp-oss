@@ -679,10 +679,10 @@ export async function loadProjectWholeCorpusContext(args: {
     const scope = retrievalScope({ projectId: access.projectId, filters: args.filters, runId: args.runId });
     const [summary] = await loadQuery(client => client<WholeCorpusSummaryRow[]>`
       select
-        count(distinct c.document_id)::int as document_count,
-        count(*)::int as chunk_count,
-        coalesce(sum(c.token_estimate), 0)::int as token_estimate,
-        coalesce(sum(length(c.text)), 0)::int as char_estimate
+        count(distinct c.document_id)::double precision as document_count,
+        count(*)::double precision as chunk_count,
+        coalesce(sum(c.token_estimate), 0)::double precision as token_estimate,
+        coalesce(sum(length(c.text)), 0)::double precision as char_estimate
       from document_chunks c
       join documents d on d.id = c.document_id
       where d.project_id = ${access.projectId}
@@ -704,8 +704,8 @@ export async function loadProjectWholeCorpusContext(args: {
       const [pageSummary] = await loadQuery(client => client<
         { page_count: number; char_estimate: number }[]
       >`
-        select count(*)::int as page_count,
-               coalesce(sum(length(p.text)), 0)::int as char_estimate
+        select count(*)::double precision as page_count,
+               coalesce(sum(length(p.text)), 0)::double precision as char_estimate
         from document_pages p
         join documents d on d.id = p.document_id
         where d.project_id = ${access.projectId}

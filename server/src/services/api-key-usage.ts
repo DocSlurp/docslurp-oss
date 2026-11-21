@@ -87,8 +87,8 @@ export async function apiKeyPagesToday(keyId: string, now = Date.now()): Promise
     if (cached.pending) return await cached.pending;
   }
 
-  const pending = sql<{ page_count: number }[]>`
-    select coalesce(sum(page_count), 0)::int as page_count
+  const pending = sql<{ page_count: string }[]>`
+    select coalesce(sum(page_count), 0)::bigint as page_count
     from api_key_usage
     where key_id = ${keyId} and minute_bucket >= ${dayStart}`
     .then(([row]) => Number(row?.page_count ?? 0));

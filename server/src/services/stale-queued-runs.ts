@@ -24,7 +24,7 @@ type StaleQueuedRunRow = {
   user_id: string;
   pipeline: PipelineFeatures | null;
   stage: string;
-  total_documents: number;
+  total_documents: number | string;
   created_at: string | Date;
   updated_at: string | Date;
   stats: Record<string, unknown> | null;
