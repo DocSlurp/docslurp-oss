@@ -31,6 +31,7 @@ if command -v apk >/dev/null 2>&1; then
 elif command -v apt-get >/dev/null 2>&1; then
   # No system OCR engine and no ocrmypdf (it depends on one); see docs/extraction/ocr.md.
   apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     bash \
     bubblewrap \

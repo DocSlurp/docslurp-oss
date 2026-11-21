@@ -6,8 +6,11 @@
 # Same pinned base image as worker/Dockerfile.lean, so bundles target the exact
 # python3 + glibc the worker runs. The base venv is rebuilt here with the same
 # script and lock so the bundle can drop packages the image already ships.
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS bundle-build
-RUN apt-get update \
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS bundle-build
+COPY scripts/configure-debian-build-snapshot.sh /tmp/configure-debian-build-snapshot.sh
+RUN sh /tmp/configure-debian-build-snapshot.sh && rm /tmp/configure-debian-build-snapshot.sh \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates pandoc python3 python3-venv zstd \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
