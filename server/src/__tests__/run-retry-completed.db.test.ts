@@ -59,7 +59,7 @@ describe("retrying a completed Run", () => {
     expect(run!.execution_generation).toEqual(expect.any(String));
     expect(run!.execution_generation).not.toBe(before!.execution_generation);
     expect(startWorkflow).toHaveBeenCalledWith("run-c", pipeline, { restartExisting: true, executionGeneration: run!.execution_generation });
-    expect(run).toMatchObject({ status: "queued", stage: "queued", processed_documents: 2, stats: { keep: true } });
+    expect(run).toMatchObject({ status: "queued", stage: "queued", processed_documents: "2", stats: { keep: true } });
     expect(run!.stats).not.toHaveProperty("failedDocuments");
     expect(await client`select id, status from documents where run_id = 'run-c' order by id`).toEqual([
       { id: "a", status: "completed" }, { id: "b", status: "completed" }, { id: "x", status: "queued" },

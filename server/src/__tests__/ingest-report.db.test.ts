@@ -220,8 +220,8 @@ describe("ingest report on a migrated database", () => {
     const versions = await sql<{ filename: string; file_size: number; page_count: number }[]>`
       select filename, file_size::int as file_size, page_count from documents where run_id = ${result.runs[0]!.id} order by filename`;
     expect(versions).toEqual([{ filename: "mixed.pdf", file_size: 900000, page_count: 4 }, { filename: "scan.pdf", file_size: 2000000, page_count: 2 }]);
-    const [{ pages_total }] = await sql<{ pages_total: number }[]>`select pages_total from project_runs where id = ${result.runs[0]!.id}`;
-    expect(pages_total).toBe(6);
+    const [{ pages_total }] = await sql<{ pages_total: string }[]>`select pages_total from project_runs where id = ${result.runs[0]!.id}`;
+    expect(pages_total).toBe("6");
   });
 
   it("recomputes the report the action came from (document scope)", async () => {
