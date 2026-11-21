@@ -408,13 +408,17 @@ export class PdfRasterCache {
     if (name !== "native-pdf" || !engine) return null;
     const dpi = clampDpi(args.dpi);
     try {
-      const source = await this.sources.get(args.document);
-      const clip = await renderClipNative(engine, source.path, args.pageNumber, args.clip, {
-        dpi,
-        maxEdgePx: args.maxEdgePx,
-        signal: args.signal,
-      });
-      return { bytes: clip.bytes, widthPx: clip.widthPx, heightPx: clip.heightPx, mimeType: clip.mimeType, engine: name, dpi };
+      const source = await this.sources.acquire(args.document);
+      try {
+        const clip = await renderClipNative(engine, source.path, args.pageNumber, args.clip, {
+          dpi,
+          maxEdgePx: args.maxEdgePx,
+          signal: args.signal,
+        });
+        return { bytes: clip.bytes, widthPx: clip.widthPx, heightPx: clip.heightPx, mimeType: clip.mimeType, engine: name, dpi };
+      } finally {
+        await source.release();
+      }
     } catch (error) {
       if (args.signal?.aborted) throw error;
       logNativePdfFallback(`raster-clip page=${args.pageNumber}`, error, "full-page render and crop");
@@ -609,134 +613,138 @@ export class PdfRasterCache {
     // recorded and authorized (recordRenderedPageAreas) before the page's bytes are cached, so a cache hit was authorized.
 
     if (missing.length > 0) {
-      const source = await this.sources.get(args.document);
-      if (!isPdf) {
-        const bytes = await readFile(source.path);
-        await this.storage.putBytes(keys.get(1)!, bytes, outputMimeType);
-        generated.set(1, { sizeBytes: bytes.byteLength, widthPx: null, heightPx: null });
-      }
-      let nativeDone = false;
-      if (isPdf && resolved.engine) {
-        let rendered: Awaited<ReturnType<typeof renderPagesNative>> | null = null;
-        try {
-          rendered = await renderPagesNative(resolved.engine, source.path, missing, {
-            dpi,
-            ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
-            concurrency: this.options.concurrency,
-            signal: args.signal,
-          });
-        } catch (error) {
-          if (args.signal?.aborted) throw error;
-          logNativePdfFallback("raster-render", error, "pdftoppm");
-        }
-        if (rendered && missing.every((pageNumber) => rendered.has(pageNumber))) {
-          const areas: PageEquivalentRow[] = [];
-          for (const [pageNumber, page] of rendered) {
-            // Billed from the page's point size, as the pdftoppm path is: a DPI lowered by the pixel bounds or a long-edge
-            // cap changes the pixels, never the page.
-            if (page.widthPt && page.heightPt) areas.push({ pageNumber, area: pageAreaEquivalentsPt(page.widthPt, page.heightPt) });
-            else if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, page.dpi) });
-          }
-          // Measured and authorized before any page is cached, outside the engine fallback: a refusal (an unfunded run is
-          // paused) or a failed record stops here and leaves nothing a retry would skip.
-          await recordRenderedPageAreas(args.runId, args.document, areas);
-          for (const [pageNumber, page] of rendered) {
-            await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
-            generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
-          }
-          nativeDone = true;
-        }
-      }
-      if (isPdf && !nativeDone && resolved.engine) {
-        // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
-        engineName = "pdftoppm";
-        for (const pageNumber of pageNumbers) {
-          keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi${edgeSuffix}/page-${pageNumber}.${extension}`);
-        }
-        await Promise.all(pageNumbers.map(async (pageNumber) => {
-          existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
-        }));
-      }
-      const pdftoppmPages = isPdf && !nativeDone
-        ? pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null)
-        : [];
-      const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
+      const source = await this.sources.acquire(args.document);
       try {
-        // Reused pdfinfo measurements size the selected pages before bounded same-size render batches.
-        const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
-        const { sizes, store: storePageSizes } = await this.measurePageSizes(args.document, args.runId, source, pdftoppmPages, lanes, args.signal);
-        if (pdftoppmPages.some((pageNumber) => !sizes.has(pageNumber))) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
-        // Each page's area from its size, measured and authorized before anything renders or is cached.
-        await recordRenderedPageAreas(args.runId, args.document, pdftoppmPages.map((pageNumber) => {
-          const size = sizes.get(pageNumber)!;
-          return { pageNumber, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) };
-        }));
-        const batchAdjacent = process.env.DOCSLURP_PDF_RASTER_BATCHING === "on";
-        const batches: Array<{ first: number; last: number; dpi: number; edge: number }> = [];
-        for (const pageNumber of pdftoppmPages) {
-          const size = sizes.get(pageNumber)!;
-          const renderDpi = longEdgeCappedDpi(size.widthPt, size.heightPt, dpi, maxLongEdgePx);
-          const edge = longEdgeCappedEdge(size.widthPt, size.heightPt, renderDpi, maxLongEdgePx);
-          const previous = batches.at(-1);
-          // At most two ordinary pages per command. Keep large renders single, with the existing edge and slot limits.
-          if (batchAdjacent && previous && previous.first === previous.last && previous.last + 1 === pageNumber &&
-              previous.dpi === renderDpi && previous.edge === edge && edge * edge * 8 <= 32 * 1024 * 1024) {
-            previous.last = pageNumber;
-          } else {
-            batches.push({ first: pageNumber, last: pageNumber, dpi: renderDpi, edge });
+        if (!isPdf) {
+          const bytes = await readFile(source.path);
+          await this.storage.putBytes(keys.get(1)!, bytes, outputMimeType);
+          generated.set(1, { sizeBytes: bytes.byteLength, widthPx: null, heightPx: null });
+        }
+        let nativeDone = false;
+        if (isPdf && resolved.engine) {
+          let rendered: Awaited<ReturnType<typeof renderPagesNative>> | null = null;
+          try {
+            rendered = await renderPagesNative(resolved.engine, source.path, missing, {
+              dpi,
+              ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
+              concurrency: this.options.concurrency,
+              signal: args.signal,
+            });
+          } catch (error) {
+            if (args.signal?.aborted) throw error;
+            logNativePdfFallback("raster-render", error, "pdftoppm");
+          }
+          if (rendered && missing.every((pageNumber) => rendered.has(pageNumber))) {
+            const areas: PageEquivalentRow[] = [];
+            for (const [pageNumber, page] of rendered) {
+              // Billed from the page's point size, as the pdftoppm path is: a DPI lowered by the pixel bounds or a long-edge
+              // cap changes the pixels, never the page.
+              if (page.widthPt && page.heightPt) areas.push({ pageNumber, area: pageAreaEquivalentsPt(page.widthPt, page.heightPt) });
+              else if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, page.dpi) });
+            }
+            // Measured and authorized before any page is cached, outside the engine fallback: a refusal (an unfunded run is
+            // paused) or a failed record stops here and leaves nothing a retry would skip.
+            await recordRenderedPageAreas(args.runId, args.document, areas);
+            for (const [pageNumber, page] of rendered) {
+              await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
+              generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
+            }
+            nativeDone = true;
           }
         }
-        await runLanes(batches, lanes, args.signal, async (batch, signal) => {
-          // Each process reads the source read-only and writes only into its own bounded output directory.
-          const laneDir = await mkdtemp(path.join(scratch, "docslurp-page-"));
-          const stem = `page-${batch.first}-${batch.last}`;
-          const rendered = await this.runner.renderPdfPageRange(
-            source.path, path.join(laneDir, stem), batch.first, batch.last, batch.dpi, batch.edge,
-          );
-          if (!rendered.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
-          const paired = batch.first !== batch.last;
-          const pairOutputLimit = 36 * 1024 * 1024;
-          await this.rasterSlots.run(signal, () => this.runner.run({
-            ...rendered, readOnlyInputs: true, ...(paired ? { maxOutputBytes: pairOutputLimit } : {}),
-          }, signal));
-
-          const files = new Map<number, string>();
-          for (const filename of await readdir(laneDir)) {
-            if (!filename.startsWith(`${stem}-`)) continue;
-            const suffix = filename.slice(stem.length + 1).match(/^(\d+)\.png$/);
-            if (!suffix) continue;
-            const pageNumber = Number(suffix[1]);
-            if (files.has(pageNumber)) throw new Error(`pdftoppm produced duplicate output for page ${pageNumber}`);
-            files.set(pageNumber, filename);
+        if (isPdf && !nativeDone && resolved.engine) {
+          // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
+          engineName = "pdftoppm";
+          for (const pageNumber of pageNumbers) {
+            keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi${edgeSuffix}/page-${pageNumber}.${extension}`);
           }
-          if (paired && files.size !== 2) throw new Error("pdftoppm did not produce exactly two pages");
-          let pairBytes = 0;
-          for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
-            const filename = files.get(pageNumber);
-            if (!filename) throw new Error(`pdftoppm did not produce page ${pageNumber}`);
-            if (!paired) continue;
-            signal.throwIfAborted();
-            const file = path.join(laneDir, filename);
-            if (!(await lstat(file)).isFile()) throw new Error("Invalid raster output file");
-            const { sizeBytes, widthPx, heightPx } = await readPngFileFacts(file);
-            pairBytes += sizeBytes;
-            if (pairBytes > pairOutputLimit || !widthPx || !heightPx || Math.max(widthPx, heightPx) > batch.edge) {
-              throw new Error(`Invalid raster output for page ${pageNumber}`);
+          await Promise.all(pageNumbers.map(async (pageNumber) => {
+            existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
+          }));
+        }
+        const pdftoppmPages = isPdf && !nativeDone
+          ? pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null)
+          : [];
+        const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-raster-"));
+        try {
+          // Reused pdfinfo measurements size the selected pages before bounded same-size render batches.
+          const lanes = this.options.pdftoppmConcurrency ?? defaultPdftoppmConcurrency();
+          const { sizes, store: storePageSizes } = await this.measurePageSizes(args.document, args.runId, source, pdftoppmPages, lanes, args.signal);
+          if (pdftoppmPages.some((pageNumber) => !sizes.has(pageNumber))) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+          // Each page's area from its size, measured and authorized before anything renders or is cached.
+          await recordRenderedPageAreas(args.runId, args.document, pdftoppmPages.map((pageNumber) => {
+            const size = sizes.get(pageNumber)!;
+            return { pageNumber, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) };
+          }));
+          const batchAdjacent = process.env.DOCSLURP_PDF_RASTER_BATCHING === "on";
+          const batches: Array<{ first: number; last: number; dpi: number; edge: number }> = [];
+          for (const pageNumber of pdftoppmPages) {
+            const size = sizes.get(pageNumber)!;
+            const renderDpi = longEdgeCappedDpi(size.widthPt, size.heightPt, dpi, maxLongEdgePx);
+            const edge = longEdgeCappedEdge(size.widthPt, size.heightPt, renderDpi, maxLongEdgePx);
+            const previous = batches.at(-1);
+            // At most two ordinary pages per command. Keep large renders single, with the existing edge and slot limits.
+            if (batchAdjacent && previous && previous.first === previous.last && previous.last + 1 === pageNumber &&
+                previous.dpi === renderDpi && previous.edge === edge && edge * edge * 8 <= 32 * 1024 * 1024) {
+              previous.last = pageNumber;
+            } else {
+              batches.push({ first: pageNumber, last: pageNumber, dpi: renderDpi, edge });
             }
           }
-          for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
-            const bytes = await readFile(path.join(laneDir, files.get(pageNumber)!));
-            signal.throwIfAborted();
-            await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
-            generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
-          }
-        });
-        const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
-        if (unrendered.length > 0) throw new Error(`pdftoppm did not render pages ${unrendered.join(",")}`);
-        args.signal?.throwIfAborted();
-        await storePageSizes();
+          await runLanes(batches, lanes, args.signal, async (batch, signal) => {
+            // Each process reads the source read-only and writes only into its own bounded output directory.
+            const laneDir = await mkdtemp(path.join(scratch, "docslurp-page-"));
+            const stem = `page-${batch.first}-${batch.last}`;
+            const rendered = await this.runner.renderPdfPageRange(
+              source.path, path.join(laneDir, stem), batch.first, batch.last, batch.dpi, batch.edge,
+            );
+            if (!rendered.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
+            const paired = batch.first !== batch.last;
+            const pairOutputLimit = 36 * 1024 * 1024;
+            await this.rasterSlots.run(signal, () => this.runner.run({
+              ...rendered, readOnlyInputs: true, ...(paired ? { maxOutputBytes: pairOutputLimit } : {}),
+            }, signal));
+
+            const files = new Map<number, string>();
+            for (const filename of await readdir(laneDir)) {
+              if (!filename.startsWith(`${stem}-`)) continue;
+              const suffix = filename.slice(stem.length + 1).match(/^(\d+)\.png$/);
+              if (!suffix) continue;
+              const pageNumber = Number(suffix[1]);
+              if (files.has(pageNumber)) throw new Error(`pdftoppm produced duplicate output for page ${pageNumber}`);
+              files.set(pageNumber, filename);
+            }
+            if (paired && files.size !== 2) throw new Error("pdftoppm did not produce exactly two pages");
+            let pairBytes = 0;
+            for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
+              const filename = files.get(pageNumber);
+              if (!filename) throw new Error(`pdftoppm did not produce page ${pageNumber}`);
+              if (!paired) continue;
+              signal.throwIfAborted();
+              const file = path.join(laneDir, filename);
+              if (!(await lstat(file)).isFile()) throw new Error("Invalid raster output file");
+              const { sizeBytes, widthPx, heightPx } = await readPngFileFacts(file);
+              pairBytes += sizeBytes;
+              if (pairBytes > pairOutputLimit || !widthPx || !heightPx || Math.max(widthPx, heightPx) > batch.edge) {
+                throw new Error(`Invalid raster output for page ${pageNumber}`);
+              }
+            }
+            for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
+              const bytes = await readFile(path.join(laneDir, files.get(pageNumber)!));
+              signal.throwIfAborted();
+              await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
+              generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+            }
+          });
+          const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
+          if (unrendered.length > 0) throw new Error(`pdftoppm did not render pages ${unrendered.join(",")}`);
+          args.signal?.throwIfAborted();
+          await storePageSizes();
+        } finally {
+          await rm(scratch, { recursive: true, force: true });
+        }
       } finally {
-        await rm(scratch, { recursive: true, force: true });
+        await source.release();
       }
     }
 

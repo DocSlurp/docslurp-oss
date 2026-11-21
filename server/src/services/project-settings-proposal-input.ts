@@ -60,7 +60,7 @@ export function resolveLegacyQualityPatch<T extends { quality?: unknown; ladder?
 const projectSettingsPipelinePatchObjectSchema = z.object({
   mediaVideo: z.object({ enabled: z.boolean() }).strict().optional(),
   chunkOverlap: z.boolean().optional(),
-  summarize: z.boolean().optional(), embed: z.boolean().optional(), indexVectors: z.boolean().optional(),
+  summarize: z.boolean().optional(), embed: z.boolean().optional(), indexVectors: z.boolean().optional(), pageIndex: z.boolean().optional(),
   preserveTables: z.boolean().optional(), preserveCode: z.boolean().optional(), preserveImages: z.boolean().optional(),
   pdfRegionExtraction: z.boolean().optional(), visionFallback: z.boolean().optional(),
   /** Figure extraction from PDFs (on by default); off keeps existing figures until reprocess. */

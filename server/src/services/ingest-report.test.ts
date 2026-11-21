@@ -552,7 +552,7 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
     for (const quality of ["fast", "auto", "good", "fastest", "smartest", "balanced", "smart"]) expect(parse({ quality }).success).toBe(true);
     expect(parse({ quality: "deep" }).success).toBe(false);
     expect(parse({ quality: "smartest" }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true, embed: true, indexVectors: true });
-    expect(parse({ quality: "fastest", readScans: false }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false });
+    expect(parse({ quality: "fastest", readScans: false }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false, pageIndex: true });
     expect(parse({ pageImages: false }).data?.changes.pipeline).toEqual({ pageImages: false });
     // Older recommendations proposed vision.forceAllPages; it arrives as Smartest.
     expect(parse({ vision: { forceAllPages: true } }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" } });
