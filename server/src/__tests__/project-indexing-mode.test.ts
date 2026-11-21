@@ -80,7 +80,7 @@ describe("project defaults", () => {
     const plain = await ws.createProject({ userId: "u1", orgId: "gold", name: "Plain" });
     expect(plain.summaries).toBe(false);
     expect(plain.pipeline.summarize).toBe(false);
-    expect(plain.pipeline.pageIndex).toBe(false);
+    expect(plain.pipeline.pageIndex).toBe(true);
     const enabled = await ws.createProject({ userId: "u1", orgId: "gold", name: "Summaries", summaries: true });
     expect(enabled.summaries).toBe(true);
     expect(enabled.pipeline.summarize).toBe(true);

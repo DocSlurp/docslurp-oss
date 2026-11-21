@@ -86,9 +86,9 @@ describe("mapping table (design 3.2)", () => {
 
 describe("input conversion (R0 writes the legacy shape)", () => {
   it("maps the levels (and the deprecated aliases) onto auto plus the ladder's highest rung", () => {
-    expect(applyExtractionConfigInput({ quality: "fastest" })).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false });
+    expect(applyExtractionConfigInput({ quality: "fastest" })).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false, pageIndex: true });
     expect(applyExtractionConfigInput({ quality: "auto" })).toEqual({ quality: "auto", ladder: { maxRung: "ocr" }, embed: true, indexVectors: true });
-    expect(applyExtractionConfigInput({ quality: "fastest", readScans: false })).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false });
+    expect(applyExtractionConfigInput({ quality: "fastest", readScans: false })).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false, pageIndex: true });
     expect(applyExtractionConfigInput({ readScans: false })).toEqual({ quality: "auto", ladder: { maxRung: "fast" } });
     expect(applyExtractionConfigInput({ quality: "smartest" })).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true, embed: true, indexVectors: true });
     expect(applyExtractionConfigInput({ quality: "balanced" })).toEqual({ quality: "auto", ladder: { maxRung: "ocr" } });
@@ -127,7 +127,7 @@ describe("input conversion (R0 writes the legacy shape)", () => {
   });
 
   it("the override schema converts, rejects bad values and conflicts", () => {
-    expect(pipelineFeatureOverridesSchema.parse({ quality: "fastest", visuals: "charts" })).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false, figures: true, chartExport: { tier: "free" } });
+    expect(pipelineFeatureOverridesSchema.parse({ quality: "fastest", visuals: "charts" })).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false, pageIndex: true, figures: true, chartExport: { tier: "free" } });
     expect(pipelineFeatureOverridesSchema.safeParse({ visuals: "everything" }).success).toBe(false);
     // A per-request override cannot reset visuals to the default (it merges onto the project).
     expect(pipelineFeatureOverridesSchema.safeParse({ visuals: null }).success).toBe(false);

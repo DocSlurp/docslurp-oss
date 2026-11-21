@@ -7,7 +7,7 @@ import { apiError, apiErrorCodeForStatus, defaultPipelineFeatures, isApiErrorCod
 import { withApiErrorDetails } from "../lib/api-error.js";
 
 // New projects start on Fastest with keyword search. Stored pipelines retain their explicit search settings.
-export const newProjectPipelineDefaults = { ...defaultPipelineFeatures, embed: false, indexVectors: false };
+export const newProjectPipelineDefaults = { ...defaultPipelineFeatures, embed: false, indexVectors: false, pageIndex: true };
 
 export const DEFAULT_PROJECT_NAME = "Default";
 

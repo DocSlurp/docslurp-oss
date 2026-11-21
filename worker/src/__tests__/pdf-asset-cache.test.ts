@@ -238,10 +238,17 @@ describe("PdfRasterCache", () => {
       async putBytes(key: string, bytes: Uint8Array) { artifacts.set(key, bytes); },
       uri(key: string) { return `s3://test/${key}`; },
     };
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    let clearedDuringRender = false;
     const ranges: Array<[number, number]> = [];
     const runner = {
       async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
       async renderPdfPageRange(_source: string, prefix: string, first: number, last: number) {
+        if (!clearedDuringRender) {
+          clearedDuringRender = true;
+          await sourceCache.clear();
+        }
+        expect(await readFile(_source, "utf8")).toBe("pdf bytes");
         ranges.push([first, last]);
         return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true };
       },
@@ -261,7 +268,6 @@ describe("PdfRasterCache", () => {
         return { stdout: "", stderr: "" };
       },
     };
-    const sourceCache = new PdfSourceCache(sourceStorage as any);
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache);
 
     vi.stubEnv("DOCSLURP_PDF_RASTER_BATCHING", "on");

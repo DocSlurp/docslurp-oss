@@ -331,6 +331,8 @@ export function convertExtractionConfigInput<T>(source: T, options: { preferNew?
       const semanticSearch = target === "smartest" || explicitAuto || readScans === true;
       next.embed ??= source.indexVectors === true || semanticSearch;
       next.indexVectors ??= source.embed === false ? false : semanticSearch;
+      // Native text remains available to keyword search when Fastest skips embeddings.
+      if (source.quality === "fastest" && source.markdownExtraction !== false) next.pageIndex ??= true;
     }
   }
   let tierUnset = false;
