@@ -133,8 +133,8 @@ describe("ingest report: observed content", () => {
     expect(ids).toContain("reindex-pages-with-text");
     const vision = report.recommendations.find((rec) => rec.id === "vision-all-pages")!;
     expect(vision.reason).toMatch(/2 pages of 6 measured have images and almost no text layer/);
-    // The default (Fastest) reads scans with OCR only.
-    expect(vision.reason).toMatch(/Auto reads scans with OCR only and never sends a page to vision, and no OCR engine read these pages/);
+    // The default Fastest preset leaves scans unread.
+    expect(vision.reason).toMatch(/Fastest with Read scans off never reads pages with OCR or vision/);
     expect(vision.reason).not.toMatch(/at most \d+ vision pages/);
     expect(vision.patch).toEqual({ visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } });
     expect(report.focus).toEqual([expect.objectContaining({ pageNumber: 4, searchable: false, reason: "scanned-no-vision", imageCount: 1 })]);
@@ -551,8 +551,8 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
     const parse = (pipeline: unknown) => projectSettingsProposalInputSchema.safeParse({ changes: { pipeline } });
     for (const quality of ["fast", "auto", "good", "fastest", "smartest", "balanced", "smart"]) expect(parse({ quality }).success).toBe(true);
     expect(parse({ quality: "deep" }).success).toBe(false);
-    expect(parse({ quality: "smartest" }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true });
-    expect(parse({ quality: "fastest", readScans: false }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "fast" } });
+    expect(parse({ quality: "smartest" }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" }, visionFallback: true, embed: true, indexVectors: true });
+    expect(parse({ quality: "fastest", readScans: false }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "fast" }, embed: false, indexVectors: false });
     expect(parse({ pageImages: false }).data?.changes.pipeline).toEqual({ pageImages: false });
     // Older recommendations proposed vision.forceAllPages; it arrives as Smartest.
     expect(parse({ vision: { forceAllPages: true } }).data?.changes.pipeline).toEqual({ quality: "auto", ladder: { maxRung: "intelligent" } });
@@ -570,7 +570,7 @@ const INDEX_1K_TO_4K = 4;
 
 describe("ingest report: helpers", () => {
   it("reports whether the quality allows vision; there is no per-file page count", () => {
-    expect(qualityAllowsVision(pipeline())).toBe(true);
+    expect(qualityAllowsVision(pipeline())).toBe(false);
     expect(qualityAllowsVision(pipeline({ quality: "fast" }))).toBe(false);
     expect(qualityAllowsVision(pipeline({ quality: "good" }))).toBe(true);
     // A stored pipeline with the retired keys still answers correctly.
@@ -609,11 +609,11 @@ describe("ingest report: pages kept as images in Fast mode", () => {
     expect(ids).not.toContain("turn-on-vision");
   });
 
-  it("recommends Read scans or Smartest to make them searchable", () => {
+  it("recommends Auto or Smartest to make them searchable", () => {
     const rec = fastReport().recommendations.find((entry) => entry.id === "fast-kept-as-image")!;
     expect(rec).toMatchObject({ affectedPages: 2, affectedDocuments: 1, reprocessDocumentIds: ["fast-scan"] });
     expect(rec.reason).toMatch(/2 pages in 1 file had no text layer and were kept as page images with Read scans off/);
-    expect(rec.effect).toMatch(/Read scans on .*Smartest/);
+    expect(rec.effect).toMatch(/Switch to Auto .*Smartest/);
     expect(rec.effect).toMatch(/\$0\.05 to \$2\.50 per 1,000 pages/);
     expect(rec.patch).toEqual({ quality: "auto", ladder: { maxRung: "ocr" } });
   });
