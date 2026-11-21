@@ -327,6 +327,11 @@ export function convertExtractionConfigInput<T>(source: T, options: { preferNew?
     next.quality = fields.quality;
     next.ladder = fields.ladder;
     if (fields.visionFallback) next.visionFallback = true;
+    if (source.quality === "fastest" || explicitAuto || target === "smartest") {
+      const semanticSearch = target === "smartest" || explicitAuto || readScans === true;
+      next.embed ??= source.indexVectors === true || semanticSearch;
+      next.indexVectors ??= source.embed === false ? false : semanticSearch;
+    }
   }
   let tierUnset = false;
   if (hasVisuals) {

@@ -134,7 +134,7 @@ describe("ingest report: observed content", () => {
     const vision = report.recommendations.find((rec) => rec.id === "vision-all-pages")!;
     expect(vision.reason).toMatch(/2 pages of 6 measured have images and almost no text layer/);
     // The default (Fastest) reads scans with OCR only.
-    expect(vision.reason).toMatch(/Fastest reads scans with OCR only and never sends a page to vision, and no OCR engine read these pages/);
+    expect(vision.reason).toMatch(/Auto reads scans with OCR only and never sends a page to vision, and no OCR engine read these pages/);
     expect(vision.reason).not.toMatch(/at most \d+ vision pages/);
     expect(vision.patch).toEqual({ visionFallback: true, quality: "auto", ladder: { maxRung: "intelligent" } });
     expect(report.focus).toEqual([expect.objectContaining({ pageNumber: 4, searchable: false, reason: "scanned-no-vision", imageCount: 1 })]);
