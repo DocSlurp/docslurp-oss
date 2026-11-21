@@ -8,6 +8,7 @@ it("widens populated counters and preserves attribution and run rollups", async 
     await db.exec(`
       CREATE ROLE capacity_test_reader;
       GRANT SELECT ON usage_attribution, admin_stats TO capacity_test_reader;
+      ALTER VIEW usage_attribution SET (security_barrier = true, security_invoker = true);
       INSERT INTO "user" (id, name, email) VALUES ('u', 'Capacity', 'capacity@example.com');
       INSERT INTO organizations (id, name, slug, created_by_user_id) VALUES ('o', 'Capacity', 'capacity', 'u');
       INSERT INTO projects (id, org_id, user_id, name)
@@ -25,7 +26,7 @@ it("widens populated counters and preserves attribution and run rollups", async 
     const attribution = () => db.query(`SELECT project_id, org_id, stamped_org_id,
       amount::text, input_tokens::text, output_tokens::text, cost_cents::text
       FROM usage_attribution WHERE id = 'before' ORDER BY project_id`);
-    const view = () => db.query(`SELECT oid::text, pg_get_viewdef(oid) AS definition, relacl::text
+    const view = () => db.query(`SELECT oid::text, pg_get_viewdef(oid) AS definition, relacl::text, reloptions
       FROM pg_class WHERE oid = 'usage_attribution'::regclass`);
     const originalAttribution = (await attribution()).rows;
     const originalView = (await view()).rows;

@@ -5,6 +5,7 @@ DO $$
 DECLARE
   definition text;
   detached text;
+  view_options text;
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_attribute
@@ -14,11 +15,16 @@ BEGIN
   ) THEN RETURN; END IF;
 
   -- Take locks in the same order as a read of the view.
+  SELECT coalesce(' WITH (' || string_agg(format('%I = %L', option_name, option_value), ', ' ORDER BY option_name) || ')', '')
+  INTO view_options
+  FROM pg_class, LATERAL pg_options_to_table(reloptions)
+  WHERE oid = 'public.usage_attribution'::regclass;
+
   definition := pg_get_viewdef('public.usage_attribution'::regclass);
   detached := replace(definition, '(ue.amount * scope.share) AS amount', 'NULL::numeric AS amount');
   detached := replace(detached, '((ue.input_tokens)::numeric * scope.share) AS input_tokens', 'NULL::numeric AS input_tokens');
   detached := replace(detached, '((ue.output_tokens)::numeric * scope.share) AS output_tokens', 'NULL::numeric AS output_tokens');
-  EXECUTE 'CREATE OR REPLACE VIEW public.usage_attribution AS ' || detached;
+  EXECUTE 'CREATE OR REPLACE VIEW public.usage_attribution' || view_options || ' AS ' || detached;
 
   ALTER TABLE public.usage_events
     ALTER COLUMN amount TYPE numeric,
@@ -28,5 +34,5 @@ BEGIN
     ADD CONSTRAINT usage_events_amount_finite_range
       CHECK (amount NOT IN ('Infinity'::numeric, '-Infinity'::numeric));
 
-  EXECUTE 'CREATE OR REPLACE VIEW public.usage_attribution AS ' || definition;
+  EXECUTE 'CREATE OR REPLACE VIEW public.usage_attribution' || view_options || ' AS ' || definition;
 END $$;
