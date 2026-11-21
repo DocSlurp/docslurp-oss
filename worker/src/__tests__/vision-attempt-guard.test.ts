@@ -783,7 +783,7 @@ describe.skipIf(!PDFTOPPM)("padded blank PDFs", () => {
         const result = await execute(plan.binary, plan.args, { timeout: 15_000, encoding: "utf8" });
         return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 } as never;
       });
-      const cache = new PdfRasterCache(runner, storage, { get: async () => ({ path: source }) } as unknown as PdfSourceCache, { engine: "pdftoppm" });
+      const cache = new PdfRasterCache(runner, storage, { acquire: async () => ({ path: source, release: async () => {} }) } as unknown as PdfSourceCache, { engine: "pdftoppm" });
       const document = { id: "doc", userId: "user-1", filename: "upload.pdf", mimeType: "application/pdf", pageCount: 1 } as Document;
       // render-images renders the page first (the normal pipeline).
       const [rendered] = await cache.renderSelectedPages({ document, runId: "run-1", pageNumbers: [1] });

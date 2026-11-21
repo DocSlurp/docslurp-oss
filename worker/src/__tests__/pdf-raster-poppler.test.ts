@@ -53,7 +53,7 @@ describe.skipIf(!available)("real Poppler allocation geometry", () => {
       });
       let image: Buffer | undefined;
       const storage = { objectSize: async () => null, putBytes: async (_key: string, bytes: Buffer) => { image = bytes; }, uri: (key: string) => key };
-      const sources = { get: async () => ({ path: source }) } as unknown as PdfSourceCache;
+      const sources = { acquire: async () => ({ path: source, release: async () => {} }) } as unknown as PdfSourceCache;
       const cache = new PdfRasterCache(runner, storage, sources, { engine: "pdftoppm" });
       const document = { id: "doc", userId: "user", mimeType: "application/pdf", pageCount: 1 } as Document;
       const [result] = await cache.renderSelectedPages({ document, runId: "run", pageNumbers: [1], dpi: 300 });

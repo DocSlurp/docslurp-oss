@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { memoryCheckpointStore } from "../pipeline/checkpoint-store-memory.js";
-import { normalizePipelineFeatures } from "@docslurp/shared";
+import { pipelineFeaturesSchema } from "@docslurp/shared";
 
 import { applyPageImageReferences } from "../lib/page-image-references.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
@@ -35,7 +35,7 @@ describe("page-index: Fast page-image references", () => {
     } as unknown as ArtifactStore;
     const state = WorkflowState.create({
       id: "run", orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
-      pipeline: normalizePipelineFeatures({ quality: "fast", pageIndex: true }),
+      pipeline: pipelineFeaturesSchema.parse({ quality: "fastest" }),
     } as unknown as ProjectRun, [document]);
     state.artifactLedger.recordDocument("doc", "canonical-document", "s3://bucket/canonical/doc.json");
     state.artifactLedger.recordDocument("doc", "extraction-contract", "s3://bucket/contract/doc.json");
