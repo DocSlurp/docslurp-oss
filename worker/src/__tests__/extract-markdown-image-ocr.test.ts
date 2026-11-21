@@ -1,3 +1,4 @@
+import { markFirstPassDocumentForTest, resetFirstPassResultsForTest } from "../pipeline/first-pass.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -673,6 +674,38 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.jobs).toHaveLength(1);
       expect(h.text().some((text) => text === "Native page\fScan 2\fScan 3")).toBe(true);
     } finally { await h.cleanup(); }
+  });
+
+  it("runs deferred first-pass scan fill once in ordinary extraction", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const h = await harness({
+      format: "pdf", pageCount: 3,
+      extract: async () => ({ text: "Native page\f\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scan ${frame}` })),
+    });
+    try {
+      h.state.run.pipeline.ladder.maxRung = "ocr";
+      h.state.firstPassShard = true;
+      h.state.firstPassExtractionDiffers = true;
+      markFirstPassDocumentForTest("run-1", "doc-1", true);
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs).toHaveLength(0);
+      expect(h.richIds()).toEqual([]);
+      expect(h.checkpoint()?.stats).toMatchObject({ firstPassScanFillDeferred: true });
+
+      resetFirstPassResultsForTest();
+      h.state.firstPassShard = false;
+      h.state.firstPassExtractionDiffers = false;
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs.map(job => job.pages)).toEqual([[2, 3]]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2", "ocr:run-1:doc-1:3"]);
+      expect(h.text()).toContain("Native page\fScan 2\fScan 3");
+    } finally {
+      resetFirstPassResultsForTest();
+      await h.cleanup();
+    }
   });
 
   it(`reads a long scan in batches of ${OCR_PDF_BATCH_PAGES} pages`, async () => {
