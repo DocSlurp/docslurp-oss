@@ -348,6 +348,7 @@ describe("first pass", () => {
   });
 
   it("a document with textless pages is extracted but left to the stage loop for OCR before it is embedded", async () => {
+    await seed({ ladder: { maxRung: "ocr" } });
     script = async (_job, emit) => { await emit(textEvent(0, 2, 0)); await emit(textEvent(1)); await emit(textEvent(2)); };
     const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
     expect(result.extracted).toEqual(["d0"]);

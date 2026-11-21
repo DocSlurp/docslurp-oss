@@ -22,7 +22,7 @@ let db: PGlite;
 let server: PGLiteSocketServer;
 let store: Store;
 
-const pipeline = (quality: "fast" | "auto") => JSON.stringify({ ...defaultPipelineFeatures, quality });
+const pipeline = (quality: "fast" | "auto") => JSON.stringify({ ...defaultPipelineFeatures, ladder: { ...defaultPipelineFeatures.ladder, maxRung: "ocr" }, quality });
 
 /** Fast run documents, one per way page facts go missing or mislead, plus a document a reader actually read. */
 const fastDocs = `
