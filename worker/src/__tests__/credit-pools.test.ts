@@ -7,7 +7,7 @@ const FUNDED_WORKER_SLOTS = workerSlotsFor(true);
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createMigratedDatabase } from "../test/migrated-db.js";
+import { applyRemainingMigrations, createMigratedDatabase } from "../test/migrated-db.js";
 
 /**
  * The prepaid balance is moved only by the SQL functions in migration 0068, so
@@ -248,3 +248,31 @@ describe("credit balance functions", () => {
     });
   });
 });
+
+it("raises the default starter worker budget and preserves custom and funded budgets", async () => {
+  const upgraded = await createMigratedDatabase({ stopBefore: "raise_starter_worker_slots" });
+  try {
+    await upgraded.exec(`
+      insert into "user" (id, name, email) values ('owner', 'Owner', 'slot-owner@example.com');
+      insert into organizations (id, name, created_by_user_id, worker_slots, funded_at) values
+        ('starter', 'Starter', 'owner', 50, null),
+        ('custom', 'Custom', 'owner', 32, null),
+        ('raised', 'Raised', 'owner', 180, null),
+        ('funded', 'Funded', 'owner', 250, now());
+    `);
+    await applyRemainingMigrations(upgraded, "raise_starter_worker_slots");
+    await upgraded.exec(`
+      insert into organizations (id, name, created_by_user_id) values ('new', 'New', 'owner');
+    `);
+    const { rows } = await upgraded.query("select id, worker_slots from organizations order by id");
+    expect(rows).toEqual([
+      { id: "custom", worker_slots: 32 },
+      { id: "funded", worker_slots: FUNDED_WORKER_SLOTS },
+      { id: "new", worker_slots: STARTER_WORKER_SLOTS },
+      { id: "raised", worker_slots: 180 },
+      { id: "starter", worker_slots: STARTER_WORKER_SLOTS },
+    ]);
+  } finally {
+    await upgraded.close();
+  }
+}, 120_000);
