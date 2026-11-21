@@ -103,7 +103,7 @@ export function normalizeQuoteSettingsInput<T extends Partial<QuoteSettings> | u
 }
 
 export const DEFAULT_QUOTE_SETTINGS: QuoteSettings = {
-  quality: "fastest",
+  quality: "fast",
   indexing: "full",
   documentSummary: false,
   structuredFields: false,

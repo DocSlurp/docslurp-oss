@@ -351,8 +351,8 @@ describe("upload indexingMode", () => {
     expect(fresh.runs).toHaveLength(0);
     expect(fast.runs).toHaveLength(0);
     // Smartest with visual stays allowed.
-    await intake.intakeIntoProject({ userId: "u1", project: "ws-existing", kind: "bulk-upload", pipeline: { quality: "auto" } as never, items: [item] }, visual.ports);
-    expect(visual.runs.at(-1)!.pipeline).toMatchObject({ quality: "auto", indexingMode: "visual" });
+    await intake.intakeIntoProject({ userId: "u1", project: "ws-existing", kind: "bulk-upload", pipeline: { quality: "smartest" } as never, items: [item] }, visual.ports);
+    expect(visual.runs.at(-1)!.pipeline).toMatchObject({ quality: "auto", ladder: { maxRung: "intelligent" }, indexingMode: "visual" });
   });
 
   it("run creation refuses a Fast + visual pipeline for every caller, and reprocess of a stored one (M3)", async () => {

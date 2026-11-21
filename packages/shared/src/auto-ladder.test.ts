@@ -26,9 +26,9 @@ const need = (pageNumber: number, kind: LadderPageNeed["need"], extra: Partial<L
   ({ pageNumber, need: kind, reason: kind === "intelligent" ? "figure:chart-or-figure" : "no-native-text", lacksText: false, confidence: 0.5, ...extra });
 
 describe("pipeline.ladder settings", () => {
-  it("defaults to the ocr rung (Fastest) with no share cap", () => {
-    expect(normalizePipelineFeatures(null).ladder).toEqual({ maxRung: "ocr" });
-    expect(defaultPipelineFeatures.ladder).toEqual({ maxRung: "ocr" });
+  it("defaults to the fast rung with no share cap", () => {
+    expect(normalizePipelineFeatures(null).ladder).toEqual({ maxRung: "fast" });
+    expect(defaultPipelineFeatures.ladder).toEqual({ maxRung: "fast" });
   });
 
   it("Smartest skips OCR and Fastest forbids vision", () => {
@@ -261,12 +261,12 @@ describe("estimates under the ladder", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     const env = { DOCSLURP_BILLING: "enforced", STRIPE_SECRET_KEY: "sk_test" };
     const files = [{ name: "scan.pdf", size: 4_000_000, pages: 100 }];
-    const base = normalizePipelineFeatures(null);
+    const base = normalizePipelineFeatures({ quality: "auto" });
     const uncapped = quoteUpload({ files, profile: { ...estimateProfileFor(base, { env }), billing: "enforced" } }).estimate.credits!;
     const fast = quoteUpload({ files, profile: { ...estimateProfileFor(normalizePipelineFeatures({ ladder: { maxRung: "fast" } }), { env }), billing: "enforced" } }).estimate.credits!;
     expect(estimateProfileFor(normalizePipelineFeatures({ ladder: { maxRung: "fast" } }), { env }).quality).toBe("fast");
     expect(fast.high).toBeLessThan(uncapped.high);
-    const shareProfile = { ...estimateProfileFor(normalizePipelineFeatures({ ladder: { maxEscalationShare: { aboveFast: 0.1 } } }), { env }), billing: "enforced" as const };
+    const shareProfile = { ...estimateProfileFor(normalizePipelineFeatures({ ladder: { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } } }), { env }), billing: "enforced" as const };
     expect(shareProfile.aboveFastShare).toBe(0.1);
     const capped = quoteUpload({ files, profile: shareProfile }).estimate.credits!;
     // At most 10 of the 100 pages Rich: Fast for all plus the Rich surcharge of 10 pages.
@@ -296,14 +296,14 @@ describe("estimates under the ladder", () => {
     });
     const env = { DOCSLURP_BILLING: "enforced", STRIPE_SECRET_KEY: "sk_test" };
     const files = [{ name: "scan.pdf", size: 4_000_000, pages: 100 }];
-    const shared = normalizePipelineFeatures({ ladder: { maxEscalationShare: { aboveFast: 0.1 } } });
-    const free = quoteEstimate({ files }, { env, base: quoteSettingsForPipeline(normalizePipelineFeatures(null)) });
+    const shared = normalizePipelineFeatures({ ladder: { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } } });
+    const free = quoteEstimate({ files }, { env, base: quoteSettingsForPipeline(normalizePipelineFeatures({ quality: "auto" })) });
     const capped = quoteEstimate({ files }, { env, base: quoteSettingsForPipeline(shared) });
     if (free.ingest.credits && capped.ingest.credits) expect(capped.ingest.credits.high).toBeLessThan(free.ingest.credits.high);
     expect(quoteSettingsForPipeline(normalizePipelineFeatures({ ladder: { maxRung: "fast" } })).quality).toBe("fast");
     const work = (features: ReturnType<typeof normalizePipelineFeatures>) =>
       estimatePipelineWork({ features, stages: ["extract-markdown", "vision-extract"], pages: 1000, documents: 1, env }).credits;
-    expect(work(shared)!.high).toBeLessThan(work(normalizePipelineFeatures(null))!.high);
-    expect(work(normalizePipelineFeatures({ ladder: { maxRung: "fast" } }))!.high).toBeLessThan(work(normalizePipelineFeatures(null))!.high);
+    expect(work(shared)!.high).toBeLessThan(work(normalizePipelineFeatures({ quality: "auto" }))!.high);
+    expect(work(normalizePipelineFeatures({ ladder: { maxRung: "fast" } }))!.high).toBeLessThan(work(normalizePipelineFeatures({ quality: "auto" }))!.high);
   });
 });

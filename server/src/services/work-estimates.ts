@@ -19,7 +19,7 @@ import {
   type ReprocessRunInput,
 } from "@docslurp/shared";
 
-import { estimateChartExportCredits, pipelineFieldsForQuality, projectExtractionView, QUALITY_LEVEL_RANK, qualityLevelOfPipeline, reprocessRequestedTier, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type RunOrigin, type VisualsLevel } from "@docslurp/shared";
+import { estimateChartExportCredits, pipelineFieldsForQuality, projectExtractionView, QUALITY_LEVEL_RANK, qualityLevelOfPipeline, reprocessRequestedTier, upgradeStoredChartExport, type ChartExportTier, type QualityLevel, type QualityPreset, type RunOrigin, type VisualsLevel } from "@docslurp/shared";
 import { replayChartExport } from "./run-creation.js";
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
@@ -53,7 +53,7 @@ export async function replayedRunPipeline(
   run: { pipeline: PipelineFeatures; projectId: string | null; orgId: string | null },
   requested: ChartExportTier | null,
   env?: EstimateEnv,
-  request: { quality?: QualityLevel | null; visuals?: VisualsLevel | null } = {},
+  request: { quality?: QualityPreset | null; visuals?: VisualsLevel | null } = {},
 ): Promise<PipelineFeatures> {
   const caps = run.projectId ? (await projectReplayCaps(run.orgId, [run.projectId])).get(run.projectId) ?? null : null;
   const replayed = replayChartExport(run.pipeline, requested, caps?.chartExport ?? null, "machine", (env ?? process.env) as Record<string, string | undefined>);
@@ -62,9 +62,7 @@ export async function replayedRunPipeline(
   return request.visuals ? { ...capped, figures: request.visuals !== "none" } : capped;
 }
 
-function withQuality<T extends PipelineFeatures>(pipeline: T, quality: QualityLevel): T {
-  const current = qualityLevelOfPipeline(pipeline).quality;
-  if (current === quality) return pipeline;
+function withQuality<T extends PipelineFeatures>(pipeline: T, quality: QualityPreset): T {
   const fields = pipelineFieldsForQuality(quality, { ladder: pipeline.ladder });
   return { ...pipeline, quality: fields.quality, ladder: fields.ladder as T["ladder"], ...(fields.visionFallback ? { visionFallback: true } : {}) };
 }
@@ -73,7 +71,7 @@ function withQuality<T extends PipelineFeatures>(pipeline: T, quality: QualityLe
 function capReplayQuality<T extends PipelineFeatures>(pipeline: T, projectQuality: QualityLevel | null): T {
   if (!projectQuality) return pipeline;
   const current = qualityLevelOfPipeline(pipeline).quality;
-  return QUALITY_LEVEL_RANK[projectQuality] < QUALITY_LEVEL_RANK[current] ? withQuality(pipeline, projectQuality) : pipeline;
+  return QUALITY_LEVEL_RANK[projectQuality] < QUALITY_LEVEL_RANK[current] ? withQuality(pipeline, "auto") : pipeline;
 }
 
 export async function estimateRunReprocess(args: {

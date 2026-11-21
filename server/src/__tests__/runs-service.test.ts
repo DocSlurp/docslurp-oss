@@ -246,7 +246,7 @@ describe("run preview", () => {
     expect(preview().estimatedPages).toBe(20);
     // Each quality's price is the pricing provider's quote for the same files, billing enforced.
     for (const quality of ["fastest", "smartest"] as const) {
-      const fields = pipelineFieldsForQuality(quality);
+      const fields = pipelineFieldsForQuality(quality, { readScans: true });
       const profile = { ...estimateProfileFor({ ...defaultPipelineFeatures, quality: fields.quality, ladder: fields.ladder as never }, { env: {} }), billing: "enforced" as const };
       const credits = quoteUpload({ files: [{ name: "scan.pdf", type: "application/pdf", size: 3_000_000, pages: 20 }], profile }).estimate.credits!;
       expect(byQuality[quality]).toEqual({ minCents: credits.low, maxCents: Math.max(credits.low, credits.high) });

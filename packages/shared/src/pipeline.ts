@@ -525,9 +525,9 @@ const pipelineFeaturesObjectSchema = z
     // extraction-config.ts) lives in the ladder's highest rung below. Retired `good`, `parserPlaybook` and
     // `vision.forceAllPages` inputs are mapped by migrateLegacyQualitySettings.
     quality: qualityModeSchema.default(DEFAULT_QUALITY_MODE),
-    // Auto ladder (auto-ladder.ts): the highest rung a page may be read on (`ocr` Fastest, the default; `fast` Fastest
-    // without Read scans; `intelligent` Smartest) and per-document escalation share caps. Ignored outside `auto`.
-    ladder: pipelineLadderSchema.default(defaultPipelineLadder),
+    // Auto ladder (auto-ladder.ts): the highest rung a page may be read on (`fast` Fastest, the default; `ocr` Auto;
+    // `intelligent` Smartest) and per-document escalation share caps. Ignored outside `auto`.
+    ladder: pipelineLadderSchema.default({ ...defaultPipelineLadder, maxRung: "fast" }),
     // Page images (thumbnails, the reader and cited-page previews): `false` keeps no viewer page image. OCR and vision
     // still render the pages they read, in scratch only.
     pageImages: z.boolean().default(true),
@@ -779,7 +779,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
   quality: DEFAULT_QUALITY_MODE,
-  ladder: defaultPipelineLadder,
+  ladder: { ...defaultPipelineLadder, maxRung: "fast" },
   pageImages: true,
   documentExtraction: defaultDocumentExtractionConfig,
   visionFallback: true,
@@ -1100,7 +1100,7 @@ export function normalizePipelineFeatures(
       ...(source?.textGeneration ?? {}),
     },
     ladder: {
-      ...defaultPipelineLadder,
+      ...defaultPipelineFeatures.ladder,
       ...(source?.ladder ?? {}),
     },
     vision: {
@@ -1383,7 +1383,7 @@ export function mergePipelineFeatures(
   const migratedOverrides = migrateLegacyQualitySettings(overrides);
   // `readScans` alone toggles the base's level: it reads the base's highest rung, so Read scans on a Smartest project
   // keeps Smartest and Read scans off lowers it to Fastest without scans.
-  const rungContext = isPlainRecord(migratedOverrides) && "readScans" in migratedOverrides && normalizeQualityLevel(migratedOverrides.quality) === null
+  const rungContext = isPlainRecord(migratedOverrides) && "readScans" in migratedOverrides && migratedOverrides.quality !== "auto" && normalizeQualityLevel(migratedOverrides.quality) === null
     && !(isPlainRecord(migratedOverrides.ladder) && migratedOverrides.ladder.maxRung !== undefined)
     ? { ...migratedOverrides, ladder: { ...(isPlainRecord(migratedOverrides.ladder) ? migratedOverrides.ladder : {}), maxRung: normalizedBase.ladder.maxRung } }
     : migratedOverrides;
@@ -1439,7 +1439,7 @@ export const pipelineFeatureOverridesSchema = z
     }
     // `readScans: true` alone keeps the project's level (Smartest stays Smartest), which only the merge onto the
     // project can tell: it stays in the override for mergePipelineFeatures to convert against the base.
-    const deferReadScans = isPlainRecord(migrated) && migrated.readScans === true && normalizeQualityLevel(migrated.quality) === null
+    const deferReadScans = isPlainRecord(migrated) && migrated.readScans === true && migrated.quality !== "auto" && normalizeQualityLevel(migrated.quality) === null
       && !(isPlainRecord(migrated.ladder) && migrated.ladder.maxRung !== undefined);
     try {
       if (deferReadScans) {

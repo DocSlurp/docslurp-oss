@@ -120,7 +120,7 @@ describe("legacy quality input", () => {
     const project = normalizePipelineFeatures({ quality: "smartest" } as never);
     expect(mergePipelineFeatures(project, { parserPlaybook: "fast" } as never).quality).toBe("fast");
     expect(qualityLevelOfPipeline(mergePipelineFeatures(project, { vision: { forceAllPages: false } } as never)).quality).toBe("smartest");
-    expect(qualityLevelOfPipeline(mergePipelineFeatures(project, { quality: "fastest" } as never))).toEqual({ quality: "fastest", readScans: true });
+    expect(qualityLevelOfPipeline(mergePipelineFeatures(project, { quality: "fastest" } as never))).toEqual({ quality: "fastest", readScans: false });
   });
 
   it("keeps an in-flight review-grade run row (forceAllPages: false) on auto through normalizePipelineFeatures", () => {
@@ -168,7 +168,7 @@ describe("Smartest turns vision on", () => {
     // Switching back to Fastest leaves vision as merged; turning it off stays allowed.
     const fastest = mergePipelineFeatures(merged, { quality: "fastest", visionFallback: false } as never);
     expect(fastest.visionFallback).toBe(false);
-    expect(fastest.ladder.maxRung).toBe("ocr");
+    expect(fastest.ladder.maxRung).toBe("fast");
   });
 
   it("toggles Read scans on the project's level", () => {
@@ -476,8 +476,12 @@ describe("Smartest locks page images on", () => {
     expect(smartestLocksPageImages({ quality: "auto", ladder: { maxRung: "ocr" }, pageImages: false })).toBe(false);
   });
 
-  it("Read scans defaults on for Fastest", () => {
-    expect(qualityLevelOfPipeline(normalizePipelineFeatures({ quality: "fastest" } as never))).toEqual({ quality: "fastest", readScans: true });
-    expect(qualityLevelOfPipeline(defaultPipelineFeatures)).toEqual({ quality: "fastest", readScans: true });
+  it("defaults Fastest to native text and Auto to OCR while preserving stored rungs", () => {
+    expect(qualityLevelOfPipeline(normalizePipelineFeatures({ quality: "fastest" } as never))).toEqual({ quality: "fastest", readScans: false });
+    expect(qualityLevelOfPipeline(defaultPipelineFeatures)).toEqual({ quality: "fastest", readScans: false });
+    const auto = pipelineFeatureOverridesSchema.parse({ quality: "auto" });
+    expect(mergePipelineFeatures(defaultPipelineFeatures, auto).ladder.maxRung).toBe("ocr");
+    expect(normalizePipelineFeatures({ quality: "auto", ladder: { maxRung: "intelligent" } }).ladder.maxRung).toBe("intelligent");
+    expect(normalizePipelineFeatures({ quality: "fastest", readScans: true } as never).ladder.maxRung).toBe("ocr");
   });
 });

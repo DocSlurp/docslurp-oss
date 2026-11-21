@@ -76,7 +76,7 @@ import {
 } from "./project-board-telemetry.js";
 import { projectAttributedUsage, sessionTokenUsage } from "./usage-attribution.js";
 import { cancelProjectRuns, deleteProjectData } from "./data-deletion.js";
-import { insertDefaultProject, ProjectAccessError } from "./default-project.js";
+import { insertDefaultProject, newProjectPipelineDefaults, ProjectAccessError } from "./default-project.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { toPublicRunRowStage } from "../lib/public-run-stage.js";
 
@@ -497,7 +497,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectR
   const template = getProjectTemplate(parsed.templateKey ?? null);
   const pipeline = applyProjectTemplateLocks(
     normalizePipelineFeatures({
-      ...(parsed.pipeline ?? template?.pipeline ?? defaultPipelineFeatures),
+      ...(parsed.pipeline ?? template?.pipeline ?? newProjectPipelineDefaults),
       summarize: parsed.summaries,
       // Never on at creation, whatever the request, template or cloned project holds: a project turns the summary
       // tree on through its own endpoint (services/project-summary-tree.ts).

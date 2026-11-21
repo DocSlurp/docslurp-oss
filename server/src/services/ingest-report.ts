@@ -898,7 +898,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       : !qualityAllowsVision(pipeline)
         ? "Fastest with Read scans off never reads pages with OCR or vision."
         : ladderForbidsVision(pipeline)
-          ? "Fastest reads scans with OCR only and never sends a page to vision, and no OCR engine read these pages (a self-hosted deployment needs DOCSLURP_OCR_MODE set to vm or local). Enable OCR, or switch to Smartest."
+          ? "Auto reads scans with OCR only and never sends a page to vision, and no OCR engine read these pages (a self-hosted deployment needs DOCSLURP_OCR_MODE set to vm or local). Enable OCR, or switch to Smartest."
           : "Page triage did not send them to vision.";
     recs.push({
       id: settingInPlace ? "reprocess-with-vision" : pipeline.visionFallback ? "vision-all-pages" : "turn-on-vision",
@@ -934,7 +934,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
         settingInPlace ? " The project now reads scans, so these files were processed before that change." : ""}`,
       effect: settingInPlace
         ? `Reprocess the ${plural(ids.length, "affected file")} so ${agree(keptAsImage.length, "this page is", "these pages are")} read.`
-        : `Turn Read scans on (Fastest reads scans and images with OCR, ${qualityModePriceRange("fastest")} per 1,000 pages) or switch to Smartest (a vision model reads them, ${qualityModePriceRange("smartest")} per 1,000 pages). Applies to new uploads; reprocess the ${plural(ids.length, "affected file")} to read existing pages.`,
+        : `Switch to Auto (reads scans and images with OCR, ${qualityModePriceRange("fastest")} per 1,000 pages) or switch to Smartest (a vision model reads them, ${qualityModePriceRange("smartest")} per 1,000 pages). Applies to new uploads; reprocess the ${plural(ids.length, "affected file")} to read existing pages.`,
       affectedPages: keptAsImage.length, affectedDocuments: ids.length,
       cost: {
         centsPer100Pages: round(vision.cents * 100, 2),

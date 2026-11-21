@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { toolInputJsonSchema } from "./mcp-tool-schemas.js";
 import { REINDEX_ESTIMATE_TOOL_DESCRIPTION, reindexEstimateToolInput, reindexRouteBody } from "./mcp-reindex-tool.js";
-import { CHART_EXPORT_OVERRIDE_DESCRIPTION, CHART_EXPORT_TIERS, chartExportOverrideSchema, fileProfileSchema, QUALITY_LEVELS, QUALITY_OVERRIDE_DESCRIPTION, qualityLevelSchema, quoteSettingsSchema, VISUALS_LEVELS, VISUALS_OVERRIDE_DESCRIPTION, visualsLevelSchema } from "@docslurp/shared";
+import { CHART_EXPORT_OVERRIDE_DESCRIPTION, CHART_EXPORT_TIERS, chartExportOverrideSchema, fileProfileSchema, QUALITY_OVERRIDE_DESCRIPTION, qualityPresetSchema, quoteSettingsSchema, VISUALS_LEVELS, VISUALS_OVERRIDE_DESCRIPTION, visualsLevelSchema } from "@docslurp/shared";
 
 /**
  * Estimate tools: one per work-creating operation, each forwarding the same body
@@ -19,7 +19,7 @@ export const chartExportOverrideJsonSchema = {
   description: CHART_EXPORT_OVERRIDE_DESCRIPTION,
 };
 
-const qualityJsonSchema = { type: "string", enum: [...QUALITY_LEVELS], description: QUALITY_OVERRIDE_DESCRIPTION };
+const qualityJsonSchema = { type: "string", enum: [...qualityPresetSchema.options], description: QUALITY_OVERRIDE_DESCRIPTION };
 const visualsJsonSchema = { type: "string", enum: [...VISUALS_LEVELS], description: VISUALS_OVERRIDE_DESCRIPTION };
 const deprecatedChartExportJsonSchema = { ...chartExportOverrideJsonSchema, description: `Deprecated: use visuals. ${CHART_EXPORT_OVERRIDE_DESCRIPTION}` };
 
@@ -91,7 +91,7 @@ const common = { project: z.string().min(1).max(256).optional() };
 const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>> = {
   "updateEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
   "searchSettingsEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
-  "reprocessEstimate": z.object({ runId: z.string().min(1), stages: z.array(z.string()).min(1).optional(), stageFrom: z.string().optional(), quality: qualityLevelSchema.optional(), visuals: visualsLevelSchema.optional(), chartExport: chartExportOverrideSchema.optional() }),
+  "reprocessEstimate": z.object({ runId: z.string().min(1), stages: z.array(z.string()).min(1).optional(), stageFrom: z.string().optional(), quality: qualityPresetSchema.optional(), visuals: visualsLevelSchema.optional(), chartExport: chartExportOverrideSchema.optional() }),
   "fullIndexEstimate": z.object({ ...common, documentId: z.string().min(1).optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }),
   "indexingModeEstimate": z.object({ ...common, mode: z.enum(["full", "map", "visual"]) }),
   "graphRebuildEstimate": z.object({ ...common }),

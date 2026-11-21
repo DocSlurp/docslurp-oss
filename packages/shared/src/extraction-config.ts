@@ -14,15 +14,13 @@ import { migrateLegacyQualitySettings, type QualityMode, type RetiredQualityMode
 /**
  * Extraction configuration, release R0 of the simplification (docs/extraction/quality-and-visuals.md):
  *
- * - `quality`: `fastest` | `smartest` (default `fastest`). Fastest reads the text layer and OCRs scans and image pages
- *   (never a vision model); with `readScans: false` it reads the text layer only and keeps scans as page images.
- *   Smartest reads the text layer and sends every page it cannot carry (scans, image pages, hard math, layouts or
- *   fonts) to the vision model, with no OCR step. `balanced` and `smart` are deprecated input aliases.
+ * - `quality`: `fastest` (native only), `auto` (OCR for scans and images), or `smartest` (vision for pages
+ *   the native reader cannot carry). Fastest is the default. Legacy clients can enable OCR with `readScans: true`.
  * - `visuals`: `none` | `figures` | `charts` | `charts-ai`, an ordered ladder over the PDF figure pass and chart export;
  *   unset means the run origin's default.
  *
  * R0 reads both shapes and accepts both on input, but **writes the legacy shape**: `quality: "auto"` plus the Auto
- * ladder's highest rung (`ladder.maxRung`: `ocr` Fastest, `fast` Fastest without Read scans, `intelligent` Smartest),
+ * ladder's highest rung (`ladder.maxRung`: `fast` Fastest, `ocr` Auto, `intelligent` Smartest),
  * `visionFallback`, `figures`, `chartExport.tier`. The new names are a view over those fields plus a run's stamped
  * `pipeline.effective`.
  *
@@ -34,6 +32,8 @@ type Env = Readonly<Record<string, string | undefined>>;
 export const QUALITY_LEVELS = ["fastest", "smartest"] as const;
 export const qualityLevelSchema = z.enum(QUALITY_LEVELS);
 export type QualityLevel = z.infer<typeof qualityLevelSchema>;
+export const qualityPresetSchema = z.enum(["fastest", "auto", "smartest"]);
+export type QualityPreset = z.infer<typeof qualityPresetSchema>;
 export const DEFAULT_QUALITY_LEVEL: QualityLevel = "fastest";
 export const QUALITY_LEVEL_RANK: Readonly<Record<QualityLevel, number>> = { fastest: 0, smartest: 1 };
 
@@ -41,7 +41,7 @@ export const QUALITY_LEVEL_RANK: Readonly<Record<QualityLevel, number>> = { fast
 export const QUALITY_LEVEL_ALIASES = { balanced: "fastest", smart: "smartest" } as const satisfies Record<string, QualityLevel>;
 export type QualityLevelAlias = keyof typeof QUALITY_LEVEL_ALIASES;
 /** A request's `quality`: a level or a deprecated alias (converted on input, never stored). */
-export const qualityLevelInputSchema = z.enum([...QUALITY_LEVELS, "balanced", "smart"]);
+export const qualityLevelInputSchema = z.enum([...qualityPresetSchema.options, "balanced", "smart"]);
 export type QualityLevelInput = z.infer<typeof qualityLevelInputSchema>;
 
 export function isQualityLevelAlias(value: unknown): value is QualityLevelAlias {
@@ -53,8 +53,8 @@ export function normalizeQualityLevel(value: unknown): QualityLevel | null {
   return isQualityLevelAlias(value) ? QUALITY_LEVEL_ALIASES[value] : null;
 }
 
-/** The ladder rung a level stores: Smartest `intelligent`; Fastest `ocr`, or `fast` with Read scans off. */
-export function ladderRungForQuality(level: QualityLevel, readScans = true): LadderRung {
+/** The ladder rung a level stores: Smartest `intelligent`; Fastest `fast`, or `ocr` with Read scans on. */
+export function ladderRungForQuality(level: QualityPreset, readScans = level === "auto"): LadderRung {
   return level === "smartest" ? "intelligent" : readScans ? "ocr" : "fast";
 }
 
@@ -127,13 +127,13 @@ export function legacyQualityModeFor(_level: QualityLevel): QualityMode {
  * keeping the ladder's share caps) and, for Smartest, `visionFallback: true` (Smartest reads with the vision model).
  */
 export function pipelineFieldsForQuality(
-  level: QualityLevel,
+  level: QualityPreset,
   options: { readScans?: boolean; ladder?: unknown } = {},
 ): { quality: QualityMode; ladder: { maxRung: LadderRung } & Record<string, unknown>; visionFallback?: true } {
   const ladder = isRecord(options.ladder) ? options.ladder : {};
   return {
     quality: "auto",
-    ladder: { ...ladder, maxRung: ladderRungForQuality(level, options.readScans ?? true) },
+    ladder: { ...ladder, maxRung: ladderRungForQuality(level, options.readScans) },
     ...(level === "smartest" ? { visionFallback: true as const } : {}),
   };
 }
@@ -216,7 +216,8 @@ export function mapLegacyExtractionSettings(
   const rawQuality = record.quality;
   const stored = qualityLevelOfPipeline(record);
   let quality: QualityLevel = normalizeQualityLevel(rawQuality) ?? stored.quality;
-  const readScans = quality === "smartest" ? true : normalizeQualityLevel(rawQuality) ? record.readScans !== false : stored.readScans;
+  const readScans = quality === "smartest" ? true : rawQuality === "fastest" ? record.readScans === true
+    : normalizeQualityLevel(rawQuality) ? record.readScans !== false : stored.readScans;
   const restricted = privacyRestricts(record.privacyMode);
   if (quality === "smartest" && restricted && !visionReaderIsLocal(record.vision)) {
     lowered.push({ field: "quality", from: "smartest", to: "fastest", reason: "privacy" });
@@ -254,11 +255,11 @@ const deprecation = (field: string, replacement: string): DeprecatedFieldWarning
 export function deprecatedExtractionFields(input: unknown, prefix = ""): DeprecatedFieldWarning[] {
   if (!isRecord(input)) return [];
   const out: DeprecatedFieldWarning[] = [];
-  if (isLegacyQualityMode(input.quality)) {
+  if (isLegacyQualityMode(input.quality) && input.quality !== "auto") {
     const level = qualityLevelFromLegacy(input.quality);
     out.push(deprecation(`${prefix}quality: "${input.quality}"`, `${prefix}quality: "${level}"${input.quality === "fast" ? `, ${prefix}readScans: false` : ""}`));
   }
-  if (isQualityLevelAlias(input.quality)) out.push(deprecation(`${prefix}quality: "${input.quality}"`, `${prefix}quality: "${QUALITY_LEVEL_ALIASES[input.quality]}"`));
+  if (isQualityLevelAlias(input.quality)) out.push(deprecation(`${prefix}quality: "${input.quality}"`, `${prefix}quality: "${input.quality === "balanced" ? "auto" : "smartest"}"`));
   if ("visionFallback" in input) out.push(deprecation(`${prefix}visionFallback`, `${prefix}quality`));
   if ("parserPlaybook" in input) out.push(deprecation(`${prefix}parserPlaybook`, `${prefix}quality`));
   if (isRecord(input.vision) && "forceAllPages" in input.vision) out.push(deprecation(`${prefix}vision.forceAllPages`, `${prefix}quality`));
@@ -299,10 +300,11 @@ export function applyExtractionConfigInput<T>(source: T): T {
 export function convertExtractionConfigInput<T>(source: T, options: { preferNew?: boolean } = {}): { value: T; tierUnset: boolean } {
   if (!isRecord(source)) return { value: source, tierUnset: false };
   const level = normalizeQualityLevel(source.quality);
+  const explicitAuto = source.quality === "auto" && (!isRecord(source.ladder) || source.ladder.maxRung === undefined);
   const hasReadScans = "readScans" in source;
   const hasVisuals = "visuals" in source;
   const hasVersion = "configVersion" in source;
-  if (!level && !hasReadScans && !hasVisuals && !hasVersion) return { value: source, tierUnset: false };
+  if (!level && !explicitAuto && !hasReadScans && !hasVisuals && !hasVersion) return { value: source, tierUnset: false };
   // Fail closed on a semantics version this release does not know.
   if (hasVersion) assertSupportedConfigVersion(source);
   const next: Record<string, unknown> = { ...source };
@@ -315,16 +317,21 @@ export function convertExtractionConfigInput<T>(source: T, options: { preferNew?
   if (level === "smartest" && readScans === false) {
     throw new ExtractionConfigConflictError("readScans", "Smartest always reads scans; send readScans with quality 'fastest'");
   }
-  if (level || hasReadScans) {
+  if (level || explicitAuto || hasReadScans) {
     const sourceLadder = isRecord(source.ladder) ? source.ladder : {};
     // Without a level, readScans sets Fastest's rung unless the input already holds Smartest (an `intelligent` rung).
     const target: QualityLevel = level ?? (sourceLadder.maxRung === "intelligent" && readScans !== false ? "smartest" : "fastest");
     // The level wins over a `ladder.maxRung` sent beside it (a whole pipeline read back carries its stored rung); the
     // ladder's share caps are kept.
-    const fields = pipelineFieldsForQuality(target, { readScans: readScans ?? true, ladder: sourceLadder });
+    const fields = pipelineFieldsForQuality(target, { readScans: readScans ?? (explicitAuto || source.quality === "balanced"), ladder: sourceLadder });
     next.quality = fields.quality;
     next.ladder = fields.ladder;
     if (fields.visionFallback) next.visionFallback = true;
+    if (source.quality === "fastest" || explicitAuto || target === "smartest") {
+      const semanticSearch = target === "smartest" || explicitAuto || readScans === true;
+      next.embed ??= source.indexVectors === true || semanticSearch;
+      next.indexVectors ??= source.embed === false ? false : semanticSearch;
+    }
   }
   let tierUnset = false;
   if (hasVisuals) {
