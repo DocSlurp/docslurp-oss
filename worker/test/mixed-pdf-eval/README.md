@@ -29,6 +29,11 @@ python3 worker/test/mixed-pdf-eval/measure.py --dataset /path/to/eval-data/mixed
   --scorers SCORERS_DIR --split train
 ```
 
+Set `SCORERS_DIR` and `MIXED_PDF_SCORERS` to the root of the shared scorer bundle containing
+`tolerant_markdown_v2_2.py` and `raster_v1/`. Each scored page reports the v2.2 component scores and
+composite under `modern`, alongside the existing acceptance and quality checks. Run identities include
+the bundle's root and raster scorer source hashes.
+
 The harness needs PyMuPDF, Pillow, latex2mathml, markdown-it-py and lxml, plus bubblewrap, Poppler (`pdftotext`,
 `pdfimages`) and `qpdf`. Tests: `python3 -m unittest test_*.py` from this directory (`test_scorer.py` also needs
 `MIXED_PDF_SCORERS`).

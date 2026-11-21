@@ -57,7 +57,7 @@ def value_contexts(text):
     return Counter(tuple(sequence[max(0,i-2):i+3]) for i,t in enumerate(sequence)
                    if re.fullmatch(r'[-+]?\d+(?:\.\d+)?|[=+*/<>^%−×÷±≤≥≠(){}\[\]-]',t))
 
-def content_score(reference, text, legacy):
+def content_score(reference, text, tolerant_scorer):
     expected, actual = Counter(tokens(reference["expectedMarkdown"])), Counter(tokens(text))
     matched = sum((expected & actual).values())
     recall = matched/sum(expected.values()) if expected else 1.0
@@ -99,7 +99,8 @@ def content_score(reference, text, legacy):
     applicable=[recall,precision,minimum_section,ordered]+[v for v in [table_row_recall,numeric,numeric_order,contextual,statement_recall] if v is not None]
     ref = {"prose":reference["expectedMarkdown"], "paragraphs":reference["paragraphs"],
            "tables":reference["tables"], "formulas":reference["formulas"], "groundTruth":{"prosePresent":True,"kind":"authored"}}
-    modern = legacy.compact(legacy.score(ref,text))
+    modern = tolerant_scorer.score(ref, text)
+    modern['tables'].pop('detail', None)
     return {"version":VERSION, "recall":recall,"precision":precision,
             "f1":2*recall*precision/max(1e-9,recall+precision),"sectionRecall":sections,
             "minimumSectionRecall":minimum_section,"numericRecall":numeric,"numericOrderRecall":numeric_order,"numericStatementRecall":statement_recall,"contextualValueRecall":contextual,"hiddenTextLeak":excluded,
@@ -230,7 +231,7 @@ def measure_case(args):
             raise RuntimeError("cached-case-identity-mismatch-use-new-run")
         return {"id":case["id"],"cached":True}
     sys.path.insert(0,scorers)
-    import tolerant_markdown
+    import tolerant_markdown_v2_2 as tolerant_markdown
     source=root/case["pdf"]
     assert_eval_execution(source)  # a dataset entry may not be a link out of the data roots
     if sha(source.read_bytes()) != case["sha256"]: raise RuntimeError("input-hash-mismatch")

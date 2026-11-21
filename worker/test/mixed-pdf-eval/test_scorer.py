@@ -3,7 +3,7 @@ import sys
 import unittest
 
 sys.path.insert(0,os.environ["MIXED_PDF_SCORERS"])
-import tolerant_markdown
+import tolerant_markdown_v2_2 as tolerant_markdown
 from generate import author
 from measure import content_score,tokens
 
@@ -18,6 +18,22 @@ class ScorerTests(unittest.TestCase):
     def test_exact_and_whitespace(self):
         self.assertTrue(self.score(self.text)["acceptable"])
         self.assertTrue(self.score(self.text.replace("\n","  "))["acceptable"])
+    def test_shared_report_scores_table_encodings_and_math(self):
+        ref = {
+            **self.ref,
+            "formulas": ["x^2"],
+            "tables": [{"rows": [["Item", "Count"], ["Boxes", "2"]]}],
+        }
+        pipe_table = "| Item | Count |\n| --- | --- |\n| Boxes | 2 |"
+        html_table = "<table><tr><th>Item</th><th>Count</th></tr><tr><td>Boxes</td><td>2</td></tr></table>"
+        for table in [pipe_table, html_table]:
+            with self.subTest(table=table):
+                report = content_score(ref, f"{self.text}\n\n{table}\n\n$$x^2$$", tolerant_markdown)["modern"]
+                self.assertEqual(report["scorerVersion"], "tolerant-markdown@v2.2")
+                self.assertEqual(report["tables"]["contentF1"], 1)
+                self.assertEqual(report["math"]["score"], 1)
+                self.assertAlmostEqual(report["content"], sum(report[key]["score"] for key in report["applicable"]) / len(report["applicable"]))
+
     def test_omitted_inset(self):
         self.assertFalse(self.score(self.text.replace(self.ref["sections"][3],""))["acceptable"])
     def test_nonapplicable_dimensions(self):
