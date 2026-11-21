@@ -600,7 +600,7 @@ describe("stored HTML table cells: stage wiring", () => {
       const internals = stage as any;
       const sourcePath = path.join(scratch, "tables.html");
       await writeFile(sourcePath, "<html><body>tables</body></html>");
-      internals.sources = { get: async () => ({ path: sourcePath, sha256: "sha-tables" }) };
+      internals.sources = { acquire: async () => ({ path: sourcePath, release: async () => {}, sha256: "sha-tables" }) };
       internals.recordSourcePageFacts = async () => undefined;
       internals.buildParserArtifacts = async () => [];
       internals.enrichOfficeStructure = async ({ document }: { document: unknown }) => document;

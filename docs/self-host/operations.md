@@ -577,3 +577,19 @@ scopes, records production query policy, and exits nonzero if either scope misse
 recall@10 or regresses more than one percentage point. Its output stays local; do not publish
 customer vectors/identifiers. `vector-index-cold.ts` measures process-cold local read bytes;
 these are neither physical I/O nor a production S3 latency measurement.
+
+### Query embedding routes
+
+```dotenv
+SEARCH_EMBEDDING=llm://openrouter.ai/baai/bge-m3,llm://deepinfra.com/BAAI/bge-m3
+```
+
+Set this on the API and durable chat executor to try routes in order for
+standard-privacy BGE-M3 search. Missing credentials or transient provider
+failures advance to the next route. Unset it to use the project's indexed
+embedding route. Other embedding spaces, privacy modes, and ingestion keep
+their configured routes.
+
+The list also accepts `llm://transformers.js/Xenova/bge-m3?pooling=cls`. Provision
+the model cache before using the local route. Verify ranking parity on
+representative queries against the existing index before enabling a pool.

@@ -1,6 +1,8 @@
+import { APICallError } from "ai";
+import { currentSearchSignal } from "./query-bounds.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
-import { embeddingRequestConfig, isPrivacyModeViolation, resolveEmbeddingRoute, type EmbeddingConfig } from "@docslurp/shared";
+import { embeddingRequestConfig, isPrivacyModeViolation, resolveEmbeddingRoute, validateHostedEmbeddingVector, type EmbeddingConfig } from "@docslurp/shared";
 import {
   embedConfiguredText,
   generateOpenRouterText,
@@ -422,14 +424,78 @@ export function queryEmbeddingApiKey(route: { runtime: string; provider: string 
         : route.provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
 }
 
+const BGE_M3_ROUTES = new Map([
+  ["llm://openrouter.ai/baai/bge-m3", "llm://openrouter/baai/bge-m3"],
+  ["llm://deepinfra.com/BAAI/bge-m3", "llm://deepinfra/BAAI/bge-m3"],
+  ["llm://transformers.js/Xenova/bge-m3?pooling=cls", "llm://transformers.js/Xenova/bge-m3?pooling=cls"],
+]);
+
+export function queryEmbeddingPool(embedding: EmbeddingConfig, privacyMode: PrivacyMode): EmbeddingConfig[] {
+  const setting = process.env.SEARCH_EMBEDDING?.trim();
+  if (!setting || privacyMode !== "standard" || embedding.dimensions !== undefined
+    || embedding.normalize === false || embedding.lateChunking
+    || (embedding.modelUri !== "llm://deepinfra/BAAI/bge-m3"
+      && embedding.modelUri !== "llm://openrouter/baai/bge-m3")) return [];
+
+  const routes = setting.split(",").map(uri => {
+    const modelUri = BGE_M3_ROUTES.get(uri.trim());
+    if (!modelUri) throw new Error("SEARCH_EMBEDDING contains an unsupported BGE-M3 route");
+    return modelUri;
+  });
+  return [...new Set(routes)].map(modelUri => ({
+    ...embedding, modelUri, normalize: true,
+    target: modelUri.startsWith("llm://transformers.js/") ? "local" : "hosted",
+  }));
+}
+
 export async function embedQuery(
   query: string,
   embedding: EmbeddingConfig,
   usage: SearchSessionJournal,
   privacyMode: PrivacyMode,
-  /** Strict-privacy audit attribution for private embedding routes. */
   auditProjectId?: string | null,
   orgId?: string,
+): Promise<number[] | null> {
+  const pool = queryEmbeddingPool(embedding, privacyMode);
+  const signal = currentSearchSignal();
+  signal?.throwIfAborted();
+  if (!pool.length) return embedQueryRoute(query, embedding, usage, privacyMode, auditProjectId, orgId, signal);
+
+  let lastError: unknown;
+  for (const candidate of pool) {
+    signal?.throwIfAborted();
+    const route = resolveEmbeddingRoute(candidate);
+    if (route.runtime === "remote" && !queryEmbeddingApiKey(route)) continue;
+    const timeout = route.runtime === "remote" ? AbortSignal.timeout(3_000) : undefined;
+    const attemptSignal = timeout && signal ? AbortSignal.any([timeout, signal]) : timeout ?? signal;
+    try {
+      const vector = await embedQueryRoute(query, candidate, usage, privacyMode, auditProjectId, orgId, attemptSignal, route.runtime === "local");
+      signal?.throwIfAborted();
+      if (vector) {
+        usage.recordDiagnostic("embeddingPool", { provider: route.provider });
+        return vector;
+      }
+    } catch (error) {
+      signal?.throwIfAborted();
+      const retryable = timeout?.aborted || (APICallError.isInstance(error)
+        && (error.statusCode === undefined || error.statusCode === 408 || error.statusCode === 429
+          || (error.statusCode >= 500 && error.statusCode <= 599)));
+      if (!retryable) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError ?? new Error("No query embedding available from SEARCH_EMBEDDING");
+}
+
+async function embedQueryRoute(
+  query: string,
+  embedding: EmbeddingConfig,
+  usage: SearchSessionJournal,
+  privacyMode: PrivacyMode,
+  auditProjectId?: string | null,
+  orgId?: string,
+  signal?: AbortSignal,
+  validateNativeVector = false,
 ): Promise<number[] | null> {
   const route = resolveEmbeddingRoute(embedding);
   const { model, provider, runtime, dimensions, requestedDimensions, baseUrl } = route;
@@ -463,7 +529,7 @@ export async function embedQuery(
     }
     if (cached) {
       console.info(`[search-cache] embedding hit model=${model} privacy=${privacyMode} entries=${cache.size}`);
-      return cached.slice();
+      return validateNativeVector ? validateHostedEmbeddingVector(cached, dimensions, false) : cached.slice();
     }
   }
   const apiKey = queryEmbeddingApiKey(route);
@@ -480,10 +546,11 @@ export async function embedQuery(
     };
     const result = await embedConfiguredText({
       value: query,
+      signal,
       runtime,
       provider,
       model,
-      dimensions,
+      dimensions: validateNativeVector ? undefined : dimensions,
       requestedDimensions,
       normalize,
       apiKey,
@@ -510,8 +577,10 @@ export async function embedQuery(
       inputTokens: result.usage.inputTokens,
       logOutputTokens: false,
     });
-    if (cacheKey) cache.set(cacheKey, result.embedding.slice());
-    return result.embedding;
+    const vector = validateNativeVector
+      ? validateHostedEmbeddingVector(result.embedding, dimensions, false) : result.embedding;
+    if (cacheKey) cache.set(cacheKey, vector.slice());
+    return vector;
   } catch (error) {
     if (METERED_EMBEDDING_PROVIDERS.has(provider)) throw error;
     return null;

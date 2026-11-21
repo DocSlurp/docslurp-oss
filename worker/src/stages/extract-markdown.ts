@@ -448,7 +448,7 @@ export class ExtractMarkdownStage implements Stage {
                   `pages=${pageCount} completed=${completedPages.size} remaining=${remaining.length}`,
               );
 
-              const cachedSource = await this.sources.get(document);
+              const cachedSource = await this.sources.acquire(document);
               const tempFile = cachedSource.path;
 
               // Track partial artifacts so we can fall through with usable assets on failure
@@ -1410,7 +1410,10 @@ export class ExtractMarkdownStage implements Stage {
                 }
                 throw error;
               } finally {
-                await Promise.all(candidateDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+                await Promise.all([
+                  cachedSource.release(),
+                  ...candidateDirs.map((dir) => rm(dir, { recursive: true, force: true })),
+                ]);
               }
             }),
             signal,

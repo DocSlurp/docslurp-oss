@@ -513,7 +513,7 @@ export const performanceLog = pgTable(
     stageName: text("stage_name").notNull(),
     metric: text().notNull(),
     pageNumber: integer("page_number"),
-    value: numeric({ precision: 16, scale: 4 }).notNull(),
+    value: numeric().notNull(),
     unit: text().notNull(),
     tags: text().array().default([""]).notNull(),
     metadata: jsonb().default({}).notNull(),

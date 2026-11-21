@@ -40,7 +40,7 @@ async function extractWithTitle(args: { filename: string; mimeType: string; form
     const internals = stage as any;
     const sourcePath = path.join(scratch, args.filename);
     await writeFile(sourcePath, args.source);
-    internals.sources = { get: async () => ({ path: sourcePath, sha256: `sha-${args.filename}` }) };
+    internals.sources = { acquire: async () => ({ path: sourcePath, release: async () => {}, sha256: `sha-${args.filename}` }) };
     internals.recordSourcePageFacts = async () => undefined;
     internals.buildParserArtifacts = async () => [];
     internals.enrichOfficeStructure = async ({ document }: { document: unknown }) => document;

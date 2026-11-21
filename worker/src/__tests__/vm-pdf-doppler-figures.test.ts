@@ -79,7 +79,7 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
   const stage = options.stage ?? new ExtractMarkdownStage(runner as any, storage as any, {} as any);
   const internals = stage as any;
   if (options.stage) { internals.runner = runner; internals.storage = storage; }
-  internals.sources = { get: async () => ({ path: sourcePath, sha256: "a".repeat(64) }) };
+  internals.sources = { acquire: async () => ({ path: sourcePath, release: async () => {}, sha256: "a".repeat(64) }) };
   internals.recordSourcePageFacts = async () => undefined;
   internals.recordPageImageEvidence = async () => null;
   options.prepare?.(internals);

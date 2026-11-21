@@ -17,6 +17,7 @@ import {
   parsePdfPageSizes,
   runLanes,
 } from "../pipeline/pdf-asset-cache.js";
+import { isReadOnlySource } from "../sandbox/paths.js";
 import { probePidNamespace, spawnContained } from "../sandbox/teardown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
@@ -78,6 +79,38 @@ describe("PdfSourceCache", () => {
     expect(concurrent.cacheHit).toBe(true);
     expect(later.cacheHit).toBe(true);
     await cache.clear();
+  });
+
+  it("keeps an extraction source available across batches while concurrent downloads exceed the cache limit", async () => {
+    const cache = new PdfSourceCache({
+      async downloadToTempFile(key) {
+        const root = await mkdtemp(path.join(tmpdir(), "source-cache-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, "source.pdf");
+        await writeFile(filePath, key);
+        return filePath;
+      },
+    }, 1);
+    const document = makeDocument();
+    const [source, shared] = await Promise.all([cache.acquire(document), cache.acquire(document)]);
+    try {
+      const others = await Promise.all(["other.pdf", "third.pdf"].map((name) =>
+        cache.get({ ...document, sourceKey: `sources/${name}` }),
+      ));
+      expect(others.every((other) => other.path !== source.path)).toBe(true);
+      expect(shared.path).toBe(source.path);
+      expect(await readFile(source.path, "utf8")).toBe(document.sourceKey);
+      await cache.clear();
+      await shared.release();
+      expect(isReadOnlySource(source.path)).toBe(true);
+      expect(await readFile(source.path, "utf8")).toBe(document.sourceKey);
+    } finally {
+      await cache.clear();
+      await shared.release();
+      await source.release();
+    }
+    expect(existsSync(source.path)).toBe(false);
+    expect(isReadOnlySource(source.path)).toBe(false);
   });
 
   it("never serves a cached source to another organization's run or another run, even under the same storage key", async () => {

@@ -590,8 +590,13 @@ export function createStageExecution(deps: {
       const localObservation = buildAllocatedResourceObservation({
         profile: deploymentProfile,
         wallTimeMs: durationMs,
-        // A range shard does only its ranges; counting whole documents would inflate pages per minute and per $1.
-        pages: pageRanges ? [...pageRanges.values()].reduce((total, ranges) => total + pagesInRanges(ranges), 0) : documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
+        // A range shard does only its ranges. A fully checkpointed stage
+        // incurs orchestration cost, but processes no new pages.
+        pages: pageRanges
+          ? [...pageRanges.values()].reduce((total, ranges) => total + pagesInRanges(ranges), 0)
+          : completedDocs.length === documents.length
+            ? 0
+            : documents.reduce((total, document) => total + Math.max(1, document.pageCount), 0),
         cold: false,
       });
       state.usageLedger.enqueue(buildLocalComputeUsageEvent({

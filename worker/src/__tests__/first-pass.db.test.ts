@@ -230,6 +230,25 @@ describe("first pass", () => {
     expect(plan.batches.flat().sort()).toEqual(DOCS);
   });
 
+  it("keeps batch demand through provisional stages and fences stale writes", async () => {
+    script = all3;
+    const generation = (await db.query<{ execution_generation: string }>(
+      "select execution_generation from project_runs where id = 'r1'",
+    )).rows[0]!.execution_generation;
+    const readDemand = async () => (await db.query<{ shard_demand: number }>(
+      "select shard_demand from project_runs where id = 'r1'",
+    )).rows[0]?.shard_demand;
+    await store.setRunShardDemand("r1", 2, generation);
+    expect(await readDemand()).toBe(2);
+    const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(result.indexed.sort()).toEqual(DOCS);
+    expect(await readDemand()).toBe(2);
+    await store.setRunShardDemand("r1", 0, "stale-generation");
+    expect(await readDemand()).toBe(2);
+    await store.setRunShardDemand("r1", 0, generation);
+    expect(await readDemand()).toBe(0);
+  });
+
   it("each document is lexical_searchable as soon as its text event is handled, while later files are still pending", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
