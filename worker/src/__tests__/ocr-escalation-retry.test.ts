@@ -151,13 +151,13 @@ describe("OCR escalation across activity retries", () => {
       batch.commit();
     }
     expect(execute).toHaveBeenCalledTimes(2);
-    const receipts = await admin<{ metric: string; input_tokens: number; output_tokens: number; cost_cents: string; provider_cost: number }[]>`
+    const receipts = await admin<{ metric: string; input_tokens: string; output_tokens: string; cost_cents: string; provider_cost: number }[]>`
       select metric, input_tokens, output_tokens, cost_cents::text, (metadata ->> 'providerCostCents')::float8 as provider_cost
       from usage_events where run_id = 'esc-run-2' and metric in ('page-analysis-attempt', 'ocr-escalation') order by metric`;
     expect(receipts).toHaveLength(2);
-    expect(receipts[0]).toMatchObject({ metric: "ocr-escalation", input_tokens: 1_500, output_tokens: 400 });
+    expect(receipts[0]).toMatchObject({ metric: "ocr-escalation", input_tokens: "1500", output_tokens: "400" });
     expect(receipts[0]!.provider_cost).toBeGreaterThan(0);
-    expect(receipts[1]).toMatchObject({ metric: "page-analysis-attempt", input_tokens: 1_500, output_tokens: 120 });
+    expect(receipts[1]).toMatchObject({ metric: "page-analysis-attempt", input_tokens: "1500", output_tokens: "120" });
     expect(receipts[1]!.provider_cost).toBeCloseTo(0.03);
     // Both calls were admitted by the durable guard: they count against the document's attempt budget.
     const [attempts] = await admin<{ attempts: number }[]>`

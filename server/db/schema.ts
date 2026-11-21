@@ -310,21 +310,22 @@ export const usageEvents = pgTable(
     provider: text().notNull(),
     model: text().notNull(),
     metric: text().notNull(),
-    amount: numeric({ precision: 12, scale: 4 }).notNull(),
+    amount: numeric().notNull(),
     unit: text().notNull(),
     costCents: numeric("cost_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     metadata: jsonb().default({}).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    inputTokens: integer("input_tokens").default(0).notNull(),
-    outputTokens: integer("output_tokens").default(0).notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).default(0).notNull(),
+    outputTokens: bigint("output_tokens", { mode: "number" }).default(0).notNull(),
     // Stamped at write time, no FKs: spend outlives the run, project and key (migration 0041).
     orgId: text("org_id"),
     projectId: text("project_id"),
     apiKeyId: text("api_key_id"),
   },
   (table) => [
+    check("usage_events_amount_finite_range", sql`${table.amount} NOT IN ('Infinity'::numeric, '-Infinity'::numeric)`),
     index("usage_events_org_created_idx").on(table.orgId, table.createdAt),
     index("usage_events_project_created_idx").on(table.projectId, table.createdAt),
     index("usage_events_run_id_idx").using(
@@ -2310,10 +2311,11 @@ export const projectRuns = pgTable(
     blockedReason: text("blocked_reason"),
     jobId: text("job_id"),
     stage: text().notNull(),
-    totalDocuments: integer("total_documents").default(0).notNull(),
-    processedDocuments: integer("processed_documents").default(0).notNull(),
-    pagesTotal: integer("pages_total").default(0).notNull(),
-    pagesProcessed: integer("pages_processed").default(0).notNull(),
+    totalDocuments: bigint("total_documents", { mode: "number" }).default(0).notNull(),
+    processedDocuments: bigint("processed_documents", { mode: "number" }).default(0).notNull(),
+    pagesTotal: bigint("pages_total", { mode: "number" }).default(0).notNull(),
+    pagesProcessed: bigint("pages_processed", { mode: "number" }).default(0).notNull(),
+    spendUncheckedPages: bigint("spend_unchecked_pages", { mode: "number" }).default(0).notNull(),
     /** @deprecated Replaced by spentCents (migration 0056); no longer read or written, dropped in a later migration. */
     inputCostCents: numeric("input_cost_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     /** @deprecated Replaced by spentCents (migration 0056); no longer read or written, dropped in a later migration. */
@@ -3394,7 +3396,7 @@ export const adminStats = pgMaterializedView("admin_stats", {
   pagesTotal: bigint("pages_total", { mode: "number" }),
   avgCostCents: numeric("avg_cost_cents"),
 }).as(
-  sql`SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total) AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM project_runs GROUP BY (date_trunc('hour'::text, created_at))`,
+  sql`SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total)::bigint AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM project_runs GROUP BY (date_trunc('hour'::text, created_at))`,
 );
 
 export const searchExperimentResults = pgView("search_experiment_results", {

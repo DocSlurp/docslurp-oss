@@ -68,7 +68,7 @@ function gate() {
 }
 
 async function pendingRun() {
-  const [row] = await sql<{ id: string; total_documents: number; creation_ready_at: Date | null }[]>`select * from project_runs`;
+  const [row] = await sql<{ id: string; total_documents: string; creation_ready_at: Date | null }[]>`select * from project_runs`;
   return row!;
 }
 
@@ -131,7 +131,7 @@ describe("Run creation and recovery together", () => {
     const result = await creating;
     expect(result.run).toMatchObject({ totalDocuments: 2, pagesTotal: 8 });
     expect(await sql`select total_documents, pages_total, creation_ready_at is not null as ready, creation_expires_at from project_runs`)
-      .toEqual([{ total_documents: 2, pages_total: 8, ready: true, creation_expires_at: null }]);
+      .toEqual([{ total_documents: "2", pages_total: "8", ready: true, creation_expires_at: null }]);
     expect(await recovery.sweepOnce()).toMatchObject({ started: 1 });
     expect(startWorkflow).toHaveBeenCalledTimes(1);
     expect(await creation.discardUnstartedRun(result.run.id)).toBe(false);
@@ -433,7 +433,7 @@ describe("Run reprocessing and bulk reprocessing through Run creation", () => {
     expect(reprocessed?.deferredReason).toBeNull();
     expect(bulk).toMatchObject({ runs: [expect.anything()], failed: [], warnings: [] });
     expect(await sql`select total_documents, pages_total, creation_ready_at is not null as ready, creation_source_keys from project_runs`)
-      .toEqual(Array.from({ length: 3 }, () => ({ total_documents: 2, pages_total: 6, ready: true, creation_source_keys: [] })));
+      .toEqual(Array.from({ length: 3 }, () => ({ total_documents: "2", pages_total: "6", ready: true, creation_source_keys: [] })));
     expect(startWorkflow).toHaveBeenCalledTimes(2);
   });
 

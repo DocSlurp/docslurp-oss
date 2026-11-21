@@ -226,9 +226,9 @@ describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
       metadata: { originalQuery: "maintenance", projectId: "w", filters: {}, options: {} } as never,
     });
     await persisted;
-    const usage = await sql<{ input_tokens: number; project_id: string }[]>`
+    const usage = await sql<{ input_tokens: string; project_id: string }[]>`
       select input_tokens, project_id from usage_events where metadata ->> 'sessionId' = ${journal.sessionId}`;
-    expect(usage).toEqual([{ input_tokens: 7, project_id: "w" }]);
+    expect(usage).toEqual([{ input_tokens: "7", project_id: "w" }]);
     expect(await sql`select id from search_sessions where id = ${journal.sessionId}`).toEqual([]);
     release();
     await session.drainSearchSessionWrites();
