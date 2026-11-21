@@ -5,8 +5,8 @@
     "source": "https://github.com/Zouuup/landrun",
     "commit": "62823c05e58ec22c1f91b4c8468318c1f97f2d32",
     "build": {
-      "go": "go1.27.3",
-      "image": "golang:1.27-trixie@sha256:af1bfc2614ebb1dbd31af514b78740fd678850e76498762b425ecee4c5c6ea80",
+      "go": "go1.27.4",
+      "image": "golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d",
       "note": "built from the pinned commit (tag v0.1.17) with CGO_ENABLED=0 -trimpath; the release binaries were built with Go 1.26.5"
     }
   }

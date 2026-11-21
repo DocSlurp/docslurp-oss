@@ -1,5 +1,5 @@
 # Build stage: compile TypeScript
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS builder
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS builder
 # TypeScript compilation never executes GPU inference; runtime installs stay unchanged.
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
@@ -20,7 +20,7 @@ RUN pnpm --filter @docslurp/worker build
 # every file are sha256-pinned in scripts/fetch-native-pdf-assets.mjs.
 #   DOCSLURP_NATIVE_PDF_OCR_MODELS=1  PP-OCRv6 small OCR models (~30 MB, Apache-2.0)
 #   DOCSLURP_NATIVE_PDF_CJK_FONTS=1   Noto CJK fallback fonts (~54 MB, OFL-1.1)
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS native-pdf-assets
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS native-pdf-assets
 ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
 ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 COPY scripts/fetch-native-pdf-assets.mjs /tmp/fetch-native-pdf-assets.mjs
@@ -30,7 +30,7 @@ RUN node /tmp/fetch-native-pdf-assets.mjs --out /opt/native-pdf \
 # landrun (Landlock sandbox provider, MIT, pinned by worker/sandbox-tools.json), built from its pinned commit with a fixed Go
 # toolchain (the v0.1.17 release binary was built with Go 1.26.5, which carries standard-library CVEs). The checkout must be
 # exactly the pinned commit, and module downloads are verified against the repository's go.sum. Static (CGO_ENABLED=0).
-FROM golang:1.27-trixie@sha256:af1bfc2614ebb1dbd31af514b78740fd678850e76498762b425ecee4c5c6ea80 AS landrun
+FROM golang:1.27.4-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS landrun
 ARG TARGETARCH=amd64
 COPY worker/sandbox-tools.json /tmp/sandbox-tools.json
 RUN set -e; \
@@ -42,7 +42,7 @@ RUN set -e; \
     /usr/local/bin/landrun --version
 
 # Production stage: runtime only (no TypeScript toolchain or devDeps)
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
 # Node's bundled npm 11.19.1 carries undici 6.28.0 and brace-expansion 5.0.9 (Trivy HIGH); npm 11.21.2 bundles the fixed
 # versions. Installed from its registry tarball, checked against the pinned sha512 first. Nothing at runtime runs npm.
 RUN node -e ' \
@@ -73,7 +73,9 @@ COPY scripts/setup-cli-docker.sh /tmp/setup-cli-docker.sh
 COPY scripts/uv-installer.lock.txt /tmp/uv-installer.lock.txt
 COPY scripts/setup-worker-python-venv.sh /tmp/setup-worker-python-venv.sh
 # The venv stays root-owned (council W #1): parsers run as uid 10001 and must not rewrite it for the next document.
-RUN sh /tmp/setup-cli-docker.sh \
+COPY scripts/configure-debian-build-snapshot.sh /tmp/configure-debian-build-snapshot.sh
+RUN sh /tmp/configure-debian-build-snapshot.sh && rm /tmp/configure-debian-build-snapshot.sh \
+ && sh /tmp/setup-cli-docker.sh \
     && rm -f /tmp/setup-cli-docker.sh /tmp/uv-installer.lock.txt
 
 # Install production Node.js dependencies only
