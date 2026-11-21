@@ -387,14 +387,19 @@ export async function getRunForensics(runId: string, userId: string): Promise<Ru
     sql<ChunkStatsRow[]>`
       select
         d.id as document_id,
-        coalesce(count(distinct c.id), 0)::int as chunk_count,
-        coalesce(count(distinct p.id), 0)::int as page_count,
-        coalesce(sum(c.token_estimate), 0)::int as token_estimate
+        c.chunk_count,
+        p.page_count,
+        c.token_estimate
       from documents d
-      left join document_chunks c on c.document_id = d.id
-      left join document_pages p on p.document_id = d.id
+      cross join lateral (
+        select count(*)::int as chunk_count,
+          coalesce(sum(token_estimate), 0)::double precision as token_estimate
+        from document_chunks where document_id = d.id
+      ) c
+      cross join lateral (
+        select count(*)::int as page_count from document_pages where document_id = d.id
+      ) p
       where d.run_id = ${runId}
-      group by d.id
     `
   ]);
 

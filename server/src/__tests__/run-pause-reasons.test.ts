@@ -11,3 +11,11 @@ it("exposes closed spend reason codes and suppresses arbitrary stored pause text
   expect(mapProjectRun({ ...base, pause_reason: "project_budget_paused" }).pauseReason).toBe("project_budget_paused");
   expect(mapProjectRun({ ...base, pause_reason: "secret-provider-error" }).pauseReason).toBeNull();
 });
+
+it("preserves numeric API run counters when Postgres returns bigint text", () => {
+  expect(mapProjectRun({
+    ...base, total_documents: "1", processed_documents: "0", pages_total: "2147483649", pages_processed: "2147483648",
+  })).toMatchObject({
+    totalDocuments: 1, processedDocuments: 0, pagesTotal: 2147483649, pagesProcessed: 2147483648,
+  });
+});

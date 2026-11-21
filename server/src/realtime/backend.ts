@@ -31,7 +31,7 @@ type EconomicsRow = { projectId: string; name: string; documentCount: number; pa
 export async function readProjectEconomics(orgId: string, page: number): Promise<EconomicsRow[]> {
   return await sql<EconomicsRow[]>`
     select w.id as "projectId", w.name,
-      (coalesce(cs.document_count,0) + inflight.documents + terminal.documents)::int as "documentCount",
+      (coalesce(cs.document_count,0) + inflight.documents + terminal.documents)::double precision as "documentCount",
       (coalesce(cs.page_count,0) + inflight.pages + terminal.pages)::float8 as "pageCount",
       (coalesce(cs.source_bytes,0) + inflight.bytes + terminal.bytes)::float8 as "sourceBytes",
       active.runs as "activeRuns",

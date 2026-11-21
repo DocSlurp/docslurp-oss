@@ -125,10 +125,10 @@ type ProjectRunRow = {
   kind: string;
   status: string;
   stage: string;
-  total_documents: number;
-  processed_documents: number;
-  pages_total: number;
-  pages_processed: number;
+  total_documents: number | string;
+  processed_documents: number | string;
+  pages_total: number | string;
+  pages_processed: number | string;
   pipeline: PipelineFeatures | null;
   stats: Record<string, unknown> | null;
   artifacts: Record<string, string> | null;
@@ -466,10 +466,10 @@ function mapProjectRun(row: ProjectRunRow, readPipeline?: PipelineFeatures): Pro
     kind: row.kind,
     status: row.status,
     stage: toPublicRunRowStage(row.stage, row.status, row.id),
-    totalDocuments: row.total_documents,
-    processedDocuments: row.processed_documents,
-    pagesTotal: row.pages_total,
-    pagesProcessed: row.pages_processed,
+    totalDocuments: Number(row.total_documents),
+    processedDocuments: Number(row.processed_documents),
+    pagesTotal: Number(row.pages_total),
+    pagesProcessed: Number(row.pages_processed),
     pipeline: readPipeline ?? normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
@@ -829,20 +829,20 @@ async function readProject(projectId: string, orgId: string, client: typeof sql 
       w.retain_document_versions,
       w.allow_china_providers,
       w.auto_confirm_reindex,
-      coalesce(cs.document_count, 0)::int as document_count,
-      coalesce(cs.page_count, 0)::int as total_page_count,
-      greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
+      coalesce(cs.document_count, 0)::double precision as document_count,
+      coalesce(cs.page_count, 0)::double precision as total_page_count,
+      greatest(coalesce(cs.page_count, 0) - coalesce(idx.unindexed_pages, 0), 0)::double precision as indexed_page_count,
       coalesce(cs.source_bytes, 0)::double precision as source_bytes,
-      coalesce(inflight.document_count, 0)::int as pending_document_count,
-      coalesce(inflight.page_count, 0)::int as pending_page_count,
-      coalesce(j.run_count, 0)::int as run_count,
-      coalesce(act.search_sessions, 0)::int as search_session_count,
+      coalesce(inflight.document_count, 0)::double precision as pending_document_count,
+      coalesce(inflight.page_count, 0)::double precision as pending_page_count,
+      coalesce(j.run_count, 0)::double precision as run_count,
+      coalesce(act.search_sessions, 0)::double precision as search_session_count,
       coalesce((
-        select count(*)::int
+        select count(*)::double precision
         from chat_sessions cs
         where cs.project_id = w.id
       ), 0) as chat_thread_count,
-      coalesce(act.chat_turns, 0)::int as chat_message_count,
+      coalesce(act.chat_turns, 0)::double precision as chat_message_count,
       recent.id as latest_run_id,
       recent.status as latest_run_status,
       w.archived_at::text as archived_at,
@@ -878,7 +878,7 @@ async function readProject(projectId: string, orgId: string, client: typeof sql 
     ) act on true
     -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
     left join lateral (
-      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
+      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0) as unindexed_pages
       from documents d
       left join lateral (
         select count(*)::int as indexed from document_page_states s
@@ -890,14 +890,14 @@ async function readProject(projectId: string, orgId: string, client: typeof sql 
     ) idx on true
     -- In-flight ingest reads only the documents_project_in_flight_idx partial index.
     left join lateral (
-      select count(*)::int as document_count,
-        coalesce(sum(greatest(page_count, 0)), 0)::int as page_count
+      select count(*) as document_count,
+        coalesce(sum(greatest(page_count, 0)), 0) as page_count
       from documents
       where project_id = w.id
         and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')
     ) inflight on true
     left join lateral (
-      select count(*)::int as run_count
+      select count(*) as run_count
       from project_runs
       where project_id = w.id
     ) j on true
@@ -937,20 +937,20 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
       w.retain_document_versions,
       w.allow_china_providers,
       w.auto_confirm_reindex,
-      coalesce(cs.document_count, 0)::int as document_count,
-      coalesce(cs.page_count, 0)::int as total_page_count,
-      greatest(coalesce(cs.page_count, 0)::int - coalesce(idx.unindexed_pages, 0), 0)::int as indexed_page_count,
+      coalesce(cs.document_count, 0)::double precision as document_count,
+      coalesce(cs.page_count, 0)::double precision as total_page_count,
+      greatest(coalesce(cs.page_count, 0) - coalesce(idx.unindexed_pages, 0), 0)::double precision as indexed_page_count,
       coalesce(cs.source_bytes, 0)::double precision as source_bytes,
-      coalesce(inflight.document_count, 0)::int as pending_document_count,
-      coalesce(inflight.page_count, 0)::int as pending_page_count,
-      coalesce(j.run_count, 0)::int as run_count,
-      coalesce(act.search_sessions, 0)::int as search_session_count,
+      coalesce(inflight.document_count, 0)::double precision as pending_document_count,
+      coalesce(inflight.page_count, 0)::double precision as pending_page_count,
+      coalesce(j.run_count, 0)::double precision as run_count,
+      coalesce(act.search_sessions, 0)::double precision as search_session_count,
       coalesce((
-        select count(*)::int
+        select count(*)::double precision
         from chat_sessions cs
         where cs.project_id = w.id
       ), 0) as chat_thread_count,
-      coalesce(act.chat_turns, 0)::int as chat_message_count,
+      coalesce(act.chat_turns, 0)::double precision as chat_message_count,
       recent.id as latest_run_id,
       recent.status as latest_run_status,
       w.archived_at::text as archived_at,
@@ -986,7 +986,7 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
     ) act on true
     -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
     left join lateral (
-      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
+      select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0) as unindexed_pages
       from documents d
       left join lateral (
         select count(*)::int as indexed from document_page_states s
@@ -998,14 +998,14 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
     ) idx on true
     -- In-flight ingest reads only the documents_project_in_flight_idx partial index.
     left join lateral (
-      select count(*)::int as document_count,
-        coalesce(sum(greatest(page_count, 0)), 0)::int as page_count
+      select count(*) as document_count,
+        coalesce(sum(greatest(page_count, 0)), 0) as page_count
       from documents
       where project_id = w.id
         and status not in ('completed', 'failed', 'cancelled', 'pii_blocked')
     ) inflight on true
     left join lateral (
-      select count(*)::int as run_count
+      select count(*) as run_count
       from project_runs
       where project_id = w.id
     ) j on true
@@ -1605,9 +1605,9 @@ export async function getProjectCockpit(
   // cost-per-page stay run-based below.
   const [summaryRow] = await sql<Array<Record<string, number>>>`
     select
-      coalesce(cs.document_count, 0)::int as total_documents,
-      coalesce(cs.document_count, 0)::int as completed_documents,
-      coalesce(cs.page_count, 0)::int as total_pages,
+      coalesce(cs.document_count, 0)::double precision as total_documents,
+      coalesce(cs.document_count, 0)::double precision as completed_documents,
+      coalesce(cs.page_count, 0)::double precision as total_pages,
       coalesce((
         select count(*)::int
         from documents d
@@ -1623,7 +1623,7 @@ export async function getProjectCockpit(
       ), 0) as active_documents,
       -- documents.chunk_count is trigger-maintained (migration 0063).
       coalesce((
-        select sum(docs.chunk_count)::int
+        select sum(docs.chunk_count)::double precision
         from documents docs
         where docs.project_id = w.id
           and docs.status = 'completed'
@@ -1666,12 +1666,12 @@ export async function getProjectCockpit(
       coalesce(count(*) filter (where status = 'processing')::int, 0) as processing_runs,
       coalesce(count(*) filter (where status = 'completed')::int, 0) as completed_runs,
       coalesce(count(*) filter (where status = 'failed')::int, 0) as failed_runs,
-      coalesce(sum(pages_processed)::int, 0) as processed_pages,
+      coalesce(sum(pages_processed), 0)::double precision as processed_pages,
       coalesce(
-        avg(extract(epoch from (updated_at - created_at)) * 1000)
-        filter (where status = 'completed'),
+        round(avg(extract(epoch from (updated_at - created_at)) * 1000)
+        filter (where status = 'completed')),
         0
-      )::int as avg_completed_run_ms
+      )::double precision as avg_completed_run_ms
     from project_runs
     where project_id = ${projectId}
   `;
@@ -1679,12 +1679,12 @@ export async function getProjectCockpit(
   const [telemetryRow] = await sql<Array<Record<string, number>>>`
     select
       coalesce((
-        select sum(a.search_sessions)::int
+        select sum(a.search_sessions)::double precision
         from project_activity_stats a
         where a.project_id = ${projectId}
       ), 0) as search_sessions,
       coalesce((
-        select count(*)::int
+        select count(*)::double precision
         from audit_log a
         where a.project_id = ${projectId}
           and a.action = 'project.chat.requested'

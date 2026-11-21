@@ -150,11 +150,11 @@ adminUsersRoutes.get("/", async (c) => {
       from session se where se."userId" = u.id
     ) sess on true
     left join lateral (
-      select count(*)::int as documents, coalesce(sum(d.page_count), 0)::int as pages, max(d.created_at) as last_upload_at
+      select count(*)::double precision as documents, coalesce(sum(d.page_count), 0)::double precision as pages, max(d.created_at) as last_upload_at
       from documents d where d.user_id = u.id
     ) docs on true
     left join lateral (
-      select count(*)::int as searches, max(s.created_at) as last_search_at from search_sessions s where s.user_id = u.id
+      select count(*)::double precision as searches, max(s.created_at) as last_search_at from search_sessions s where s.user_id = u.id
     ) srch on true
     left join lateral (
       select count(*) filter (where k.key_type <> 'client')::int as api_keys,

@@ -59,11 +59,11 @@ export function materializationForecast(pages: number, remainingCredits: number,
 
 /** Reconcile a persisted bounded workflow against its current source and page ledger. */
 export async function remainingMaterializationForecast(tx: TransactionSql, run: {
-  id: string; org_id: string; project_id: string; stats: unknown; pipeline: { speedBoost?: boolean }; total_documents: number; pages_total: number;
+  id: string; org_id: string; project_id: string; stats: unknown; pipeline: { speedBoost?: boolean }; total_documents: number | string; pages_total: number | string;
 }): Promise<number> {
   const stats = z.object({ materialization: planSchema }).passthrough().parse(run.stats);
   const plan = stats.materialization;
-  if (plan.orgId !== run.org_id || plan.projectId !== run.project_id || run.total_documents !== 1 || run.pages_total !== plan.pages.length) {
+  if (plan.orgId !== run.org_id || plan.projectId !== run.project_id || Number(run.total_documents) !== 1 || Number(run.pages_total) !== plan.pages.length) {
     throw new Error("Materialization plan billing scope mismatch");
   }
   const source = await materializationSource(tx, plan);

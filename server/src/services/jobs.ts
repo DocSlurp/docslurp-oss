@@ -45,10 +45,10 @@ type JobRunRow = {
   status: string;
   blocked_reason: string | null;
   control_state: string | null;
-  total_documents: number;
-  processed_documents: number;
-  pages_total: number;
-  pages_processed: number;
+  total_documents: number | string;
+  processed_documents: number | string;
+  pages_total: number | string;
+  pages_processed: number | string;
   job: Partial<JobMeta> | null;
   job_id: string | null;
   ahead: number | string;
@@ -103,10 +103,10 @@ function jobFromRunRows(rows: JobRunRow[], jobId: string): JobStatusWithProgress
     ...(meta?.estimateUrl ? { estimateUrl: meta.estimateUrl } : {}),
     statusUrl: jobStatusUrl(jobId),
     progress: {
-      documents: rows.reduce((sum, row) => sum + row.processed_documents, 0),
-      documentsTotal: rows.reduce((sum, row) => sum + row.total_documents, 0),
-      pages: rows.reduce((sum, row) => sum + row.pages_processed, 0),
-      pagesTotal: rows.reduce((sum, row) => sum + row.pages_total, 0),
+      documents: rows.reduce((sum, row) => sum + Number(row.processed_documents), 0),
+      documentsTotal: rows.reduce((sum, row) => sum + Number(row.total_documents), 0),
+      pages: rows.reduce((sum, row) => sum + Number(row.pages_processed), 0),
+      pagesTotal: rows.reduce((sum, row) => sum + Number(row.pages_total), 0),
     },
   };
 }

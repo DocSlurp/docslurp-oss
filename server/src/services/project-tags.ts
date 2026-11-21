@@ -3,7 +3,7 @@ import { sql } from "../db.js";
 /** Call only after resolving and authorizing the project. Current versions include queued uploads. */
 export async function listProjectTags(projectId: string): Promise<Array<{ tag: string; documentCount: number }>> {
   const rows = await sql<{ tag: string; document_count: number }[]>`
-    select t.tag, count(*)::int as document_count
+    select t.tag, count(*)::double precision as document_count
     from document_tags t
     join documents d on d.id = t.document_id
     where d.project_id = ${projectId} and d.superseded_at is null

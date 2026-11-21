@@ -38,7 +38,7 @@ beforeAll(async () => {
   });
   for (const row of [
     event("a-pages", "oa", "ua", "pa", "run-a", { cost_cents: 12 }),
-    event("a-llm", "oa", "ua", "pa", "run-a", { provider: "openrouter", model: "openai/gpt-6-luna", metric: "page-analysis", unit: "token", input_tokens: 100, output_tokens: 50, cost_cents: 0.4 }),
+    event("a-llm", "oa", "ua", "pa", "run-a", { provider: "openrouter", model: "openai/gpt-6-luna", metric: "page-analysis", unit: "token", input_tokens: 2147483647, output_tokens: 51, cost_cents: 0.4 }),
     event("b-pages", "ob", "ub", "pb", "run-b", { cost_cents: 4000 }),
     event("b-llm", "ob", "ub", "pb", "run-b", { provider: "openrouter", model: "openai/gpt-6-luna", metric: "page-analysis", unit: "token", input_tokens: 900, output_tokens: 300, cost_cents: 7 }),
   ]) {
@@ -59,7 +59,7 @@ describe("customer cost breakdown is tenant-scoped", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.credits).toBe(12);
-    expect(body.totalTokens).toBe(150);
+    expect(body.totalTokens).toBe(2147483698);
     expect(JSON.stringify(body)).not.toMatch(/openai|luna|costCents/);
   });
 
