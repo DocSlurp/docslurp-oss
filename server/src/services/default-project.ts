@@ -6,6 +6,9 @@ import { apiError, apiErrorCodeForStatus, defaultPipelineFeatures, isApiErrorCod
 
 import { withApiErrorDetails } from "../lib/api-error.js";
 
+// New projects start on Fastest with keyword search. Stored pipelines retain their explicit search settings.
+export const newProjectPipelineDefaults = { ...defaultPipelineFeatures, embed: false, indexVectors: false };
+
 export const DEFAULT_PROJECT_NAME = "Default";
 
 export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "project_not_found" | "project_forbidden" | "project_ambiguous" | "invalid_request" | "forbidden" | "editor_required">;
@@ -70,7 +73,7 @@ export async function insertDefaultProject(
       ${args.userId},
       ${DEFAULT_PROJECT_NAME},
       true,
-      ${query.json(stripManagedPipelineFields(JSON.parse(JSON.stringify(normalizePipelineFeatures(defaultPipelineFeatures)))))}
+      ${query.json(stripManagedPipelineFields(JSON.parse(JSON.stringify(normalizePipelineFeatures(newProjectPipelineDefaults)))))}
     )
     on conflict (org_id) where is_default do nothing
   `;

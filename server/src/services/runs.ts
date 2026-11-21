@@ -1,5 +1,5 @@
 import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode, resolveManagedPipeline } from "@docslurp/shared";
-import { pipelineFieldsForQuality, reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE, type QualityLevel, type VisualsLevel } from "@docslurp/shared";
+import { pipelineFieldsForQuality, reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE, type QualityPreset, type VisualsLevel } from "@docslurp/shared";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { chartExportOverrideError } from "./chart-export-availability.js";
 import {
@@ -381,7 +381,7 @@ function checkReusableSource(
 export async function reprocessRun(
   runId: string,
   userId: string,
-  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; quality?: QualityLevel; visuals?: VisualsLevel; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null;
+  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; quality?: QualityPreset; visuals?: VisualsLevel; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin; apiKeyId?: string | null;
     /** The audit record, written in the transaction that publishes the new run (scoped to its org, project and run). */
     audit?: (runId: string) => Parameters<typeof appendAuditLog>[0] },
 ): Promise<{ run: ProjectRun; deferredReason: string | null } | null> {
@@ -451,7 +451,7 @@ export async function reprocessRun(
     origin: options?.origin ?? "machine",
     // The source run's stamped tier, capped at what the project resolves to now; only an explicit override (refused above
     // when unavailable, and subject to the editor/scope ceiling) may raise it.
-    chartExportReplay: { requested: requestedTier, quality: options?.quality ?? null },
+    chartExportReplay: { requested: requestedTier, quality: options?.quality === "auto" ? "fastest" : options?.quality ?? null },
     apiKeyId: options?.apiKeyId ?? null,
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
     ...(options?.audit ? { onPublish: async (client: typeof sql, run: { runId: string }) => {

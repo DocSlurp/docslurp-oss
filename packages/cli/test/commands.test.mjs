@@ -611,7 +611,7 @@ test("--quality sends pipeline.quality on upload and ingest-url, and rejects unk
 
     result = await invoke(["upload", file, "--quality", "deep"], respond);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /--quality must be fastest or smartest/);
+    assert.match(result.stderr, /--quality must be fastest, auto or smartest/);
     assert.deepEqual(result.requests, []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

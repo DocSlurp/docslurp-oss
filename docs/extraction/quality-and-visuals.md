@@ -2,30 +2,29 @@
 
 Two project settings say how DocSlurp reads your files:
 
-- **`quality`**: `fastest` | `smartest` (default `fastest`), with **`readScans`** (Fastest only, default `true`). How
-  pages are read.
+- **`quality`**: `fastest` | `auto` | `smartest` (default `fastest`). How pages are read.
 - **`visuals`**: `none` | `figures` | `charts` | `charts-ai`. What happens to figures and charts.
 
-They replace `quality: fast|auto|good` and `balanced`/`smart`, `visionFallback`, `figures` and `chartExport.tier`, which
+They replace `quality: fast|good` and `balanced`/`smart`, `visionFallback`, `figures` and `chartExport.tier`, which
 stay accepted during a deprecation window (see [Deprecated names](#deprecated-names)).
 
 ## `quality`
 
 | Quality | Reads | Billing |
 |---|---|---|
-| `fastest` (default) | Every file is read by its native reader (text layer, Office structure, and so on). Only scanned pages and images are queued for OCR. Never a vision model. | Text pages, plus Scan pages for pages OCR read |
-| `fastest` + `readScans: false` | Native readers only. Scanned pages and images are kept as page images, not read and not searchable. | Text pages only |
+| `fastest` (default) | Native readers extract existing text and document structure. Scans and images without text stay unsearchable. | Text pages only |
+| `auto` | Native readers first. OCR reads scans and image pages. | Text pages, plus Scan pages for pages OCR read |
 | `smartest` | Native readers first. Scans, image pages and pages with hard math, layouts or fonts go straight to a vision model, with no OCR step. | Text pages, plus Vision pages for pages a vision model read |
 
-Stored, a level is `quality: "auto"` plus the Auto ladder's highest rung (`pipeline.ladder.maxRung`): `ocr` for Fastest,
-`fast` for Fastest without Read scans, `intelligent` for Smartest ([auto-ladder.md](auto-ladder.md)). The retired `good`
-(a vision model on every page) is read as Smartest; `balanced` is read as Fastest. AI chart reads (`visuals: charts-ai`)
+Stored, a level is `quality: "auto"` plus the Auto ladder's highest rung (`pipeline.ladder.maxRung`): `fast` for Fastest,
+`ocr` for Auto, `intelligent` for Smartest ([auto-ladder.md](auto-ladder.md)). The retired `good`
+(a vision model on every page) is read as Smartest; `balanced` is read as Auto. AI chart reads (`visuals: charts-ai`)
 and visual indexing (`indexingMode: visual`) are vision reads, so they run on Smartest only. If vision cannot read a
 Smartest run (vision off, or refused by the privacy mode), OCR reads its scans instead, so no scan is left unread.
 
-Pages read at query time (on-demand indexing, `indexingMode: map`) follow the same rule: Fastest reads a page without a
-text layer with the OCR engine (one Scan page), Smartest with the vision model (a Vision page), and Fastest without Read
-scans leaves it as a page image.
+Pages read at query time (on-demand indexing, `indexingMode: map`) follow the same rule: Auto reads a page without a
+text layer with the OCR engine (one Scan page), Smartest with the vision model (a Vision page), and Fastest
+leaves it as a page image.
 
 **Page images** (`pageImages`, default `true`) store the rendered page images used for thumbnails, the reader and
 cited-page previews. `false` (Fastest only) renders no new viewer image; images already stored are still served, and
@@ -103,7 +102,7 @@ Every run resolves both settings once, the same way on every surface (`resolveEx
 2. A request **above** the project's value is a raise. Raising to `smartest` or `charts-ai` needs a project editor's
    session, or an API key whose stored scopes include `pipeline:billed-features` (or `projects:manage`) **and** whose
    owner is a project editor. Otherwise: `403 quality_smart_forbidden` / `403 chart_export_models_forbidden`. A
-   revoked or unknown key never qualifies. Raising to `figures` or (where allowed) `charts`, turning Fastest's `readScans` on, and every lowering, needs
+   revoked or unknown key never qualifies. Raising to `figures` or (where allowed) `charts`, choosing Auto, and every lowering, needs
    nothing.
 3. Replays (reprocess, bulk reprocess, reindex, full index) inherit the source run's values, capped at what the project
    allows now: a document read at `smartest` before the project moved to `fastest` is reprocessed at `fastest` unless the
@@ -167,7 +166,7 @@ VM is started, and keep the recogniser's text. See [extractor plugins](extractor
 | `chartExport.tier: "off"` / `"free"` / `"models"` | `visuals: "figures"` / `"charts"` / `"charts-ai"` |
 | `chartExportDefaults` | `visualsDefaults` |
 | reprocess / estimate `chartExport: { tier }` | `visuals` |
-| CLI `--chart-export`, `--no-figures`; `--quality fast\|auto\|good\|balanced\|smart` | `--visuals`; `--quality fastest\|smartest`, `--no-read-scans` |
+| CLI `--chart-export`, `--no-figures`; `--quality fast\|good\|balanced\|smart` | `--visuals`; `--quality fastest\|auto\|smartest`, `--no-read-scans` |
 
 A request that uses a deprecated name still works; its response carries a `Deprecation: true` header and
 `warnings: [{ "code": "deprecated_field", "field", "replacement", "message" }]` (a route whose `warnings` are strings

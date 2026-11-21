@@ -927,15 +927,17 @@ describe("quality and visuals (extraction config R0): raise authorisation, caps,
     const res = await patch({ pipeline: { ...graphPipeline, quality: "fastest", visuals: "charts", figures: undefined, chartExport: undefined, visionFallback: undefined } });
     expect(res.status, await res.clone().text()).toBe(200);
     const stored = (await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from projects where id = 'w'`)[0]!.pipeline;
-    expect(stored).toMatchObject({ quality: "auto", ladder: { maxRung: "ocr" }, figures: true, chartExport: { tier: "free" } });
+    expect(stored).toMatchObject({ quality: "auto", ladder: { maxRung: "fast" }, figures: true, chartExport: { tier: "free" } });
     expect(stored.visuals).toBeUndefined();
     const project = await (await app.request("/v1/projects/w")).json() as { extraction?: unknown; visualsDefaults?: unknown; project?: { extraction?: unknown; visualsDefaults?: unknown } };
     const record = project.project ?? project;
-    expect(record.extraction).toEqual({ quality: "fastest", readScans: true, visuals: "charts" });
+    expect(record.extraction).toEqual({ quality: "fastest", readScans: false, visuals: "charts" });
     expect(record.visualsDefaults).toMatchObject({ machine: "figures", available: expect.arrayContaining(["charts-ai"]) });
-    const legacy = await patch({ pipeline: { ...graphPipeline, quality: "auto" } });
-    expect(legacy.status).toBe(200);
-    expect(legacy.headers.get("Deprecation")).toBe("true");
+    const auto = await patch({ pipeline: { quality: "auto" } });
+    expect(auto.status).toBe(200);
+    expect(auto.headers.get("Deprecation")).toBeNull();
+    const ocr = (await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from projects where id = 'w'`)[0]!.pipeline;
+    expect(ocr).toMatchObject({ quality: "auto", ladder: { maxRung: "ocr" } });
   });
 
   it("run records expose extraction: the stamp, or legacy: true for runs stamped before this release", async () => {

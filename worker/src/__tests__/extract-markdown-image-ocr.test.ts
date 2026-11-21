@@ -28,7 +28,13 @@ function createRun(pipeline: Record<string, unknown> = {}, pagesTotal = 1): Proj
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal, pagesProcessed: 0, spentCents: 0,
-    pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, ...pipeline },
+    pipeline: {
+      ...defaultPipelineFeatures,
+      // This OCR suite opts into Auto. Native-only cases override the quality.
+      ladder: { ...defaultPipelineFeatures.ladder, maxRung: "ocr" },
+      markdownExtraction: true,
+      ...pipeline,
+    },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
   } as ProjectRun;
 }
