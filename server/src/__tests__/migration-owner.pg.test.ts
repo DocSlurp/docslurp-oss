@@ -81,7 +81,10 @@ it.skipIf(!url)("keeps a closed pre-generation database on one superuser session
     const pid = (await c.query("select pg_backend_pid() as pid")).rows[0].pid;
     await applyOwnedMigrations(c, { migrationsFolder: folder, env: attested });
     expect((await c.query("select pg_backend_pid() as pid")).rows[0].pid).toBe(pid);
-    expect((await c.query("select count(*)::int n from pg_stat_activity where datname=current_database()")).rows[0].n).toBe(1);
+    // Autovacuum can attach during the migration. Check that no second client
+    // connection was left behind. The pre-migration barrier still checks all backends.
+    expect((await c.query(`select count(*)::int n from pg_stat_activity
+      where datname = current_database() and backend_type = 'client backend'`)).rows[0].n).toBe(1);
     const { rows } = await c.query("select distinct tableowner from pg_tables where schemaname in ('public','drizzle','docslurp_migrations','docslurp_mastra')");
     expect(rows).toEqual([{ tableowner: owner }]);
     // The fixture was migrated by Drizzle through the first 112 files: those are mapped, not re-run; the rest ran.
@@ -186,11 +189,21 @@ it.skipIf(!url)("refuses an elevated delegated owner or a preconfigured role ove
 it.skipIf(!url)("runs the actual supported CLI against the closed database and preserves ownership", async () => {
   const name = await database(); await admin.query(`alter database ${name} connection limit 0`);
   const target = new URL(url!); target.pathname = `/${name}`;
-  const result = spawnSync(process.execPath, ["db/migrate.mjs"], {
+  const migrateCli = () => spawnSync(process.execPath, ["db/migrate.mjs"], {
     encoding: "utf8", timeout: 30_000,
     env: { ...process.env, DATABASE_URL: target.toString(), MIGRATION_DATABASE_URL: target.toString(),
       MIGRATION_OWNER_ROLE: owner, POSTGIS_MIGRATIONS: "0", ...attested },
   });
+  // CONNECTION LIMIT 0 blocks ordinary connections, but an autovacuum worker
+  // can still be finishing on this newly migrated fixture. The CLI must refuse
+  // while it is present. Retry once after the fixture is actually drained.
+  let result = migrateCli();
+  if (result.stderr?.includes("database must have CONNECTION LIMIT 0, a superuser migrator, and no other sessions")) {
+    await expect.poll(async () => (await admin.query(
+      "select backend_type from pg_stat_activity where datname = $1", [name],
+    )).rows, { timeout: 2_000 }).toEqual([]);
+    result = migrateCli();
+  }
   expect(result.status, result.stderr).toBe(0);
   const c = await connect(name);
   try {

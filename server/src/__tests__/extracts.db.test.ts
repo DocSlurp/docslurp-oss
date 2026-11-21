@@ -157,9 +157,10 @@ describe("extract sweep", () => {
     const runId = await seedRun(extract);
     await extracts.sweepExtracts();
 
-    const [settled] = await sql<{ pages: number; stored_bytes: string; export_id: string; retention_credits: string | null }[]>`
+    const [settled] = await sql<{ pages: string; stored_bytes: string; export_id: string; retention_credits: string | null }[]>`
       select pages, stored_bytes::text, export_id, retention_credits::text from extracts where id = ${extract.id}`;
-    expect(settled!.pages).toBe(10);
+    expect(settled!.pages).toBe("10");
+    expect((await extracts.getExtractForActor(extract.id, owner))?.pages).toBe(10);
     expect(Number(settled!.stored_bytes)).toBe(2 * MB + 10 * (96 + 28) * 1024);
     expect(settled!.retention_credits).toBeNull();
     const [download] = await sql<{ run_id: string; object_key: string; notify_email: boolean; max_expires_at: Date; expires_at: Date; filename: string }[]>`
