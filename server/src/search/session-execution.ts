@@ -80,6 +80,7 @@ export interface SearchSessionRetrievalInput
   extends Omit<SearchSessionExecutionInput, "availability" | "chunks"> {
   limit: number;
   retrieveCandidateLists(): Promise<SearchChunk[][]>;
+  followUp?(baseline: SearchChunk[]): Promise<SearchChunk[] | null>;
   buildAvailability(chunks: SearchChunk[]): SearchAvailability;
   rerankApiKey?: string;
   rerankScope?: { orgId: string; projectId: string };
@@ -315,6 +316,7 @@ export async function executeSearchSessionRetrieval(
   }
 
   recordSearchPhase("fuse", performance.now() - fuseStarted);
+  if (input.followUp && chunks.length > 1) chunks = await input.followUp(chunks) ?? chunks;
   const response = await timePhase("finalize", () => finalizeSearchSessionExecution({
     query: input.query,
     retrievalQuery: input.retrievalQuery,
