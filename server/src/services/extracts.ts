@@ -161,7 +161,7 @@ interface ExtractRow {
 const selectExtract = sql`
   select e.id, e.org_id, e.project_id, e.user_id, e.api_key_id, e.run_id, e.storage_prefix, e.state,
     e.retention_hours, e.paid_retention, e.expires_at::text, e.notify_email, e.download_content,
-    e.completed_at::text, e.run_status, e.pages, e.stored_bytes, e.retention_credits, e.charged_at::text,
+    e.completed_at::text, e.run_status, e.pages::double precision as pages, e.stored_bytes, e.retention_credits, e.charged_at::text,
     e.export_id, e.export_skipped, e.created_at::text, e.deleted_at::text,
     r.status as live_run_status, x.status as export_status, x.expires_at::text as export_expires_at,
     (e.state <> 'active' or e.expires_at <= now()) as expired
@@ -440,7 +440,7 @@ async function settleFinishedExtracts(result: ExtractSweepResult): Promise<void>
   const settled = await sql<{ id: string }[]>`
     with finished as (
       select e.id, r.status,
-        coalesce(sum(d.page_count), 0)::int as pages,
+        coalesce(sum(d.page_count), 0) as pages,
         coalesce(sum(d.file_size), 0)::bigint as source_bytes
       from extracts e
       join project_runs r on r.id = e.run_id and r.extract_id = e.id
@@ -454,7 +454,7 @@ async function settleFinishedExtracts(result: ExtractSweepResult): Promise<void>
     update extracts e
     set completed_at = now(), run_status = finished.status, updated_at = now(),
       pages = finished.pages,
-      stored_bytes = finished.source_bytes + finished.pages * ${ESTIMATED_ARTIFACT_BYTES_PER_PAGE + ESTIMATED_INDEX_BYTES_PER_PAGE},
+      stored_bytes = finished.source_bytes + finished.pages * ${ESTIMATED_ARTIFACT_BYTES_PER_PAGE + ESTIMATED_INDEX_BYTES_PER_PAGE}::bigint,
       next_email_at = case when e.notify_email then now() else null end
     from finished
     where e.id = finished.id and e.completed_at is null
@@ -486,7 +486,7 @@ export async function chargeExtractRetention(
     `;
     if (!row || !row.paid_retention || row.charged_at) return 0;
     const [measured] = await client<{ pages: number; source_bytes: string }[]>`
-      select coalesce(sum(d.page_count), 0)::int as pages, coalesce(sum(d.file_size), 0)::bigint::text as source_bytes
+      select coalesce(sum(d.page_count), 0)::double precision as pages, coalesce(sum(d.file_size), 0)::bigint::text as source_bytes
       from documents d join project_runs r on r.id = d.run_id
       where r.extract_id = ${row.id} and d.org_id = ${row.org_id} and d.purged_at is null
     `;
@@ -625,7 +625,7 @@ async function sendDueExtractEmails(result: ExtractSweepResult): Promise<void> {
         select 1 from document_exports x where x.id = e.export_id and x.status in ('ready', 'failed')
       ))
     returning e.id, e.org_id, e.project_id, e.user_id, e.run_id, e.storage_prefix, e.retention_hours, e.expires_at::text,
-      e.export_id, e.export_skipped, e.pages, u.email, e.email_attempts,
+      e.export_id, e.export_skipped, e.pages::double precision as pages, u.email, e.email_attempts,
       (select x.status from document_exports x where x.id = e.export_id) as export_status,
       (select w.name from projects w where w.id = e.project_id) as project_name
   `;

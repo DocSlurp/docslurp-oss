@@ -717,24 +717,24 @@ export const algoliaCompatRoutes = new Hono()
     }[]>`
       select
         coalesce((
-          select count(*)::int
+          select count(*)::double precision
           from search_sessions s
           where s.project_id = ${project.id}
         ), 0) as queries,
         coalesce((
-          select count(*)::int
+          select count(*)::double precision
           from search_zero_results z
           where z.project_id = ${project.id}
         ), 0) as zero_results,
         coalesce((
-          select count(*)::int
+          select count(*)::double precision
           from audit_log a
           where a.resource_type = 'project'
             and a.resource_id = ${project.id}
             and a.action = 'compat.algolia.click'
         ), 0) as clicks,
         coalesce((
-          select count(*)::int
+          select count(*)::double precision
           from audit_log a
           where a.resource_type = 'project'
             and a.resource_id = ${project.id}

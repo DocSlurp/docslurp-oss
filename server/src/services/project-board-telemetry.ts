@@ -112,8 +112,8 @@ export async function listProjectBoardSummaries(
       -- Current corpus (completed, not superseded) from trigger-maintained counters.
       select
         cs.project_id,
-        cs.document_count::int as total_documents,
-        cs.page_count::int as total_pages,
+        cs.document_count as total_documents,
+        cs.page_count as total_pages,
         cs.source_bytes::double precision as source_bytes
       from project_corpus_stats cs
       where cs.project_id in (select id from requested_projects)
@@ -122,14 +122,14 @@ export async function listProjectBoardSummaries(
       select
         r.project_id,
         count(*) filter (where r.status = 'completed')::int as completed_runs,
-        coalesce(sum(r.pages_processed), 0)::int as processed_pages,
+        coalesce(sum(r.pages_processed), 0) as processed_pages,
         -- Completed runs only: a failed run's wall time says nothing about throughput.
         coalesce(
-          avg(extract(epoch from (r.updated_at - r.created_at)) * 1000)
-          filter (where r.status = 'completed'),
+          round(avg(extract(epoch from (r.updated_at - r.created_at)) * 1000)
+          filter (where r.status = 'completed')),
           0
-        )::int as avg_completed_run_ms,
-        coalesce(sum(r.pages_processed) filter (where r.status = 'completed'), 0)::int as completed_run_pages,
+        ) as avg_completed_run_ms,
+        coalesce(sum(r.pages_processed) filter (where r.status = 'completed'), 0) as completed_run_pages,
         coalesce(
           sum(extract(epoch from (r.updated_at - r.created_at)) * 1000)
           filter (where r.status = 'completed'),
@@ -164,9 +164,9 @@ export async function listProjectBoardSummaries(
       -- so sum / count is the same double avg() returned for the integer milliseconds searches record.
       select
         a.project_id,
-        sum(a.search_sessions)::int as search_sessions,
-        sum(a.search_result_count)::int as search_result_count,
-        sum(a.zero_result_searches)::int as zero_result_searches,
+        sum(a.search_sessions) as search_sessions,
+        sum(a.search_result_count) as search_result_count,
+        sum(a.zero_result_searches) as zero_result_searches,
         case when sum(a.search_duration_count) > 0
           then sum(a.search_duration_ms)::double precision / sum(a.search_duration_count)::double precision
         end as average_search_ms
@@ -193,7 +193,7 @@ export async function listProjectBoardSummaries(
         (now() at time zone 'UTC')::date, interval '1 day')::date as day
     ), activity_daily as (
       select project_id, (created_at at time zone 'UTC')::date as day,
-        sum(input_tokens::bigint + output_tokens::bigint)::double precision as tokens
+        sum(input_tokens::numeric + output_tokens)::double precision as tokens
       from usage_project_scope
       where created_at >= (((now() at time zone 'UTC')::date - 29) at time zone 'UTC')
       group by project_id, (created_at at time zone 'UTC')::date
@@ -233,18 +233,18 @@ export async function listProjectBoardSummaries(
       w.id as project_id,
       acts.activity,
       (select coalesce(max(tokens), 0) from activity_daily) as activity_max_tokens,
-      coalesce(ds.total_documents, 0)::int as total_documents,
-      coalesce(ds.total_pages, 0)::int as total_pages,
+      coalesce(ds.total_documents, 0)::double precision as total_documents,
+      coalesce(ds.total_pages, 0)::double precision as total_pages,
       coalesce(ds.source_bytes, 0)::double precision as source_bytes,
-      coalesce(rs.processed_pages, 0)::int as processed_pages,
+      coalesce(rs.processed_pages, 0)::double precision as processed_pages,
       coalesce(rs.completed_runs, 0)::int as completed_runs,
       (coalesce(cb.chunk_bytes, 0) + coalesce(pb.page_bytes, 0))::bigint as indexed_bytes,
-      coalesce(rs.avg_completed_run_ms, 0)::int as avg_completed_run_ms,
-      coalesce(rs.completed_run_pages, 0)::int as completed_run_pages,
+      coalesce(rs.avg_completed_run_ms, 0)::double precision as avg_completed_run_ms,
+      coalesce(rs.completed_run_pages, 0)::double precision as completed_run_pages,
       coalesce(rs.completed_run_ms, 0)::double precision as completed_run_ms,
-      coalesce(ss.search_sessions, 0)::int as search_sessions,
-      coalesce(ss.search_result_count, 0)::int as search_result_count,
-      coalesce(ss.zero_result_searches, 0)::int as zero_result_searches,
+      coalesce(ss.search_sessions, 0)::double precision as search_sessions,
+      coalesce(ss.search_result_count, 0)::double precision as search_result_count,
+      coalesce(ss.zero_result_searches, 0)::double precision as zero_result_searches,
       ss.average_search_ms,
       coalesce(ts.compute_cost_cents, 0)::double precision as compute_cost_cents,
       coalesce(ts.base_fee_cost_cents, 0)::double precision as base_fee_cost_cents,

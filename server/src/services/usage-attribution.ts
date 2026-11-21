@@ -153,11 +153,11 @@ export async function projectUsageTotals(
   window: UsageWindow = "month",
   client: SqlClient = sql,
 ): Promise<UsageTotals> {
-  const [row] = await client<{ tokens: string; cost_cents: number; event_count: number }[]>`
+  const [row] = await client<{ tokens: string; cost_cents: number; event_count: string }[]>`
     select
       coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      count(distinct au.id)::int as event_count
+      count(distinct au.id) as event_count
     from ${projectAttributedUsage(projectId, window, client)} au
   `;
   return toTotals(row);
@@ -168,11 +168,11 @@ export async function orgUsageTotals(
   window: UsageWindow = "month",
   client: SqlClient = sql,
 ): Promise<UsageTotals> {
-  const [row] = await client<{ tokens: string; cost_cents: number; event_count: number }[]>`
+  const [row] = await client<{ tokens: string; cost_cents: number; event_count: string }[]>`
     select
       coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      count(distinct au.id)::int as event_count
+      count(distinct au.id) as event_count
     from ${orgAttributedUsage(orgId, window, client)} au
     where au.org_id = ${orgId}
   `;
@@ -186,12 +186,12 @@ export async function userUsageTotals(
   client: SqlClient = sql,
 ): Promise<Map<string, UsageTotals>> {
   if (userIds.length === 0) return new Map();
-  const rows = await client<{ user_id: string; tokens: string; cost_cents: number; event_count: number }[]>`
+  const rows = await client<{ user_id: string; tokens: string; cost_cents: number; event_count: string }[]>`
     select
       au.user_id,
       coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      count(distinct au.id)::int as event_count
+      count(distinct au.id) as event_count
     from ${attributedUsage(window, client)} au
     where au.user_id = any(${userIds as string[]})
     group by au.user_id
@@ -223,12 +223,12 @@ export async function orgDailyUsage(
   since: Date,
   client: SqlClient = sql,
 ): Promise<Array<UsageTotals & { date: string }>> {
-  const rows = await client<{ date: string; tokens: string; cost_cents: number; event_count: number }[]>`
+  const rows = await client<{ date: string; tokens: string; cost_cents: number; event_count: string }[]>`
     select
       date_trunc('day', au.created_at)::date as date,
       coalesce(sum(au.input_tokens + au.output_tokens), 0) as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      count(distinct au.id)::int as event_count
+      count(distinct au.id) as event_count
     from ${orgAttributedUsage(orgId, since, client)} au
     where au.org_id = ${orgId}
     group by date_trunc('day', au.created_at)::date
@@ -404,7 +404,7 @@ export async function orgUnitUsage(orgId: string, since: UsageWindow, client: Sq
     select m.metric,
       m.amount::double precision as amount,
       m.cost_cents::double precision as cost_cents,
-      case when m.metric = ${chat} then (select count(distinct c.id) from charges c where c.metric = ${chat}) else 0 end::int as events,
+      case when m.metric = ${chat} then (select count(distinct c.id) from charges c where c.metric = ${chat}) else 0 end::double precision as events,
       (m.unlinked_pages + case when m.metric = ${rich}
         then (select count(distinct c.rich_page) from charges c where c.rich_page is not null) else 0 end)::double precision as final_pages
     from by_metric m
@@ -451,7 +451,7 @@ export async function runUsageTotals(runId: string, client: SqlClient = sql): Pr
       coalesce(sum(au.input_tokens), 0) as input_tokens,
       coalesce(sum(au.output_tokens), 0) as output_tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      count(distinct au.id)::int as events
+      count(distinct au.id) as events
     from ${attributedUsage(null, client)} au
     where au.run_id = ${runId}
   `;
@@ -486,7 +486,7 @@ export async function documentUsageTotals(documentId: string, client: SqlClient 
       coalesce(sum(au.input_tokens), 0) as input_tokens,
       coalesce(sum(au.output_tokens), 0) as output_tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
-      count(distinct au.id)::int as events
+      count(distinct au.id) as events
     from ${attributedUsage(null, client)} au
     where au.document_id = ${documentId}
   `;
@@ -555,8 +555,8 @@ export async function orgIngestUsage(
   client: SqlClient = sql,
 ): Promise<{ rows: IngestUsageRow[]; total: number }> {
   const runFilter = args.runId ? client`and au.source_run_id = ${args.runId}` : client``;
-  const [countRow] = await client<{ total: number }[]>`
-    select count(distinct au.id)::int as total
+  const [countRow] = await client<{ total: string }[]>`
+    select count(distinct au.id) as total
     from ${attributedUsage(null, client)} au
     where au.org_id = ${args.orgId} and au.source_kind = 'ingest' ${runFilter}
   `;
@@ -564,8 +564,8 @@ export async function orgIngestUsage(
     select
       au.source_run_id as run_id,
       au.document_id,
-      round(au.input_tokens)::int as input_tokens,
-      round(au.output_tokens)::int as output_tokens,
+      round(au.input_tokens)::double precision as input_tokens,
+      round(au.output_tokens)::double precision as output_tokens,
       au.cost_cents::double precision as cost_cents,
       au.model,
       au.provider,
@@ -594,7 +594,7 @@ export async function runCostBreakdown(
   const stageRows = await client<{ stage: string | null; tokens: number; cost_cents: number }[]>`
     select
       wr.stage,
-      round(coalesce(sum(au.input_tokens + au.output_tokens), 0))::int as tokens,
+      round(coalesce(sum(au.input_tokens + au.output_tokens), 0))::double precision as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents
     from ${attributedUsage(null, client)} au
     left join project_runs wr on wr.id = au.run_id
@@ -605,7 +605,7 @@ export async function runCostBreakdown(
   const modelRows = await client<{ model: string; tokens: number; cost_cents: number }[]>`
     select
       au.model,
-      round(coalesce(sum(au.input_tokens + au.output_tokens), 0))::int as tokens,
+      round(coalesce(sum(au.input_tokens + au.output_tokens), 0))::double precision as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents
     from ${attributedUsage(null, client)} au
     where au.source_run_id = ${args.runId} and au.org_id = ${args.orgId}
@@ -644,17 +644,17 @@ export type RunUsageCostTotalsRow = {
 /** Columns of RunUsageCostTotalsRow, aggregated over `au` (usage_attribution). */
 function runUsageCostColumns(client: SqlClient) {
   return client`
-      round(coalesce(sum(au.input_tokens), 0))::int as input_tokens,
-      round(coalesce(sum(au.output_tokens), 0))::int as output_tokens,
+      round(coalesce(sum(au.input_tokens), 0))::double precision as input_tokens,
+      round(coalesce(sum(au.output_tokens), 0))::double precision as output_tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as recorded_cost_cents,
       coalesce(sum(au.cost_cents) filter (where au.provider not in ('local-compute', 'docslurp')), 0)::double precision as ai_cost_cents,
       coalesce(sum(au.cost_cents) filter (where au.metadata -> 'selfHosted' is not null), 0)::double precision as self_hosted_cost_cents,
-      coalesce(sum((au.metadata #>> '{selfHosted,hostedEquivalentListCents}')::double precision) filter (
+      coalesce(sum((au.metadata #>> '{selfHosted,hostedEquivalentListCents}')::numeric) filter (
         where au.metadata -> 'selfHosted' is not null
       ), 0)::double precision as self_hosted_list_cents,
       coalesce(sum(au.cost_cents) filter (where au.provider = 'docslurp'), 0)::double precision as fee_cost_cents,
       coalesce(sum(au.cost_cents) filter (where au.provider = 'local-compute'), 0)::double precision as billed_compute_cents,
-      coalesce(sum((au.metadata ->> 'effectiveCostCents')::double precision) filter (
+      coalesce(sum((au.metadata ->> 'effectiveCostCents')::numeric) filter (
         where au.provider = 'local-compute'
           and coalesce(au.metadata ->> 'costRollup', 'authoritative') = 'authoritative'
           and coalesce(au.metadata ->> 'billable', 'false') <> 'true'
@@ -782,7 +782,7 @@ export async function extractUsageTotals(orgId: string, since: UsageWindow, clie
       select
         coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
         coalesce(sum(au.cost_cents) filter (where au.metric = ${BILLABLE_UNIT_METRICS.extractRetention}), 0)::double precision as retention_cents,
-        coalesce(sum((au.metadata ->> 'effectiveCostCents')::double precision) filter (
+        coalesce(sum((au.metadata ->> 'effectiveCostCents')::numeric) filter (
           where au.provider = 'local-compute' and coalesce(au.metadata ->> 'billable', 'false') <> 'true'
         ), 0)::double precision as compute_cents
       from usage_attribution au
@@ -792,7 +792,7 @@ export async function extractUsageTotals(orgId: string, since: UsageWindow, clie
       where au.org_id = ${orgId} and au.created_at >= (select min(created_at) from scoped)
     )
     select (select count(*)::int from scoped) as extracts,
-      (select coalesce(sum(pages), 0)::int from scoped) as pages,
+      (select coalesce(sum(pages), 0)::bigint from scoped) as pages,
       usage.cost_cents, usage.retention_cents, usage.compute_cents
     from usage
   `;

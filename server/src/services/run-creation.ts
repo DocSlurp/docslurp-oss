@@ -749,7 +749,7 @@ async function publishRunCreation(
     const client = tx as unknown as SqlClient;
     await lockRunCreation(runId, client);
     const [manifest] = await client<{ count: number; pages: number }[]>`
-      select count(*)::int as count, coalesce(sum(page_count), 0)::int as pages
+      select count(*)::double precision as count, coalesce(sum(page_count), 0)::double precision as pages
       from documents where run_id = ${runId}
     `;
     if (manifest?.count !== totalDocuments) {

@@ -171,7 +171,7 @@ export async function estimateModeSwitch(
   }
   if (from === "full") return { pages: 0, estimatedCredits: priceOrNull(0), billing: billingMode(), job: "none" };
   const [row] = await sql<PageCountRow[]>`
-    select coalesce(sum(d.page_count), 0)::int as pages, count(*)::int as documents
+    select coalesce(sum(d.page_count), 0)::double precision as pages, count(*)::double precision as documents
     from documents d
     where d.project_id = ${projectId} and d.status = 'completed' and d.superseded_at is null
       and d.indexing_mode <> 'full'

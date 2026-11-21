@@ -75,12 +75,12 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
   }[]>`
     select
       coalesce((
-        select sum(d.chunk_count)::int
+        select sum(d.chunk_count)
         from documents d
         where d.project_id = w.id
           and d.status = 'completed' and d.superseded_at is null
-      ), 0) as indexed_chunk_count,
-      coalesce(cs.document_count, 0)::int as completed_documents,
+      ), 0)::double precision as indexed_chunk_count,
+      coalesce(cs.document_count, 0)::double precision as completed_documents,
       coalesce((
         select count(*)::int
         from documents d
@@ -96,10 +96,10 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
 
   const headingSuggestions =
     semanticRow && semanticRow.indexed_chunk_count > 0
-      ? await sql<{ heading: string; hits: number }[]>`
+      ? await sql<{ heading: string }[]>`
           select
             heading,
-            count(*)::int as hits
+            count(*) as hits
           from (
             select trim(both from heading) as heading
             from document_chunks c

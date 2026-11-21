@@ -835,7 +835,7 @@ export async function buildRunProgressSnapshot(
       select
         document_id,
         stage_name,
-        count(*)::int as completed_pages
+        count(*)::double precision as completed_pages
       from page_stage_states
       where run_id = ${run.id}
         and status = 'completed'
