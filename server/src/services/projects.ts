@@ -838,7 +838,7 @@ async function readProject(projectId: string, orgId: string, client: typeof sql 
       coalesce(j.run_count, 0)::double precision as run_count,
       coalesce(act.search_sessions, 0)::double precision as search_session_count,
       coalesce((
-        select count(*)::int
+        select count(*)::double precision
         from chat_sessions cs
         where cs.project_id = w.id
       ), 0) as chat_thread_count,
@@ -946,7 +946,7 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
       coalesce(j.run_count, 0)::double precision as run_count,
       coalesce(act.search_sessions, 0)::double precision as search_session_count,
       coalesce((
-        select count(*)::int
+        select count(*)::double precision
         from chat_sessions cs
         where cs.project_id = w.id
       ), 0) as chat_thread_count,
@@ -1684,7 +1684,7 @@ export async function getProjectCockpit(
         where a.project_id = ${projectId}
       ), 0) as search_sessions,
       coalesce((
-        select count(*)::int
+        select count(*)::double precision
         from audit_log a
         where a.project_id = ${projectId}
           and a.action = 'project.chat.requested'

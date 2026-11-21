@@ -990,7 +990,7 @@ export async function listDocumentIndexEntries(args: {
   const whereClause = andSqlFragments(conditions);
 
   const [summaryRow] = await sql<{ total_count: number }[]>`
-     select count(*)::int as total_count
+     select count(*)::double precision as total_count
      ${joinClause}
      where ${whereClause}
   `;
