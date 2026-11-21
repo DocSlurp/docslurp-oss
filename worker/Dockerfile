@@ -1,5 +1,5 @@
 # Build stage: compile TypeScript
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS builder
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS builder
 # TypeScript compilation never executes GPU inference; runtime installs stay unchanged.
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 WORKDIR /app
@@ -20,7 +20,7 @@ RUN pnpm --filter @docslurp/worker build
 # every file are sha256-pinned in scripts/fetch-native-pdf-assets.mjs.
 #   DOCSLURP_NATIVE_PDF_OCR_MODELS=1  PP-OCRv6 small OCR models (~30 MB, Apache-2.0)
 #   DOCSLURP_NATIVE_PDF_CJK_FONTS=1   Noto CJK fallback fonts (~54 MB, OFL-1.1)
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS native-pdf-assets
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0 AS native-pdf-assets
 ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
 ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 COPY scripts/fetch-native-pdf-assets.mjs /tmp/fetch-native-pdf-assets.mjs
@@ -42,7 +42,7 @@ RUN set -e; \
     /usr/local/bin/landrun --version
 
 # Production stage: runtime only (no TypeScript toolchain or devDeps)
-FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d
+FROM node:24-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
 # Node's bundled npm 11.19.1 carries undici 6.28.0 and brace-expansion 5.0.9 (Trivy HIGH); npm 11.21.2 bundles the fixed
 # versions. Installed from its registry tarball, checked against the pinned sha512 first. Nothing at runtime runs npm.
 RUN node -e ' \
