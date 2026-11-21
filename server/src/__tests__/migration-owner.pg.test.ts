@@ -81,7 +81,10 @@ it.skipIf(!url)("keeps a closed pre-generation database on one superuser session
     const pid = (await c.query("select pg_backend_pid() as pid")).rows[0].pid;
     await applyOwnedMigrations(c, { migrationsFolder: folder, env: attested });
     expect((await c.query("select pg_backend_pid() as pid")).rows[0].pid).toBe(pid);
-    expect((await c.query("select count(*)::int n from pg_stat_activity where datname=current_database()")).rows[0].n).toBe(1);
+    // Autovacuum can attach during the migration. Check that no second client
+    // connection was left behind. The pre-migration barrier still checks all backends.
+    expect((await c.query(`select count(*)::int n from pg_stat_activity
+      where datname = current_database() and backend_type = 'client backend'`)).rows[0].n).toBe(1);
     const { rows } = await c.query("select distinct tableowner from pg_tables where schemaname in ('public','drizzle','docslurp_migrations','docslurp_mastra')");
     expect(rows).toEqual([{ tableowner: owner }]);
     // The fixture was migrated by Drizzle through the first 112 files: those are mapped, not re-run; the rest ran.
