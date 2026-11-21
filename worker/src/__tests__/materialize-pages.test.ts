@@ -492,7 +492,7 @@ describe("materializePageRange", () => {
 
 describe("materializePageRange respects processing quality", () => {
   const fast = { ...defaultPipelineFeatures, quality: "fast" as const };
-  const fastest = defaultPipelineFeatures;
+  const auto = { ...defaultPipelineFeatures, ladder: { ...defaultPipelineFeatures.ladder, maxRung: "ocr" as const } };
   const reasons = ["query", "full-index"] as const;
 
   it.each(reasons)("fast (%s) indexes only the text layer and keeps textless pages unread", async (reason) => {
@@ -510,9 +510,9 @@ describe("materializePageRange respects processing quality", () => {
     expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "kept-as-image" });
   });
 
-  it.each(reasons)("fastest (%s) reads textless pages with the OCR engine, never with vision", async (reason) => {
+  it.each(reasons)("Auto (%s) reads textless pages with the OCR engine, never with vision", async (reason) => {
     const h = harness({ 1: LONG, 2: "" });
-    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], fastest), reason });
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2], auto), reason });
     expect(h.ocrCalls).toEqual([]);
     expect(h.ocrEngineCalls).toEqual([[2]]);
     expect(result.indexed.sort()).toEqual([1, 2]);
@@ -521,30 +521,30 @@ describe("materializePageRange respects processing quality", () => {
     expect(ledger.filter((e) => e.metric === "page-analysis")).toEqual([]);
   });
 
-  it("fastest with Read scans off keeps textless pages unread", async () => {
+  it("Fastest keeps textless pages unread", async () => {
     const h = harness({ 1: LONG, 2: "" });
-    const result = await claimAndMaterialize(h.deps, input(h, [1, 2], { ...defaultPipelineFeatures, ladder: { maxRung: "fast" as const } }));
+    const result = await claimAndMaterialize(h.deps, input(h, [1, 2], defaultPipelineFeatures));
     expect(h.ocrCalls).toEqual([]);
     expect(h.ocrEngineCalls).toEqual([]);
     expect(result.failed).toEqual([{ page: 2, reason: "kept-as-image" }]);
   });
 
-  it("fastest stops OCR reads at the credit limit and releases the rest", async () => {
+  it("Auto stops OCR reads at the credit limit and releases the rest", async () => {
     const h = harness({ 1: "", 2: "", 3: "" });
-    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2, 3], fastest), maxCredits: 0.0005 });
+    const result = await claimAndMaterialize(h.deps, { ...input(h, [1, 2, 3], auto), maxCredits: 0.0005 });
     expect(h.ocrEngineCalls).toEqual([]);
     expect(result.indexed).toEqual([]);
     expect(result.failed.map((f) => f.reason)).toEqual(["credit-limit", "credit-limit", "credit-limit"]);
   });
 
-  it("fastest: an OCR read that found an empty page is final, never claimed again", async () => {
+  it("Auto: an OCR read that found an empty page is final, never claimed again", async () => {
     const h = harness({ 1: "" }, {
       async readPagesWithOcrEngine(_document, pages) {
         h.ocrEngineCalls.push(pages);
         return { pages: pages.map((page) => ({ pageNumber: page, text: "   " })), charged: [] };
       },
     });
-    const result = await claimAndMaterialize(h.deps, input(h, [1], fastest));
+    const result = await claimAndMaterialize(h.deps, input(h, [1], auto));
     expect(result.failed).toEqual([{ page: 1, reason: "empty-page" }]);
     const state = await db.query<{ state: string; attempts: number }>(
       `select state, attempts from document_page_states where document_id = 'd1' and page_number = 1`);
@@ -552,11 +552,11 @@ describe("materializePageRange respects processing quality", () => {
     expect(state.rows[0]!.attempts).toBeGreaterThanOrEqual(MAX_PAGE_ATTEMPTS);
   });
 
-  it("fastest: an OCR boundary that cannot run is retried, never a permanent kept page", async () => {
+  it("Auto: an OCR boundary that cannot run is retried, never a permanent kept page", async () => {
     const h = harness({ 1: "" }, {
       async readPagesWithOcrEngine() { throw new OcrInfrastructureError("VM capacity"); },
     });
-    await expect(claimAndMaterialize(h.deps, input(h, [1], fastest))).rejects.toBeInstanceOf(OcrInfrastructureError);
+    await expect(claimAndMaterialize(h.deps, input(h, [1], auto))).rejects.toBeInstanceOf(OcrInfrastructureError);
     const state = await db.query<{ state: string; failure_reason: string | null }>(
       `select state, failure_reason from document_page_states where document_id = 'd1' and page_number = 1`);
     expect(state.rows[0]!.failure_reason).not.toBe("kept-as-image");
