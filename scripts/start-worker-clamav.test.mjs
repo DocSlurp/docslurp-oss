@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, mkdir, rm, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync, spawn } from "node:child_process";
@@ -24,6 +24,12 @@ async function fixture(
 ) {
   const dir = await mkdtemp(join(tmpdir(), "clam-startup-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
+  const launch = join(dir, "scripts", "start-worker.sh");
+  const hostDir = join(dir, "vendor-artifacts", "operator-config");
+  await mkdir(join(dir, "scripts"));
+  await mkdir(hostDir, { recursive: true });
+  await copyFile(startup, launch);
+  await writeFile(join(hostDir, "worker-host.mjs"), "");
   const bin = join(dir, "bin"),
     db = join(dir, "db"),
     run = join(dir, "run"),
@@ -77,11 +83,12 @@ ${workerSignal ? `for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=
   return {
     dir,
     env,
+    launch,
     worker,
     calls,
     versionTZ,
     run: () => {
-      const r = spawnSync("bash", [startup], {
+      const r = spawnSync("bash", [launch], {
         env,
         encoding: "utf8",
         timeout: 12000,
@@ -106,6 +113,15 @@ ${workerSignal ? `for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=
     },
   };
 }
+test("hosted startup rejects a missing staged entry before starting the worker", async (t) => {
+  const f = await fixture(t);
+  await rm(join(f.dir, "vendor-artifacts", "operator-config", "worker-host.mjs"));
+  const result = f.run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /requires a staged worker-host/);
+  await assert.rejects(readFile(f.worker), { code: "ENOENT" });
+});
+
 test("freshly copied files cannot hide an old signature header; refresh and periodic updater receive no credentials", async (t) => {
   const f = await fixture(t);
   const r = f.run();
@@ -196,7 +212,7 @@ test("a fractional day beyond the freshness deadline is refused", async (t) => {
 for (const signal of ["SIGTERM", "SIGINT"])
   test("parent " + signal + " drains worker and reaps updater", async (t) => {
     const f = await fixture(t, { age: 1, workerSignal: true });
-    const child = spawn("bash", [startup], {
+    const child = spawn("bash", [f.launch], {
       env: f.env,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -276,7 +292,7 @@ trap 'qa_inject_signal "$BASH_COMMAND"' DEBUG
 `,
         );
         f.env.BASH_ENV = envFile;
-        const child = spawn("bash", [startup], {
+        const child = spawn("bash", [f.launch], {
           env: f.env,
           stdio: ["ignore", "ignore", "ignore"],
         });
@@ -318,7 +334,7 @@ for (const first of ["SIGTERM", "SIGINT"])
           workerSignal: true,
           drainMs: 400,
         });
-        const child = spawn("bash", [startup], {
+        const child = spawn("bash", [f.launch], {
           env: f.env,
           stdio: ["ignore", "ignore", "ignore"],
         });

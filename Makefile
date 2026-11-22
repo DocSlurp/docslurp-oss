@@ -16,8 +16,5 @@ setup-docker:
 dev:
 	pnpm dev
 
-dev-worker:
-	pnpm --filter @docslurp/worker dev
-
 build:
 	pnpm build

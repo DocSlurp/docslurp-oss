@@ -326,4 +326,4 @@ ENV DOCSLURP_GIT_SHA=${DOCSLURP_GIT_SHA}
 ENV NODE_ENV=production
 USER docslurp
 
-CMD ["bash", "/app/scripts/start-worker.sh"]
+CMD ["node", "/app/worker/dist/processor/cli.js"]

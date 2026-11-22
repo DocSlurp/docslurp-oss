@@ -99,7 +99,7 @@ describe("chat executor pricing startup (council E #2)", () => {
 
   it("every entrypoint that loads the provider hands it the durable state", () => {
     const core = path.resolve(serverDir, "..");
-    for (const file of ["server/src/server.ts", "worker/src/temporal/worker.ts", "server/scripts/chat-operation-executor.ts"]) {
+    for (const file of ["server/src/server.ts", "server/scripts/chat-operation-executor.ts"]) {
       const source = readFileSync(path.join(core, file), "utf8");
       const calls = [...source.matchAll(/loadPricingProvider\(([^;]*)\)/g)].map((match) => match[1]!);
       expect(calls.length, file).toBeGreaterThan(0);

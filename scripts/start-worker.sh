@@ -2,18 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKER_ENTRYPOINT="${ROOT_DIR}/worker/dist/temporal/worker.js"
-case "${DOCSLURP_WORKER_HOST:-builtin}" in
-  builtin) ;;
-  external)
-    WORKER_ENTRYPOINT="${ROOT_DIR}/vendor-artifacts/operator-config/worker-host.mjs"
-    if [[ ! -f "$WORKER_ENTRYPOINT" || -L "$WORKER_ENTRYPOINT" ]]; then
-      echo "DOCSLURP_WORKER_HOST=external requires a staged worker-host.mjs" >&2
-      exit 1
-    fi
-    ;;
-  *) echo "DOCSLURP_WORKER_HOST must be builtin or external" >&2; exit 1 ;;
-esac
+WORKER_ENTRYPOINT="${ROOT_DIR}/vendor-artifacts/operator-config/worker-host.mjs"
 VENV="${DOCSLURP_WORKER_VENV:-${ROOT_DIR}/.venv}"
 INSTALL_ON_STARTUP="${DOCSLURP_WORKER_INSTALL_HEAVY_DEPS_ON_STARTUP:-true}"
 REQUIREMENTS_MODE="${DOCSLURP_WORKER_REQUIREMENTS_MODE:-auto}"
@@ -137,6 +126,14 @@ refuse_unsafe_overrides() {
 }
 
 refuse_unsafe_overrides
+if [[ "${DOCSLURP_WORKER_HOST:-external}" != "external" ]]; then
+  echo "DOCSLURP_WORKER_HOST must be external" >&2
+  exit 1
+fi
+if [[ ! -f "$WORKER_ENTRYPOINT" || -L "$WORKER_ENTRYPOINT" ]]; then
+  echo "Hosted worker startup requires a staged worker-host.mjs" >&2
+  exit 1
+fi
 CLAMAV_ENABLED="$(normalize_env_setting "${CLAMAV_ENABLED}")"
 CLAMAV_MAX_DB_AGE_HOURS="$(normalize_env_setting "${CLAMAV_MAX_DB_AGE_HOURS}")"
 
