@@ -38,7 +38,7 @@ Compose passes every variable in `.env.selfhost` to the server and workers (`env
 | `DOCSLURP_UPLOAD_LOCK_INTAKE_WAIT_MS` | `30000` | How long a bulk, URL or website intake sent with an `Idempotency-Key` waits for an intake slot before answering `409 upload_session_busy` (at most 120 s). Simultaneous uploads queue for this long instead of being refused. |
 | `DOCSLURP_UPLOAD_LOCK_HOLD_BUDGET_MS` | `5000` | How long one `files/complete` call (or reconciler pass) keeps starting new files; files it did not reach are answered as retryable `upload_session_busy`. |
 | `DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS` | `30000` | Hard cap on one call's storage work under the session lock; in-flight storage calls are cancelled after it. |
-| `STORAGE_PUBLIC_ENDPOINT` | unset | Browser-reachable `http(s)` origin that presigned upload URLs are signed against, when the `STORAGE_URI` endpoint (`http://minio:9000` in Compose) only resolves inside Docker. Server-side storage calls keep using `STORAGE_URI`. See [MCP Apps uploader and MinIO](../self-host.md#mcp-apps-uploader-and-minio). |
+| `STORAGE_PUBLIC_ENDPOINT` | unset | Browser-reachable `http(s)` origin that presigned upload URLs are signed against, when the `STORAGE_URI` endpoint (`http://minio:9000` in Compose) only resolves inside Docker. Server-side storage calls keep using `STORAGE_URI`. See [MCP Apps uploader and MinIO](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host.md#mcp-apps-uploader-and-minio). |
 
 Storage is preconfigured in `compose.selfhost.yml` as
 `STORAGE_URI=s3://docslurp-files?endpoint=http://minio:9000&region=us-east-1`
