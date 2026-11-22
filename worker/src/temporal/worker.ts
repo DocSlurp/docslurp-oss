@@ -16,8 +16,9 @@ import { initializeObservability, shutdownObservability, withBackgroundSpan } fr
  */
 
 import { setMeteringEnforced } from "../pipeline/local-compute-cost.js";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { hostname } from "node:os";
+import { pathToFileURL } from "node:url";
 import { getHeapStatistics } from "node:v8";
 
 import { NativeConnection, Worker, type WorkerOptions } from "@temporalio/worker";
@@ -96,7 +97,8 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
 /** Set once the teardown breaker opened: the process exits by this timer at the latest. */
 let quarantineExitTimer: NodeJS.Timeout | null = null;
 
-async function main(): Promise<void> {
+/** Start one worker host per process. The host installs process-wide lifecycle handlers. */
+export async function runTemporalWorker(): Promise<void> {
   installWorkerProcessGuards({ report: (error, attributes) => reportException(error, attributes) });
   // Development-only fail-open settings stop startup before anything else outside development (#398).
   // initializeParserSandbox repeats the check for CLIs and preflight that start there.
@@ -803,9 +805,9 @@ async function main(): Promise<void> {
 }
 
 // Non-fatal failures never reach here: superviseTemporalWorkers retries them. An error that
-// escapes main() is fatal by definition (worker-supervisor.ts), so exit non-zero and let the
+// escapes runTemporalWorker() is fatal by definition (worker-supervisor.ts); exit non-zero and let the
 // platform restart policy take over.
-main().catch(async (error) => {
+export async function reportFatalWorkerError(error: unknown): Promise<void> {
   logWorkerFatal(error, { phase: "main" });
   initializeWorkerErrorReporting();
   reportException(error, { operation: "worker-startup-or-shutdown" });
@@ -816,4 +818,8 @@ main().catch(async (error) => {
   process.exitCode = 1;
   // A quarantined worker's force-exit timer keeps the process alive; leave now that we have flushed.
   if (quarantineExitTimer) process.exit(1);
-});
+}
+
+if (process.argv[1] && existsSync(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  void runTemporalWorker().catch(reportFatalWorkerError);
+}

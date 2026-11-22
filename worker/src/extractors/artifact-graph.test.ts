@@ -8,6 +8,23 @@ function ref(id: string, kind: string, parents: string[] = [], pageNumber?: numb
 }
 
 describe("executeArtifactGraph", () => {
+  it("rejects duplicate lineage that leaves out an input", async () => {
+    const adapter: ArtifactGraphAdapter = {
+      id: "merge",
+      accepts: ["document/text", "document/metadata"],
+      emits: ["document/markdown"],
+      scope: "document",
+      async run() { return [ref("output", "document/markdown", ["text", "text"], undefined, "merge")]; },
+    };
+
+    await expect(executeArtifactGraph({
+      sourceDocumentId: "doc",
+      initial: [ref("text", "document/text"), ref("metadata", "document/metadata")],
+      target: ["document/markdown"],
+      adapters: [adapter],
+    })).rejects.toThrow("invalid parents");
+  });
+
   it("fans out page work and joins only matching page inputs", async () => {
     const seen: string[][] = [];
     const adapter: ArtifactGraphAdapter = { id: "layout", accepts: ["page/text", "page/image"], emits: ["page/markdown"], scope: "page",

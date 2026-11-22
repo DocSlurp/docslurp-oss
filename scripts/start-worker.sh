@@ -2,6 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKER_ENTRYPOINT="${ROOT_DIR}/worker/dist/temporal/worker.js"
+case "${DOCSLURP_WORKER_HOST:-builtin}" in
+  builtin) ;;
+  external)
+    WORKER_ENTRYPOINT="${ROOT_DIR}/vendor-artifacts/operator-config/worker-host.mjs"
+    if [[ ! -f "$WORKER_ENTRYPOINT" || -L "$WORKER_ENTRYPOINT" ]]; then
+      echo "DOCSLURP_WORKER_HOST=external requires a staged worker-host.mjs" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "DOCSLURP_WORKER_HOST must be builtin or external" >&2; exit 1 ;;
+esac
 VENV="${DOCSLURP_WORKER_VENV:-${ROOT_DIR}/.venv}"
 INSTALL_ON_STARTUP="${DOCSLURP_WORKER_INSTALL_HEAVY_DEPS_ON_STARTUP:-true}"
 REQUIREMENTS_MODE="${DOCSLURP_WORKER_REQUIREMENTS_MODE:-auto}"
@@ -497,7 +509,7 @@ run_worker_with_updater() {
   local pending_signal="" exited="" status=0
   trap 'pending_signal=TERM' TERM
   trap 'pending_signal=INT' INT
-  node "${ROOT_DIR}/worker/dist/temporal/worker.js" &
+  node "$WORKER_ENTRYPOINT" &
   WORKER_PID="$!"
   trap 'stop_worker TERM; exit 143' TERM
   trap 'stop_worker INT; exit 130' INT
@@ -638,5 +650,5 @@ configure_runtime_memory_budgets
 if [[ -n "${FRESHCLAM_PID}" ]]; then
   run_worker_with_updater
 else
-  exec node "${ROOT_DIR}/worker/dist/temporal/worker.js"
+  exec node "$WORKER_ENTRYPOINT"
 fi

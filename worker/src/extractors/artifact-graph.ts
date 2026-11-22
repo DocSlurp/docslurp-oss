@@ -100,7 +100,10 @@ export async function executeArtifactGraph(input: ArtifactGraphInput): Promise<A
         if (raw.sourceDocumentId !== input.sourceDocumentId) throw new Error(`Artifact ${raw.id} belongs to another document`);
         if (!step.emits.includes(raw.kind)) throw new Error(`Adapter ${step.id} emitted undeclared kind ${raw.kind}`);
         if (raw.producer.id !== step.id) throw new Error(`Artifact ${raw.id} has wrong producer`);
-        if (raw.derivedFrom.length !== expectedParents.size || raw.derivedFrom.some((id) => !expectedParents.has(id))) throw new Error(`Artifact ${raw.id} has invalid parents`);
+        const actualParents = new Set(raw.derivedFrom);
+        if (raw.derivedFrom.length !== expectedParents.size || [...expectedParents].some((id) => !actualParents.has(id))) {
+          throw new Error(`Artifact ${raw.id} has invalid parents`);
+        }
         validatePlacement(raw);
         const outputPages = pagesOf(raw);
         if (outputScope === "page" && outputPages.length === 0) throw new Error(`Artifact ${raw.id} lacks page placement`);
