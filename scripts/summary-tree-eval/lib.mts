@@ -130,26 +130,6 @@ export async function embedDocuments(texts: string[], step: string): Promise<Flo
   return texts.map((text) => cache.get(text)!);
 }
 
-/** Query-task vectors through the server's own query embedding call, cached. */
-export async function embedQueries(queries: string[], step: string): Promise<Float32Array[]> {
-  const cache = new VectorCache(`query-${EMBEDDING_ROUTE.model.replaceAll("/", "_")}`);
-  const missing = queries.filter((query) => !cache.get(query));
-  if (missing.length) {
-    loadProviderKey();
-    const { embedQuery } = await import("../../server/src/search/session-planner.js");
-    for (const query of missing) {
-      assertBudget();
-      let tokens = 0;
-      const journal = { record: (event: { inputTokens?: number }) => { tokens += event.inputTokens ?? 0; }, recordDiagnostic: () => {} };
-      const vector = await embedQuery(query, EMBEDDING as never, journal as never, "standard", null, undefined);
-      if (!vector) throw new Error("Query embedding returned nothing");
-      recordSpend(step, EMBEDDING_ROUTE.model, tokens, 0);
-      cache.set(query, vector);
-    }
-  }
-  return queries.map((query) => cache.get(query)!);
-}
-
 export type Generated = { text: string; finishReason: string; inputTokens: number; outputTokens: number; ms: number; model: string };
 /**
  * One text call on the default model. `restrictedHosts` routes it the way the product does for a project that
