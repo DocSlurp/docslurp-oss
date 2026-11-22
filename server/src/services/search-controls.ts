@@ -203,6 +203,20 @@ export async function userCanEditProjectSettings(projectId: string, userId: stri
   return access !== null && canEditProject(access, userId);
 }
 
+/** Keep a single hit per filename when a result list spans multiple files. */
+export function dedupeSearchHitsByFilename<T>(hits: T[], filename: (hit: T) => string): T[] {
+  const keys = new Set(hits.map(filename).filter(Boolean));
+  if (keys.size <= 1) return hits;
+  const seen = new Set<string>();
+  return hits.filter((hit) => {
+    const key = filename(hit);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function applySearchControls(args: {
   query: string;
   results: SearchResult[];
@@ -210,24 +224,8 @@ export function applySearchControls(args: {
 }): SearchResult[] {
   let out = [...args.results];
 
-  // De-duplicate by filename if requested
   if (args.settings.dedupeByFilename) {
-    const uniqueDocumentKeys = new Set(
-      out
-        .map((result) => result.citation.filename || result.citation.documentId)
-        .filter((key): key is string => Boolean(key)),
-    );
-
-    if (uniqueDocumentKeys.size > 1) {
-      const seen = new Set<string>();
-      out = out.filter((r) => {
-        const key = r.citation.filename || r.citation.documentId;
-        if (!key) return true;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    }
+    out = dedupeSearchHitsByFilename(out, (result) => result.citation.filename || result.citation.documentId);
   }
 
   // Boosts: simple numeric add/multiply based on tags/mime/heading
