@@ -17,8 +17,27 @@ const manifest = await processor.execute({
 ```
 
 Run `pnpm --filter @docslurp/worker build` from the repo root to build the binding
-and executable. The executable loads a trusted operator module from
-`DOCSLURP_PROCESSOR_MODULE`:
+and executable. The built-in selectable-text PDF recipe uses the Modal parser
+VM and the standard Modal client credentials. Point it at an approved, digest-pinned parser
+image with `DOCSLURP_MODAL_IMAGE` and `DOCSLURP_MODAL_IMAGE_DIGEST`. It does not require an
+app account, a database or Temporal.
+
+```sh
+DOCSLURP_PARSER_SANDBOX=modal \
+DOCSLURP_PROCESSOR_OUTPUT_DIR=./processed \
+  node worker/dist/processor/cli.js input.pdf document/markdown page/chunks
+```
+
+Choose a fresh output directory. Request `page/markdown` or `page/chunks` for
+larger PDFs and advance `DOCSLURP_PROCESSOR_FIRST_PAGE` in 64-page increments,
+using a fresh destination for each window. Whole-document Markdown is limited
+to 64 pages. The recipe reads the PDF text layer from files up to 128 MiB.
+Page chunks are JSON arrays of text slices up to 2,000 Unicode code points. OCR, structured extraction
+and embedding require additional adapters. The same recipe is available as
+`@docslurp/worker/processor/pdf-reference` for TypeScript callers.
+
+To use custom adapters, set `DOCSLURP_PROCESSOR_MODULE` to a trusted operator
+module:
 
 ```sh
 DOCSLURP_PROCESSOR_MODULE=/opt/docslurp/adapters.mjs \
