@@ -17,7 +17,6 @@ This repository holds the **DocSlurp server** (API and worker), the **database m
 
 | Path | What it is | License |
 | --- | --- | --- |
-| `server/` | The Hono API (`@docslurp/server`): ingestion, search, RAG context, chat, MCP, webhooks, auth | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `worker/` | Temporal-driven ingestion pipeline: parsing, OCR, chunking, embedding, indexing, extraction | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/cli` | `@docslurp/cli`: upload files, watch runs, retrieve cited evidence | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/contrib-algolia-server` | Server-side Algolia-style sync adapter | MIT |
@@ -59,11 +58,7 @@ Every package has an official docs page, a source folder in this repository and 
 ## Develop
 
 ```sh
-cp .env.example .env
 pnpm install
-pnpm db:up && pnpm db:migrate && pnpm db:seed
-pnpm dev:api        # the Hono API on http://localhost:8787
-pnpm dev:worker     # the ingestion worker (second terminal)
 pnpm typecheck && pnpm test
 ```
 

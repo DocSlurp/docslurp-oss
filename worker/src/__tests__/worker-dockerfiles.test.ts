@@ -29,7 +29,7 @@ describe("worker Dockerfiles", () => {
     expect(runtime.indexOf("ENV NODE_ENV=production")).toBeLessThan(runtime.indexOf("\nUSER docslurp"));
   });
 
-  it.each(["worker/Dockerfile", "worker/Dockerfile.lean", "worker/Dockerfile.full", "server/Dockerfile"])(
+  it.each(["worker/Dockerfile", "worker/Dockerfile.lean", "worker/Dockerfile.full"])(
     "%s copies pnpm patches wherever it copies the lockfile",
     async (filename) => {
       const dockerfile = await readFile(path.join(root, "..", filename), "utf8");

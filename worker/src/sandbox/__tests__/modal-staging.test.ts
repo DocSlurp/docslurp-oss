@@ -1,3 +1,4 @@
+import { hasTestApplication, testApplicationPath } from "../../test/application-path.js";
 import { pricing } from "@docslurp/shared";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -2166,9 +2167,9 @@ describe("modal usage event", () => {
 });
 
 describe("modal usage amount is not provider cost (real-Modal run)", () => {
-  it("the loss alert and spend attribution read providerCostCents, and amount only for billable metrics", async () => {
+  it.skipIf(!hasTestApplication())("the loss alert and spend attribution read providerCostCents, and amount only for billable metrics", async () => {
     const { readFileSync } = await import("node:fs");
-    const attribution = readFileSync(new URL("../../../../server/src/services/usage-attribution.ts", import.meta.url), "utf8");
+    const attribution = readFileSync(testApplicationPath("src/services/usage-attribution.ts"), "utf8");
     // The provider-cost loss query takes provider cost from metadata.providerCostCents, never from amount.
     const loss = attribution.slice(attribution.indexOf("function settledUsageItems"), attribution.indexOf("function settledUsageItems") + 2_500);
     expect(loss).toMatch(/metadata -> 'providerCostCents'/);

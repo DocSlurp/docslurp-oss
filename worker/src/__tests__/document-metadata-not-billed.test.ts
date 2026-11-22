@@ -1,3 +1,4 @@
+import { hasTestApplication, testApplicationPath } from "../test/application-path.js";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -43,7 +44,8 @@ describe("an Office file's declared counts never bill", () => {
 describe("no billing, limit or routing code reads document-declared counts", () => {
   it("nothing reads docProps page/slide/word counts, XMP page counts or 'Page N of M' text", async () => {
     const worker = path.resolve(import.meta.dirname, "..", "..");
-    const roots = ["src", "scripts", "../server/src", "../packages/shared/src"].map((dir) => path.resolve(worker, dir));
+    const roots = ["src", "scripts", "../packages/shared/src"].map((dir) => path.resolve(worker, dir));
+    if (hasTestApplication()) roots.push(testApplicationPath("src"));
     const files: string[] = [];
     const walk = async (dir: string): Promise<void> => {
       for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
