@@ -8,6 +8,7 @@
  * re-recording the fixtures.
  */
 
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Worker } from "@temporalio/worker";
@@ -16,6 +17,8 @@ import { describe, expect, it } from "vitest";
 import { WORKFLOWS_PATH, loadHistoryFixtures } from "../test/temporal-replay/fixtures.js";
 
 const fixtures = loadHistoryFixtures();
+const externalWorkflows = process.env.DOCSLURP_TEST_WORKFLOWS_PATH;
+const workflowsPath = externalWorkflows ? resolve(externalWorkflows) : WORKFLOWS_PATH;
 
 describe("Temporal workflow replay safety", () => {
   it("has recorded histories for the main run paths", () => {
@@ -41,7 +44,7 @@ describe("Temporal workflow replay safety", () => {
 
   it("replays every recorded history against the current workflow code", async () => {
     const results = Worker.runReplayHistories(
-      { workflowsPath: WORKFLOWS_PATH, replayName: "docslurp-replay" },
+      { workflowsPath, replayName: "docslurp-replay" },
       fixtures.map((fixture) => ({ workflowId: fixture.workflowId, history: fixture.history })),
     );
     const failures: string[] = [];

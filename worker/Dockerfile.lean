@@ -28,6 +28,8 @@ RUN \
 COPY worker/src ./worker/src
 # Optional trusted host source. Compile it in the same module graph as the worker.
 COPY vendor-artifact[s]/worker-host/host-entr[y].ts ./worker/src/temporal/
+COPY vendor-artifact[s]/worker-host/host-workflow[s].ts ./worker/src/temporal/
+COPY vendor-artifact[s]/worker-host/host-activitie[s].ts ./worker/src/temporal/
 COPY worker/scripts/copy-routing-assets.mjs ./worker/scripts/copy-routing-assets.mjs
 COPY worker/scripts/bundle-chart-guest.mjs worker/scripts/chart-guest-bundle.mjs worker/scripts/chart-export-worker.mjs ./worker/scripts/
 COPY scripts/lib/model-prices.json ./scripts/lib/model-prices.json
