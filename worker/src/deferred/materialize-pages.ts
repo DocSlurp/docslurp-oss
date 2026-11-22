@@ -25,6 +25,7 @@ import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import { runLocalArtifactCommand } from "../extractors/local-artifact-adapters.js";
+import { readPdfTextLayer } from "../processor/pdf-text-layer.js";
 import { createPiiTextScanner } from "../lib/pii-redaction.js";
 import type { Document, EmbeddingProfile } from "../models.js";
 import { chunkTextWithMeta, htmlTableSources } from "../pipeline/chunking.js";
@@ -144,11 +145,9 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       const count = range.last - range.first + 1;
       if (document.mimeType !== "application/pdf") return Array.from({ length: count }, () => "");
       const sourcePath = await raster().sourcePath(document);
-      const out = await runLocalArtifactCommand(
-        "pdftotext",
-        ["-f", String(range.first), "-l", String(range.last), "-layout", "-enc", "UTF-8", sourcePath, "-"],
-        TEXT_LAYER_MAX_BYTES,
-        TEXT_LAYER_TIMEOUT_MS,
+      const out = await readPdfTextLayer(
+        runLocalArtifactCommand, sourcePath, range,
+        { maxBytes: TEXT_LAYER_MAX_BYTES, timeoutMs: TEXT_LAYER_TIMEOUT_MS },
         signal,
       );
       // pdftotext separates pages with a form feed.

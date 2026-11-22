@@ -4,6 +4,7 @@ import path from "node:path";
 import { embeddedImageFactsSchema, type EmbeddedImageFacts, type ExtractionArtifactRef } from "@docslurp/shared";
 import { buildMediaMap, mediaMapEntries } from "./embedded-images.js";
 import { parsePdfImagesList, pdfImagesFacts, pngDimensions } from "./pdfimages-list.js";
+import { readPdfTextLayer, type ParserCommand } from "../processor/pdf-text-layer.js";
 import type { ArtifactGraphAdapter } from "./artifact-graph.js";
 import { CommandRunner, resolveVenvBin } from "../tools/runner.js";
 import { ensureBinary } from "../tools/python-deps.js";
@@ -13,7 +14,7 @@ import { resolveOcrMode } from "../ocr/mode.js";
 /** The caller owns outputDir and its lifetime. Each run writes immutable files there. */
 export interface LocalArtifactAdapterOptions {
   outputDir: string;
-  command?: typeof runLocalArtifactCommand;
+  command?: ParserCommand;
   maxBytes?: number;
   timeoutMs?: number;
   imageScaleTo?: number;
@@ -142,7 +143,7 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
     } },
     { id: "poppler-page-text", accepts: ["source/pdf"], emits: ["page/text"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await command("pdftotext", ["-f", String(number), "-l", String(number), "-layout", "-enc", "UTF-8", filePath(input), "-"], maxBytes, timeoutMs, ctx.signal);
+      const bytes = await readPdfTextLayer(command, filePath(input), { first: number, last: number }, { maxBytes, timeoutMs }, ctx.signal);
       return [await emit("poppler-page-text", "page/text", input, bytes, "text/plain; charset=utf-8", "txt", number)];
     } },
     { id: "poppler-page-html", accepts: ["source/pdf"], emits: ["page/html"], scope: "page", cost: 1, async run(inputs, ctx) {
