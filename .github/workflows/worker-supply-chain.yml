@@ -10,6 +10,7 @@ on:
       - 'scripts/setup-worker-python-venv.sh'
       - 'scripts/start-worker.sh'
       - 'scripts/setup-cli-*.sh'
+      - 'scripts/configure-debian-build-snapshot.sh'
       - 'scripts/check-worker-prerequisites*'
       - 'scripts/normalize-sbom-sarif*'
       - 'worker/package.json'
@@ -34,6 +35,7 @@ on:
       - 'scripts/setup-worker-python-venv.sh'
       - 'scripts/start-worker.sh'
       - 'scripts/setup-cli-*.sh'
+      - 'scripts/configure-debian-build-snapshot.sh'
       - 'scripts/check-worker-prerequisites*'
       - 'scripts/normalize-sbom-sarif*'
       - 'worker/package.json'
@@ -74,14 +76,14 @@ jobs:
       # Build all profiles on one runner: reuse Docker layers and clean disk once.
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          python-version: '3.11'
+          python-version: '3.13'
           version: '0.13.0'
 
       # Every install path runs pip/uv with --require-hashes, so the locks must
       # carry a sha256 for every artifact (uv pip compile --generate-hashes).
       - name: Rebuild tracked worker lockfiles
         run: |
-          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --generate-hashes --python-version 3.11.5 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
+          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --generate-hashes --python-version 3.13 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements.txt --generate-hashes --python-version 3.11.5 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements.lock.txt
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-fallback.txt --generate-hashes --python-version 3.11.5 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-fallback.lock.txt
           uv pip compile worker/requirements-ocr.txt --generate-hashes --python-version 3.13 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-ocr.lock.txt
