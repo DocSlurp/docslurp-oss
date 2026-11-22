@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { access, mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ExtractionArtifactRef } from "@docslurp/shared";
-import { executeArtifactGraph } from "./artifact-graph.js";
+import { createArtifactProcessor } from "../processor/index.js";
 import { availableLocalArtifactAdapters } from "./local-artifact-adapters.js";
 
 export interface LocalPdfGraphInput {
@@ -73,17 +73,15 @@ export async function runLocalPdfArtifactGraph(input: LocalPdfGraphInput): Promi
   };
   const ocrPages = new Set<number>();
   const adapters = await availableLocalArtifactAdapters({ outputDir: scratchDir, maxBytes: maxArtifactBytes, ocrLanguage: input.ocrLanguage, onOcrRead: (page) => ocrPages.add(page) });
-  const result = await executeArtifactGraph({
+  const result = await createArtifactProcessor(adapters).execute({
     sourceDocumentId: input.sourceDocumentId,
     initial: [source],
     target: input.targetKinds,
-    adapters,
     pageNumbers: Array.from({ length: input.pageCount }, (_, i) => i + 1),
-    signal: input.signal,
     maxSteps: 12,
     maxStates: 4096,
     maxOutputs,
-  });
+  }, input.signal);
   if (!result.ok) {
     const available = adapters.map((adapter) => adapter.id).join(", ") || "none";
     throw new Error(`Local PDF artifact graph ${result.reason}; missing: ${result.missing.join(", ") || "unknown"}. Available adapters: ${available}`);

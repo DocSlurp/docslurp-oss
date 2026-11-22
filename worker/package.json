@@ -10,6 +10,14 @@
       "types": "./dist/temporal/worker.d.ts",
       "default": "./dist/temporal/worker.js"
     },
+    "./temporal-host": {
+      "types": "./dist/temporal/worker.d.ts",
+      "default": "./dist/temporal/worker.js"
+    },
+    "./processor": {
+      "types": "./dist/processor/index.d.ts",
+      "default": "./dist/processor/index.js"
+    },
     "./testing": {
       "types": "./src/testing.ts",
       "default": "./src/testing.ts"
@@ -18,6 +26,7 @@
   "scripts": {
     "dev": "tsx watch src/temporal/worker.ts",
     "start": "node dist/temporal/worker.js",
+    "process:artifacts": "node dist/processor/cli.js",
     "build": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json && node scripts/copy-routing-assets.mjs && node scripts/bundle-chart-guest.mjs",
     "typecheck": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
