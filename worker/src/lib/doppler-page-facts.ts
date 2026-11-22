@@ -16,6 +16,7 @@
  * `pageCount`, which is kept as `reportedPageCount` for diagnostics.
  */
 
+import { validateRasterTextRegions } from "./raster-text-regions.js";
 import {
   DOPPLER_ENCODING_COUNTS_MAX, DOPPLER_FLAG_WORD_MAX, DOPPLER_MATH_FLAGS, DOPPLER_TABLE_FLAGS, decodeDopplerFlags, dopplerEncodingNibble,
   type DopplerMathFlag, type DopplerTableFlag,
@@ -343,6 +344,8 @@ export interface DopplerPageFacts {
   page: number;
   failed?: true;
   geometry?: DopplerGeometry;
+  /** Advisory raster-text rectangles in normalized displayed-page coordinates. Never authorizes an OCR read. */
+  rasterTextRegions?: Box[];
   text?: DopplerTextFacts;
   fonts?: DopplerFontFacts;
   images?: DopplerImageFacts;
@@ -892,6 +895,10 @@ export function validateDopplerPage(value: unknown, pageCount: number): DopplerP
     if (!has(value, name)) continue;
     const parsed = check(value[name]);
     if (parsed !== undefined) (out as unknown as Obj)[name] = parsed;
+  }
+  if (out.geometry) {
+    const regions = validateRasterTextRegions(value.rasterTextRegions);
+    if (regions) out.rasterTextRegions = regions;
   }
   mathTableFields(value, out);
   crossCheckPage(out);
