@@ -1,3 +1,4 @@
+import { testMigrationPath } from "../test/migration-path.js";
 /** Real PostgreSQL concurrency gate for fair job admission. Use an explicitly supplied disposable local database. */
 import postgres from "postgres";
 import { createHash, randomUUID } from "node:crypto";
@@ -12,8 +13,8 @@ beforeAll(async () => {
   // Eight simulated workers, each with its own connections.
   workers = Array.from({ length: 8 }, () => postgres(url, { max: 4, prepare: false, onnotice: () => {} }));
   const [{ exists }] = await workers[0]`select to_regclass('public.compute_fleets') is not null as exists`;
-  if (!exists) await workers[0].unsafe(await readFile(new URL("../../../server/db/migrations/0181_compute_fleet_admission.sql", import.meta.url), "utf8"));
-  await workers[0].unsafe(await readFile(new URL("../../../server/db/migrations/0186_compute_job_admission.sql", import.meta.url), "utf8"));
+  if (!exists) await workers[0].unsafe(await readFile(testMigrationPath("0181_compute_fleet_admission.sql"), "utf8"));
+  await workers[0].unsafe(await readFile(testMigrationPath("0186_compute_job_admission.sql"), "utf8"));
 });
 afterAll(async () => { await Promise.all(workers.map((sql) => sql.end())); });
 const org = (name: string) => createHash("sha256").update(`pg-org:${name}`).digest("hex");

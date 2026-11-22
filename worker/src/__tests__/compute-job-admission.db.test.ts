@@ -1,3 +1,4 @@
+import { testMigrationPath } from "../test/migration-path.js";
 import postgres from "postgres";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -22,7 +23,7 @@ beforeAll(async () => {
   await sql.unsafe("create role docslurp_app nologin; create role docslurp_worker nologin; create role custom_app nologin");
   await sql.unsafe("grant select,insert,update,delete on compute_job_fleets,compute_job_tickets to custom_app");
   // Re-applying the migration once roles exist closes inherited grants before any reconciliation.
-  await sql.unsafe(await readFile(new URL("../../../server/db/migrations/0186_compute_job_admission.sql", import.meta.url), "utf8"));
+  await sql.unsafe(await readFile(testMigrationPath("0186_compute_job_admission.sql"), "utf8"));
   const [upgrade] = await sql`select has_table_privilege('custom_app','compute_job_fleets','UPDATE') as cap_write,
     has_table_privilege('custom_app','compute_job_tickets','SELECT') as ticket_read`;
   expect(upgrade).toEqual({ cap_write: false, ticket_read: false });

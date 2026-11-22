@@ -1,7 +1,7 @@
+import { testMigrationPath } from "../test/migration-path.js";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { connect } from "@lancedb/lancedb";
 import { VectorNamespaceManager } from "@docslurp/shared";
@@ -178,8 +178,7 @@ describe("lancedb relocate", () => {
   }, 120_000);
 
   it("points pending vector writes queued with the org-level layout at the project database", async () => {
-    const migration = await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)),
-      "../../../server/db/migrations/0082_workspace_vector_databases.sql"), "utf8");
+    const migration = await readFile(testMigrationPath("0082_workspace_vector_databases.sql"), "utf8");
     const rewrite = migration.split("--> statement-breakpoint").find((statement) => statement.includes("UPDATE vector_index_outbox"))!;
     const oldUri = `${lanceDir}/org1/vectors/provider%2Fmodel%2Ev1/4`;
     await sql`insert into vector_index_outbox (table_key, lance_uri, lance_table, org_id, document_id, run_id, artifact_key, metadata, record_count)
