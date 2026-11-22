@@ -9,8 +9,6 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 // otherwise fail them. The pool's workers inherit this process's environment.
 delete process.env.NODE_COMPILE_CACHE;
 
-const externalActivities = process.env.DOCSLURP_TEST_ACTIVITIES_PATH;
-
 export default defineConfig({
   test: {
     // CI stops at the first failing test; local runs report every failure.
@@ -21,7 +19,6 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      ...(externalActivities ? { "../temporal/activities.js": path.resolve(externalActivities) } : {}),
       "@docslurp/shared/pricing-loader": path.resolve(__dirname, "../packages/shared/src/pricing-loader.ts"),
       "@docslurp/shared/error-reporting": path.resolve(__dirname, "../packages/shared/src/error-reporting.ts"),
       "@docslurp/shared/env-flags": path.resolve(__dirname, "../packages/shared/src/env-flags.ts"),

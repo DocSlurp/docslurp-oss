@@ -29,8 +29,6 @@
     "typecheck": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:temporal-replay": "vitest run src/__tests__/temporal-replay.test.ts",
-    "temporal:record-histories": "tsx src/test/temporal-replay/record-histories.ts",
     "fixtures:pdf": "node testdata/pdf-fixtures/generate-fixtures.mjs",
     "benchmark:vision": "tsx src/benchmarks/vision-benchmark-cli.ts",
     "benchmark:parsebench": "tsx src/benchmarks/parsebench-benchmark-cli.ts",
