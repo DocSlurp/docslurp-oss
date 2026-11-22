@@ -17,7 +17,7 @@ extractor links an OCR engine.
 | Format | Default order | Where it parses | Notes |
 | --- | --- | --- | --- |
 | PDF, VM deployment (`DOCSLURP_PDF_MODE=vm`, `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1` or `DOCSLURP_PROFILE=service`) | `vm-pdf` (Doppler) | One offline VM per document | Host PDF extractors are refused; without a provider the worker does not start. Production ships this, configured statically. |
-| PDF, customer-owned local mode (`DOCSLURP_PDF_MODE=local`, `DOCSLURP_PROFILE=selfhost`) | `doppler-md`, then `native-pdf` (when installed) and `poppler-text` only when Doppler failed on the file | Sandboxed `pdftomarkdown` (Doppler) on the worker host | Host parsing ([Docker Compose](self-host/docker-compose.md#pdfs)). Headings, pipe tables and form-feed pages. A fallback shows as a per-file warning in the ingest report. |
+| PDF, customer-owned local mode (`DOCSLURP_PDF_MODE=local`, `DOCSLURP_PROFILE=selfhost`) | `doppler-md`, then `native-pdf` (when installed) and `poppler-text` only when Doppler failed on the file | Sandboxed `pdftomarkdown` (Doppler) on the worker host | Host parsing ([Docker Compose](integration/artifact-processor.md)). Headings, pipe tables and form-feed pages. A fallback shows as a per-file warning in the ingest report. |
 | PDF, neither | none | | Refused: `PDF extraction is not configured`; the worker logs `[pdf] mode=off` at startup. |
 | Word `.docx` | `pandoc` | Sandboxed `office_markdown.py` running `pandoc --sandbox -f docx` | Appends headers, footers, comments and link targets (`office_context.py`). |
 | OpenDocument `.odt`, RTF | `pandoc` | Sandboxed `pandoc --sandbox` | Pandoc 3.1's ODT reader drops a table's header row; its RTF reader can drop the letter after an opening curly quote. |
