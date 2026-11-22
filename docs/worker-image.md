@@ -36,7 +36,7 @@ off `PATH`. `pdfpagecount` is the structural PDF page count (run under `prlimit`
 `pdftomarkdown` runs the fork's `pdftotext` from beside itself, and every other host PDF tool (`pdfinfo`, `pdfimages`,
 `pdftoppm`) stays Debian's `poppler-utils`. The images set `DOCSLURP_DOPPLER_BIN_DIR=/usr/lib/doppler/bin`.
 
-Where it runs is `DOCSLURP_PDF_MODE` ([Docker Compose](self-host/docker-compose.md#pdfs)): in a VM (`vm`, the sandboxed PDF
+Where it runs is `DOCSLURP_PDF_MODE` ([Docker Compose](integration/artifact-processor.md)): in a VM (`vm`, the sandboxed PDF
 provider; production) or, for customer-owned execution only, on the worker host under the parser sandbox (`local`, which needs
 `DOCSLURP_PROFILE=selfhost`). With neither, PDFs are refused and no other host parser runs.
 

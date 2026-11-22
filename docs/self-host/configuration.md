@@ -2,7 +2,7 @@
 
 Edit `.env.selfhost` before running `up`. Recreate affected containers after an
 edit with the same `up -d` command (see [Docker Compose install](docker-compose.md)).
-The [template](../../.env.selfhost.example) lists all supported first-run options.
+The [template](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/.env.selfhost.example) lists all supported first-run options.
 
 Compose passes every variable in `.env.selfhost` to the server and workers (`env_file`), but the shared `environment` block in `compose.selfhost.yml` wins for the keys it sets: `NODE_ENV`, `APP_URL`, `API_URL`, `PUBLIC_API_URL` and `BETTER_AUTH_URL` (all set from `SELFHOST_URL`), `PORT`, `HOST`, `STORAGE_URI`, `VECTOR_BACKENDS`, `LANCEDB_URI`, `API_RATE_LIMIT_REDIS_URL`, `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` and `RUN_STARTUP_MIGRATIONS` (the credentials and `WORKER_DOC_CONCURRENCY` are read from `.env.selfhost` through `--env-file`). Setting one of the fixed keys in `.env.selfhost` has no effect; edit `compose.selfhost.yml` instead (for example to point `STORAGE_URI` at an external bucket).
 
@@ -38,7 +38,7 @@ Compose passes every variable in `.env.selfhost` to the server and workers (`env
 | `DOCSLURP_UPLOAD_LOCK_INTAKE_WAIT_MS` | `30000` | How long a bulk, URL or website intake sent with an `Idempotency-Key` waits for an intake slot before answering `409 upload_session_busy` (at most 120 s). Simultaneous uploads queue for this long instead of being refused. |
 | `DOCSLURP_UPLOAD_LOCK_HOLD_BUDGET_MS` | `5000` | How long one `files/complete` call (or reconciler pass) keeps starting new files; files it did not reach are answered as retryable `upload_session_busy`. |
 | `DOCSLURP_UPLOAD_LOCK_HOLD_MAX_MS` | `30000` | Hard cap on one call's storage work under the session lock; in-flight storage calls are cancelled after it. |
-| `STORAGE_PUBLIC_ENDPOINT` | unset | Browser-reachable `http(s)` origin that presigned upload URLs are signed against, when the `STORAGE_URI` endpoint (`http://minio:9000` in Compose) only resolves inside Docker. Server-side storage calls keep using `STORAGE_URI`. See [MCP Apps uploader and MinIO](../self-host.md#mcp-apps-uploader-and-minio). |
+| `STORAGE_PUBLIC_ENDPOINT` | unset | Browser-reachable `http(s)` origin that presigned upload URLs are signed against, when the `STORAGE_URI` endpoint (`http://minio:9000` in Compose) only resolves inside Docker. Server-side storage calls keep using `STORAGE_URI`. See [MCP Apps uploader and MinIO](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host.md#mcp-apps-uploader-and-minio). |
 
 Storage is preconfigured in `compose.selfhost.yml` as
 `STORAGE_URI=s3://docslurp-files?endpoint=http://minio:9000&region=us-east-1`
@@ -280,7 +280,7 @@ Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
 > **Scans and the default quality.** Fastest (the default quality) reads scanned and image pages only with OCR and never with a vision model, and Smartest sends them to the vision model. With `DOCSLURP_OCR_MODE=off` (a stock self-hosted install), Fastest leaves scans unread: their text is not searchable, and the ingest report recommends enabling OCR or switching to Smartest. Set `DOCSLURP_OCR_MODE=local` or `vm` to read scans on Fastest. OCR escalation (`DOCSLURP_OCR_ESCALATION`) and the OCR page reader never run on Fastest: both are vision-model reads.
 
 | `DOCSLURP_SERVICE_PROFILE` | unset | Deprecated name of `DOCSLURP_PROFILE` (`self-hosted` = `selfhost`, `service` = `service`), still read in this release: a warning when it repeats `DOCSLURP_PROFILE`, a startup refusal when it disagrees. `service` makes `vm` the default and refuses `local`, runs PDFs only in `vm-pdf` and refuses to start without a sandboxed PDF provider; `local` OCR and PDF modes need `selfhost`. |
-| `DOCSLURP_PDF_MODE` | `vm` when a VM is selected (`DOCSLURP_PROFILE=service`, `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1`); otherwise unset (PDFs refused) | Where Doppler reads PDFs: `vm` (the sandboxed PDF provider, one VM per document) or `local` (`doppler-md` on this host under the parser sandbox; customer-owned execution only, needs `DOCSLURP_PROFILE=selfhost`). Unset with no VM: the worker logs `[pdf] mode=off` and refuses PDFs; nothing falls back to a host parser. See [Docker Compose](docker-compose.md#pdfs). |
+| `DOCSLURP_PDF_MODE` | `vm` when a VM is selected (`DOCSLURP_PROFILE=service`, `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1`); otherwise unset (PDFs refused) | Where Doppler reads PDFs: `vm` (the sandboxed PDF provider, one VM per document) or `local` (`doppler-md` on this host under the parser sandbox; customer-owned execution only, needs `DOCSLURP_PROFILE=selfhost`). Unset with no VM: the worker logs `[pdf] mode=off` and refuses PDFs; nothing falls back to a host parser. See [Docker Compose](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/docker-compose.md#pdfs). |
 | `DOCSLURP_DOPPLER_BIN_DIR` | `/usr/lib/doppler/bin` | Where Doppler's `pdftomarkdown` is (the worker images install it there, off `PATH`). `local` mode refuses to start without it. |
 | `DOCSLURP_OCR_PYTHON`, `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-venv/bin/python3`, `/opt/docslurp/ocr-models` | The local OCR runtime (`local` mode). The full worker image sets both. |
 

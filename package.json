@@ -23,7 +23,6 @@
     "dev:api": "pnpm --filter @docslurp/server dev",
     "start:api": "pnpm --filter @docslurp/server start",
     "dev": "pnpm dev:api",
-    "dev:worker": "pnpm --filter @docslurp/worker dev",
     "worker:python:setup": "bash scripts/setup-worker-python-venv.sh",
     "eval:routing": "pnpm --filter @docslurp/worker eval:document-routing",
     "worker:check": "node scripts/check-worker-prerequisites.mjs",

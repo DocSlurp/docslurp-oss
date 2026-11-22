@@ -3,16 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "dist/temporal/worker.js",
-  "types": "dist/temporal/worker.d.ts",
+  "main": "dist/processor/index.js",
+  "types": "dist/processor/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/temporal/worker.d.ts",
-      "default": "./dist/temporal/worker.js"
-    },
-    "./temporal-host": {
-      "types": "./dist/temporal/worker.d.ts",
-      "default": "./dist/temporal/worker.js"
+      "types": "./dist/processor/index.d.ts",
+      "default": "./dist/processor/index.js"
     },
     "./processor": {
       "types": "./dist/processor/index.d.ts",
@@ -28,8 +24,6 @@
     }
   },
   "scripts": {
-    "dev": "tsx watch src/temporal/worker.ts",
-    "start": "node dist/temporal/worker.js",
     "process:artifacts": "node dist/processor/cli.js",
     "build": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json && node scripts/copy-routing-assets.mjs && node scripts/bundle-chart-guest.mjs",
     "typecheck": "pnpm --filter @docslurp/shared build && tsc -p tsconfig.json --noEmit",
