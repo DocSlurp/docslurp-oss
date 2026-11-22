@@ -226,6 +226,8 @@ export function pageEvidenceFromDopplerPage(page: DopplerPageFacts, context: Dop
       boxes: (img.items ?? []).map((item) => ({ bbox: [...item.bbox] as [number, number, number, number], coverage: item.coverage })),
     } : null,
     placements: placements(page, context.repeated ?? new Set()),
+    ...(size && !page.parseWarnings.includes("xref-repaired") && page.rasterTextRegions !== undefined
+      ? { rasterTextRegions: page.rasterTextRegions } : {}),
     vectors: vec ? { paths: vec.paths, uncoveredRatio: vec.uncoveredRatio ?? null, ruleScore: Math.min(vec.hRules, vec.vRules) } : null,
     ...gridEvidence(page),
     tables: null,

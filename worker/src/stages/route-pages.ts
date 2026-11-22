@@ -282,6 +282,7 @@ export class RoutePagesStage implements Stage {
       const probeStarted = performance.now();
       let pages: PageInput[];
       let factsSummary: Record<string, unknown> | undefined;
+      let regionCandidates: Set<number> | undefined;
       if (probeSource === "doppler-facts") {
         const facts = await (this.deps.factsProbe ?? this.defaultFactsProbe(state, document))({
           documentId: document.id,
@@ -297,7 +298,17 @@ export class RoutePagesStage implements Stage {
           return this.fallback(state, document, mode, probeSource, "facts-incomplete-for-active", sandboxed, `${facts.pages.length}/${hostPages}`);
         }
         pages = await pageInputsFromEvidence(facts.pages, routing, "pdf", { pageCount: hostPages ?? facts.pages.length });
-        factsSummary = { locked: facts.locked, pagesKnown: facts.pagesKnown, pagesFailed: facts.pagesFailed, linesDropped: facts.linesDropped };
+        regionCandidates = new Set<number>();
+        let pagesWithRegionFacts = 0;
+        for (const page of facts.pages) {
+          if (page.rasterTextRegions === undefined) continue;
+          pagesWithRegionFacts += 1;
+          if (page.rasterTextRegions.length > 0) regionCandidates.add(page.page);
+        }
+        factsSummary = {
+          locked: facts.locked, pagesKnown: facts.pagesKnown, pagesFailed: facts.pagesFailed, linesDropped: facts.linesDropped,
+          pagesWithRegionFacts, pagesWithRegionCandidates: regionCandidates.size,
+        };
       } else {
         guard("native-probe");
         const source = await this.sources.get(document);
@@ -380,6 +391,15 @@ export class RoutePagesStage implements Stage {
       // Persist why triage authorized each budgeted page's read with the plan, so routed execution admits it under that
       // durable budget and never as an ordinary read (stampReadBudgets).
       const plan = stampReadBudgets(parsedPlan, routing);
+
+      if (factsSummary && regionCandidates) {
+        // OCR admission comes from the existing plan. Measure overlap even if one page has several assignments.
+        const ocrCandidates = new Set<number>();
+        for (const assignment of plan.assignments) {
+          if (assignment.role === "ocr" && regionCandidates.has(assignment.pageNumber)) ocrCandidates.add(assignment.pageNumber);
+        }
+        factsSummary.regionCandidatePagesRoutedToOcr = ocrCandidates.size;
+      }
 
       if (mode === "active") assertCompleteActivePlan(plan);
       const runTableGate = (this.deps.tableGate ?? readRoutingFlags().tableGate) === "shadow";
