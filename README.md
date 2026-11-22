@@ -17,24 +17,19 @@ This repository holds the **DocSlurp server** (API and worker), the **database m
 
 | Path | What it is | License |
 | --- | --- | --- |
-| `worker/` | Temporal-driven ingestion pipeline: parsing, OCR, chunking, embedding, indexing, extraction | BUSL-1.1 (→ Apache-2.0 after 3 years) |
+| `worker/` | Document processing runtime: parsing, OCR, chunking, embedding, indexing, extraction | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/cli` | `@docslurp/cli`: upload files, watch runs, retrieve cited evidence | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/contrib-algolia-server` | Server-side Algolia-style sync adapter | MIT |
 | `packages/sdk` (incl. `@docslurp/sdk/embed`), `contrib-astro`, `contrib-search-compat`, `shared` | TypeScript SDK and embeddable widgets, Astro component, Algolia/Meilisearch/Typesense/Pagefind-compatible clients, shared contracts | MIT |
 | `packages/contrib-wordpress` | WordPress search plugin | MIT |
 
-## Self-host quickstart
+## Standalone processing
 
-You need Docker with Compose v2 (8 GB RAM or more for the lean worker) and a recent Node.js for the one-time config generator.
+Build the worker and run the [artifact processor](docs/integration/artifact-processor.md) with a configured parser VM.
+The CLI and the TypeScript binding process files without an application account, application database, or Temporal server.
 
-```sh
-node scripts/selfhost-init.mjs                  # writes .env.selfhost with random secrets
-node scripts/selfhost-check.mjs                 # validates the configuration
-docker compose --env-file .env.selfhost -f compose.selfhost.yml up -d --build
-node scripts/selfhost-check.mjs --running       # waits for a healthy API and worker
-```
-
-The stack runs the API, one worker, Postgres, Redis, MinIO and Temporal. There is no bundled web UI: use the REST API under `/v1`, the CLI, the SDK or MCP. Back up `.env.selfhost`: changing encryption keys later can make stored secrets unreadable. Full details, configuration options and operations notes are in [docs/self-host/README.md](docs/self-host/README.md).
+The former bundled API and worker Compose setup is retired. Its last pre-retirement instructions remain available in
+[the earlier repository tree](https://github.com/DocSlurp/docslurp-oss/tree/8dc734e2/docs/self-host).
 
 ## Use it
 
@@ -68,7 +63,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_
 
 DocSlurp is **source-available, not OSI-approved open source**.
 
-- **Server** (`server/` including `server/db/`, `worker/`, CLI): [Business Source License 1.1](LICENSE). Each version becomes Apache-2.0 three years after it is first published.
+- **Worker, schema fixtures and CLI** (`worker/`, `server/db/`, CLI): [Business Source License 1.1](LICENSE). Each version becomes Apache-2.0 three years after it is first published.
   - **Free production use** for a deployment of up to **16 vCPUs across at most 4 worker or GPU instances** (parser/OCR sandboxes and self-hosted GPU inference count; per-request model APIs do not). No license key, no sign-up: it is an honor system and the software does not check.
   - **Larger deployments** need a commercial license: email legal@docslurp.io.
   - Offering DocSlurp to third parties as a hosted document ingestion, extraction, search or chat service is not covered by the free grant.

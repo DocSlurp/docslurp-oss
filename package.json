@@ -18,7 +18,6 @@
     "test": "pnpm test:packages && pnpm --filter @docslurp/worker test",
     "test:packages": "pnpm -r --filter @docslurp/cli --filter @docslurp/contrib-astro --filter @docslurp/contrib-search-compat --filter @docslurp/sdk --filter @docslurp/shared test && pnpm test:scripts",
     "test:scripts": "node scripts/node-test.mjs scripts/*.test.mjs scripts/lib/*.test.mjs scripts/multisearch-quality/*.test.mjs packages/contrib-astro/*.test.mjs",
-    "dev:worker": "pnpm --filter @docslurp/worker dev",
     "worker:python:setup": "bash scripts/setup-worker-python-venv.sh",
     "eval:routing": "pnpm --filter @docslurp/worker eval:document-routing",
     "worker:check": "node scripts/check-worker-prerequisites.mjs",
