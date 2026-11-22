@@ -29,6 +29,7 @@ import {
 
 import type { PageEncodingRoute } from "./doppler-encoding-facts.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
+import type { RasterTextRegion } from "./raster-text-regions.js";
 
 // ── Rules ──
 
@@ -222,6 +223,8 @@ export interface PageEvidence {
   images: ImageEvidence | null;
   /** Placed images with stream facts and furniture marked, as the walker lists them; null when the listing is unknown. */
   placements: PageLayoutImage[] | null;
+  /** Advisory scan regions in displayed-page coordinates, when measured. */
+  rasterTextRegions?: readonly RasterTextRegion[];
   vectors: VectorEvidence | null;
   grids: GridEvidence;
   /** The extractor's own tables with their geometry (walker); null when unknown. */

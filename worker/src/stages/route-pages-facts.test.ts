@@ -5,6 +5,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildDecisionModelCatalog, defaultPageRouterConfig, routePlanSchema, type PageRouterConfig, type PageRouterMode } from "@docslurp/shared";
 
+const stageResult = vi.hoisted(() => vi.fn());
+
 const native = vi.hoisted(() => ({
   loadNativePdfEngine: vi.fn(async () => ({ ok: false as const, reason: "test" })),
   loadNativePdfModule: vi.fn(() => ({ ok: false as const, reason: "test" })),
@@ -26,6 +28,7 @@ vi.mock("../pipeline/checkpoints.js", () => ({
   },
   runDocumentStage: async (...args: unknown[]) => {
     const result = await (args[5] as () => Promise<{ artifactUri?: string }>)();
+    stageResult(result);
     (args[0] as WorkflowState).artifactLedger.record(args[3] as string, result.artifactUri);
   },
   runSpentCents: (state: WorkflowState) => state.run.spentCents + state.usageLedger.pendingBillableCents,
@@ -142,6 +145,32 @@ describe("sandboxedPdfDeploymentReason", () => {
 });
 
 describe("route-pages on a sandboxed deployment", () => {
+  it("counts advisory regions without granting OCR or opening the PDF", async () => {
+    const regions = [[0.1, 0.2, 0.5, 0.6]];
+    const baseline = await route({ facts: jsonl([docLine(), textPage(1), scanPage(2), figurePage(3), runLine()]) });
+    const measured = await route({
+      facts: jsonl([docLine(),
+        { ...textPage(1), rasterTextRegions: regions },
+        { ...scanPage(2), rasterTextRegions: regions },
+        { ...figurePage(3), rasterTextRegions: regions, parseWarnings: ["xref-repaired"] }, runLine()]),
+    });
+    expectNoHostPdfAccess();
+    expect(measured.plan).not.toBeNull();
+    const ocrPages = new Set(measured.plan?.assignments.filter((assignment) => assignment.role === "ocr")
+      .map((assignment) => assignment.pageNumber));
+    expect(ocrPages.has(1)).toBe(false);
+    expect(ocrPages.has(2)).toBe(true);
+    expect(measured.plan?.assignments.filter((assignment) => assignment.pageNumber < 3))
+      .toEqual(baseline.plan?.assignments.filter((assignment) => assignment.pageNumber < 3));
+    expect(stageResult).toHaveBeenLastCalledWith(expect.objectContaining({
+      stats: expect.objectContaining({
+        facts: expect.objectContaining({
+          pagesWithRegionFacts: 2, pagesWithRegionCandidates: 2, regionCandidatePagesRoutedToOcr: 1,
+        }),
+      }),
+    }));
+  });
+
   it("never loads, renders, clips or scans the PDF on the host, even with image decision models and the table gate on", async () => {
     const { plan, metrics, state } = await route({
       facts: fullFixture(),
