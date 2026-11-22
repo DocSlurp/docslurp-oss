@@ -1,3 +1,5 @@
+import { pathToFileURL } from "node:url";
+import { hasTestApplication, testApplicationPath } from "../test/application-path.js";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres from "postgres";
@@ -65,7 +67,7 @@ async function seedChain(count: number, canonicalId = "/chain", prefix = "v") {
 // The app file is outside this package's tsconfig rootDir, so load it at runtime only.
 type OrgStorage = { sourceBytes: number; pages: number };
 async function getOrgStorage(orgId: string, db: unknown): Promise<OrgStorage> {
-  const path = new URL("../../../server/src/services/billing/overview.ts", import.meta.url).href;
+  const path = pathToFileURL(testApplicationPath("src/services/billing/overview.ts")).href;
   const mod = (await import(/* @vite-ignore */ path)) as { getOrgStorage(orgId: string, db: unknown): Promise<OrgStorage> };
   return mod.getOrgStorage(orgId, db);
 }
@@ -241,7 +243,7 @@ describe("retention-aware superseded purge", () => {
     expect(queries).toBe(1);
   }, 60_000);
 
-  it("archived versions keep counting toward org storage; purging removes them", async () => {
+  it.skipIf(!hasTestApplication())("archived versions keep counting toward org storage; purging removes them", async () => {
     await sql`update organizations set retain_document_versions = 2 where id = 'o1'`;
     await seedChain(3);
     const live = await getOrgStorage("o1", sql);

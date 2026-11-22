@@ -37,8 +37,6 @@ jobs:
           - suite: worker 2/2
             run: DOCSLURP_REQUIRE_DOPPLER_TOOLS=1 pnpm --filter @docslurp/worker test --shard=2/2
             worker-tools: true
-          - suite: server
-            run: pnpm --filter @docslurp/server test
           - suite: packages and scripts
             run: pnpm test:packages
     env:
@@ -183,61 +181,6 @@ jobs:
   # TEST_DATABASE_URL / TEST_REDIS_URL, so run them here against service containers;
   # the runner sets those per file, one fresh copy of a migrated template database
   # each, and fails on skipped tests too.
-  database:
-    name: database integration
-    timeout-minutes: 20
-    runs-on: ubuntu-24.04
-    services:
-      postgres:
-        # PostgreSQL 17 plus the optional extension exercised by owner migration tests.
-        image: postgis/postgis:17-3.5@sha256:01a6a70e41e6c4467c8f55f6063555ed72db2d6662cd0d571040d42eadaeb6f6
-        env:
-          POSTGRES_USER: docslurp
-          POSTGRES_PASSWORD: ci-only-password
-          POSTGRES_DB: tmpl
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U docslurp" --health-interval 2s --health-timeout 5s --health-retries 30
-      redis:
-        image: redis:7.4-alpine@sha256:6ba19c50b56777f5c11c58eff8ddb69d0d5f27ba131cffb63f180ccfd43c66af
-        ports: ['6379:6379']
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
-    env:
-      TEST_DATABASE_ADMIN_URL: postgres://docslurp:ci-only-password@127.0.0.1:5432
-      TEST_DATABASE_TEMPLATE: tmpl
-      TEST_REDIS_URL: redis://127.0.0.1:6379
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          cache: 'pnpm'
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @docslurp/shared build
-      - name: Require durable Redis for native runtime tests
-        env:
-          REDIS_CONTAINER: ${{ job.services.redis.id }}
-        run: |
-          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET appendonly yes
-          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET appendfsync always
-          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET no-appendfsync-on-rewrite no
-          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory-policy noeviction
-          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory 268435456
-          ready=0
-          for attempt in $(seq 1 30); do
-            if docker exec "$REDIS_CONTAINER" redis-cli INFO persistence | tr -d '\r' | grep -q '^aof_rewrite_in_progress:0$'; then ready=1; break; fi
-            sleep 1
-          done
-          test "$ready" = 1
-      - name: Migrate the template database
-        run: DATABASE_URL="${TEST_DATABASE_ADMIN_URL}/${TEST_DATABASE_TEMPLATE}" node server/db/migrate.mjs
-      - name: Run gated database and Redis tests
-        run: node scripts/run-database-tests.mjs
-
   # The real OCR CLI (worker/scripts/docslurp_ocr.py) with its pinned models, alone and under the real parser sandbox.
   # Models are fetched and sha256-verified at install (scripts/install-ocr-runtime.sh); the CLI loads them only by path
   # and refuses sockets, and the sandbox has no network. scripts/run-ocr-cli-tests.mjs fails on any skipped test.
@@ -348,7 +291,7 @@ jobs:
 
   ci-success:
     # A stable required check. Never mask failures.
-    needs: [test, database, estimate, ocr-cli, doppler-pagecount]
+    needs: [test, estimate, ocr-cli, doppler-pagecount]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 1

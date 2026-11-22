@@ -1,3 +1,4 @@
+import { hasTestApplication, testApplicationPath } from "../test/application-path.js";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,8 +42,10 @@ describe("worker spend owners", () => {
   });
 
   it("has one definition of the dev skip switch, in the shared spend rule", () => {
-    const owners = [...new Set(["server/src", "worker/src", "packages/shared/src"].flatMap((root) =>
-      filesMatching(join(repoRoot, root), /SKIP_RUN_BUDGET_GUARDS_IN_DEV\s*!==/).map((file) => `${root}/${file}`)))];
+    const roots = ["worker/src", "packages/shared/src"];
+    if (hasTestApplication()) roots.push("server/src");
+    const owners = [...new Set(roots.flatMap((root) =>
+      filesMatching(root === "server/src" ? testApplicationPath("src") : join(repoRoot, root), /SKIP_RUN_BUDGET_GUARDS_IN_DEV\s*!==/).map((file) => `${root}/${file}`)))];
     expect(owners).toEqual(["packages/shared/src/spend-rule.ts"]);
   });
 

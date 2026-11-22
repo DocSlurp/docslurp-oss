@@ -13,8 +13,5 @@ setup-python:
 setup-docker:
 	docker build -f worker/Dockerfile .
 
-dev:
-	pnpm dev
-
 build:
 	pnpm build

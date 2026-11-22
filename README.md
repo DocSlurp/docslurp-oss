@@ -17,7 +17,6 @@ This repository holds the **DocSlurp server** (API and worker), the **database m
 
 | Path | What it is | License |
 | --- | --- | --- |
-| `server/` | The Hono API (`@docslurp/server`): ingestion, search, RAG context, chat, MCP, webhooks, auth | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `worker/` | Document processing runtime: parsing, OCR, chunking, embedding, indexing, extraction | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/cli` | `@docslurp/cli`: upload files, watch runs, retrieve cited evidence | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/contrib-algolia-server` | Server-side Algolia-style sync adapter | MIT |
@@ -54,10 +53,7 @@ Every package has an official docs page, a source folder in this repository and 
 ## Develop
 
 ```sh
-cp .env.example .env
 pnpm install
-pnpm db:up && pnpm db:migrate && pnpm db:seed
-pnpm dev:api        # the Hono API on http://localhost:8787
 pnpm typecheck && pnpm test
 ```
 
@@ -67,7 +63,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_
 
 DocSlurp is **source-available, not OSI-approved open source**.
 
-- **Server** (`server/` including `server/db/`, `worker/`, CLI): [Business Source License 1.1](LICENSE). Each version becomes Apache-2.0 three years after it is first published.
+- **Worker, schema fixtures and CLI** (`worker/`, `server/db/`, CLI): [Business Source License 1.1](LICENSE). Each version becomes Apache-2.0 three years after it is first published.
   - **Free production use** for a deployment of up to **16 vCPUs across at most 4 worker or GPU instances** (parser/OCR sandboxes and self-hosted GPU inference count; per-request model APIs do not). No license key, no sign-up: it is an honor system and the software does not check.
   - **Larger deployments** need a commercial license: email legal@docslurp.io.
   - Offering DocSlurp to third parties as a hosted document ingestion, extraction, search or chat service is not covered by the free grant.

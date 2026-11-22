@@ -1,5 +1,10 @@
 # Summary-tree phase-0 evaluation harness
 
+The product-backed arm runner and local API harness belong to the former API distribution.
+See their [pre-retirement instructions](https://github.com/DocSlurp/docslurp-oss/blob/19a28640/scripts/summary-tree-eval/README.md)
+when reproducing those evaluation runs.
+
+
 Evaluation tooling for the summary-tree plan's phase 0 ("Quality" and "Reuse").
 It decides nothing about the product by itself and ships no product code.
 Reports live in `docs/evals/summary-tree/`.
