@@ -1,3 +1,4 @@
+import { testMigrationPath } from "../test/migration-path.js";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -24,7 +25,7 @@ beforeAll(async () => {
   // Model grants inherited from a preexisting custom application's owner default privileges.
   await sql.unsafe("grant select,insert,update,delete on compute_fleets,compute_allocation_reservations to custom_app");
   // Repeat after roles exist, then reconcile both standard and configured role names.
-  await sql.unsafe(await readFile(new URL("../../../server/db/migrations/0181_compute_fleet_admission.sql",import.meta.url),"utf8"));
+  await sql.unsafe(await readFile(testMigrationPath("0181_compute_fleet_admission.sql"),"utf8"));
   const [upgrade]=await sql`select has_table_privilege('custom_app','compute_fleets','UPDATE') as cap_write,
     has_table_privilege('custom_app','compute_allocation_reservations','DELETE') as ledger_delete,
     has_table_privilege('custom_app','compute_allocation_reservations','SELECT') as ledger_read`;

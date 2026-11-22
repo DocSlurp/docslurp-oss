@@ -1,13 +1,9 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 
-// The migrations live in the server package (server/db/migrations), which owns the
-// schema. The worker only reads the SQL files by relative path for its test
-// databases; it never imports server code (see scripts/lib/server-boundary.mjs).
-const migrationsDir = fileURLToPath(new URL("../../../server/db/migrations/", import.meta.url));
+import { testMigrationPath } from "./migration-path.js";
 
 const MIGRATION_NAME = /^(?:\d{4}|2\d{7}T\d{4})_[a-z0-9][a-z0-9_]*$/;
 
@@ -17,7 +13,7 @@ const MIGRATION_NAME = /^(?:\d{4}|2\d{7}T\d{4})_[a-z0-9][a-z0-9_]*$/;
  * helper only reads the same directory the same way.
  */
 export function readMigrationTags(): string[] {
-  return readdirSync(migrationsDir, { withFileTypes: true })
+  return readdirSync(testMigrationPath(), { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
     .map((entry) => entry.name.slice(0, -".sql".length))
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -40,7 +36,7 @@ function findTag(tags: string[], name: string): number {
  * with it.
  */
 export async function applyMigration(db: PGlite, tag: string): Promise<void> {
-  const sql = readFileSync(`${migrationsDir}${tag}.sql`, "utf8");
+  const sql = readFileSync(testMigrationPath(`${tag}.sql`), "utf8");
   await db.transaction(async (tx) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
       if (statement.trim()) await tx.exec(statement);

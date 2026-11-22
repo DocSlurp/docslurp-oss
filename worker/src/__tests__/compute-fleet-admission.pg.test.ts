@@ -1,3 +1,4 @@
+import { testMigrationPath } from "../test/migration-path.js";
 /** Real PostgreSQL concurrency gate. Use an explicitly supplied disposable local database. */
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
@@ -9,7 +10,7 @@ let sql: ReturnType<typeof postgres>;
 beforeAll(async()=>{
   if(!url)return;
   sql=postgres(url,{max:16,prepare:false,onnotice:()=>{}});
-  await sql.unsafe(await readFile(new URL("../../../server/db/migrations/0181_compute_fleet_admission.sql",import.meta.url),"utf8"));
+  await sql.unsafe(await readFile(testMigrationPath("0181_compute_fleet_admission.sql"),"utf8"));
 });
 afterAll(async()=>{await sql?.end();});
 async function fleet(cap:number){const id=`concurrency:${randomUUID()}`;await sql`insert into compute_fleets(id,max_active,enabled) values(${id},${cap},true)`;return id;}
@@ -26,7 +27,7 @@ describe.skipIf(!url)("real PostgreSQL fleet admission",()=>{
       const connection=new URL(url!);connection.pathname=`/${database}`;
       upgrade=postgres(connection.toString(),{max:1,prepare:false,onnotice:()=>{}});
       await upgrade.unsafe(`alter default privileges grant select,insert,update,delete on tables to "${role}"`);
-      await upgrade.unsafe(await readFile(new URL("../../../server/db/migrations/0181_compute_fleet_admission.sql",import.meta.url),"utf8"));
+      await upgrade.unsafe(await readFile(testMigrationPath("0181_compute_fleet_admission.sql"),"utf8"));
       const [row]=await upgrade`select has_table_privilege(${role},'compute_fleets','UPDATE') as cap_write,
         has_table_privilege(${role},'compute_allocation_reservations','DELETE') as ledger_delete,
         has_table_privilege(${role},'compute_allocation_reservations','SELECT') as ledger_read`;
