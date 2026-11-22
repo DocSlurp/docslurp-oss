@@ -13,6 +13,7 @@ import { resolveOcrMode } from "../ocr/mode.js";
 /** The caller owns outputDir and its lifetime. Each run writes immutable files there. */
 export interface LocalArtifactAdapterOptions {
   outputDir: string;
+  command?: typeof runLocalArtifactCommand;
   maxBytes?: number;
   timeoutMs?: number;
   imageScaleTo?: number;
@@ -100,6 +101,7 @@ export async function localArtifactToolAvailability(): Promise<Record<string, bo
 }
 
 export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions): ArtifactGraphAdapter[] {
+  const command = options.command ?? runLocalArtifactCommand;
   const maxBytes = options.maxBytes ?? defaultMaxBytes;
   const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
   const imageScaleTo = options.imageScaleTo ?? 1600;
@@ -132,7 +134,7 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
       const input = one(inputs), number = page(ctx.pageNumber);
       await mkdir(outputDir, { recursive: true });
       const prefix = path.join(outputDir, `render-${randomUUID()}-${number}`);
-      await runLocalArtifactCommand("pdftoppm", ["-f", String(number), "-l", String(number), "-singlefile", "-scale-to", String(imageScaleTo), "-png", filePath(input), prefix], maxBytes, timeoutMs, ctx.signal);
+      await command("pdftoppm", ["-f", String(number), "-l", String(number), "-singlefile", "-scale-to", String(imageScaleTo), "-png", filePath(input), prefix], maxBytes, timeoutMs, ctx.signal);
       const rendered = `${prefix}.png`;
       if ((await stat(rendered)).size > maxBytes) throw new Error("Rendered page exceeds output limit");
       const bytes = await readFile(rendered);
@@ -140,17 +142,17 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
     } },
     { id: "poppler-page-text", accepts: ["source/pdf"], emits: ["page/text"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await runLocalArtifactCommand("pdftotext", ["-f", String(number), "-l", String(number), "-layout", "-enc", "UTF-8", filePath(input), "-"], maxBytes, timeoutMs, ctx.signal);
+      const bytes = await command("pdftotext", ["-f", String(number), "-l", String(number), "-layout", "-enc", "UTF-8", filePath(input), "-"], maxBytes, timeoutMs, ctx.signal);
       return [await emit("poppler-page-text", "page/text", input, bytes, "text/plain; charset=utf-8", "txt", number)];
     } },
     { id: "poppler-page-html", accepts: ["source/pdf"], emits: ["page/html"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await runLocalArtifactCommand("pdftohtml", ["-f", String(number), "-l", String(number), "-i", "-stdout", filePath(input)], maxBytes, timeoutMs, ctx.signal);
+      const bytes = await command("pdftohtml", ["-f", String(number), "-l", String(number), "-i", "-stdout", filePath(input)], maxBytes, timeoutMs, ctx.signal);
       return [await emit("poppler-page-html", "page/html", input, bytes, "text/html; charset=utf-8", "html", number)];
     } },
     { id: "poppler-pdf-metadata", accepts: ["source/pdf"], emits: ["document/metadata"], scope: "document", cost: 1, async run(inputs, ctx) {
       const input = one(inputs);
-      const raw = (await runLocalArtifactCommand("pdfinfo", [filePath(input)], maxBytes, timeoutMs, ctx.signal)).toString("utf8");
+      const raw = (await command("pdfinfo", [filePath(input)], maxBytes, timeoutMs, ctx.signal)).toString("utf8");
       const metadata = Object.fromEntries(raw.split(/\r?\n/).flatMap(line => { const at = line.indexOf(":"); return at < 1 ? [] : [[line.slice(0, at).trim(), line.slice(at + 1).trim()]]; }));
       return [await emit("poppler-pdf-metadata", "document/metadata", input, Buffer.from(JSON.stringify(metadata)), "application/json", "json")];
     } },
@@ -159,9 +161,9 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
       await mkdir(outputDir, { recursive: true });
       const prefix = `embedded-${randomUUID()}-${number}`;
       const range = ["-f", String(number), "-l", String(number)];
-      const listing = parsePdfImagesList((await runLocalArtifactCommand("pdfimages", ["-list", ...range, filePath(input)], maxBytes, timeoutMs, ctx.signal)).toString("utf8"));
+      const listing = parsePdfImagesList((await command("pdfimages", ["-list", ...range, filePath(input)], maxBytes, timeoutMs, ctx.signal)).toString("utf8"));
       if (listing.length > 128) throw new Error("Too many embedded images on page");
-      await runLocalArtifactCommand("pdfimages", [...range, "-png", filePath(input), path.join(outputDir, prefix)], maxBytes, timeoutMs, ctx.signal);
+      await command("pdfimages", [...range, "-png", filePath(input), path.join(outputDir, prefix)], maxBytes, timeoutMs, ctx.signal);
       const files = (await readdir(outputDir)).filter(name => name.startsWith(`${prefix}-`) && name.endsWith(".png")).sort();
       if (files.length > 128) throw new Error("Too many embedded images on page");
       const images = await Promise.all(files.map(async (name, index) => {
@@ -197,12 +199,12 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
     } },
     { id: "pandoc-text-markdown", accepts: ["page/text"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await runLocalArtifactCommand("pandoc", ["-f", "markdown", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
+      const bytes = await command("pandoc", ["-f", "markdown", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
       return [await emit("pandoc-text-markdown", "page/markdown", input, bytes, "text/markdown; charset=utf-8", "md", number)];
     } },
     { id: "pandoc-html-markdown", accepts: ["page/html"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await runLocalArtifactCommand("pandoc", ["-f", "html", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
+      const bytes = await command("pandoc", ["-f", "html", "-t", "gfm", filePath(input)], maxBytes, timeoutMs, ctx.signal);
       return [await emit("pandoc-html-markdown", "page/markdown", input, bytes, "text/markdown; charset=utf-8", "md", number)];
     } },
     { id: "assemble-page-markdown", accepts: ["page/markdown"], emits: ["document/markdown"], scope: "aggregate", cost: 1, async run(inputs, ctx) {

@@ -5,15 +5,19 @@ import { createArtifactProcessor, type ProcessorModule } from "./index.js";
 
 async function main([input, ...targets]: string[]): Promise<void> {
   const modulePath = process.env.DOCSLURP_PROCESSOR_MODULE?.trim();
-  if (!modulePath || !input || targets.length === 0) {
-    throw new Error("Set DOCSLURP_PROCESSOR_MODULE and pass <input> <target-kind> [<target-kind> ...]");
+  if (!input || targets.length === 0) {
+    throw new Error("Pass <input> <target-kind> [<target-kind> ...]");
   }
+  // Adapter and provider diagnostics must leave stdout available for the manifest.
+  console.log = console.info = console.error;
   const abort = new AbortController();
   const cancel = () => abort.abort();
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
   try {
-    const module = await import(pathToFileURL(resolve(modulePath)).href) as ProcessorModule;
+    const module: ProcessorModule = modulePath
+      ? await import(pathToFileURL(resolve(modulePath)).href)
+      : await import("./pdf-reference.js");
     const { adapters, prepare } = await module.configure(process.env);
     const prepared = await prepare(input, targets, abort.signal);
     let result;
