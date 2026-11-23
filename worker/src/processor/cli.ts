@@ -18,11 +18,14 @@ async function main([input, ...targets]: string[]): Promise<void> {
     const module: ProcessorModule = modulePath
       ? await import(pathToFileURL(resolve(modulePath)).href)
       : await import("./pdf-reference.js");
-    const { adapters, prepare } = await module.configure(process.env);
-    const prepared = await prepare(input, targets, abort.signal);
+    const configured = await module.configure(process.env);
+    if (input === "-" && !configured.prepareStream) throw new Error("Configured processor does not accept stdin");
+    const prepared = input === "-" && configured.prepareStream
+      ? await configured.prepareStream(process.stdin, targets, abort.signal)
+      : await configured.prepare(input, targets, abort.signal);
     let result;
     try {
-      const processor = createArtifactProcessor(adapters);
+      const processor = createArtifactProcessor(configured.adapters);
       result = await processor.execute({ ...prepared.request, target: targets }, abort.signal);
     } finally {
       await prepared.close?.();

@@ -3,7 +3,7 @@ import { constants, createWriteStream } from "node:fs";
 import { copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Transform } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import { createLocalArtifactAdapters } from "../extractors/local-artifact-adapters.js";
@@ -19,11 +19,11 @@ const maxArtifactBytes = 4 * 1024 * 1024;
 const allowedTools = new Set(["pdfinfo", "pdftotext", "pandoc"]);
 const adapterIds = new Set(["poppler-page-text", "pandoc-text-markdown", "assemble-page-markdown"]);
 
-async function stagePdf(input: string, destination: string, signal: AbortSignal): Promise<string> {
-  const file = await open(input, constants.O_RDONLY | constants.O_NONBLOCK);
+async function stagePdf(input: string | Readable, destination: string, signal: AbortSignal): Promise<string> {
+  const file = typeof input === "string" ? await open(input, constants.O_RDONLY | constants.O_NONBLOCK) : undefined;
   try {
-    const info = await file.stat();
-    if (!info.isFile() || info.size > maxSourceBytes) throw new Error("PDF source must be a regular file of at most 128 MiB");
+    const info = await file?.stat();
+    if (info && (!info.isFile() || info.size > maxSourceBytes)) throw new Error("PDF source must be a regular file of at most 128 MiB");
     const digest = createHash("sha256");
     let length = 0;
     const boundAndHash = new Transform({
@@ -34,11 +34,12 @@ async function stagePdf(input: string, destination: string, signal: AbortSignal)
         done(null, bytes);
       },
     });
-    await pipeline(file.createReadStream({ autoClose: false }), boundAndHash,
+    const source = typeof input === "string" ? file!.createReadStream() : input;
+    await pipeline(source, boundAndHash,
       createWriteStream(destination, { mode: 0o600, flags: "wx" }), { signal });
     return digest.digest("hex");
   } finally {
-    await file.close();
+    await file?.close();
   }
 }
 
@@ -122,55 +123,60 @@ export const configure: ProcessorModule["configure"] = async (env) => {
     .filter((adapter) => adapterIds.has(adapter.id));
   adapters.push(markdownChunks(outputDir));
 
-  return {
-    adapters,
-    async prepare(input, targets, signal) {
-      if (preparationStarted) throw new Error("Configure a fresh PDF recipe for each CLI invocation");
-      preparationStarted = true;
-      if (targets.some((target) => !["document/markdown", "page/markdown", "page/chunks"].includes(target))) {
-        throw new Error("PDF recipe targets: document/markdown, page/markdown, page/chunks");
+  async function prepare(input: string | Readable, targets: readonly string[], signal: AbortSignal) {
+    if (preparationStarted) throw new Error("Configure a fresh PDF recipe for each CLI invocation");
+    preparationStarted = true;
+    if (targets.some((target) => !["document/markdown", "page/markdown", "page/chunks"].includes(target))) {
+      throw new Error("PDF recipe targets: document/markdown, page/markdown, page/chunks");
+    }
+    signal.throwIfAborted();
+    const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-pdf-recipe-"));
+    scratchDir = scratch;
+    const close = async () => {
+      try {
+        try { await session?.close(); }
+        finally { await provider.drain?.(); }
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    };
+
+    try {
+      inputPath = path.join(scratch, "input.pdf");
+      const sha256 = await stagePdf(input, inputPath, signal);
+      signal.throwIfAborted();
+      const probe = await provider.probe(config);
+      if (!probe.ok) throw new Error("The configured PDF parser VM failed its probe");
+      assertSandboxPolicy({ providerId: provider.id, isolation: probe.isolation, env: strictEnv });
+      session = await provider.openSession(config, { activityId: randomUUID() });
+      assertSandboxPolicy({ providerId: session.providerId, isolation: session.isolation, env: strictEnv });
+      const info = await command("pdfinfo", [inputPath], 64 * 1024, 60_000, signal);
+      const counts = [...info.toString("utf8").matchAll(/^Pages:[ \t]*(\d+)[ \t]*\r?$/gm)];
+      const pageCount = counts.length === 1 ? Number(counts[0][1]) : NaN;
+      if (!Number.isSafeInteger(pageCount) || pageCount < pageStart) throw new Error("The parser did not report the requested PDF page");
+      const pageNumbers = Array.from({ length: Math.min(maxWindowPages, pageCount - pageStart + 1) }, (_, i) => pageStart + i);
+      if (targets.includes("document/markdown") && (pageStart !== 1 || pageNumbers.length !== pageCount)) {
+        throw new Error("Document Markdown requires at most 64 pages; request page artifacts for larger PDFs");
       }
       signal.throwIfAborted();
-      const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-pdf-recipe-"));
-      scratchDir = scratch;
-      const close = async () => {
-        try {
-          try { await session?.close(); }
-          finally { await provider.drain?.(); }
-        } finally {
-          await rm(scratch, { recursive: true, force: true });
-        }
+      await mkdir(outputDir, { mode: 0o700 });
+      const sourceDocumentId = `pdf-${sha256.slice(0, 16)}`;
+      const source: ExtractionArtifactRef = {
+        id: `${sourceDocumentId}:source`, kind: "source/pdf", uri: inputPath, mediaType: "application/pdf",
+        sha256, sourceDocumentId, derivedFrom: [], placements: [], producer: { id: recipe, optionsDigest: sha256 },
       };
-
-      try {
-        inputPath = path.join(scratch, "input.pdf");
-        const sha256 = await stagePdf(input, inputPath, signal);
-        signal.throwIfAborted();
-        const probe = await provider.probe(config);
-        if (!probe.ok) throw new Error("The configured PDF parser VM failed its probe");
-        assertSandboxPolicy({ providerId: provider.id, isolation: probe.isolation, env: strictEnv });
-        session = await provider.openSession(config, { activityId: randomUUID() });
-        assertSandboxPolicy({ providerId: session.providerId, isolation: session.isolation, env: strictEnv });
-        const info = await command("pdfinfo", [inputPath], 64 * 1024, 60_000, signal);
-        const counts = [...info.toString("utf8").matchAll(/^Pages:[ \t]*(\d+)[ \t]*\r?$/gm)];
-        const pageCount = counts.length === 1 ? Number(counts[0][1]) : NaN;
-        if (!Number.isSafeInteger(pageCount) || pageCount < pageStart) throw new Error("The parser did not report the requested PDF page");
-        const pageNumbers = Array.from({ length: Math.min(maxWindowPages, pageCount - pageStart + 1) }, (_, i) => pageStart + i);
-        if (targets.includes("document/markdown") && (pageStart !== 1 || pageNumbers.length !== pageCount)) {
-          throw new Error("Document Markdown requires at most 64 pages; request page artifacts for larger PDFs");
-        }
-        signal.throwIfAborted();
-        await mkdir(outputDir, { mode: 0o700 });
-        const sourceDocumentId = `pdf-${sha256.slice(0, 16)}`;
-        const source: ExtractionArtifactRef = {
-          id: `${sourceDocumentId}:source`, kind: "source/pdf", uri: inputPath, mediaType: "application/pdf",
-          sha256, sourceDocumentId, derivedFrom: [], placements: [], producer: { id: recipe, optionsDigest: sha256 },
-        };
-        return { request: { sourceDocumentId, initial: [source], pageNumbers, maxOutputs: maxWindowPages * 3 + 2 }, close };
-      } catch (error) {
-        await close();
-        throw error;
-      }
+      return { request: { sourceDocumentId, initial: [source], pageNumbers, maxOutputs: maxWindowPages * 3 + 2 }, close };
+    } catch (error) {
+      await close();
+      throw error;
+    }
+  }
+  return {
+    adapters,
+    prepare,
+    async prepareStream(input, targets, signal) {
+      if (!(input instanceof Readable)) throw new TypeError("Expected a Node readable byte stream");
+      return prepare(input, targets, signal);
     },
   };
 };

@@ -11,7 +11,7 @@ Send DocSlurp any file. Get back page-by-page Markdown and structured fields, hy
 2. **RAG search:** hybrid search and RAG context with page citations, over REST, the SDK, the CLI, MCP and drop-in Algolia, Meilisearch, Typesense and Pagefind clients.
 3. **Configurable chat endpoint:** cited answers from `/v1/chat` and the OpenAI-compatible `/v1/chat/completions`, with streaming and per-project settings.
 
-This repository holds the **DocSlurp server** (API and worker), the **database migrations**, the **CLI**, the **client SDKs** and the search integrations. The hosted product and its web dashboard are developed separately at <https://docslurp.io>.
+This repository provides the processing runtime, artifact processor CLI and TypeScript API, shared contracts, and client SDKs. The hosted HTTP API, durable jobs, and dashboard are developed separately.
 
 ## What is in this repository
 
@@ -75,4 +75,4 @@ DocSlurp is **source-available, not OSI-approved open source**.
 
 ## Repository ownership
 
-Develop the server, worker, SDKs and CLI in this repository. The private web application and production operations live in [DocSlurp/app](https://github.com/DocSlurp/app), which pins this repository as its `core/` submodule. The former private monorepo is retained as a historical archive; new changes and releases belong here.
+Develop processing transformations, worker integrations, SDKs and CLI tools here. The hosted application pins this repository as its core submodule.

@@ -59,5 +59,5 @@ health and metrics paths stay open).
 Do not publish the Postgres, Redis, MinIO, or Temporal ports. This Compose file
 does not bind them to the host. See [Security](security.md) for the full list of
 exposed and internal services. For public use, configure
-[backups](operations.md#backups-and-restore) and monitor disk, memory, worker
+[backups](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#backups-and-restore) and monitor disk, memory, worker
 errors, and the `/health` endpoint before inviting users.

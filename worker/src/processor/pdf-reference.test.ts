@@ -1,3 +1,4 @@
+import { PassThrough, Readable } from "node:stream";
 import { mkdtemp, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -52,6 +53,35 @@ describe("the standalone PDF recipe", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it("stages streamed byte chunks before invoking the parser", async () => {
+    const { prepareStream } = await configure(env);
+    async function* chunks() { yield Buffer.from("mock "); yield Buffer.from("PDF"); }
+    const { request, close } = await prepareStream!(Readable.from(chunks()), ["page/markdown"], signal);
+    try { expect(await readFile(request.initial[0].uri, "utf8")).toBe("mock PDF"); }
+    finally { await close?.(); }
+  });
+
+  it("refuses an oversized stream before opening a VM", async () => {
+    const { prepareStream } = await configure(env);
+    async function* oversized() {
+      const chunk = Buffer.alloc(1024 * 1024);
+      for (let i = 0; i < 129; i++) yield chunk;
+    }
+    await expect(prepareStream!(Readable.from(oversized()), ["page/markdown"], signal)).rejects.toThrow(/128 MiB/);
+    expect(vm.probe).not.toHaveBeenCalled();
+    expect(vm.openSession).not.toHaveBeenCalled();
+  });
+
+  it("cancels an idle byte stream before VM startup", async () => {
+    const { prepareStream } = await configure(env);
+    const input = new PassThrough();
+    const controller = new AbortController();
+    const pending = prepareStream!(input, ["page/markdown"], controller.signal);
+    input.once("resume", () => controller.abort());
+    await expect(pending).rejects.toThrow(/abort/i);
+    expect(vm.openSession).not.toHaveBeenCalled();
+  });
+
   it("keeps parsing in the VM and preserves text artifacts after closing the session", async () => {
     const { prepare, adapters } = await configure(env);
     const target = ["document/markdown", "page/chunks"];
@@ -76,6 +106,18 @@ describe("the standalone PDF recipe", () => {
     expect(chunks).toHaveLength(2);
     expect(JSON.parse(await readFile(chunks[0].uri, "utf8"))).toEqual([text]);
     expect(await readFile(result.targets.find(({ kind }) => kind === "document/markdown")!.uri, "utf8")).toContain(text.trim());
+  });
+
+  it("preserves absolute page placement in a later window", async () => {
+    vm.run.mockImplementation(async (command: SandboxCommand) => ({
+      exitCode: 0, stdout: command.binary === "pdfinfo" ? "Pages: 65" : text,
+    }));
+    const { prepare, adapters } = await configure({ ...env, DOCSLURP_PROCESSOR_FIRST_PAGE: "65" });
+    const target = ["page/markdown"];
+    const { request, close } = await prepare(source, target, signal);
+    const result = await createArtifactProcessor(adapters).execute({ ...request, target }, signal).finally(close);
+    expect(result).toMatchObject({ ok: true, targets: [{ placements: [{ pageNumber: 65 }] }] });
+    expect(vm.run.mock.calls.find(([c]) => c.binary === "pdftotext")?.[0].args.slice(0, 4)).toEqual(["-f", "65", "-l", "65"]);
   });
 
   it("refuses a session without full network isolation before sending the PDF", async () => {

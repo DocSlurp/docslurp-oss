@@ -21,6 +21,14 @@
     "./testing": {
       "types": "./src/testing.ts",
       "default": "./src/testing.ts"
+    },
+    "./processor/pdf-text-layer": {
+      "types": "./dist/processor/pdf-text-layer.d.ts",
+      "default": "./dist/processor/pdf-text-layer.js"
+    },
+    "./processor/ocr": {
+      "types": "./dist/ocr/engine.d.ts",
+      "default": "./dist/ocr/engine.js"
     }
   },
   "scripts": {

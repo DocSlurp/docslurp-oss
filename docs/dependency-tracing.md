@@ -67,7 +67,7 @@ Percentiles are histogram bucket upper bounds. `getLanceS3TraceStats()` from
 `@docslurp/shared/lancedb-s3-trace` returns the cumulative counters.
 
 With `LANCEDB_S3_CACHE_DIR` set the proxy also serves cached reads (see
-[Local disk cache for LanceDB](self-host/operations.md#local-disk-cache-for-lancedb)). The
+[Local disk cache for LanceDB](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#local-disk-cache-for-lancedb)). The
 summary line then ends with `upstream_requests=...` (requests actually sent to the
 object store) and `cache_hits`, `cache_misses`, `cache_hit_ratio`, `cache_bypass`,
 `cache_bytes_served`, `cache_bytes_filled`, `cache_fill_requests`, `cache_evictions`,
