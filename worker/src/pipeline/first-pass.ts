@@ -40,8 +40,9 @@ import { admitCommandSource, findQuarantinedSourceError } from "../sandbox/sourc
 import { latchedTeardownError } from "../sandbox/session-context.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import type { Document, UsageEvent } from "../models.js";
-import type { UsageSummary } from "../temporal/shared.js";
+import type { FirstPassCountInput, UsageSummary } from "../temporal/shared.js";
 import { firstPassCheckpointStale, runDocumentStage } from "./checkpoints.js";
+import { StaleExecutionError } from "../db/execution-ownership.js";
 import { loadRunState } from "./stage-execution.js";
 import type { WorkflowState } from "./pipeline.js";
 import { firstPassPublishGate } from "./first-pass-gate.js";
@@ -285,13 +286,20 @@ async function admitBatchDocument(state: WorkflowState, document: Document): Pro
   }, () => admitCommandSource());
 }
 
-export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId: string; documentIds: string[] }): Promise<FirstPassBatchResult> {
+async function loadFirstPassShard(store: FirstPassStore, input: FirstPassCountInput): Promise<WorkflowState> {
+  const state = await loadRunState(store, input.runId, { hydrate: true });
+  if ((input.executionGeneration ?? null) !== (state.run.executionGeneration ?? null)) throw new StaleExecutionError();
+  state.executionGeneration = input.executionGeneration;
+  state.beginShard(input.documentIds);
+  return state;
+}
+
+export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: FirstPassCountInput): Promise<FirstPassBatchResult> {
   const now = deps.now ?? Date.now;
   const started = now();
   const provider = sandboxedPdfBatchProvider();
   if (!provider) throw new Error("First pass needs a sandboxed PDF batch provider");
-  const state = await loadRunState(deps.store, input.runId, { hydrate: true });
-  state.beginShard(input.documentIds);
+  const state = await loadFirstPassShard(deps.store, input);
   const documents = new Map(state.documents.map((document) => [document.id, document]));
   if (documents.size !== new Set(input.documentIds).size) throw new Error("First-pass batch names documents outside its run");
   const scopes = await deps.store.records.documentScopes(input.documentIds);
@@ -603,10 +611,9 @@ export async function countDeferredPdfPages(args: {
 /** Activity body: count the deferred PDFs of these documents (a failed batch, unplanned documents). */
 export async function countFirstPassPages(
   deps: { store: FirstPassStore; storage: Pick<ArtifactStore, "downloadToTempFile">; runner?: Parameters<typeof recordMeasuredPdfPageCount>[0]["runner"]; signal?: AbortSignal },
-  input: { runId: string; documentIds: string[] },
+  input: FirstPassCountInput,
 ): Promise<{ counted: number }> {
-  const state = await loadRunState(deps.store, input.runId, { hydrate: true });
-  state.beginShard(input.documentIds);
+  const state = await loadFirstPassShard(deps.store, input);
   state.firstPassRun = true;
   const assumed = state.documents.filter((document) => document.pageCountSource === "assumed");
   await countDeferredPdfPages({ state, storage: deps.storage, runner: deps.runner ?? unusedRunner, documents: state.documents, signal: deps.signal, reason: () => "first-pass-unfinished" });

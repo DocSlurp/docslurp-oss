@@ -37,6 +37,7 @@ const INFRASTRUCTURE_ERROR_CODES = new Set([
   "CONNECT_TIMEOUT",
 ]);
 const INFRASTRUCTURE_ERROR_NAMES = new Set([
+  "StaleExecutionError",
   "CancelledFailure",
   "AbortError",
   "PostgresError",

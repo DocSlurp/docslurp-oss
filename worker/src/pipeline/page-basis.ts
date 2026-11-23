@@ -48,7 +48,7 @@ export interface SpendOutcome { paused: boolean; blocked: boolean }
  */
 export interface PageBasisLedger {
   /** documents.page_count = pages, page_count_source = 'counted'. False when the document is not the run's own. */
-  setPageCount(runId: string, documentId: string, pages: number): Promise<boolean>;
+  setPageCount(runId: string, documentId: string, pages: number, executionGeneration?: string | null): Promise<boolean>;
   /** documents.billing_pages = pages, billing_pages_method = method. False when the document is not the run's own. */
   setBillingPages(runId: string, documentId: string, pages: number, method: string): Promise<boolean>;
   /** Raises per-page equivalents and billing_pages (db/page-equivalents.ts recordPageEquivalents); returns billing_pages. */
@@ -134,6 +134,8 @@ export class PageBasisUnboundError extends SpendCheckUnavailableError {
 
 /** What a PageBasis reads from its workflow state: the run (mutated in place) and the charges still buffered in this activity. */
 export interface PageBasisState {
+  /** The generation claimed by the activity input, including legacy activities without a generation. */
+  readonly executionGeneration?: string | null;
   readonly run: ProjectRun;
   readonly usageLedger: { readonly pendingBillableCents: number };
 }
@@ -192,7 +194,7 @@ export class PageBasis {
         const pages = measurement.pages;
         if (!Number.isSafeInteger(pages) || pages < 0) throw new PageBasisInvariantError(`invalid page count ${pages} for document ${document.id}`);
         const before = Math.max(1, Math.trunc(Number(document.pageCount)) || 1);
-        const persisted = await this.ledger.setPageCount(run.id, document.id, pages);
+        const persisted = await this.ledger.setPageCount(run.id, document.id, pages, this.state.executionGeneration);
         document.pageCount = pages;
         document.pageCountSource = "counted";
         run.pagesTotal = Math.max(0, (Number(run.pagesTotal) || 0) + pages - before);
@@ -297,7 +299,7 @@ export class PageBasis {
     const recorded = Math.max(1, Math.trunc(document.pageCount) || 1);
     let persisted = false;
     if (document.pageCount !== frames) {
-      persisted = await this.ledger.setPageCount(run.id, document.id, frames);
+      persisted = await this.ledger.setPageCount(run.id, document.id, frames, this.state.executionGeneration);
       console.log(`[ocr] image-frames document=${document.id} pages=${frames} intake=${document.pageCount}`);
       document.pageCount = frames;
     }

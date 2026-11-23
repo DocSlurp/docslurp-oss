@@ -62,6 +62,7 @@ afterAll(async () => { await store?.close(); await server?.stop(); await db?.clo
 async function stateFor(runId: string, documentId: string) {
   const document = (await loadFixtureDocument(store, documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
+  state.executionGeneration = state.run.executionGeneration;
   state.bindStore(store);
   state.usageLedger.runId = runId;
   return { state, document };
