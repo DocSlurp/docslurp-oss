@@ -736,15 +736,16 @@ export class PostgresRunLedger implements CheckpointStore {
         // A late activity may settle paid usage after another actor terminates
         // the run. Keep its terminal outcome and lease state while inserting usage.
         // An explicit retry resets the row to queued before checkpoints resume.
+        const keepStage = client`project_runs.status in ('completed', 'failed') or project_runs.control_state = 'cancel_requested'`;
         const runAssignments = shardDelta
           ? client`
-            stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
+            stage = case when ${keepStage} then project_runs.stage else ${state.stage} end,
             processed_documents = greatest(project_runs.processed_documents, ${state.run.processedDocuments}),
             pages_processed = greatest(project_runs.pages_processed, ${state.run.pagesProcessed}),
             artifacts = coalesce(project_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
           : client`
-            status = case when project_runs.status in ('completed', 'failed') then project_runs.status else ${state.run.status} end,
-            stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
+            status = case when ${keepStage} then project_runs.status else ${state.run.status} end,
+            stage = case when ${keepStage} then project_runs.stage else ${state.stage} end,
             processed_documents = ${state.run.processedDocuments},
             pages_total = ${state.run.pagesTotal},
             pages_processed = ${state.run.pagesProcessed},
@@ -1077,7 +1078,7 @@ export class PostgresRunLedger implements CheckpointStore {
       // Temporal can report the first stage in a group. The database has the active stage.
       const cancelled = current.control_state === "cancel_requested";
       const terminalStage = cancelled ? current.stage : stage;
-      const terminalMessage = cancelled ? "Cancelled by operator" : message;
+      const terminalMessage = cancelled ? "Cancelled" : message;
       const plan = cancelled ? {
         failureCount: current.failure_count,
         deadLettered: false,

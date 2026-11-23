@@ -110,12 +110,15 @@ describe("partial Document failure in the store", () => {
     const owner = { runId, orgId: "o1", projectId: "w", executionGeneration: "g1" };
     await withStore(async store => {
       await expect(store.failRun(runId, "parse", "workflow cancelled", { ...owner, executionGeneration: "old" })).rejects.toThrow("ownership");
-      await expect(store.completeRun(await loadRunState(store, runId), owner)).rejects.toThrow("ownership");
+      const stale = await loadRunState(store, runId);
+      stale.stage = "format-detect";
+      await store.updateProgress(stale);
+      await expect(store.completeRun(stale, owner)).rejects.toThrow("ownership");
       await store.failRun(runId, "parse", "workflow cancelled", owner);
       await store.failRun(runId, "parse", "retry", owner);
     });
     expect((await db.query("select status, control_state, stage, error, failure_count from project_runs where id=$1", [runId])).rows)
-      .toEqual([{ status: "failed", control_state: "cancelled", stage: "embed", error: "Cancelled by operator", failure_count: 2 }]);
+      .toEqual([{ status: "failed", control_state: "cancelled", stage: "embed", error: "Cancelled", failure_count: 2 }]);
     expect((await db.query("select status from project_run_stage_states where run_id=$1", [runId])).rows).toEqual([{ status: "failed" }]);
     expect((await db.query("select stage_name from project_run_events where run_id=$1 and event_type='run.failed'", [runId])).rows)
       .toEqual([{ stage_name: "embed" }]);
