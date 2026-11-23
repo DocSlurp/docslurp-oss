@@ -284,6 +284,10 @@ const PDF_NAME_END = (() => {
 export function pdfHasEncryptName(bytes: Buffer): boolean | null {
   const head = bytes.subarray(0, 1024);
   if (head.indexOf("%PDF-", 0, "latin1") < 0) return null;
+  return containsPdfEncryptName(bytes);
+}
+
+export function containsPdfEncryptName(bytes: Buffer): boolean {
   for (let slash = bytes.indexOf(0x2f); slash >= 0; slash = bytes.indexOf(0x2f, slash + 1)) {
     let name = "";
     for (let index = slash + 1; index < bytes.length && name.length <= 8; index += 1) {

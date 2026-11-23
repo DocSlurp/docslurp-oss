@@ -2,7 +2,7 @@
 const extractorEnvironment = (): Record<string, string | undefined> => typeof process === "undefined" ? {} : process.env;
 
 /** Maximum PDF source size the isolated VM PDF route (`vm-pdf`) accepts. */
-export const VM_PDF_MAX_SOURCE_BYTES = 500 * 1024 * 1024;
+export const VM_PDF_MAX_SOURCE_BYTES = 1024 * 1024 * 1024;
 
 /** The extractor ids DOCSLURP_PDF_EXTRACTOR accepts. Empty selects the built-in PDF order. */
 export const PDF_EXTRACTOR_SETTINGS = ["vm-pdf"] as const;
