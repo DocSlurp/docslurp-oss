@@ -471,14 +471,14 @@ async function boundedJobOutput(stream: ReadableStream<Uint8Array | string>, lim
 function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteFs {
   const fs = sandbox.filesystem;
   async function upload(p: string, send: (path: string) => Promise<unknown>) {
-      const staged = `${CONTROL_DIR}/upload-${randomUUID()}`;
-      try {
-        await send(staged);
-        await runChecked(sandbox, ["/bin/chmod", "0644", "--", staged], "parser VM upload staging failed");
-        await runInJobTree(sandbox, [...asParserUser(), "/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$2")" && cp -- "$1" "$2"', "sh", staged, p], "parser VM upload into the job tree failed");
-      } finally {
-        await fs.remove(staged).catch(() => {});
-      }
+    const staged = `${CONTROL_DIR}/upload-${randomUUID()}`;
+    try {
+      await send(staged);
+      await runChecked(sandbox, ["/bin/chmod", "0644", "--", staged], "parser VM upload staging failed");
+      await runInJobTree(sandbox, [...asParserUser(), "/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$2")" && cp -- "$1" "$2"', "sh", staged, p], "parser VM upload into the job tree failed");
+    } finally {
+      await fs.remove(staged).catch(() => {});
+    }
   }
   return {
     async stat(p) {

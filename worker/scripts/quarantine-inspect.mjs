@@ -1,8 +1,19 @@
 // Parser VM only: no worker credentials enter this process.
-import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import { open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { inspectQuarantineBytes } from "../dist/lib/quarantine-bytes.js";
 const [input, optionsPath, output] = process.argv.slice(2);
-if ((await stat(input)).size > 500 * 1024 * 1024 || (await stat(optionsPath)).size > 64 * 1024) throw new Error("quarantine input exceeds limit");
+const size = (await stat(input)).size;
+if (size > 1024 ** 3 || (await stat(optionsPath)).size > 64 * 1024) throw new Error("quarantine input exceeds limit");
+if (size > 500 * 1024 * 1024) {
+  const file = await open(input, "r");
+  try {
+    const header = Buffer.alloc(5);
+    await file.read(header, 0, header.length, 0);
+    if (!header.equals(Buffer.from("%PDF-"))) throw new Error("quarantine input exceeds limit");
+  } finally {
+    await file.close();
+  }
+}
 const options = JSON.parse(await readFile(optionsPath, "utf8"));
 const bytes = await readFile(input);
 const charts = options.charts && typeof options.charts === "object" ? options.charts : null;
