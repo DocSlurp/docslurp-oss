@@ -146,8 +146,9 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
   }, 60_000);
 
   it("fails closed for two TIFFs authorizing at the same time while the spend check's database errors", async () => {
-    await admin`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-      values (100, 'ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
+    const generation = "tiff-budget-execution";
+    await admin`insert into project_runs (execution_generation, monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
+      values (${generation}, 100, 'ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
     for (const id of ["ocrb-tiff-a", "ocrb-tiff-b"]) {
       await admin`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
         values (${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'ocrb-tiff-run', ${`${id}.tiff`}, 'image/tiff', ${`raw/${id}`}, 'processing', 1, 'assumed')`;
@@ -160,6 +161,7 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
       const activities = await Promise.all(["ocrb-tiff-a", "ocrb-tiff-b"].map(async (id) => {
         const created = store();
         const state = WorkflowState.create(await created.loadRun("ocrb-tiff-run"), [(await created.loadDocument(id, { runId: "ocrb-tiff-run" }))!]);
+        state.executionGeneration = generation;
         state.bindStore(created);
         state.usageLedger.runId = "ocrb-tiff-run";
         return { id, state };
