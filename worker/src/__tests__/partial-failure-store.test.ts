@@ -102,6 +102,25 @@ describe("partial Document failure in the store", () => {
     await withStore(async store => store.completeRun(await loadRunState(store, "success-rollback")));
   });
 
+  it("acknowledges an operator cancellation at the active stage exactly once", async () => {
+    const runId = "cancel-during-stage";
+    await seedRun(runId);
+    await db.query("update project_runs set execution_generation='g1', control_state='cancel_requested', failure_count=2 where id=$1", [runId]);
+    await db.query("insert into project_run_stage_states(run_id, stage_name, status) values ($1, 'embed', 'processing')", [runId]);
+    const owner = { runId, orgId: "o1", projectId: "w", executionGeneration: "g1" };
+    await withStore(async store => {
+      await expect(store.failRun(runId, "parse", "workflow cancelled", { ...owner, executionGeneration: "old" })).rejects.toThrow("ownership");
+      await expect(store.completeRun(await loadRunState(store, runId), owner)).rejects.toThrow("ownership");
+      await store.failRun(runId, "parse", "workflow cancelled", owner);
+      await store.failRun(runId, "parse", "retry", owner);
+    });
+    expect((await db.query("select status, control_state, stage, error, failure_count from project_runs where id=$1", [runId])).rows)
+      .toEqual([{ status: "failed", control_state: "cancelled", stage: "embed", error: "Cancelled by operator", failure_count: 2 }]);
+    expect((await db.query("select status from project_run_stage_states where run_id=$1", [runId])).rows).toEqual([{ status: "failed" }]);
+    expect((await db.query("select stage_name from project_run_events where run_id=$1 and event_type='run.failed'", [runId])).rows)
+      .toEqual([{ stage_name: "embed" }]);
+  });
+
   it("deduplicates an acknowledged-lost commit and rejects stale or cross-tenant owners", async () => {
     await seedRun("receipt-retry");
     await db.exec("update project_runs set execution_generation = 'g1' where id = 'receipt-retry'");
