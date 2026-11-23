@@ -1,3 +1,5 @@
+import { buffer } from "node:stream/consumers";
+import type { Readable } from "node:stream";
 import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -166,7 +168,7 @@ describe("scan what we parse (council round 6, R6-H1)", () => {
         await writeFile(file, objects.get(key) ?? Buffer.alloc(0));
         return file;
       },
-      putBytes: async (key: string, data: Uint8Array) => { objects.set(key, Buffer.from(data)); },
+      streamToStorage: async (key: string, source: Readable) => { objects.set(key, await buffer(source)); },
       putArtifactJson: async () => {},
       uri: (key: string) => `s3://test/${key}`,
     } as unknown as ArtifactStore;

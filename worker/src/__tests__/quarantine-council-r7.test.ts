@@ -1,3 +1,5 @@
+import { buffer } from "node:stream/consumers";
+import type { Readable } from "node:stream";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -80,7 +82,7 @@ function memoryStorage(objects: Map<string, Buffer>) {
     downloadSourceToTempFile: toTemp,
     downloadToTempFile: toTemp,
     getBytes: async (key: string) => read(key),
-    putBytes: async (key: string, data: Uint8Array) => { objects.set(key, Buffer.from(data)); },
+    streamToStorage: async (key: string, source: Readable) => { objects.set(key, await buffer(source)); },
     putArtifactJson: async () => {},
     deleteKeys: async (keys: string[]) => { for (const key of keys) objects.delete(key); },
     uri: (key: string) => `s3://b/${key}`,
