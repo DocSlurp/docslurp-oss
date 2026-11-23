@@ -76,14 +76,16 @@ const row = async (id: string) => (await db.query<{ page_count: number; page_cou
 async function activity(runId: string, documentIds: string[]): Promise<WorkflowState> {
   const state = WorkflowState.create(await store.loadRun(runId), await Promise.all(documentIds.map(async (id) => (await loadFixtureDocument(store, id))!)));
   await store.hydrateState(state);
+  state.executionGeneration = state.run.executionGeneration; // Model the current workflow activity input.
   return state;
 }
 
 describe("PostgresPageBasisLedger writes: the run's own, non-deduplicated document only", () => {
   it("never writes another run's document, a deduplicated copy or a missing one", async () => {
     const ledger = store.pageBasisLedger;
+    const generation = (await store.loadRun("run1")).executionGeneration;
     for (const id of ["other-run", "copy", "missing"]) {
-      expect(await ledger.setPageCount("run1", id, 99)).toBe(false);
+      expect(await ledger.setPageCount("run1", id, 99, generation)).toBe(false);
       expect(await ledger.setBillingPages("run1", id, 99, "text-rule")).toBe(false);
     }
     expect(await row("other-run")).toMatchObject({ page_count: 1, billing_pages: null });
@@ -108,7 +110,7 @@ describe("PageBasis over Postgres", () => {
         expect((await row("other-run"))?.page_count).toBe(1);
         expect((await store.loadRun("run2")).pagesTotal).toBe(1);
       } finally {
-        await db.exec("update project_runs set execution_generation = null, control_state = null, status = 'processing' where id = 'run2'");
+        await db.query("update project_runs set execution_generation = $1, control_state = null, status = 'processing' where id = 'run2'", [batch.executionGeneration]);
       }
     }
     expect(isDocumentLevelFailure(new StaleExecutionError())).toBe(false);
@@ -256,7 +258,7 @@ describe("PageBasis over Postgres", () => {
     try {
       const run = { ...(await store.loadRun("run2")), orgId: null };
       const document = (await loadFixtureDocument(store, "other-run"))!;
-      const pageBasis = new PageBasis({ run, usageLedger: { pendingBillableCents: 0 } }, store.pageBasisLedger);
+      const pageBasis = new PageBasis({ run, executionGeneration: run.executionGeneration, usageLedger: { pendingBillableCents: 0 } }, store.pageBasisLedger);
       await expect(pageBasis.record(document, { kind: "page-count", pages: 20 })).rejects.toBeInstanceOf(SpendCheckUnavailableError);
       await expect(pageBasis.fund({ kind: "page-read", mode: "ocr", pages: 1 })).rejects.toBeInstanceOf(SpendCheckUnavailableError);
       await expect(pageBasis.affordable({ kind: "page-upgrade", from: "ocr", to: "rich" }, 1)).rejects.toBeInstanceOf(SpendCheckUnavailableError);

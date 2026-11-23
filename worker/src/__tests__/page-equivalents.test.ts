@@ -73,6 +73,7 @@ async function documentRun(pages: number, mime = "application/pdf", facts: objec
       values ('${documentId}', '${org.org}', 'u1', '${org.project}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}', 1, '${STAGED_SHA}');`);
   const document = (await loadFixtureDocument(store, documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
+  state.executionGeneration = state.run.executionGeneration;
   state.bindStore(store);
   return { state, document, runId, documentId };
 }

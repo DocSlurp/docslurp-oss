@@ -71,6 +71,7 @@ afterAll(async () => { await store?.close(); await server?.stop(); await db?.clo
 async function stateFor(runId: string, documentId: string) {
   const document = (await loadFixtureDocument(store, documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
+  state.executionGeneration = state.run.executionGeneration;
   state.bindStore(store);
   state.usageLedger.runId = runId;
   return { state, document };
@@ -486,6 +487,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
       getBytes: vi.fn(),
     } as unknown as ArtifactStore;
     const state = WorkflowState.create(await store.loadRun("run-e2e"), [(await loadFixtureDocument(store, "e2e-pdf"))!, (await loadFixtureDocument(store, "e2e-txt"))!]);
+    state.executionGeneration = state.run.executionGeneration;
     state.bindStore(store);
     await new FormatDetectStage(storage, runner(9)).run(state);
     expect(await pageRow("e2e-pdf")).toEqual({ page_count: 9, page_count_source: "counted" });
@@ -506,6 +508,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     const storage = { putJson: vi.fn(async () => undefined), uri: (key: string) => `s3://b/${key}`, downloadSourceToTempFile: vi.fn(), downloadToTempFile: vi.fn(), getBytes: vi.fn() } as unknown as ArtifactStore;
     const host = runner(2);
     const state = WorkflowState.create(await store.loadRun("run-off"), [(await loadFixtureDocument(store, "off-pdf"))!]);
+    state.executionGeneration = state.run.executionGeneration;
     state.bindStore(store);
     await new FormatDetectStage(storage, host).run(state);
     expect(state.documentStage("off-pdf", "format-detect")?.status).toBe("failed");
