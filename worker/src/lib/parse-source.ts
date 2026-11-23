@@ -49,6 +49,7 @@ export type ParseSourceDecision =
 
 /** The row fields the resolver reads (documents.*, migrations 0134-0135). */
 export interface ParseSourceRow {
+  org_id?: string | null;
   id: string;
   source_key: string;
   source_sha256?: string | null;
@@ -65,6 +66,8 @@ export interface ScannedParseSource {
 
 /** What quarantine records for an accepted document (db/document-records.ts setDocumentParseSource). */
 export interface ParseSourceDecisionRecord {
+  validationOrgId?: string;
+  fullScan?: boolean;
   /** The scanned copy parsers read instead of the upload (an encrypted PDF's), or null: they read the upload. */
   copy: ScannedParseSource | null;
   /** sha256 of the exact upload bytes the scan read: what parsers of the upload are bound to (council R8-L1). */
@@ -120,7 +123,7 @@ export function resolveDocumentSource(row: ParseSourceRow, env: NodeJS.ProcessEn
   if ((key !== null && sha === null) || (sha !== null && !SHA256_HEX.test(sha)) || (key !== null && version === null)) {
     throw new Error(`document ${row.id} has an incomplete scanned parse copy record`);
   }
-  if (hasCurrentParseDecision(row)) {
+  if (hasCurrentParseDecision(row, env)) {
     return key
       ? { sourceKey: key, sourceSha256: sha, originalSourceSha256: row.source_sha256 ?? null, parseSourceDecision: "scanned-copy" }
       : { sourceKey: row.source_key, sourceSha256: sha, parseSourceDecision: "original" };

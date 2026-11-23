@@ -1,3 +1,4 @@
+import { PARSE_SOURCE_FULL_SCAN_VERSION, PARSE_SOURCE_VALIDATION_VERSION } from "@docslurp/shared";
 import type { DerivedDocumentTitle, FileFacts } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
@@ -98,10 +99,13 @@ export class PostgresDocumentRecords {
   async setDocumentParseSource(runId: string, documentId: string, decision: ParseSourceDecisionRecord | null): Promise<boolean> {
     const copy = decision?.copy ?? null;
     const sha = decision ? assertParseSourceRecord(decision) : null;
+    const version = !decision ? null : decision.validationOrgId ? PARSE_SOURCE_VALIDATION_VERSION
+      : decision.fullScan ? PARSE_SOURCE_FULL_SCAN_VERSION : PARSE_SOURCE_SCAN_VERSION;
     const rows = await this.sql`
       update documents set parse_source_key = ${copy?.key ?? null}, parse_source_sha256 = ${sha},
-        parse_source_scan_version = ${decision ? PARSE_SOURCE_SCAN_VERSION : null}, updated_at = now()
+        parse_source_scan_version = ${version}, updated_at = now()
       where id = ${documentId} and run_id = ${runId}
+        and (${decision?.validationOrgId ?? null}::text is null or org_id = ${decision?.validationOrgId ?? null})
       returning id
     `;
     return rows.length > 0;
@@ -134,5 +138,5 @@ export async function documentParseSource(
   const [row] = await sql<Array<{ id: string; source_key: string; source_sha256: string | null; parse_source_key: string | null; parse_source_sha256: string | null; parse_source_scan_version: number | null }>>`
     select id, source_key, source_sha256, parse_source_key, parse_source_sha256, parse_source_scan_version
     from documents where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId} and status = 'completed'`;
-  return row ? resolveDocumentSource(row, env) : null;
+  return row ? resolveDocumentSource({ ...row, org_id: scope.orgId }, env) : null;
 }

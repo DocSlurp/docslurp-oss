@@ -1,4 +1,4 @@
-import { compilePipelinePlan, CURRENT_INGEST_CAPABILITIES, CURRENT_INGEST_VERSION, PARSE_SOURCE_SCAN_VERSION, type PipelineFeatures } from "@docslurp/shared";
+import { compilePipelinePlan, CURRENT_INGEST_CAPABILITIES, CURRENT_INGEST_VERSION, PARSE_SOURCE_SCAN_VERSION, PARSE_SOURCE_VALIDATION_VERSION, PARSE_SOURCE_FULL_SCAN_VERSION, type PipelineFeatures } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
 /**
@@ -31,7 +31,7 @@ export function runStampsIngestVersion(kind: string | null | undefined): boolean
 }
 
 function measuredParseDecision(client: Sql<Record<string, unknown>>) {
-  return client`case when d.parse_source_scan_version = ${PARSE_SOURCE_SCAN_VERSION} and d.parse_source_sha256 is not null
+  return client`case when d.parse_source_scan_version in (${PARSE_SOURCE_SCAN_VERSION}, ${PARSE_SOURCE_VALIDATION_VERSION}, ${PARSE_SOURCE_FULL_SCAN_VERSION}) and d.parse_source_sha256 is not null
     then 'parseSourceDecision' end`;
 }
 

@@ -1,3 +1,4 @@
+import { requiresMalwareScan } from "@docslurp/shared";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -43,7 +44,12 @@ export class QuarantineStage implements Stage {
     // Snapshot flag on: each document's checks run in their own scanner session, whose VMs are restored from the clean
     // snapshot and terminated when the document's checks finish. No VM ever serves a second document (council M1): a
     // document that compromised the daemon could otherwise answer for every later one. Off: the stage runs as before.
-    const snapshot = quarantineScanSnapshotEnabled();
+    const strictScanning = Boolean(process.env.DOCSLURP_MALWARE_SCAN_ORGS);
+    const scanPolicy = strictScanning
+      ? { ...this.config, quarantineFailOpenOnToolMissing: false, requireFreshMalwareDefinitions: true }
+      : this.config;
+    const fullScan = requiresMalwareScan(state.run.orgId);
+    const snapshot = fullScan && quarantineScanSnapshotEnabled();
     const perDocument = <T>(fn: () => Promise<T>): Promise<T> => snapshot ? this.runner.withMalwareScanner(fn) : fn();
     await runDocuments(documents, state.docConcurrency, async (document) => {
       const key = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.json`);
@@ -100,7 +106,8 @@ export class QuarantineStage implements Stage {
                 bytes,
                 tempFile,
                 runner: this.runner,
-                policy: this.config,
+                policy: scanPolicy,
+                validationOnly: !fullScan,
                 signal,
                 scannedCopyDir: copyDir
               });
@@ -123,7 +130,13 @@ export class QuarantineStage implements Stage {
               // copy, or the upload it scanned) before the verdict is recorded, and a refused one loses any decision. Nothing
               // parses a document without one (lib/parse-source.ts).
               const accepted = artifact.decision === "accepted";
-              const decision = { copy: parseCopy, scannedSha256 };
+              const validationOnly = artifact.malwareScan.status === "not-requested";
+              const decision = {
+                copy: parseCopy,
+                scannedSha256,
+                validationOrgId: validationOnly ? state.run.orgId! : undefined,
+                fullScan: strictScanning && !validationOnly,
+              };
               if (state.store) {
                 if (!(await state.store.records.setDocumentParseSource(state.run.id, document.id, accepted ? decision : null))) {
                   throw new Error(`parse decision of document ${document.id} was not recorded`);
