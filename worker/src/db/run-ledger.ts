@@ -736,15 +736,16 @@ export class PostgresRunLedger implements CheckpointStore {
         // A late activity may settle paid usage after another actor terminates
         // the run. Keep its terminal outcome and lease state while inserting usage.
         // An explicit retry resets the row to queued before checkpoints resume.
+        const keepStage = client`project_runs.status in ('completed', 'failed') or project_runs.control_state = 'cancel_requested'`;
         const runAssignments = shardDelta
           ? client`
-            stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
+            stage = case when ${keepStage} then project_runs.stage else ${state.stage} end,
             processed_documents = greatest(project_runs.processed_documents, ${state.run.processedDocuments}),
             pages_processed = greatest(project_runs.pages_processed, ${state.run.pagesProcessed}),
             artifacts = coalesce(project_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
           : client`
-            status = case when project_runs.status in ('completed', 'failed') then project_runs.status else ${state.run.status} end,
-            stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
+            status = case when ${keepStage} then project_runs.status else ${state.run.status} end,
+            stage = case when ${keepStage} then project_runs.stage else ${state.stage} end,
             processed_documents = ${state.run.processedDocuments},
             pages_total = ${state.run.pagesTotal},
             pages_processed = ${state.run.pagesProcessed},
@@ -1039,7 +1040,8 @@ export class PostgresRunLedger implements CheckpointStore {
       if (existing) return;
       const [eligible] = await tx`select id from project_runs where id = ${owner.runId}
         and status in ('queued', 'processing')
-        and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
+        and coalesce(control_state, '') not in ('cancelled', 'paused', 'pause_requested', 'dead-letter')
+        and (control_state is distinct from 'cancel_requested' or ${outcome === "failed"})`;
       if (!eligible) throw new StaleExecutionError();
       const [receipt] = await tx`
         insert into run_terminal_receipts (id, run_id, execution_generation, outcome)
@@ -1056,12 +1058,14 @@ export class PostgresRunLedger implements CheckpointStore {
     await this.finalizeRun(owner, "failed", async (client, logicalId) => {
       const [current] = await client<
         {
+          stage: string;
+          control_state: string | null;
           user_id: string;
           stats: JsonMap | null;
           failure_count: number;
         }[]
       >`
-        select user_id, stats, coalesce(failure_count, 0) as failure_count
+        select user_id, stage, control_state, stats, coalesce(failure_count, 0) as failure_count
         from project_runs
         where id = ${runId}
         limit 1
@@ -1071,7 +1075,17 @@ export class PostgresRunLedger implements CheckpointStore {
         return;
       }
 
-      const plan = planRunFailure({
+      // Temporal can report the first stage in a group. The database has the active stage.
+      const cancelled = current.control_state === "cancel_requested";
+      const terminalStage = cancelled ? current.stage : stage;
+      const terminalMessage = cancelled ? "Cancelled" : message;
+      const plan = cancelled ? {
+        failureCount: current.failure_count,
+        deadLettered: false,
+        stats: current.stats ?? {},
+        eventMessage: terminalMessage,
+        eventPayload: { controlState: "cancelled" },
+      } : planRunFailure({
         failureCount: current.failure_count,
         stats: current.stats,
         stage,
@@ -1086,13 +1100,13 @@ export class PostgresRunLedger implements CheckpointStore {
         update project_runs
         set
           status = 'failed',
-          stage = ${stage},
-          error = ${message},
+          stage = ${terminalStage},
+          error = ${terminalMessage},
           lease_expires_at = now(),
           failure_count = ${nextFailureCount},
           dead_lettered_at = case when ${deadLettered} then now() else dead_lettered_at end,
           dead_letter_reason = case when ${deadLettered} then ${message} else dead_letter_reason end,
-          control_state = case when ${deadLettered} then 'dead-letter' else control_state end,
+          control_state = case when ${cancelled} then 'cancelled' when ${deadLettered} then 'dead-letter' else control_state end,
           stats = ${this.toJson(nextStats)}::jsonb,
           updated_at = now()
         where id = ${runId}
@@ -1104,17 +1118,23 @@ export class PostgresRunLedger implements CheckpointStore {
       }
 
       await client`select retire_replaced_pending_documents(${runId})`;
-      // Exhausted infrastructure retries: each unfinished document gets the public reason marker (real-Modal P3); the raw
-      // run error after it is for operators only (public APIs map stored errors to reviewed copy).
-      await this.failProcessingDocumentStages(runId, stage,
-        options.infrastructureRetriesExhausted ? `${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}: ${message}` : message, client);
+      if (cancelled) {
+        await client`update project_run_stage_states set status = 'failed', error = ${terminalMessage}, updated_at = now()
+          where run_id = ${runId} and status = 'processing'`;
+        await client`update document_run_stage_states set status = 'failed', error = ${terminalMessage}, updated_at = now()
+          where run_id = ${runId} and status = 'processing'`;
+      } else {
+        // Exhausted infrastructure retries give unfinished documents the public reason marker.
+        await this.failProcessingDocumentStages(runId, stage,
+          options.infrastructureRetriesExhausted ? `${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}: ${message}` : message, client);
+      }
       await this.failUnfinishedDocumentsForRun(runId, client);
 
       await insertProjectRunEvents({ sql: client, events: [{
         id: logicalId,
         userId: row.user_id,
         runId,
-        stageName: stage,
+        stageName: terminalStage,
         eventType: "run.failed",
         status: "failed",
         message: plan.eventMessage,
