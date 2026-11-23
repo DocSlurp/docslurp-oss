@@ -110,7 +110,7 @@ from staying behind:
   with the data gone.
 
 Org-level tables from before per-project databases are deleted by the
-relocation CLI's `--drop-legacy` step (see [operations](self-host/operations.md#moving-to-per-project-lancedb-databases-migration-0082));
+relocation CLI's `--drop-legacy` step (see [operations](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#moving-to-per-project-lancedb-databases-migration-0082));
 cleanup rows queued for them before migration 0082 drop them by their legacy
 names.
 
@@ -177,7 +177,7 @@ maintenance is switched off (`maintenance=off`).
   by writes, so ordinary maintenance prunes them, and any pass that compacts
   re-arms the prune.
 
-With the [local disk cache](self-host/operations.md#local-disk-cache-for-lancedb) on, each
+With the [local disk cache](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#local-disk-cache-for-lancedb) on, each
 API machine also keeps a copy of the index and data files it has read. Files that cleanup or
 compaction later remove from the bucket are revalidated on their next cached read, at most
 30 seconds after the previous origin check. A missing object or access refusal discards the

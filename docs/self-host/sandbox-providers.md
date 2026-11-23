@@ -46,7 +46,7 @@ The network levels mean:
 
 | Provider | Host requirements |
 | --- | --- |
-| Bubblewrap | Linux, `bwrap` installed, a kernel and container runtime that allow unprivileged user namespaces. In Docker this needs the security options in [Requirements](requirements.md#host-requirements). |
+| Bubblewrap | Linux, `bwrap` installed, a kernel and container runtime that allow unprivileged user namespaces. In Docker this needs the security options in [Requirements](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/requirements.md#host-requirements). |
 | Landlock | Linux with a kernel that supports Landlock ABI v9, and the `landrun` binary. landrun v0.1.17 refuses to run on a kernel with a lower ABI; the probe tells you whether yours qualifies (the test host on kernel 7.2.5 works, Fargate's kernel 6.1 does not). The worker images include landrun. `landrun` v0.1.17 is a dynamically linked release binary that needs glibc 2.38 or newer (Debian trixie, not bookworm). No namespaces or extra container options needed. |
 | Modal | Outbound HTTPS from the worker to Modal, a Modal account and API token, and the `modal` npm package (an optional dependency of `@docslurp/worker`). |
 | None | Nothing. Development only. |
@@ -172,7 +172,7 @@ Results of local Docker checks on 2026-10-20. Image: Debian trixie-slim with bub
 | Default seccomp | Fails: `bwrap: No permissions to create a new namespace` | Works: filesystem rules enforced, TCP connect denied |
 | `seccomp`, `apparmor` and `systempaths` all `unconfined` | Works | Works |
 
-Takeaway: landrun itself worked in containers without `unconfined` security options, but this test predates per-command PID namespaces (see [Process teardown](#process-teardown)). Landlock now needs user namespaces too, so expect the same container options as bubblewrap; run the probe. Bubblewrap worked only when `seccomp`, `apparmor` and `systempaths` were all `unconfined` in this test. Each option was not tested alone. `compose.selfhost.yml` keeps bubblewrap as the default and uses `systempaths=unconfined` plus a custom seccomp profile (see [Security](security.md#parser-sandbox)).
+Takeaway: landrun itself worked in containers without `unconfined` security options, but this test predates per-command PID namespaces (see [Process teardown](#process-teardown)). Landlock now needs user namespaces too, so expect the same container options as bubblewrap; run the probe. Bubblewrap worked only when `seccomp`, `apparmor` and `systempaths` were all `unconfined` in this test. Each option was not tested alone.
 
 <details>
 <summary>Raw probe output, default seccomp</summary>

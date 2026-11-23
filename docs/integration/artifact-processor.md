@@ -59,3 +59,9 @@ The caller owns authorization, staging, and the lifetime of output artifacts.
 The processing graph itself handles references only. An adapter that parses
 untrusted content must use a credential-free VM or equivalent isolation. A
 module path is operator configuration and grants code execution in the host.
+
+Pass a file path or use `-` to stream PDF bytes from stdin. The PDF recipe also accepts a Node readable byte stream that supports destruction on cancellation through `prepareStream(input, targets, signal)`. Both forms stage the source incrementally under the same byte limit before opening the parser VM. Custom processor modules can implement the optional streaming method.
+
+The public processing entry points are the TypeScript binding and CLI. A host owns HTTP, authorization, durable job status and retries. Invoke shared transformations inside the host’s existing page-range activities. Publish completed targets after durable writes and verify ownership of the active attempt before marking a job complete.
+
+To invoke an individual transformation at an existing page-range retry boundary, import `readPdfTextLayer` from `@docslurp/worker/processor/pdf-text-layer` or `readWithOcr` from `@docslurp/worker/processor/ocr`. Supply the configured sandbox command runner and an inclusive page range for text or the requested one-based pages for OCR. Consume OCR artifacts before calling the returned `dispose()` in a finally block.

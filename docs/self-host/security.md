@@ -1,6 +1,6 @@
 # Security
 
-What protects a self-hosted install: the parser sandbox, malware scanning, secrets and encryption keys, and network exposure. For how the pieces connect, see the [trust boundaries diagram](architecture.md#trust-boundaries).
+What protects a self-hosted install: the parser sandbox, malware scanning, secrets and encryption keys, and network exposure. For how the pieces connect, see the [trust boundaries diagram](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/architecture.md#trust-boundaries).
 
 ## Parser sandbox
 
@@ -44,7 +44,7 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 | Variable | Default in production | Default otherwise | Meaning |
 | --- | --- | --- | --- |
 | `DOCSLURP_CLAMAV_REQUIRE_DAEMON` | `false` | `false` | Require `clamdscan`. If it is unavailable, the scan returns an error ("clamdscan is required but unavailable"). |
-| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false`; setting it stops startup | `false` | When `false`, a stale or missing signature database blocks scanning. In development and test only, `true` makes it a warning; anywhere else the worker refuses to start with it set ([development-only settings](configuration.md#development-only-settings)). |
+| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false`; setting it stops startup | `false` | When `false`, a stale or missing signature database blocks scanning. In development and test only, `true` makes it a warning; anywhere else the worker refuses to start with it set ([development-only settings](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/configuration.md#development-only-settings)). |
 | `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. Outside development and test the worker accepts 1 to 72 and refuses to start with anything else. Upstream publishes about once a day, so at `24` a worker that starts just after the newest set turns a day old refuses to start until the next set reaches it; `48` avoids that. |
 | `DOCSLURP_CLAMAV_DB_DIR` | `/var/lib/clamav` | `/var/lib/clamav` | Signature directory. |
 

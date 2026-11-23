@@ -554,7 +554,7 @@ takes `application/json` (or `application/*+json`). A body of another type gets
 expected type (for example `request_body:json`: "Send the request body as
 application/json."). A request with no body needs no `Content-Type`.
 
-Self-hosters: see [automatic completion and Tigris setup](self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
+Self-hosters: see [automatic completion and Tigris setup](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#automatic-upload-completion-and-tigris-notifications)
 for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
@@ -1565,7 +1565,7 @@ Project exports hold current versions only (no superseded, archived or purged do
 - **Lifetime:** every link works for **7 days** from when the export is ready (`expiresAt`). After that `download` answers `404` and the file is deleted. Each `download` call checks the export (requester, project access, expiry) and then redirects to a presigned storage link that lasts two minutes, so the zip downloads straight from storage. Call `download` again for a fresh link; resumable downloads (Range) work against the storage link.
 - **Limits:** three unfinished exports per user, and 20 exports or 20 GB (estimated) per user per day (`429 rate_limited`). Asking for the same export again within an hour returns the one already in flight or finished. A single document must have finished processing (`409` otherwise).
 
-Sessions and server keys with `artifacts` can export; keys stay within their organization and project restrictions. Objects live in the private bucket under `exports/<orgId>/<projectId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](self-host/operations.md#export-cleanup)).
+Sessions and server keys with `artifacts` can export; keys stay within their organization and project restrictions. Objects live in the private bucket under `exports/<orgId>/<projectId>/<exportId>.zip` with an `Expires` header and `docslurp-expires-at` metadata; the API's maintenance sweep deletes them. A bucket lifecycle rule that expires `exports/` after 8 days is a useful backstop (see [operations](https://github.com/DocSlurp/docslurp-oss/blob/8dc734e2/docs/self-host/operations.md#export-cleanup)).
 
 ## Primary sponsor
 

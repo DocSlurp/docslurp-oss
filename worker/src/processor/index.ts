@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 import { executeArtifactGraph, type ArtifactGraphAdapter, type ArtifactGraphInput } from "../extractors/artifact-graph.js";
 
 export type { ExtractionArtifactRef } from "@docslurp/shared";
@@ -17,12 +18,15 @@ export function createArtifactProcessor(adapters: readonly ArtifactGraphAdapter[
 }
 
 /** The CLI loads this from trusted operator code. A host supplies staging and tool/model adapters. */
+export interface PreparedInput {
+  request: Omit<ArtifactRequest, "target">;
+  close?: () => Promise<void>;
+}
+
 export interface ProcessorModule {
   configure(env: NodeJS.ProcessEnv): Promise<{
     adapters: readonly ArtifactGraphAdapter[];
-    prepare(input: string, targets: readonly string[], signal: AbortSignal): Promise<{
-      request: Omit<ArtifactRequest, "target">;
-      close?: () => Promise<void>;
-    }>;
+    prepare(input: string, targets: readonly string[], signal: AbortSignal): Promise<PreparedInput>;
+    prepareStream?(input: Readable, targets: readonly string[], signal: AbortSignal): Promise<PreparedInput>;
   }>;
 }
