@@ -736,18 +736,20 @@ export class PostgresRunLedger implements CheckpointStore {
         // A late activity may settle paid usage after another actor terminates
         // the run. Keep its terminal outcome and lease state while inserting usage.
         // An explicit retry resets the row to queued before checkpoints resume.
+        // Measurements persist their own total before the next activity loads. Only the whole-run virtual
+        // page index replaces it at its stage boundary with its count of the indexed pages.
+        const pagesTotal = !shard && state.stage === "split-pages" && options.stageBoundary
+          ? client`${state.run.pagesTotal}::bigint` : client`project_runs.pages_total`;
         const runAssignments = shardDelta
           ? client`
             stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
             processed_documents = greatest(project_runs.processed_documents, ${state.run.processedDocuments}),
-            pages_processed = greatest(project_runs.pages_processed, ${state.run.pagesProcessed}),
             artifacts = coalesce(project_runs.artifacts, '{}'::jsonb) || ${this.toJson(shardDelta.artifacts)}::jsonb`
           : client`
             status = case when project_runs.status in ('completed', 'failed') then project_runs.status else ${state.run.status} end,
             stage = case when project_runs.status in ('completed', 'failed') then project_runs.stage else ${state.stage} end,
             processed_documents = ${state.run.processedDocuments},
-            pages_total = ${state.run.pagesTotal},
-            pages_processed = ${state.run.pagesProcessed},
+            pages_total = ${pagesTotal},
             stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
             artifacts = ${this.toJson(state.run.artifacts ?? {})}::jsonb`;
         // The run row is locked from this update to commit, so spent_cents
@@ -758,6 +760,7 @@ export class PostgresRunLedger implements CheckpointStore {
             set
               ${counter.assignments},
               ${runAssignments},
+              pages_processed = least(${pagesTotal}, greatest(project_runs.pages_processed, ${state.run.pagesProcessed})),
               last_heartbeat_at = case when project_runs.status in ('completed', 'failed') then project_runs.last_heartbeat_at else now() end,
               lease_expires_at = case
                 when project_runs.status in ('completed', 'failed') then project_runs.lease_expires_at
@@ -775,6 +778,7 @@ export class PostgresRunLedger implements CheckpointStore {
             update project_runs
             set
               ${runAssignments},
+              pages_processed = least(${pagesTotal}, greatest(project_runs.pages_processed, ${state.run.pagesProcessed})),
               last_heartbeat_at = case when project_runs.status in ('completed', 'failed') then project_runs.last_heartbeat_at else now() end,
               lease_expires_at = case
                 when project_runs.status in ('completed', 'failed') then project_runs.lease_expires_at

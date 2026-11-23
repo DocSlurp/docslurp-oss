@@ -4,10 +4,13 @@ import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures, PAGE_READ_METRICS, page
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadFixtureDocument } from "../test/load-document.js";
 
+import { StaleExecutionError } from "../db/execution-ownership.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { setSpendCheckConfig, SpendCheckUnavailableError } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { extraCreditsForMeasuredPages } from "../lib/office-page-count.js";
 import { PageBasis, UnfundedPagesError } from "../pipeline/page-basis.js";
+import { recordPageProgress } from "../pipeline/run-ledger.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -89,6 +92,52 @@ describe("PostgresPageBasisLedger writes: the run's own, non-deduplicated docume
 });
 
 describe("PageBasis over Postgres", () => {
+  it("refuses a measurement after execution replacement, cancellation or completion", async () => {
+    const batch = await activity("run2", ["other-run"]);
+    const record = () => batch.pageBasis.record(batch.documents[0]!, { kind: "page-count", pages: 17 });
+    for (const change of ["execution_generation = 'next'", "control_state = 'cancel_requested'", "status = 'completed'"]) {
+      await db.exec(`update project_runs set ${change} where id = 'run2'`);
+      try {
+        await expect(record()).rejects.toBeInstanceOf(StaleExecutionError);
+        if (change.startsWith("execution_generation")) {
+          const retry = await activity("run2", ["other-run"]);
+          expect(retry.run.executionGeneration).toBe("next");
+          retry.executionGeneration = "previous";
+          await expect(retry.pageBasis.record(retry.documents[0]!, { kind: "page-count", pages: 17 })).rejects.toBeInstanceOf(StaleExecutionError);
+        }
+        expect((await row("other-run"))?.page_count).toBe(1);
+        expect((await store.loadRun("run2")).pagesTotal).toBe(1);
+      } finally {
+        await db.exec("update project_runs set execution_generation = null, control_state = null, status = 'processing' where id = 'run2'");
+      }
+    }
+    expect(isDocumentLevelFailure(new StaleExecutionError())).toBe(false);
+  });
+
+  it("publishes first-pass measurements before the extraction shard loads, even across retries and stale checkpoints", async () => {
+    const original = await activity("run2", ["other-run"]);
+    const batch = await activity("run2", ["other-run"]);
+    batch.beginShard(["other-run"]);
+    const count = async (pages: number) => {
+      await batch.pageBasis.record(batch.documents[0]!, { kind: "page-count", pages });
+    };
+    await count(13);
+    const drain = await activity("run2", ["other-run"]);
+    expect(drain.run.pagesTotal).toBe(13);
+    drain.beginShard(["other-run"]);
+    for (let pageNumber = 1; pageNumber <= 13; pageNumber++) {
+      recordPageProgress(drain, { documentId: "other-run", stageName: "extract-markdown", pageNumber, pageCount: 13, status: "completed" });
+    }
+    await store.updateProgress(drain);
+    await count(13);
+    await store.updateProgress(original);
+    expect(await store.loadRun("run2")).toMatchObject({ pagesTotal: 13, pagesProcessed: 13 });
+    await count(6);
+    await store.updateProgress(batch);
+    expect(await store.loadRun("run2")).toMatchObject({ pagesTotal: 6, pagesProcessed: 6 });
+    await count(1);
+  }, 60_000);
+
   it("a hydrated state's page basis records a counted page count, and the run-wide reads see it", async () => {
     const state = await activity("run1", ["pdf"]);
     const pdf = state.documents[0]!;

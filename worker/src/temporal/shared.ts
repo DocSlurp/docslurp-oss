@@ -263,6 +263,7 @@ export interface FirstPassPlanOutput {
 
 export interface FirstPassCountInput {
   runId: string;
+  executionGeneration?: string;
   documentIds: string[];
 }
 
@@ -276,6 +277,7 @@ export const FIRST_PASS_BATCH_FINAL_FAILURE = "FirstPassBatchFinal";
 
 export interface FirstPassBatchInput {
   runId: string;
+  executionGeneration?: string;
   batchIndex: number;
   documentIds: string[];
   totalStages: number;

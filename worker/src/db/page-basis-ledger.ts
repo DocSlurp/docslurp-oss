@@ -1,6 +1,7 @@
 import type { Sql } from "postgres";
 
 import type { PageBasisLedger, PageBasisRun, RunMeasurements, SpendOutcome } from "../pipeline/page-basis.js";
+import { StaleExecutionError } from "./execution-ownership.js";
 import { recordPageEquivalents, recordWholeDocumentPages, type PageEquivalentRow } from "./page-equivalents.js";
 import { enforceRunSpendForCharge, largestFundedCharge, pauseRunForSpend, SpendCheckUnavailableError } from "./spend-check.js";
 
@@ -15,13 +16,36 @@ export class PostgresPageBasisLedger implements PageBasisLedger {
    * Records a counted page basis (documents.page_count, page_count_source 'counted'): the pages the text splits into, the page
    * rows, citations and the completion charge count.
    */
-  async setPageCount(runId: string, documentId: string, pages: number): Promise<boolean> {
-    const rows = await this.sql`
-      update documents set page_count = ${pages}, page_count_source = 'counted', updated_at = now()
-      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
-      returning id
+  async setPageCount(runId: string, documentId: string, pages: number, executionGeneration?: string | null): Promise<boolean> {
+    // The first pass hands a file to another activity as soon as it is counted. That activity must see the new
+    // denominator even if this shard never checkpoints. Lock the prior document value so retries add zero and
+    // independent documents adjust the same run without replacing one another's measurements.
+    const [result] = await this.sql<{ recorded: boolean }[]>`
+      with owner as (
+        select id from project_runs where id = ${runId}
+          and execution_generation is not distinct from ${executionGeneration ?? null}
+          and status in ('queued', 'processing')
+          and coalesce(control_state, '') not in ('cancel_requested', 'cancelled', 'pause_requested', 'paused', 'dead-letter')
+        for no key update
+      ), prior as (
+        select d.id, d.page_count from owner join documents d on d.run_id = owner.id
+        where d.id = ${documentId} and d.deduped_from_document_id is null
+        for no key update of d
+      ), measured as (
+        update documents d set page_count = ${pages}, page_count_source = 'counted', updated_at = now()
+        from prior where d.id = prior.id
+        returning d.id, d.page_count - prior.page_count as delta
+      ), adjusted as (
+        update project_runs r
+        set pages_total = greatest(0, r.pages_total + m.delta),
+          pages_processed = least(r.pages_processed, greatest(0, r.pages_total + m.delta)),
+          updated_at = now()
+        from measured m where r.id = ${runId} and m.delta <> 0
+      )
+      select exists(select 1 from measured) as recorded from owner
     `;
-    return rows.length > 0;
+    if (!result) throw new StaleExecutionError();
+    return result.recorded;
   }
 
   /**
