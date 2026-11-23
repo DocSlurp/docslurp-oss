@@ -1,4 +1,9 @@
+import { VM_PDF_MAX_SOURCE_BYTES } from "@docslurp/shared";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { containsPdfEncryptName } from "../lib/quarantine-bytes.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -16,7 +21,7 @@ import {
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
-import { sha256Bytes, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
+import { sha256Bytes, sha256File, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
 import { chartExportActive, chartExportConfigOf, chartExportModelsActive } from "../chart-export/config.js";
 import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { parserImageCapability } from "../sandbox/startup.js";
@@ -24,6 +29,26 @@ import { CHART_INLINE_SLOT, chartExportInlineEnabled, chartInlineSlotValue, inli
 import { INLINE_COMMAND_BUDGET_CAPABILITY } from "../chart-export/inline-guest.js";
 import { chartExportVmUsageEvent, deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
+
+/** Keep the header and enough overlap for a slash, seven escaped name bytes and a delimiter. */
+export async function quarantineSourceEvidence(file: string) {
+  const hash = createHash("sha256");
+  let bytes = Buffer.alloc(0);
+  let tail: Buffer = Buffer.alloc(0);
+  let encryptName = false;
+  for await (const chunk of createReadStream(file)) {
+    const data = chunk as Buffer;
+    hash.update(data);
+    if (bytes.length < 1024) bytes = Buffer.concat([bytes, data.subarray(0, 1024 - bytes.length)]);
+    if (!encryptName && bytes.subarray(0, 5).toString("latin1") === "%PDF-") {
+      const window = Buffer.concat([tail, data]);
+      // Appending an ordinary name byte avoids treating the end of a chunk as a delimiter.
+      encryptName = window.includes("/Encrypt") || containsPdfEncryptName(Buffer.concat([window, Buffer.from("x")]));
+      tail = Buffer.from(window.subarray(-32));
+    }
+  }
+  return { bytes, scannedSha256: hash.digest("hex"), encryptName: encryptName || containsPdfEncryptName(tail) };
+}
 
 export class QuarantineStage implements Stage {
   readonly name = "quarantine";
@@ -68,6 +93,7 @@ export class QuarantineStage implements Stage {
               trustedTempDownloadPattern("docslurp-quarantine-", document),
               {
                 maxBytes: Math.max(
+                  document.mimeType === "application/pdf" ? VM_PDF_MAX_SOURCE_BYTES : 0,
                   this.config.quarantineMaxSingleEntryBytes,
                   this.config.quarantineMaxTotalUncompressedBytes
                 )
@@ -76,10 +102,11 @@ export class QuarantineStage implements Stage {
 
             const copyDir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-copy-"));
             try {
-              const bytes = await readFile(tempFile);
+              const evidence = vmOnlyParsing() ? await quarantineSourceEvidence(tempFile) : undefined;
+              const bytes = evidence?.bytes ?? await readFile(tempFile);
               // The scanned bytes must be the bytes the server hashed. Their hash is what the decision binds parsers of the
               // upload to (council R8-L1), so a swap after this scan is refused even for a row without a server hash.
-              const scannedSha256 = sha256Bytes(bytes);
+              const scannedSha256 = evidence?.scannedSha256 ?? sha256Bytes(bytes);
               // The upload has no parse decision yet (this scan records it), so the parsers' decision gate, which refuses
               // an object without one in production, does not apply; the hash binding and the unreadable-key refusal do.
               verifyQuarantineUpload(original, scannedSha256);
@@ -98,6 +125,7 @@ export class QuarantineStage implements Stage {
                 filename: document.filename,
                 declaredMimeType: verified?.scanDeclaredMimeType ?? document.mimeType,
                 bytes,
+                hostEncryptName: evidence?.encryptName,
                 tempFile,
                 runner: this.runner,
                 policy: this.config,
@@ -113,10 +141,9 @@ export class QuarantineStage implements Stage {
               if (artifact.decision === "accepted" && artifact.pdfDecryption?.status === "decrypted") {
                 if (!copyPath) throw new Error("encrypted PDF accepted without its scanned copy");
                 const stored = performance.now();
-                const copy = await readFile(copyPath);
                 const copyKey = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.scanned.pdf`);
-                parseCopy = { key: copyKey, sha256: sha256Bytes(copy) };
-                await this.storage.putBytes(copyKey, copy, "application/pdf");
+                parseCopy = { key: copyKey, sha256: await sha256File(copyPath) };
+                await this.storage.streamToStorage(copyKey, createReadStream(copyPath), "application/pdf");
                 artifact.pdfDecryption.parseSource = { uri: this.storage.uri(copyKey), sha256: parseCopy.sha256, storeMs: Math.round(performance.now() - stored) };
               }
               // Fail closed (council R7-H1): every accepted document gets this build's parse decision on its own row (its scanned

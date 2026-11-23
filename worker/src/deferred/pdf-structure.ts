@@ -1,3 +1,4 @@
+import { VM_PDF_MAX_SOURCE_BYTES } from "@docslurp/shared";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,16 +13,17 @@ export interface OutlineNode { title: string; level: number; physicalPage: numbe
 export interface PdfStructure { pageCount: number; outline: OutlineNode[]; pageLabels: string[] | null }
 
 /** PDF.js runs in the parser VM; only typed structure JSON returns to the worker. */
-export async function readPdfStructure(bytes: Uint8Array): Promise<PdfStructure> {
+export async function readPdfStructure(source: Uint8Array | string): Promise<PdfStructure> {
+  const size = typeof source === "string" ? (await stat(source)).size : source.byteLength;
+  if (size > VM_PDF_MAX_SOURCE_BYTES) throw new Error("PDF structure input exceeds 1 GiB");
   if (!vmOnlyParsing()) {
-    return (await import("./pdf-structure-guest.js")).readPdfStructure(bytes);
+    return (await import("./pdf-structure-guest.js")).readPdfStructure(typeof source === "string" ? await readFile(source) : source);
   }
-  if (bytes.byteLength > 500 * 1024 * 1024) throw new Error("PDF structure input exceeds 500 MiB");
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-pdf-structure-"));
   try {
-    const input = path.join(dir, "input.pdf");
+    const input = typeof source === "string" ? source : path.join(dir, "input.pdf");
     const output = path.join(dir, "structure.json");
-    await writeFile(input, bytes, { mode: 0o600 });
+    if (typeof source !== "string") await writeFile(input, source, { mode: 0o600 });
     await new CommandRunner().run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "pdf-structure.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 });
     if ((await stat(output)).size > 4 * 1024 * 1024) throw new Error("PDF structure output exceeds 4 MiB");
     const result = JSON.parse(await readFile(output, "utf8")) as PdfStructure;

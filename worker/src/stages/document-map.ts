@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 
 import type { Sql } from "postgres";
@@ -60,7 +60,7 @@ export function mapCoverage(nodes: MapNode[], pageCount: number): number {
 
 /** Side-effecting edges, injectable so tests need no poppler, vision model or LLM. */
 export interface DocumentMapOps {
-  readStructure(bytes: Uint8Array): Promise<PdfStructure>;
+  readStructure(sourcePath: string): Promise<PdfStructure>;
   /** Text layer for pages first..last, one string per page (a single pdftotext call). */
   extractText(sourcePath: string, first: number, last: number, signal?: AbortSignal): Promise<string[]>;
   /** OCR pages first..last of a scanned document. */
@@ -155,7 +155,7 @@ export class DocumentMapStage implements Stage {
     const sql = this.sqlFor(state);
     const source = await this.sources.get(document);
     // A corrupt or encrypted PDF degrades to text-only mapping instead of failing the stage.
-    const structure = await ops.readStructure(await readFile(source.path)).catch((error): PdfStructure => {
+    const structure = await ops.readStructure(source.path).catch((error): PdfStructure => {
       console.warn(`[document-map] structure read failed document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
       return { pageCount: Math.max(1, document.pageCount), outline: [], pageLabels: null };
     });

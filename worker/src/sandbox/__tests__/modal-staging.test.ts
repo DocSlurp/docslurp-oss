@@ -36,6 +36,7 @@ class MemoryRemoteFs implements RemoteFs {
     this.writes.push(p);
     this.files.set(p, { data, mtime: ++this.clock });
   }
+  async writeFromLocal(p: string, local: string) { await this.writeFile(p, readFileSync(local)); }
   async readFile(p: string) {
     this.reads.push(p);
     const file = this.files.get(p);
@@ -78,6 +79,21 @@ describe("SessionStaging", () => {
     await staging.ensureUploaded([file, file]);
     expect(remote.writes).toEqual([file]);
     expect(Buffer.from(remote.files.get(file)!.data).toString()).toBe("hello");
+  });
+
+  it("stages large inputs from private disk once and releases snapshots on errors", async () => {
+    const file = path.join(root, "long.pdf");
+    writeFileSync(file, Buffer.alloc(9 * 1024 * 1024, 65));
+    const copy = vi.spyOn(remote, "writeFromLocal");
+    await staging.ensureUploaded([file, file]);
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(existsSync(copy.mock.calls[0]![1])).toBe(false);
+    writeFileSync(file, Buffer.alloc(9 * 1024 * 1024, 66));
+    copy.mockRejectedValueOnce(new Error("transfer failed"));
+    await expect(staging.ensureUploaded([file])).rejects.toThrow("transfer failed");
+    expect(existsSync(copy.mock.calls[1]![1])).toBe(false);
+    await staging.ensureUploaded([file]);
+    expect(copy).toHaveBeenCalledTimes(3);
   });
 
   it("refreshes a reused input path when its contents change, including same-size edits", async () => {
@@ -927,7 +943,7 @@ describe("modal provider session lifecycle", () => {
       const big = path.join(dir, "big.bin");
       await writeFile(big, "");
       const { truncate } = await import("node:fs/promises");
-      await truncate(big, 512 * 1024 * 1024 + 1);
+      await truncate(big, 1024 * 1024 * 1024 + 1);
       const small = path.join(dir, "in.pdf");
       await writeFile(small, "%PDF");
       // Oversize: B's verdict (a document failure), nothing blamed on A.

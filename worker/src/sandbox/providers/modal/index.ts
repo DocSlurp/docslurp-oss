@@ -470,6 +470,16 @@ async function boundedJobOutput(stream: ReadableStream<Uint8Array | string>, lim
 
 function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteFs {
   const fs = sandbox.filesystem;
+  async function upload(p: string, send: (path: string) => Promise<unknown>) {
+      const staged = `${CONTROL_DIR}/upload-${randomUUID()}`;
+      try {
+        await send(staged);
+        await runChecked(sandbox, ["/bin/chmod", "0644", "--", staged], "parser VM upload staging failed");
+        await runInJobTree(sandbox, [...asParserUser(), "/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$2")" && cp -- "$1" "$2"', "sh", staged, p], "parser VM upload into the job tree failed");
+      } finally {
+        await fs.remove(staged).catch(() => {});
+      }
+  }
   return {
     async stat(p) {
       try {
@@ -483,16 +493,8 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
     // Job-controlled trees are written only as the parser user (council M #3): root writes the bytes into its own control
     // directory, then uid 10001 copies them into place, so a link a surviving job process planted reaches only what
     // uid 10001 could already write.
-    async writeFile(p, data) {
-      const staged = `${CONTROL_DIR}/upload-${randomUUID()}`;
-      await fs.writeBytes(data, staged);
-      try {
-        await runChecked(sandbox, ["/bin/chmod", "0644", "--", staged], "parser VM upload staging failed");
-        await runInJobTree(sandbox, [...asParserUser(), "/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$2")" && cp -- "$1" "$2"', "sh", staged, p], "parser VM upload into the job tree failed");
-      } finally {
-        await fs.remove(staged).catch(() => {});
-      }
-    },
+    writeFile: (p, data) => upload(p, staged => fs.writeBytes(data, staged)),
+    writeFromLocal: (p, local) => upload(p, staged => fs.copyFromLocal(local, staged)),
     async readFile(p, limit = 128 * 1024 * 1024) {
       // Read as the parser user: root never follows a link the job left in its own output (council K #5).
       const proc = await sandbox.exec([...asParserUser(), "/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });

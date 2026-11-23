@@ -1,6 +1,9 @@
-import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createReadStream } from "node:fs";
+import { constants, createReadStream } from "node:fs";
+import { tmpdir } from "node:os";
+import { pipeline } from "node:stream/promises";
+import { VM_PDF_MAX_SOURCE_BYTES } from "@docslurp/shared";
 import { createHash } from "node:crypto";
 
 import { SandboxOutputError, SandboxOutputLimitError } from "../../types.js";
@@ -18,6 +21,7 @@ export interface RemoteFs {
   /** The entry at `p`, or null when nothing exists there. */
   stat(p: string): Promise<RemoteEntry | null>;
   writeFile(p: string, data: Uint8Array): Promise<void>;
+  writeFromLocal?(p: string, local: string): Promise<void>;
   /** Read a file, failing (without buffering past it) once it exceeds `limit` bytes. */
   readFile(p: string, limit?: number): Promise<Uint8Array>;
   /** Direct children of a directory, symlinks excluded. */
@@ -204,12 +208,46 @@ export class SessionStaging {
       this.claim(abs, "upload");
       for (const name of await readdir(abs)) await this.upload(path.join(abs, name));
     } else if (stats.isFile()) {
-      if (stats.size > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM input file exceeds limit");
+      if (stats.size > VM_PDF_MAX_SOURCE_BYTES) throw new SandboxOutputError("parser VM input file exceeds limit");
+      if (stats.size > 8 * 1024 * 1024) {
+        if (!this.remote.writeFromLocal) throw new SandboxOutputError("parser VM streaming input transfer unavailable");
+        const directory = await mkdtemp(path.join(tmpdir(), "parser-input-"));
+        const local = path.join(directory, "source");
+        try {
+          const file = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          try {
+            const before = await file.stat();
+            if (!before.isFile() || before.size !== stats.size || before.ino !== stats.ino || before.dev !== stats.dev) throw new SandboxOutputError("parser VM input changed");
+            const digest = createHash("sha256");
+            let total = 0;
+            const output = await open(local, "wx", 0o600);
+            try {
+              await pipeline(file.createReadStream({ autoClose: false }), async function* (input) {
+                for await (const chunk of input) {
+                  total += chunk.length;
+                  if (total > before.size) throw new SandboxOutputError("parser VM input grew");
+                  digest.update(chunk);
+                  yield chunk;
+                }
+              }, output.createWriteStream());
+            } finally { await output.close(); }
+            const after = await file.stat();
+            if (total !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) throw new SandboxOutputError("parser VM input changed");
+            const hash = digest.digest("hex");
+            if (this.inputHashes.get(abs) !== hash) {
+              await this.remote.writeFromLocal(abs, local);
+              this.inputHashes.set(abs, hash);
+              this.claim(abs, "upload");
+            }
+          } finally { await file.close(); }
+        } finally { await rm(directory, { recursive: true, force: true }); }
+        return;
+      }
       const chunks: Buffer[] = []; let bytes = 0;
       // Bound allocation while reading, including growth after the initial stat.
       for await (const chunk of createReadStream(abs)) {
         bytes += chunk.length;
-        if (bytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual input file exceeds limit");
+        if (bytes > stats.size) throw new SandboxOutputError("parser VM actual input file exceeds limit");
         chunks.push(chunk as Buffer);
       }
       const data = Buffer.concat(chunks, bytes);
