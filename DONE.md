@@ -1,3 +1,7 @@
+## Organization malware scanning policy
+
+Operators can reserve full malware scans for a roster of organizations. All uploads retain structural validation, source integrity checks and sandboxed parsing.
+
 ## The spend rule is decided in one place (2026-11-19)
 
 No behaviour change. The API decided "may this organization spend" in `spendBlockReason`, the worker in its own `spendBlockCode`, and four more worker files read `org_spend_status()` themselves; the dev skip was written three times.

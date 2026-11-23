@@ -593,3 +593,9 @@ their configured routes.
 The list also accepts `llm://transformers.js/Xenova/bge-m3?pooling=cls`. Provision
 the model cache before using the local route. Verify ranking parity on
 representative queries against the existing index before enabling a pool.
+
+### Organization malware scanning
+
+By default every organization receives the full malware scan. To restrict that scan to contracted organizations, configure `DOCSLURP_MALWARE_SCAN_ORGS` identically on the API and all workers with the complete comma-separated roster of organization UUIDs. The explicit value `none` represents an empty roster. Missing or malformed configuration and unknown organization identities require the full scan. Only operators may change this setting.
+
+All uploads still undergo integrity, type and archive checks. Standard uploads report malware status `not-requested`. Encrypted PDFs, OLE files and archive contents requiring scanner inspection retain full checking. Validation-only decisions bind the original bytes to their hash. Adding an organization to the scan roster makes its validation-only decisions insufficient for subsequent parsing. Legacy decisions also need renewal for organizations requiring strict scan assurance. Reprocess the affected documents to obtain full scan decisions. Roll out compatible readers before activating the roster.

@@ -210,7 +210,7 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     inspectable: true,
     issues: [...new Set(issues)],
     chartParts,
-    ...(nesting.notices.length ? { notices: nesting.notices } : {}),
+    notices: nesting.notices,
     nestedContainers: nesting.nestedContainers,
     maxNestingDepth: nesting.maxNestingDepth
   };

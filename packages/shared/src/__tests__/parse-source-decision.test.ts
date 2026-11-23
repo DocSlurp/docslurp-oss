@@ -15,7 +15,7 @@ describe("parse source decision (PR #339)", () => {
       { parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION },
       { parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION, parse_source_sha256: "x" },
       { parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION, parse_source_sha256: c, source_sha256: a },
-      { parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION + 1, parse_source_sha256: a },
+      { parse_source_scan_version: 999, parse_source_sha256: a },
     ]) {
       expect(hasCurrentParseDecision(row)).toBe(false);
       expect(parseSourceRescanRequired(row, prod)).toBe(true);
@@ -56,5 +56,30 @@ describe("rescan API error", () => {
     const { API_ERROR_PUBLIC_MESSAGES, publicApiErrorDetails } = await import("../api-error.js");
     expect(API_ERROR_PUBLIC_MESSAGES.quarantine_rescan_required).toBe("This document needs to be scanned again; reprocess it to view pages");
     expect(publicApiErrorDetails({ category: "quarantine-rescan-required", action: "reprocess", raw: "worker said x" })).toEqual({ category: "quarantine-rescan-required", action: "reprocess" });
+  });
+});
+
+describe("operator-owned malware scanning entitlement", () => {
+  const enterprise = "b53c2ff7-bc5e-4ab1-a33e-d6294dc02d66";
+  const standard = "706aa517-ec47-47de-bd25-e77acf57c613";
+  const validated = { parse_source_scan_version: -1, parse_source_sha256: "a".repeat(64), source_sha256: "a".repeat(64) };
+
+  it("requires the organization's current entitlement even on a previously validated source", () => {
+    const env = { NODE_ENV: "production", DOCSLURP_MALWARE_SCAN_ORGS: enterprise };
+    expect(parseSourceRescanRequired({ ...validated, org_id: standard }, env)).toBe(false);
+    expect(parseSourceRescanRequired({ ...validated, org_id: enterprise }, env)).toBe(true);
+    expect(parseSourceRescanRequired({ ...validated, org_id: enterprise, parse_source_scan_version: 1 }, env)).toBe(true);
+    expect(parseSourceRescanRequired({ ...validated, org_id: enterprise, parse_source_scan_version: 2 }, env)).toBe(false);
+    expect(parseSourceRescanRequired({ ...validated, org_id: standard }, { ...env, DOCSLURP_MALWARE_SCAN_ORGS: standard })).toBe(true);
+    expect(parseSourceRescanRequired({ ...validated, org_id: standard, source_sha256: "b".repeat(64) }, env)).toBe(true);
+    expect(parseSourceRescanRequired({ ...validated, org_id: standard, parse_source_key: "copy" }, env)).toBe(true);
+  });
+
+  it("requires a scan for unknown organizations and absent or invalid configuration", () => {
+    for (const roster of [undefined, "", "invalid", enterprise + ","]) {
+      expect(parseSourceRescanRequired({ ...validated, org_id: standard }, { NODE_ENV: "production", DOCSLURP_MALWARE_SCAN_ORGS: roster })).toBe(true);
+    }
+    expect(parseSourceRescanRequired({ ...validated, org_id: standard }, { NODE_ENV: "production", DOCSLURP_MALWARE_SCAN_ORGS: "none" })).toBe(false);
+    expect(parseSourceRescanRequired(validated, { NODE_ENV: "production", DOCSLURP_MALWARE_SCAN_ORGS: "none" })).toBe(true);
   });
 });

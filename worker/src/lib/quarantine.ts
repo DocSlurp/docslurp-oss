@@ -11,7 +11,7 @@ import { fileFactsFromSniff, quarantineFailureText, type FileFacts } from "@docs
 
 import type { Config } from "../config.js";
 import { DocumentStageError } from "../pipeline/checkpoints.js";
-import { CommandExitError, type MalwareScanResult } from "../tools/runner.js";
+import { CommandExitError, quarantineScanSnapshotEnabled, type MalwareScanResult } from "../tools/runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { vmOnlyParsing } from "./vm-only-parsing.js";
 import { INLINE_CHART_LIMITS } from "../chart-export/inline-guest.js";
@@ -58,7 +58,7 @@ export interface QuarantineArtifact {
   /** The bytes' facts as sniffed here: encoding, container and the declared-vs-sniffed verdict. */
   fileFacts: Pick<FileFacts, "sniffedMimeType" | "encoding" | "container" | "mismatch">;
   archive: ArchiveInspection | null;
-  malwareScan: MalwareScanResult;
+  malwareScan: MalwareScanResult | (Omit<MalwareScanResult, "status"> & { status: "not-requested" });
   /**
    * An encrypted PDF's in-VM decryption (CommandRunner.decryptPdfForScan) and the scan of its plaintext copy; null when
    * the file is not a PDF naming /Encrypt or its own scan was not clean.
@@ -95,7 +95,7 @@ export type QuarantinePolicy = Pick<
   | "quarantineMaxTotalUncompressedBytes"
   | "quarantineMaxSingleEntryBytes"
   | "quarantineMaxExpansionRatio"
->;
+> & { requireFreshMalwareDefinitions?: boolean };
 
 /**
  * The API only glances at an upload (magic bytes and the declared type; it never opens a container), so a document it
@@ -133,6 +133,7 @@ export async function scanDocumentForQuarantine(args: {
    * the scan read is the copy every parser reads (lib/parse-source.ts). Without it the copy is removed after the scan.
    */
   scannedCopyDir?: string;
+  validationOnly?: boolean;
 }): Promise<QuarantineArtifact> {
   const reasons: QuarantineReason[] = [];
   // Production reads the bytes in the parser VM (MIME sniff, ZIP inspection); never in this process. Facts follow from the sniff.
@@ -205,8 +206,18 @@ export async function scanDocumentForQuarantine(args: {
     }
   }
 
-  const malwareScan = await args.runner.scanForMalware(args.tempFile, args.signal);
-  reasons.push(...malwareScanReasons(malwareScan, args.policy));
+  // Encryption and containers which only ClamAV opens still need the full inspection path.
+  const validationOnly = args.validationOnly && !encryptName && inspected.sniffed.container !== "ole" && (!archive || (archive.inspectable && archive.nestedContainers !== undefined && archive.notices?.length === 0));
+  if (args.validationOnly && !validationOnly && quarantineScanSnapshotEnabled()) {
+    // A scanner-only container still needs the daemon session when standard uploads use a parser VM.
+    return args.runner.withMalwareScanner(() => scanDocumentForQuarantine({ ...args, inspection: inspected, validationOnly: false }));
+  }
+  const malwareScan: QuarantineArtifact["malwareScan"] = validationOnly ? {
+    status: "not-requested", engine: null, signature: null, available: false,
+    databaseStatus: "unknown", databaseUpdatedAt: null, databaseAgeHours: null, databaseSource: null,
+    healthWarnings: [], stdout: "", stderr: "", exitCode: null,
+  } : await args.runner.scanForMalware(args.tempFile, args.signal);
+  if (malwareScan.status !== "not-requested") reasons.push(...malwareScanReasons(malwareScan, args.policy));
 
   // libclamav scans an owner-password PDF's unfiltered streams as ciphertext (clam-hostile-matrix.docker.test.ts): a PDF
   // that names /Encrypt and scanned clean is decrypted in the parser VM and the plaintext copy scanned too. Clean only if
@@ -293,6 +304,9 @@ const ENCRYPTED_CONTENT_MESSAGE = "file is encrypted or password-protected, so i
 /** The quarantine reasons one malware scan verdict gives (none for a clean scan). */
 function malwareScanReasons(malwareScan: MalwareScanResult, policy: QuarantinePolicy): QuarantineReason[] {
   const reasons: QuarantineReason[] = [];
+  if (policy.requireFreshMalwareDefinitions && malwareScan.status === "clean" && malwareScan.databaseStatus !== "fresh") {
+    reasons.push({ code: "malware-definitions-unverified", severity: "error", message: "malware scan requires current definitions" });
+  }
   if (malwareScan.status === "unscannable" || (malwareScan.status === "infected" && isClamEncryptedAlert(malwareScan.signature))) {
     // AlertEncryptedArchive/AlertEncryptedDoc (clam-limits.ts): encrypted archive members or a PDF that needs a user
     // password, which the scanner cannot read. Not malware and never clean: refused whatever the fail-open policy says.

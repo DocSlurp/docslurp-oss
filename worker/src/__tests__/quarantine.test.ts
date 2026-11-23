@@ -446,3 +446,44 @@ describe("verifyIntakeFileFacts (the worker inspects what the API only glanced a
     expect(verifyIntakeFileFacts({ filename: "a.docx", mimeType: DOCX, fileFacts: null }, inspectionOf(zip))).toBeNull();
   });
 });
+
+describe("validation without a malware scan", () => {
+  const runner = { scanForMalware: () => { throw new Error("scanner called"); } } as never;
+  const input = { documentId: "document", filename: "notes.txt", declaredMimeType: "text/plain", bytes: Buffer.from("sample text"), tempFile: "unused", policy: basePolicy, runner, validationOnly: true };
+
+  it("refuses a clean verdict with stale definitions under strict scanning", async () => {
+    const artifact = await scanDocumentForQuarantine({
+      ...input,
+      validationOnly: false,
+      policy: { ...basePolicy, requireFreshMalwareDefinitions: true, quarantineFailOpenOnToolMissing: false },
+      runner: { scanForMalware: async () => ({
+        engine: "clamscan", status: "clean", available: true, signature: null, databaseStatus: "stale",
+        stdout: "", stderr: "", exitCode: 0,
+      }) } as typeof input.runner,
+    });
+    expect(artifact.decision).toBe("quarantined");
+    expect(artifact.reasons.map(reason => reason.code)).toContain("malware-definitions-unverified");
+  });
+
+  it("records an accepted validation independently of a clean malware result", async () => {
+    const artifact = await scanDocumentForQuarantine(input);
+    expect(artifact.decision).toBe("accepted");
+    expect(buildQuarantineStats(artifact)).toMatchObject({ malwareStatus: "not-requested" });
+  });
+
+  it("still refuses a PDF when its structural inspection is missing", async () => {
+    expect(await scanDocumentForQuarantine({ ...input, filename: "sample.pdf", declaredMimeType: "application/pdf", bytes: Buffer.from("%PDF-1.7"), inspection: { ...inspectionOf(Buffer.from("%PDF-1.7"), "sample.pdf"), pdf: null } })).toMatchObject({ decision: "quarantined" });
+  });
+
+  it("uses the scanner when a guest cannot attest its nested archive checks", async () => {
+    const bytes = buildZipBuffer([{ name: "word/document.xml", compressedSize: 12, uncompressedSize: 64 }]);
+    const inspection = inspectionOf(bytes);
+    const archive = { ...inspection.archive! };
+    delete archive.notices;
+    await expect(scanDocumentForQuarantine({ ...input, bytes, inspection: { ...inspection, archive } })).rejects.toThrow("scanner called");
+  });
+
+  it("uses the scanner for full scans", async () => {
+    await expect(scanDocumentForQuarantine({ ...input, validationOnly: false })).rejects.toThrow("scanner called");
+  });
+});
