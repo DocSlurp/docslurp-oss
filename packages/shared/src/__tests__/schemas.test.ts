@@ -921,4 +921,30 @@ describe("projectRunSchema", () => {
     const result = projectRunSchema.safeParse({ ...validRun, stage: "unknown-stage" });
     expect(result.success).toBe(false);
   });
+
+  it("leaves the progress fields absent when a server does not report them", () => {
+    const run = projectRunSchema.parse(validRun);
+    expect(run.pagesSearchable).toBeUndefined();
+    expect(run.pagesCountedAt).toBeUndefined();
+    expect(run.workerStartedAt).toBeUndefined();
+    expect("pagesSearchable" in run).toBe(false);
+  });
+
+  it("carries searchable pages, the final-count time and the worker pickup time", () => {
+    const run = projectRunSchema.parse({
+      ...validRun, status: "processing", stage: "index", pagesProcessed: 10,
+      pagesSearchable: 4, pagesCountedAt: "2026-01-01T00:00:05.000Z", workerStartedAt: "2026-01-01T00:00:02.000Z",
+    });
+    expect(run).toMatchObject({ pagesProcessed: 10, pagesSearchable: 4, pagesCountedAt: "2026-01-01T00:00:05.000Z", workerStartedAt: "2026-01-01T00:00:02.000Z" });
+  });
+
+  it("accepts null for a run that is queued, still being counted or not reported", () => {
+    const run = projectRunSchema.parse({ ...validRun, pagesSearchable: null, pagesCountedAt: null, workerStartedAt: null });
+    expect(run).toMatchObject({ pagesSearchable: null, pagesCountedAt: null, workerStartedAt: null });
+  });
+
+  it("rejects a negative or fractional searchable page count", () => {
+    expect(projectRunSchema.safeParse({ ...validRun, pagesSearchable: -1 }).success).toBe(false);
+    expect(projectRunSchema.safeParse({ ...validRun, pagesSearchable: 1.5 }).success).toBe(false);
+  });
 });

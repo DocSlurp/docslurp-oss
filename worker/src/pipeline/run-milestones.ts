@@ -29,6 +29,27 @@ const EXTRACTION_STAGES: ReadonlySet<string> = new Set(["extract-markdown", "ext
 const PAGE_CHECKPOINT_STAGES: ReadonlySet<string> = new Set([
   "split-pages", "page-embed", "extract-markdown", "extract-html", "render-images", "vision-extract", "structured-extract", "embed",
 ]);
+/**
+ * Stages that can change a document's page count: the page count read from the file, the virtual page index, and the
+ * extraction stages (processed PDF pages, the text rule, frames of a multi-frame image). Later stages only read it.
+ */
+const PAGE_COUNT_STAGES: ReadonlySet<string> = new Set(["format-detect", "split-pages", "extract-markdown", "extract-html", "vision-extract"]);
+
+/**
+ * True once `pages_total` can no longer change: every page-counting stage this run executes has completed at run
+ * level. A partial run that reuses all of them inherits measured counts, so it is final from its first stage boundary.
+ * An unreadable plan is never final (the run's completion stamps it instead).
+ */
+export function pageCountsFinal(pipeline: Parameters<typeof compilePipelinePlan>[0], runStages: ReadonlyMap<string, { status: string }>): boolean {
+  try {
+    const plan = compilePipelinePlan(pipeline);
+    const reused = new Set<string>(plan.reusedStages);
+    return plan.stageOrder.every((stage) => !PAGE_COUNT_STAGES.has(stage) || reused.has(stage) || runStages.get(stage)?.status === "completed");
+  } catch {
+    return false;
+  }
+}
+
 /** A worker process younger than this when it picks a run up was started for the work: a cold start. */
 export const COLD_WORKER_UPTIME_SECONDS = 120;
 

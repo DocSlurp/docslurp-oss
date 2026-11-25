@@ -2315,6 +2315,10 @@ export const projectRuns = pgTable(
     processedDocuments: bigint("processed_documents", { mode: "number" }).default(0).notNull(),
     pagesTotal: bigint("pages_total", { mode: "number" }).default(0).notNull(),
     pagesProcessed: bigint("pages_processed", { mode: "number" }).default(0).notNull(),
+    /** Pages of documents that finished indexing; null when no release that reports it has written the run (migration 20261125T2042). */
+    pagesSearchable: bigint("pages_searchable", { mode: "number" }),
+    /** When pages_total stopped being provisional; null while documents are still being counted (migration 20261125T2042). */
+    pagesCountedAt: timestamp("pages_counted_at", { withTimezone: true, mode: "string" }),
     spendUncheckedPages: bigint("spend_unchecked_pages", { mode: "number" }).default(0).notNull(),
     /** @deprecated Replaced by spentCents (migration 0056); no longer read or written, dropped in a later migration. */
     inputCostCents: numeric("input_cost_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),

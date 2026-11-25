@@ -28,6 +28,13 @@ export interface ProjectRun {
   pagesTotal: number;
   pagesProcessed: number;
   /**
+   * Pages of the run's documents that finished indexing (`project_runs.pages_searchable`), as last read from the run
+   * row. Null: nothing reported yet. Undefined: the database predates the column, so checkpoints leave it and
+   * `pages_counted_at` alone. Stages never set it: an indexed document adds its pages to
+   * `WorkflowState.pendingSearchablePages` and the next checkpoint adds that to the row.
+   */
+  pagesSearchable?: number | null;
+  /**
    * Committed billed spend of the run (`project_runs.spent_cents`): the sum
    * of cost_cents of every usage event persisted for it, kept by a trigger on
    * usage_events (migration 0056) and refreshed by each progress checkpoint.
