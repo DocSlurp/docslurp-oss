@@ -301,6 +301,8 @@ export async function runDocumentStage(
   }
 
   const checkpoint = state.documentStage(document.id, stageName);
+  // Read now: the attempt below replaces the checkpoint in the state.
+  const completedBefore = checkpoint?.status === "completed";
   if (checkpoint?.status === "completed" && options?.rerunCompleted !== true && !firstPassCheckpointStale(state, document.id, stageName, checkpoint)) {
     console.log(
       `[checkpoint-debug] document=${document.id} stage=${stageName} skipped=already-completed ` +
@@ -436,6 +438,9 @@ export async function runDocumentStage(
 
       if (state.store) {
         await state.store.completeDocumentStage(state, document.id, stageName, artifactUri, stats, result.geoFinalSource);
+        // The index checkpoint publishes the document to search. Its pages reach the run row with the next progress
+        // checkpoint (no statement of their own); a checkpoint that was already complete added them before.
+        if (stageName === "index" && !completedBefore) state.pendingSearchablePages += Math.max(1, document.pageCount);
         await noteDocumentStageComplete(state, stageName, document.pageCount);
         if (needsDocumentProgressCheckpoint(state)) await state.store.updateProgress(state);
         await state.store.appendEvent(

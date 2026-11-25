@@ -9,7 +9,7 @@ vi.mock("@docslurp/shared/observability", () => ({
 }));
 
 const {
-  finalPageStage, noteDocumentStageComplete, noteRunMilestone, noteRunOutcome, noteRunPageStage, recordPagesRouted, recordRunOutcome,
+  finalPageStage, noteDocumentStageComplete, pageCountsFinal, noteRunMilestone, noteRunOutcome, noteRunPageStage, recordPagesRouted, recordRunOutcome,
   resetRunMilestoneMemory, workerStartKind,
 } = await import("../pipeline/run-milestones.js");
 const { defaultPipelineFeatures: DEFAULT_PIPELINE } = await import("@docslurp/shared");
@@ -37,6 +37,24 @@ describe("run milestones", () => {
     expect(finalPageStage(["split-pages", "extract-markdown", "embed", "index"])).toBe("embed");
     expect(finalPageStage(["split-pages", "extract-markdown", "embed", "index"], ["embed"])).toBe("extract-markdown");
     expect(finalPageStage(["format-detect", "index"])).toBeNull();
+  });
+
+  it("calls page counts final once every page-counting stage of the plan has completed", async () => {
+    const { compilePipelinePlan } = await import("@docslurp/shared");
+    const plan = compilePipelinePlan(DEFAULT_PIPELINE);
+    const counting = plan.stageOrder.filter((stage) => ["format-detect", "split-pages", "extract-markdown", "extract-html", "vision-extract"].includes(stage));
+    expect(counting.length).toBeGreaterThan(0);
+    const stages = new Map<string, { status: string }>();
+    expect(pageCountsFinal(DEFAULT_PIPELINE, stages)).toBe(false);
+    for (const stage of counting.slice(0, -1)) stages.set(stage, { status: "completed" });
+    stages.set(counting.at(-1)!, { status: "processing" });
+    // Later stages finishing first (execution order may differ from plan order) does not make the total final.
+    stages.set("index", { status: "completed" });
+    expect(pageCountsFinal(DEFAULT_PIPELINE, stages)).toBe(false);
+    stages.set(counting.at(-1)!, { status: "completed" });
+    expect(pageCountsFinal(DEFAULT_PIPELINE, stages)).toBe(true);
+    // A plan that cannot be read is never final: completion stamps the run instead.
+    expect(pageCountsFinal({ configVersion: 999_999 } as never, stages)).toBe(false);
   });
 
   it("records a milestone once per process and only when the store stamped it", async () => {

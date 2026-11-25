@@ -193,6 +193,12 @@ export class WorkflowState {
   /** Last time updateProgress was called (throttle granular flushes) */
   lastProgressFlushAt = 0;
   /**
+   * Pages of documents this state indexed that no checkpoint has added to `project_runs.pages_searchable` yet
+   * (checkpoints.ts runDocumentStage). The next progress checkpoint adds them to the row and subtracts what it wrote,
+   * so the counter costs no statement of its own and shards of one stage add up instead of overwriting each other.
+   */
+  pendingSearchablePages = 0;
+  /**
    * Set while this state runs one document shard of a stage beside other
    * shards: what the run row already holds from this state, so progress
    * checkpoints write only this shard's additions (see PostgresRunLedger.writeProgress).

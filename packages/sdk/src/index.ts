@@ -461,6 +461,20 @@ export type ProjectRun = JsonObject & {
   /** Why the worker paused the run for spend (credit_exhausted, project_budget_paused, org_budget_paused, plan_not_entitled); it resumes by itself once the org may spend. */
   pauseReason?: string | null;
   error?: string | null;
+  /** Pages the run covers; provisional until `pagesCountedAt` is set. */
+  pagesTotal?: number;
+  /** Page checkpoints of the extraction stages. Reaches `pagesTotal` before the run can be searched; see `pagesSearchable`. */
+  pagesProcessed?: number;
+  /**
+   * Pages of documents that finished indexing and are served by search. Advances a document at a time; on a completed
+   * run it stays below `pagesTotal` when documents failed. Null or absent: not reported (an older server, or a run
+   * that predates the field), so fall back to `pagesProcessed`.
+   */
+  pagesSearchable?: number | null;
+  /** When `pagesTotal` became final. Null while documents are still being counted; absent when not reported. */
+  pagesCountedAt?: string | null;
+  /** When a worker first picked the run up. Null while the run waits for a worker; absent when not reported. */
+  workerStartedAt?: string | null;
 };
 
 export type DocumentRecord = JsonObject & {

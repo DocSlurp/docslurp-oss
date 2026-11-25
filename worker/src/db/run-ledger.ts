@@ -1,9 +1,9 @@
-import { RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneExtra, type RunMilestoneHit } from "../pipeline/run-milestones.js";
+import { pageCountsFinal, RUN_MILESTONE_COLUMNS, type RunMilestone, type RunMilestoneExtra, type RunMilestoneHit } from "../pipeline/run-milestones.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { type GeoFinalSource } from "./geo-final-source.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
-import { INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT } from "@docslurp/shared";
+import { INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, STAGE_DOCUMENT_PAGES_STAT } from "@docslurp/shared";
 import { DocumentNotFoundError, DocumentOutOfScopeError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { randomUUID } from "node:crypto";
@@ -65,6 +65,8 @@ type ProjectRunRow = {
   processed_documents: number | string;
   pages_total: number | string;
   pages_processed: number | string;
+  /** Absent when the database predates migration 20261125T2042 (run rows are read with `r.*`). */
+  pages_searchable?: number | string | null;
   spent_cents: number | string;
   pipeline: Partial<ProjectRun["pipeline"]> | null;
   stats: JsonMap | null;
@@ -242,6 +244,19 @@ function stageStateRowsQuery(client: Sql<Record<string, unknown>>, runId: string
     where run_id = ${runId}
     order by updated_at asc
   `;
+}
+
+/**
+ * Pages of the run's documents whose index checkpoint is complete (a document with no counted page still counts one,
+ * as the index stage counts it). Correlated to the `project_runs` row being updated.
+ */
+function indexedPagesSql(client: Sql<Record<string, unknown>>) {
+  return client`(
+    select coalesce(sum(greatest(1, d.page_count)), 0)::bigint
+    from document_run_stage_states s
+    join documents d on d.id = s.document_id
+    where s.run_id = project_runs.id and s.stage_name = 'index' and s.status = 'completed'
+  )`;
 }
 
 /** The three reads that open a stage activity, mapped; a stage-completion checkpoint can fetch them for the next stage. */
@@ -701,6 +716,12 @@ export class PostgresRunLedger implements CheckpointStore {
     const shardDelta = shard
       ? { artifacts: state.artifactLedger.changedSince(shard.artifacts) }
       : null;
+    // Progress columns (migration 20261125T2042), written only for a run whose row was read with them. Pages indexed
+    // since the last committed checkpoint are added, never assigned, so shards and retried checkpoints stay additive.
+    const progressColumns = state.run.pagesSearchable !== undefined;
+    const searchablePages = progressColumns ? Math.max(0, Math.trunc(state.pendingSearchablePages)) : 0;
+    // The unsharded stage pass owns run-level stage state: only its boundary can tell that counting is over.
+    const countsFinal = progressColumns && !shard && options.stageBoundary === true && pageCountsFinal(state.run.pipeline, state.runStages);
     // project_runs.spent_cents once this checkpoint commits.
     let spentCents = state.run.spentCents;
 
@@ -753,6 +774,15 @@ export class PostgresRunLedger implements CheckpointStore {
             pages_total = ${pagesTotal},
             stats = ${this.toJson(state.run.stats ?? {})}::jsonb,
             artifacts = ${this.toJson(state.run.artifacts ?? {})}::jsonb`;
+        // A row no reporting release has written yet (null) starts from what is already indexed: one aggregate, once per
+        // run, so a run adopted from an older release mid-way does not under-report. After that the row only takes deltas.
+        const progressAssignments = progressColumns
+          ? client`
+              pages_searchable = least(greatest(${pagesTotal}, 0), case
+                when project_runs.pages_searchable is null then ${indexedPagesSql(client)}
+                else project_runs.pages_searchable + ${searchablePages}::bigint end),
+              pages_counted_at = ${countsFinal ? client`coalesce(project_runs.pages_counted_at, now())` : client`project_runs.pages_counted_at`},`
+          : client``;
         // The run row is locked from this update to commit, so spent_cents
         // changes only by the trigger on this checkpoint's own usage inserts.
         const runUpdate = counter
@@ -761,6 +791,7 @@ export class PostgresRunLedger implements CheckpointStore {
             set
               ${counter.assignments},
               ${runAssignments},
+              ${progressAssignments}
               pages_processed = least(${pagesTotal}, greatest(project_runs.pages_processed, ${state.run.pagesProcessed})),
               last_heartbeat_at = case when project_runs.status in ('completed', 'failed') then project_runs.last_heartbeat_at else now() end,
               lease_expires_at = case
@@ -779,6 +810,7 @@ export class PostgresRunLedger implements CheckpointStore {
             update project_runs
             set
               ${runAssignments},
+              ${progressAssignments}
               pages_processed = least(${pagesTotal}, greatest(project_runs.pages_processed, ${state.run.pagesProcessed})),
               last_heartbeat_at = case when project_runs.status in ('completed', 'failed') then project_runs.last_heartbeat_at else now() end,
               lease_expires_at = case
@@ -848,6 +880,8 @@ export class PostgresRunLedger implements CheckpointStore {
     usageBatch.commit();
     state.run.spentCents = spentCents;
     state.lastProgressFlushAt = Date.now();
+    // Only what this checkpoint added leaves the pending count; documents indexed meanwhile wait for the next one.
+    state.pendingSearchablePages = Math.max(0, state.pendingSearchablePages - searchablePages);
     if (shard && shardDelta) {
       Object.assign(shard.artifacts, shardDelta.artifacts);
     }
@@ -1001,8 +1035,16 @@ export class PostgresRunLedger implements CheckpointStore {
         const stampMode = runReusesExtraction(state.run.pipeline) ? "inherited" as const : "extracted" as const;
         const stampDocuments = stamps ? client`with stamped as (${stampDocumentIngestVersion(client, state.run.id, stampMode)} returning 1)` : client``;
         const stampRun = stamps ? runStamp(client, stampMode) : client``;
+        // The terminal write settles the progress columns exactly: pages of the documents this run completed (a
+        // pipeline without an index stage completes them here), and a page total that can no longer change.
+        const progressColumns = state.run.pagesSearchable !== undefined
+          ? client`pages_searchable = least(greatest(pages_total, 0), (
+              select coalesce(sum(greatest(1, d.page_count)), 0)::bigint from documents d
+              where d.run_id = project_runs.id and d.status = 'completed' and d.superseded_at is null)),
+            pages_counted_at = coalesce(pages_counted_at, now()),`
+          : client``;
         await client`${stampDocuments} update project_runs set status = 'completed', stage = 'completed',
-          processed_documents = total_documents, pages_processed = pages_total,
+          processed_documents = total_documents, pages_processed = pages_total, ${progressColumns}
           stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
           lease_expires_at = null, updated_at = now() ${stampRun} where id = ${state.run.id}`;
         await insertProjectRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
@@ -1630,6 +1672,12 @@ export class PostgresRunLedger implements CheckpointStore {
       geoFinalSource.runId !== state.run.id || geoFinalSource.projectId !== state.run.projectId ||
       geoFinalSource.orgId !== state.run.orgId)) throw new Error("Geo checkpoint scope mismatch");
     const completesDocument = stage === "index";
+    // The checkpoint records the document's page count: per-stage page progress at document granularity for stages
+    // that finish a document's pages together, without a row per page (shared/run-stage-pages.ts).
+    const documentPages = state.documents.find((entry) => entry.id === documentId)?.pageCount;
+    if (typeof documentPages === "number" && Number.isFinite(documentPages) && documentPages >= 0) {
+      stats = { ...stats, [STAGE_DOCUMENT_PAGES_STAT]: Math.floor(documentPages) };
+    }
     const vectors = completesDocument
       ? state.vectorIndexes.filter((vector) => vector.documentId === documentId)
       : [];
@@ -2188,6 +2236,8 @@ function mapRun(row: ProjectRunRow): ProjectRun {
     processedDocuments: Number(row.processed_documents),
     pagesTotal: Number(row.pages_total),
     pagesProcessed: Number(row.pages_processed),
+    // Present only when the column exists: checkpoints write the progress columns for exactly these runs.
+    ...(row.pages_searchable !== undefined ? { pagesSearchable: row.pages_searchable === null ? null : Number(row.pages_searchable) } : {}),
     spentCents: Number(row.spent_cents ?? 0) || 0,
     // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings, and so
     // does the operator's private model map (DOCSLURP_MODEL_MODE, DOCSLURP_PRIVATE_*_MODEL) where hosted models are not allowed.
