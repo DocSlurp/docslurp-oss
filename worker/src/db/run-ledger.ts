@@ -3,7 +3,7 @@ import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { type GeoFinalSource } from "./geo-final-source.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
-import { INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT } from "@docslurp/shared";
+import { INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, STAGE_DOCUMENT_PAGES_STAT } from "@docslurp/shared";
 import { DocumentNotFoundError, DocumentOutOfScopeError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { randomUUID } from "node:crypto";
@@ -1672,6 +1672,12 @@ export class PostgresRunLedger implements CheckpointStore {
       geoFinalSource.runId !== state.run.id || geoFinalSource.projectId !== state.run.projectId ||
       geoFinalSource.orgId !== state.run.orgId)) throw new Error("Geo checkpoint scope mismatch");
     const completesDocument = stage === "index";
+    // The checkpoint records the document's page count: per-stage page progress at document granularity for stages
+    // that finish a document's pages together, without a row per page (shared/run-stage-pages.ts).
+    const documentPages = state.documents.find((entry) => entry.id === documentId)?.pageCount;
+    if (typeof documentPages === "number" && Number.isFinite(documentPages) && documentPages >= 0) {
+      stats = { ...stats, [STAGE_DOCUMENT_PAGES_STAT]: Math.floor(documentPages) };
+    }
     const vectors = completesDocument
       ? state.vectorIndexes.filter((vector) => vector.documentId === documentId)
       : [];

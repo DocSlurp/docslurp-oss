@@ -1,6 +1,6 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { compilePipelinePlan, PARSE_SOURCE_SCAN_VERSION } from "@docslurp/shared";
+import { completedPagesByStage, compilePipelinePlan, PARSE_SOURCE_SCAN_VERSION } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { Store } from "../db/store.js";
@@ -119,6 +119,14 @@ describe("run progress columns", () => {
     });
     // Extraction progress is a separate counter and keeps its meaning.
     expect((await progress(served.db, "index")).processed).toBe(0);
+    // Each completed checkpoint records its document's pages, so a reader can roll stages up without page rows.
+    const checkpoints = await served.db.query<{ document_id: string; stats: Record<string, unknown> }>(
+      "select document_id, stats from document_run_stage_states where run_id = 'index' and stage_name = 'index' order by document_id");
+    expect(checkpoints.rows.map((row) => [row.document_id, row.stats.documentPages])).toEqual([["index-a", 10], ["index-b", 5]]);
+    expect(completedPagesByStage({
+      stages: checkpoints.rows.map((row) => ({ documentId: row.document_id, stage: "index" as const, status: "completed" as const, stats: row.stats })),
+    })).toEqual({ index: 15 });
+    expect((await served.db.query("select 1 from page_stage_states where run_id = 'index'")).rows).toHaveLength(0);
 
     // A later activity loads the row's value and does not count the indexed documents again.
     await withStore(served.url, async (store) => {
