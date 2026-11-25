@@ -14,7 +14,7 @@ Durations are histograms in seconds with boundaries from 0.5 s to 4 h, so quanti
 | `first_page_extracted` | The first page has extracted content, by any method | |
 | `first_page_completed` | The first page finished every page-level stage of the run's plan | |
 
-Each milestone is stamped once on `project_runs` (`worker_started_at`, `first_page_extracted_at`, `first_page_completed_at`) by a conditional update, so the metric is recorded at most once across workers, retries and resumes. The columns are the source of truth: a worker that stops before its next metric export loses the sample but not the timestamp. `worker_started` carries no `pages` label, because the page count is rarely measured that early.
+Each milestone is stamped once on `project_runs` (`worker_started_at`, `first_page_extracted_at`, `first_page_completed_at`) by a conditional update, so the metric is recorded at most once across workers, retries and resumes. The columns are the source of truth: a worker that stops before its next metric export loses the sample but not the timestamp. `worker_started` carries no `pages` label, because the page count is rarely measured that early. The run record reports `worker_started_at` to clients as `workerStartedAt`, so a wait for a worker can be told apart from slow processing.
 
 `first_page_completed` follows the plan: it fires on the last stage that checkpoints pages one by one (for a default run, `embed`). Document-level stages such as `index` have no per-page completion; a document that never checkpoints pages closes both page milestones when it is indexed.
 

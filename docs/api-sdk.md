@@ -682,6 +682,20 @@ The HTTP response is the full `{ run, stages, recentEvents, temporal, progress?,
 }
 ```
 
+#### What the run's page counters mean
+
+| Field | Meaning |
+| --- | --- |
+| `pagesTotal` | Pages the run covers. Provisional while `pagesCountedAt` is `null`: formats only the worker can count start from an estimate. |
+| `pagesProcessed` | Page checkpoints of the extraction stages. It reaches `pagesTotal` when text extraction finishes, before routing, page reading and indexing run. Don't present it as "searchable". |
+| `pagesSearchable` | Optional. Pages of documents that finished indexing and are served by search. It advances a document at a time, because a document is published to search whole. On a completed run it stays below `pagesTotal` when documents failed or were withheld. |
+| `pagesCountedAt` | Optional. When `pagesTotal` became final; `null` while documents are still being counted. |
+| `workerStartedAt` | Optional. When a worker first picked the run up; `null` while the run waits for one. A retry or resume doesn't reset it. |
+
+The three optional fields are absent, or `null` for `pagesSearchable`, when the server or the worker that ran the job doesn't report them, and for runs created before they existed. Treat that as "unknown" and fall back to `pagesProcessed`; never read it as zero.
+
+For progress inside a stage, a completed document checkpoint in `stages` carries `stats.documentPages`, the document's page count. `completedPagesByStage({ stages, pageProgress: progress.pageRollup.byDocument })` from `@docslurp/shared` adds those to the page checkpoints, so stages that finish a document's pages together (classification, routing, the page index, the vector index) advance a document at a time. One document's progress inside such a stage isn't reported: its pages finish together.
+
 `progress` may be absent, and `temporal` may be `null`. Stage rollups report completed pages, document status counts, duration and usage. Resource totals report elapsed time, CPU time and memory. Run and stage progress can infer completion from lifecycle state, so use [project state](#current-project-state) for current searchable page coverage. A recorded cost of zero doesn't prove there was no API or infrastructure cost.
 
 ### Subscribe over HTTP

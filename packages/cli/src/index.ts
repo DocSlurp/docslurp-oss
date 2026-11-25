@@ -1776,6 +1776,8 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
         processedDocuments: number;
         pagesTotal: number;
         pagesProcessed: number;
+        pagesSearchable?: number | null;
+        pagesCountedAt?: string | null;
       };
     };
 
@@ -1790,6 +1792,10 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
       `Stage:     ${run.stage}`,
       `Documents: [${renderBar(run.processedDocuments, run.totalDocuments)}] ${run.processedDocuments}/${run.totalDocuments} (${docPct}%)`,
       `Pages:     [${renderBar(run.pagesProcessed, run.pagesTotal)}] ${run.pagesProcessed}/${run.pagesTotal} (${pagePct}%)`,
+      // Extraction reaches 100% before the run can be searched; servers that report searchable pages get their own bar.
+      ...(typeof run.pagesSearchable === "number"
+        ? [`Indexed:   [${renderBar(run.pagesSearchable, run.pagesTotal)}] ${run.pagesSearchable}/${run.pagesTotal}${run.pagesCountedAt === null ? " (still counting pages)" : ""}`]
+        : []),
       `Elapsed:   ${elapsed}`
     ];
 

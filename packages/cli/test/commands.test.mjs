@@ -49,6 +49,21 @@ test("license is available without credentials or network access", async () => {
   assert.match(result.stdout, /Business Source License 1\.1/);
 });
 
+test("status shows indexed pages only when the server reports them", async () => {
+  const processing = { stage: "index", pagesProcessed: 3 };
+  const unreported = await invoke(["status", "run"], () => ({ body: { run: run("processing", processing) } }));
+  assert.equal(unreported.code, 0, unreported.stderr);
+  assert.match(unreported.stdout, /Pages: .* 3\/3 \(100%\)/);
+  assert.doesNotMatch(unreported.stdout, /Indexed:/);
+  const nulled = await invoke(["status", "run"], () => ({ body: { run: run("processing", { ...processing, pagesSearchable: null }) } }));
+  assert.doesNotMatch(nulled.stdout, /Indexed:/);
+
+  const counting = await invoke(["status", "run"], () => ({ body: { run: run("processing", { ...processing, pagesSearchable: 1, pagesCountedAt: null }) } }));
+  assert.match(counting.stdout, /Indexed: .* 1\/3 \(still counting pages\)/);
+  const counted = await invoke(["status", "run"], () => ({ body: { run: run("processing", { ...processing, pagesSearchable: 1, pagesCountedAt: "2026-01-01T00:00:00.000Z" }) } }));
+  assert.match(counted.stdout, /Indexed: .* 1\/3\n/);
+});
+
 test("search scopes to project and authenticates", async () => {
   const result = await invoke(["search", "termination", "policy", "--project", "project"], () => ({ body: {
     results: [{ score: 0.8, text: "Termination requires notice.\nExceptions apply.", citation: { filename: "policy.pdf", pageNumbers: [2, 3] } }],

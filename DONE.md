@@ -1,3 +1,12 @@
+## Runs report searchable pages, a final page total and worker pickup (2026-11-25)
+
+`pagesProcessed` counts page checkpoints of the extraction stages, so it reaches `pagesTotal` before routing, page reading and indexing run; clients that divided the two showed 100% long before a run could be searched.
+
+- `project_runs.pages_searchable` and `pages_counted_at` (migration `20261125T2042_run_progress_fields`, nullable, no backfill). The index stage adds a document's pages to a pending count and the next progress checkpoint adds it to the row: no statement of its own, additive across shards, settled exactly by the terminal write. `pages_counted_at` is stamped at the boundary of the last stage that can change a page count, and at completion.
+- The run schema (`packages/shared/src/run.ts`), the SDK's `ProjectRun` and `docslurp status` gain optional `pagesSearchable`, `pagesCountedAt` and `workerStartedAt` (the existing `worker_started_at` milestone). Null or absent means not reported, never zero.
+- Completed document checkpoints record `stats.documentPages`; `completedPagesByStage` (`packages/shared/src/run-stage-pages.ts`) rolls page progress up per stage at document granularity with no extra writes.
+- `pagesProcessed` keeps its meaning. Not done: progress inside one document for stages that finish its pages together (text extraction of one large file, classification, routing, page index, vector index), and a queue position.
+
 ## The spend rule is decided in one place (2026-11-19)
 
 No behaviour change. The API decided "may this organization spend" in `spendBlockReason`, the worker in its own `spendBlockCode`, and four more worker files read `org_spend_status()` themselves; the dev skip was written three times.
