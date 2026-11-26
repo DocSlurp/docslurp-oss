@@ -128,8 +128,8 @@ export class SummaryTreeBuildInProgress extends SummaryTreeStateRefused {
  * pages are already the placeholder), so the pre-scan artifacts they withhold and the earlier tree they withdrew do not
  * refuse a new one. Whole-document, redaction and every other withheld outcome do.
  */
-function summaryTreePiiAllows(row: { status: string | null; pii: unknown; withheld_count: number; redacted_detection: boolean; withdrawn: boolean }): boolean {
-  const withholding = piiWithholding({ status: row.status, metadata: row.pii === null || row.pii === undefined ? {} : { pii: row.pii } });
+function summaryTreePiiAllows(row: { status: string | null; pii: unknown; indexing_mode?: string | null; withheld_count: number; redacted_detection: boolean; withdrawn: boolean }): boolean {
+  const withholding = piiWithholding({ status: row.status, metadata: row.pii === null || row.pii === undefined ? {} : { pii: row.pii }, indexingMode: row.indexing_mode });
   if (withholding.scope === "document") return false;
   if ((row.pii as { redacted?: unknown } | null)?.redacted === true || row.redacted_detection) return false;
   if (withholding.scope === "pages" || withholding.scope === "sections") return true;
@@ -139,8 +139,8 @@ function summaryTreePiiAllows(row: { status: string | null; pii: unknown; withhe
 export async function withSummaryTreeDocumentLock<T>(sql: Client, scope: SummaryTreeScope, documentId: string, owner: string | undefined, work: (tx: Client) => Promise<T>): Promise<T> {
   assertScope(scope);
   const run = async (tx: Client): Promise<T> => {
-    const [document] = await tx<Array<{ id: string; status: string | null; pii: unknown; withheld_count: number; redacted_detection: boolean; withdrawn: boolean }>>`
-      select id, status, metadata->'pii' as pii,
+    const [document] = await tx<Array<{ id: string; status: string | null; pii: unknown; indexing_mode: string | null; withheld_count: number; redacted_detection: boolean; withdrawn: boolean }>>`
+      select id, status, indexing_mode, metadata->'pii' as pii,
         coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
           then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) as withheld_count,
         exists (select 1 from pii_detections pd where pd.document_id = documents.id and pd.redacted) as redacted_detection,

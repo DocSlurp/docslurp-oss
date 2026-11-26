@@ -211,7 +211,9 @@ describe("buildDocumentExport", () => {
       expect(names.some((name) => name.endsWith(".html") || name.includes("images/")), names.join(",")).toBe(false);
       const files = unzip("exp-scan").files;
       const pageTwo = Object.keys(files).find((name) => name.endsWith("page-0002.md"));
-      if (pageTwo) expect(strFromU8(files[pageTwo]!)).not.toContain("Page two");
+      expect(pageTwo, Object.keys(files).join(",")).toBeDefined();
+      expect(strFromU8(files[pageTwo!]!)).toContain("privacy scan has not read it");
+      expect(strFromU8(files[pageTwo!]!)).not.toContain("Page two");
       // A processing (or failed) document with no outcome and no completed pii-detect: no source either.
       await sql`update documents set indexing_mode = 'full', metadata = '{}' where id = 'doc-2'`;
       await queue("exp-pending", { content: "all", filename: "Finance.zip" });
@@ -222,6 +224,14 @@ describe("buildDocumentExport", () => {
       await queue("exp-failed", { content: "all", filename: "Finance.zip" });
       await buildDocumentExport({ sql, storage: storage as never }, "exp-failed");
       expect(Object.keys(unzip("exp-failed").files).some((name) => name.includes("original/q3 plan.docx"))).toBe(false);
+      // A document whose run row is gone (run_id set null) falls back to the project's current policy.
+      await sql`update projects set pipeline = ${sql.json(policy)} where id = 'w'`;
+      await sql`update documents set run_id = null, status = 'completed' where id = 'doc-2'`;
+      await queue("exp-norun", { content: "all", filename: "Finance.zip" });
+      await buildDocumentExport({ sql, storage: storage as never }, "exp-norun");
+      expect(Object.keys(unzip("exp-norun").files).some((name) => name.includes("original/q3 plan.docx"))).toBe(false);
+      await sql`update documents set run_id = 'run', status = 'processing' where id = 'doc-2'`;
+      await sql`update projects set pipeline = '{}' where id = 'w'`;
       // flag_for_review withholds nothing: the same documents ship their sources.
       await sql`update project_runs set pipeline = ${sql.json({ piiPolicy: { ...policy.piiPolicy, action: "flag_for_review" } })} where id = 'run'`;
       await sql`update documents set metadata = '{}', indexing_mode = 'map' where id = 'doc-1'`;

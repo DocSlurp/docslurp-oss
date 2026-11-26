@@ -48,10 +48,10 @@ export class PostgresDocumentRecords {
    * stage keeps clean pages servable. A missing document, or one outside the scope, withholds everything (fail closed).
    */
   async documentPiiWithholding(scope: DocumentRowScope): Promise<PiiWithholding> {
-    const [row] = await this.sql<{ status: string | null; metadata: unknown }[]>`
-      select status, metadata #- '{pii,withheldArtifactUris}' as metadata from documents
+    const [row] = await this.sql<{ status: string | null; metadata: unknown; indexing_mode: string | null }[]>`
+      select status, indexing_mode, metadata #- '{pii,withheldArtifactUris}' as metadata from documents
       where id = ${scope.documentId} and run_id = ${scope.runId} and org_id = ${scope.orgId}`;
-    return row ? piiWithholding(row) : { scope: "document", reason: "missing-document" };
+    return row ? piiWithholding({ status: row.status, metadata: row.metadata, indexingMode: row.indexing_mode }) : { scope: "document", reason: "missing-document" };
   }
 
   /**

@@ -9,6 +9,8 @@ import {
   isPageImageReferenceBlock,
   isPageImageWithheld,
   piiWholeDocumentServable,
+  piiScanPendingPageText,
+  withoutPendingScan,
   isPageWithheld,
   piiWithheldPageText,
   piiWithholding,
@@ -246,9 +248,12 @@ export async function* documentExportEntries(
     // A withheld page's stored text is already the placeholder; it is replaced here as well, never read through.
     // A document withheld whole (including an outcome that cannot be read) exports no page text (fail closed).
     const pages = (completed && piiState.scope !== "document" ? await source.pages(row.id) : []).map((page) =>
-      isPageWithheld(piiState, page.page_number)
-        ? { ...page, text: piiWithheldPageText(page.page_number, piiState.scope === "pages" ? piiState.pageTypes?.get(page.page_number) : undefined) }
-        : page);
+      !isPageWithheld(piiState, page.page_number)
+        ? page
+        // Withheld only because a deferred scan has not read it: pending, not withheld for PII.
+        : !isPageWithheld(withoutPendingScan(piiState), page.page_number)
+          ? { ...page, text: piiScanPendingPageText(page.page_number) }
+          : { ...page, text: piiWithheldPageText(page.page_number, piiState.scope === "pages" ? piiState.pageTypes?.get(page.page_number) : undefined) });
     const imagePlan = completed ? await documentImagePlan(source, artifacts, withheld, artifactKey("artifact-graph"), args.content === "all") : null;
     if (imagePlan?.problem) skipped.push({ path: `${folder}/images/`, reason: `embedded images left out: ${imagePlan.problem}` });
     const links = new Map<string, string>();
@@ -476,7 +481,9 @@ function cell(value: string): string {
 const documentColumns = (sql: Sql) => sql`
   d.id, d.project_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
   d.page_count, d.version_number, d.metadata, d.created_at::text, d.updated_at::text, d.indexing_mode,
-  (select r.pipeline->'piiPolicy' from project_runs r where r.id = d.run_id) as pii_policy,
+  -- A deleted run (run_id set null) falls back to the project's current policy.
+  coalesce((select r.pipeline->'piiPolicy' from project_runs r where r.id = d.run_id),
+    (select p.pipeline->'piiPolicy' from projects p where p.id = d.project_id)) as pii_policy,
   exists (select 1 from document_run_stage_states s where s.run_id = d.run_id and s.document_id = d.id
     and s.stage_name = 'pii-detect' and s.status = 'completed') as pii_detect_completed,
   coalesce((select array_agg(dt.tag order by dt.tag) from document_tags dt where dt.document_id = d.id), '{}') as tags,

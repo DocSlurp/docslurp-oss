@@ -572,3 +572,8 @@ export function piiWholeDocumentServable(document: PiiServingDocument): boolean 
   const withholding = piiWithholding({ status: document.status, metadata: document.pii === null || document.pii === undefined ? {} : { pii: document.pii }, indexingMode: document.indexingMode });
   return withholding.scope !== "document" && !piiScanIncomplete(withholding);
 }
+
+/** Text shown for a page a deferred scan has not read yet (not withheld for PII: pending). */
+export function piiScanPendingPageText(pageNumber: number): string {
+  return `[Page ${pageNumber} not shown yet: the privacy scan has not read it]`;
+}

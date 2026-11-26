@@ -483,7 +483,8 @@ export class PiiDetectStage implements Stage {
     // the next match only in the Markdown. Locate each Markdown match's value in the blocks so those blocks are
     // replaced (or redacted) too; embed, search and the canonical download read the canonical document.
     const blocks = canonicalBlocks(canonical?.value);
-    const mapped = canonicalResult && markdown && markdownResult
+    // flag_for_review rewrites nothing, so it needs no value mapping.
+    const mapped = policy.action !== "flag_for_review" && canonicalResult && markdown && markdownResult
       ? mapTextMatchesToCanonical(blocks, markdown.text, markdownResult.matches, document.pageCount)
       : undefined;
     let plan: PiiWithholdingPlan = planPiiWithholding(policy.action, {

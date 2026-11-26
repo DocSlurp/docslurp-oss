@@ -154,6 +154,24 @@ describe("backfill completion when the source changed mid-run", () => {
     expect(tmp!.canonical_id).toBeNull();
   });
 
+  it("adopts a temporary version whose outcome is scan progress only, carrying the scan onto the source", async () => {
+    await seedPair("pscan");
+    await db.exec(`update documents set metadata = '{"pii": {"scope": "none", "action": "block_indexing", "pageCount": 3, "scanPending": true, "scannedPages": [1], "withheldArtifactUris": []}}' where id = 'tmp-pscan'`);
+    await completeRun("bf-pscan");
+    expect(await rows(`select 1 from document_page_vectors where document_id = 'src-pscan'`)).not.toHaveLength(0);
+    const [src] = await rows<{ pii: { scanPending?: boolean; scannedPages?: number[] } | null }>(`select metadata->'pii' as pii from documents where id = 'src-pscan'`);
+    expect(src!.pii).toMatchObject({ scanPending: true, scannedPages: [1] });
+  });
+
+  it("a source with its own outcome keeps it and gains only the temp's scan fields", async () => {
+    await seedPair("pkeep");
+    await db.exec(`update documents set metadata = '{"pii": {"scope": "pages", "withheldPages": [2], "withheldPageCount": 1}}' where id = 'src-pkeep';
+      update documents set metadata = '{"pii": {"scope": "none", "scanPending": true, "scannedPages": [1, 3]}}' where id = 'tmp-pkeep'`);
+    await completeRun("bf-pkeep");
+    const [src] = await rows<{ pii: Record<string, unknown> }>(`select metadata->'pii' as pii from documents where id = 'src-pkeep'`);
+    expect(src!.pii).toMatchObject({ scope: "pages", withheldPages: [2], scanPending: true, scannedPages: [1, 3] });
+  });
+
   it("skips a purged source", async () => {
     await seedPair("pur");
     await db.exec(`update documents set purged_at = now() where id = 'src-pur'`);

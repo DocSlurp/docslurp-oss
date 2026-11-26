@@ -291,11 +291,19 @@ function blockStrings(block: CanonicalBlockLike): string[] {
   return out;
 }
 
-function occurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0;
-  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) count += 1;
-  return count;
+/**
+ * How often each needle occurs in `haystack` (overlapping occurrences count, as repeated `indexOf` does). One pass per
+ * distinct needle length: every substring of that length is looked up in the needle set. Cost O(haystack x lengths).
+ */
+function countOccurrences(haystack: string, needles: ReadonlySet<string>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const length of new Set([...needles].map((needle) => needle.length))) {
+    for (let at = 0; at + length <= haystack.length; at += 1) {
+      const sub = haystack.slice(at, at + length);
+      if (needles.has(sub)) counts.set(sub, (counts.get(sub) ?? 0) + 1);
+    }
+  }
+  return counts;
 }
 
 const alnum = (text: string) => text.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
@@ -354,32 +362,39 @@ export function mapTextMatchesToCanonical(
     }
     return low;
   };
-  /** Every block holding the value exactly or ignoring spacing and punctuation (both: a hit of one never hides the other). */
-  const findIn = (entry: PageIndex, value: string, loose: string): number[] => {
-    const found = new Set<number>();
-    for (const [haystack, needle, starts] of [[entry.exact, value, entry.exactStarts], [entry.loose, loose, entry.looseStarts]] as const) {
-      if (!needle) continue;
-      for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) found.add(entry.blocks[blockAt(starts, at)]!);
+  // Every block holding each value exactly or ignoring spacing and punctuation (both: a hit of one never hides the
+  // other), found in one pass per distinct value length over each page's strings, not one search per match.
+  const exactNeedles = new Set(matches.map((match) => text.slice(match.charOffset, match.charOffset + match.length)).filter(Boolean));
+  const looseNeedles = new Set([...exactNeedles].map(alnum).filter(Boolean));
+  const hitsOf = new Map<PageIndex, Map<string, Set<number>>>();
+  for (const entry of byPage.values()) {
+    const hits = new Map<string, Set<number>>();
+    for (const [haystack, needles, starts] of [[entry.exact, exactNeedles, entry.exactStarts], [entry.loose, looseNeedles, entry.looseStarts]] as const) {
+      for (const length of new Set([...needles].map((needle) => needle.length))) {
+        for (let at = 0; at + length <= haystack.length; at += 1) {
+          const sub = haystack.slice(at, at + length);
+          if (!needles.has(sub)) continue;
+          // Exact and loose needles share the map: a loose needle keys only with a "\u0002" prefix.
+          const key = haystack === entry.loose ? `\u0002${sub}` : sub;
+          const set = hits.get(key) ?? new Set<number>();
+          set.add(entry.blocks[blockAt(starts, at)]!);
+          hits.set(key, set);
+        }
+      }
     }
-    return [...found];
+    hitsOf.set(entry, hits);
+  }
+  const findIn = (entry: PageIndex, value: string, loose: string): number[] => {
+    const hits = hitsOf.get(entry)!;
+    return [...new Set([...(hits.get(value) ?? []), ...(loose ? hits.get(`\u0002${loose}`) ?? [] : [])])];
   };
   const offsets = pageCount > 1 ? pageOffsets(text, pageCount) : null;
   const unmapped: Array<number[] | null> = [];
-  let textLoose: string | null = null;
-  let looseBlockTexts: string[] | null = null;
-  /** Each block's own text, normalized (never its heading path or metadata). */
-  const blockTexts = () => (looseBlockTexts ??= blocks.map((block) => (typeof block.text === "string" ? alnum(block.text) : "")));
-  const allLoose = () => (textLoose ??= alnum(text));
-  const counted = new Map<string, number>();
-  const blockOccurrences = (needle: string) => {
-    let count = counted.get(needle);
-    if (count === undefined) {
-      count = 0;
-      for (const text of blockTexts()) count += occurrences(text, needle);
-      counted.set(needle, count);
-    }
-    return count;
-  };
+  // Occurrence counts of every match's normalized value, in the whole text and in the blocks' own text (never heading
+  // paths or metadata), counted once per document: one pass per distinct value length over each haystack.
+  const needles = new Set(matches.map((match) => alnum(text.slice(match.charOffset, match.charOffset + match.length))).filter(Boolean));
+  const textCounts = countOccurrences(alnum(text), needles);
+  const blockCounts = countOccurrences(blocks.map((block) => (typeof block.text === "string" ? alnum(block.text) : "")).join("\u0000"), needles);
   for (const match of matches) {
     const value = text.slice(match.charOffset, match.charOffset + match.length);
     const loose = alnum(value);
@@ -392,7 +407,7 @@ export function mapTextMatchesToCanonical(
     // every block under a heading, so a hit there does not show that the match's own occurrence was found. Every
     // occurrence in the text (ignoring spacing and punctuation) needs one in the blocks' own text; fewer, and the match
     // is unmapped (the caller fails closed). Hits elsewhere are still replaced.
-    const located = occurrences(allLoose(), loose) <= blockOccurrences(loose);
+    const located = (textCounts.get(loose) ?? 0) <= (blockCounts.get(loose) ?? 0);
     if (found.length === 0 || !located) {
       unmapped.push(pages ?? (pageCount <= 1 ? [1] : null));
       if (found.length === 0) continue;

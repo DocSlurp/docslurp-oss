@@ -127,6 +127,14 @@ What a map-mode project with such a policy sees:
 Documents processed in map mode before this change keep their recorded outcome and read as before. A map-mode document
 with no recorded outcome (it matched nothing) and no pii-detect run now waits for the scan like any other.
 
+## Known limitations
+
+- Under `redact_artifacts`, a clean document whose text literally contains a redaction marker (`[REDACTED:ssn]`) reads
+  as a carried redaction on rescan: its page images and unrewritten artifacts are withheld. This fails closed and
+  affects only that document.
+- Under a withholding or redaction policy in map or visual mode, a non-PDF document is not scanned until a query reads
+  it. A document that no query reads never serves its source.
+
 ## Rollout
 
 - An action this worker does not know (a newer API configured it) blocks the document.

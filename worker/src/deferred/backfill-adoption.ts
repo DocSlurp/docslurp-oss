@@ -1,4 +1,4 @@
-import { deferredProfilesEnabled } from "@docslurp/shared";
+import { deferredProfilesEnabled, piiWithholding } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
 /**
@@ -25,17 +25,15 @@ export async function adoptBackfillDocuments(
   runId: string,
   env: Record<string, string | undefined> = process.env,
 ): Promise<string[]> {
-  const rows = await client<{ temp_id: string; source_id: string | null; mode: string; source_run_id: string | null; adoptable: boolean }[]>`
+  const raw = await client<{ temp_id: string; source_id: string | null; mode: string; source_run_id: string | null; healthy: boolean; temp_status: string | null; temp_pii: unknown; }[]>`
     select t.id as temp_id, s.id as source_id, t.indexing_mode as mode, s.run_id as source_run_id,
+      t.status as temp_status, t.metadata->'pii' as temp_pii,
       (s.id is not null and s.superseded_at is null and s.purged_at is null and s.status = 'completed'
         and t.status not in ('failed', 'cancelled', 'pii_blocked')
-        -- A temporary version the PII policy touched is never adopted: its page vectors and rows would land on a
-        -- source whose metadata does not record what the policy withheld. It is retired instead (fail closed).
-        and t.metadata->'pii' is null
         and not exists (
           select 1 from document_run_stage_states st
           where st.document_id = t.id and st.run_id = t.run_id and st.status = 'failed'
-        )) as adoptable
+        )) as healthy
     from documents t
     join project_runs r on r.id = t.run_id and r.kind = 'full-index'
     left join documents s on s.id = t.reused_from_document_id
@@ -43,6 +41,13 @@ export async function adoptBackfillDocuments(
       and t.indexing_mode <> 'full'
       and t.superseded_at is null
   `;
+  // The PII outcome must travel with what is adopted. A temporary version with no outcome, or one that withheld and
+  // redacted nothing (scan progress only: the map stage always records it under a withholding policy), is adopted and
+  // its scan progress is carried onto the source. One that withheld or redacted something is retired (fail closed).
+  const rows = raw.map((row) => {
+    const carry = piiCarry(row.temp_pii);
+    return { ...row, carry, adoptable: row.healthy && carry !== "refuse" };
+  });
   // Every temporary version is retired (never left to supersede its source or hold a canonical id); only
   // healthy temps with a live source are adopted, and only while the flag is on.
   const adopting = deferredProfilesEnabled(env);
@@ -50,7 +55,7 @@ export async function adoptBackfillDocuments(
   for (const other of rows.filter((row) => !pairs.includes(row))) {
     await retire(client, other.temp_id, other.adoptable ? "completed" : null);
   }
-  for (const { temp_id: temp, source_id: source, mode, source_run_id: sourceRun } of pairs as Array<{ temp_id: string; source_id: string; mode: string; source_run_id: string | null }>) {
+  for (const { temp_id: temp, source_id: source, mode, source_run_id: sourceRun, carry } of pairs as Array<{ temp_id: string; source_id: string; mode: string; source_run_id: string | null; carry: ReturnType<typeof piiCarry> }>) {
     // Lock order: the source document's row before its page rows, as a query-time materialization of it takes them.
     await client`select 1 from documents where id = ${source} for no key update`;
     await client`delete from document_maps where document_id = ${source} and exists (select 1 from document_maps where document_id = ${temp})`;
@@ -101,7 +106,14 @@ export async function adoptBackfillDocuments(
     await client`
       update documents
       set indexing_mode = ${mode},
-          metadata = metadata || coalesce((select jsonb_strip_nulls(jsonb_build_object('mapTitle', t.metadata -> 'mapTitle')) from documents t where t.id = ${temp}), '{}'::jsonb),
+          metadata = metadata || coalesce((select jsonb_strip_nulls(jsonb_build_object('mapTitle', t.metadata -> 'mapTitle')) from documents t where t.id = ${temp}), '{}'::jsonb)
+            -- The temp's scan progress: its whole outcome onto a source without one, else only its scan fields.
+            || ${carry === "carry" ? client`(select case
+                when coalesce(jsonb_typeof(src.metadata -> 'pii'), '') <> 'object' then jsonb_build_object('pii', t.metadata -> 'pii')
+                else jsonb_build_object('pii', (src.metadata -> 'pii') - 'scanPending' - 'scannedPages' - 'scanComplete'
+                  || jsonb_strip_nulls(jsonb_build_object('scanPending', t.metadata -> 'pii' -> 'scanPending',
+                    'scannedPages', t.metadata -> 'pii' -> 'scannedPages', 'scanComplete', t.metadata -> 'pii' -> 'scanComplete')))
+              end from documents t, documents src where t.id = ${temp} and src.id = ${source})` : client`'{}'::jsonb`},
           updated_at = now()
       where id = ${source}
     `;
@@ -118,4 +130,15 @@ async function retire(client: Sql<Record<string, unknown>>, tempId: string, stat
     set status = coalesce(${status}, status), canonical_id = null, superseded_at = now(), updated_at = now()
     where id = ${tempId}
   `;
+}
+
+/**
+ * What adoption does with the temporary version's PII outcome: "none" (it has none), "carry" (it withheld and redacted
+ * nothing: its scan progress goes onto the source), or "refuse" (it withheld or redacted something, or cannot be read:
+ * the temp is retired, fail closed).
+ */
+export function piiCarry(tempPii: unknown): "none" | "carry" | "refuse" {
+  if (tempPii === null || tempPii === undefined) return "none";
+  const temp = piiWithholding({ metadata: { pii: tempPii } });
+  return temp.scope === "none" && (tempPii as { redacted?: unknown }).redacted !== true && (temp.redactedPages?.size ?? 0) === 0 ? "carry" : "refuse";
 }
