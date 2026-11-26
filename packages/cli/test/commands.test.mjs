@@ -49,6 +49,35 @@ test("license is available without credentials or network access", async () => {
   assert.match(result.stdout, /Business Source License 1\.1/);
 });
 
+test("a completed run or job with failed documents says how many failed and exits 2, never a clean 0", async () => {
+  const partial = run("completed", { totalDocuments: 10, processedDocuments: 10, failedDocuments: 5, outcome: "partial", pagesSearchable: 2, pagesCountedAt: "2026-01-01T00:00:00.000Z" });
+  const status = await invoke(["status", "run"], () => ({ body: { run: partial } }));
+  assert.equal(status.code, 2, status.stderr);
+  assert.match(status.stdout, /Failed: +5 of 10 documents/);
+  assert.match(status.stdout, /Done with failures: run completed in .*; 5 of 10 documents failed/);
+  // An older server without `outcome`: derived from failedDocuments.
+  const older = await invoke(["status", "run"], () => ({ body: { run: { ...partial, outcome: undefined } } }));
+  assert.equal(older.code, 2, older.stderr);
+  const clean = await invoke(["status", "run"], () => ({ body: { run: run("completed") } }));
+  assert.equal(clean.code, 0, clean.stderr);
+  assert.doesNotMatch(clean.stdout, /Failed:/);
+
+  const job = (extra) => ({ id: "job", kind: "reprocess", status: "completed", runIds: ["run"], queue: { position: null, ahead: null }, estimate: null, statusUrl: "/v1/jobs/job", ...extra });
+  const watched = await invoke(["jobs", "watch", "job"], () => ({ body: job({ outcome: "partial", progress: { documents: 10, documentsTotal: 10, documentsFailed: 5, pages: 6, pagesTotal: 6 } }) }));
+  assert.equal(watched.code, 2, watched.stderr);
+  assert.match(watched.stdout, /Job job: reprocess completed, 5 of 10 documents failed \(the rest are searchable\)/);
+  const succeeded = await invoke(["jobs", "watch", "job"], () => ({ body: job({ outcome: "succeeded", progress: { documents: 1, documentsTotal: 1, documentsFailed: 0, pages: 1, pagesTotal: 1 } }) }));
+  assert.equal(succeeded.code, 0, succeeded.stderr);
+  const failed = await invoke(["jobs", "watch", "job"], () => ({ body: job({ status: "failed", outcome: "failed" }) }));
+  assert.equal(failed.code, 1, failed.stderr);
+  // Completed with every document failed: a failure (1), not a partial success.
+  const allFailedJob = await invoke(["jobs", "watch", "job"], () => ({ body: job({ outcome: "failed", progress: { documents: 3, documentsTotal: 3, documentsFailed: 3, pages: 3, pagesTotal: 3 } }) }));
+  assert.equal(allFailedJob.code, 1, allFailedJob.stderr);
+  const allFailedRun = await invoke(["status", "run"], () => ({ body: { run: run("completed", { totalDocuments: 3, processedDocuments: 3, failedDocuments: 3, outcome: "failed" }) } }));
+  assert.equal(allFailedRun.code, 1, allFailedRun.stderr);
+  assert.doesNotMatch(allFailedRun.stdout, /Done/);
+});
+
 test("status shows indexed pages only when the server reports them", async () => {
   const processing = { stage: "index", pagesProcessed: 3 };
   const unreported = await invoke(["status", "run"], () => ({ body: { run: run("processing", processing) } }));

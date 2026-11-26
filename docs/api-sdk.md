@@ -498,6 +498,9 @@ large), `code` and `message`. The request fails (with every file named) only
 when nothing can be accepted. A file whose bytes contradict its declared type
 (text declared as a PDF, a plain ZIP declared as a DOCX) is refused for that
 file when its session is confirmed, under `rejected[]` with `unreadable_source`.
+An empty file (0 bytes, or only a byte-order mark) is refused for that file with
+`empty_file` (`400`), and a stored file whose size the server could not verify
+with `unverified_size` (`422`); upload it again.
 
 Send an `Idempotency-Key` header (1-255 printable ASCII characters) with the
 create request. A repeated create with the same key and body returns the first
@@ -635,7 +638,7 @@ for await (const snapshot of client.streamProgress(run.id, {
 
 The iterator yields a final snapshot for completed, failed, cancelled or dead-letter runs, then finishes. Check that final state: the loop ending doesn't mean the run succeeded. Paused runs stay observable until they resume, are cancelled, or the deadline expires.
 
-`waitForRun()` throws for failed, paused, cancelled and dead-letter runs. Both methods default to a five-minute overall deadline, and a client deadline doesn't cancel ingestion. Breaking out of the loop or aborting closes the connection.
+`waitForRun()` throws for failed, paused, cancelled and dead-letter runs. A run where only some documents failed still completes, so `waitForRun()` returns it: `run.outcome` (or `runOutcome(run)`, which also works against older servers) is `partial`, and `run.failedDocuments` of `run.totalDocuments` failed while the rest are searchable. Pass `failOnDocumentFailures: true` to have such a run throw `DocSlurpRunError` too. A run whose documents all failed is `failed`. The progress snapshot also carries `outcome`, `documentsFailed`, `failureReasons` and, per failed document, its stage and reason code; the CLI exits `2` for such a run. Both methods default to a five-minute overall deadline, and a client deadline doesn't cancel ingestion. Breaking out of the loop or aborting closes the connection.
 
 ### Read one snapshot over HTTP
 
