@@ -111,20 +111,30 @@ for parsing, OCR, page indexing or storage.
 
 Off by default (unset and unknown values are off). The summary stage normally makes one model call over at most ten
 sampled pages and 10 KB. With `DOCSLURP_SUMMARY_SCAN=on`, a document that has more pages than that sample, verified page
-references and a page offset index gets a short read loop instead: the first call reads the same evidence as today and
-returns a document type, up to six topics and the summary; later calls read ten further pages each, spread across the
-unread pages (plus pages the model asks for, within the loop's limits, starting with the first call's reply), until the
-type and topics stop changing (same type, topic overlap of at least 0.8 on two consecutive calls; two calls at least
-for documents over 200 pages) or a limit is reached (six model calls in all, a small cost and token cap, the summary
-deadline). Every call's tokens and cost are reported as `summary-generation` usage, and the document's one summary unit
-is recorded once. The per-document summary charge stays one. When the scan read more pages than the evidence, the
-"Sampled document overview" notice and the stored page coverage count the pages it read.
+references and a page offset index gets a short read loop instead:
 
-Every other document (small, no index, unverified pages, text files, a document whose pages were redacted for PII) keeps
-the single call and the same prompt. A failed later call or page never fails the document: the best state so far is
-stored. `summaries/<documentId>.json` gains two optional fields, `labels` (`docType`, `topics`) and `scan` (`steps`,
-`stoppedBy`, `pagesRead`, `pagesTotal`); readers that do not know them ignore them. Document text, topics and
-summaries are never logged or traced by this path.
+- The first call reads the same evidence as today and returns the whole result: a document type, up to six topics and
+  the summary.
+- Each later call reads ten further pages, spread across the unread pages (plus pages the model asks for, within the
+  loop's limits), and reports only what those pages add: whether they fit the result so far, their own type, up to
+  three new topics and one sentence.
+- Code merges the reports. The first call's type stands unless at least two later calls, and at least half, say their
+  pages do not fit, which makes the document `mixed`. New topics follow the first call's, and each sentence is appended
+  to the summary. A later call can extend the result but never replace it.
+- The loop stops when two later calls in a row add nothing, when the model says more pages would not change the result
+  (after two calls for documents over 200 pages), or at a limit: six model calls in all, a small cost and token cap,
+  the summary deadline.
+
+A document whose evidence already holds every page gets one call with the first call's prompt, so it is labelled too.
+Every call's tokens and cost are reported as `summary-generation` usage, and the document's one summary unit is recorded
+once. The per-document summary charge stays one. When the scan read more pages than the evidence, the "Sampled document
+overview" notice and the stored page coverage count the pages it read.
+
+Every other document (no index, unverified pages, text files, a larger document whose pages were redacted for PII) keeps
+the single call and the same prompt, and so does any document whose first call returns an unusable reply. A failed later
+call or page never fails the document: everything merged so far is stored. `summaries/<documentId>.json` gains two
+optional fields, `labels` (`docType`, `topics`) and `scan` (`steps`, `stoppedBy`, `pagesRead`, `pagesTotal`); readers
+that do not know them ignore them. Document text, topics and summaries are never logged or traced by this path.
 
 ## Summary tree: section summaries for long documents
 
