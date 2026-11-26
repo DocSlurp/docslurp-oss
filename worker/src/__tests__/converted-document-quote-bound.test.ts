@@ -82,14 +82,15 @@ const bodyBytes = (parts: ReadonlyArray<readonly [string, string]>) => parts
   .reduce((total, [, data]) => total + Buffer.byteLength(data), 0);
 
 describe("the quote's high end covers what dense converted files measure", () => {
-  it.each(CASES.filter((entry) => entry.format !== "office-excel"))("$name, with the file's profile: a ceiling", (entry) => {
+  it.each(CASES.filter((entry) => entry.format !== "office-excel"))("$name, with the file's profile: the range covers it, still not a ceiling", (entry) => {
     const size = zipBytes(entry.parts);
     const measured = measureExtractedPages(entry.format, entry.extractor, entry.markdown)!;
     const file = { ...entry.file, size, profile: { office: { bodyBytes: bodyBytes(entry.parts) } } };
     const range = quoteFilePageRange(file);
     expect(measured.pages).toBeGreaterThan(1);
     expect(range.measured).toBe(false);
-    expect(quoteHighIsCeiling(file)).toBe(true);
+    expect(quoteHighIsCeiling(file)).toBe(false);
+    expect(quoteHighIsCeiling({ ...file, pages: 1 })).toBe(false);
     expect(measured.pages, `${entry.name}: ${size} bytes measured ${measured.pages} pages, quoted at most ${range.high}`).toBeLessThanOrEqual(range.high);
   });
 
@@ -114,7 +115,7 @@ describe("the quote's high end covers what dense converted files measure", () =>
     expect(bare.unboundedFiles).toBe(2);
     expect(bare.basis).toContain("not a ceiling for 2");
     const profiled = quoteUpload({ files: [{ ...word, profile: { schema: FILE_PROFILE_SCHEMA, profiler: "test", kind: "office", format: "docx", bytes: word.size, office: { embeddedImages: 0, bodyBytes: 20 * 1024 * 1024 } } }], profile }).estimate;
-    expect(profiled.unboundedFiles).toBeUndefined();
+    expect(profiled.unboundedFiles).toBe(1);
   });
 
   it("ordinary files quote ordinary ranges from their size; only a profile widens toward the worker's cap", () => {

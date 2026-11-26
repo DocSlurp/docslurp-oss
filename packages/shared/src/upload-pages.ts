@@ -41,8 +41,8 @@ export const WORKER_COUNTED_FORMATS: readonly WorkerCountedFormat[] = ["office-w
  * prose (files built of such content measured 150 to 350 bytes a page for Word and EPUB, DocSlurp/app issue 601), and one
  * fragment repeated compresses further still. No divisor of the compressed size bounds such a file without quoting every
  * ordinary report at the worker's page cap, so the size alone gives an ordinary range and the quote says it is not a
- * ceiling (quoteHighIsCeiling). A ceiling needs the uncompressed body size, which only a client's file profile measures
- * (WORKER_COUNTED_BODY_BYTES_PER_PAGE): the API never opens the package (customer files are parsed only in the parser VM).
+ * ceiling (quoteHighIsCeiling). A client file profile's uncompressed body size widens the range but is not a ceiling either
+ * (WORKER_COUNTED_BODY_BYTES_PER_PAGE); only the worker's measurement is. The API never opens the package (customer files are parsed only in the parser VM).
  */
 export const UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE: Readonly<Record<WorkerCountedFormat, { min: number; typical: number; max: number }>> = {
   "office-word": { min: 1_024, typical: 12 * 1024, max: 150 * 1024 },
@@ -266,20 +266,16 @@ export function profilePageEquivalentRange(file: ProfiledFile, allowance = DEFAU
 }
 
 /**
- * Whether a quote's high end for `file` is a ceiling on what the worker can measure. False only for a Word, slide, sheet or
- * EPUB file whose pages nobody counted and that has no file profile body size (an API, MCP, URL or connector upload sends no
- * profile), and for every uncounted sheet (shared strings, WORKER_COUNTED_BODY_BYTES_PER_PAGE): its high end assumes ordinary
- * density, and repetitive content can measure more pages (never more than WORKER_COUNTED_MAX_PAGES). The estimate counts
- * these files and says so (CostEstimate.unboundedFiles, quoteUpload).
+ * Whether a quote's high end for `file` is a ceiling on what the worker can measure. Never for a Word, slide, sheet or EPUB
+ * file the worker has not measured: client page counts and file-profile sizes come from the caller or the document (zip
+ * headers, footnotes, speaker notes and dense lines all escape them), so they can widen a quote but never make it a ceiling.
+ * The estimate counts these files and says so (CostEstimate.unboundedFiles, quoteUpload).
  */
 export function quoteHighIsCeiling(file: {
   name: string; type?: string | null; pages?: number; measured?: { pages: number }; profile?: { office?: { bodyBytes: number } };
 }): boolean {
-  if (file.pages !== undefined || file.measured !== undefined) return true;
-  const counted = workerCountedFormat(file);
-  if (!counted) return true;
-  if (counted === "office-excel") return false;
-  return Number(file.profile?.office?.bodyBytes) > 0;
+  if (file.measured !== undefined) return true;
+  return !workerCountedFormat(file);
 }
 
 /** Pages of a file over the range its size allows when the client has not counted them; one value when they are known. */
