@@ -1,4 +1,4 @@
-import { modelEndpointUrl, TenantModelEndpointRefusedError, tenantModelEndpointProblem } from "@docslurp/shared";
+import { assertTenantModelBaseUrlAllowed, canonicalModelBaseUrl, defaultLocalModelBaseUrl, modelEndpointUrl, TenantModelEndpointRefusedError, tenantModelEndpointProblem, type TenantModelEndpointRefusal } from "@docslurp/shared";
 import { platformModelKey } from "../lib/platform-model-keys.js";
 import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
@@ -558,6 +558,9 @@ function servedRoute(
 function routeBaseUrl(route: Pick<VisionExecutionConfig, "runtime" | "baseUrl" | "provider">, cfg: Pick<Config, "openAiBaseUrl">): string | null {
   if (route.runtime === "local-cli" || route.provider === PRIVATE_MODEL_PROVIDER) return route.baseUrl;
   if (route.runtime === "remote-openai") return configuredOpenAiBaseUrl(cfg);
+  // A local server route (tenant-set or its default address): from the parsed URL, `localhost` pinned to 127.0.0.1.
+  const localDefault = defaultLocalModelBaseUrl(route.provider);
+  if (localDefault) return canonicalModelBaseUrl(route.baseUrl?.trim() || localDefault);
   return effectiveVisionBaseUrl(route.baseUrl, cfg);
 }
 
@@ -794,6 +797,17 @@ export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string
   return "";
 }
 
+/** Why the resolved local server route's base URL is refused (`assertTenantModelBaseUrlAllowed`), or null. */
+function resolvedLocalRouteProblem(route: VisionExecutionConfig, cfg: Pick<Config, "openAiBaseUrl">): TenantModelEndpointRefusal | null {
+  try {
+    assertTenantModelBaseUrlAllowed(route.provider, routeBaseUrl(route, cfg));
+    return null;
+  } catch (error) {
+    if (error instanceof TenantModelEndpointRefusedError) return error.code;
+    throw error;
+  }
+}
+
 function normalizeVisionConfig(
   vision: VisionConfig,
   cfg: Config,
@@ -808,14 +822,25 @@ function normalizeVisionConfig(
   if (problem) throw new UnpricedVisionRouteError(vision.modelUri, `is refused: ${problem}`);
   if (endpointProblem) throw new TenantModelEndpointRefusedError(endpointProblem);
   if (vision.remoteFallbackModelUri) {
-    // The fallback is admitted here too, before the primary's request is sent, not only at failover.
-    const fallbackEndpointProblem = tenantModelEndpointProblem(vision.remoteFallbackModelUri);
-    if (fallbackEndpointProblem === "tenant-local-endpoints-disabled") throw new TenantModelEndpointRefusedError(fallbackEndpointProblem);
+    // The fallback is admitted here too, before the primary's request is sent, not only at failover. A refused fallback
+    // (a stale stored setting) never fails the primary's read: it is dropped with a logged code, and the primary runs
+    // with no fallback. Nothing is ever sent to it.
+    // A fallback the catalog refuses (unpriced, Pro/Ultra) is still refused outright, as before.
     const fallbackProblem = visionModelUriProblem(vision.remoteFallbackModelUri);
-    if (fallbackProblem) throw new UnpricedVisionRouteError(vision.remoteFallbackModelUri, `is refused: ${fallbackProblem}`);
-    if (fallbackEndpointProblem) throw new TenantModelEndpointRefusedError(fallbackEndpointProblem);
+    const fallbackRefusal = tenantModelEndpointProblem(vision.remoteFallbackModelUri)
+      ?? (fallbackProblem ? null : resolvedLocalRouteProblem(resolveVisionRoute({ ...vision, modelUri: vision.remoteFallbackModelUri, remoteFallbackModelUri: null }), cfg));
+    if (fallbackRefusal) {
+      console.warn(`[vision-fallback] dropped refused fallback code=${fallbackRefusal}`);
+      vision = { ...vision, remoteFallbackModelUri: null };
+    } else if (fallbackProblem) {
+      throw new UnpricedVisionRouteError(vision.remoteFallbackModelUri, `is refused: ${fallbackProblem}`);
+    }
   }
   const selected = resolveVisionRoute(vision);
+  // The resolved route's own destination is judged too (its port included): a local server route without a baseUrl
+  // goes to the provider's default address, which the operator's port list may leave out.
+  const resolvedProblem = resolvedLocalRouteProblem(selected, cfg);
+  if (resolvedProblem) throw new TenantModelEndpointRefusedError(resolvedProblem);
   return {
     ...selected,
     baseUrl: routeBaseUrl(selected, cfg),

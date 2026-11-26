@@ -34,6 +34,8 @@ export type ProviderErrorCode =
   | "routing-excluded"
   | "quota-exhausted"
   | "auth-refused"
+  | "payment-required"
+  | "redirect-refused"
   | "not-found"
   | "bad-request"
   | "http-error";
@@ -43,7 +45,8 @@ export function providerErrorCodeForStatus(status: number): ProviderErrorCode {
   if (status === 429) return "rate-limited";
   if (status === 503 || status === 529) return "overloaded";
   if (status === 408 || status === 504) return "timeout";
-  if (status === 401 || status === 402 || status === 403) return "auth-refused";
+  if (status === 402) return "payment-required";
+  if (status === 401 || status === 403) return "auth-refused";
   if (status === 404) return "not-found";
   if (status === 400 || status === 422) return "bad-request";
   if (status >= 500) return "server-error";
@@ -62,8 +65,33 @@ export function providerNetworkErrorCode(error: unknown): ProviderErrorCode {
   return name === "TimeoutError" || /time(d)? ?out/i.test(message) ? "timeout" : "network-error";
 }
 
+/**
+ * True when a fetch failed because the response was a redirect and the request refused to follow it
+ * (`redirect: "error"`). Judged on the error and its causes.
+ */
+export function isRefusedRedirectError(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 5; current = (current as { cause?: unknown }).cause, depth += 1) {
+    const message = current instanceof Error ? current.message : typeof current === "string" ? current : "";
+    if (/redirect/i.test(message)) return true;
+  }
+  return false;
+}
+
+/**
+ * A provider answered with a redirect that the request refused to follow: never retried (the same request gets the
+ * same redirect), and the message carries the code only.
+ */
+export class ProviderRedirectRefusedError extends Error {
+  readonly code = "redirect-refused" as const;
+  readonly retryable = false;
+  constructor(label: string, readonly provider: string) {
+    super(`${label} failed: redirect-refused`);
+    this.name = "ProviderRedirectRefusedError";
+  }
+}
+
 /** Logs a provider's response text for operators (worker log and traces only), bounded and JSON-quoted. */
-export function logProviderErrorDetail(provider: string, label: string, code: ProviderErrorCode, status: number | null, detail: string): void {
+export function logProviderErrorDetail(provider: string, label: string, code: ProviderErrorCode | "invalid-json", status: number | null, detail: string): void {
   console.warn(
     `[provider-error] provider=${provider} label="${label}" code=${code} status=${status ?? "none"} ` +
       `detail=${JSON.stringify(detail.replace(/\s+/g, " ").slice(0, 500))}`,
@@ -435,6 +463,10 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
       if (options.signal?.aborted) throw error;
       // The fleet limiter already waited its budget; hand the wait to Temporal.
       if (isProviderRetryableError(error)) throw error;
+      if (isRefusedRedirectError(error)) {
+        logProviderErrorDetail(options.provider, options.label, "redirect-refused", null, error instanceof Error ? error.message : String(error));
+        throw new ProviderRedirectRefusedError(options.label, options.provider);
+      }
       code = providerNetworkErrorCode(error);
       logProviderErrorDetail(options.provider, options.label, code, null, error instanceof Error ? error.message : String(error));
     }

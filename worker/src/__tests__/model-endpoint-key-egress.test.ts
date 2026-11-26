@@ -10,12 +10,12 @@ import { TenantModelEndpointRefusedError, visionConfigSchema, type VisionConfig 
 import type { Config } from "../config.js";
 import { guardedVisionCall } from "../lib/guarded-vision-call.js";
 import { PlatformModelBaseUrlError } from "../lib/platform-model-keys.js";
-import { fetchWithProviderRetry, ProviderRequestError, ProviderRetryableError } from "../lib/provider-retry.js";
+import { fetchWithProviderRetry, providerErrorCodeForStatus, ProviderRedirectRefusedError, ProviderRequestError, ProviderRetryableError } from "../lib/provider-retry.js";
 import { MemoryVisionAttemptBackend } from "../lib/vision-attempt-guard.js";
 import type { WorkerAiUsageInput } from "../lib/ai-usage.js";
 import type { EmbeddingProfile } from "../models.js";
-import { embedTextChunks } from "../stages/embedding-runtime.js";
-import { buildFailedVisionAttemptUsage } from "../stages/vision-extract.js";
+import { classifyEmbeddingError, embedTextChunks } from "../stages/embedding-runtime.js";
+import { buildFailedVisionAttemptUsage, isVisionModelRefusal, shouldFailOpenVisionError } from "../stages/vision-extract.js";
 import { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime, resolveVisionApiKey, runVisionRequest, type VisionExecutionResult } from "../tools/vision-runtime.js";
 import { resetStreamingSupportForTest } from "../tools/vision-stream.js";
@@ -61,6 +61,7 @@ let main: { server: Server; origin: string; port: number };
 let sink: { server: Server; origin: string; port: number };
 let received: Received[];
 let sinkHits: string[];
+let sinkHeaders: IncomingHttpHeaders[];
 let respond: (path: string) => Reply;
 let nextForwardedFrom: string | null = null;
 
@@ -72,8 +73,9 @@ beforeAll(async () => {
     if (path.startsWith("/redir")) return { status: 307, body: "", headers: { location: `${sink.origin}/steal` } };
     return respond(path);
   });
-  sink = await startServer((path) => {
+  sink = await startServer((path, headers) => {
     sinkHits.push(path);
+    sinkHeaders.push(headers);
     return { status: 200, body: COMPLETION };
   });
 });
@@ -85,6 +87,7 @@ const realFetch = globalThis.fetch;
 beforeEach(() => {
   received = [];
   sinkHits = [];
+  sinkHeaders = [];
   cfg = baseCfg;
   respond = () => ({ status: 500, body: MARKER });
   resetStreamingSupportForTest();
@@ -200,7 +203,10 @@ describe("platform keys at the receiving server", () => {
     await visionSend("openai", `http://localhost:${main.port}/v1`);
     expectNoPlatformKey(received);
     await visionSend("openai", `${sink.origin}/v1`);
+    // Another port on the same host is another destination: the request arrives with no key at all.
     expect(sinkHits).toHaveLength(1);
+    expect(sinkHeaders[0]!.authorization).toBeUndefined();
+    for (const key of PLATFORM_KEYS) expect(headerText(sinkHeaders[0]!)).not.toContain(key);
   });
 
   it("a tenant loopback endpoint (flag on) receives no platform key: vision sends no authorization, embeddings the placeholder only (regression guard)", async () => {
@@ -338,11 +344,38 @@ describe("tenant loopback base URLs (flag on)", () => {
     expect(received).toEqual([]);
   });
 
-  it("a refused fallback is refused before the primary request is sent", async () => {
+  it("a refused fallback is dropped with a logged code: the primary runs and the fallback is never contacted", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const vision: VisionConfig = { ...visionConfigSchema.parse({ modelUri: local() }), remoteFallbackModelUri: "llm://vllm/acme/plain-vl?baseUrl=http%3A%2F%2F127.0.0.1%3A6379%2Fv1" };
     const outcome = await visionRead(vision);
+    expect((outcome as { result?: VisionExecutionResult }).result?.text).toBe("Page text");
+    expect(received.map((request) => request.path)).toEqual(["/v1/chat/completions"]);
+    expect(warn.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("code=tenant-base-url-port-not-allowed");
+  });
+
+  it("with the flag off, a stale local fallback does not stop a hosted primary", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "false");
+    const vision: VisionConfig = { ...visionConfigSchema.parse({ modelUri: DIRECT }), remoteFallbackModelUri: "llm://vllm/acme/plain-vl" };
+    const outcome = await visionRead(vision);
+    expect((outcome as { result?: VisionExecutionResult }).result?.text).toBe("Page text");
+    expect(received.map((request) => request.forwardedFrom)).toEqual(["https://api.deepinfra.com/v1/openai/chat/completions"]);
+  });
+
+  it("a local route with no baseUrl is judged at its default address: a port the list leaves out is refused", async () => {
+    vi.stubEnv("DOCSLURP_TENANT_LOCAL_MODEL_PORTS", "11434");
+    const vision: VisionConfig = { ...visionConfigSchema.parse({ modelUri: local() }), modelUri: "llm://vllm/acme/plain-vl" };
+    const outcome = await visionRead(vision);
     expect((outcome as TenantModelEndpointRefusedError).code).toBe("tenant-base-url-port-not-allowed");
-    expect(received).toEqual([]);
+    // The same fallback is dropped, not sent.
+    const withFallback: VisionConfig = { ...visionConfigSchema.parse({ modelUri: DIRECT }), remoteFallbackModelUri: "llm://vllm/acme/plain-vl" };
+    expect(((await visionRead(withFallback)) as { result?: VisionExecutionResult }).result?.text).toBe("Page text");
+    expect(received.map((request) => request.forwardedFrom)).toEqual(["https://api.deepinfra.com/v1/openai/chat/completions"]);
+  });
+
+  it("a tenant localhost base URL is requested at 127.0.0.1", async () => {
+    const outcome = await visionRead(visionConfigSchema.parse({ modelUri: `llm://vllm/acme/plain-vl?baseUrl=${encodeURIComponent(`http://localhost:${main.port}/v1`)}` }));
+    expect((outcome as { result?: VisionExecutionResult }).result?.baseUrl).toBe(`http://127.0.0.1:${main.port}/v1`);
+    expect(received.map((request) => request.headers.host)).toEqual([`127.0.0.1:${main.port}`]);
   });
 
   it.each([
@@ -386,9 +419,40 @@ describe("redirects are never followed", () => {
 
   it("fetchWithProviderRetry (the page router's decision client) refuses a redirect while carrying a key", async () => {
     const outcome = await fetchWithProviderRetry(`${main.origin}/redir/decide`, { method: "POST", headers: { authorization: `Bearer ${PLATFORM_KEYS[0]}` }, body: "{}" },
-      { provider: "decision-test", label: "decision request", maxRetries: 0 }).catch((error: unknown) => error);
-    expect(outcome).toBeInstanceOf(ProviderRetryableError);
-    expect(outcome).toMatchObject({ code: "network-error", status: null });
+      { provider: "decision-test", label: "decision request", maxRetries: 3 }).catch((error: unknown) => error);
+    // Coded as a refused redirect and never retried: the same request would get the same redirect.
+    expect(outcome).toBeInstanceOf(ProviderRedirectRefusedError);
+    expect(outcome).not.toBeInstanceOf(ProviderRetryableError);
+    expect(outcome).toMatchObject({ code: "redirect-refused" });
+    expect(received).toHaveLength(1);
     expect(sinkHits).toEqual([]);
+  });
+});
+
+describe("a refused vision endpoint never fails the document", () => {
+  it("is a model refusal: the page keeps its own text", () => {
+    const refusal = new TenantModelEndpointRefusedError("tenant-local-endpoints-disabled");
+    expect(isVisionModelRefusal(refusal)).toBe(true);
+    expect(shouldFailOpenVisionError(refusal)).toBe(true);
+    expect(shouldFailOpenVisionError(new Error("wrapped", { cause: refusal }))).toBe(true);
+  });
+});
+
+describe("provider error codes", () => {
+  it("gives 402 its own code, apart from refused credentials", () => {
+    expect(providerErrorCodeForStatus(402)).toBe("payment-required");
+    expect(providerErrorCodeForStatus(401)).toBe("auth-refused");
+    expect(providerErrorCodeForStatus(403)).toBe("auth-refused");
+  });
+
+  it("labels an embedding quota 429 as quota-exhausted, not a network error, and still hands it back as retryable", () => {
+    // The SDK marks a 429 retryable; the status rule leaves a quota body to the caller. Shaped like the SDK's APICallError.
+    const quota = Object.assign(new Error(`429 ${MARKER}`), { statusCode: 429, isRetryable: true, responseBody: JSON.stringify({ error: { code: "insufficient_quota", message: MARKER } }) });
+    const classified = classifyEmbeddingError(quota, "openai");
+    expect(classified).toBeInstanceOf(ProviderRetryableError);
+    expect(classified).toMatchObject({ code: "quota-exhausted", status: 429 });
+    expect(classified!.message).not.toContain(MARKER);
+    // No response at all is still a network error.
+    expect(classifyEmbeddingError(Object.assign(new Error("socket hang up"), { isRetryable: true }), "openai")).toMatchObject({ code: "network-error", status: null });
   });
 });

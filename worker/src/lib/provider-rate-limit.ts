@@ -811,7 +811,8 @@ export async function runWithProviderRateLimit<T>(
       if (options.signal?.aborted) throw error;
       const retryable = options.classify(error);
       if (!retryable) throw error;
-      if (retryable.status === 429) {
+      // A quota 429 is not a throttle: it does not slow the fleet (it never did; it used to arrive with no status).
+      if (retryable.status === 429 && retryable.code !== "quota-exhausted") {
         await limiter.reportThrottle({ provider: options.provider, model: options.model, retryAfterMs: retryable.retryAfterMs });
       }
       const tooLong = retryable.retryAfterMs !== null && retryable.retryAfterMs > maxInlineWaitMs;
@@ -822,6 +823,7 @@ export async function runWithProviderRateLimit<T>(
           retryable.status,
           retryable.retryAfterMs,
           index + 1,
+          retryable.code,
         );
       }
       const delayMs = Math.min(maxInlineWaitMs, Math.max(retryable.retryAfterMs ?? 0, backoffDelayMs(index, random)));

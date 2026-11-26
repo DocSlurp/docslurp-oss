@@ -15,7 +15,7 @@ import { blankPages, embedPerplexity, imageAnchorsToAltText, pageImageReferenceP
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { createSerialQueue, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
-import { logProviderErrorDetail, ProviderRetryableError, providerErrorSummary, providerLimiter, providerNetworkErrorCode, toProviderRequestError, toProviderRetryableError } from "../lib/provider-retry.js";
+import { isQuotaExhaustedBody, logProviderErrorDetail, providerErrorCodeForStatus, ProviderRetryableError, providerErrorSummary, providerLimiter, providerNetworkErrorCode, toProviderRequestError, toProviderRetryableError } from "../lib/provider-retry.js";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 
 import type { Config } from "../config.js";
@@ -714,15 +714,22 @@ export function estimateEmbeddingTokens(batch: string[]): number {
 }
 
 /** 429/5xx, or an AI SDK error it marks retryable (network failures). */
-function classifyEmbeddingError(error: unknown, provider: string): ProviderRetryableError | null {
+export function classifyEmbeddingError(error: unknown, provider: string): ProviderRetryableError | null {
   const byStatus = toProviderRetryableError(error, provider, "embedding request");
   if (byStatus) return byStatus;
   const retryable = Boolean(error && typeof error === "object" && (error as { isRetryable?: unknown }).isRetryable === true);
   if (!retryable) return null;
-  // No response (a dropped connection or timeout): the code only; the SDK's text is logged.
-  const code = providerNetworkErrorCode(error);
-  logProviderErrorDetail(provider, "embedding request", code, null, error instanceof Error ? error.message : String(error));
-  return new ProviderRetryableError(`embedding request failed: ${providerErrorSummary(code, null)}`, provider, null, null, 1, code);
+  // A response the status rule does not retry here but the SDK marks retryable (a quota 429): labelled by its status,
+  // with the same retry behaviour as before. No response (a dropped connection or timeout): the network code.
+  const withStatus = [error, (error as { lastError?: unknown }).lastError]
+    .find((candidate) => candidate && typeof candidate === "object" && typeof (candidate as { statusCode?: unknown }).statusCode === "number") as
+    { statusCode: number; responseBody?: unknown } | undefined;
+  const status = withStatus ? withStatus.statusCode : null;
+  const body = String(withStatus?.responseBody ?? "");
+  const code = status === null ? providerNetworkErrorCode(error)
+    : status === 429 && isQuotaExhaustedBody(body) ? "quota-exhausted" : providerErrorCodeForStatus(status);
+  logProviderErrorDetail(provider, "embedding request", code, status, `${error instanceof Error ? error.message : String(error)} ${body}`);
+  return new ProviderRetryableError(`embedding request failed: ${providerErrorSummary(code, status)}`, provider, status, null, 1, code);
 }
 
 function embeddingMaxRetries(): number {
