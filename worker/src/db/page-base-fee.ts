@@ -109,18 +109,9 @@ export type RunPageCharges = {
 };
 
 /**
- * The documents of a run that bill pages of their own. The one copy predicate: a content-deduplicated copy
- * (`deduped_from_document_id`) pays nothing of its own here; how copies bill is decided in this function only.
- */
-export function ownDocumentSql(client: Sql<Record<string, unknown>>) {
-  return client`d.deduped_from_document_id is null`;
-}
-
-/**
  * The run-wide completion charge, for runs started before the per-document rule (no `run:page-billing-fast-document` pin, or
  * pinned "0"): charge the run's remaining pages once it completes, with one fixed id per run (`fast:<run>`, the id every
- * release has written, so a retried or second completion charges nothing twice), excluding content-deduplicated, failed and
- * media documents and pages an OCR or vision read already charged (OCR or Rich). Called from completeRun only; a run that fails
+ * release has written, so a retried or second completion charges nothing twice), excluding failed and media documents and pages an OCR or vision read already charged (OCR or Rich). Called from completeRun only; a run that fails
  * or is cancelled is not charged here. Runs pinned to the per-document rule never reach it (chargeDocumentsFastStatement).
  */
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
@@ -151,7 +142,7 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
           (d.billing_pages is not null or d.page_count_source = 'counted') as measured,
           greatest(0, coalesce(d.billing_pages, d.page_count) - ${stampedPagesSql(client, state)})::int as pages
         from documents d
-        where d.run_id = ${runId} and ${ownDocumentSql(client)} and d.status <> 'failed'
+        where d.run_id = ${runId} and d.status <> 'failed'
           and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
           and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
       ), reads as (
@@ -268,7 +259,7 @@ export function fastPerDocumentConfigured(env: NodeJS.ProcessEnv = process.env):
 /**
  * Pin the run's Fast rule unless it has one. Called by startRun before any other billing pin is written. "1" (per document)
  * only on the run's first start: no page billing pin yet, no OCR class decision, no completion report (`pageCharges`) and no
- * document it completed itself (a copy's seeded checkpoints do not count), so a run an earlier release started, billed or
+ * document it completed itself, so a run an earlier release started, billed or
  * completed (and that is now retried) keeps the run-wide rule and is never billed under both. Then only when the operator has
  * it on and every live worker advertises the capability; a fleet check that fails reads as no.
  */
@@ -323,7 +314,7 @@ export type DocumentFastChargeRow = { documents: number; pages: string; cents: s
  *   OCR or Rich read of this run charged (looked up by the reads' primary keys, `ocr:`/`rich:<run>:<document>:<page>`).
  * - Exactly once: the id is deterministic and the insert is `on conflict do nothing`; a document completed again (a retry, a
  *   stale worker, a re-index in the same run) inserts nothing.
- * - Scope: the run's own organization on every row read and written; documents of the run only, never copies (ownDocumentSql),
+ * - Scope: the run's own organization on every row read and written; documents of the run only,
  *   media or deferred documents, and only `completed` ones (failed, cancelled, PII-blocked documents never served bill nothing).
  * - `accrue`: mid-run, the inserted credits also count toward the run's next spend check and consume its credit lease, as a
  *   checkpoint's charges do, so an unfunded run pauses at its next checkpoint. The charge itself never refuses: completing the
@@ -371,7 +362,7 @@ export function chargeDocumentsFastStatement(
       select d.id, d.page_count, (d.billing_pages is not null or d.page_count_source = 'counted') as measured,
         greatest(0, coalesce(d.billing_pages, d.page_count) - ${stampedPagesSql(client, state)})::bigint as pages
       from documents d
-      where d.run_id = ${runId} and d.org_id = ${orgId} and d.status = 'completed' and ${ownDocumentSql(client)}
+      where d.run_id = ${runId} and d.org_id = ${orgId} and d.status = 'completed'
         and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
         and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
         ${only}

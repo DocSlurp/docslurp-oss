@@ -33,7 +33,7 @@ export async function recordPageEquivalents(
       insert into document_page_facts (document_id, page_number, run_id, text_equivalents, area_equivalents)
       select d.id, r.page_number, ${args.runId}, r.text_equivalents, r.area_equivalents
       from jsonb_to_recordset(${sql.json(rows as unknown as JSONValue)}::jsonb) as r(page_number integer, text_equivalents integer, area_equivalents integer)
-      join documents d on d.id = ${args.documentId} and d.run_id = ${args.runId} and d.deduped_from_document_id is null
+      join documents d on d.id = ${args.documentId} and d.run_id = ${args.runId}
       on conflict (document_id, page_number) do update
       set text_equivalents = nullif(greatest(coalesce(document_page_facts.text_equivalents, 0), coalesce(excluded.text_equivalents, 0)), 0),
           area_equivalents = nullif(greatest(coalesce(document_page_facts.area_equivalents, 0), coalesce(excluded.area_equivalents, 0)), 0)`;
@@ -51,7 +51,7 @@ export async function recordPageEquivalents(
         billing_pages_method = case when d.page_count + extra.pages > coalesce(d.billing_pages, 0) then 'page-equivalents' else d.billing_pages_method end,
         updated_at = now()
     from extra
-    where d.id = ${args.documentId} and d.run_id = ${args.runId} and d.deduped_from_document_id is null
+    where d.id = ${args.documentId} and d.run_id = ${args.runId}
       -- Only a page that measured above one changes anything: an empty Office file's measured 0 stays 0.
       and extra.pages > 0
     returning d.billing_pages`;
@@ -77,7 +77,7 @@ export async function recordWholeDocumentPages(
   const [updated] = await sql<{ billing_pages: number | null }[]>`
     update documents d
     set billing_pages = ${pages}, billing_pages_method = 'page-equivalents', updated_at = now()
-    where d.id = ${args.documentId} and d.run_id = ${args.runId} and d.deduped_from_document_id is null
+    where d.id = ${args.documentId} and d.run_id = ${args.runId}
       and ${pages} > greatest(coalesce(d.billing_pages, 0), d.page_count)
     returning d.billing_pages`;
   if (updated) return Number(updated.billing_pages);

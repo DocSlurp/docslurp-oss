@@ -177,10 +177,43 @@ jobs:
           (cd packages/contrib-search-compat && node ../../scripts/node-test.mjs test/*.test.mjs)
           node scripts/check-package-imports.mjs
 
-  # Real-Postgres and Redis tests (locks, concurrency, billing, OAuth) skip without
-  # TEST_DATABASE_URL / TEST_REDIS_URL, so run them here against service containers;
-  # the runner sets those per file, one fresh copy of a migrated template database
-  # each, and fails on skipped tests too.
+  # Worker tests that need a real Postgres (*.native.test.ts: concurrent transactions across connections, which PGlite cannot
+  # run) skip without NATIVE_PG_TESTS=1 and a migrated DATABASE_URL. Run them here against a throwaway service container,
+  # migrated by the repo's own runner. Cheap: no worker tools, one small job.
+  native-postgres:
+    name: worker on real Postgres
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: docslurp_native_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/docslurp_native_ci
+      MIGRATION_DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/docslurp_native_ci
+      NATIVE_PG_TESTS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:migrate
+      - name: Native Postgres tests
+        # A dropped env var would make every native test skip and the job pass: require passed tests and no skips.
+        run: |
+          pnpm --filter @docslurp/worker exec vitest run .native.test.ts --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/native.json"
+          node -e 'const r = require(process.argv[1]); if (!(r.numPassedTests > 0) || r.numPendingTests > 0) { console.error(`native tests: ${r.numPassedTests} passed, ${r.numPendingTests} skipped`); process.exit(1) }' "$RUNNER_TEMP/native.json"
+
   # The real OCR CLI (worker/scripts/docslurp_ocr.py) with its pinned models, alone and under the real parser sandbox.
   # Models are fetched and sha256-verified at install (scripts/install-ocr-runtime.sh); the CLI loads them only by path
   # and refuses sockets, and the sandbox has no network. scripts/run-ocr-cli-tests.mjs fails on any skipped test.
@@ -291,7 +324,7 @@ jobs:
 
   ci-success:
     # A stable required check. Never mask failures.
-    needs: [test, estimate, ocr-cli, doppler-pagecount]
+    needs: [test, estimate, ocr-cli, doppler-pagecount, native-postgres]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 1

@@ -13,6 +13,8 @@ import { loadRunState } from "../pipeline/stage-execution.js";
  */
 const url = process.env.DATABASE_URL ?? "";
 const enabled = process.env.NATIVE_PG_TESTS === "1" && url !== "";
+// The CI job sets both; a job that silently skipped would pass with nothing tested.
+if (process.env.CI && process.env.NATIVE_PG_TESTS === "1" && !enabled) throw new Error("NATIVE_PG_TESTS=1 needs DATABASE_URL");
 vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
 type Sql = postgres.Sql<Record<string, unknown>>;
