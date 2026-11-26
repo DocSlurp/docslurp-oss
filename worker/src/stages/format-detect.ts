@@ -7,26 +7,52 @@ import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
 import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
-import { recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES } from "../lib/text-page-count.js";
+import { hostTextEvidenceOfFile, recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES, TextPageCountUnavailableError } from "../lib/text-page-count.js";
+import { inspectTextPages, type TextPagesInspection, type TextPagesRequest } from "../lib/text-pages-guest.js";
+import { inspectQuarantine, type QuarantinePolicy } from "../lib/quarantine.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { detectDocumentFormat } from "../lib/document-format.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { detectFileFormat, resolvePdfMode, type NormalizedFormat } from "@docslurp/shared";
+import { resolvePdfMode } from "@docslurp/shared";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
-/**
- * The format intake persisted from the sniffed bytes (documents.file_facts) when there is one; otherwise the stored MIME type
- * and extension, for documents ingested before intake sniffed.
- */
-function detectFormat(document: Document): { format: NormalizedFormat; detectedBy: "intake-file-facts" | "mime-and-extension" } {
-  const persisted = document.fileFacts?.format;
-  if (persisted && persisted !== "unknown") return { format: persisted, detectedBy: "intake-file-facts" };
-  return { format: detectFileFormat({ filename: document.filename, mimeType: document.mimeType }), detectedBy: "mime-and-extension" };
-}
 
 export class FormatDetectStage implements Stage {
   readonly name = "format-detect";
 
-  constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfPageCount" | "pdfPopplerAcceptance" | "run">) {}
+  constructor(
+    private readonly storage: ArtifactStore,
+    private readonly runner?: Pick<CommandRunner, "pdfPageCount" | "pdfPopplerAcceptance" | "run">,
+    /** The quarantine inspection's limits, for the rare re-inspection that only wants its text answer. */
+    private readonly config?: QuarantinePolicy,
+  ) {}
+
+  /**
+   * The text answer for a document quarantine did not count. Under the VM-only floor: the same in-VM inspection on the
+   * hash-verified staged source, its count bounded by this host's byte facts of that file; never a host decode. In
+   * development: the shared rule in-process.
+   */
+  private async measureText(document: Document, request: TextPagesRequest, signal?: AbortSignal): Promise<TextPagesInspection | null | undefined> {
+    if (!vmOnlyParsing()) {
+      const bytes = await readSourceBytes(this.storage, document, { maxBytes: TEXT_MEASURE_MAX_BYTES });
+      if (bytes.length > TEXT_MEASURE_MAX_BYTES) throw new Error(`text file too large to measure (over ${TEXT_MEASURE_MAX_BYTES} bytes)`);
+      const encoding = document.fileFacts?.encoding ?? null;
+      return inspectTextPages(bytes, { mimeType: document.fileFacts?.sniffedMimeType ?? null, encoding }, request);
+    }
+    if (!this.runner || !this.config) throw new TextPageCountUnavailableError("text page count unavailable: no parser VM runner is configured, so no host decoder runs");
+    const temp = await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-text-pages-", document), { maxBytes: TEXT_MEASURE_MAX_BYTES });
+    try {
+      const evidence = await hostTextEvidenceOfFile(temp);
+      const inspection = await inspectQuarantine({
+        bytes: Buffer.alloc(0), filename: document.filename, tempFile: temp, runner: this.runner as CommandRunner, policy: this.config,
+        text: request, textEvidence: evidence, ...(signal ? { signal } : {}),
+      });
+      return inspection.text;
+    } finally {
+      await cleanupTempFile(temp);
+    }
+  }
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     for (const document of healthyDocuments(state)) {
@@ -44,7 +70,7 @@ export class FormatDetectStage implements Stage {
             throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
           }
 
-          const { format: normalizedFormat, detectedBy } = detectFormat(document);
+          const { format: normalizedFormat, detectedBy } = detectDocumentFormat(document);
 
           await this.storage.putJson(key, {
             documentId: document.id,
@@ -70,14 +96,13 @@ export class FormatDetectStage implements Stage {
             // Hash-bound like every parser read (council R7-L2): bytes that are not the decided parse source are refused.
             sourcePath: async () => (temp ??= await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
           }).finally(async () => { if (temp) await cleanupTempFile(temp); }) : null;
-          // A text file (intake estimates every one from its size and never decodes it): the text rule over the whole text, in the
-          // parser VM under the VM-only floor (hash-bound staged source), in-process only in development.
-          let textTemp: string | null = null;
+          // A text file quarantine's inspection did not count (quarantine off in development, a checkpoint from an older
+          // build, HTML recognised only by that inspection): the text rule over the whole text, in the parser VM under the
+          // VM-only floor, in-process only in development. Rare: quarantine counts every other one in the inspection it runs.
           const textPages = await recordMeasuredTextPageCount({
-            state, document, format: normalizedFormat, runner: this.runner, signal,
-            readSource: (maxBytes) => readSourceBytes(this.storage, document, { maxBytes }),
-            stageSource: async () => (textTemp ??= await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-text-pages-", document), { maxBytes: TEXT_MEASURE_MAX_BYTES })),
-          }).finally(async () => { if (textTemp) await cleanupTempFile(textTemp); });
+            state, document, format: normalizedFormat,
+            measure: (request) => this.measureText(document, request, signal),
+          });
           // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
           // what admission priced, from durable state (intake_page_count), before any later stage runs.
           await state.pageBasis.authorize(document);

@@ -38,7 +38,8 @@ describe("planned pdftoppm dimensions", () => {
       for (const rotate of [0, 90, 180, 270]) {
         const planned = plannedPdftoppmDimensions({ widthPt: w, heightPt: h, rotate }, 4000)!;
         expect(Math.min(planned.widthPx, planned.heightPx)).toBeGreaterThanOrEqual(1);
-        expect(Math.max(planned.widthPx, planned.heightPx)).toBeLessThanOrEqual(4001);
+        // Only a square page goes past the edge, by one pixel, as pdftoppm's own rounding does (the 612 x 612 fixture above).
+        expect(Math.max(planned.widthPx, planned.heightPx)).toBeLessThanOrEqual(w === h ? 4001 : 4000);
       }
     }
   });

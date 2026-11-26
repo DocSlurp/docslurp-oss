@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { assertParseSourceDecided } from "../lib/parse-source.js";
-import { createReadStream } from "node:fs";
-import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -474,7 +474,9 @@ export class PdfRasterCache {
     const missing = () => pages.filter((page) => !sizes.has(page));
     const take = (found: ReadonlyMap<number, PdfPageSize>, counter: "memo" | "artifact") => {
       for (const [page, size] of found) {
-        if (sizes.has(page)) continue;
+        // A size stored before rotations were kept is treated as missing, so pdfinfo runs again and the render's planned
+        // dimensions stay known instead of becoming null.
+        if (sizes.has(page) || size.rotate === undefined) continue;
         sizes.set(page, size);
         counts[counter] += 1;
       }
@@ -730,10 +732,16 @@ export class PdfRasterCache {
               if (pairBytes > pairOutputLimit) throw new Error(`Invalid raster output for page ${pageNumber}`);
             }
             for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
-              const bytes = await readFile(path.join(laneDir, files.get(pageNumber)!));
+              const bytes = await readRasterOutput(path.join(laneDir, files.get(pageNumber)!));
+              // The 8-byte PNG signature, a fixed comparison (no header is parsed): anything else fails the render instead of
+              // being stored and cached as image/png.
+              if (bytes.length < PNG_SIGNATURE.length || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+                throw new Error(`Invalid raster output for page ${pageNumber}: not a PNG`);
+              }
               signal.throwIfAborted();
               await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
-              // Dimensions from the render plan (pdfinfo's size and rotation, the edge chosen here), never from the PNG's header.
+              // Dimensions from the render plan (pdfinfo's size and rotation, the edge chosen here), never from the PNG's header:
+              // accurate to one pixel (plannedPdftoppmDimensions), metadata only.
               const planned = plannedPdftoppmDimensions(sizes.get(pageNumber)!, batch.edge);
               generated.set(pageNumber, { sizeBytes: bytes.byteLength, widthPx: planned?.widthPx ?? null, heightPx: planned?.heightPx ?? null });
             }
@@ -849,6 +857,19 @@ export async function runLanes<T>(
  * unnumbered "Page size:" form instead; it applies to `first` only when first === last. Only lines after the last
  * line-start "Pages:" count: metadata such as the title prints before it and may contain newlines.
  */
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** A raster the VM wrote, read only when it is a regular file reached without following a link (local sandbox job dirs). */
+async function readRasterOutput(file: string): Promise<Buffer> {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error("Invalid raster output file");
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
 export function parsePdfPageSizes(stdout: string, first: number, last: number): Map<number, PdfPageSize> {
   const sizes = new Map<number, PdfPageSize>();
   const rotations = new Map<number, PdfPageRotation>();

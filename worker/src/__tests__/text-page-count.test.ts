@@ -12,10 +12,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { maxTextPagesForBytes, recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES, TEXT_PAGES_CAPABILITY } from "../lib/text-page-count.js";
+import {
+  hostTextEvidenceOfFile, INSPECTION_TEXT_PAGES_CAPABILITY, pagesFromTextInspection, recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES,
+  TextEvidenceCounter, textPagesBounds, TextPageCountUnavailableError, textPagesRequestFor, validateTextPagesInspection,
+} from "../lib/text-page-count.js";
 import * as textPagesGuest from "../lib/text-pages-guest.js";
-import { setDefaultParserSandbox } from "../sandbox/startup.js";
-import type { ParserSandboxProvider } from "../sandbox/types.js";
+import { inspectQuarantine } from "../lib/quarantine.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -78,6 +82,9 @@ async function stateFor(runId: string, documentId: string) {
 }
 const pageRow = async (id: string) => (await db.query<{ page_count: number; page_count_source: string }>(`select page_count, page_count_source from documents where id = '${id}'`)).rows[0];
 
+/** The in-process measurement (development), as format-detect runs it outside the service profile. */
+const inProcess = (content: Uint8Array) => async (request: textPagesGuest.TextPagesRequest) => textPagesGuest.inspectTextPages(content, { mimeType: null, encoding: "utf-8" }, request);
+
 describe("text pages are measured in full by the worker, and only that count bills", () => {
   it("the fixture's 2 MB sample under-counts the file", () => {
     expect(bytes.length).toBeGreaterThan(SAMPLE_BYTES);
@@ -96,8 +103,9 @@ describe("text pages are measured in full by the worker, and only that count bil
   it("counts the whole decoded text with the same rule, records it counted, and bills exactly that count", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const { state, document } = await stateFor("run1", "big");
-    const readSource = vi.fn(async (maxBytes: number) => { expect(maxBytes).toBe(TEXT_MEASURE_MAX_BYTES); return bytes; });
-    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource })).toEqual({ pages: fullCount, estimate: apiEstimate });
+    const measure = vi.fn(inProcess(bytes));
+    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", measure })).toEqual({ pages: fullCount, estimate: apiEstimate });
+    expect(measure).toHaveBeenCalledWith({ markup: false, force: true });
     expect(await pageRow("big")).toEqual({ page_count: fullCount, page_count_source: "counted" });
     const sql = (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
     const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("run1"), [(await loadFixtureDocument(store, "big"))!, (await loadFixtureDocument(store, "small"))!]));
@@ -109,30 +117,40 @@ describe("text pages are measured in full by the worker, and only that count bil
 
   it("leaves a count intake took from the whole text alone", async () => {
     const { state, document } = await stateFor("run1", "small");
-    const readSource = vi.fn();
-    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource })).toBeNull();
-    expect(readSource).not.toHaveBeenCalled();
+    const measure = vi.fn();
+    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", measure })).toBeNull();
+    expect(measure).not.toHaveBeenCalled();
   }, 60_000);
 
-  it("pauses the run when the measured pages above the estimate no longer fit the balance", async () => {
+  it("pauses the run when the measured pages above the estimate no longer fit the balance (the estimate-to-measured gap is authorized)", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const { state, document } = await stateFor("run2", "poor");
     // The page basis records the count, then authorizes the raise: the run is paused and the document stopped.
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => bytes })).rejects.toMatchObject({ name: "RunPolicyError", paused: true });
+    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", measure: inProcess(bytes) })).rejects.toMatchObject({ name: "RunPolicyError", paused: true });
     expect(await pageRow("poor")).toEqual({ page_count: fullCount, page_count_source: "counted" });
     await expect(state.pageBasis.authorize(document)).rejects.toMatchObject({ name: "RunPolicyError" });
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run2'`);
     expect(rows[0]!.control_state).toBe("paused");
   }, 60_000);
 
-  it("refuses a file too large to measure, or bytes that are not the uploaded source, instead of billing an estimate", async () => {
+  it("refuses a file too large to measure instead of billing an estimate", async () => {
     await db.exec(`update documents set page_count = ${apiEstimate}, page_count_source = 'assumed' where id = 'poor'`);
     const { state, document } = await stateFor("run2", "poor");
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async (max) => { throw new StorageObjectTooLargeError("raw/poor", max + 1, max); } }))
+    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", measure: async () => { throw new StorageObjectTooLargeError("raw/poor", TEXT_MEASURE_MAX_BYTES + 1, TEXT_MEASURE_MAX_BYTES); } }))
       .rejects.toThrow(/too large to measure/);
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => new TextEncoder().encode("swapped") }))
-      .rejects.toMatchObject({ name: "SourceIntegrityError" });
     expect(await pageRow("poor")).toEqual({ page_count: apiEstimate, page_count_source: "assumed" });
+  }, 60_000);
+
+  it("an inspection with no text answer (an image older than the worker) is retried, never a document failure, and records nothing", async () => {
+    await db.exec(`update documents set page_count = 1, page_count_source = 'assumed' where id = 'vm'`);
+    const { state, document } = await stateFor("run1", "vm");
+    const failure = await recordMeasuredTextPageCount({ state, document, format: "plain-text", measure: async () => undefined }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TextPageCountUnavailableError);
+    expect(isDocumentLevelFailure(failure)).toBe(false);
+    // A guest that measured nothing although asked with `force` is not a count of this file: refused (a document failure).
+    const none = await recordMeasuredTextPageCount({ state, document, format: "plain-text", measure: async () => null }).catch((error: unknown) => error);
+    expect(none).toMatchObject({ name: "TextPageCountRefusedError" });
+    expect(await pageRow("vm")).toEqual({ page_count: 1, page_count_source: "assumed" });
   }, 60_000);
 
   it("PostgresPageBasisLedger.pauseForFunds pauses a processing run once; a second pause reports blocked, not paused", async () => {
@@ -146,17 +164,76 @@ describe("text pages are measured in full by the worker, and only that count bil
   }, 60_000);
 });
 
-/**
- * DocSlurp/app issue 599: under the VM-only floor the worker never decodes a text source. The count comes from the parser VM's
- * text-pages guest; the host checks the answer against the staged file's size and refuses anything else.
- */
-describe("text pages under the VM-only floor", () => {
-  const remote = { filesystem: true, network: "full", processes: true, location: "remote" } as const;
-  const vmImage = (capabilities: string[]) => setDefaultParserSandbox({ provider: { id: "modal" } as unknown as ParserSandboxProvider, config: {}, isolation: remote, capabilities });
+/** A UTF-16 file as the guest would see it: little-endian with its byte-order mark. */
+const utf16 = (text: string) => new Uint8Array(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]));
+const evidenceOf = (content: Uint8Array) => { const counter = new TextEvidenceCounter(); counter.update(content); return counter.result(); };
+
+describe("the host's bounds on the guest's text count", () => {
+  it("are exact from below for ASCII-compatible text, and never below what the rule measures", () => {
+    const cases: Array<[string, Uint8Array, "utf-8" | "utf-16le" | "8-bit", boolean]> = [
+      ["newlines", new Uint8Array(Buffer.alloc(100_000, "\n")), "utf-8", false],
+      ["one long line", new Uint8Array(Buffer.alloc(100_000, "x")), "utf-8", false],
+      ["narrow CSV", new TextEncoder().encode("a,b\n".repeat(20_000)), "utf-8", false],
+      ["East Asian UTF-8", new TextEncoder().encode("漢字かな".repeat(10_000)), "utf-8", false],
+      ["East Asian UTF-16", utf16("漢字かな".repeat(10_000)), "utf-16le", false],
+      ["UTF-16 CSV", utf16("a,b\n".repeat(20_000)), "utf-16le", false],
+      ["HTML markup", new TextEncoder().encode("<b>x</b>".repeat(20_000)), "utf-8", true],
+      ["8-bit", new Uint8Array(Buffer.from("caf\xe9\n".repeat(10_000), "latin1")), "8-bit", false],
+    ];
+    for (const [name, content, encoding, markup] of cases) {
+      const measured = textPagesGuest.measureTextPagesBytes(content, { encoding, markup }).pages;
+      const bounds = textPagesBounds(evidenceOf(content), { encoding, markup });
+      expect([name, measured >= bounds.min && measured <= bounds.max]).toEqual([name, true]);
+    }
+    // Plain UTF-8 text: the lower bound is the count itself, so a guest cannot report one page for a big file.
+    const lines = new Uint8Array(Buffer.alloc(100_000, "\n"));
+    expect(textPagesBounds(evidenceOf(lines), { encoding: "utf-8", markup: false }).min).toBe(Math.ceil(100_001 / 60));
+    const line = new Uint8Array(Buffer.alloc(100_000, "x"));
+    expect(textPagesBounds(evidenceOf(line), { encoding: "utf-8", markup: false })).toEqual({ min: 29, max: Math.ceil(150_000 / 3500) });
+  });
+
+  it.each([
+    ["more pages than the bytes can hold", (n: number) => ({ pages: n, bytes: 7 })],
+    ["fewer pages than the newlines give", () => ({ pages: 1, bytes: 6_000 })],
+    ["zero pages", () => ({ pages: 0, bytes: 6_000 })],
+    ["a fractional count", () => ({ pages: 1.5, bytes: 6_000 })],
+    ["a count as a string", () => ({ pages: "100", bytes: 6_000 })],
+    ["another file's size", () => ({ pages: 100, bytes: 6_001 })],
+    ["extra fields", () => ({ pages: 100, bytes: 6_000, note: "x" })],
+    ["not an object", () => [100]],
+  ])("refuses a guest answer with %s", (_name, answer) => {
+    const evidence = evidenceOf(new Uint8Array(Buffer.alloc(6_000, "\n")));
+    expect(() => validateTextPagesInspection({ text: answer(10_000) }, evidence, "utf-8")).toThrow(expect.objectContaining({ name: "TextPageCountRefusedError" }));
+  });
+
+  it("accepts the guest's exact answer, and tells an absent answer (older image) from no measurement", () => {
+    const content = new Uint8Array(Buffer.alloc(6_000, "\n"));
+    const evidence = evidenceOf(content);
+    expect(validateTextPagesInspection({ text: { pages: 101, bytes: 6_000 } }, evidence, "utf-8")).toEqual({ pages: 101, bytes: 6_000 });
+    expect(validateTextPagesInspection({ text: null }, evidence, "utf-8")).toBeNull();
+    expect(validateTextPagesInspection({ sniffed: {} }, evidence, "utf-8")).toBeUndefined();
+    expect(() => pagesFromTextInspection(undefined, "plain-text")).toThrow(TextPageCountUnavailableError);
+    expect(pagesFromTextInspection({ pages: 3, bytes: 9 }, "html")).toBeNull();
+    expect(pagesFromTextInspection({ pages: 3, markupPages: 1, bytes: 9 }, "html")).toBe(1);
+  });
+
+  it("hostTextEvidenceOfFile streams the same facts as the counter", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "text-evidence-"));
+    try {
+      const content = Buffer.concat([Buffer.alloc(300_000, "a\n"), Buffer.from([0xff, 0x0a, 0x20, 0x7e, 0x7f])]);
+      await writeFile(path.join(dir, "f"), content);
+      expect(await hostTextEvidenceOfFile(path.join(dir, "f"))).toEqual(evidenceOf(new Uint8Array(content)));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("text pages under the VM-only floor: the quarantine inspection carries the count", () => {
   const dirs: string[] = [];
   afterAll(async () => { await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true }))); });
+  const policy = { quarantineFailOpenOnToolMissing: false, quarantineMaxArchiveEntries: 2000, quarantineMaxArchiveDepth: 12, quarantineMaxTotalUncompressedBytes: 1 << 30, quarantineMaxSingleEntryBytes: 1 << 29, quarantineMaxExpansionRatio: 100 };
 
-  /** A staged source on disk, as stageSourceFile leaves it (already hash-verified there). */
   async function staged(content: Uint8Array): Promise<string> {
     const dir = await mkdtemp(path.join(tmpdir(), "text-pages-test-"));
     dirs.push(dir);
@@ -165,160 +242,81 @@ describe("text pages under the VM-only floor", () => {
     return file;
   }
 
-  /** A parser VM stand-in that answers with `answer` (what a guest wrote), recording the command it was given. */
-  function vmRunner(answer: (source: string, options: unknown) => unknown) {
-    const calls: Array<{ binary: string; args: string[] }> = [];
+  /** A parser VM stand-in: answers with `answer(options)` as the guest's result JSON, recording each command. */
+  function vmRunner(answer: (options: Record<string, unknown>) => unknown) {
     return {
-      calls,
       run: vi.fn(async (plan: { binary: string; args: string[] }) => {
-        calls.push(plan);
-        const [source, config, output] = plan.args.slice(-3) as [string, string, string];
-        await writeFile(output, JSON.stringify(answer(source, JSON.parse(await readFile(config, "utf8")))));
+        const [, config, output] = plan.args.slice(-3) as [string, string, string];
+        await writeFile(output, JSON.stringify(answer(JSON.parse(await readFile(config, "utf8")) as Record<string, unknown>)));
         return { stdout: "", stderr: "", exitCode: 0 };
       }),
     };
   }
+  const sniffedText = { mimeType: "text/plain", container: null, encoding: "utf-8" };
 
-  /** Hostile text: invalid UTF-8, NULs, a 2 MB single line, an HTML body behind a .txt name. */
-  const hostile = new Uint8Array(Buffer.concat([
-    Buffer.from([0xff, 0xfe, 0x00, 0xd8, 0xc3, 0x28, 0xa0, 0xa1, 0xe2, 0x28, 0xa1, 0xf0, 0x28, 0x8c, 0xbc, 0x00, 0x00]),
-    Buffer.alloc(2_000_000, "x"),
-    Buffer.from("<html><script>".repeat(1000)),
-  ]));
-
-  it("runs the text-pages guest on the staged source and records its count; no host decoder runs", async () => {
-    vmImage([TEXT_PAGES_CAPABILITY]);
-    const decode = vi.spyOn(textPagesGuest, "measureTextPagesBytes");
-    const { state, document } = await stateFor("run1", "vm");
-    const source = await staged(hostile);
-    const runner = vmRunner(() => ({ pages: 7, bytes: hostile.length }));
-    const readSource = vi.fn();
-    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource, runner, stageSource: async () => source, vmOnly: true }))
-      .toEqual({ pages: 7, estimate: 1 });
-    expect(readSource).not.toHaveBeenCalled();
+  it("asks for the count in the same command and validates it against the host's byte facts; no host decoder runs", async () => {
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
+    vi.stubEnv("NODE_ENV", "production");
+    const decode = vi.spyOn(textPagesGuest, "inspectTextPages");
+    const content = new Uint8Array(Buffer.alloc(6_000, "\n"));
+    const file = await staged(content);
+    let seen: Record<string, unknown> | undefined;
+    const runner = vmRunner((options) => { seen = options; return { sniffed: sniffedText, archive: null, pdf: null, text: { pages: 101, bytes: 6_000 } }; });
+    const inspection = await inspectQuarantine({ bytes: Buffer.alloc(0), filename: "a.txt", tempFile: file, runner: runner as never, policy, text: { markup: false, force: true }, textEvidence: await hostTextEvidenceOfFile(file) });
+    expect(inspection.text).toEqual({ pages: 101, bytes: 6_000 });
+    expect(seen?.text).toEqual({ markup: false, force: true });
+    expect(runner.run).toHaveBeenCalledTimes(1);
     expect(decode).not.toHaveBeenCalled();
-    expect(runner.calls).toHaveLength(1);
-    expect(runner.calls[0]!.binary).toBe("node");
-    expect(runner.calls[0]!.args.some((arg) => arg.endsWith("text-pages.mjs"))).toBe(true);
-    expect(runner.calls[0]!.args.at(-3)).toBe(source);
-    expect(await pageRow("vm")).toEqual({ page_count: 7, page_count_source: "counted" });
-    await db.exec(`update documents set page_count = 1, page_count_source = 'assumed' where id = 'vm'`);
-  }, 60_000);
-
-  it("in development the same rule runs in-process (the spy the refusals rely on sees that decode)", async () => {
-    const decode = vi.spyOn(textPagesGuest, "measureTextPagesBytes");
-    const { state, document } = await stateFor("run1", "vm");
-    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => bytes, vmOnly: false })).toEqual({ pages: fullCount, estimate: 1 });
-    expect(decode).toHaveBeenCalledTimes(1);
-    await db.exec(`update documents set page_count = 1, page_count_source = 'assumed' where id = 'vm'`);
-  }, 60_000);
-
-  it("passes the guest only the sniffed encoding and whether the text is HTML", async () => {
-    vmImage([TEXT_PAGES_CAPABILITY]);
-    const { state, document } = await stateFor("run1", "vm");
-    const source = await staged(new TextEncoder().encode("<p>hi</p>"));
-    let seen: unknown;
-    const runner = vmRunner((_source, options) => { seen = options; return { pages: 1, bytes: 9 }; });
-    await recordMeasuredTextPageCount({ state, document, format: "html", readSource: vi.fn(), runner, stageSource: async () => source, vmOnly: true });
-    expect(seen).toEqual({ encoding: "utf-8", markup: true });
-    await db.exec(`update documents set page_count = 1, page_count_source = 'assumed' where id = 'vm'`);
-  }, 60_000);
-
-  it.each([
-    ["more pages than the bytes can hold", (bytes: number) => ({ pages: maxTextPagesForBytes(bytes) + 1, bytes })],
-    ["zero pages", (bytes: number) => ({ pages: 0, bytes })],
-    ["a fractional count", (bytes: number) => ({ pages: 1.5, bytes })],
-    ["a count as a string", (bytes: number) => ({ pages: "5", bytes })],
-    ["another file's size", (bytes: number) => ({ pages: 1, bytes: bytes + 1 })],
-    ["extra fields", (bytes: number) => ({ pages: 1, bytes, note: "x" })],
-    ["not an object", () => [1]],
-  ])("refuses a guest answer with %s, recording nothing", async (_name, answer) => {
-    vmImage([TEXT_PAGES_CAPABILITY]);
-    const { state, document } = await stateFor("run1", "vm");
-    const source = await staged(hostile);
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: vi.fn(), runner: vmRunner(() => answer(hostile.length)), stageSource: async () => source, vmOnly: true }))
+    // An undercount the newlines contradict is refused.
+    const lying = vmRunner(() => ({ sniffed: sniffedText, archive: null, pdf: null, text: { pages: 1, bytes: 6_000 } }));
+    await expect(inspectQuarantine({ bytes: Buffer.alloc(0), filename: "a.txt", tempFile: file, runner: lying as never, policy, text: { markup: false, force: true }, textEvidence: await hostTextEvidenceOfFile(file) }))
       .rejects.toMatchObject({ name: "TextPageCountRefusedError" });
-    expect(await pageRow("vm")).toEqual({ page_count: 1, page_count_source: "assumed" });
-  }, 60_000);
-
-  it("refuses loudly, never decoding on the host, without a VM runner or on an image without the guest", async () => {
-    const decode = vi.spyOn(textPagesGuest, "measureTextPagesBytes");
-    const { state, document } = await stateFor("run1", "vm");
-    const readSource = vi.fn(async () => hostile);
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource, vmOnly: true }))
-      .rejects.toMatchObject({ name: "TextPageCountRefusedError" });
-    // An older image (no text-pages capability), or no sandbox known yet: refused before anything is staged or run.
-    for (const capabilities of [[], null] as const) {
-      if (capabilities) vmImage([...capabilities]); else setDefaultParserSandbox(undefined);
-      const runner = vmRunner(() => ({ pages: 1, bytes: hostile.length }));
-      const source = await staged(hostile);
-      await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource, runner, stageSource: async () => source, vmOnly: true }))
-        .rejects.toThrow(/text-pages guest/);
-      expect(runner.run).not.toHaveBeenCalled();
-    }
-    expect(readSource).not.toHaveBeenCalled();
+    // An older image: no `text` key, read as unavailable (undefined), never decoded here.
+    const old = vmRunner(() => ({ sniffed: sniffedText, archive: null, pdf: null }));
+    const inspected = await inspectQuarantine({ bytes: Buffer.alloc(0), filename: "a.txt", tempFile: file, runner: old as never, policy, text: { markup: false, force: true }, textEvidence: await hostTextEvidenceOfFile(file) });
+    expect(inspected.text).toBeUndefined();
+    expect(() => pagesFromTextInspection(inspected.text, "plain-text")).toThrow(TextPageCountUnavailableError);
     expect(decode).not.toHaveBeenCalled();
-    expect(await pageRow("vm")).toEqual({ page_count: 1, page_count_source: "assumed" });
-  }, 60_000);
+    vi.unstubAllEnvs();
+  });
 
-  it("refuses an oversized text file before the VM runs, never billing an estimate", async () => {
-    vmImage([TEXT_PAGES_CAPABILITY]);
-    const { state, document } = await stateFor("run1", "vm");
-    const runner = vmRunner(() => ({ pages: 1, bytes: 1 }));
-    // The staged download is bounded: storage refuses an object over the limit.
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: vi.fn(), runner, vmOnly: true,
-      stageSource: async () => { throw new StorageObjectTooLargeError("raw/vm", TEXT_MEASURE_MAX_BYTES + 1, TEXT_MEASURE_MAX_BYTES); } }))
-      .rejects.toThrow(/too large to measure/);
-    // A staged file over the limit (a sparse file: no bytes written) is refused on its size alone.
-    const dir = await mkdtemp(path.join(tmpdir(), "text-pages-test-"));
-    dirs.push(dir);
-    const big = path.join(dir, "big.txt");
-    await writeFile(big, "");
-    const { truncate } = await import("node:fs/promises");
-    await truncate(big, TEXT_MEASURE_MAX_BYTES + 1);
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: vi.fn(), runner, stageSource: async () => big, vmOnly: true }))
-      .rejects.toThrow(/too large to measure/);
-    expect(runner.run).not.toHaveBeenCalled();
-    expect(await pageRow("vm")).toEqual({ page_count: 1, page_count_source: "assumed" });
-  }, 60_000);
+  it("refuses a guest result reached through a symlink", async () => {
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
+    vi.stubEnv("NODE_ENV", "production");
+    const file = await staged(new TextEncoder().encode("hi"));
+    const { symlink } = await import("node:fs/promises");
+    const target = path.join(path.dirname(file), "elsewhere.json");
+    await writeFile(target, JSON.stringify({ sniffed: sniffedText, archive: null, pdf: null, text: null }));
+    const runner = { run: vi.fn(async (plan: { args: string[] }) => { await symlink(target, plan.args.at(-1)!); return { stdout: "", stderr: "", exitCode: 0 }; }) };
+    await expect(inspectQuarantine({ bytes: Buffer.alloc(0), filename: "a.txt", tempFile: file, runner: runner as never, policy })).rejects.toThrow();
+    vi.unstubAllEnvs();
+  });
+
+  it("asks only for documents that still owe a count, with markup for HTML", () => {
+    expect(textPagesRequestFor({ pageCountSource: "counted" }, "plain-text")).toBeNull();
+    expect(textPagesRequestFor({ pageCountSource: "assumed" }, "html")).toEqual({ markup: true, force: true });
+    expect(textPagesRequestFor({ pageCountSource: "assumed" }, "unknown")).toEqual({ markup: false, force: false });
+  });
 });
 
-describe("the text-pages guest", () => {
-  it("counts hostile bytes without failing: invalid UTF-8, NULs, a huge single line, unclosed markup", () => {
-    const line = new Uint8Array(Buffer.alloc(3_500 * 40, "y"));
-    expect(textPagesGuest.measureTextPagesBytes(line, { encoding: "utf-8", markup: false })).toEqual({ pages: 40, bytes: line.length });
-    const junk = new Uint8Array([0xc3, 0x28, 0x00, 0x00, 0xff, 0xfe, 0xa0, 0x0a, 0x0a]);
-    for (const encoding of ["utf-8", "utf-16le", "utf-16be", "8-bit", null] as const) {
-      const { pages } = textPagesGuest.measureTextPagesBytes(junk, { encoding, markup: true });
-      expect(pages).toBeGreaterThanOrEqual(1);
-      expect(pages).toBeLessThanOrEqual(maxTextPagesForBytes(junk.length));
-    }
-    const lines = new Uint8Array(Buffer.alloc(6_000, "\n"));
-    expect(textPagesGuest.measureTextPagesBytes(lines, { encoding: "utf-8", markup: false }).pages).toBe(maxTextPagesForBytes(lines.length));
-    const unclosed = new TextEncoder().encode("<script>".repeat(50_000));
-    expect(textPagesGuest.measureTextPagesBytes(unclosed, { encoding: "utf-8", markup: true }).pages).toBe(1);
+describe("worker startup under the VM-only floor", () => {
+  const contract = (capabilities: string[]) => ({
+    id: "fake-remote",
+    readConfig: () => ({}),
+    probe: async () => ({ ok: true, isolation: { filesystem: true, network: "none", processes: true, location: "remote" }, detail: "ok", capabilities }),
   });
 
-  it("refuses options it did not expect", () => {
-    for (const raw of [null, [], {}, { encoding: "utf-7", markup: false }, { encoding: null, markup: "yes" }, { encoding: null, markup: false, path: "/etc/passwd" }]) {
-      expect(() => textPagesGuest.parseTextPagesOptions(raw)).toThrow(/invalid text pages options/);
-    }
-    expect(textPagesGuest.parseTextPagesOptions({ encoding: "utf-16le", markup: true })).toEqual({ encoding: "utf-16le", markup: true });
-  });
-
-  it("refuses a file over the limit by its size, before reading it", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "text-pages-test-"));
-    try {
-      const big = path.join(dir, "big.txt");
-      await writeFile(big, "");
-      const { truncate } = await import("node:fs/promises");
-      await truncate(big, TEXT_MEASURE_MAX_BYTES + 1);
-      await expect(textPagesGuest.measureTextPagesFile(big, { encoding: null, markup: false })).rejects.toThrow(/too large to measure/);
-      const small = path.join(dir, "small.txt");
-      await writeFile(small, "a\nb\n");
-      expect(await textPagesGuest.measureTextPagesFile(small, { encoding: null, markup: false })).toEqual({ pages: 1, bytes: 4 });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+  it("refuses a remote parser image without the inspection's text answer, so a bad deploy never takes traffic", async () => {
+    const registry = await import("../sandbox/registry.js");
+    vi.spyOn(registry, "resolveSandboxProviderId").mockReturnValue("modal" as never);
+    vi.spyOn(registry, "loadSandboxProvider").mockResolvedValue(contract([]) as never);
+    const policy = await import("../sandbox/policy.js");
+    vi.spyOn(policy, "assertSandboxPolicy").mockReturnValue({ warnings: [] } as never);
+    const vmOnly = await import("../lib/vm-only-parsing.js");
+    vi.spyOn(vmOnly, "assertServiceProfileRuntime").mockReturnValue(undefined as never);
+    const env = { NODE_ENV: "production", DOCSLURP_PROFILE: "service" } as NodeJS.ProcessEnv;
+    await expect(initializeParserSandbox(env, "linux")).rejects.toThrow(/lacks required capabilities: inspection-text-pages/);
+    vi.spyOn(registry, "loadSandboxProvider").mockResolvedValue(contract([INSPECTION_TEXT_PAGES_CAPABILITY]) as never);
+    await expect(initializeParserSandbox(env, "linux")).resolves.toMatchObject({ capabilities: [INSPECTION_TEXT_PAGES_CAPABILITY] });
   });
 });

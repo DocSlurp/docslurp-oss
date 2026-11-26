@@ -1,3 +1,4 @@
+import { inspectTextPages } from "../lib/text-pages-guest.js";
 import { createHash } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
@@ -394,7 +395,7 @@ describe("whole-document text formats bill their true count from intake through 
     await db.exec(`update documents set page_count_source = 'assumed', parse_source_sha256 = '${scanned}' where id = '${documentId}'`);
     document.pageCountSource = "assumed";
     document.sourceSha256 = scanned;
-    await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => new Uint8Array(Buffer.from(text)) });
+    await recordMeasuredTextPageCount({ state, document, format: "plain-text", measure: async (request) => inspectTextPages(new Uint8Array(Buffer.from(text)), { mimeType: null, encoding: "utf-8" }, request) });
     expect(document.pageCount).toBe(10);
     await recordExtractedPageEquivalents(state, document, "plain-text", text);
     expect(await billedFastPages(runId, documentId)).toBe(10);
@@ -444,7 +445,7 @@ describe("rendered-area equivalents are authorized like every measured page (cou
         }
         calls.pdftoppm += 1;
         const [prefix, first] = plan.args;
-        await writeFile(`${prefix}-${first}.png`, "png");
+        await writeFile(`${prefix}-${first}.png`, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
         return { stdout: "", stderr: "" };
       },
     };

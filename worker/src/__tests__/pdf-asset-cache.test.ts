@@ -31,6 +31,7 @@ function pdfinfoSizes(first: number, last: number): string {
 }
 
 const tempRoots: string[] = [];
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 function makeDocument(): Document {
   return {
@@ -260,7 +261,7 @@ describe("PdfRasterCache", () => {
         for (let page = Number(firstText); page <= Number(lastText); page += 1) {
           if (page === 3 && failure === "missing") continue;
           const header = Buffer.alloc(24);
-          header.writeUInt32BE(0x89504e47);
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
           header.write("IHDR", 12);
           header.writeUInt32BE(1200, 16);
           header.writeUInt32BE(1600, 20);
@@ -338,7 +339,7 @@ describe("PdfRasterCache", () => {
         for (let page = Number(firstText); page <= Number(lastText); page += 1) {
           // What a compromised renderer could write: any header at all.
           const header = Buffer.alloc(32);
-          if (signature) header.writeUInt32BE(0x89504e47);
+          if (signature) Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
           header.write("IHDR", 12);
           header.writeUInt32BE(width, 16);
           header.writeUInt32BE(height, 20);
@@ -349,8 +350,15 @@ describe("PdfRasterCache", () => {
     };
     const cache = new PdfRasterCache(runner as any, storage as any, sourceCache);
     vi.stubEnv("DOCSLURP_PDF_RASTER_BATCHING", "on");
-    const pages = await cache.renderSelectedPages({ document: makeDocument(), runId: "run-1", pageNumbers: [2, 3, 5] });
-    expect(pages.map((page) => [page.pageNumber, page.widthPx, page.heightPx, page.sizeBytes])).toEqual([[2, 1275, 1650, 32], [3, 1275, 1650, 32], [5, 1275, 1650, 32]]);
+    // Output without the 8-byte PNG signature fails the render (never stored or cached as image/png); a forged IHDR under a
+    // real signature changes nothing: dimensions come from the plan.
+    if (!signature) {
+      await expect(cache.renderSelectedPages({ document: makeDocument(), runId: "run-1", pageNumbers: [2, 3, 5] })).rejects.toThrow(/not a PNG/);
+      expect(artifacts.size).toBe(0);
+    } else {
+      const pages = await cache.renderSelectedPages({ document: makeDocument(), runId: "run-1", pageNumbers: [2, 3, 5] });
+      expect(pages.map((page) => [page.pageNumber, page.widthPx, page.heightPx, page.sizeBytes])).toEqual([[2, 1275, 1650, 32], [3, 1275, 1650, 32], [5, 1275, 1650, 32]]);
+    }
     await sourceCache.clear();
   });
 
@@ -386,7 +394,7 @@ describe("PdfRasterCache", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         active -= 1;
         const [prefix, firstText] = plan.args;
-        await writeFile(`${prefix}-${firstText}.png`, `page ${firstText}`);
+        await writeFile(`${prefix}-${firstText}.png`, Buffer.concat([PNG_SIGNATURE, Buffer.from(`page ${firstText}`)]));
         return { stdout: "", stderr: "" };
       },
     };
@@ -401,7 +409,8 @@ describe("PdfRasterCache", () => {
     );
     expect(peak).toBe(3);
     expect(pages.map((page) => page.pageNumber)).toEqual([2, 4, 5, 7, 9, 11]);
-    expect(pages.map((page) => page.sizeBytes)).toEqual([6, 6, 6, 6, 6, 7]);
+    // "page N" behind the 8-byte PNG signature.
+    expect(pages.map((page) => page.sizeBytes)).toEqual([14, 14, 14, 14, 14, 15]);
     await sourceCache.clear();
   });
 
@@ -435,7 +444,7 @@ describe("PdfRasterCache", () => {
           await bothStarted;
           if (page !== 1) await new Promise((resolve) => setTimeout(resolve, 20));
           if (page === 1) throw new Error("pdftoppm crashed");
-          await writeFile(`${plan.args[0]}-${page}.png`, "x");
+          await writeFile(`${plan.args[0]}-${page}.png`, Buffer.concat([PNG_SIGNATURE, Buffer.from("x")]));
           return { stdout: "", stderr: "" };
         } finally {
           running -= 1;
@@ -625,7 +634,7 @@ describe("PdfRasterCache", () => {
           throw new Error("pdftoppm crashed");
         }
         // This command completes successfully with its page written, but only after the sibling failed.
-        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, Buffer.concat([PNG_SIGNATURE, Buffer.from("x")]));
         releaseSibling();
         await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
         finishedAfterAbort = true;
@@ -663,7 +672,7 @@ describe("PdfRasterCache", () => {
       async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
       async run(plan: { binary?: string; args: string[] }) {
         if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
-        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, Buffer.concat([PNG_SIGNATURE, Buffer.from("x")]));
         return { stdout: "", stderr: "" };
       },
     };
@@ -697,7 +706,7 @@ describe("PdfRasterCache", () => {
         try {
           await new Promise((resolve) => setTimeout(resolve, 5));
           if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
-          await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+          await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, Buffer.concat([PNG_SIGNATURE, Buffer.from("x")]));
           return { stdout: "", stderr: "" };
         } finally {
           active -= 1;
@@ -734,7 +743,7 @@ describe("PdfRasterCache", () => {
       async renderPdfPageRange(_source: string, prefix: string, first: number) { return { binary: "pdftoppm", args: [prefix, String(first)], available: true }; },
       async run(plan: { binary?: string; args: string[] }) {
         if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
-        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, "x");
+        await writeFile(`${plan.args[0]}-${plan.args[1]}.png`, Buffer.concat([PNG_SIGNATURE, Buffer.from("x")]));
         return { stdout: "", stderr: "" };
       },
     };

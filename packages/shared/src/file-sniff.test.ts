@@ -297,8 +297,27 @@ describe("header-only inspection (what the API does with customer bytes)", () =>
     expect(sniffFileBytes(Buffer.from("\ufeffa,b\n", "utf16le"), "x.bin", header)).toEqual({ mimeType: "text/plain", container: null, encoding: "utf-16le" });
     // The UTF-16LE mark (FF FE) is text, not an MPEG frame sync.
     expect(sniffFileBytes(Buffer.from([0xfe, 0xff, 0x00, 0x61]), "x.bin", header).encoding).toBe("utf-16be");
+    // FF FE is also an MPEG-1 Layer I frame header: under an MPEG audio name it stays audio at header depth.
+    const layerOne = Buffer.concat([Buffer.from([0xff, 0xfe, 0x90, 0x00]), Buffer.alloc(400, 0x55)]);
+    expect(sniffFileBytes(layerOne, "track.mp3", header).mimeType).toBe("audio/mpeg");
+    expect(sniffFileBytes(Buffer.from("\ufeffa,b\n", "utf16le"), "data.csv", header).encoding).toBe("utf-16le");
     // Full depth still detects and classifies (the worker's quarantine, in its parser VM).
     expect(sniffFileBytes(Buffer.from("a,b\n1,2\n3,4\n"), "x.bin")).toMatchObject({ mimeType: "text/csv", encoding: "utf-8" });
+  });
+
+  it("recognises GIF and BMP by their magic numbers, so text under those declared types is refused at intake", () => {
+    const gif = Buffer.concat([Buffer.from("GIF89a"), Buffer.alloc(32, 0)]);
+    expect(sniffFileBytes(gif, "a.gif", header).mimeType).toBe("image/gif");
+    const bmp = Buffer.alloc(54, 0);
+    bmp.write("BM", 0, "latin1");
+    bmp.writeUInt32LE(54, 2);
+    bmp.writeUInt32LE(40, 14);
+    expect(sniffFileBytes(bmp, "a.bmp", header).mimeType).toBe("image/bmp");
+    // Text starting "BM" is not a bitmap.
+    expect(sniffFileBytes(Buffer.from("BMW quarterly report\nrevenue up\n"), "notes.txt", header).mimeType).toBeNull();
+    for (const declared of ["image/gif", "image/bmp"]) {
+      expect(fileFactsFor(Buffer.from("just some words\n"), { filename: "x", declaredMimeType: declared }, header).mismatch).toBe("unresolved");
+    }
   });
 
   it("keeps unmarked text under a magic-bound declared type provisional only with a text extension", () => {

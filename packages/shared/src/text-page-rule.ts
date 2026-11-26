@@ -108,15 +108,52 @@ export function textPageCount(text: string, options: { markup?: boolean } = {}):
   return measuredTextPages(text, options);
 }
 
+/** Whether `code` is a character String.prototype.trim removes (ECMAScript WhiteSpace and LineTerminator). */
+function isTrimSpace(code: number): boolean {
+  return code === 0x20 || (code >= 0x09 && code <= 0x0d) || code === 0xa0 || code === 0x1680 || (code >= 0x2000 && code <= 0x200a)
+    || code === 0x2028 || code === 0x2029 || code === 0x202f || code === 0x205f || code === 0x3000 || code === 0xfeff;
+}
+
 /**
  * The same text rule as textPageCount over the whole text, never sampled: the worker's measured count of a text file, which
  * billing reads (worker/src/lib/text-page-count.ts). The caller bounds the text's size.
+ *
+ * Counted by one scan with constant extra memory (no split into lines: a 128 MiB file of newlines would otherwise build an
+ * array of about 134 million strings). Lines are the "\n" characters plus one ("\r\n" is one break, a lone "\r" none),
+ * as `split(/\r?\n/)` counts them; with `markup`, only lines holding a character `trim` keeps.
  */
 export function measuredTextPages(text: string, options: { markup?: boolean } = {}): number {
   const visible = options.markup ? stripHtmlMarkup(text) : text;
-  const lines = options.markup ? visible.split(/\r?\n/).filter((line) => line.trim() !== "").length : visible.split(/\r?\n/).length;
-  const trimmed = visible.trim();
-  let chars = trimmed.length;
-  for (const char of trimmed) if (isCjkCodePoint(char.codePointAt(0)!)) chars += TEXT_PAGE_CJK_WEIGHT - 1;
+  let lines = 0;
+  if (options.markup) {
+    let content = false;
+    for (let at = 0; at < visible.length; at++) {
+      const code = visible.charCodeAt(at);
+      if (code === 10) {
+        if (content) lines++;
+        content = false;
+      } else if (!content && !isTrimSpace(code)) content = true;
+    }
+    if (content) lines++;
+  } else {
+    lines = 1;
+    for (let at = visible.indexOf("\n"); at >= 0; at = visible.indexOf("\n", at + 1)) lines++;
+  }
+  // Characters of the trimmed text, East Asian code points weighted.
+  let start = 0, end = visible.length;
+  while (start < end && isTrimSpace(visible.charCodeAt(start))) start++;
+  while (end > start && isTrimSpace(visible.charCodeAt(end - 1))) end--;
+  let chars = end - start;
+  for (let at = start; at < end; at++) {
+    let code = visible.charCodeAt(at);
+    if (code >= 0xd800 && code <= 0xdbff && at + 1 < end) {
+      const low = visible.charCodeAt(at + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        code = (code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000;
+        at++;
+      }
+    }
+    if (isCjkCodePoint(code)) chars += TEXT_PAGE_CJK_WEIGHT - 1;
+  }
   return Math.max(1, Math.ceil(lines / TEXT_PAGE_LINES), Math.ceil(chars / TEXT_PAGE_CHARS));
 }

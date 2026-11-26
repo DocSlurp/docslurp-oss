@@ -1,13 +1,16 @@
 /**
- * VM guest: count a text file's pages with the shared text rule (measuredTextPages over the whole decoded text).
+ * VM guest: a text file's pages by the shared text rule (measuredTextPages over the whole decoded text), taken by the
+ * quarantine inspection every file already goes through (scripts/quarantine-inspect.mjs), so counting costs no extra
+ * command, download or staging.
  *
- * Runs only inside the credential-free parser VM in the service profile (`scripts/text-pages.mjs`); the host never decodes
- * a text source there (lib/text-page-count.ts refuses). The result is one page count and the byte length the guest read,
- * which the host checks against the staged file's own size and the most pages that many bytes can hold before it records
- * the count. Outside the service profile the host runs this same function in-process.
+ * Under the VM-only floor this runs only inside the credential-free parser VM; the host never decodes a text source there
+ * (lib/text-page-count.ts refuses). The answer is the page count (and, for HTML, the count with markup removed) and the
+ * byte length the guest read, which the host checks against the staged file's size and against bounds it takes from fixed
+ * byte comparisons of its own before it records anything. Outside the service profile the host runs this same function
+ * in-process. This module is imported dynamically by the guest scripts, so an image without it (or without the shared
+ * `text-page-rule` subpath) still inspects every file; it only lacks the text answer, and the contract does not advertise
+ * the capability.
  */
-import { open } from "node:fs/promises";
-
 import { decodeTextBytes, type FileEncoding } from "@docslurp/shared/file-sniff";
 import { measuredTextPages } from "@docslurp/shared/text-page-rule";
 
@@ -19,50 +22,50 @@ export const TEXT_MEASURE_MAX_BYTES = 128 * 1024 * 1024;
 
 export const TEXT_PAGE_ENCODINGS: ReadonlySet<FileEncoding> = new Set<FileEncoding>(["utf-8", "utf-8-bom", "utf-16le", "utf-16be", "8-bit"]);
 
-export interface TextPagesOptions {
-  /** The encoding the quarantine sniff recorded; null lets the decoder detect it from the bytes. */
-  encoding: FileEncoding | null;
-  /** HTML: tags, scripts and styles are removed and only non-blank lines count. */
+/** What the host asks of the inspection: count pages, with markup removed too (HTML), even when the sniff says binary. */
+export interface TextPagesRequest {
+  /** Also count with HTML markup removed (`markupPages`). The guest does so on its own when the sniff says HTML. */
   markup: boolean;
+  /** Count even when the sniff found no text encoding (a file the host will treat as text by its declared type). */
+  force: boolean;
 }
 
-export interface TextPagesResult {
-  pages: number;
+/**
+ * The inspection's text answer: `pages` by the plain rule, `markupPages` with HTML markup removed (when asked or sniffed
+ * as HTML), and `bytes`, the length the guest measured. Null in the result: not measured (not asked, not text, too large).
+ */
+export interface TextPagesInspection {
   bytes: number;
+  pages: number;
+  markupPages?: number;
 }
 
-/** Options as the host wrote them, refused when anything is unexpected. */
-export function parseTextPagesOptions(raw: unknown): TextPagesOptions {
-  const value = raw as Partial<TextPagesOptions> | null;
-  if (!value || typeof value !== "object" || Object.keys(value).some((key) => key !== "encoding" && key !== "markup")) throw new Error("invalid text pages options");
-  if (typeof value.markup !== "boolean") throw new Error("invalid text pages options");
-  if (!(value.encoding === null || (typeof value.encoding === "string" && TEXT_PAGE_ENCODINGS.has(value.encoding)))) throw new Error("invalid text pages options");
-  return { encoding: value.encoding, markup: value.markup };
+/** The request as the host wrote it into the guest's options, refused when anything is unexpected. */
+export function parseTextPagesRequest(raw: unknown): TextPagesRequest | null {
+  if (raw === undefined || raw === null) return null;
+  const value = raw as Partial<TextPagesRequest>;
+  if (typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "markup" && key !== "force")
+    || typeof value.markup !== "boolean" || typeof value.force !== "boolean") throw new Error("invalid text pages request");
+  return { markup: value.markup, force: value.force };
 }
 
 /** Pages of decoded `bytes` by the text rule; an empty file is one page. */
-export function measureTextPagesBytes(bytes: Uint8Array, options: TextPagesOptions): TextPagesResult {
+export function measureTextPagesBytes(bytes: Uint8Array, options: { encoding: FileEncoding | null; markup: boolean }): { pages: number; bytes: number } {
   if (bytes.length > TEXT_MEASURE_MAX_BYTES) throw new Error(`text file too large to measure (over ${TEXT_MEASURE_MAX_BYTES} bytes)`);
   const pages = bytes.length === 0 ? 1 : measuredTextPages(decodeTextBytes(bytes, options.encoding ?? undefined), { markup: options.markup });
   return { pages, bytes: bytes.length };
 }
 
-/** Reads at most TEXT_MEASURE_MAX_BYTES + 1 bytes of `filePath` (a larger file is refused, never read in full). */
-export async function measureTextPagesFile(filePath: string, options: TextPagesOptions): Promise<TextPagesResult> {
-  const handle = await open(filePath, "r");
-  try {
-    const { size } = await handle.stat();
-    if (size > TEXT_MEASURE_MAX_BYTES) throw new Error(`text file too large to measure (over ${TEXT_MEASURE_MAX_BYTES} bytes)`);
-    const buffer = Buffer.alloc(size);
-    let offset = 0;
-    while (offset < size) {
-      const { bytesRead } = await handle.read(buffer, offset, size - offset, offset);
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    if (offset !== size) throw new Error("text file changed while it was read");
-    return measureTextPagesBytes(buffer, options);
-  } finally {
-    await handle.close();
-  }
+/**
+ * The text answer for the inspection result: measured when asked and the bytes are text by the sniff (or `force`), up to
+ * TEXT_MEASURE_MAX_BYTES; null otherwise. Decodes once (by the sniffed encoding, or detection when none) and counts both
+ * ways when markup is wanted.
+ */
+export function inspectTextPages(bytes: Uint8Array, sniffed: { mimeType: string | null; encoding: FileEncoding | null }, request: TextPagesRequest | null): TextPagesInspection | null {
+  if (!request || bytes.length > TEXT_MEASURE_MAX_BYTES) return null;
+  if (sniffed.encoding === null && !request.force) return null;
+  const markup = request.markup || sniffed.mimeType === "text/html";
+  if (bytes.length === 0) return { bytes: 0, pages: 1, ...(markup ? { markupPages: 1 } : {}) };
+  const text = decodeTextBytes(bytes, sniffed.encoding ?? undefined);
+  return { bytes: bytes.length, pages: measuredTextPages(text), ...(markup ? { markupPages: measuredTextPages(text, { markup: true }) } : {}) };
 }

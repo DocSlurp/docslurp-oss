@@ -37,6 +37,12 @@ export function boundedRasterEdge(widthPt: number, heightPt: number, dpi: number
  * rounded up, width and height swapped for a page rotated 90 or 270 degrees), from the page's CropBox size in points and
  * rotation. The host takes a render's dimensions from this plan, never from the PNG the parser VM wrote. Null when the
  * rotation is unknown.
+ *
+ * Accurate to one pixel, not exact: pdfinfo prints sizes to six significant digits while pdftoppm uses the page's real box
+ * (a 1283.6004-point page prints as 1283.6; 612.0004 and 611.9996 both print as 612), and floating point can round the
+ * short side either way: a square page renders one pixel wider than `edge`, as pdftoppm itself does, so a side is at most
+ * `edge + 1`. Callers use it as metadata (stored image dimensions, area
+ * estimates), never as exact pixel coordinates; anything that needs exact pixels must measure the image in the VM.
  */
 export function plannedPdftoppmDimensions(size: { widthPt: number; heightPt: number; rotate?: number }, edge: number): { widthPx: number; heightPx: number } | null {
   const { widthPt, heightPt, rotate } = size;
