@@ -7,7 +7,7 @@ import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
 import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
-import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
+import { recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES } from "../lib/text-page-count.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { detectFileFormat, resolvePdfMode, type NormalizedFormat } from "@docslurp/shared";
@@ -70,11 +70,14 @@ export class FormatDetectStage implements Stage {
             // Hash-bound like every parser read (council R7-L2): bytes that are not the decided parse source are refused.
             sourcePath: async () => (temp ??= await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
           }).finally(async () => { if (temp) await cleanupTempFile(temp); }) : null;
-          // A text file intake could not count in full (sampled over 2 MB, or no evidence): the same text rule over the whole text.
+          // A text file (intake estimates every one from its size and never decodes it): the text rule over the whole text, in the
+          // parser VM under the VM-only floor (hash-bound staged source), in-process only in development.
+          let textTemp: string | null = null;
           const textPages = await recordMeasuredTextPageCount({
-            state, document, format: normalizedFormat,
+            state, document, format: normalizedFormat, runner: this.runner, signal,
             readSource: (maxBytes) => readSourceBytes(this.storage, document, { maxBytes }),
-          });
+            stageSource: async () => (textTemp ??= await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-text-pages-", document), { maxBytes: TEXT_MEASURE_MAX_BYTES })),
+          }).finally(async () => { if (textTemp) await cleanupTempFile(textTemp); });
           // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
           // what admission priced, from durable state (intake_page_count), before any later stage runs.
           await state.pageBasis.authorize(document);

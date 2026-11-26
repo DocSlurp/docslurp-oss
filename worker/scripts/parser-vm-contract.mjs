@@ -2,7 +2,7 @@
 import { access, constants } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "chart-inline.mjs", "../dist/chart-export/inline-guest.js", "../dist/chart-export/extractors/limits.js", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "vision-tables.mjs", "table-routing.mjs", "chart-export-extract.mjs", "chart-export-worker.mjs", "../dist/chart-export/guest.bundle.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/vision-tables-guest.js", "../dist/pipeline/table-routing-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js", "../dist/lib/archive-nesting.js", "../dist/lib/pdf-encryption-structure.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
+for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "chart-inline.mjs", "../dist/chart-export/inline-guest.js", "../dist/chart-export/extractors/limits.js", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "vision-tables.mjs", "table-routing.mjs", "text-pages.mjs", "chart-export-extract.mjs", "chart-export-worker.mjs", "../dist/chart-export/guest.bundle.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/vision-tables-guest.js", "../dist/pipeline/table-routing-guest.js", "../dist/lib/text-pages-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js", "../dist/lib/archive-nesting.js", "../dist/lib/pdf-encryption-structure.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
 // The chart-export guest runs one bundled module: refuse a stale bundle (worker dist changed after it was built), then
 // import it and extract a built-in SVG and XLSX, so a bundle that is present but broken fails here, not per document.
 const { probeChartGuestBundle, probeInlineCharts, verifyChartGuestBundle, verifyCompileCache } = await import("./chart-guest-bundle.mjs");
@@ -52,4 +52,8 @@ try { qpdfVersion = /^qpdf version (\d+\.\d+\.\d+)/m.exec(execFileSync("qpdf", [
 // the host refuses inline charts on an image without it (DOCSLURP_CHART_EXPORT_INLINE=1).
 const { inlineStepBudget } = await import("../dist/chart-export/inline-guest.js");
 const capabilities = typeof inlineStepBudget === "function" ? ["inline-command-budget"] : [];
+// "text-pages": the text-rule page count guest (text-pages.mjs). Probed on built-in bytes, so a present but broken module
+// (its @docslurp/shared subpaths missing from this image) is not advertised; the host refuses text page counts without it.
+const { measureTextPagesBytes } = await import("../dist/lib/text-pages-guest.js");
+if (measureTextPagesBytes(new TextEncoder().encode("one\ntwo\n"), { encoding: "utf-8", markup: false }).pages === 1) capabilities.push("text-pages");
 console.log(JSON.stringify({ protocol: "parser-vm@5", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2, qpdfVersion, capabilities }));
