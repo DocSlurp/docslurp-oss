@@ -112,8 +112,10 @@ export async function writeSummaryRows(args: WriteSummaryRowsArgs): Promise<Vect
         and d.purged_at is null and d.superseded_at is null and d.archived_at is null
         and not coalesce((d.metadata->'pii'->>'blocked')::boolean, false)
         and not coalesce((d.metadata->'pii'->>'redacted')::boolean, false)
-        and coalesce(jsonb_array_length(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
-          then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0
+        -- Page- and section-scoped withholding: summaries come from the rewritten text (summary-tree/state-store.ts).
+        and (coalesce(d.metadata->'pii'->>'scope', '') in ('pages', 'sections')
+          or coalesce(jsonb_array_length(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
+            then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0)
         and not exists (select 1 from pii_detections pd where pd.document_id = d.id and pd.redacted)
       for key share of d
     `;

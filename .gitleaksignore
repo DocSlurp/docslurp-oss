@@ -2,3 +2,5 @@
 # now assembles them at runtime. History cannot be rewritten, so the two findings are listed.
 3fa23a720b3e3a64f2e87b920e48920ce568e11b:packages/shared/src/__tests__/telemetry-span.test.ts:stripe-access-token:96
 3fa23a720b3e3a64f2e87b920e48920ce568e11b:packages/shared/src/__tests__/telemetry-span.test.ts:jwt:97
+# Fake PEM key in the page-break PII test (feat/pii-page-scoped, commit 3190e8b8); the test now assembles it at runtime.
+3190e8b8779d299dd983a6974846f94fb23cccea:worker/src/__tests__/pii-page-scoped.test.ts:private-key:172

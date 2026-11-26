@@ -19,7 +19,14 @@ import {
   qualityAllowsPageReading,
   richPagesForOutputTokens,
   type MaterializePagesInput,
-  type PipelineFeatures, switchDisabled } from "@docslurp/shared";
+  type PipelineFeatures,
+  switchDisabled,
+  isPageWithheld,
+  type PiiPatternType,
+  isDeferredMode,
+  piiPolicyWithholds,
+  withoutPendingScan,
+} from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
@@ -39,6 +46,8 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import { projectVectorLocation } from "../stages/lancedb-location.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { resolvePolicy } from "../stages/pii-detect.js";
+import { loadDocumentPiiWithholding } from "../pipeline/pii-gate.js";
+import { recordDeferredPiiMatch } from "../lib/pii-deferred-outcome.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -566,18 +575,65 @@ export async function materializePageRange(
   const blocked: number[] = [];
   /** Pages with any PII match: their read is never kept, so a retry re-reads under the policy in force then. */
   const piiMatched = new Set<number>();
+  // Pages the document's ingest scan withheld stay withheld, whatever this read finds (page-scoped PII, one helper).
+  // Pages not scanned yet are what this read is about to scan: only what the policy withheld is dropped here.
+  const recorded = withoutPendingScan(await loadDocumentPiiWithholding(deps.sql as never, documentId));
+  for (const entry of [...prepared.values()]) {
+    if (!isPageWithheld(recorded, entry.page)) continue;
+    piiMatched.add(entry.page);
+    prepared.delete(entry.page);
+    blocked.push(entry.page);
+  }
+  /** Pages this read matched (not already withheld), with the kinds of PII found: recorded before anything is indexed. */
+  const newMatches = new Map<number, PiiPatternType[]>();
+  /** Pages whose read text this batch scanned. */
+  const scannedNow = new Set<number>();
   if (scan) {
     for (const entry of [...prepared.values()]) {
+      scannedNow.add(entry.page);
       const scanned = scan(entry.text, entry.page);
       if (scanned.matches.length === 0) continue;
       piiMatched.add(entry.page);
-      if (policy.action === "block_indexing") {
+      newMatches.set(entry.page, [...new Set(scanned.matches.map((match) => match.patternType))]);
+      // Deferred pages are read one by one: block_indexing withholds the page that matched; block_document (below)
+      // blocks the whole document.
+      if (policy.action === "block_indexing" || policy.action === "block_document") {
         prepared.delete(entry.page);
         blocked.push(entry.page);
       } else if (policy.action === "redact_artifacts") {
         entry.text = scanned.redacted;
       }
     }
+  }
+
+  // A match is recorded on the document before anything of this batch is indexed, exactly as the ingest scan records it
+  // (pii-deferred-outcome.ts): the page (types, findings, its image and the source withheld), merged with any earlier
+  // outcome under the row lock. `block_document` (or every page withheld) blocks the document, and nothing of this
+  // batch is indexed. Redaction records the redacted pages, whose images are then withheld.
+  // Under a withholding or redaction policy in a deferred mode, the pages this read scanned are added to the
+  // document's scan: their pixels and text become servable (unless withheld), and the source once every page is.
+  // A page that was read and came back empty was read too: it counts as scanned (it holds no text to match).
+  for (const [page, reason] of failed) if (reason === "empty-page") scannedNow.add(page);
+  const scanProgress = scan && piiPolicyWithholds(policy) && isDeferredMode(pipeline)
+    ? { scan: { pages: new Set([...scannedNow]), reset: false } }
+    : {};
+  if (newMatches.size > 0) {
+    const merged = await deps.sql.begin((tx) => recordDeferredPiiMatch(tx as never, documentId, {
+      pages: newMatches, action: policy.action, runId: input.runId, pageCount: document.pageCount,
+      sourceUri: deps.storage.uri(document.sourceKey), ...scanProgress,
+      matches: (text) => scan!(text).matches.length > 0,
+    }));
+    // Null: the document was withheld whole meanwhile (a concurrent read); fail closed for this batch too.
+    if (merged?.blocked || (merged === null && policy.action !== "flag_for_review")) {
+      for (const entry of [...prepared.values()]) { prepared.delete(entry.page); blocked.push(entry.page); }
+    }
+  } else if (scanProgress.scan && scannedNow.size > 0) {
+    // Nothing matched: one locked update records the scanned pages (none when the scan is already complete).
+    await deps.sql.begin((tx) => recordDeferredPiiMatch(tx as never, documentId, {
+      // No match: nothing is withheld, so the source URI is not used.
+      pages: new Map(), action: policy.action, runId: input.runId, pageCount: document.pageCount,
+      sourceUri: "", ...scanProgress,
+    }));
   }
 
   // 3. Chunk, with map headings when a document map exists.

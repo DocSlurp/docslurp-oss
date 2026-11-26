@@ -150,6 +150,23 @@ describe("decision client request shapes", () => {
     const failing = createDecisionClient({ privacyMode: "standard", env, fetchImpl: mockFetch({ error: "bad" }, 400), retry, ...proven });
     await expect(inAllowingRun(() => failing.ask(model, "s", questions))).rejects.toMatchObject({ status: 400 });
   });
+
+  it("keeps response text out of the error: a code and status on failure, a fixed message for a body that is not JSON", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const model = catalogModel("perplexity/pplx-decider-v1.1-27b");
+    const marker = "INTERNAL-ONLY-BODY service-token=abc123";
+    const failing = createDecisionClient({ privacyMode: "standard", env, fetchImpl: mockFetch({ error: marker }, 400), retry, ...proven });
+    const refused = await inAllowingRun(() => failing.ask(model, "s", questions)).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(DecisionRequestError);
+    expect((refused as Error).message).toContain("bad-request (400)");
+    expect((refused as Error).message).not.toContain(marker);
+    const notJson = vi.fn(async () => new Response(`<html>${marker}</html>`, { status: 200 }));
+    const garbled = createDecisionClient({ privacyMode: "standard", env, fetchImpl: notJson, retry, ...proven });
+    const parsed = await inAllowingRun(() => garbled.ask(model, "s", questions)).catch((error: unknown) => error);
+    expect(parsed).toBeInstanceOf(DecisionRequestError);
+    expect((parsed as Error).message).toContain("invalid-json");
+    expect(JSON.stringify({ message: (parsed as Error).message, cause: String((parsed as Error).cause ?? "") })).not.toContain(marker);
+  });
 });
 
 describe("privacy", () => {

@@ -17,7 +17,8 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { dopplerImageLimits, figuresEnabled, type PipelineFeatures } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, isPageImageWithheld, type PipelineFeatures } from "@docslurp/shared";
+import { pageScopedTextVerified, perPageArtifactServable } from "../lib/pii-page-withholding.js";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchEvent, type SandboxedPdfBatchFile, type SandboxedPdfBatchJob, type SandboxedPdfBatchProvider,
@@ -26,7 +27,7 @@ import { markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvid
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { pageFactsForResend } from "../extractors/sandboxed-pdf-page-facts.js";
 import { dopplerPageFactsRequest } from "../lib/doppler-page-facts.js";
-import { DopplerFigureRejection, disposeDopplerFigureSet, dopplerFigureUris, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
+import { DOPPLER_MARKDOWN_SLOT, DopplerFigureRejection, disposeDopplerFigureSet, dopplerFigureSlotUris, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
 import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
@@ -722,6 +723,12 @@ export async function storeFirstPassFigures(args: {
   try {
     const rowScope = { orgId: state.run.orgId ?? null, runId: state.run.id, documentId };
     const withhold = piiEnabled ? await pii!.documentPiiWithholds(rowScope) : false;
+    // Page-scoped withholding (pii-withholding.ts): only the withheld pages' files join the list, and `document.md` is
+    // kept when the slot's text provably carries the placeholder on every withheld page. Anything else that withholds
+    // (redaction, a blocked document, an outcome that cannot be read or does not match the text) withholds everything.
+    const recorded = withhold ? await pii!.documentPiiWithholding(rowScope) : null;
+    const pageScoped = recorded?.scope === "pages" ? recorded : null;
+    const markdownKept = !withhold || (pageScoped !== null && pageScopedTextVerified(args.markdownSlot, pageScoped, document.pageCount));
     figures = await readDopplerFigureDir(args.dir, {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
       sourceSha256: document.sourceSha256 ?? null, gaps: outcome.gaps ?? null,
@@ -729,15 +736,32 @@ export async function storeFirstPassFigures(args: {
     const committedUris = committedDocumentUris(state, documentId);
     // Withheld before any byte is uploaded or any row is marked stored (the ledger serves stored rows): every object this
     // store can make reachable joins the list first. A failed append stores nothing (fail closed) and deletes nothing.
-    if (withhold) await pii!.appendWithheldArtifactUris(rowScope, dopplerFigureUris(args.storage, document, args.runId, figures));
+    // Page-scoped: only the clean pages' figures (and the verified `document.md`) stay off the list.
+    const cleanPage = (page: number) => pageScoped !== null && page <= document.pageCount && !isPageImageWithheld(pageScoped, page);
+    const servable = ({ slot }: { slot: string | null }) =>
+      slot !== null && (perPageArtifactServable(slot, cleanPage) || (pageScoped !== null && markdownKept && slot === DOPPLER_MARKDOWN_SLOT));
+    if (withhold) {
+      await pii!.appendWithheldArtifactUris(rowScope, dopplerFigureSlotUris(args.storage, document, args.runId, figures).filter((entry) => !servable(entry)).map(({ uri }) => uri));
+    }
     const stored = await storeDopplerFigures({
       storage: args.storage, document, runId: args.runId, figures, markdown: args.markdownSlot?.toString("utf8") ?? "",
-      documentMarkdown: withhold ? null : args.markdownSlot, source: dopplerSourcePointer(document), signal: args.signal,
+      documentMarkdown: markdownKept ? args.markdownSlot : null, source: dopplerSourcePointer(document), signal: args.signal,
       committedUris,
       ...(ledgerHooks ? { ledger: ledgerHooks } : {}),
     });
-    // Every recorded slot is withheld (a no-op union when the list above already covers it); never a delete.
-    if (withhold) await pii!.appendWithheldArtifactUris(rowScope, stored.slots.map(({ uri }) => uri));
+    if (withhold) {
+      try {
+        // Figures of clean pages stay servable, and so does the verified `document.md`; every other file (the index,
+        // manifests, withheld pages' figures) is on the list already. Without a page-scoped outcome, everything is.
+        // A no-op union for what the pre-upload list covered; never a delete of a committed object.
+        await pii!.appendWithheldArtifactUris(rowScope, stored.slots.filter((entry) => !servable(entry)).map(({ uri }) => uri));
+      } catch (error) {
+        // Nothing records these objects: remove them (never a committed one) rather than leave them unreachable.
+        const removable = stored.objectKeys.filter((objectKey) => !committedUris.has(args.storage.uri(objectKey)));
+        if (removable.length > 0) await args.storage.deleteKeys?.(removable).catch(() => undefined);
+        throw error;
+      }
+    }
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));
