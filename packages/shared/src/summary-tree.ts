@@ -55,6 +55,13 @@ export type UpdateProjectSummaryTreeInput = z.infer<typeof updateProjectSummaryT
 export const SUMMARY_TREE_BUILD_ENV_FLAG = "DOCSLURP_SUMMARY_TREE_BUILD";
 export const SUMMARY_TREE_SERVE_ENV_FLAG = "DOCSLURP_SUMMARY_TREE_SERVE";
 
+/**
+ * `DOCSLURP_SUMMARY_SCAN`: parsed like the switches above (unset and unknown are off). On, the document summary stage
+ * keeps reading further page samples of a large document until its labels stop changing and stores the labels beside
+ * the summary. Off is the single-call summary. It is not a tree switch and needs no project setting.
+ */
+export const SUMMARY_SCAN_ENV_FLAG = "DOCSLURP_SUMMARY_SCAN";
+
 export const SUMMARY_TREE_ENV_ON_VALUES: readonly string[] = ["on", "1", "true", "yes"];
 export const SUMMARY_TREE_ENV_OFF_VALUES: readonly string[] = ["", "off", "0", "false", "no"];
 
@@ -75,10 +82,15 @@ export function summaryTreeServeAvailable(env: Env): boolean {
   return switchOn(env, SUMMARY_TREE_SERVE_ENV_FLAG);
 }
 
+/** Whether this deployment lets the document summary read further page samples of large documents. */
+export function summaryScanAvailable(env: Env): boolean {
+  return switchOn(env, SUMMARY_SCAN_ENV_FLAG);
+}
+
 /** Startup warnings for switch values the parser does not know (each is treated as off). */
 export function summaryTreeSwitchWarnings(env: Env): string[] {
   const warnings: string[] = [];
-  for (const flag of [SUMMARY_TREE_BUILD_ENV_FLAG, SUMMARY_TREE_SERVE_ENV_FLAG]) {
+  for (const flag of [SUMMARY_TREE_BUILD_ENV_FLAG, SUMMARY_TREE_SERVE_ENV_FLAG, SUMMARY_SCAN_ENV_FLAG]) {
     const raw = env[flag];
     if (raw === undefined) continue;
     const value = raw.trim().toLowerCase();

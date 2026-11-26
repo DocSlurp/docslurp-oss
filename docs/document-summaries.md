@@ -107,6 +107,22 @@ structured extraction for exact prices, product records and version comparisons.
 The limits above constrain summary work; they do not replace ingestion limits
 for parsing, OCR, page indexing or storage.
 
+## Adaptive summary and labels (`DOCSLURP_SUMMARY_SCAN`)
+
+Off by default (unset and unknown values are off). The summary stage normally makes one model call over at most ten
+sampled pages and 10 KB. With `DOCSLURP_SUMMARY_SCAN=on`, a document that has more pages than that sample, verified page
+references and a page offset index gets a short read loop instead: the first call reads the same evidence as today and
+returns a document type, up to six topics and the summary; later calls read ten further pages each, spread across the
+unread pages, until the type and topics stop changing (same type, topic overlap of at least 0.8 on two consecutive
+calls) or a limit is reached (six model calls in all, a small cost and token cap, the summary deadline). Every call is
+reported as `summary-generation` usage; the per-document summary charge stays one.
+
+Every other document (small, no index, unverified pages, text files, a document whose pages were redacted for PII) keeps
+the single call and the same prompt. A failed later call or page never fails the document: the best state so far is
+stored. `summaries/<documentId>.json` gains two optional fields, `labels` (`docType`, `topics`) and `scan` (`steps`,
+`stoppedBy`, `pagesRead`, `pagesTotal`); readers that do not know them ignore them. Document text, topics and
+summaries are never logged or traced by this path.
+
 ## Summary tree: section summaries for long documents
 
 A project that turns the summary tree on gets, for each long document, summaries

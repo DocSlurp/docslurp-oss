@@ -1,4 +1,4 @@
-import { calculateAiUsageCostCents, resolveAllowedPipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { calculateAiUsageCostCents, resolveAllowedPipelineTextModel, summaryScanAvailable, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -23,6 +23,7 @@ import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { selectSummaryInput } from "./summary-input.js";
 import { readSummarySource } from "./summary-source.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { openScanSource, runSummaryScan, scanArtifactFields, scanEligible, type ScanModelCall, type ScanOutcome } from "./summary-scan.js";
 
 export const SUMMARY_MAX_CONCURRENCY = 4;
 const SUMMARY_DEADLINE_MS = 120_000;
@@ -68,6 +69,7 @@ export class DocumentSummaryStage implements Stage {
             if (isCostCapExceeded(state)) {
               return { message: "Document summary skipped: run cost cap reached", stats: { summarySkipped: "cost-cap" } };
             }
+            const summaryStartedAt = Date.now();
             const deadline = AbortSignal.timeout(SUMMARY_DEADLINE_MS);
             const summarySignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
             const extracted = await readSummarySource(
@@ -84,6 +86,11 @@ export class DocumentSummaryStage implements Stage {
             const sourceStats = { sourceBytes: extracted.sourceBytes, readBytes: extracted.readBytes,
               inputCharacters: selected.text.length, inputBytes: Buffer.byteLength(selected.text), sampled: selected.sampled,
               coverage: extracted.coverage ?? { totalPages: document.pageCount || null, pages: [], pageReferences: "unavailable" } };
+            // Adaptive labels (DOCSLURP_SUMMARY_SCAN): null unless the flag is on and the document qualifies.
+            const scan = summaryScanAvailable(process.env) && extracted.coverage
+              ? await this.scanSummary({ state, document, extracted, selected, model, signal: summarySignal,
+                  wallMs: SUMMARY_DEADLINE_MS - (Date.now() - summaryStartedAt) })
+              : null;
             const {
               text: generatedSummary,
               finishReason,
@@ -91,7 +98,8 @@ export class DocumentSummaryStage implements Stage {
               outputTokens: summaryOutputTokens,
               costCents: providerCostCents,
               metadata: costMetadata,
-            } = await measureOp(
+            } = scan ? { text: scan.state.summary, finishReason: "stop", inputTokens: scan.inputTokens, outputTokens: scan.outputTokens,
+              costCents: scan.costCents, metadata: undefined } : await measureOp(
               "summary-llm-latency",
               () => this.generateSummary(selected, model, state.run.pipeline.privacyMode, summarySignal, state.run.pipeline.textGeneration),
               { metadata: { documentId: document.id } },
@@ -104,8 +112,8 @@ export class DocumentSummaryStage implements Stage {
               costPer1kOutputTokens: this.config.costPer1kOutputTokens,
             });
 
-            // Account for generation even if embedding or persistence fails later.
-            state.usageLedger.record({
+            // Account for generation even if embedding or persistence fails later (the scan recorded each of its calls).
+            if (!scan) state.usageLedger.record({
               ...textUsageLabels(model),
               metric: "summary-generation",
               amount: 1,
@@ -157,6 +165,7 @@ export class DocumentSummaryStage implements Stage {
               documentId: document.id,
               summary: summaryText,
               sourceSelection: sourceStats,
+              ...(scan ? scanArtifactFields(scan) : {}),
               tokenEstimate: estimateTokens(summaryText),
               embedding: {
                 model: profile.model,
@@ -198,6 +207,95 @@ export class DocumentSummaryStage implements Stage {
         );
       },
     );
+  }
+
+  /**
+   * The adaptive scan: null (today's single call) unless the evidence is a verified page sample, a page offset index
+   * describes the current Markdown and the document's text was not rewritten for PII. Logs ids, counts and the stop
+   * reason only: never page text, labels, summaries or file names.
+   */
+  private async scanSummary(args: {
+    state: WorkflowState;
+    document: { id: string; filename?: string | null };
+    extracted: NonNullable<Awaited<ReturnType<typeof readSummarySource>>>;
+    selected: { text: string; sampled: boolean };
+    model: string;
+    signal: AbortSignal;
+    wallMs: number;
+  }): Promise<ScanOutcome | null> {
+    const { state, document, extracted, selected, model, signal } = args;
+    try {
+      const coverage = extracted.coverage;
+      if (!scanEligible(coverage, selected.sampled)) return null;
+      // Redaction rewrites the Markdown under the same key; never read pages of a document it touched.
+      if (state.documentStage?.(document.id, "pii-detect")?.stats?.redacted === true) return null;
+      const evidenceUri = state.artifactLedger.readDocument(document.id, "summary-evidence");
+      const markdownUri = state.artifactLedger.readDocument(document.id, "markdown");
+      if (!evidenceUri || !markdownUri) return null;
+      const source = await openScanSource({ storage: this.storage, documentId: document.id, evidenceUri, markdownUri,
+        pagesTotal: coverage.totalPages, signal });
+      if (!source) return null;
+      const textGeneration = state.run.pipeline.textGeneration;
+      const call: ScanModelCall = async ({ system, prompt, maxOutputTokens, signal: callSignal }) => {
+        const result = await generateOpenRouterText({
+          operation: "document-summary",
+          apiKey: textModelApiKey(this.config.openRouterApiKey, model),
+          privacyMode: state.run.pipeline.privacyMode,
+          model,
+          maxOutputTokens,
+          textGeneration: {
+            ...textGeneration,
+            model: textGeneration?.model ?? null,
+            models: textGeneration?.models ?? {},
+            reasoningEfforts: { ...textGeneration?.reasoningEfforts,
+              "document-summary": textGeneration?.reasoningEfforts?.["document-summary"] ?? textGeneration?.reasoningEffort ?? "none" },
+            maxOutputTokens: { ...textGeneration?.maxOutputTokens,
+              "document-summary": Math.min(maxOutputTokens, textGeneration?.maxOutputTokens?.["document-summary"] ?? maxOutputTokens) },
+          },
+          deploymentProfile: this.config.textGenerationProfile,
+          system,
+          prompt,
+          signal: callSignal,
+        });
+        const { inputTokens, outputTokens, costCents, metadata } = result.usage;
+        return { text: result.text, finishReason: result.finishReason, inputTokens, outputTokens, metadata,
+          costCents: costCents ?? calculateAiUsageCostCents({ inputTokens, outputTokens,
+            costPer1kInputTokens: this.config.costPer1kInputTokens, costPer1kOutputTokens: this.config.costPer1kOutputTokens }) };
+      };
+      let recorded = 0;
+      const outcome = await runSummaryScan({
+        call,
+        onAttempt: (result, info) => {
+          state.usageLedger.record({
+            ...textUsageLabels(model),
+            metric: "summary-generation",
+            // One summary per document: the first attempt carries the unit, later calls only their tokens and cost.
+            amount: recorded++ === 0 ? 1 : 0,
+            unit: "document",
+            costCents: result.costCents ?? 0,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            metadata: { ...result.metadata, documentId: document.id, scanStep: info.step, scanAttempt: info.attempt },
+          });
+        },
+        source,
+        fileName: document.filename ?? "",
+        evidenceText: selected.text,
+        evidencePages: coverage.pages.map((page) => page.pageNumber),
+        signal,
+        shouldStop: () => isCostCapExceeded(state),
+        wallMs: args.wallMs,
+      });
+      if (!outcome) {
+        console.warn(`[document-summary] summary_scan_round1_failed document=${document.id}`);
+        return null;
+      }
+      console.info(`[document-summary] summary_scan document=${document.id} steps=${outcome.steps} stopped_by=${outcome.stoppedBy} pages_read=${outcome.pagesRead} pages_total=${outcome.pagesTotal}`);
+      return outcome;
+    } catch (error) {
+      console.warn(`[document-summary] summary_scan_unavailable document=${document.id} error=${error instanceof Error ? error.name : "Error"}`);
+      return null;
+    }
   }
 
   private async generateSummary(
