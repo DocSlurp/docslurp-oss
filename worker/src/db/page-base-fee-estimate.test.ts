@@ -135,16 +135,46 @@ describe("estimate high end against the worker's charge", () => {
   });
 });
 
+/**
+ * Every place in the worker that charges a page read, and the pipeline stage it charges under. A read charge is a call of
+ * the usage ledger's chargeOcrPage or chargeRichPage, or a usage event whose metric is one of the read metrics (the ledger
+ * turns those into OCR or Rich page charges), written literally or as the hosted reader's `purpose`. `null`: not a run stage,
+ * so a run or reprocess estimate never prices it (named with the reason).
+ */
+const READ_CHARGE_SITES: Record<string, PipelineRunStage[] | null> = {
+  "stages/document-map.ts": ["document-map"],
+  "stages/page-embed.ts": ["page-embed"],
+  "stages/extract-markdown.ts": ["extract-markdown"],
+  "stages/vision-extract.ts": ["vision-extract"],
+  // The OCR route's helpers: called from extraction (the OCR route of extract-markdown and the vision stage's OCR reader).
+  "ocr/ledger.ts": ["extract-markdown", "vision-extract"],
+  "ocr/page-reader.ts": ["extract-markdown", "vision-extract"],
+  "ocr/hosted-reader.ts": ["extract-markdown", "vision-extract"],
+  "routing/executors/deps.ts": ["extract-markdown", "vision-extract"],
+  // Map mode's on-demand page materialization: its own job after the run, billed there, not by a run's stages.
+  "deferred/materialize-pages.ts": null,
+};
+
+/** Worker source files (relative to src/) whose code charges a page read, by the patterns READ_CHARGE_SITES describes. */
+function readChargingFiles(): string[] {
+  const src = join(import.meta.dirname, "..");
+  const metrics = [...OCR_PAGE_READ_METRICS, ...RICH_PAGE_READ_METRICS].map((metric) => metric.replace(/[-]/g, "\\-")).join("|");
+  const charges = new RegExp(`\\.chargeOcrPage\\(|\\.chargeRichPage\\(|metric:\\s*(?:"(?:${metrics})"|purpose\\b)`);
+  return (readdirSync(src, { recursive: true }) as string[])
+    .map((file) => file.split("\\").join("/"))
+    .filter((file) => file.endsWith(".ts") && !file.includes(".test.") && !file.includes("__tests__") && file !== "pipeline/usage-ledger.ts")
+    .filter((file) => charges.test(readFileSync(join(src, file), "utf8")))
+    .sort();
+}
+
 describe("PAGE_READ_CHARGING_STAGES", () => {
-  it("lists every stage whose code charges a page read (OCR or Rich)", () => {
-    const dir = join(import.meta.dirname, "..", "stages");
-    const metrics = [...OCR_PAGE_READ_METRICS, ...RICH_PAGE_READ_METRICS].map((metric) => metric.replace(/[-]/g, "\\-")).join("|");
-    const charges = new RegExp(`chargeOcrPage\\(|chargeRichPage\\(|metric:\\s*"(?:${metrics})"`);
-    const charging = readdirSync(dir)
-      .filter((file) => file.endsWith(".ts") && !file.includes(".test."))
-      .filter((file) => charges.test(readFileSync(join(dir, file), "utf8")))
-      .map((file) => file.replace(/\.ts$/, ""));
-    expect(charging.length).toBeGreaterThan(0);
-    for (const stage of charging) expect(PAGE_READ_CHARGING_STAGES).toContain(stage as PipelineRunStage);
+  it("every read-charging call site in the worker is mapped to a stage the estimate counts as reading pages", () => {
+    const found = readChargingFiles();
+    expect(found.length).toBeGreaterThan(0);
+    // A new call site fails here until it is mapped: to its stage (then listed in PAGE_READ_CHARGING_STAGES) or to null.
+    expect(found).toEqual(Object.keys(READ_CHARGE_SITES).sort());
+    for (const stages of Object.values(READ_CHARGE_SITES)) {
+      for (const stage of stages ?? []) expect(PAGE_READ_CHARGING_STAGES).toContain(stage);
+    }
   });
 });

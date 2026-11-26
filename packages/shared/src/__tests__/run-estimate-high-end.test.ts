@@ -158,21 +158,63 @@ describe("run estimate high end covers the charge that follows", () => {
     expect(capped.credits!.high).toBeGreaterThanOrEqual(100 * rich * TEST_HIGH_RICH_PAGES_PER_READ);
   });
 
-  it("a reprocess of page embedding alone charges every page it embeds Rich", () => {
+  it("a reprocess of page embedding alone charges exactly one Rich page per page, at both ends", () => {
     const features = { ...at("smartest"), indexingMode: "visual" } as PipelineFeatures;
     const plan = subsetStages(features, ["page-embed"]);
     expect(plan.stageOrder).toContain("page-embed");
     expect(plan.stageOrder).not.toContain("extract-markdown");
     const estimate = estimatePipelineWork({ features, stages: plan.stageOrder, pages, documents: 4, env });
+    // One Rich page per embedded page, never the planning figure for a dense answer (an embedding has no output tokens).
     expect(estimate.credits!.high).toBeGreaterThanOrEqual(pages * rich);
-    expect(estimate.credits!.high).toBeLessThan(pages * rich * TEST_HIGH_RICH_PAGES_PER_READ * 1.01);
+    expect(estimate.credits!.high).toBeLessThan(pages * rich * 1.01);
+    // The charge is certain: the low end carries it too.
+    expect(estimate.credits!.low).toBeCloseTo(pages * rich, 3);
+    expect(estimate.basis).toMatch(/one Rich page per page it embeds/);
   });
 
-  it("an Auto ladder limit keeps page embedding off, so Fastest's high end stays at OCR reads", () => {
+  it("an Auto ladder limit keeps page embedding off: a visual run under Fastest reads no page and bills Fast at completion", () => {
     const features = { ...at("fastest"), indexingMode: "visual" } as PipelineFeatures;
+    // Visual mode runs page-embed in place of extraction, and page-embed refuses under a ladder limit (worker page-embed.ts).
+    expect(full(features)).not.toContain("extract-markdown");
     const estimate = estimatePipelineWork({ features, stages: full(features), pages, documents: 4, env });
-    expect(estimate.credits!.high).toBeGreaterThanOrEqual(pages * ocr);
-    expect(estimate.credits!.high).toBeLessThan(pages * ocr * 1.01);
+    expect(estimate.credits!.high).toBeGreaterThanOrEqual(pages * fast * 0.05);
+    expect(estimate.credits!.high).toBeLessThan(pages * ocr);
+  });
+
+  it("pages of fast-only formats bill Fast at both ends, whatever the quality", () => {
+    const features = at("smartest");
+    const officePages = 300;
+    const estimate = estimatePipelineWork({ features, stages: full(features), pages, documents: 4, fastOnlyPages: officePages,
+      low: { pages, documents: 4, fastOnlyPages: officePages }, env });
+    const charge = (pages - officePages) * rich * TEST_HIGH_RICH_PAGES_PER_READ + officePages * fast;
+    expect(estimate.credits!.high).toBeGreaterThanOrEqual(charge);
+    expect(estimate.credits!.high).toBeLessThan(charge * 1.01);
+    // A failed spreadsheet only: every page Fast, so the high end is the Fast charge of its pages, not a vision read of each.
+    const sheet = estimatePipelineWork({ features, stages: full(features), pages: 4_096, documents: 1, fastOnlyPages: 4_096, low: { pages: 0, documents: 0 }, env });
+    expect(sheet.credits!.high).toBeGreaterThanOrEqual(4_096 * fast);
+    expect(sheet.credits!.high).toBeLessThan(4_096 * fast * 1.01);
+    expect(sheet.basis).toMatch(/4096 pages of Word, slide, sheet and other Office files bill Fast/);
+  });
+
+  it("the document map reads at most min(60, ceil(5% of pages)) per document, not every page", () => {
+    const features = { ...at("smartest"), indexingMode: "map" } as PipelineFeatures;
+    const plan = subsetStages(features, ["document-map"]);
+    expect(plan.stageOrder).toContain("document-map");
+    expect(plan.stageOrder).not.toContain("extract-markdown");
+    expect(plan.stageOrder).not.toContain("vision-extract");
+    // 4 documents of 100 pages: at most ceil(0.05 x 100) = 5 reads each.
+    const reads = 4 * Math.min(60, Math.ceil(0.05 * 100));
+    const estimate = estimatePipelineWork({ features, stages: plan.stageOrder, pages, documents: 4, env });
+    // Over totals the bound is ceil(5% of 400) + one per document = 24 reads; the rest Fast at completion.
+    expect(estimate.credits!.high).toBeGreaterThanOrEqual(reads * rich * TEST_HIGH_RICH_PAGES_PER_READ);
+    expect(estimate.credits!.high).toBeLessThanOrEqual(24 * rich * TEST_HIGH_RICH_PAGES_PER_READ + pages * fast + 1e-6);
+    expect(estimate.credits!.high).toBeLessThan(pages * rich);
+  });
+
+  it("audio and video left out of the pages are named in the basis", () => {
+    const features = at("fastest");
+    const estimate = estimatePipelineWork({ features, stages: full(features), pages, documents: 4, mediaDocuments: 2, env });
+    expect(estimate.basis).toMatch(/2 audio or video documents are not included/);
   });
 
   it("features allow one more block per document than an even split", () => {
