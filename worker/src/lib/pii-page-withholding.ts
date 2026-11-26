@@ -272,18 +272,33 @@ function planSections(findings: PiiScanFindings): PiiWithholdingPlan {
   return { scope: "sections", sectionCount: Math.max(1, sectionCount) };
 }
 
-/** Text-bearing strings of a canonical block: its text, heading path entries and every string in its metadata. */
+/**
+ * Text-bearing strings of a canonical block: its text, heading path entries and every string in its metadata, except
+ * structural keys (`url`, `*Id`, `*Key`), which redaction leaves alone: a value only there is not located (fails closed).
+ */
 function blockStrings(block: CanonicalBlockLike): string[] {
   const out: string[] = [];
   const visit = (node: unknown) => {
     if (typeof node === "string") out.push(node);
     else if (Array.isArray(node)) node.forEach(visit);
-    else if (node && typeof node === "object") for (const child of Object.values(node as Record<string, unknown>)) visit(child);
+    else if (node && typeof node === "object") {
+      for (const [key, child] of Object.entries(node as Record<string, unknown>)) if (!isStructuralKey(key)) visit(child);
+    }
   };
   visit(block.text);
   visit(block.headingPath);
   visit(block.metadata);
   return out;
+}
+
+/** Values shorter than this (letters and digits) must be found near their place in the text to count as located. */
+const SHORT_VALUE_CHARS = 12;
+
+function occurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) count += 1;
+  return count;
 }
 
 const alnum = (text: string) => text.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
@@ -342,19 +357,29 @@ export function mapTextMatchesToCanonical(
     }
     return low;
   };
+  /** Every block holding the value exactly or ignoring spacing and punctuation (both: a hit of one never hides the other). */
   const findIn = (entry: PageIndex, value: string, loose: string): number[] => {
     const found = new Set<number>();
     for (const [haystack, needle, starts] of [[entry.exact, value, entry.exactStarts], [entry.loose, loose, entry.looseStarts]] as const) {
       if (!needle) continue;
-      for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) {
-        found.add(entry.blocks[blockAt(starts, at)]!);
-      }
-      if (found.size > 0) break;
+      for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, at + 1)) found.add(entry.blocks[blockAt(starts, at)]!);
     }
     return [...found];
   };
   const offsets = pageCount > 1 ? pageOffsets(text, pageCount) : null;
   const unmapped: Array<number[] | null> = [];
+  let textLoose: string | null = null;
+  const allLoose = () => (textLoose ??= alnum(text));
+  const counted = new Map<string, number>();
+  const blockOccurrences = (needle: string) => {
+    let count = counted.get(needle);
+    if (count === undefined) {
+      count = 0;
+      for (const entry of byPage.values()) count += occurrences(entry.loose, needle);
+      counted.set(needle, count);
+    }
+    return count;
+  };
   for (const match of matches) {
     const value = text.slice(match.charOffset, match.charOffset + match.length);
     const loose = alnum(value);
@@ -363,9 +388,13 @@ export function mapTextMatchesToCanonical(
     let found = candidates.flatMap((entry) => (entry ? findIn(entry, value, loose) : []));
     // Paged text whose page disagrees with the blocks' page: look everywhere rather than miss the value.
     if (found.length === 0 && pages) found = [...byPage.values()].flatMap((entry) => findIn(entry, value, loose));
-    if (found.length === 0) {
+    // A short value can also sit inside an unrelated string (an order number), so a hit there does not show that the
+    // match's own occurrence was found. For short values every occurrence in the text (ignoring spacing and
+    // punctuation) needs one in the blocks; fewer, and the match is unmapped (the caller fails closed).
+    const located = loose.length >= SHORT_VALUE_CHARS || occurrences(allLoose(), loose) <= blockOccurrences(loose);
+    if (found.length === 0 || !located) {
       unmapped.push(pages ?? (pageCount <= 1 ? [1] : null));
-      continue;
+      if (found.length === 0) continue;
     }
     for (const index of new Set(found)) {
       blockIndexes.set(index, (blockIndexes.get(index) ?? new Set<PiiPatternType>()).add(match.patternType));

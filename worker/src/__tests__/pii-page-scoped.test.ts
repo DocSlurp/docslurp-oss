@@ -564,3 +564,34 @@ describe("placeholder-only chunks are never indexed", () => {
     ]);
   });
 });
+
+describe("the canonical locator (M9, structural keys)", () => {
+  const block = (text: string, metadata: Record<string, unknown> = {}) => ({ id: text, type: "paragraph", order: 0, text, headingPath: [], pageNumber: 1, metadata });
+  const at = (text: string, value: string) => ({ patternType: "passport" as const, charOffset: text.indexOf(value), length: value.length }) as never;
+
+  it("a short value inside an unrelated string does not hide its own occurrence split over two blocks: unmapped", async () => {
+    const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
+    const text = "Order 9X1234567 shipped.\n\nPassport number\n\nX1234\n567";
+    const blocks = [block("Order 9X1234567 shipped."), block("Passport number"), block("X1234"), block("567")];
+    const mapped = mapTextMatchesToCanonical(blocks, text, [at(text, "X1234\n567")], 1);
+    expect(mapped.unmapped).toHaveLength(1);
+    // The unrelated hit is still replaced (more is withheld, never less).
+    expect(mapped.blockIndexes.has(0)).toBe(true);
+  });
+
+  it("exact and re-spaced hits are both found", async () => {
+    const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
+    const text = "Passport number\n\nX1234567 and again X 1234 567";
+    const blocks = [block("Passport number"), block("X1234567"), block("again X 1234 567")];
+    const mapped = mapTextMatchesToCanonical(blocks, text, [at(text, "X1234567")], 1);
+    expect(mapped.unmapped).toHaveLength(0);
+    expect([...mapped.blockIndexes.keys()].sort()).toEqual([1, 2]);
+  });
+
+  it("a value only in a structural key (url, *Id) is not located: the caller fails closed", async () => {
+    const { mapTextMatchesToCanonical } = await import("../lib/pii-page-withholding.js");
+    const text = "Passport number\n\nX1234567";
+    const blocks = [block("Passport number"), block("see link", { url: "https://example.test/X1234567", linkId: "X1234567" })];
+    expect(mapTextMatchesToCanonical(blocks, text, [at(text, "X1234567")], 1).unmapped).toHaveLength(1);
+  });
+});
