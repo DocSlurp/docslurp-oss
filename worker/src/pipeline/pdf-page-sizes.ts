@@ -20,6 +20,14 @@ import { isCommandTeardownError } from "../sandbox/teardown.js";
 export interface PdfPageSize {
   widthPt: number;
   heightPt: number;
+  /** pdfinfo's page rotation, when it was read with the size: a 90 or 270 page renders with width and height swapped. */
+  rotate?: PdfPageRotation;
+}
+
+export type PdfPageRotation = 0 | 90 | 180 | 270;
+
+export function isPdfPageRotation(value: unknown): value is PdfPageRotation {
+  return value === 0 || value === 90 || value === 180 || value === 270;
 }
 
 export const PAGE_SIZES_SCHEMA = "docslurp-pdf-page-sizes/1";
@@ -80,14 +88,14 @@ function validSide(value: unknown): value is number {
 
 /** A size worth retaining: positive, finite and bounded. */
 export function storablePageSize(size: PdfPageSize | undefined): size is PdfPageSize {
-  return !!size && validSide(size.widthPt) && validSide(size.heightPt);
+  return !!size && validSide(size.widthPt) && validSide(size.heightPt) && (size.rotate === undefined || isPdfPageRotation(size.rotate));
 }
 
 export function serializePageSizes(binding: PageSizeBinding, sizes: ReadonlyMap<number, PdfPageSize>): Buffer {
   const pages = [...sizes]
     .filter(([page, size]) => Number.isSafeInteger(page) && page >= 1 && page <= binding.pageCount && storablePageSize(size))
     .sort(([a], [b]) => a - b)
-    .map(([page, size]) => [page, size.widthPt, size.heightPt]);
+    .map(([page, size]) => size.rotate === undefined ? [page, size.widthPt, size.heightPt] : [page, size.widthPt, size.heightPt, size.rotate]);
   return Buffer.from(JSON.stringify({
     schema: PAGE_SIZES_SCHEMA,
     source: "pdfinfo",
@@ -128,10 +136,12 @@ export function parsePageSizesArtifact(bytes: Uint8Array, binding: PageSizeBindi
   if (!Array.isArray(record.pages) || record.pages.length > binding.pageCount) return { ok: false, reason: "page" };
   const sizes = new Map<number, PdfPageSize>();
   for (const entry of record.pages) {
-    if (!Array.isArray(entry) || entry.length !== 3) return { ok: false, reason: "page" };
-    const [page, widthPt, heightPt] = entry as unknown[];
+    // [page, width, height] or, with the rotation pdfinfo reported, [page, width, height, rotate].
+    if (!Array.isArray(entry) || (entry.length !== 3 && entry.length !== 4)) return { ok: false, reason: "page" };
+    const [page, widthPt, heightPt, rotate] = entry as unknown[];
     if (typeof page !== "number" || !Number.isSafeInteger(page) || page < 1 || page > binding.pageCount || sizes.has(page)) return { ok: false, reason: "page" };
-    const size = { widthPt: widthPt as number, heightPt: heightPt as number };
+    if (entry.length === 4 && !isPdfPageRotation(rotate)) return { ok: false, reason: "page" };
+    const size: PdfPageSize = { widthPt: widthPt as number, heightPt: heightPt as number, ...(entry.length === 4 ? { rotate: rotate as PdfPageRotation } : {}) };
     if (!storablePageSize(size)) return { ok: false, reason: "page" };
     sizes.set(page, size);
   }
@@ -186,8 +196,11 @@ export class PdfPageSizeMemo {
     entry.lastAccess = ++this.tick;
     for (const [page, size] of sizes) {
       if (!Number.isSafeInteger(page) || page < 1 || page > binding.pageCount || !storablePageSize(size)) continue;
-      if (!entry.sizes.has(page)) this.pages += 1;
-      entry.sizes.set(page, { widthPt: size.widthPt, heightPt: size.heightPt });
+      const previous = entry.sizes.get(page);
+      if (!previous) this.pages += 1;
+      // A size read without its rotation (an artifact written before rotations were kept) keeps one already known.
+      const rotate = size.rotate ?? (previous && previous.widthPt === size.widthPt && previous.heightPt === size.heightPt ? previous.rotate : undefined);
+      entry.sizes.set(page, { widthPt: size.widthPt, heightPt: size.heightPt, ...(rotate === undefined ? {} : { rotate }) });
     }
     this.evict(key);
   }

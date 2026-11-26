@@ -11,6 +11,7 @@ import { EmbedStage } from "../stages/embed.js";
 import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
 import { buildSummaryEvidence } from "../stages/summary-evidence.js";
 import { readSummarySource } from "../stages/summary-source.js";
+import { coerceMarkdownExtractionForVmFloor } from "../pipeline/stage-execution.js";
 import { PiiDetectStage, PiiScanIncompleteError, resolvePolicy, type PiiDetectionArtifact, type PiiDetectionSink, type PiiDocumentOutcome } from "../stages/pii-detect.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
@@ -355,6 +356,26 @@ describe("piiPolicy redact_artifacts and summary evidence", () => {
     expect(storage.objects.has(evidenceKey)).toBe(false);
     expect(await readSummarySource(storage, document, undefined, undefined,
       state.artifactLedger.readDocument(documentId, "summary-evidence"))).toBeNull();
+  });
+});
+
+describe("piiPolicy with Markdown extraction \"disabled\" under the VM-only floor (DocSlurp/app issue 599)", () => {
+  it("scans the extraction artifact the summary reads: PII in front matter, a title and a link definition is withheld", async () => {
+    const { storage, sink, state, stage, document, documentId, prefix } = setup("block_indexing");
+    // The run asked for no extraction; hydration under the floor turned it back on (stage-execution.ts), so the text every
+    // stage reads is the one artifact extraction wrote, never the source file.
+    state.run.pipeline = coerceMarkdownExtractionForVmFloor({ pipeline: normalizePipelineFeatures({ ...state.run.pipeline, markdownExtraction: false }) }, true).pipeline;
+    expect(state.run.pipeline.markdownExtraction).toBe(true);
+    storage.objects.delete(`${prefix}/canonical/${documentId}.json`);
+    delete (state.run.artifacts as Record<string, string>)[`${documentId}:canonical-document`];
+    storage.objects.set(`${prefix}/markdown/candidate-a.md`, `---\nowner: ${EMAIL}\n---\n<title>${EMAIL}</title>\n\n[unused]: mailto:${EMAIL}\n\nBody text.\n`);
+    await stage.run(state);
+    expect(document.status).toBe(PII_BLOCKED_DOCUMENT_STATUS);
+    expect(sink.outcomes[0]?.outcome).toMatchObject({ blocked: true });
+    expect(sink.outcomes[0]?.outcome.patternTypes).toContain("email");
+    // Every email in the artifact (front matter, title, link definition) was found, plus the one in the HTML rendering.
+    expect(sink.detections[0]?.matches.filter((match) => match.patternType === "email").length).toBeGreaterThanOrEqual(3);
+    expect(indexableDocuments(state)).toEqual([]);
   });
 });
 

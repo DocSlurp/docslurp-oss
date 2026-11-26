@@ -195,6 +195,27 @@ test("an in-flight 409 that outlasts the request timeout is reported, and other 
   }
 });
 
+test("a keyed multipart bulk upload waits out an in-flight or busy 409 and repeats the same key; an unkeyed one never repeats", async () => {
+  const { createDocSlurpClient } = await import("../dist/index.js");
+  const answers = [
+    json({ error: { code: "idempotency_in_flight", message: "busy" } }, 409),
+    json({ error: { code: "upload_session_busy", message: "busy" } }, 409),
+  ];
+  const keys = [];
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: async (url, init = {}) => {
+    keys.push(new Headers(init.headers).get("idempotency-key"));
+    return answers.shift() ?? json({ project: { id: "p", name: "P" }, run: { id: "run" }, documents: [], warnings: [] }, 201);
+  } });
+  const result = await client.upload(new Blob(["hello"], { type: "text/plain" }), { filename: "a.txt", idempotencyKey: "bulk-key", directUpload: false });
+  assert.equal(result.run.id, "run");
+  assert.deepEqual(keys, ["bulk-key", "bulk-key", "bulk-key"]);
+
+  let attempts = 0;
+  const unkeyed = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: async () => { attempts++; return json({ error: { code: "upload_session_busy", message: "busy" } }, 409); } });
+  await assert.rejects(unkeyed.upload(new Blob(["x"]), { filename: "a.txt", directUpload: false }), (error) => error instanceof DocSlurpApiError && error.code === "upload_session_busy");
+  assert.equal(attempts, 1);
+});
+
 test("session calls wait out a busy session or a rate limit, honouring Retry-After", async () => {
   const { createDocSlurpClient } = await import("../dist/index.js");
   const answers = { sign: [409, 429], complete: [409], batch: [409], read: [409] };

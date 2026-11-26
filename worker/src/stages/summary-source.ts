@@ -2,12 +2,13 @@ import { SUMMARY_EVIDENCE_MAX_BYTES, SUMMARY_INPUT_MAX_BYTES, type SummaryEviden
 import { imageAnchorsToAltText } from "@docslurp/shared";
 import type { Document } from "../models.js";
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 export const SUMMARY_SOURCE_MAX_BYTES = SUMMARY_INPUT_MAX_BYTES;
 const MANIFEST_MAX_BYTES = 4000;
 const RANGE_COUNT = 4;
 
-/** No PDF parser fallback: summaries consume already-extracted text only. */
+/** No PDF parser fallback: summaries consume already-extracted text only (a text source only in development). */
 export async function readSummarySource(
   storage: Pick<ArtifactStore, "bucket" | "objectSize" | "getByteRange">,
   document: Pick<Document, "sourceKey" | "mimeType"> & { id?: string },
@@ -39,7 +40,15 @@ export async function readSummarySource(
     }
   }
   let key = artifactUri ? keyFromStorageUri(artifactUri, storage.bucket) : null;
-  if (!artifactUri && document.mimeType?.startsWith("text/")) key = document.sourceKey;
+  if (!artifactUri && document.mimeType?.startsWith("text/")) {
+    // Under the VM-only floor this host never reads a source file for its text (DocSlurp/app issue 599): no extraction
+    // artifact means no summary source. Markdown extraction always runs when a summary is planned there, so this is logged.
+    if (vmOnlyParsing()) {
+      console.warn(`[document-summary] no_summary_source document=${document.id ?? "unknown"} reason=no-extraction-artifact`);
+      return null;
+    }
+    key = document.sourceKey;
+  }
   if (!key) return null;
 
   let size = await storage.objectSize(key, signal);

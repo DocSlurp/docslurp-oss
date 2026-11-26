@@ -9,7 +9,7 @@ import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { Store } from "../db/store.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
-import { coerceIndexingModeForFlag } from "../pipeline/stage-execution.js";
+import { coerceIndexingModeForFlag, coerceMarkdownExtractionForVmFloor } from "../pipeline/stage-execution.js";
 import type { MaterializeResult } from "../temporal/materialize-ranges.js";
 import { claimPages, ensurePageRows } from "./page-ledger.js";
 import { materializePageRange, type PageMaterializerDeps } from "./materialize-pages.js";
@@ -158,7 +158,7 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
   const loaded = await store.loadRun(input.runId);
   // The run may read another run's document (a query or backfill run): scoped to the run's organization.
   const document = await store.loadDocument(input.documentId, { orgId: loaded.orgId ?? null });
-  const run = coerceIndexingModeForFlag(await withSourcePipeline(sql, loaded, document.id));
+  const run = coerceMarkdownExtractionForVmFloor(coerceIndexingModeForFlag(await withSourcePipeline(sql, loaded, document.id)));
   const state = WorkflowState.create(run, [document]);
   // Full-index runs label their pages 'full-index'; query/backfill keep the requested reason.
   const reason = run.kind === "full-index" ? "full-index" : input.reason;

@@ -7,6 +7,7 @@ import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import type { MapDraft, MapNode } from "./siphon-agent.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
+import { readGuestResultText } from "../lib/guest-result.js";
 
 export interface OutlineNode { title: string; level: number; physicalPage: number | null; children: OutlineNode[] }
 
@@ -25,8 +26,7 @@ export async function readPdfStructure(source: Uint8Array | string): Promise<Pdf
     const output = path.join(dir, "structure.json");
     if (typeof source !== "string") await writeFile(input, source, { mode: 0o600 });
     await new CommandRunner().run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "pdf-structure.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 });
-    if ((await stat(output)).size > 4 * 1024 * 1024) throw new Error("PDF structure output exceeds 4 MiB");
-    const result = JSON.parse(await readFile(output, "utf8")) as PdfStructure;
+    const result = JSON.parse(await readGuestResultText(output, 4 * 1024 * 1024, () => new Error("PDF structure output exceeds 4 MiB"))) as PdfStructure;
     if (!Number.isSafeInteger(result.pageCount) || result.pageCount < 1 || result.pageCount > 1_000_000 || !Array.isArray(result.outline)) throw new Error("invalid PDF structure result");
     if (result.pageLabels !== null && (!Array.isArray(result.pageLabels) || result.pageLabels.length !== result.pageCount || result.pageLabels.some((label) => typeof label !== "string" || label.length > 1024))) throw new Error("invalid PDF page labels");
     const pending = result.outline.map((node) => ({ node, depth: 1 }));

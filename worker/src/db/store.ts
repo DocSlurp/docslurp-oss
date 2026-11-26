@@ -15,6 +15,7 @@ import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
 import {
   lexicalColumnProbe,
   ocrPageClassSettlementProbe,
+  fastPerDocumentSchemaProbe,
   piiFindingsTableProbe,
   resolveWorkerCapabilities,
   WorkerCapabilityRegistry,
@@ -81,6 +82,7 @@ export class Store extends PostgresRunLedger {
   capabilityRegistry(options: Omit<WorkerCapabilityRegistryOptions, "sql" | "capabilities">): WorkerCapabilityRegistry {
     const lexicalColumnPresent = lexicalColumnProbe(this.sql);
     const ocrSettlement = ocrPageClassSettlementProbe(this.sql);
+    const fastPerDocumentSchema = fastPerDocumentSchemaProbe(this.sql);
     const piiFindingsTable = piiFindingsTableProbe(this.sql);
     return new WorkerCapabilityRegistry({
       ...options,
@@ -88,6 +90,7 @@ export class Store extends PostgresRunLedger {
       capabilities: () => resolveWorkerCapabilities({
         creditLeasesActive: () => this.creditLeases.active(),
         ocrPageClassSettlement: ocrSettlement,
+        fastPerDocumentSchema,
         lexicalColumnPresent,
         piiFindingsTable,
         firstPassBatch: () => sandboxedPdfBatchProvider() !== null,

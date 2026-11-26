@@ -58,10 +58,35 @@ export const RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set([
 
 /**
  * Page reads that bill one Rich page at most: their output tokens never add Rich units, and a
- * read that returned no text (`metadata.outcome = "empty-output"`) charges nothing. `ocr-escalation` is the hosted second
+ * read that returned no text (`metadata.outcome = "empty-output"`) charges nothing, and no read that did not complete charges (readCompleted). `ocr-escalation` is the hosted second
  * read of a page the recogniser read poorly (owner decision, 2026-11-05); its provider cost is recorded either way.
  */
 export const FLAT_RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set(["ocr-escalation"]);
+
+/** Outcomes of a page read that did not complete: kept for their provider cost, never charged as a page read. */
+export const NON_CHARGING_READ_OUTCOMES: ReadonlySet<string> = new Set(["timeout", "failed", "failure", "error", "rejected"]);
+
+const warnedReadOutcomes = new Set<string>();
+
+/**
+ * Whether a page-read usage event is a read that completed, the only kind a page read charges (OCR or Rich). A read that timed
+ * out after it was sent (`timeout`, possibly billed by the provider), failed or was rejected (NON_CHARGING_READ_OUTCOMES) is
+ * kept for its provider cost and charges the customer nothing: the page keeps the text it had and bills by that. Every other
+ * outcome charges: none, `completed`, `empty-output` (the read completed and found no text: a flat read charges nothing for it,
+ * see FLAT_RICH_PAGE_READ_METRICS), and any outcome this build does not know, which is logged once so a new reader's outcome
+ * never silently bills nothing.
+ */
+export function readCompleted(metadata: Record<string, unknown> | null | undefined): boolean {
+  const outcome = metadata?.outcome;
+  if (outcome === undefined || outcome === null || outcome === "completed" || outcome === "empty-output") return true;
+  if (typeof outcome === "string" && NON_CHARGING_READ_OUTCOMES.has(outcome)) return false;
+  const key = String(outcome).slice(0, 64);
+  if (!warnedReadOutcomes.has(key)) {
+    warnedReadOutcomes.add(key);
+    console.warn(`[usage-ledger] page read with unknown outcome=${key}: charged as a completed read`);
+  }
+  return true;
+}
 
 /** Events taken for one checkpoint write; `commit()` once it has persisted. */
 export interface PipelineUsageBatch {
@@ -225,6 +250,8 @@ export class PipelineUsageEventLedger {
   }
 
   private chargePageRead(event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null }, visionAttemptTicket: string | null = null): void {
+    // A read that timed out, failed or was rejected is recorded for its provider cost, never charged as a page read (readCompleted).
+    if (!readCompleted(event.metadata)) return;
     if (OCR_PAGE_READ_METRICS.has(event.metric)) {
       // Before the OCR class (or with it off for this run), an OCR route read was a Rich read like a vision read.
       if (this.ocrPageClass()) this.chargeOcrPageRead(event, false, visionAttemptTicket);

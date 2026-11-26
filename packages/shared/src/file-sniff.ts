@@ -4,8 +4,10 @@
  *
  * Pure functions over bytes: no I/O, no process spawning. There are two depths:
  *
- * - `header` is all the API does with customer bytes: magic numbers in the first few KB and a text-encoding check of the
- *   first 8 KB. A ZIP or OLE file stays a generic container, and text is not classified (CSV, JSON, HTML).
+ * - `header` is all the API does with customer bytes: fixed magic-number comparisons at the start of the file, nothing
+ *   decoded. Text is recognised only by a byte-order mark (its encoding then follows from the mark); text without one is
+ *   left unrecognised, so the declared type and extension decide until the worker inspects it. A ZIP or OLE file stays a
+ *   generic container, and text is not classified (CSV, JSON, HTML).
  * - `full` (the default, run by the worker inside its quarantine stage, before any parser) lists the ZIP central
  *   directory or walks an OLE2 file's directory entries, which tells OOXML from OLE and EPUB from a plain ZIP, and
  *   classifies text. The worker persists its result over the API's header facts.
@@ -254,6 +256,17 @@ function looksLikeText(decoded: string): boolean {
   return controls / decoded.length < 0.02;
 }
 
+/**
+ * The encoding a byte-order mark at offset 0 names, else null: a fixed comparison of at most three bytes, nothing decoded.
+ * The header-depth (API) text check; the full check is detectTextEncoding, which only the worker runs (in its parser VM).
+ */
+export function byteOrderMarkEncoding(bytes: Uint8Array): FileEncoding | null {
+  if (startsWith(bytes, [0xef, 0xbb, 0xbf])) return "utf-8-bom";
+  if (startsWith(bytes, [0xff, 0xfe])) return "utf-16le";
+  if (startsWith(bytes, [0xfe, 0xff])) return "utf-16be";
+  return null;
+}
+
 /** Decodes a text file's bytes the way it is encoded (a UTF-16 CSV is not a UTF-8 one). */
 export function decodeTextBytes(bytes: Uint8Array, encoding: FileEncoding | null = detectTextEncoding(bytes)): string {
   switch (encoding) {
@@ -292,6 +305,10 @@ export function sniffFileBytes(input: Uint8Array, filename = "", options: SniffO
   if (ZIP_SIGNATURES.some((signature) => startsWith(bytes, signature))) return { ...none, mimeType: header ? GENERIC_ZIP_MIME : sniffZip(bytes, filename), container: "zip" };
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { ...none, mimeType: "image/png" };
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return { ...none, mimeType: "image/jpeg" };
+  // GIF and BMP by fixed comparisons: GIF's six-byte signature; BMP's "BM" with its reserved bytes zero and a known DIB
+  // header size, so a text file starting "BM" is not taken for one.
+  if (ascii(bytes, 0, 6) === "GIF87a" || ascii(bytes, 0, 6) === "GIF89a") return { ...none, mimeType: "image/gif" };
+  if (isBmpHeader(bytes)) return { ...none, mimeType: "image/bmp" };
   if (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a])) return { ...none, mimeType: "image/tiff" };
   if (ascii(bytes, 0, 4) === "RIFF") {
     const kind = ascii(bytes, 8, 12);
@@ -317,20 +334,38 @@ export function sniffFileBytes(input: Uint8Array, filename = "", options: SniffO
   if (ascii(bytes, 0, 4) === "OggS") return { ...none, mimeType: "audio/ogg" };
   if (ascii(bytes, 0, 4) === "fLaC") return { ...none, mimeType: "audio/flac" };
   if (ascii(bytes, 0, 3) === "ID3") return { ...none, mimeType: "audio/mpeg" };
-  // Text before the MPEG frame check: a UTF-16LE byte-order mark (FF FE) looks like an MPEG sync word.
-  const encoding = detectTextEncoding(bytes);
-  const wide = encoding === "utf-16le" || encoding === "utf-16be";
+  // Text before the MPEG frame check: a UTF-16LE byte-order mark (FF FE) looks like an MPEG sync word. Header depth decodes
+  // nothing: only a byte-order mark makes the bytes text there.
+  const encoding = header ? byteOrderMarkEncoding(bytes) : detectTextEncoding(bytes);
+  // FF FE is both the UTF-16LE mark and, with most third bytes, an MPEG-1 Layer I frame header. Header depth decodes nothing
+  // to tell them apart, so the name does: an MPEG audio extension keeps the frame reading (the worker's full inspection then
+  // decides), anything else is UTF-16 text until that inspection.
+  const mpegNamed = header && encoding === "utf-16le" && MPEG_AUDIO_EXTENSIONS.has(fileExtension(filename)) && isMpegAudioFrame(bytes);
+  const wide = !mpegNamed && (encoding === "utf-16le" || encoding === "utf-16be");
   if (!wide) {
     if (isMpegAudioFrame(bytes)) return { ...none, mimeType: "audio/mpeg" };
     if (bytes[0] === 0xff && (bytes[1]! & 0xf6) === 0xf0) return { ...none, mimeType: "audio/aac" };
   }
   if (startsWith(bytes, OLE_SIGNATURE)) return { ...none, mimeType: header ? OLE_STORAGE_MIME : sniffOle(bytes), container: "ole" };
-  if (encoding && header) return { mimeType: "text/plain", container: null, encoding };
+  if (encoding && header && !mpegNamed) return { mimeType: "text/plain", container: null, encoding };
   if (encoding) return { mimeType: classifyText(decodeTextBytes(bytes.subarray(0, SAMPLE_BYTES), encoding).slice(0, 4096)), container: null, encoding };
   return none;
 }
 
 const TEXT_FAMILY_MIME = (mimeType: string | null) => mimeFamily(mimeType) === "text";
+
+/** Names whose FF FE start header depth reads as an MPEG audio frame, not a UTF-16 mark. */
+const MPEG_AUDIO_EXTENSIONS: ReadonlySet<string> = new Set([".mp3", ".mp2", ".mp1", ".mpga", ".m1a", ".m2a"]);
+
+/** BITMAPCOREHEADER, BITMAPINFOHEADER and its V2-V5 successors: the DIB header sizes a BMP's 14-byte file header precedes. */
+const BMP_DIB_HEADER_SIZES = new Set([12, 40, 52, 56, 64, 108, 124]);
+
+function isBmpHeader(bytes: Uint8Array): boolean {
+  if (bytes.length < 18 || bytes[0] !== 0x42 || bytes[1] !== 0x4d) return false;
+  for (let index = 6; index < 10; index++) if (bytes[index] !== 0) return false;
+  const dib = bytes[14]! | (bytes[15]! << 8) | (bytes[16]! << 16) | (bytes[17]! << 24);
+  return BMP_DIB_HEADER_SIZES.has(dib);
+}
 
 /**
  * Types whose bytes start with a fixed magic number that sniffFileBytes recognises at offset 0: PDF, every ZIP-based and
@@ -346,6 +381,8 @@ export const MAGIC_BOUND_MIMES: ReadonlySet<string> = new Set([
   "image/jpeg",
   "image/tiff",
   "image/webp",
+  "image/gif",
+  "image/bmp",
   "audio/wav",
   "audio/flac",
   "audio/ogg",
@@ -399,7 +436,15 @@ export function fileFactsFromSniff(sniffed: SniffedBytes, file: { filename: stri
   // magic is not at offset 0 (junk or a prefix before it) is refused, never confirmed by an empty sniff. Extractors
   // tolerate such prefixes (pdf.js and poppler look for `%PDF-` in the first KB, Python's zipfile finds the end record
   // anywhere) while the malware scanner types the file by its first bytes and skips its PDF or ZIP parsing.
-  if (!sniffed.mimeType) return facts(fallback, magicBoundMime(fallback, file.filename) ? "unresolved" : "none");
+  if (!sniffed.mimeType) {
+    const magicBound = magicBoundMime(fallback, file.filename);
+    // Header depth recognises text only by a byte-order mark, so unmarked text arrives here unrecognised. Under a declared
+    // type with a magic number, a text extension (a CSV a browser declared application/vnd.ms-excel) stays provisional as
+    // that text type, as a header text sniff used to leave it: the worker's full inspection, before any parser, either
+    // confirms text or refuses the bytes against the declared type. Any other extension is refused here, as before.
+    if (inspection === "header" && magicBound && TEXT_FAMILY_MIME(extensionMime)) return facts(extensionMime!, "same-family");
+    return facts(fallback, magicBound ? "unresolved" : "none");
+  }
 
   if (inspection === "header" && sniffed.container) {
     // The container's contents are the worker's to read. Here the declaration (or the extension) stands if a container of

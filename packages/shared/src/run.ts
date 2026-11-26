@@ -60,6 +60,12 @@ export const projectRunSchema = z.object({
    */
   failedDocuments: z.number().int().nonnegative().default(0),
   /**
+   * How the finished run went, beside `status` (whose values are unchanged): `succeeded` (completed, no document
+   * failed), `partial` (completed, some documents failed: `failedDocuments` of `totalDocuments`), `failed` (the run
+   * failed). Null while the run is not finished, or when it was cancelled. Absent: not reported (an older server).
+   */
+  outcome: z.enum(["succeeded", "partial", "failed"]).nullable().optional(),
+  /**
    * Run cost, read from the usage ledger (`usage_attribution`): AI/API calls,
    * per-page fees and worker compute, with unbilled compute at its rate-card
    * estimate. The same figure as the progress snapshot's

@@ -540,6 +540,9 @@ const pipelineFeaturesObjectSchema = z
     visionFallback: z.boolean().default(true),
     vision: visionConfigSchema.default(defaultVisionConfig),
     htmlExtraction: z.boolean().default(false),
+    // `false` skips Markdown extraction only when no planned stage reads the document's text. Accepted from every caller for
+    // compatibility; where parsing is VM-only (every non-development deployment) a run that embeds, scans for PII,
+    // summarizes or builds an index still extracts (`requireMarkdownExtraction`), so no stage reads the source file itself.
     markdownExtraction: z.boolean().default(true),
     embed: z.boolean().default(true),
     indexVectors: z.boolean().default(true),
@@ -1032,6 +1035,34 @@ export const pipelineStagePlan: readonly PipelineStagePlanItem[] = basePipelineS
       ? item
       : { ...item, isEnabled: (features) => !isDeferredMode(features) && item.isEnabled(features) },
 );
+
+/**
+ * Stages that read a document's text. Without Markdown extraction each of them would have to read the source file itself;
+ * see `requireMarkdownExtraction`.
+ */
+export const textConsumingStages: ReadonlySet<PipelineRunStage> = new Set([
+  "pii-detect",
+  "document-summary",
+  "structured-extract",
+  "embed",
+  "graph-enrich",
+  "page-index",
+  "proposition-index",
+]);
+
+/**
+ * Features whose plan runs `extract-markdown` whenever any stage in `textConsumingStages` is planned. The worker applies
+ * this under the VM-only parsing floor, where no host process may read a source file for its text: one extraction in the
+ * parser VM produces the text every later stage (PII scan, summary, embed, indexes) reads, and measures the pages the run
+ * bills. `markdownExtraction: false` is still accepted from every caller; it now only takes effect when nothing in the plan
+ * needs the text. Returns the same object when nothing changes.
+ */
+export function requireMarkdownExtraction<T extends PipelineFeatures>(features: T): T {
+  if (features.markdownExtraction) return features;
+  const forced = { ...features, markdownExtraction: true };
+  const needsText = pipelineStagePlan.some((item) => textConsumingStages.has(item.stage) && item.isEnabled(forced));
+  return needsText ? forced : features;
+}
 
 export const pipelineStageOrder: PipelineRunStage[] = pipelineStagePlan.map(
   (item) => item.stage,

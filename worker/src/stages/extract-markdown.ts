@@ -134,7 +134,7 @@ import { sandboxedPdfPageFactsMathRead } from "../extractors/sandboxed-pdf-page-
 import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
 import { documentCostStats } from "../lib/document-cost-stats.js";
 import { DOPPLER_FACTS_EVIDENCE_SOURCE, checkDopplerFactsEvidence, pageFactRowsFromCheckedFacts, pageImageEvidenceFromCheckedFacts } from "../lib/doppler-page-facts-evidence.js";
-import { runBillsScansAtCompletion } from "../db/page-base-fee.js";
+import { runHasNoPageBillingPin } from "../db/page-base-fee.js";
 import { extractionPageRecords, recordPageExtracts, type ScanFillPageRead } from "../pipeline/page-extracts.js";
 import { runUsesOcrPageClass } from "../pipeline/ocr-page-class.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
@@ -1945,8 +1945,9 @@ export class ExtractMarkdownStage implements Stage {
    * the host probes this route never runs: page-image evidence for classify-route (vision fallback on) and the ingest report's
    * per-page source rows. Fails closed: another mode, another winner, or facts that do not cover every page of the host's own
    * count with the families needed (lib/doppler-page-facts-evidence.ts) build nothing, and the route goes without, as before.
-   * Never billing: no size or read is recorded, and the rows are not written for a run that bills scanned pages from them at
-   * completion (runBillsScansAtCompletion). Never throws on facts; a storage failure is logged and the evidence is skipped.
+   * No size or read is recorded, and no page charge reads the rows' scan facts (their text and area equivalents do raise
+   * billing_pages, db/page-equivalents.ts); a run without a page billing pin gets no rows (runHasNoPageBillingPin). Never throws
+   * on facts; a storage failure is logged and the evidence is skipped.
    */
   private async recordDopplerFactsEvidence(
     document: import("../models.js").Document,
@@ -1994,12 +1995,12 @@ export class ExtractMarkdownStage implements Stage {
       console.warn(`[doppler-page-facts] document=${document.id} page-image evidence not stored: ${error instanceof Error ? error.name : typeof error}`);
       evidenceReason = "store-failed";
     }
-    // A run without a page billing pin bills pages with no text bytes and an image as scans at completion: facts rows would
-    // raise its charge, so it keeps going without them.
-    const legacyBilling = runBillsScansAtCompletion(state);
-    const rows = legacyBilling || mode !== "use" ? [] : pageFactRowsFromCheckedFacts(check.checked, { documentId: document.id, runId: state.run.id });
+    // A run without a page billing pin gets no facts rows for one more release: an earlier release's worker completing it would
+    // bill pages without text bytes Rich from them (runHasNoPageBillingPin says when this goes).
+    const unpinned = runHasNoPageBillingPin(state);
+    const rows = unpinned || mode !== "use" ? [] : pageFactRowsFromCheckedFacts(check.checked, { documentId: document.id, runId: state.run.id });
     await recordPageFacts(state, rows);
-    console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${legacyBilling ? " rows-skipped=legacy-billing" : ""}`);
+    console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${unpinned ? " rows-skipped=legacy-billing" : ""}`);
     const mathRead = candidate.plan.sandboxedPdf ? sandboxedPdfPageFactsMathRead(candidate.plan.sandboxedPdf) : false;
     const layoutFacts = smartestRouting
       ? candidate.layoutFacts
@@ -2011,7 +2012,7 @@ export class ExtractMarkdownStage implements Stage {
       layoutFacts,
       stats: {
         status: "built", pages: pageCount, evidencePages, rows: rows.length,
-        ...(evidenceReason ? { evidenceSkipped: evidenceReason } : {}), ...(legacyBilling ? { rowsSkipped: "legacy-billing" } : {}),
+        ...(evidenceReason ? { evidenceSkipped: evidenceReason } : {}), ...(unpinned ? { rowsSkipped: "legacy-billing" } : {}),
       },
     };
   }

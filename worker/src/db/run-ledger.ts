@@ -5,7 +5,7 @@ import { type GeoFinalSource } from "./geo-final-source.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, STAGE_DOCUMENT_PAGES_STAT } from "@docslurp/shared";
 import { DocumentNotFoundError, DocumentOutOfScopeError, isMissingDocumentError } from "./missing-document.js";
-import { recordPageBaseFee } from "./page-base-fee.js";
+import { chargeCompletedDocumentsFast, chargeDocumentsFastStatement, noteDocumentsFastCharge, recordPageBaseFee, runChargesFastPerDocument, type DocumentFastChargeRow, type RunPageCharges } from "./page-base-fee.js";
 import { randomUUID } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
@@ -1018,9 +1018,9 @@ export class PostgresRunLedger implements CheckpointStore {
         }
         state.refreshStats();
         await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
-        const pageCharges = await recordPageBaseFee(client, state, { afterCommit });
-        // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
-        state.run.stats = { ...state.run.stats, pageCharges };
+        // A per-document run charges below, once its documents are completed; a run-wide run charges here, as before.
+        const perDocument = runChargesFastPerDocument(state.artifactLedger);
+        let pageCharges: RunPageCharges | undefined = perDocument ? undefined : await recordPageBaseFee(client, state, { afterCommit });
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         // Documents completed here (pipelines without an index stage) get their page extract records' finals too: the two
         // finalization statements go out right behind the statement that completes the documents (one flight; the
@@ -1028,6 +1028,18 @@ export class PostgresRunLedger implements CheckpointStore {
         const finalizeScope = { orgId: owner.orgId, runId: state.run.id, documentIds: "completed-in-run" as const };
         const completed = await completeRunDocuments(client, state.run.id, finalizePageExtracts(client, finalizeScope));
         logFinalizeOutcome(completed.finalized, finalizeScope);
+        if (perDocument) {
+          // Every completed document of the run without its Fast charge (those this transaction completed, and any the index
+          // stage did not charge): one statement, each document once (`fast:<run>:<document>`). The run is terminal, so the
+          // charge consumes no lease and feeds no spend check.
+          const statement = chargeDocumentsFastStatement(client, state, "run", { accrue: false });
+          // `fastPages`/`credits`: what this statement charged (the index stage charged the rest as documents completed).
+          const charged = noteDocumentsFastCharge(state, statement ? await statement : []);
+          pageCharges = charged;
+          afterCommit.push(() => { state.run.spentCents = (Number(state.run.spentCents) || 0) + charged.credits; });
+        }
+        // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
+        state.run.stats = { ...state.run.stats, pageCharges };
         const replacements = await supersededInThisTransaction(client, completed.ids.filter(id => !adopted.has(id)));
         await this.notifications.announceReplacements(state, replacements, client, logicalId);
         // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
@@ -1174,6 +1186,8 @@ export class PostgresRunLedger implements CheckpointStore {
         await this.failProcessingDocumentStages(runId, stage,
           options.infrastructureRetriesExhausted ? `${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}: ${message}` : message, client);
       }
+      // No Fast charge here: a per-document run charged each document when it completed (the documents still completed stay
+      // charged); a run-wide run charges only when it completes (db/page-base-fee.ts).
       await this.failUnfinishedDocumentsForRun(runId, client);
 
       await insertProjectRunEvents({ sql: client, events: [{
@@ -1458,6 +1472,9 @@ export class PostgresRunLedger implements CheckpointStore {
         where run_id = ${state.run.id} and stage_name = ${stage}
       `,
     ], { stageBoundary: true, readControlState: options.readControlState, preloadRunState: options.preloadRunState });
+    // The index stage's own pass is over and its checkpoint persisted the reads: a per-document run charges every completed
+    // document still without its Fast charge (the first pass's documents the loop did not index again).
+    if (stage === "index" && !state.shard && !state.firstPassShard) await chargeCompletedDocumentsFast(this.sql, state);
 
     await this.appendEvent({
       userId: state.run.userId,
@@ -1697,11 +1714,26 @@ export class PostgresRunLedger implements CheckpointStore {
         where run_id = ${state.run.id} and document_id = ${documentId} and stage_name = ${stage}`;
     let cutover: CanonicalReplacement[] = [];
     if (completesDocument) {
+      // A per-document run charges the document's Fast pages in the transaction that makes it searchable, first-pass shards
+      // included: once the document is completed it is served, so its charge cannot wait for a later stage the run may never
+      // reach (cancelled, failed, paused). The id is `fast:<run>:<document>`, so the ordinary loop indexing it again charges nothing.
+      // The document's buffered OCR and Rich read charges are persisted first, in the same transaction (their own ids, on conflict
+      // do nothing), so the Fast statement sees only persisted reads and a crash after commit leaves no page uncharged.
+      // A run has an organization (chargeDocumentsFastStatement logs and charges nothing without one).
+      const chargesFast = runChargesFastPerDocument(state.artifactLedger);
       cutover = await retryTransaction(`complete-document-stage run=${state.run.id} stage=${stage}`, async () => {
-        const results = await pipelineTransaction(this.sql, (client) => [
-          ...this.vectorIndexStatements(vectors, client),
-          stageStateUpdate(client),
-          client`
+        let fastCharge = false;
+        const readBatch = chargesFast ? state.usageLedger.takeRichPageCharges(documentId) : null;
+        let readFrom = 0;
+        let readTo = 0;
+        let readCost: (results: readonly unknown[][]) => number = () => 0;
+        let readCredits = 0;
+        let supersedeIndex = 0;
+        const results = await pipelineTransaction(this.sql, (client) => {
+          const statements: PendingQuery<any>[] = [
+            ...this.vectorIndexStatements(vectors, client),
+            stageStateUpdate(client),
+            client`
             update documents d
             set status = case
                   when status = 'pii_blocked' then status
@@ -1713,13 +1745,39 @@ export class PostgresRunLedger implements CheckpointStore {
                   ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
                   : client``}
             where d.id = ${documentId}`,
-          // The document's page extract records get their one final row per page, in the transaction that publishes it
-          // (after the documents UPDATE above, which holds the document's row lock: documents first, then extract rows).
-          ...(state.run.orgId ? finalizePageExtracts(client, { orgId: state.run.orgId, runId: state.run.id, documentIds: [documentId] }) : []),
-          supersededInThisTransactionQuery(client, [documentId]),
-        ]);
-        if (state.run.orgId) logFinalizeOutcome(results.at(-2) as Array<{ run_found: number; changed: number }>, { runId: state.run.id, documentIds: [documentId] });
-        return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
+            // The document's page extract records get their one final row per page, in the transaction that publishes it
+            // (after the documents UPDATE above, which holds the document's row lock: documents first, then extract rows).
+            ...(state.run.orgId ? finalizePageExtracts(client, { orgId: state.run.orgId, runId: state.run.id, documentIds: [documentId] }) : []),
+            supersededInThisTransactionQuery(client, [documentId]),
+          ];
+          supersedeIndex = statements.length - 1;
+          if (readBatch && readBatch.events.length > 0) {
+            const usage = runUsageEventStatements({ client, state, usageEvents: readBatch.events });
+            readFrom = statements.length;
+            statements.push(...usage.statements);
+            readTo = statements.length;
+            readCost = usage.cost;
+          }
+          // After the documents UPDATE (which completes the document and holds its row lock); the usage insert's statement
+          // trigger then takes the run row (0056), the order every checkpoint and charge keeps.
+          const statement = chargesFast ? chargeDocumentsFastStatement(client, state, { documentId }, { accrue: true }) : null;
+          fastCharge = statement !== null;
+          if (statement) statements.push(statement);
+          return statements;
+        }, async (client, rows) => {
+          // The read charges inserted here count toward the run's next spend check and its credit lease, as a checkpoint's do.
+          readCredits = readCost((rows as unknown as unknown[][]).slice(readFrom, readTo));
+          if (readCredits > 0) {
+            await client`update project_runs set spend_unchecked_credits = spend_unchecked_credits + ${readCredits} where id = ${state.run.id}`;
+            if (state.run.orgId) await client`update credit_leases set consumed = consumed + ${readCredits}, updated_at = now()
+              where holder_kind = 'run' and holder_id = ${state.run.id} and org_id = ${state.run.orgId}`;
+          }
+        });
+        readBatch?.commit();
+        const tail = supersedeIndex;
+        if (fastCharge) noteDocumentsFastCharge(state, results.at(-1) as DocumentFastChargeRow[]);
+        if (state.run.orgId) logFinalizeOutcome(results.at(tail - 1) as Array<{ run_found: number; changed: number }>, { runId: state.run.id, documentIds: [documentId] });
+        return mapSuperseded(results.at(tail) as Parameters<typeof mapSuperseded>[0]);
       });
     } else if (geoFinalSource) {
       const source = geoFinalSource;

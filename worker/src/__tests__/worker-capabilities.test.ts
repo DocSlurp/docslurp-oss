@@ -164,11 +164,11 @@ describe("WorkerCapabilityRegistry", () => {
     expect(await resolveWorkerCapabilities({
       creditLeasesActive: async () => false,
       lexicalColumnPresent: async () => true,
-    })).toEqual(["extraction.config-v1", "search.early-lexical", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
+    })).toEqual(["extraction.config-v1", "inspection.text-pages", "search.early-lexical", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
     expect(await resolveWorkerCapabilities({
       creditLeasesActive: async () => { throw new Error("db down"); },
       lexicalColumnPresent: async () => false,
-    })).toEqual(["extraction.config-v1", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
+    })).toEqual(["extraction.config-v1", "inspection.text-pages", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-document-threshold", "workflow.quarantine-shards"]);
   });
 
   it("advertises pii.block-document only once the findings table exists", async () => {

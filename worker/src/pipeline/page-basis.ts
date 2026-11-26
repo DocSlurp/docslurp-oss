@@ -186,8 +186,12 @@ export class PageBasis {
    *  - image-frames: page_count; frames past intake are checked at the OCR rate, on every attempt.
    *  - billing-pages: billing_pages, never below an intake count taken from the bytes.
    *  - page-equivalents / whole-document: raise billing_pages (never lowered), then `authorize`.
+   *
+   * `deferAuthorization` (page-count only): persist without the spend check, for a stage whose retry is expensive (quarantine
+   * counts text pages inside its VM inspection). The caller guarantees a later stage authorizes the document on every
+   * attempt before anything uses or bills the pages (format-detect does, for every document); nothing is charged here.
    */
-  async record(document: Document, measurement: PageMeasurement): Promise<PageBasisChange> {
+  async record(document: Document, measurement: PageMeasurement, options: { deferAuthorization?: boolean } = {}): Promise<PageBasisChange> {
     const run = this.state.run;
     switch (measurement.kind) {
       case "page-count": {
@@ -198,7 +202,7 @@ export class PageBasis {
         document.pageCount = pages;
         document.pageCountSource = "counted";
         run.pagesTotal = Math.max(0, (Number(run.pagesTotal) || 0) + pages - before);
-        await this.authorize(document);
+        if (!options.deferAuthorization) await this.authorize(document);
         return { persisted, pageCount: pages, billingPages: document.billingPages ?? null };
       }
       case "image-frames":

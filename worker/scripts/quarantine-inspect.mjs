@@ -32,6 +32,19 @@ if (charts) {
   }
 }
 const inspection = inspectQuarantineBytes(bytes, options.filename, options.policy);
+// The text page count (DocSlurp/app issue 599), only when the host asks. Its module is loaded here, guarded, so an image
+// missing it (or the shared text-page-rule subpath) still inspects every file: the answer key is then absent, which the
+// host treats as unavailable (retried), and parser-vm-contract.mjs does not advertise inspection-text-pages. Once loaded,
+// a request it refuses or a count that throws fails this command, like any inspection failure.
+if (options.text !== undefined && options.text !== null) {
+  let textPages = null;
+  try {
+    textPages = await import("../dist/lib/text-pages-guest.js");
+  } catch {
+    textPages = null;
+  }
+  if (textPages) inspection.text = textPages.inspectTextPages(bytes, inspection.sniffed, textPages.parseTextPagesRequest(options.text));
+}
 // The inspection's own bound, unchanged: 2 MiB without the chart answer.
 const own = JSON.stringify(inspection);
 if (Buffer.byteLength(own) > 2 * 1024 * 1024) throw new Error("quarantine result exceeds limit");

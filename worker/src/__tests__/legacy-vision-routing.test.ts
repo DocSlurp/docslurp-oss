@@ -238,7 +238,8 @@ describe("routing v2 off (VISION_ROUTING_V2 default)", () => {
     const chart = classifyAdaptivePage(1, "Figure 3: quarterly revenue chart with legend and axis labels, Q1 Q2 Q3 up 12%");
     const minorImage = { ...chart, ocrDecision: { authorized: false, confidence: 0.8, signals: ["ocr-not-authorized:minor-images=1"] } };
     expect(selectLegacyVisionPages([minorImage])).toEqual([]);
-    expect(selectLegacyVisionPages([chart])).toEqual([1]);
+    // Words that name a chart never read a page, in v1 either (DocSlurp/app issue 601).
+    expect(selectLegacyVisionPages([chart])).toEqual([]);
     const notes = "Field observation log. We determine the conservation status of private plots and elevated terraces.";
     expect(classifyTextAndFilename(notes, "notes.pdf").label).not.toBe("generic");
   });

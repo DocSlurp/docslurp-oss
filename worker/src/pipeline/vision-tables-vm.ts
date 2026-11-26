@@ -34,9 +34,10 @@
  * rebuilds tables from its own parse5 allow-list; artifacts are served as text/markdown or under `default-src 'none'`;
  * the SDK widget uses textContent). Do not describe or rely on this pass as a general HTML sanitizer.
  */
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { readGuestResultText } from "../lib/guest-result.js";
 
 import { escapeMarkdownCellText } from "@docslurp/shared";
 
@@ -309,8 +310,7 @@ async function runGuest(pages: string[], runner: Pick<CommandRunner, "run">, sig
     const input = path.join(dir, "pages.json"), output = path.join(dir, "tables.json");
     await writeFile(input, JSON.stringify(pages), { mode: 0o600 });
     await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "vision-tables.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
-    if ((await stat(output)).size > MAX_RESULT_BYTES) throw new Error("vision table result exceeds limit");
-    const parsed = JSON.parse(await readFile(output, "utf8")) as unknown;
+    const parsed = JSON.parse(await readGuestResultText(output, MAX_RESULT_BYTES, () => new Error("vision table result exceeds limit"))) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== pages.length) throw new Error("invalid vision table result");
     return parsed;
   } finally {

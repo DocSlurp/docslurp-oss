@@ -52,4 +52,14 @@ try { qpdfVersion = /^qpdf version (\d+\.\d+\.\d+)/m.exec(execFileSync("qpdf", [
 // the host refuses inline charts on an image without it (DOCSLURP_CHART_EXPORT_INLINE=1).
 const { inlineStepBudget } = await import("../dist/chart-export/inline-guest.js");
 const capabilities = typeof inlineStepBudget === "function" ? ["inline-command-budget"] : [];
+// "inspection-text-pages": quarantine-inspect.mjs returns the text page count (text-pages-guest.js). Imported here, guarded,
+// and probed on built-in bytes, so a module or shared subpath missing from this image withholds only this capability (the
+// worker refuses to start without it in the service profile) and never fails the contract or any other guest.
+try {
+  const { inspectTextPages } = await import("../dist/lib/text-pages-guest.js");
+  const probe = inspectTextPages(new TextEncoder().encode("<p>one</p>\ntwo\n"), { mimeType: "text/html", encoding: "utf-8" }, { markup: true, force: true });
+  if (probe?.pages === 1 && probe.markupPages === 1 && probe.bytes === 15) capabilities.push("inspection-text-pages");
+} catch {
+  // Not advertised.
+}
 console.log(JSON.stringify({ protocol: "parser-vm@5", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2, qpdfVersion, capabilities }));

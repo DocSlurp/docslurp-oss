@@ -4032,6 +4032,9 @@ export const intakeRequestReceipts = pgTable("intake_request_receipts", {
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   runId: text("run_id").unique().references(() => projectRuns.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  /** The live claim on this key: who holds it and until when (the deadline is fixed when the claim is taken). */
+  claimToken: text("claim_token"),
+  claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true, mode: "string" }),
 }, table => [primaryKey({ columns: [table.idempotencyKey, table.routeKey] })]);
 
 

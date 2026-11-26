@@ -272,7 +272,8 @@ describe("header-only inspection (what the API does with customer bytes)", () =>
     const textFacts = fileFactsFor(hugeText, { filename: "a.txt", declaredMimeType: "text/plain" }, header);
     const elapsed = performance.now() - started;
     expect(zipFacts).toMatchObject({ mimeType: DOCX, container: "zip", inspection: "header" });
-    expect(textFacts).toMatchObject({ mimeType: "text/plain", encoding: "utf-8" });
+    // Text without a byte-order mark is not recognised from content: the declared type stands until the worker inspects it.
+    expect(textFacts).toMatchObject({ mimeType: "text/plain", sniffedMimeType: null, encoding: null, mismatch: "none", inspection: "header" });
     expect(elapsed).toBeLessThan(250);
   });
 
@@ -290,8 +291,67 @@ describe("header-only inspection (what the API does with customer bytes)", () =>
     expect(fileFactsFor(Buffer.from("%PDF-1.7\n%âãÏÓ\n"), { filename: "r.pdf", declaredMimeType: "text/plain" }, header)).toMatchObject({ mimeType: "application/pdf", mismatch: "corrected" });
   });
 
-  it("does not classify text (CSV, JSON, HTML) from content", () => {
-    expect(sniffFileBytes(Buffer.from("a,b\n1,2\n3,4\n"), "x.bin", header)).toMatchObject({ mimeType: "text/plain", encoding: "utf-8" });
+  it("does not classify text (CSV, JSON, HTML) from content; only a byte-order mark makes bytes text", () => {
+    expect(sniffFileBytes(Buffer.from("a,b\n1,2\n3,4\n"), "x.bin", header)).toEqual({ mimeType: null, container: null, encoding: null });
+    expect(sniffFileBytes(Buffer.from("\ufeffa,b\n1,2\n", "utf8"), "x.bin", header)).toEqual({ mimeType: "text/plain", container: null, encoding: "utf-8-bom" });
+    expect(sniffFileBytes(Buffer.from("\ufeffa,b\n", "utf16le"), "x.bin", header)).toEqual({ mimeType: "text/plain", container: null, encoding: "utf-16le" });
+    // The UTF-16LE mark (FF FE) is text, not an MPEG frame sync.
+    expect(sniffFileBytes(Buffer.from([0xfe, 0xff, 0x00, 0x61]), "x.bin", header).encoding).toBe("utf-16be");
+    // FF FE is also an MPEG-1 Layer I frame header: under an MPEG audio name it stays audio at header depth.
+    const layerOne = Buffer.concat([Buffer.from([0xff, 0xfe, 0x90, 0x00]), Buffer.alloc(400, 0x55)]);
+    expect(sniffFileBytes(layerOne, "track.mp3", header).mimeType).toBe("audio/mpeg");
+    expect(sniffFileBytes(Buffer.from("\ufeffa,b\n", "utf16le"), "data.csv", header).encoding).toBe("utf-16le");
+    // Full depth still detects and classifies (the worker's quarantine, in its parser VM).
+    expect(sniffFileBytes(Buffer.from("a,b\n1,2\n3,4\n"), "x.bin")).toMatchObject({ mimeType: "text/csv", encoding: "utf-8" });
+  });
+
+  it("recognises GIF and BMP by their magic numbers, so text under those declared types is refused at intake", () => {
+    const gif = Buffer.concat([Buffer.from("GIF89a"), Buffer.alloc(32, 0)]);
+    expect(sniffFileBytes(gif, "a.gif", header).mimeType).toBe("image/gif");
+    const bmp = Buffer.alloc(54, 0);
+    bmp.write("BM", 0, "latin1");
+    bmp.writeUInt32LE(54, 2);
+    bmp.writeUInt32LE(40, 14);
+    expect(sniffFileBytes(bmp, "a.bmp", header).mimeType).toBe("image/bmp");
+    // Text starting "BM" is not a bitmap.
+    expect(sniffFileBytes(Buffer.from("BMW quarterly report\nrevenue up\n"), "notes.txt", header).mimeType).toBeNull();
+    for (const declared of ["image/gif", "image/bmp"]) {
+      expect(fileFactsFor(Buffer.from("just some words\n"), { filename: "x", declaredMimeType: declared }, header).mismatch).toBe("unresolved");
+    }
+  });
+
+  it("keeps unmarked text under a magic-bound declared type provisional only with a text extension", () => {
+    const csv = Buffer.from("name,total\nacme,10\n");
+    expect(fileFactsFor(csv, { filename: "data.csv", declaredMimeType: "application/vnd.ms-excel" }, header)).toMatchObject({ mimeType: "text/csv", mismatch: "same-family", sniffedMimeType: null });
+    expect(fileFactsFor(csv, { filename: "data.xls", declaredMimeType: "application/vnd.ms-excel" }, header).mismatch).toBe("unresolved");
+    // The worker's full inspection decides: text stays the CSV, a binary file under that declaration is refused there.
+    expect(fileFactsFor(csv, { filename: "data.csv", declaredMimeType: "application/vnd.ms-excel" })).toMatchObject({ mimeType: "text/csv", mismatch: "same-family" });
+    expect(fileFactsFor(Buffer.alloc(64, 0), { filename: "data.csv", declaredMimeType: "application/vnd.ms-excel" }).mismatch).toBe("unresolved");
+  });
+
+  it("never runs a text decoder on hostile bytes (DocSlurp/app issue 599)", () => {
+    const hostile: Array<[string, Buffer, string, string | null]> = [
+      ["invalid UTF-8", Buffer.from([0xc3, 0x28, 0xa0, 0xa1, 0xe2, 0x28, 0xa1, 0xf0, 0x28, 0x8c, 0xbc]), "a.txt", "text/plain"],
+      ["NULs", Buffer.alloc(9000, 0), "a.csv", "text/csv"],
+      ["a huge single line", Buffer.alloc(4 * 1024 * 1024, "x"), "a.txt", "text/plain"],
+      ["HTML behind a .txt name", Buffer.from("<html><script>".repeat(5000)), "a.txt", null],
+      ["UTF-16 with a mark, then garbage", Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.alloc(9000, 0xd8)]), "a.txt", "application/octet-stream"],
+      ["text declared as a PDF", Buffer.from("plain words\n".repeat(1000)), "a.pdf", "application/pdf"],
+    ];
+    const original = globalThis.TextDecoder;
+    let constructed = 0;
+    globalThis.TextDecoder = class { constructor() { constructed += 1; throw new Error("decoder used at header depth"); } } as unknown as typeof TextDecoder;
+    try {
+      const facts = hostile.map(([, bytes, filename, declaredMimeType]) => fileFactsFor(bytes, { filename, declaredMimeType }, header));
+      expect(facts.map((fact) => [fact.mimeType, fact.mismatch])).toEqual([
+        ["text/plain", "none"], ["text/csv", "none"], ["text/plain", "none"], ["text/plain", "none"], ["text/plain", "none"],
+        // The magic bytes alone refuse it, as before.
+        ["application/pdf", "unresolved"],
+      ]);
+    } finally {
+      globalThis.TextDecoder = original;
+    }
+    expect(constructed).toBe(0);
   });
 
   it("full inspection is the default and marks its facts", () => {

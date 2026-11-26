@@ -588,7 +588,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     } finally { await h.cleanup(); }
   });
 
-  it("billing is unchanged by facts: the same Rich reads, no page-equivalent sizes from facts, no rows for a legacy-billed run", async () => {
+  it("billing is unchanged by facts: the same Rich reads, no page-equivalent sizes from facts, no rows for an unpinned run", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
     // Facts that would, if read for billing, size every page at the maximum and mark page 2 a scan with no text.
@@ -602,6 +602,8 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
       try {
         await h.stage.run(h.state);
         expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        // A pinned run with facts gets one facts row per page of the document (three), and none without facts.
+        expect(sourceRows(h)).toHaveLength("pageFacts" in provider ? 3 : 0);
         outcomes.push({ rich: h.richIds(), equivalents: recordPageEquivalents.mock.calls });
       } finally { await h.cleanup(); }
     }
@@ -610,8 +612,9 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     expect(outcomes[0]!.rich).toEqual(["ocr:run-1:doc-1:2"]);
     expect(outcomes[0]!.equivalents).toEqual([]);
 
-    // A run started before the page billing pin bills pages with no text bytes and an image as scans at completion
-    // (page-base-fee.ts): facts rows would raise its charge, so none are written. The evidence (routing) still is.
+    // A run without a page billing pin bills from its reads like any other (page-base-fee.ts), but a worker of the release
+    // before, completing the same run, would bill pages without text bytes Rich from facts rows: none are written for it for
+    // one more release (runHasNoPageBillingPin). The evidence (routing) still is, and the reads are the same.
     const h = await harness({ markdown: "Born digital text\f\fA figure", ocrPages: [2], pageFacts: facts });
     h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
     try {

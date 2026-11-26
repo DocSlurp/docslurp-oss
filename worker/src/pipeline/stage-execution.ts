@@ -5,7 +5,8 @@ import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import type { PreloadedRunState } from "../db/run-ledger.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
-import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
+import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder, requireMarkdownExtraction } from "@docslurp/shared";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { noteRunMilestone, noteRunOutcome, workerStartKind } from "./run-milestones.js";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
@@ -44,7 +45,7 @@ import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
-import { pinRunPageBillingRules } from "../db/page-base-fee.js";
+import { pinRunFastPerDocument, pinRunPageBillingRules } from "../db/page-base-fee.js";
 import { pinRunOcrPageClass } from "./ocr-page-class.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
@@ -164,6 +165,20 @@ export function coerceIndexingModeForFlag<T extends { pipeline: { indexingMode?:
   return run;
 }
 
+/**
+ * Under the VM-only parsing floor a run never skips Markdown extraction while a later stage needs the document's text
+ * (`requireMarkdownExtraction`): with it off, the PII scan, summary, embed and indexes would each have to read the source
+ * file themselves, which no host process may do, and Office and EPUB files would go unmeasured. `markdownExtraction: false`
+ * stays accepted from every caller and only takes effect when no planned stage reads the text. Development keeps the stored
+ * setting.
+ */
+export function coerceMarkdownExtractionForVmFloor<T extends { pipeline: import("@docslurp/shared").PipelineFeatures }>(run: T, vmOnly = vmOnlyParsing()): T {
+  if (!vmOnly || !run.pipeline || run.pipeline.markdownExtraction !== false) return run;
+  const pipeline = requireMarkdownExtraction(run.pipeline);
+  if (pipeline !== run.pipeline) run.pipeline = pipeline;
+  return run;
+}
+
 /** The one Run hydration path for every activity entry point. */
 export async function loadRunState(
   store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState" | "pageBasisLedger"> & {
@@ -186,7 +201,7 @@ export async function loadRunState(
   const [run, documents] = options.preloaded
     ? [options.preloaded.run, options.preloaded.documents]
     : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
-  const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
+  const state = WorkflowState.create(coerceMarkdownExtractionForVmFloor(coerceIndexingModeForFlag(run)), documents);
   // Every loaded state checks spend through the store's page basis, hydrated or not (a page task leaves state.store unset so
   // it never flushes a stale run snapshot, but its OCR reads are still checked against the balance).
   state.pageBasis = new PageBasis(state, store.pageBasisLedger);
@@ -271,8 +286,13 @@ export function createStageExecution(deps: {
     // pin), and persisted with the run's artifacts by the progress write below, so every stage, shard and page
     // task agrees. There is no environment switch.
     const visionRoutingVersion = pinRunRoutingVersion(state);
-    // Page billing rules, pinned the same way: a run without the pin (started by an earlier release) keeps that release's
-    // completion charge for image files and scanned pages (db/page-base-fee.ts).
+    // Page billing rules, pinned the same way. A run without the pin (started by an earlier release) bills by the same per-read
+    // rule; the pin's absence only keeps page-facts rows off it until the earlier release is gone (db/page-base-fee.ts).
+    // The per-document Fast rule: decided before any other billing pin is written (it is on only for a run's first start), and
+    // only when every live worker advertises it (db/page-base-fee.ts pinRunFastPerDocument).
+    const completedDocuments = documents.some((document) => document.status === "completed"
+      && ![...(state.documentStages.get(document.id)?.values() ?? [])].some((checkpoint) => (checkpoint.stats as { deduplicated?: unknown } | undefined)?.deduplicated === true));
+    const fastPerDocument = await pinRunFastPerDocument(state, async () => (await store.fleetAdvertises("billing.fast-per-document")) === true, { completedDocuments });
     const pageBillingRules = pinRunPageBillingRules(state);
     // The OCR page class, pinned the same way: on only when every live worker advertises it (pipeline/ocr-page-class.ts).
     const ocrPageClass = await pinRunOcrPageClass(state, async () => (await store.fleetAdvertises("billing.ocr-page-class")) === true);
@@ -306,7 +326,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules} ocrPageClass=${ocrPageClass}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules} ocrPageClass=${ocrPageClass} fastPerDocument=${fastPerDocument}`,
     );
     if (completedRunStages.length > 0) {
       console.log(
@@ -376,6 +396,9 @@ export function createStageExecution(deps: {
       if (!shard) throw new Error("a pipeline override is only for document shards");
       // Only the first pass overrides the pipeline: its checkpoints are provisional (pipeline/checkpoints.ts).
       state.firstPassShard = true;
+      // Whether the ordinary loop extracts this run's documents again (and may read their pages): a per-document Fast charge
+      // waits for it (db/run-ledger.ts completeDocumentStage). Taken from the run's own pipeline, before the override.
+      state.firstPassExtractionDiffers = firstPassExtractionDiffers(state.run.pipeline);
       state.run.pipeline = runtime.pipelineOverride(state.run.pipeline);
     } else if (runtime.firstPassRun) {
       state.firstPassExtractionDiffers = firstPassExtractionDiffers(state.run.pipeline);
