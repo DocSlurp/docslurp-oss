@@ -243,7 +243,9 @@ describe("estimatePipelineWork", () => {
   it("prices fewer stages lower", () => {
     const full = estimatePipelineWork({ features: base, stages, pages: 500, documents: 5, env });
     const small = estimatePipelineWork({ features: base, stages: ["index"], pages: 500, documents: 5, env });
-    expect(small.credits!.high).toBeLessThan(full.credits!.high);
+    expect(small.credits!.low).toBeLessThan(full.credits!.low);
+    // The high end never drops below what the worker can charge: the open default pays a full completion share for any run.
+    expect(small.credits!.high).toBeLessThanOrEqual(full.credits!.high);
     expect(estimatePipelineWork({ features: base, stages: [], pages: 500, documents: 5, env }).credits!.high).toBe(0);
   });
 });
