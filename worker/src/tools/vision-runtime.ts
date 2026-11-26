@@ -1,4 +1,5 @@
-import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
+import { TenantModelEndpointRefusedError, tenantModelEndpointProblem } from "@docslurp/shared";
+import { platformModelKey } from "../lib/platform-model-keys.js";
 import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { activeCapabilityPools, poolMemberAutomaticRoute, poolMemberForModel, nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed, AutomaticCallRefusedError, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
@@ -296,6 +297,19 @@ export class VisionRouteRegionError extends Error {
   }
 }
 
+/** Stable codes for why a vision read fell back, the only fallback detail kept on tenant-visible results. */
+export type VisionFallbackReason = "routing" | "timeout" | "unavailable" | "rejected" | "route-overrun" | "error";
+
+/** The `VisionFallbackReason` for a primary read's failure. Never the error's text. */
+export function visionFallbackReasonCode(error: unknown, signal?: AbortSignal): VisionFallbackReason {
+  if (findVisionGuardStop(error)?.reason === "route-overrun") return "route-overrun";
+  const outage = visionOutageReason(error, signal);
+  if (outage) return outage;
+  if (findProviderRoutingExclusion(error)) return "routing";
+  if (findVisionOutputRejected(error)) return "rejected";
+  return "error";
+}
+
 /**
  * Why a primary vision read was an outage the pool may fail over from, or null when it was the page's own answer: `routing`
  * (no host under the request's constraints, nothing billed), `timeout` or `unavailable` (a server error or a dropped
@@ -473,7 +487,10 @@ export async function executeVisionRuntime(args: {
     }
     recordPoolFailover("vision", primaryMember, fallbackMember, failoverReason);
 
-    const fallbackReason = error instanceof Error ? error.message : String(error);
+    // The reason a tenant sees is a stable code; the primary's error text (it can quote the remote's response body)
+    // goes to the worker log only.
+    const fallbackReason = visionFallbackReasonCode(error, args.signal);
+    console.warn(`[vision-fallback] reason=${fallbackReason} from=${selected.provider} detail=${JSON.stringify((error instanceof Error ? error.message : String(error)).slice(0, 500))}`);
     // The primary's requests may have been billed (a rejected output, a stream cut off): kept for the caller to
     // record on the primary's own route, whatever the fallback does.
     const servedPrimary = findVisionServedRoute(error);
@@ -764,21 +781,14 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
 }
 
 /**
- * The key a vision request carries: the OpenRouter key only to the official OpenRouter endpoint, the DeepInfra key
- * only to DeepInfra's official OpenAI-compatible endpoint, the OpenAI key only to the configured OpenAI base URL,
- * and no key anywhere else (loopback servers, local runtimes).
+ * The key a vision request carries (`platformModelKey`, the worker's one key resolver): the OpenRouter key only to
+ * OpenRouter's origin, the DeepInfra key only to DeepInfra's, the OpenAI key only to the configured OpenAI base URL's
+ * origin, and no key anywhere else (loopback servers, local runtimes, private routes, any other host).
  */
 export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Pick<Config, "openRouterApiKey" | "openAiApiKey" | "deepInfraApiKey" | "openAiBaseUrl">): string {
-  if (billing === "openrouter") {
-    return baseUrl?.replace(/\/+$/, "") === OPENROUTER_BASE_URL ? cfg.openRouterApiKey : "";
-  }
-  if (billing === "deepinfra") {
-    return baseUrl?.replace(/\/+$/, "") === DEEPINFRA_VISION_BASE_URL ? cfg.deepInfraApiKey ?? "" : "";
-  }
-  if (billing === "openai") {
-    const configured = configuredOpenAiBaseUrl(cfg).replace(/\/+$/, "");
-    return (baseUrl ?? configured).replace(/\/+$/, "") === configured ? cfg.openAiApiKey : "";
-  }
+  if (billing === "openrouter" || billing === "deepinfra") return platformModelKey(billing, baseUrl, cfg);
+  // An OpenAI route with no base URL of its own is sent to the configured OpenAI base URL (`effectiveVisionBaseUrl`).
+  if (billing === "openai") return platformModelKey("openai", baseUrl ?? configuredOpenAiBaseUrl(cfg), cfg);
   return "";
 }
 
@@ -788,9 +798,13 @@ function normalizeVisionConfig(
   outputSchema?: Record<string, unknown> | null,
 ): VisionExecutionConfig {
   // Configs are validated (visionConfigSchema); a route built some other way is checked again before use.
-  assertTenantModelEndpointAllowed(vision.modelUri);
+  // Tenant endpoint admission (model-endpoints.ts): a disabled local endpoint is refused first; a URI the catalog
+  // refuses keeps its pricing refusal; any other endpoint refusal (a non-loopback base URL) follows.
+  const endpointProblem = tenantModelEndpointProblem(vision.modelUri);
+  if (endpointProblem === "tenant-local-endpoints-disabled") throw new TenantModelEndpointRefusedError(endpointProblem);
   const problem = visionModelUriProblem(vision.modelUri);
   if (problem) throw new UnpricedVisionRouteError(vision.modelUri, `is refused: ${problem}`);
+  if (endpointProblem) throw new TenantModelEndpointRefusedError(endpointProblem);
   if (vision.remoteFallbackModelUri) {
     const fallbackProblem = visionModelUriProblem(vision.remoteFallbackModelUri);
     if (fallbackProblem) throw new UnpricedVisionRouteError(vision.remoteFallbackModelUri, `is refused: ${fallbackProblem}`);

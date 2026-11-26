@@ -3,8 +3,9 @@
  *
  * Two rules, shared by every caller that sends a model request:
  *
- * 1. A platform-held provider key is sent only to that provider's own origin (scheme, host and port, compared after
- *    URL normalisation). There is no fallback: an unknown, look-alike or tenant-named destination gets no key.
+ * 1. A platform-held provider key is sent only to that provider's configured base URL: the same origin (scheme, host
+ *    and port, after URL normalisation) and path. There is no fallback: an unknown, look-alike or tenant-named
+ *    destination gets no key.
  * 2. A tenant setting (project pipeline, run override, per-request option) may name its own model server only for the
  *    local OpenAI-compatible providers (`ollama`, `vllm`, `lmstudio`), only on a literal loopback host, and only when
  *    the operator sets `DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS=true` (a trusted single-tenant host). Hosted and
@@ -79,8 +80,21 @@ export function isLoopbackModelBaseUrl(value: string): boolean {
 }
 
 /**
- * The platform key for a request to `destination`: `grant.key` when the destination's origin is exactly the origin of
- * the provider's configured base URL, else "" (send no key). Never a fallback to a default provider's key.
+ * A base URL in comparable form: its origin plus its path without trailing slashes, or null when it has user info,
+ * a query or a fragment, or is not an http(s) URL.
+ */
+export function normalizedModelBaseUrl(value: string | null | undefined): string | null {
+  const origin = modelEndpointOrigin(value);
+  if (origin === null) return null;
+  const url = new URL(value!.trim());
+  if (url.search || url.hash || value!.includes("#") || value!.includes("?")) return null;
+  return `${origin}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+/**
+ * The platform key for a request to `destination`: `grant.key` when the destination is the provider's configured
+ * base URL (same origin, scheme, host and port, and the same path; no user info, query or fragment), else "" (send
+ * no key). Never a fallback to a default provider's key.
  */
 export function platformKeyForDestination(
   destination: string | null | undefined,
@@ -88,8 +102,8 @@ export function platformKeyForDestination(
 ): string {
   const key = grant.key?.trim();
   if (!key) return "";
-  const target = modelEndpointOrigin(destination);
-  const owner = modelEndpointOrigin(grant.baseUrl);
+  const target = normalizedModelBaseUrl(destination);
+  const owner = normalizedModelBaseUrl(grant.baseUrl);
   return target !== null && target === owner ? key : "";
 }
 

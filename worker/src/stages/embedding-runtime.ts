@@ -1,4 +1,5 @@
-import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
+import { assertTenantModelBaseUrlAllowed } from "@docslurp/shared";
+import { platformModelKey } from "../lib/platform-model-keys.js";
 import { decodeDelimitedBytes, delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -774,7 +775,7 @@ async function embedRemoteChunks(args: {
     const model = privateCall
       ? createOpenAI({ apiKey: "private-endpoint", baseURL: privateCall.baseUrl, fetch: instrumentFetch("private", "embedding", privateCall.fetch) }).embedding(privateCall.model) as any
       : openRouterCharge
-        ? createOpenAI({ apiKey: requiredKey(args.config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", openRouterCharge.fetch) }).embedding(args.profile.model) as any
+        ? createOpenAI({ apiKey: requiredKey(platformModelKey("openrouter", OPENROUTER_BASE_URL, args.config), "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", openRouterCharge.fetch) }).embedding(args.profile.model) as any
         : sharedModel;
     const batchStartedAt = Date.now();
     const result = await withObservation(
@@ -1327,26 +1328,27 @@ export function packEmbeddingBatches(chunks: readonly string[], maxInputs: numbe
 }
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
-  assertTenantModelEndpointAllowed(`llm://${profile.provider}/local`);
+  // Profiles come from validated settings; the base URL a local route will use is judged again here, at call time.
+  assertTenantModelBaseUrlAllowed(profile.provider, profile.baseUrl);
   switch (profile.provider) {
     case "deepinfra":
       if (profile.model !== "BAAI/bge-m3" || profile.dimensions !== 1024) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
-      return createOpenAI({ apiKey: requiredKey(config.deepInfraApiKey ?? "", "DEEPINFRA_API_KEY"), baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") }).embedding(profile.model) as any;
+      return createOpenAI({ apiKey: requiredKey(platformModelKey("deepinfra", DEEPINFRA_EMBEDDING_BASE_URL, config), "DEEPINFRA_API_KEY"), baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") }).embedding(profile.model) as any;
     case "openrouter": {
       const route = openRouterEmbeddingRoute(profile.model);
       if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
-      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) }).embedding(profile.model) as any;
+      return createOpenAI({ apiKey: requiredKey(platformModelKey("openrouter", OPENROUTER_BASE_URL, config), "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) }).embedding(profile.model) as any;
     }
     case "openai":
       return (
         config.openAiBaseUrl &&
         config.openAiBaseUrl !== "https://api.openai.com/v1"
           ? createOpenAI({
-              apiKey: requiredKey(config.openAiApiKey, "OPENAI_API_KEY"),
+              apiKey: requiredKey(platformModelKey("openai", config.openAiBaseUrl, config), "OPENAI_API_KEY"),
               baseURL: config.openAiBaseUrl,
               fetch: instrumentFetch("openai", "embedding"),
             }).embedding(profile.model)
-          : createOpenAI({ apiKey: config.openAiApiKey || undefined, fetch: instrumentFetch("openai", "embedding") }).embedding(profile.model)
+          : createOpenAI({ apiKey: platformModelKey("openai", "https://api.openai.com/v1", config) || undefined, fetch: instrumentFetch("openai", "embedding") }).embedding(profile.model)
       ) as any;
     case "ollama":
     case "vllm":

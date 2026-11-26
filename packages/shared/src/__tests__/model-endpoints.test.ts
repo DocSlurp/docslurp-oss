@@ -130,7 +130,7 @@ describe("loopback detection", () => {
   });
 });
 
-describe("platform key grants match the provider origin exactly", () => {
+describe("platform key grants match the provider base URL exactly", () => {
   const grant = { baseUrl: "https://api.openai.com/v1", key: "platform-openai-key" };
 
   it("sends the key to the provider's own origin", () => {
@@ -148,6 +148,9 @@ describe("platform key grants match the provider origin exactly", () => {
     "https://evil.example/v1?u=https://api.openai.com/v1",
     "http://127.0.0.1:8080/v1",
     "http://169.254.169.254/v1",
+    "https://api.openai.com/other",
+    "https://api.openai.com/v1?x=1",
+    "https://api.openai.com/v1#f",
     "",
     "not a url",
   ])("sends no key to %s", (destination) => {
