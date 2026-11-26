@@ -242,7 +242,7 @@ function laterRoundContract(): string {
     `"fits": true when the pages shown now belong in a document of the type the result so far gives; false when they are clearly a different kind of document.`,
     `"docType": the type of the pages shown now, judged on their own.`,
     `"topics": subjects of these pages that the topics so far do not already name; [] when there are none.`,
-    `"adds": one sentence of at most 40 words naming the subjects these pages cover that the summary so far does not mention, written so it can follow that summary. Use "" when the summary already covers them. Do not repeat the summary, do not mention page numbers, and do not call the document an excerpt.`,
+    `"adds": one sentence of at most 40 words naming the subjects these pages cover that the summary so far does not mention, written about the document ("It also covers ...") so it can follow that summary. Use "" when the summary already covers them, and for pages that carry no subject matter of their own: title and copyright pages, licensing, acknowledgments, tables of contents, indexes, blank pages. Do not repeat the summary, do not mention pages or page numbers, and do not call the document an excerpt.`,
     NEXT_CONTRACT,
   ].join("\n");
 }
