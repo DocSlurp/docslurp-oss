@@ -1185,7 +1185,7 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original" | "doppler_folder" | typeof SUMMARY_TREE_CLEANUP_KIND;
+  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original" | "upload_skipped" | "doppler_folder" | typeof SUMMARY_TREE_CLEANUP_KIND;
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
@@ -1431,6 +1431,20 @@ export async function drainStorageCleanupQueue(
             not_before = now() + interval '1 day' where id = ${row.id}`;
           result.purged += 1;
           return;
+        } else if (row.kind === "upload_skipped") {
+          // The stored object of a direct-upload file its confirmed session left out (aborted or rejected), queued after
+          // every signed URL for it expired. Deleted only while a left-out file row of this organization's session still
+          // names exactly this key, and nothing else does: no document, no other session file.
+          if (!row.org_id || row.target.endsWith("/") || row.target.includes("..") || !row.target.slice(0, row.target.lastIndexOf("/") + 1).endsWith("/raw/")) {
+            throw new Error("Refusing invalid skipped-upload cleanup target");
+          }
+          const [owner] = await client`select 1 from upload_session_files f join upload_sessions s on s.id = f.session_id
+            where f.source_key = ${row.target} and f.status in ('aborted', 'rejected') and s.org_id = ${row.org_id} limit 1`;
+          if (!owner) throw new Error("Skipped upload ownership cannot be verified");
+          const [reference] = await client`select 1 from documents where source_key = ${row.target}
+            union all select 1 from upload_session_files where source_key = ${row.target} and status not in ('aborted', 'rejected') limit 1`;
+          if (reference) throw new Error("Skipped upload is still referenced");
+          await txStorage.deleteKeys([row.target]);
         } else if (row.kind === "storage_prefix") {
           if (!SAFE_RUN_PREFIX.test(row.target)) throw new Error(`Refusing unsafe storage prefix: ${row.target}`);
           // Direct-upload recovery deliberately reuses the session ID as its
