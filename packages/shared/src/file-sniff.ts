@@ -413,7 +413,15 @@ export function fileFactsFromSniff(sniffed: SniffedBytes, file: { filename: stri
   // magic is not at offset 0 (junk or a prefix before it) is refused, never confirmed by an empty sniff. Extractors
   // tolerate such prefixes (pdf.js and poppler look for `%PDF-` in the first KB, Python's zipfile finds the end record
   // anywhere) while the malware scanner types the file by its first bytes and skips its PDF or ZIP parsing.
-  if (!sniffed.mimeType) return facts(fallback, magicBoundMime(fallback, file.filename) ? "unresolved" : "none");
+  if (!sniffed.mimeType) {
+    const magicBound = magicBoundMime(fallback, file.filename);
+    // Header depth recognises text only by a byte-order mark, so unmarked text arrives here unrecognised. Under a declared
+    // type with a magic number, a text extension (a CSV a browser declared application/vnd.ms-excel) stays provisional as
+    // that text type, as a header text sniff used to leave it: the worker's full inspection, before any parser, either
+    // confirms text or refuses the bytes against the declared type. Any other extension is refused here, as before.
+    if (inspection === "header" && magicBound && TEXT_FAMILY_MIME(extensionMime)) return facts(extensionMime!, "same-family");
+    return facts(fallback, magicBound ? "unresolved" : "none");
+  }
 
   if (inspection === "header" && sniffed.container) {
     // The container's contents are the worker's to read. Here the declaration (or the extension) stands if a container of

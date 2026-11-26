@@ -301,6 +301,15 @@ describe("header-only inspection (what the API does with customer bytes)", () =>
     expect(sniffFileBytes(Buffer.from("a,b\n1,2\n3,4\n"), "x.bin")).toMatchObject({ mimeType: "text/csv", encoding: "utf-8" });
   });
 
+  it("keeps unmarked text under a magic-bound declared type provisional only with a text extension", () => {
+    const csv = Buffer.from("name,total\nacme,10\n");
+    expect(fileFactsFor(csv, { filename: "data.csv", declaredMimeType: "application/vnd.ms-excel" }, header)).toMatchObject({ mimeType: "text/csv", mismatch: "same-family", sniffedMimeType: null });
+    expect(fileFactsFor(csv, { filename: "data.xls", declaredMimeType: "application/vnd.ms-excel" }, header).mismatch).toBe("unresolved");
+    // The worker's full inspection decides: text stays the CSV, a binary file under that declaration is refused there.
+    expect(fileFactsFor(csv, { filename: "data.csv", declaredMimeType: "application/vnd.ms-excel" })).toMatchObject({ mimeType: "text/csv", mismatch: "same-family" });
+    expect(fileFactsFor(Buffer.alloc(64, 0), { filename: "data.csv", declaredMimeType: "application/vnd.ms-excel" }).mismatch).toBe("unresolved");
+  });
+
   it("never runs a text decoder on hostile bytes (DocSlurp/app issue 599)", () => {
     const hostile: Array<[string, Buffer, string, string | null]> = [
       ["invalid UTF-8", Buffer.from([0xc3, 0x28, 0xa0, 0xa1, 0xe2, 0x28, 0xa1, 0xf0, 0x28, 0x8c, 0xbc]), "a.txt", "text/plain"],

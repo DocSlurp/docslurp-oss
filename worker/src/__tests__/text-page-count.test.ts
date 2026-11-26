@@ -25,9 +25,10 @@ import { StorageObjectTooLargeError } from "../tools/storage.js";
 process.env.RUN_CREDIT_OVERDRAFT_CREDITS = "0";
 
 /**
- * The API counts a text file over 2 MB from a 2 MB sample scaled by size (`assumed`). The worker counts the whole decoded
- * text with the same rule, records it `counted`, and billing reads only that. This file's sample under-counts: its first
- * 2 MB is one long line (pages by characters), the rest is a million short lines (pages by lines).
+ * Intake records a text file's pages as an estimate (`assumed`): it used to scale a 2 MB sample's count by size, and now
+ * estimates from the size alone without decoding. The worker counts the whole decoded text with the text rule, records it
+ * `counted`, and billing reads only that. This fixture's sample under-counts: its first 2 MB is one long line (pages by
+ * characters), the rest is a million short lines (pages by lines).
  */
 const SAMPLE_BYTES = 2_000_000;
 const bytes = new Uint8Array(Buffer.concat([Buffer.alloc(SAMPLE_BYTES, "a"), Buffer.alloc(1_000_000, "\n"), Buffer.from("end")]));

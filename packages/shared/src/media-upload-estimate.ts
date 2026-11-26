@@ -53,8 +53,9 @@ export function isUploadImageFile(file: { name: string; type?: string | null }):
 }
 
 /**
- * MIME type prefixes whose page count the API derives from the text (server/src/services/source-metadata.ts):
- * the larger of one page per TEXT_PAGE_LINES lines and one per TEXT_PAGE_CHARS characters.
+ * MIME type prefixes whose pages are text pages: the larger of one page per TEXT_PAGE_LINES lines and one per TEXT_PAGE_CHARS
+ * characters. Intake (server source-metadata.ts) estimates them from the size; the worker counts the decoded text in its
+ * parser VM (worker/src/lib/text-page-count.ts).
  */
 export const TEXT_PAGE_MIME_PREFIXES = [
   "text/",
