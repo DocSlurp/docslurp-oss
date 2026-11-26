@@ -16,6 +16,8 @@ import { runArtifactRoot } from "../lib/artifact-root.js";
 import { tableCellsArtifactKey } from "../pipeline/html-table-cells-cache.js";
 import {
   PII_BLOCKED_DOCUMENT_STATUS,
+  PII_DETECTOR_VALIDATION,
+  piiCategoryIds,
   type PiiMatch,
   type PiiPolicy,
   type PiiPatternType,
@@ -40,15 +42,14 @@ export interface PiiDetectionArtifact {
   documentId: string;
   policy: PiiPolicy;
   matchCount: number;
+  /**
+   * The category, page and text source of each match. This artifact is a stage artifact the document's own users can
+   * fetch, so it holds no fingerprint (an unsalted hash of a short value such as an SSN can be brute-forced) and no
+   * offset or length: those stay in pii_detections, which no tenant route reads.
+   */
   matches: Array<{
     patternType: string;
-    matchedPrefix: string;
     pageNumber: number | null;
-    /** UTF-8 byte offset within the scanned text (a canonical block's text, the markdown, ...), not the file. */
-    byteOffset: number;
-    /** UTF-16 code-unit index within the same scanned text. */
-    charOffset: number;
-    length: number;
     source: PiiTextSource;
   }>;
   sourcesScanned: PiiTextSource[];
@@ -85,6 +86,13 @@ export type PiiDocumentOutcome = {
   action: PiiPolicy["action"];
   matchCount: number;
   patternTypes: string[];
+  /**
+   * Kinds of PII detected on each withheld page (`documents.metadata.pii.withheldPageTypes`, page-number keys): what
+   * tenant responses say a page was withheld for. Categories only.
+   */
+  withheldPageTypes: Record<string, PiiPatternType[]>;
+  /** Operator-only per-page findings with the detector's confidence (`pii_page_findings`); never in documents.metadata. */
+  findings: PiiPageFinding[];
   blocked: boolean;
   reviewRequired: boolean;
   redacted: boolean;
@@ -96,6 +104,32 @@ export type PiiDocumentOutcome = {
    */
   withheldArtifactUris: string[];
 };
+
+/**
+ * One operator-only finding: a kind of PII detected on a withheld page (0: no page), with the detector's confidence, or
+ * null and the rule's validation basis when the detector has no score (every current detector).
+ */
+export type PiiPageFinding = {
+  pageNumber: number;
+  patternType: PiiPatternType;
+  detector: "rule" | "model";
+  validation: "checksum" | "structure" | "context" | "format" | "score";
+  confidence: number | null;
+};
+
+/** Findings for what the outcome withholds: per withheld page, or page 0 when the categories have no page. */
+export function piiPageFindings(
+  pageTypes: ReadonlyMap<number, readonly PiiPatternType[]>,
+  unplacedTypes: readonly PiiPatternType[],
+): PiiPageFinding[] {
+  const rule = (pageNumber: number, patternType: PiiPatternType): PiiPageFinding => ({
+    pageNumber, patternType, detector: "rule", validation: PII_DETECTOR_VALIDATION[patternType], confidence: null,
+  });
+  return [
+    ...[...pageTypes].sort(([a], [b]) => a - b).flatMap(([page, types]) => piiCategoryIds(types).map((type) => rule(page, type))),
+    ...piiCategoryIds(unplacedTypes).map((type) => rule(0, type)),
+  ];
+}
 
 /** A scan could not look at text it was supposed to check. The stage fails; "no PII found" is not an answer. */
 export class PiiScanIncompleteError extends Error {
@@ -171,6 +205,7 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
             runId: outcome.runId,
             matchCount: outcome.matchCount,
             patternTypes: outcome.patternTypes,
+            ...(outcome.scope === "pages" && Object.keys(outcome.withheldPageTypes).length > 0 ? { withheldPageTypes: outcome.withheldPageTypes } : {}),
             blocked: outcome.blocked,
             reviewRequired: outcome.reviewRequired,
             redacted: outcome.redacted,
@@ -182,6 +217,26 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
       // A summary tree the document already has was written from the text this outcome withholds: it stops being
       // served now and its rows and artifact are queued for strict removal (summary-tree/state-store.ts).
       if (outcome.blocked || outcome.redacted || outcome.scope === "pages" || outcome.scope === "sections") await withdrawSummaryTreeForPii(db as never, documentId);
+      // Operator-only findings (confidence and its basis): replaced per scan, scoped to the document's own organization
+      // and project through the row itself. Never written to documents.metadata.
+      // One primary-key-prefix delete per scan (a clean rescan clears an earlier scan's rows); the insert only when there
+      // are findings. A failure between the two leaves fewer operator rows, never tenant-visible data, and fails the stage.
+      await db`delete from pii_page_findings where document_id = ${documentId}`;
+      if (outcome.findings.length > 0) {
+        await db`
+          insert into pii_page_findings (document_id, org_id, project_id, run_id, page_number, pattern_type, detector, validation, confidence)
+          select d.id, d.org_id, d.project_id, ${outcome.runId}, f.page_number, f.pattern_type, f.detector, f.validation, f.confidence
+          from documents d
+          cross join unnest(
+            ${outcome.findings.map((finding) => finding.pageNumber)}::int[],
+            ${outcome.findings.map((finding) => finding.patternType)}::text[],
+            ${outcome.findings.map((finding) => finding.detector)}::text[],
+            ${outcome.findings.map((finding) => finding.validation)}::text[],
+            ${outcome.findings.map((finding) => finding.confidence)}::real[]
+          ) as f(page_number, pattern_type, detector, validation, confidence)
+          where d.id = ${documentId} and d.org_id is not null and d.project_id is not null
+        `;
+      }
       if (outcome.scope === "pages" && outcome.withheldPages.length > 0) {
         // Rows written before this scan (the map's rough text, a kept model read) of a page it withholds are removed:
         // the map scanned only its own text, and this outcome may place a hit it never saw (OCR, a cross-page span).
@@ -442,7 +497,7 @@ export class PiiDetectStage implements Stage {
         // Pages: withhold on the original text, then redact each clean page alone (a redacted span that crossed a
         // page break would otherwise drop the break and shift every later page).
         currentMarkdown = plan.scope === "pages"
-          ? withholdPagesThenRedact(markdown.text, new Set(plan.pages), (page) => scan(page).redacted, markdownResult.matches)
+          ? withholdPagesThenRedact(markdown.text, new Set(plan.pages), (page) => scan(page).redacted, markdownResult.matches, plan.pageTypes)
           : withholding ? applyPlanToText(plan, markdown.text, markdownResult.matches) : markdownResult.redacted;
         await this.storage.streamText(markdown.key, currentMarkdown, markdown.contentType);
         redactedArtifacts.push(markdown.slot);
@@ -460,7 +515,7 @@ export class PiiDetectStage implements Stage {
         // Embed, summary and page index read the markdown slot before the source file.
         const key = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.redacted.md`;
         currentMarkdown = plan.scope === "pages"
-          ? withholdPagesThenRedact(fallbackText!, new Set(plan.pages), (page) => scan(page).redacted, fallbackResult.matches)
+          ? withholdPagesThenRedact(fallbackText!, new Set(plan.pages), (page) => scan(page).redacted, fallbackResult.matches, plan.pageTypes)
           : withholding ? applyPlanToText(plan, fallbackText!, fallbackResult.matches) : fallbackResult.redacted;
         await this.storage.streamText(key, currentMarkdown, "text/markdown");
         ledger.recordDocument(document.id, "markdown", this.storage.uri(key));
@@ -494,6 +549,20 @@ export class PiiDetectStage implements Stage {
       : [];
 
     const withheldPageList = plan.scope === "pages" ? plan.pages : [];
+    // Kinds of PII per withheld page: what tenant responses say a page was withheld for. Whole-document and section
+    // outcomes keep their categories document-level (patternTypes); their findings go on the page they were placed on
+    // when known, else page 0.
+    const withheldPageTypes = plan.scope === "pages" ? plan.pageTypes : new Map<number, PiiPatternType[]>();
+    const placedTypes = blocked && located && located.unattributed.length === 0
+      ? new Map([...located.types].map(([page, types]) => [page, [...types]] as const))
+      : null;
+    const pageFindings = plan.scope === "pages"
+      ? piiPageFindings(withheldPageTypes, [])
+      : blocked || plan.scope === "sections"
+        ? placedTypes && placedTypes.size > 0
+          ? piiPageFindings(placedTypes, [])
+          : piiPageFindings(new Map(), piiCategoryIds(patternTypes))
+        : [];
     const reason = blocked
       ? policy.action === "block_document" || plan.reason === "every-page-withheld"
         ? `PII policy blocked indexing: ${matchCount} match${matchCount === 1 ? "" : "es"} (${patternTypes.join(", ")})`
@@ -514,6 +583,8 @@ export class PiiDetectStage implements Stage {
       action: policy.action,
       matchCount: anyMatch ? matchCount : 0,
       patternTypes,
+      withheldPageTypes: Object.fromEntries([...withheldPageTypes].map(([page, types]) => [String(page), types])),
+      findings: pageFindings,
       blocked,
       reviewRequired,
       redacted,
@@ -526,15 +597,7 @@ export class PiiDetectStage implements Stage {
       documentId: document.id,
       policy,
       matchCount: anyMatch ? matchCount : 0,
-      matches: primary.map((m) => ({
-        patternType: m.patternType,
-        matchedPrefix: m.matchedPrefix,
-        pageNumber: m.pageNumber,
-        byteOffset: m.byteOffset,
-        charOffset: m.charOffset,
-        length: m.length,
-        source: m.source,
-      })),
+      matches: primary.map((m) => ({ patternType: m.patternType, pageNumber: m.pageNumber, source: m.source })),
       sourcesScanned,
       action: policy.action,
       blocked,

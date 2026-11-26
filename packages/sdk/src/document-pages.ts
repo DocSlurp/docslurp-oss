@@ -23,6 +23,8 @@ export type DocumentPreviewPage = {
   detail: string | null; widthPx: number | null; heightPx: number | null;
   /** The project's PII policy withholds this page: show a placeholder, never request its image. */
   withheld?: boolean;
+  /** Why, when `withheld`: "Page 3 withheld: contains an email address." (categories only). Absent from older servers. */
+  withheldReason?: string;
 };
 
 function isImageArtifact(artifact: DocumentArtifactEntry) {

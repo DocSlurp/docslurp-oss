@@ -414,7 +414,8 @@ describe("piiPolicy detections carry honest offsets", () => {
     const text = "é😀 SSN 123-45-6789";
     expect(match?.charOffset).toBe(text.indexOf("123"));
     expect(match?.byteOffset).toBe(Buffer.byteLength(text.slice(0, text.indexOf("123"))));
-    expect(piiArtifact(storage, prefix, documentId).matches[0]).toMatchObject({ byteOffset: match?.byteOffset, charOffset: match?.charOffset });
+    // The stage artifact is fetchable by the document's users: category, page and source only, no offsets or fingerprint.
+    expect(piiArtifact(storage, prefix, documentId).matches[0]).toEqual({ patternType: "ssn", pageNumber: null, source: "source-text" });
   });
 });
 

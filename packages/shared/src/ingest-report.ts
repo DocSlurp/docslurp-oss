@@ -204,6 +204,8 @@ export type IngestReportPartialExtraction = z.infer<typeof ingestReportPartialEx
  * Files the PII policy withheld part of (page-scoped `block_indexing`): page numbers and counts only, never what
  * matched. The rest of each file completed and is searchable.
  */
+const ingestReportPiiCategorySchema = z.object({ id: z.string().max(48), label: z.string().max(80) });
+
 export const ingestReportPiiWithheldSchema = z.object({
   total: count,
   pages: count,
@@ -215,7 +217,18 @@ export const ingestReportPiiWithheldSchema = z.object({
     withheldPages: z.array(z.number().int().positive()).max(1000),
     withheldPageCount: count,
     withheldSectionCount: count,
-    /** "N pages withheld for privacy (pages 3, 7)". */
+    /**
+     * Kinds of PII detected in what was withheld (stable category ids with labels); empty when the file was processed
+     * before types were recorded. Categories only, never what matched.
+     */
+    types: z.array(ingestReportPiiCategorySchema).max(32).default([]),
+    /** Per withheld page: its categories and a short reason ("Page 3 withheld: contains an email address."). */
+    pages: z.array(z.object({
+      page: z.number().int().positive(),
+      types: z.array(ingestReportPiiCategorySchema).max(32),
+      message: z.string(),
+    })).max(1000).default([]),
+    /** "N pages withheld for privacy (pages 3, 7): contains an email address". */
     message: z.string(),
   })),
 });

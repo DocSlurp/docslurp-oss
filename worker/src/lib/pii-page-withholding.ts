@@ -4,11 +4,14 @@ import {
   pageOffsets,
   pagesOfMatch,
   PII_WITHHELD_SECTION_TEXT,
+  piiCategoryIds,
+  piiPlaceholderTypes,
   piiWithheldPageText,
   withheldPageOfSlot,
   withholdTextPages,
   withholdTextSections,
   type PiiMatch,
+  type PiiPatternType,
   type PiiPolicy,
   type PiiWithholding,
 } from "@docslurp/shared";
@@ -30,11 +33,17 @@ import {
  */
 export type PiiWithholdingPlan =
   | { scope: "none" }
-  | { scope: "pages"; pages: number[]; carriedPages: number[] }
+  | {
+      scope: "pages";
+      pages: number[];
+      carriedPages: number[];
+      /** Kinds of PII detected on each withheld page (from its matches, or a carried placeholder); unknown pages are absent. */
+      pageTypes: Map<number, PiiPatternType[]>;
+    }
   | { scope: "sections"; sectionCount: number }
   | { scope: "document"; reason: string };
 
-type Located = { pages: Set<number>; unattributed: string[] };
+type Located = { pages: Set<number>; unattributed: string[]; types: Map<number, Set<PiiPatternType>> };
 
 export type PiiScanFindings = {
   pageCount: number;
@@ -64,15 +73,25 @@ export function locateMatches(findings: PiiScanFindings): Located {
   const pages = new Set<number>();
   const unattributed: string[] = [];
   const byFingerprint = new Map<string, Set<number>>();
-  const place = (fingerprint: string, found: number[]) => {
-    for (const page of found) pages.add(page);
+  const types = new Map<number, Set<PiiPatternType>>();
+  const typeOn = (page: number, type: PiiPatternType) => {
+    const known = types.get(page) ?? new Set<PiiPatternType>();
+    known.add(type);
+    types.set(page, known);
+  };
+  const place = (match: PiiMatch, found: number[]) => {
+    const fingerprint = match.matchedPrefix;
+    for (const page of found) {
+      pages.add(page);
+      typeOn(page, match.patternType);
+    }
     const known = byFingerprint.get(fingerprint) ?? new Set<number>();
     for (const page of found) known.add(page);
     byFingerprint.set(fingerprint, known);
   };
 
   for (const match of findings.canonical?.matches ?? []) {
-    if (validPage(match.pageNumber, pageCount)) place(match.matchedPrefix, [match.pageNumber]);
+    if (validPage(match.pageNumber, pageCount)) place(match, [match.pageNumber]);
     else unattributed.push("canonical-block-without-page");
   }
   for (const page of findings.canonical?.changedPages ?? []) {
@@ -84,35 +103,42 @@ export function locateMatches(findings: PiiScanFindings): Located {
     const offsets = pageOffsets(entry.text, pageCount);
     for (const match of entry.matches) {
       const found = pagesOfMatch(offsets, match.charOffset, match.length);
-      if (found) place(match.matchedPrefix, found);
+      if (found) place(match, found);
       else unattributed.push(`${source}-page-breaks-unknown`);
     }
   }
   for (const [source, entry] of [["html", findings.html], ["extraction-contract", findings.contract]] as const) {
     for (const match of entry?.matches ?? []) {
       if (validPage(match.pageNumber, pageCount)) {
-        place(match.matchedPrefix, [match.pageNumber]);
+        place(match, [match.pageNumber]);
         continue;
       }
       // The HTML rendering and page-less contract fields repeat text a paged source already placed.
       const known = byFingerprint.get(match.matchedPrefix);
-      if (known && known.size > 0) for (const page of known) pages.add(page);
+      if (known && known.size > 0) for (const page of known) { pages.add(page); typeOn(page, match.patternType); }
       else unattributed.push(`${source}-match-without-page`);
     }
   }
-  return { pages, unattributed: [...new Set(unattributed)] };
+  return { pages, unattributed: [...new Set(unattributed)], types };
 }
 
-/** Pages a previous scan already replaced with the withheld placeholder: a rescan of rewritten text keeps them. */
-export function carriedWithheldPages(findings: PiiScanFindings): Set<number> {
-  const carried = new Set<number>();
+/**
+ * Pages a previous scan already replaced with the withheld placeholder: a rescan of rewritten text keeps them, with the
+ * kinds of PII the placeholder names (none for a placeholder written before types were recorded).
+ */
+export function carriedWithheldPages(findings: PiiScanFindings): Map<number, PiiPatternType[]> {
+  const carried = new Map<number, PiiPatternType[]>();
+  const carry = (page: number, text: string) => {
+    carried.set(page, piiCategoryIds([...(carried.get(page) ?? []), ...(piiPlaceholderTypes(text) ?? [])]));
+  };
   const { pageCount } = findings;
   for (const entry of [findings.markdown, findings.fallback]) {
     if (!entry) continue;
     const offsets = pageOffsets(entry.text, pageCount);
     if (!offsets || pageCount <= 1) continue;
     offsets.forEach((range, index) => {
-      if (isPiiWithheldPlaceholder(entry.text.slice(range.start, range.end))) carried.add(index + 1);
+      const pageText = entry.text.slice(range.start, range.end);
+      if (isPiiWithheldPlaceholder(pageText)) carry(index + 1, pageText);
     });
   }
   if (findings.canonical && pageCount > 1) {
@@ -123,7 +149,7 @@ export function carriedWithheldPages(findings: PiiScanFindings): Set<number> {
     }
     for (const [page, texts] of textByPage) {
       const meaningful = texts.filter((text) => text.trim());
-      if (meaningful.length > 0 && meaningful.every(isPiiWithheldPlaceholder)) carried.add(page);
+      if (meaningful.length > 0 && meaningful.every(isPiiWithheldPlaceholder)) for (const text of meaningful) carry(page, text);
     }
   }
   return carried;
@@ -135,7 +161,7 @@ export function planPiiWithholding(action: PiiPolicy["action"], findings: PiiSca
   const blocking = action === "block_indexing" || action === "block_document";
   if (!anyMatch || !blocking) {
     return carried.size > 0
-      ? withPages(findings, [...carried], [...carried])
+      ? withPages(findings, [...carried.keys()], [...carried.keys()], mergeTypes(carried, new Map()))
       : { scope: "none" };
   }
   if (action === "block_document") return { scope: "document", reason: "policy-block-document" };
@@ -145,10 +171,19 @@ export function planPiiWithholding(action: PiiPolicy["action"], findings: PiiSca
   const located = locateMatches(findings);
   if (located.unattributed.length > 0) return { scope: "document", reason: `unattributed:${located.unattributed.join(",")}` };
   if (located.pages.size === 0) return { scope: "document", reason: "unattributed:no-page-for-match" };
-  return withPages(findings, [...located.pages, ...carried], [...carried]);
+  return withPages(findings, [...located.pages, ...carried.keys()], [...carried.keys()], mergeTypes(carried, located.types));
 }
 
-function withPages(findings: PiiScanFindings, pages: number[], carriedPages: number[]): PiiWithholdingPlan {
+function mergeTypes(carried: ReadonlyMap<number, readonly PiiPatternType[]>, located: ReadonlyMap<number, ReadonlySet<PiiPatternType>>): Map<number, PiiPatternType[]> {
+  const out = new Map<number, PiiPatternType[]>();
+  for (const page of new Set([...carried.keys(), ...located.keys()])) {
+    const ids = piiCategoryIds([...(carried.get(page) ?? []), ...(located.get(page) ?? [])]);
+    if (ids.length > 0) out.set(page, ids);
+  }
+  return out;
+}
+
+function withPages(findings: PiiScanFindings, pages: number[], carriedPages: number[], pageTypes: Map<number, PiiPatternType[]>): PiiWithholdingPlan {
   const unique = [...new Set(pages)].sort((a, b) => a - b);
   if (unique.length >= findings.pageCount) return { scope: "document", reason: "every-page-withheld" };
   // Text artifacts are rewritten page by page; text whose page breaks are unknown cannot be.
@@ -157,7 +192,10 @@ function withPages(findings: PiiScanFindings, pages: number[], carriedPages: num
       return { scope: "document", reason: `unattributed:${source}-page-breaks-unknown` };
     }
   }
-  return { scope: "pages", pages: unique, carriedPages: [...new Set(carriedPages)].sort((a, b) => a - b) };
+  return {
+    scope: "pages", pages: unique, carriedPages: [...new Set(carriedPages)].sort((a, b) => a - b),
+    pageTypes: new Map([...pageTypes].filter(([page]) => unique.includes(page)).sort(([a], [b]) => a - b)),
+  };
 }
 
 function planSections(findings: PiiScanFindings): PiiWithholdingPlan {
@@ -188,13 +226,14 @@ export function withholdPagesThenRedact(
   pages: ReadonlySet<number>,
   redact: (page: string) => string,
   matches: readonly PiiMatch[] = [],
+  pageTypes?: ReadonlyMap<number, readonly PiiPatternType[]>,
 ): string {
   let start = 0;
   return text.split("\f").map((page, index) => {
     const pageStart = start;
     const pageEnd = start + page.length;
     start = pageEnd + 1;
-    if (pages.has(index + 1)) return piiWithheldPageText(index + 1);
+    if (pages.has(index + 1)) return piiWithheldPageText(index + 1, pageTypes?.get(index + 1));
     // Clip to the page, merge overlapping spans (earliest first, as `redactPii` does), then replace from the end.
     const clippedSpans = matches
       .map((match) => ({ type: match.patternType, from: Math.max(match.charOffset, pageStart), to: Math.min(match.charOffset + match.length, pageEnd) }))
@@ -215,7 +254,7 @@ export function withholdPagesThenRedact(
 }
 
 export function applyPlanToText(plan: PiiWithholdingPlan, text: string, matches: readonly PiiMatch[]): string {
-  if (plan.scope === "pages") return withholdTextPages(text, new Set(plan.pages));
+  if (plan.scope === "pages") return withholdTextPages(text, new Set(plan.pages), plan.pageTypes);
   if (plan.scope === "sections") return withholdTextSections(text, matches).text;
   return text;
 }
@@ -253,7 +292,7 @@ export function applyPlanToCanonical<T extends { blocks?: unknown }>(
     if (page !== null && withheld.has(page)) {
       if (seen.has(page)) continue;
       seen.add(page);
-      out.push({ ...block, type: "paragraph", text: piiWithheldPageText(page), headingPath: [], bbox: null, metadata: { piiWithheld: true } });
+      out.push({ ...block, type: "paragraph", text: piiWithheldPageText(page, plan.pageTypes.get(page)), headingPath: [], bbox: null, metadata: { piiWithheld: true } });
       continue;
     }
     const headingPath = Array.isArray(block.headingPath)
@@ -278,7 +317,7 @@ export function applyPlanToJson(plan: PiiWithholdingPlan, value: unknown, isStru
   const visit = (node: unknown, page: number | null): unknown => {
     if (typeof node === "string") {
       if (page === null) return node.trim() ? PII_WITHHELD_SECTION_TEXT : node;
-      return withheld.has(page) ? piiWithheldPageText(page) : node;
+      return withheld.has(page) ? piiWithheldPageText(page, plan.pageTypes.get(page)) : node;
     }
     if (Array.isArray(node)) return node.map((item) => visit(item, page));
     if (node && typeof node === "object") {

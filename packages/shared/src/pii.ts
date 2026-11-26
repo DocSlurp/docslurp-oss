@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { PII_DETECTORS } from "./pii-detectors.js";
+export { PII_DETECTOR_VALIDATION, type PiiDetectorValidation } from "./pii-detectors.js";
 
 export const piiPatternTypeSchema = z.enum([
   "ssn",

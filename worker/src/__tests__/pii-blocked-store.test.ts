@@ -64,6 +64,8 @@ describe("PII-blocked documents in the run lifecycle", () => {
       runId: "run-1", scope: "document", withheldPages: [], withheldSectionCount: 0, pageCount: 2,
       action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
       blocked: true, reviewRequired: false, redacted: false, reason: "PII policy blocked indexing: 1 match (ssn)",
+      withheldPageTypes: {},
+      findings: [],
       withheldArtifactUris: ["s3://b/k1"],
     });
     await sink.close();
@@ -134,7 +136,7 @@ describe("PII-blocked documents in the run lifecycle", () => {
     await sink.setDocumentOutcome("d-rescan", {
       runId: "run-1", scope: "none", withheldPages: [], withheldSectionCount: 0, pageCount: 2,
       action: "block_indexing", matchCount: 0, patternTypes: [],
-      blocked: false, reviewRequired: false, redacted: false, reason: null, withheldArtifactUris: [],
+      blocked: false, reviewRequired: false, redacted: false, withheldPageTypes: {}, findings: [], reason: null, withheldArtifactUris: [],
     });
     await sink.close();
 
@@ -157,6 +159,8 @@ describe("PII-blocked documents in the run lifecycle", () => {
     await sink.setDocumentOutcome("d-pages", {
       runId: "run-1", scope: "pages", withheldPages: [3], withheldSectionCount: 0, pageCount: 5,
       action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
+      withheldPageTypes: { "3": ["ssn"] },
+      findings: [{ pageNumber: 3, patternType: "ssn", detector: "rule", validation: "structure", confidence: null }],
       blocked: false, reviewRequired: false, redacted: false, reason: "PII policy withheld 1 page", withheldArtifactUris: ["s3://b/page-3.png"],
     });
     await sink.close();
@@ -167,7 +171,22 @@ describe("PII-blocked documents in the run lifecycle", () => {
     expect(row.rows[0]?.status).toBe("processing");
     expect(row.rows[0]?.metadata.pii).toMatchObject({
       scope: "pages", withheldPages: [3], withheldPageCount: 1, pageCount: 5, blocked: false, withheldArtifactUris: ["s3://b/page-3.png"],
+      withheldPageTypes: { "3": ["ssn"] },
     });
+    // The confidence (none: a rule-based detector, recorded as its basis) is in the operator-only table, never metadata.
+    expect(JSON.stringify(row.rows[0]?.metadata)).not.toMatch(/confidence|validation|structure/);
+    const findings = await db.query(`select org_id, project_id, run_id, page_number, pattern_type, detector, validation, confidence from pii_page_findings where document_id = 'd-pages'`);
+    expect(findings.rows).toEqual([{ org_id: "o1", project_id: "w", run_id: "run-1", page_number: 3, pattern_type: "ssn", detector: "rule", validation: "structure", confidence: null }]);
+
+    // A clean rescan clears the findings with the outcome.
+    const rescan = createPostgresPiiDetectionSink(url);
+    await rescan.setDocumentOutcome("d-pages", {
+      runId: "run-1", scope: "none", withheldPages: [], withheldSectionCount: 0, pageCount: 5,
+      action: "block_indexing", matchCount: 0, patternTypes: [], withheldPageTypes: {}, findings: [],
+      blocked: false, reviewRequired: false, redacted: false, reason: null, withheldArtifactUris: [],
+    });
+    await rescan.close();
+    expect((await db.query(`select 1 from pii_page_findings where document_id = 'd-pages'`)).rows).toEqual([]);
   });
 
   it("page-scoped outcome: removes earlier rough-text rows and kept reads of the withheld pages, and withdraws an existing summary tree", async () => {
@@ -185,7 +204,7 @@ describe("PII-blocked documents in the run lifecycle", () => {
     await sink.setDocumentOutcome("d-rows", {
       runId: "run-1", scope: "pages", withheldPages: [2], withheldSectionCount: 0, pageCount: 3,
       action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
-      blocked: false, reviewRequired: false, redacted: false, reason: "PII policy withheld 1 page", withheldArtifactUris: [],
+      blocked: false, reviewRequired: false, redacted: false, withheldPageTypes: {}, findings: [], reason: "PII policy withheld 1 page", withheldArtifactUris: [],
     });
     await sink.close();
 

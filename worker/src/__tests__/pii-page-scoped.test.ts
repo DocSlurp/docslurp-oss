@@ -114,9 +114,12 @@ describe("block_indexing withholds the page, not the document", () => {
     expect(isPageWithheldInRun(f.state, f.document, null)).toBe(true);
 
     const markdown = f.storage.objects.get(f.markdownKey)!;
-    expect(markdown.split("\f")).toEqual(["Intro page.", piiWithheldPageText(2), "Closing page."]);
+    expect(markdown.split("\f")).toEqual(["Intro page.", piiWithheldPageText(2, ["ssn"]), "Closing page."]);
+    expect(markdown.split("\f")[1]).toBe("[Page 2 withheld by the project's privacy policy: contains a Social Security number]");
+    expect(outcome(f).withheldPageTypes).toEqual({ "2": ["ssn"] });
+    expect(outcome(f).findings).toEqual([{ pageNumber: 2, patternType: "ssn", detector: "rule", validation: "structure", confidence: null }]);
     const doc = f.storage.json<CanonicalDocument>(f.canonicalKey);
-    expect(doc.blocks.map((block) => block.text)).toEqual(["Intro page.", piiWithheldPageText(2), "Closing page."]);
+    expect(doc.blocks.map((block) => block.text)).toEqual(["Intro page.", piiWithheldPageText(2, ["ssn"]), "Closing page."]);
     expect(JSON.stringify([...f.storage.objects.values()])).not.toContain(SSN.slice(0, 6) + "6789");
 
     // What later stages embed and index is the rewritten text.
@@ -143,7 +146,7 @@ describe("block_indexing withholds the page, not the document", () => {
     expect(outcome(f)).toMatchObject({ scope: "pages", withheldPages: [7] });
     const pages = f.storage.objects.get(f.markdownKey)!.split("\f");
     expect(pages).toHaveLength(12);
-    expect(pages[6]).toBe(piiWithheldPageText(7));
+    expect(pages[6]).toBe(piiWithheldPageText(7, ["ssn"]));
     expect(pages[5]).toBe("Shard A page 6.");
     expect(pages[7]).toBe("Shard B page 8.");
     const withheld = new Set(outcome(f).withheldArtifactUris);
@@ -163,7 +166,7 @@ describe("block_indexing withholds the page, not the document", () => {
     const located = locateMatches(findings);
     expect([...located.pages].sort()).toEqual([2, 3]);
     expect(located.unattributed).toEqual([]);
-    expect(planPiiWithholding("block_indexing", findings, true)).toEqual({ scope: "pages", pages: [2, 3], carriedPages: [] });
+    expect(planPiiWithholding("block_indexing", findings, true)).toEqual({ scope: "pages", pages: [2, 3], carriedPages: [], pageTypes: new Map([[2, ["credit-card"]], [3, ["credit-card"]]]) });
   });
 
   it("a match whose span crosses a page break never merges pages: later pages keep their numbers", async () => {
@@ -177,7 +180,7 @@ describe("block_indexing withholds the page, not the document", () => {
     await f.stage.run(f.state);
     expect(outcome(f)).toMatchObject({ scope: "pages", withheldPages: [2, 3, 5] });
     const pages = f.storage.objects.get(f.markdownKey)!.split("\f");
-    expect(pages).toEqual(["p1 clean", piiWithheldPageText(2), piiWithheldPageText(3), "p4 clean", piiWithheldPageText(5), "p6 clean"]);
+    expect(pages).toEqual(["p1 clean", piiWithheldPageText(2, ["private-key"]), piiWithheldPageText(3, ["private-key"]), "p4 clean", piiWithheldPageText(5, ["ssn"]), "p6 clean"]);
     expect(f.storage.objects.get(f.markdownKey)).not.toContain("Jane Doe");
   });
 
@@ -215,6 +218,8 @@ describe("block_indexing withholds the page, not the document", () => {
     await f.stage.run(f.state);
     expect(outcome(f)).toMatchObject({ scope: "document", blocked: true });
     expect(outcome(f).reason).toContain("could not be placed on a page");
+    // Unplaced: the finding has no page (0), never a guessed one.
+    expect(outcome(f).findings).toEqual([{ pageNumber: 0, patternType: "ssn", detector: "rule", validation: "structure", confidence: null }]);
     expect(f.document.status).toBe(PII_BLOCKED_DOCUMENT_STATUS);
     expect(new Set(outcome(f).withheldArtifactUris).has(uri(f, "page-1"))).toBe(true);
   });
@@ -233,9 +238,11 @@ describe("block_document keeps whole-document blocking as an explicit choice", (
   it("one match blocks the document", async () => {
     const f = setup("block_document", ["clean", `bad ${SSN}`, "clean"]);
     await f.stage.run(f.state);
-    expect(outcome(f)).toMatchObject({ scope: "document", blocked: true });
+    expect(outcome(f)).toMatchObject({ scope: "document", blocked: true, withheldPageTypes: {} });
     expect(f.document.status).toBe(PII_BLOCKED_DOCUMENT_STATUS);
     expect(documentPiiWithholding(f.state, f.document).scope).toBe("document");
+    // Operator findings name the page the match was on; tenants see the document-level categories only.
+    expect(outcome(f).findings).toEqual([{ pageNumber: 2, patternType: "ssn", detector: "rule", validation: "structure", confidence: null }]);
   });
 });
 
@@ -247,6 +254,26 @@ describe("rescans lift or extend page withholding", () => {
     await again.stage.run(again.state);
     expect(outcome(again)).toMatchObject({ scope: "pages", withheldPages: [2] });
     expect(new Set(outcome(again).withheldArtifactUris).has(uri(again, "page-2"))).toBe(true);
+    // The carried page keeps its reason: the placeholder names its categories, and the rescan reads them back.
+    expect(outcome(again).withheldPageTypes).toEqual({ "2": ["ssn"] });
+    expect(again.storage.objects.get(again.markdownKey)!.split("\f")[1]).toBe(piiWithheldPageText(2, ["ssn"]));
+  });
+
+  it("a page withheld before types were recorded stays withheld on rescan, with a generic reason", async () => {
+    const first = setup("block_indexing", ["p1", `p2 ${SSN}`, "p3"]);
+    await first.stage.run(first.state);
+    // Rewrite page 2 to the pre-types placeholder, as an older release wrote it.
+    const legacy = "[Page 2 withheld by the project's privacy policy]";
+    const markdown = first.storage.objects.get(first.markdownKey)!.split("\f");
+    markdown[1] = legacy;
+    first.storage.objects.set(first.markdownKey, markdown.join("\f"));
+    const doc = first.storage.json<CanonicalDocument>(first.canonicalKey);
+    doc.blocks[1] = { ...doc.blocks[1]!, text: legacy };
+    first.storage.objects.set(first.canonicalKey, JSON.stringify(doc));
+    const again = setup("block_indexing", ["p1", "x", "p3"], { storage: first.storage });
+    await again.stage.run(again.state);
+    expect(outcome(again)).toMatchObject({ scope: "pages", withheldPages: [2], withheldPageTypes: {}, findings: [] });
+    expect(again.storage.objects.get(again.markdownKey)!.split("\f")[1]).toBe(legacy);
   });
 
   it("a rescan that finds a new PII page extends the withheld set", async () => {

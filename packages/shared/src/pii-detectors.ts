@@ -378,3 +378,35 @@ export const PII_DETECTORS: Record<PiiPatternType, PiiDetector> = {
   "jwt": jwts,
   "private-key": privateKeys,
 };
+
+/**
+ * How each detector proves a candidate, for the operator-only finding record (pii_page_findings): every detector is
+ * rule-based and produces no score, so its confidence is recorded as this basis, never as an invented number.
+ * - `checksum`: a check digit or modulus (Luhn, IBAN mod 97, ABA) must hold.
+ * - `structure`: structural rules (SSN area and group ranges, country calling codes, address ranges).
+ * - `context`: a bare number accepted only next to a label ("passport", "account number", "api_key =").
+ * - `format`: a published key or token format (vendor prefix, PEM armour, JWT segments) or an address shape.
+ */
+export type PiiDetectorValidation = "checksum" | "structure" | "context" | "format";
+
+export const PII_DETECTOR_VALIDATION: Readonly<Record<PiiPatternType, PiiDetectorValidation>> = Object.freeze({
+  "ssn": "structure",
+  "credit-card": "checksum",
+  "phone": "structure",
+  "email": "format",
+  "openai-api-key": "format",
+  "anthropic-api-key": "format",
+  "github-token": "format",
+  "generic-api-key": "context",
+  "ip-address": "structure",
+  "bank-account": "context",
+  "iban": "checksum",
+  "passport": "context",
+  "drivers-license": "context",
+  "aws-access-key": "format",
+  "stripe-api-key": "format",
+  "slack-token": "format",
+  "google-api-key": "format",
+  "jwt": "format",
+  "private-key": "format",
+});

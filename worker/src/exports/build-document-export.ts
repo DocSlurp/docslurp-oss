@@ -235,7 +235,7 @@ export async function* documentExportEntries(
     // A document withheld whole (including an outcome that cannot be read) exports no page text (fail closed).
     const pages = (completed && piiState.scope !== "document" ? await source.pages(row.id) : []).map((page) =>
       isPageWithheld(piiState, page.page_number)
-        ? { ...page, text: piiWithheldPageText(page.page_number) }
+        ? { ...page, text: piiWithheldPageText(page.page_number, piiState.scope === "pages" ? piiState.pageTypes?.get(page.page_number) : undefined) }
         : page);
     const imagePlan = completed ? await documentImagePlan(source, artifacts, withheld, artifactKey("artifact-graph"), args.content === "all") : null;
     if (imagePlan?.problem) skipped.push({ path: `${folder}/images/`, reason: `embedded images left out: ${imagePlan.problem}` });

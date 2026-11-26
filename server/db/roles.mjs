@@ -82,6 +82,7 @@ export const WORKER_TABLES = Object.freeze({
   parser_eval_results: { privileges: ["insert"], evidence: "worker/src/db/store.ts parser evaluations" },
   performance_log: { privileges: DML, evidence: "worker/src/db/store.ts perf log and pruning" },
   pii_detections: { privileges: DML, evidence: "worker/src/stages/pii-detect.ts" },
+  pii_page_findings: { privileges: ["select", "insert", "delete"], evidence: "worker/src/stages/pii-detect.ts setDocumentOutcome (a rescan replaces the document's rows); operator-only, never read by tenant routes" },
   privacy_audit_log: { privileges: ["insert"], evidence: "worker/src/lib/privacy-guard.ts" },
   quarantined_sources: { privileges: ["select", "insert", "update"], evidence: "release N-1 workers until the contract migration drops it (superseded by org_quarantined_sources, 0184)" },
   remote_capacity_leases: { privileges: DML, evidence: "worker/src/media/capacity, journal.ts" },

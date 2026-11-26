@@ -1,4 +1,5 @@
 import { DOPPLER_FIGURE_ID } from "./doppler-figures.js";
+import { piiPatternTypeSchema, type PiiPatternType } from "./pii.js";
 import { PII_BLOCKED_DOCUMENT_STATUS } from "./run.js";
 
 /**
@@ -20,26 +21,111 @@ import { PII_BLOCKED_DOCUMENT_STATUS } from "./run.js";
  */
 export type PiiWithholding =
   | { scope: "none" }
-  | { scope: "sections"; sectionCount: number }
-  | { scope: "pages"; pages: ReadonlySet<number> }
-  | { scope: "document"; reason: string };
+  | { scope: "sections"; sectionCount: number; types?: readonly PiiPatternType[] }
+  | {
+      scope: "pages";
+      pages: ReadonlySet<number>;
+      /** Kinds of PII detected on each withheld page; a page missing here has unknown types (a generic reason). */
+      pageTypes?: ReadonlyMap<number, readonly PiiPatternType[]>;
+      types?: readonly PiiPatternType[];
+    }
+  | { scope: "document"; reason: string; types?: readonly PiiPatternType[] };
 
 export type PiiWithholdingScope = PiiWithholding["scope"];
 
-/** The fixed text a withheld page is replaced with. It never names what matched. */
-export function piiWithheldPageText(pageNumber: number): string {
-  return `[Page ${pageNumber} withheld by the project's privacy policy]`;
+/**
+ * Plain labels for the kinds of PII the detectors find (`PiiPatternType` ids are the stable category ids). Labels are
+ * noun phrases for "contains ...". Credential formats share a label, so a reason never names a vendor.
+ */
+export const PII_CATEGORY_LABELS: Readonly<Record<PiiPatternType, string>> = Object.freeze({
+  "ssn": "a Social Security number",
+  "credit-card": "a payment card number",
+  "phone": "a phone number",
+  "email": "an email address",
+  "openai-api-key": "an API key",
+  "anthropic-api-key": "an API key",
+  "github-token": "an access token",
+  "generic-api-key": "an API key",
+  "ip-address": "an IP address",
+  "bank-account": "a bank account number",
+  "iban": "a bank account number",
+  "passport": "a passport number",
+  "drivers-license": "a driver's license number",
+  "aws-access-key": "an API key",
+  "stripe-api-key": "an API key",
+  "slack-token": "an access token",
+  "google-api-key": "an API key",
+  "jwt": "an access token",
+  "private-key": "a private key",
+});
+
+/** A detected PII category as responses show it: the stable id and its label. */
+export type PiiCategory = { id: PiiPatternType; label: string };
+
+const CATEGORY_ORDER = new Map(piiPatternTypeSchema.options.map((id, index) => [id, index]));
+
+function isPiiPatternType(value: unknown): value is PiiPatternType {
+  return typeof value === "string" && CATEGORY_ORDER.has(value as PiiPatternType);
+}
+
+/** Known category ids from stored data, deduplicated and in a stable order; unknown or malformed entries are dropped. */
+export function piiCategoryIds(values: unknown): PiiPatternType[] {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.filter(isPiiPatternType))].sort((a, b) => CATEGORY_ORDER.get(a)! - CATEGORY_ORDER.get(b)!);
+}
+
+export function piiCategories(ids: readonly PiiPatternType[]): PiiCategory[] {
+  return piiCategoryIds(ids).map((id) => ({ id, label: PII_CATEGORY_LABELS[id] }));
+}
+
+/** "a payment card number and an email address"; null when no type is known. Labels shared by several ids appear once. */
+export function describePiiCategories(ids: readonly PiiPatternType[]): string | null {
+  const labels = [...new Set(piiCategoryIds(ids).map((id) => PII_CATEGORY_LABELS[id]))];
+  if (labels.length === 0) return null;
+  if (labels.length === 1) return labels[0]!;
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
+
+/**
+ * The fixed text a withheld page is replaced with. It names the kinds of PII detected (never the matched text, where
+ * it was or how many): `[Page 3 withheld by the project's privacy policy: contains a payment card number]`.
+ */
+export function piiWithheldPageText(pageNumber: number, types: readonly PiiPatternType[] = []): string {
+  const described = describePiiCategories(types);
+  return `[Page ${pageNumber} withheld by the project's privacy policy${described ? `: contains ${described}` : ""}]`;
 }
 
 /** The fixed text a withheld section of an unpaged document is replaced with. */
 export const PII_WITHHELD_SECTION_TEXT = "[Section withheld by the project's privacy policy]";
 
-const WITHHELD_PAGE_TEXT = /^\[Page [1-9][0-9]{0,8} withheld by the project's privacy policy\]$/;
+const WITHHELD_PAGE_TEXT = /^\[Page [1-9][0-9]{0,8} withheld by the project's privacy policy(?:: contains ([a-zA-Z' ,]{1,600}))?\]$/;
+const LABEL_IDS = new Map<string, PiiPatternType>();
+for (const id of piiPatternTypeSchema.options) if (!LABEL_IDS.has(PII_CATEGORY_LABELS[id])) LABEL_IDS.set(PII_CATEGORY_LABELS[id], id);
 
 /** True when a page's whole text is the withheld placeholder (a rescan of rewritten text keeps it withheld). */
 export function isPiiWithheldPlaceholder(text: string): boolean {
   const trimmed = text.trim();
-  return WITHHELD_PAGE_TEXT.test(trimmed) || trimmed === PII_WITHHELD_SECTION_TEXT;
+  if (trimmed === PII_WITHHELD_SECTION_TEXT) return true;
+  const match = WITHHELD_PAGE_TEXT.exec(trimmed);
+  return match !== null && (match[1] === undefined || piiPlaceholderTypes(trimmed) !== null);
+}
+
+/**
+ * The categories a page placeholder names (a rescan keeps a carried page's reason), or null when the text is not a
+ * placeholder or names something that is not a label. Labels several ids share read back as one representative id.
+ */
+export function piiPlaceholderTypes(text: string): PiiPatternType[] | null {
+  const match = WITHHELD_PAGE_TEXT.exec(text.trim());
+  if (!match) return null;
+  if (match[1] === undefined) return [];
+  const parts = match[1].split(/, | and /);
+  const ids: PiiPatternType[] = [];
+  for (const part of parts) {
+    const id = LABEL_IDS.get(part);
+    if (!id) return null;
+    ids.push(id);
+  }
+  return piiCategoryIds(ids);
 }
 
 function isPositiveInteger(value: unknown): value is number {
@@ -51,15 +137,21 @@ function isPositiveInteger(value: unknown): value is number {
  * malformed page list all withhold the whole document.
  */
 export function piiWithholding(document: { status?: string | null; metadata?: unknown }): PiiWithholding {
-  if (document.status === PII_BLOCKED_DOCUMENT_STATUS) return { scope: "document", reason: "pii-blocked" };
+  if (document.status === PII_BLOCKED_DOCUMENT_STATUS) {
+    const types = piiCategoryIds((document.metadata as { pii?: { patternTypes?: unknown } } | null | undefined)?.pii?.patternTypes);
+    return { scope: "document", reason: "pii-blocked", ...(types.length > 0 ? { types } : {}) };
+  }
   const metadata = document.metadata;
   if (metadata === null || metadata === undefined) return { scope: "none" };
   if (typeof metadata !== "object" || Array.isArray(metadata)) return { scope: "document", reason: "malformed-metadata" };
   const pii = (metadata as { pii?: unknown }).pii;
   if (pii === null || pii === undefined) return { scope: "none" };
   if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed-metadata" };
-  const record = pii as { blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown };
-  if (record.blocked === true) return { scope: "document", reason: "pii-blocked" };
+  const record = pii as { blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown; withheldPageTypes?: unknown; patternTypes?: unknown };
+  // Kinds of PII are descriptive: missing or malformed type data never changes what is withheld, only the reason shown.
+  const types = piiCategoryIds(record.patternTypes);
+  const typed = types.length > 0 ? { types } : {};
+  if (record.blocked === true) return { scope: "document", reason: "pii-blocked", ...typed };
   switch (record.scope) {
     case undefined:
     case null:
@@ -73,15 +165,30 @@ export function piiWithholding(document: { status?: string | null; metadata?: un
       if (!Array.isArray(pages) || pages.length === 0 || !pages.every(isPositiveInteger)) {
         return { scope: "document", reason: "malformed-metadata" };
       }
-      return { scope: "pages", pages: new Set(pages) };
+      const pageSet = new Set(pages);
+      const pageTypes = withheldPageTypes(record.withheldPageTypes, pageSet);
+      return { scope: "pages", pages: pageSet, ...(pageTypes.size > 0 ? { pageTypes } : {}), ...typed };
     }
     case "sections":
-      return { scope: "sections", sectionCount: isPositiveInteger(record.withheldSectionCount) ? record.withheldSectionCount : 1 };
+      return { scope: "sections", sectionCount: isPositiveInteger(record.withheldSectionCount) ? record.withheldSectionCount : 1, ...typed };
     case "document":
-      return { scope: "document", reason: "pii-blocked" };
+      return { scope: "document", reason: "pii-blocked", ...typed };
     default:
       return { scope: "document", reason: "unknown-scope" };
   }
+}
+
+/** `metadata.pii.withheldPageTypes` (`{ "3": ["credit-card"] }`) for withheld pages; anything malformed is skipped. */
+function withheldPageTypes(value: unknown, pages: ReadonlySet<number>): Map<number, PiiPatternType[]> {
+  const out = new Map<number, PiiPatternType[]>();
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return out;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const page = /^[1-9][0-9]{0,8}$/.test(key) ? Number(key) : 0;
+    if (!pages.has(page)) continue;
+    const ids = piiCategoryIds(entry);
+    if (ids.length > 0) out.set(page, ids);
+  }
+  return out;
 }
 
 /**
@@ -107,36 +214,69 @@ export function withheldPages(withholding: PiiWithholding): number[] | "all" {
   return [...withholding.pages].sort((a, b) => a - b);
 }
 
-/** Public summary for document responses and the ingest report: counts and page numbers, never content. */
+/** One withheld page as responses show it: its number, the kinds of PII detected on it, and a short reason. */
+export type PiiWithheldPage = { page: number; types: PiiCategory[]; message: string };
+
+/**
+ * Public summary for document responses, the ingest report and the viewer: scope, page numbers, counts of pages and
+ * sections, and the kinds of PII detected. Never the matched text, where on a page it was, or how many matches.
+ */
 export type PiiWithheldSummary = {
   scope: PiiWithholdingScope;
   withheldPages: number[];
   withheldPageCount: number;
   withheldSectionCount: number;
+  /** Kinds of PII detected in what was withheld; empty when not recorded (documents processed before types were). */
+  types: PiiCategory[];
+  /** Per withheld page (page scope only). */
+  pages: PiiWithheldPage[];
   message: string | null;
 };
+
+/** "Page 3 withheld: contains a payment card number and an email address." (or a generic reason when types are unknown). */
+export function piiWithheldPageMessage(page: number, types: readonly PiiPatternType[]): string {
+  const described = describePiiCategories(types);
+  return described ? `Page ${page} withheld: contains ${described}.` : `Page ${page} withheld for privacy.`;
+}
+
+function withTypes(base: string, types: readonly PiiPatternType[]): string {
+  const described = describePiiCategories(types);
+  return described ? `${base}: contains ${described}` : base;
+}
 
 export function piiWithheldSummary(withholding: PiiWithholding, pageCount?: number | null): PiiWithheldSummary {
   switch (withholding.scope) {
     case "none":
-      return { scope: "none", withheldPages: [], withheldPageCount: 0, withheldSectionCount: 0, message: null };
-    case "sections":
+      return { scope: "none", withheldPages: [], withheldPageCount: 0, withheldSectionCount: 0, types: [], pages: [], message: null };
+    case "sections": {
+      const types = withholding.types ?? [];
       return {
         scope: "sections", withheldPages: [], withheldPageCount: 0, withheldSectionCount: withholding.sectionCount,
-        message: `${withholding.sectionCount} section${withholding.sectionCount === 1 ? "" : "s"} withheld for privacy`,
+        types: piiCategories(types), pages: [],
+        message: withTypes(`${withholding.sectionCount} section${withholding.sectionCount === 1 ? "" : "s"} withheld for privacy`, types),
       };
+    }
     case "pages": {
       const pages = [...withholding.pages].sort((a, b) => a - b);
+      const perPage = pages.map((page) => {
+        const ids = withholding.pageTypes?.get(page) ?? [];
+        return { page, types: piiCategories(ids), message: piiWithheldPageMessage(page, ids) };
+      });
+      const recorded = perPage.flatMap((entry) => entry.types.map((type) => type.id));
+      const types = piiCategoryIds(recorded.length > 0 ? recorded : withholding.types ?? []);
       return {
         scope: "pages", withheldPages: pages, withheldPageCount: pages.length, withheldSectionCount: 0,
-        message: `${pages.length} page${pages.length === 1 ? "" : "s"} withheld for privacy (${pages.length === 1 ? "page" : "pages"} ${pages.join(", ")})`,
+        types: piiCategories(types), pages: perPage,
+        message: withTypes(`${pages.length} page${pages.length === 1 ? "" : "s"} withheld for privacy (${pages.length === 1 ? "page" : "pages"} ${pages.join(", ")})`, types),
       };
     }
     case "document": {
       const all = isPositiveInteger(pageCount) ? Array.from({ length: pageCount }, (_, index) => index + 1) : [];
+      const types = withholding.types ?? [];
       return {
         scope: "document", withheldPages: all, withheldPageCount: all.length, withheldSectionCount: 0,
-        message: "Document withheld for privacy",
+        types: piiCategories(types), pages: [],
+        message: withTypes("Document withheld for privacy", types),
       };
     }
   }
@@ -196,10 +336,14 @@ export function pagesOfMatch(
   return pages.length > 0 ? pages : null;
 }
 
-/** `\f`-separated text with each withheld page's text replaced by its placeholder. */
-export function withholdTextPages(text: string, pages: ReadonlySet<number>): string {
+/** `\f`-separated text with each withheld page's text replaced by its placeholder (naming its PII types when known). */
+export function withholdTextPages(
+  text: string,
+  pages: ReadonlySet<number>,
+  pageTypes?: ReadonlyMap<number, readonly PiiPatternType[]>,
+): string {
   if (pages.size === 0) return text;
-  return text.split("\f").map((page, index) => (pages.has(index + 1) ? piiWithheldPageText(index + 1) : page)).join("\f");
+  return text.split("\f").map((page, index) => (pages.has(index + 1) ? piiWithheldPageText(index + 1, pageTypes?.get(index + 1)) : page)).join("\f");
 }
 
 /**
