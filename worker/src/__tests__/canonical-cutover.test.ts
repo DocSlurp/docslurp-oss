@@ -52,6 +52,7 @@ describe("canonical cutover", () => {
           embeddingModelUri: "llm://host-a/m?dimensions=4", embeddingModelClass: "embeddingProfile=cheapest-hosted" },
         { documentId: "other", backend: "lancedb", bucket: "b", path: "p3", embeddingModel: "m", dimension: 4 },
       ],
+      artifactLedger: { read: () => undefined },
       setDocumentStage: () => {},
       refreshStats: () => {},
     } as unknown as WorkflowState;

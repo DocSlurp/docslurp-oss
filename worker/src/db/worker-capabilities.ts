@@ -29,6 +29,8 @@ export interface WorkerCapabilityProbes {
   lexicalColumnPresent: () => Promise<boolean>;
   /** The page read charge settlement trigger exists (0185): this worker may write OCR page class charges. */
   ocrPageClassSettlement?: () => Promise<boolean>;
+  /** The per-document Fast backstop exists (20261126T0327): this worker may pin runs to per-document Fast charges. */
+  fastPerDocumentSchema?: () => Promise<boolean>;
   /** The PII findings table exists (20261126T0225): this worker can run `block_document` and page withholding. */
   piiFindingsTable?: () => Promise<boolean>;
 }
@@ -48,10 +50,11 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
     // refuses an image without inspection-text-pages), so intake need not decode text on the API host (app issue 599).
     "inspection.text-pages",
   ];
-  const [leases, lexical, ocrSettlement, piiFindings] = await Promise.all([
+  const [leases, lexical, ocrSettlement, fastPerDocument, piiFindings] = await Promise.all([
     probes.creditLeasesActive().catch(() => false),
     probes.lexicalColumnPresent().catch(() => false),
     probes.ocrPageClassSettlement?.().catch(() => false) ?? Promise.resolve(false),
+    probes.fastPerDocumentSchema?.().catch(() => false) ?? Promise.resolve(false),
     probes.piiFindingsTable?.().catch(() => false) ?? Promise.resolve(false),
   ]);
   // Handles block_document and fails closed on unknown PII actions; advertised only once its findings table exists, so
@@ -59,6 +62,9 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
   if (piiFindings) capabilities.push("pii.block-document");
   // Bills OCR route reads in the OCR page class and settles Fast with page rules 2 (pipeline/ocr-page-class.ts).
   if (ocrSettlement) capabilities.push("billing.ocr-page-class");
+  // Charges Fast per document when a document completes (db/page-base-fee.ts); needs the schema that refuses an older worker's
+  // run-wide charge on such a run.
+  if (ocrSettlement && fastPerDocument) capabilities.push("billing.fast-per-document");
   if (leases) capabilities.push("billing.credit-leases");
   if (lexical) capabilities.push("search.early-lexical");
   // Only a worker whose PDF provider converts batches can run a first pass: without it the fleet never records one.
@@ -103,6 +109,23 @@ export function ocrPageClassSettlementProbe(sql: Client): () => Promise<boolean>
     if (state && (state.present || now - state.checkedAt < 5 * 60_000)) return state.present;
     const [row] = await sql<{ present: boolean }[]>`
       select exists (select 1 from pg_trigger where tgname = 'usage_events_settle_page_read_charge' and not tgisinternal) as present
+    `;
+    state = { present: row?.present === true, checkedAt: now };
+    return state.present;
+  };
+}
+
+/**
+ * Cached once present; re-checked every 5 minutes while missing: the per-document Fast backstop of migration
+ * 20261126T0327 (the settlement trigger's function names `perDocument`).
+ */
+export function fastPerDocumentSchemaProbe(sql: Client): () => Promise<boolean> {
+  let state: { present: boolean; checkedAt: number } | null = null;
+  return async () => {
+    const now = Date.now();
+    if (state && (state.present || now - state.checkedAt < 5 * 60_000)) return state.present;
+    const [row] = await sql<{ present: boolean }[]>`
+      select exists (select 1 from pg_proc where proname = 'settle_page_read_charge' and prosrc like '%perDocument%') as present
     `;
     state = { present: row?.present === true, checkedAt: now };
     return state.present;

@@ -11,6 +11,8 @@ import type { QualityMode } from "./quality.js";
  * - `ocr`: transcription of pixels: scanned and image pages, text drawn as paths, table rescue. Read by the OCR engine
  *   (its recogniser and escalation), the page image reader, or plain page transcription by the run's vision route.
  * - `intelligent`: pages whose meaning is in a figure: charts, diagrams, image-heavy pages, read by the hosted vision model.
+ *   Page triage no longer sends a page here from its words (the `chart-or-figure` and `image-heavy` routes, DocSlurp/app issue
+ *   601): a page reaches it when the quality promotes its read (smartest), or from triage an earlier release stored.
  *
  * A page's rung comes from page triage (which pages need a read, and why) and is recorded per page with its reason.
  * Two project limits (`pipeline.ladder`) cap it: the highest rung allowed, and the largest share of a document's pages

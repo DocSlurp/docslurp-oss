@@ -185,7 +185,8 @@ export interface LegacyPageHints {
   encodingReadPages?: ReadonlySet<number>;
   /**
    * Pages page triage routed as figure- or chart-bearing (`chart-or-figure`, `image-heavy`): the vision page reader, an
-   * OCR specialist that skips image insets, leaves them to the hosted route (vision-page-reader.ts).
+   * OCR specialist that skips image insets, leaves them to the hosted route (vision-page-reader.ts). Those routes come only from
+   * triage an earlier release stored (no classifier writes them since DocSlurp/app issue 601); delete with v1 routing.
    */
   figurePages?: ReadonlySet<number>;
   /** Built from page triage (legacyPageHints): without it no page is known not to be a figure, so none goes to the reader. */
@@ -211,6 +212,7 @@ export function legacyPageHints(pages: Array<{ pageNumber: number; textDensitySc
   const encodingReadPages = new Set<number>();
   const figurePages = new Set<number>();
   for (const page of pages) {
+    // Stored triage of an earlier release only (figurePages).
     if (page.route === "chart-or-figure" || page.route === "image-heavy") figurePages.add(page.pageNumber);
     // A read the encodings alone authorized takes their budget, even where a table-leak signal also rides on it.
     const budget = readBudgetOf(page);

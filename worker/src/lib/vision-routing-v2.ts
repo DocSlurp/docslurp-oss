@@ -7,8 +7,11 @@ import type { ProjectRun } from "../models.js";
  * - `v3` (every run started since evidence routing): a page goes to a vision/OCR read only on facts about the PDF
  *   page itself (docs/page-routing-evidence.md): native words from the text layer, significant non-repeated images,
  *   the text layer's own quality, drawn content. Text routes only label pages for the report.
- * - `v1` (runs started earlier and still in flight, or states built without a pin): the keyword and character-class
- *   heuristics those runs were classified with. Nothing starts a new run on v1; delete it once in-flight runs drain.
+ * - `v1` (runs started earlier and still in flight, or states built without a pin): the text-derived heuristics those
+ *   runs were classified with, less their keyword triggers (DocSlurp/app issue 601: words naming a chart, figure or photo
+ *   no longer route a page). It still routes on measures of the extracted text (replacement characters, symbol noise,
+ *   short-token pages, sparse table pages) and on page evidence. Nothing starts a new run on v1; delete it once in-flight
+ *   runs drain.
  *
  * Why `v3` and not `v2`: the previous release pinned `v2` for its canary keyword-routing rules (VISION_ROUTING_V2).
  * Evidence routing changed what the pin means, and during a rolling deploy an old worker (which understands only
@@ -20,7 +23,7 @@ import type { ProjectRun } from "../models.js";
  * The version is pinned when the run starts (`pinRunRoutingVersion` from `startRun`) and persisted as a run
  * artifact. Every later stage, shard and page task reads that artifact (`resolveRunRoutingV2`, v1 when it is
  * missing or unknown), so workers with different builds, retries and rehydrated runs all route the run the same
- * way. There is no environment switch: a flag would only bring the keyword triggers back.
+ * way. There is no environment switch: a flag would only bring text-derived routing back to new runs.
  */
 
 /** Run artifact slot holding the run's resolved routing version (`v1` or `v3`). */
@@ -29,7 +32,7 @@ export const VISION_ROUTING_VERSION_SLOT = "run:vision-routing-version";
 export type RoutingVersion = "v1" | "v3";
 
 export interface RoutingVersionOptions {
-  /** Evidence routing (v3). Off reads as v1: the keyword routing of runs started earlier. */
+  /** Evidence routing (v3). Off reads as v1: the text-derived routing of runs started earlier. */
   routingV2?: boolean;
 }
 

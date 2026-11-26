@@ -528,7 +528,8 @@ export async function materializePageRange(
             costCents: ocr.costCents,
             inputTokens: ocr.inputTokens,
             outputTokens: ocr.outputTokens,
-            metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId },
+            // The read completed (onResult): no provider metadata key may mark it otherwise (usage-ledger readCompleted).
+            metadata: { ...ocr.metadata, documentId, pageNumber: page, materializedBy: input.reason, sessionId: input.sessionId, outcome: "completed" },
           });
         },
       });

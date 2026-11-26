@@ -813,6 +813,7 @@ const NO_NATIVE_TEXT_SIGNALS = new Set([
 export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = PAGE_RASTER_ROUTING.drawnContentMinBytesPerPage;
 /** Extracted words on a page with neither a text layer nor images that make it drawn text, not blank. */
 export const DRAWN_TEXT_MIN_WORDS = 10;
+// `chart-or-figure` (and `image-heavy` below) are no longer produced (DocSlurp/app issue 601); kept for triage an earlier release stored.
 const STRUCTURED_TEXT_ROUTES = new Set<AdaptivePageRoute>(["table-heavy", "form", "formula-heavy", "chart-or-figure"]);
 
 /**
@@ -831,7 +832,7 @@ export function pageLacksNativeText(page: Pick<AdaptivePageRoutingEntry, "ocrDec
  * the selection.
  *
  * v1 (runs started before evidence routing): a routing decision from page evidence decides alone; otherwise
- * vision-rescue routes and sparse form or table pages. v2 (evidence routing): exactly the pages whose own
+ * vision-rescue routes (a text layer degraded by its characters' measures, never by what its words say) and sparse table pages. v2 (evidence routing): exactly the pages whose own
  * evidence authorized a read (scans, raster pages, drawn content, an unreadable text layer); blank pages never,
  * and no text route adds or removes a page.
  */
@@ -845,10 +846,11 @@ export function selectLegacyVisionPages(
         if (page.ocrDecision !== undefined) {
           return page.ocrDecision.authorized;
         }
+        // A form route comes from label words ("name", "date"), so it never adds a read; a sparse table route comes from
+        // the page's structure (aligned rows, grids).
         return (
           page.extractorHint === "vision-rescue" ||
-          ((page.route === "form" || page.route === "table-heavy") &&
-            page.textDensityScore < 0.45)
+          (page.route === "table-heavy" && page.textDensityScore < 0.45)
         );
       })
       .map((page) => page.pageNumber);
@@ -1285,11 +1287,6 @@ export function classifyAdaptivePage(
     colonLineCount >= Math.max(3, Math.ceil(lines.length * 0.25)),
     /name|address|date|signature|phone|email|account|policy|claim/i.test(normalized)
   ].filter(Boolean).length;
-  const chartMarkers = [
-    /figure|chart|graph|axis|legend|series|plot|dataset/i.test(normalized),
-    /%/.test(normalized),
-    lines.some((line) => /\bq[1-4]\b|\bjan\b|\bfeb\b|\bmar\b/i.test(line))
-  ].filter(Boolean).length;
   // v2: text from fonts without a Unicode map comes out as long runs of shifted glyph codes
   // ("6FDOLQJDWWHQWLRQ...") rather than words: the text layer exists but is unreadable.
   const garbledCharacters = !routingV2 ? 0 : matchedLength(scanText, /[A-Za-z0-9]{20,}/g);
@@ -1299,10 +1296,6 @@ export function classifyAdaptivePage(
     /�/.test(normalized),
     countMatches(normalized, /[^\w\s.,:%$()/-]/g) > Math.max(6, charCount * 0.08),
     wordCount > 0 && charCount / Math.max(1, wordCount) < 3.2
-  ].filter(Boolean).length;
-  const imageMarkers = [
-    /photo|image|diagram|illustration|screenshot/i.test(normalized),
-    charCount < 140 && wordCount < 24 && chartMarkers >= 2
   ].filter(Boolean).length;
   const textDensityScore = Math.min(1, (charCount / 900) * 0.6 + (wordCount / 180) * 0.4);
   const signals: string[] = [];
@@ -1315,8 +1308,10 @@ export function classifyAdaptivePage(
   let extractorHint: AdaptivePageRoutingEntry["extractorHint"] = "cheap-text";
   let confidence = Math.max(0.45, textDensityScore);
 
-  // v2 never reads a page's quality or content class off its words: a page is degraded, a chart or an image page
-  // only when facts about the PDF page say so (buildEvidencePages). Its text still labels tables, forms, formulas, code.
+  // No version reads a page's content class off its words: a chart or an image page only when facts about the PDF page
+  // say so. v2 also never reads quality off the text (buildEvidencePages); v1 keeps its character-class degradation
+  // measures (replacement characters, symbol noise), which describe the text layer, not what the words say.
+  // The text still labels tables, forms, formulas, code.
   if (!routingV2 && garbledText) {
     route = "handwriting-or-degraded";
     extractorHint = "vision-rescue";
@@ -1366,17 +1361,10 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.7;
     signals.push(encodingTableSignal(encodings!));
-  } else if (!routingV2 && chartMarkers >= 2) {
-    route = "chart-or-figure";
-    extractorHint = "vision-rescue";
-    confidence = 0.72;
-    signals.push("chart-markers");
-  } else if (!routingV2 && imageMarkers >= 1) {
-    route = "image-heavy";
-    extractorHint = "vision-rescue";
-    confidence = 0.68;
-    signals.push("image-markers");
   } else {
+    // Words that name a chart, a figure or a photo ("photovoltaic", "see the diagram") are document content: they never
+    // make a page a chart or image page, in either routing version (DocSlurp/app issue 601). Whether a page's content is
+    // pixels is measured (page-image evidence, the text layer's own quality), and that decides a read.
     signals.push("dense-prose");
   }
   if (encodings) {

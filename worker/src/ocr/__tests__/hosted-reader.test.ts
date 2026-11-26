@@ -266,6 +266,9 @@ describe("OCR escalation reads", () => {
     expect(state.usageLedger.snapshot().filter((event) => event.metadata?.possiblyBilled === true)).toEqual([
       expect.objectContaining({ model: "z-ai/glm-5.3-flash", costCents: 0, metadata: expect.objectContaining({ outcome: "timeout", costSource: "unknown", poolMemberId: "ocr.llm.glm-5.3-flash+morph.us" }) }),
     ]);
+    // A read that returned nothing charges no page: no Rich (or OCR) page charge for the timed-out read.
+    expect(state.usageLedger.snapshot().filter((event) => /^(ocr|rich):/.test(event.id ?? ""))).toEqual([]);
+    expect(state.usageLedger.pageChargeClass("doc-1", 1)).toBeNull();
     expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "unknown-billed": 1 } });
   });
 
