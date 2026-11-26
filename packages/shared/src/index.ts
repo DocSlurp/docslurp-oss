@@ -63,6 +63,7 @@ export * from "./file-formats.js";
 export * from "./file-sniff.js";
 export * from "./read-loop-contract.js";
 export * from "./read-loop.js";
+export * from "./read-map.js";
 export * from "./page-raster-routing.js";
 export * from "./page-cost-route.js";
 export * from "./text-layer-quality.js";
