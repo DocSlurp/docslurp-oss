@@ -1337,6 +1337,12 @@ function isSessionBusyError(error: unknown): error is DocSlurpApiError {
 
 /** files/complete's answers that mean the file's bytes (or some parts) are not in storage: upload them, then complete. */
 const RESEND_COMPLETION_CODES = new Set(["upload_object_missing", "upload_parts_incomplete"]);
+/**
+ * A session file the server rejected (its stored bytes or the upload policy check failed; `rejection` says why): final, never
+ * sent again. The session goes on with the other files and its confirm reports this one per file.
+ */
+const REJECTED_FILE_STATUS = "rejected";
+const REJECTED_COMPLETION_CODE = "upload_file_rejected";
 function isResendableCompletion(error: unknown): boolean {
   return error instanceof DocSlurpApiError && RESEND_COMPLETION_CODES.has(error.code ?? "");
 }
@@ -2839,6 +2845,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions, slot: TransferSlot): Promise<void> {
+    // A file the server rejected is final: nothing to send (it carries no upload target).
+    if (first.status === REJECTED_FILE_STATUS) return;
     let descriptor = first;
     for (let round = 0; ; round++) {
       try {
@@ -2869,7 +2877,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         // The refreshed targets must belong to the same file the local bytes were matched to.
         const refreshed = refreshedDescriptor(askedDescriptors(session.files, [descriptor.id]), descriptor);
         if (!refreshed) throw error;
-        if (refreshed.status === "completed") return;
+        if (refreshed.status === "completed" || refreshed.status === REJECTED_FILE_STATUS) return;
         if (refreshed.status === "failed" || refreshed.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${refreshed.status}`);
         descriptor = refreshed;
       }
@@ -2920,7 +2928,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         const name = original.filename;
         const fresh = refreshedDescriptor(described, original);
         if (!fresh) throw new Error(`Upload session no longer has ${name}`);
-        if (fresh.status === "completed") continue;
+        if (fresh.status === "completed" || fresh.status === REJECTED_FILE_STATUS) continue;
         if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
         resend.set(id, fresh);
       }
@@ -2954,7 +2962,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       for (const file of files) {
         const result = byId.get(file.id);
         const code = result?.error?.code;
-        outcomes.set(file.id, result?.status === "completed" ? "completed"
+        outcomes.set(file.id, result?.status === "completed" || code === REJECTED_COMPLETION_CODE ? "completed"
           : code && RESEND_COMPLETION_CODES.has(code) ? "missing"
           : result?.error?.retryable ? "retry"
           : { code: code ?? "missing result" });

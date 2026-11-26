@@ -804,7 +804,8 @@ async function settleUninspected(sessionPath: string, uninspected: DirectUploadD
       const name = original.filename;
       const fresh = refreshedDescriptor(described, original);
       if (!fresh) throw new Error(`Upload session no longer has ${name}`);
-      if (fresh.status === "completed") continue;
+      // A rejected file is final (the server says why in `rejection`): never sent again; the confirm reports it per file.
+      if (fresh.status === "completed" || fresh.status === "rejected") continue;
       if (fresh.status === "failed" || fresh.status === "aborted") throw new Error(`Upload of ${name} ${fresh.status}`);
       resend.set(id, fresh);
     }
@@ -987,8 +988,8 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
     // Files go up a few at a time; each one is completed as soon as its bytes are in storage.
     await forEachLimited(work, uploadConcurrency(), async ({ first, match }) => {
       const target = first.inspected === false ? resend.get(first.id) : first;
-      // An uninspected file whose stored object completed it needs nothing more.
-      if (!target) return;
+      // An uninspected file whose stored object completed it needs nothing more; a rejected one is final (nothing to send).
+      if (!target || target.status === "rejected") return;
       let descriptor: DirectUploadDescriptor = target;
       let complete: Record<string, unknown> | null = null;
       for (let round = 0; complete === null; round++) {
@@ -1013,6 +1014,8 @@ async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: 
           const next = refreshedDescriptor(askedDescriptors(refreshedFiles, [descriptor.id]), descriptor);
           if (!next) throw error;
           if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
+          // Rejected by the server: final, nothing to send or complete; the confirm reports it per file.
+          if (next.status === "rejected") return;
           if (next.status === "failed" || next.status === "aborted") throw new Error(`Upload of ${descriptor.filename} ${next.status}`);
           descriptor = next;
         }
