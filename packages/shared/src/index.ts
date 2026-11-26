@@ -51,6 +51,7 @@ export * from "./summary-tree-job.js";
 
 // Sub-modules created during refactor
 export * from "./embedding.js";
+export * from "./model-endpoints.js";
 export * from "./perplexity-embeddings.js";
 export * from "./deferred-indexing.js";
 export * from "./page-vectors.js";
