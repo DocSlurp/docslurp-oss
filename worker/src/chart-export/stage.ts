@@ -451,6 +451,6 @@ async function applyVisualGroups(
   ]);
   ledger.recordDocument(document.id, "canonical-document", storage.uri(canonicalKey));
   ledger.recordDocument(document.id, "markdown", storage.uri(markdownKey));
-  await refreshSummaryEvidence({ storage, ledger, document, text: reconciled.markdown, sourceUri: storage.uri(markdownKey) });
+  await refreshSummaryEvidence({ storage, ledger, document, text: reconciled.markdown, sourceUri: storage.uri(markdownKey), textIsStored: true });
   return { changedPages, unpaged };
 }

@@ -27,12 +27,12 @@ import {
   type StructuredSchemaDef,
   type StructuredResultEnvelope,
   validateStructuredResult,
+  runReadMap,
 } from "@docslurp/shared";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { runBounded } from "../lib/bounded-concurrency.js";
 import { buildEvidenceIndex, locateEvidence } from "../lib/evidence-locator.js";
-import { mergeFieldAnswers, pickField, planStructuredWindows, type RawField } from "../lib/structured-windows.js";
+import { mergeFieldAnswers, pickField, planStructuredWindows, type RawField, type ReadWindow } from "../lib/structured-windows.js";
 import { readCanonicalDocumentArtifact, readExtractedText } from "./embedding-runtime.js";
 
 /** Characters of document text per model read, and the most reads per document (about 800 pages of prose). */
@@ -333,23 +333,18 @@ export class StructuredExtractStage implements Stage {
               }
             };
 
-            const readWindow = async (windowIndex: number) => {
-              const window = plan.windows[windowIndex]!;
+            // Read (and billed) by an earlier attempt of this run: no model call, no new spend.
+            const lookupWindow = async ({ item: window, index: windowIndex }: { item: ReadWindow; index: number }) => {
               const cached = await cachedWindowText(windowIndex);
-              if (cached !== null) {
-                // Read (and billed) by an earlier attempt of this run: no model call, no new spend.
-                windowFields[windowIndex] = parseStructuredFields(cached || "{}");
-                windowsRead += 1;
-                readChars += window.text.length;
-                readCjk += cjkCount(window.text);
-                billRead(false);
-                return;
-              }
-              // The run's cost cap counts this stage's own spend: once it is reached no further window is read.
-              if (isCostCapExceeded(state)) {
-                skippedForCap += 1;
-                return;
-              }
+              if (cached === null) return null;
+              windowFields[windowIndex] = parseStructuredFields(cached || "{}");
+              windowsRead += 1;
+              readChars += window.text.length;
+              readCjk += cjkCount(window.text);
+              billRead(false);
+              return { value: null };
+            };
+            const readWindow = async ({ item: window, index: windowIndex, signal: mapSignal }: { item: ReadWindow; index: number; signal: AbortSignal }) => {
               const task = buildTrustedDocumentTaskPrompt({
                 instruction: [
                   "Extract structured fields from document text.",
@@ -397,7 +392,7 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                       deploymentProfile: this.config.textGenerationProfile,
                       system: task.system,
                       prompt: task.prompt,
-                      signal,
+                      signal: mapSignal,
                     }),
                   { metadata: { documentId: document.id, window: windowIndex + 1 } },
                 );
@@ -420,15 +415,16 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
               const outputTokens = result.usage.outputTokens;
               usageInputTokens += inputTokens;
               usageOutputTokens += outputTokens;
+              const callCostCents = result.usage.costCents ?? (
+                (inputTokens / 1000) * this.config.costPer1kInputTokens +
+                  (outputTokens / 1000) * this.config.costPer1kOutputTokens
+              );
               state.usageLedger.record({
                 ...textUsageLabels(extractionConfig.model),
                 metric: "structured-extract",
                 amount: inputTokens + outputTokens,
                 unit: "token",
-                costCents: result.usage.costCents ?? (
-                  (inputTokens / 1000) * this.config.costPer1kInputTokens +
-                    (outputTokens / 1000) * this.config.costPer1kOutputTokens
-                ),
+                costCents: callCostCents,
                 inputTokens,
                 outputTokens,
                 metadata: {
@@ -446,14 +442,29 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                   },
                 },
               });
+              return { value: null, costCents: callCostCents, inputTokens };
             };
-            try {
-              await runBounded(plan.windows.length, STRUCTURED_WINDOW_CONCURRENCY, readWindow);
-            } catch (error) {
+            // The windows are independent reads, so they run as one read map: a few in flight at once, cached answers served
+            // without a call, and the run's cost cap (which counts this stage's own spend) checked before every call.
+            const reads = await runReadMap({
+              items: plan.windows,
+              lookup: lookupWindow,
+              map: readWindow,
+              budget: {
+                maxCalls: structuredMaxWindows(),
+                maxInputTokens: Number.POSITIVE_INFINITY,
+                maxCostCents: Number.POSITIVE_INFINITY,
+                maxWallMs: Number.POSITIVE_INFINITY,
+                concurrency: STRUCTURED_WINDOW_CONCURRENCY,
+              },
+              ports: { shouldStop: () => isCostCapExceeded(state), signal },
+            });
+            if (reads.stoppedBy === "errors" || reads.stoppedBy === "aborted") {
               // The windows that finished were read and are billed (text read, no page floor); the failed one adds nothing.
               billRead(false);
-              throw error;
+              throw reads.error ?? signal?.reason ?? new Error("structured extraction was cancelled");
             }
+            skippedForCap = reads.usage.skipped;
             if (skippedForCap > 0) {
               console.warn(`[structured-extract] document=${document.id} cost cap reached; skipped ${skippedForCap} of ${plan.windows.length} windows`);
             }

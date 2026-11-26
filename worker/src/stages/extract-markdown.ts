@@ -10,7 +10,8 @@ import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForMarkdownC
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfGridSettlement, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfLayoutWalkerUnknown, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
-import { buildSummaryEvidence } from "./summary-evidence.js";
+import { SUMMARY_MAX_PAGES, buildSummaryEvidence } from "./summary-evidence.js";
+import { readStoredMarkdown, syncPageOffsets } from "./summary-evidence-refresh.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
@@ -67,7 +68,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { dopplerImageLimits, figuresEnabled, ladderSkipsOcr, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, ladderSkipsOcr, summaryScanAvailable, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -746,8 +747,12 @@ export class ExtractMarkdownStage implements Stage {
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash,
                       ...(ladderPolicy.ladder.active ? { ladderBudget: ladderPolicy.aboveFastBudget } : {}) }, signal)
                     : null;
+                  // The one text this stage stored byte for byte (UTF-8 of this string): the page offset index describes stored
+                  // bytes, so it is written only when the final text is still this string at this URI.
+                  let exactlyStored: { uri: string; text: string } | null = null;
                   if (scanFill) {
                     winningText = scanFill.text;
+                    exactlyStored = { uri: scanFill.textUri, text: scanFill.text };
                     strategy = `${strategy}+ocr`;
                     partialArtifactUri = scanFill.textUri;
                   }
@@ -774,6 +779,7 @@ export class ExtractMarkdownStage implements Stage {
                   });
                   if (critique && critique.acceptedPages.length > 0) {
                     winningText = critique.correctedText;
+                    if (critique.correctedTextUri) exactlyStored = { uri: critique.correctedTextUri, text: critique.correctedText };
                     strategy = `${strategy}+critique`;
                     plausibilityScore = scoreExtractionPlausibility(
                       winningText,
@@ -1010,6 +1016,18 @@ export class ExtractMarkdownStage implements Stage {
                       documentId: document.id, sourceUri: artifactUri,
                     }));
                     state.artifactLedger.recordDocument(document.id, "summary-evidence", this.storage.uri(evidenceKey));
+                    // The index holds byte offsets into the stored object. The candidate branch (winningCandidate.textUri) holds
+                    // the extractor's raw bytes while winningText has been decoded, sanitized and normalized since, so there the
+                    // stored object is read back: one extra read, paid only when the adaptive summary is on and the document is
+                    // larger than one summary sample (the only reader of the index today).
+                    const exact = exactlyStored && exactlyStored.uri === artifactUri && exactlyStored.text === winningText;
+                    const stored = exact ? winningText
+                      : summaryScanAvailable(process.env) && document.pageCount > SUMMARY_MAX_PAGES
+                        ? await readStoredMarkdown(this.storage, artifactUri, signal)
+                        : null;
+                    await syncPageOffsets(this.storage, {
+                      evidenceKey, documentId: document.id, pageCount: document.pageCount, sourceUri: artifactUri, stored,
+                    });
                   }
                   const manifestUri = this.storage.uri(manifestKey);
                   const canonicalUri = this.storage.uri(canonicalKey);
