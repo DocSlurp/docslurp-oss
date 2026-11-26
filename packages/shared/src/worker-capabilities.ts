@@ -58,6 +58,12 @@ export const WORKER_CAPABILITIES = [
    * full DOCSLURP_DISABLE vocabulary enforced at execution, and the posture digest in its registry row (`config`).
    */
   "extraction.config-v1",
+  /**
+   * Measures every text document's pages itself, in the parser VM under the VM-only floor (DocSlurp/app issue 599): intake
+   * may send a size-and-line-feed estimate instead of decoding the text on the API host. A VM-only worker whose parser image
+   * cannot count text refuses to start, so it never advertises this.
+   */
+  "inspection.text-pages",
 ] as const;
 
 export type WorkerCapability = (typeof WORKER_CAPABILITIES)[number];
@@ -114,6 +120,11 @@ export const GATED_FEATURES: readonly GatedFeature[] = [
     flag: "DOCSLURP_DISABLE",
     capability: "extraction.config-v1",
     description: "kill switches enforced by every worker at execution (the app's own lowering applies either way)",
+  },
+  {
+    flag: "DOCSLURP_INTAKE_TEXT_ESTIMATE",
+    capability: "inspection.text-pages",
+    description: "intake estimates text pages from size and line feeds; the worker measures them in the parser VM",
   },
 ];
 
