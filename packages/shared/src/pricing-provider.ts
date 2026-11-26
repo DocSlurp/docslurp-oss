@@ -188,6 +188,12 @@ export interface PricingProvider {
   pageCredits(mode: PageMode, pages: number): number;
   /** Rich pages one model read of a page counts as, given its output tokens (unknown: 1). */
   richPagesForOutputTokens(outputTokens: number | null | undefined): number;
+  /**
+   * Optional. Rich pages a run or reprocess estimate's high end counts for one vision read of a page: a planning figure for
+   * a dense page, not a ceiling (a page whose answer is longer can bill more, `richPagesForOutputTokens`). Absent, or not a
+   * finite number of at least 1: 1 (estimatePipelineWork).
+   */
+  estimateHighRichPagesPerRead?(): number;
   /** Rich pages an audio or video file counts as for its duration. */
   mediaRichPages(kind: "audio" | "video", seconds: number): number;
   /** Monthly storage credits for `bytes` stored. */

@@ -100,6 +100,8 @@ Config estimates return `{ impact, estimate, billing }` (project update and rein
   "basis": "default pipeline, historical averages" }
 ```
 
+For run and reprocess estimates, `credits.low` assumes every page has a text layer and bills Fast, over the documents whose pages are measured, at the smaller of the selected stages' share and the share of the completion page charge the pricing provider gives the run. `credits.high` assumes every page the run may read is a scan: each OCR or vision read is counted in full, as the worker charges it whatever share of the run the stage is, a vision read at the provider's planning size for a dense page, an Auto ladder share at its per-document budget (at least one page per document), pages not yet measured at the most their size allows, and each optional feature with one extra block per document. Very dense pages (long tables) can bill more Rich pages than that planning size, and features that bill on the text they read can exceed the page count for text-dense documents; the run's cost cap (`maxCostCents`), when set, and the organization's credit balance, checked as the run spends (the run pauses when it runs out), limit that spend. The `basis` string says which of these apply.
+
 A mutation's returned `job.estimate` equals its estimate route's result, and `job.estimateUrl` names that route. A slow estimate is still returned: the mutation waits for it either way.
 
 On self-hosted deployments billing is disabled: `billing` is `"disabled"`, `credits` is `null`, and pages and time still apply. Nothing is ever priced or charged.

@@ -1,8 +1,9 @@
 import { z } from "zod";
 
-import { QUALITY_RANK } from "./quality.js";
-import { applyLadderLimits, ladderAllowsMore, ladderChartExportTier, ladderEstimateMix, pageReadingQuality } from "./auto-ladder.js";
-import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, pipelineProfileIdFor, richPagesForOutputTokens, workerSlotsFor, type PipelineProfileId } from "./billing.js";
+import { QUALITY_RANK, qualityAllowsPageReading } from "./quality.js";
+import { applyLadderLimits, effectiveLadder, ladderAllowsMore, ladderAllowsOffPlanReads, ladderChartExportTier, ladderEstimateMix, ladderShareBudget, pageReadingQuality } from "./auto-ladder.js";
+import { estimateHighRichPagesPerRead, expectedVisualExportCredits, featureCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, pageCredits, pipelineProfileIdFor, workerSlotsFor, type PipelineProfileId } from "./billing.js";
+import type { DocumentFeature } from "./pricing-provider.js";
 import { pricing } from "./pricing-provider.js";
 import type { VisualCandidateStats } from "./chart-export.js";
 import { chartExportDefaults, chartExportModelsAvailable, CONSERVATIVE_CHART_EXPORT_DEFAULTS, effectiveTierFromDefaults, type ChartExportDefaults, type ChartExportTier, type RunOrigin } from "./chart-export.js";
@@ -470,35 +471,61 @@ export function freeChartTierSeconds(documents: number, workerSlots: number): { 
 const profileFor = (features: PipelineFeatures): PipelineProfileId => pipelineProfileIdFor(features);
 
 /**
- * Stages that read pages with OCR or a vision model. The worker charges each such read as the page is read, in full,
- * whatever share of the run the stage is (db/page-base-fee.ts); only the pages no read covered bill at completion, at the
- * provider's page charge share.
+ * Stages that charge a page as it is read, OCR or Rich, in full, whatever share of the run the stage is (worker
+ * pipeline/usage-ledger.ts `chargeOcrPage`, `chargeRichPage` and the OCR and Rich read metrics): `document-map` (its OCR of a
+ * page without text), `page-embed` (every page it embeds), `extract-markdown` (the OCR route and its escalation) and
+ * `vision-extract` (the vision model). Only the pages no read covered bill at completion (db/page-base-fee.ts), at the
+ * provider's page charge share. The worker's tests check every stage that charges a read is listed here.
  */
-export const PAGE_READ_CHARGING_STAGES: readonly PipelineRunStage[] = ["extract-markdown", "vision-extract"];
+export const PAGE_READ_CHARGING_STAGES: readonly PipelineRunStage[] = ["document-map", "page-embed", "extract-markdown", "vision-extract"];
+
+/**
+ * Of those, the stages that may charge every page they reach Rich, outside the document's ladder plan: the document map's
+ * OCR of a page without text (only with no above-fast share) and page-image embedding (only with no ladder limit at all),
+ * auto-ladder.ts `ladderAllowsOffPlanReads`.
+ */
+const OFF_PLAN_RICH_STAGES = { documentMap: "document-map", pageEmbed: "page-embed" } as const satisfies Record<string, PipelineRunStage>;
 
 /** The cheap end of a run's page mix: every page has a text layer. */
 const RUN_LOW_MIX = { text: 1, complex: 0, scanned: 0 } as const;
-/** The expensive end: every page is a scan (the upload quote's high bound too). */
-const RUN_HIGH_MIX = { text: 0, complex: 0, scanned: 1 } as const;
-
-/**
- * Output tokens of a dense full page a vision model reads, for the high end of an estimate. A Rich read whose answer is longer
- * than the provider's included output bills more Rich pages (`richPagesForOutputTokens`), so the high end counts each such
- * read at this length: typical of a dense page, not a ceiling. The upload quote's high end assumes the same.
- */
-export const ESTIMATE_HIGH_VISION_OUTPUT_TOKENS = 2_000;
-
-/** Rich pages the high end counts per vision read (at least 1; a provider answer that is not a finite number reads as 1). */
-function highRichPagesPerRead(): number {
-  const pages = richPagesForOutputTokens(ESTIMATE_HIGH_VISION_OUTPUT_TOKENS);
-  return Number.isFinite(pages) ? Math.max(1, pages) : 1;
-}
 
 /** The provider's share of the completion page charge for a run of `selected` out of `planned`, clamped as the worker clamps it. */
 function completionShare(planned: ReadonlySet<PipelineRunStage>, selected: readonly PipelineRunStage[]): number {
   const reused = [...planned].filter((stage) => !selected.includes(stage));
   const share = pricing().pageChargeShare({ stageOrder: selected, reusedStages: reused });
   return Number.isFinite(share) ? Math.min(1, Math.max(0, share)) : 1;
+}
+
+/**
+ * The most pages the ladder lets a run read above Fast (OCR or vision). The worker budgets each document on its own,
+ * `ladderShareBudget`: floor(share x pages), and at least one page when the share is above 0. With each document's page
+ * count that is the exact sum; with only totals, floor(share x pages) plus one page per document bounds it (each document's
+ * floor adds less than one page). No above-fast share: every page.
+ */
+export function ladderReadPagesHigh(args: { features: PipelineFeatures; pages: number; documents: number; documentPages?: readonly number[] | null }): number {
+  const ladder = effectiveLadder(args.features);
+  const pages = Math.max(0, Math.floor(args.pages));
+  if (ladder.maxRung === "fast") return 0;
+  if (ladder.aboveFast === undefined) return pages;
+  if (args.documentPages && args.documentPages.length > 0) {
+    const exact = args.documentPages.reduce((sum, count) => sum + ladderShareBudget(ladder.aboveFast, count), 0);
+    return Math.min(pages, exact);
+  }
+  return Math.min(pages, Math.floor(ladder.aboveFast * pages + 1e-9) + Math.max(0, Math.floor(args.documents)));
+}
+
+/**
+ * The most an optional feature can charge over `documents` documents holding `pages` pages in all, however the pages are
+ * spread: the provider prices each document on its own pages (worker pipeline/feature-charges.ts), so an even split can
+ * undercount. For any price of the form `a + c x ceil(pages / block)` the sum over documents is at most the price of all
+ * the pages as one document plus one one-page price per document. Priced on the page count: a feature that bills on text
+ * read can bill more when a document's text is denser than its pages (see the estimate's basis).
+ */
+function featureCreditsHigh(feature: DocumentFeature, pages: number, documents: number): number {
+  if (documents <= 0) return 0;
+  const all = featureCredits(feature, Math.max(1, pages));
+  const one = featureCredits(feature, 1);
+  return (Number.isFinite(all) ? Math.max(0, all) : 0) + documents * (Number.isFinite(one) ? Math.max(0, one) : 0);
 }
 
 /** Stages whose run re-exports charts and diagrams: the generator runs at the end of vision-extract (worker chart-export/stage.ts). */
@@ -574,9 +601,21 @@ export function estimatePipelineWork(args: {
    * override). Unset and default tiers never resolve to `models`, so they price 0.
    */
   chartExportTier?: ChartExportTier | null;
+  /**
+   * The low end's page basis when it differs from `pages`: the pages and documents the completion charge will include (the
+   * worker's coalesce(billing_pages, page_count) over measured, non-deduplicated, non-failed, non-media documents). `pages`
+   * stays the high end's basis. Unset: `pages` and `documents`.
+   */
+  low?: { pages: number; documents: number };
+  /** Each document's page count, when known: the high end then caps ladder reads per document exactly (ladderReadPagesHigh). */
+  documentPages?: readonly number[] | null;
+  /** Documents whose page count is not measured yet, counted in `pages` at the most their size allows (for the basis). */
+  unmeasuredDocuments?: number;
 }): CostEstimate {
   const pages = Math.max(0, Math.round(args.pages));
   const documents = Math.max(0, Math.round(args.documents));
+  const lowPages = args.low ? Math.min(pages, Math.max(0, Math.round(args.low.pages))) : pages;
+  const lowDocuments = args.low ? Math.min(documents, Math.max(0, Math.round(args.low.documents))) : documents;
   const billing = isBillingEnforced(args.env) ? "enforced" : "disabled";
   const profile = profileFor(args.features);
   const planned = new Set<PipelineRunStage>(compilePipelinePlan(args.features).stageOrder);
@@ -592,27 +631,45 @@ export function estimatePipelineWork(args: {
     knowledgeGraph: selected.includes("graph-enrich") && Boolean(args.features.graphRag),
     propositions: selected.includes("proposition-index"),
   };
-  // A page beyond the ladder's above-fast share is never estimated as a read page (ladderEstimateMix).
-  const run = (mix: { text: number; complex: number; scanned: number }) =>
-    estimateIngest({ pages, documents: Math.max(1, documents), mix: ladderEstimateMix(mix, args.features), profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
-  const paged = (estimate: ReturnType<typeof run>) => estimate.credits.totalCredits - estimate.credits.breakdown.features;
-  const priced = (estimate: ReturnType<typeof run>) => paged(estimate) * share + estimate.credits.breakdown.features;
-  const low = run(RUN_LOW_MIX);
-  const high = run(RUN_HIGH_MIX);
-  // The high end covers what the worker can charge for these pages (db/page-base-fee.ts): when a page-reading stage runs,
-  // every OCR and vision read in full (a vision read at a dense page's output), plus the unread pages Fast at the larger of
-  // the stage share and the provider's completion share; when none runs, every page Fast at that share. Never below the
-  // stage-share price, so the bound only widens.
-  const readsPages = selected.some((stage) => PAGE_READ_CHARGING_STAGES.includes(stage));
+  const ingest = (input: { pages: number; documents: number; mix: { text: number; complex: number; scanned: number } }) =>
+    estimateIngest({ pages: input.pages, documents: Math.max(1, input.documents), mix: input.mix, profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
+  const paged = (estimate: ReturnType<typeof ingest>) => estimate.credits.totalCredits - estimate.credits.breakdown.features;
   // A run that executes no stage charges nothing.
-  const fastShare = selected.length === 0 ? 0 : Math.max(share, completionShare(planned, selected));
-  const reads = readsPages ? high.credits.breakdown.ocr + high.credits.breakdown.rich * highRichPagesPerRead() : 0;
-  const highPaged = Math.max(
-    paged(high) * share,
-    reads + high.credits.breakdown.fast * fastShare,
-    low.credits.breakdown.fast * fastShare,
+  const fullShare = selected.length === 0 ? 0 : completionShare(planned, selected);
+
+  // Low end: every page has a text layer and is charged Fast at completion, at the smaller of the stage share and the
+  // provider's completion share, over the pages the completion charge includes. Features as the provider models them.
+  // A page beyond the ladder's above-fast share is never estimated as a read page (ladderEstimateMix).
+  const low = ingest({ pages: lowPages, documents: lowDocuments, mix: ladderEstimateMix(RUN_LOW_MIX, args.features) });
+  const lowCredits = paged(low) * Math.min(share, fullShare) + low.credits.breakdown.features;
+  // Time: the same all-text run over every page sent.
+  const lowTime = ingest({ pages, documents, mix: ladderEstimateMix(RUN_LOW_MIX, args.features) });
+
+  // High end: what the worker can charge for these pages. A stage that reads pages charges each read in full as the page is
+  // read (PAGE_READ_CHARGING_STAGES); pages no read covered bill Fast at completion at the provider's completion share.
+  const readsPages = selected.some((stage) => PAGE_READ_CHARGING_STAGES.includes(stage));
+  const offPlan = ladderAllowsOffPlanReads(args.features);
+  const pageReading = qualityAllowsPageReading(args.features.quality);
+  // The document map's OCR (and its coarse page-image fallback) and page embedding read every page they reach, Rich.
+  const everyPageRich = pageReading && (
+    (selected.includes(OFF_PLAN_RICH_STAGES.documentMap) && (offPlan.pageReads || offPlan.pageEmbeddings))
+    || (selected.includes(OFF_PLAN_RICH_STAGES.pageEmbed) && offPlan.pageEmbeddings));
+  const readPages = !readsPages ? 0 : everyPageRich
+    ? pages
+    : ladderReadPagesHigh({ features: args.features, pages, documents, documentPages: args.documentPages ?? null });
+  // Every page the ladder lets the run read is a scan, read by the profile's reader.
+  const high = ingest({ pages, documents, mix: { text: pages - readPages, complex: 0, scanned: readPages } });
+  const perRead = estimateHighRichPagesPerRead();
+  const reads = everyPageRich
+    ? pageCredits("rich", pages) * perRead
+    : high.credits.breakdown.ocr + high.credits.breakdown.rich * perRead;
+  const unreadFast = everyPageRich ? 0 : high.credits.breakdown.fast;
+  const highPaged = Math.max(paged(high) * share, reads + unreadFast * Math.max(share, fullShare), pageCredits("fast", pages) * Math.max(share, fullShare));
+  // Features: each document is priced on its own pages, so the high end allows one more block per document.
+  const highFeatures = Math.max(
+    high.credits.breakdown.features,
+    (Object.entries(features) as [DocumentFeature, boolean][]).reduce((sum, [feature, on]) => sum + (on ? featureCreditsHigh(feature, pages, documents) : 0), 0),
   );
-  const highFeatures = Math.max(high.credits.breakdown.features, low.credits.breakdown.features);
   // Chart & diagram export is charged per visual a model read whenever a charging stage runs (not by stage share).
   const visuals = chartExportCredits({
     // Below the intelligent rung no chart is read by a model (applyLadderLimits): the free tier prices nothing.
@@ -630,20 +687,25 @@ export function estimatePipelineWork(args: {
   const freeTier = (args.chartExportTier ?? args.features.chartExport?.tier) === "free" && selected.includes("vision-extract") && pages > 0
     ? freeChartTierSeconds(Math.max(1, documents), args.workerSlots ?? workerSlotsFor(true))
     : { low: 0, high: 0 };
+  const lowTotal = lowCredits + visuals.low;
 
   return costEstimateSchema.parse({
     pages,
     documents,
     billing,
     credits: billing === "disabled" ? null : {
-      low: round(priced(low) + visuals.low),
-      high: round(Math.max(priced(low), highPaged + highFeatures) + visuals.high),
+      low: round(lowTotal),
+      high: round(Math.max(lowTotal, highPaged + highFeatures + visuals.high)),
     },
-    seconds: { low: round(scaleSeconds(low.wallSeconds) + freeTier.low), high: round(Math.max(scaleSeconds(low.wallSeconds), scaleSeconds(high.wallSeconds)) + freeTier.high) },
+    seconds: { low: round(scaleSeconds(lowTime.wallSeconds) + freeTier.low), high: round(Math.max(scaleSeconds(lowTime.wallSeconds), scaleSeconds(high.wallSeconds)) + freeTier.high) },
     basis: `${profile} profile, ${selected.length} of ${Math.max(planned.size, selected.length)} stages; `
-      + "range from all-text to every page a scan"
-      + (readsPages ? "; the high end counts every page read in full, as it is charged, whatever share of the run the stage is" : "")
+      + "low: every page has a text layer and bills Fast, at the smaller of the stage's share and the completion share; "
+      + "high: every page the run may read is a scan"
+      + (readsPages ? ", each read charged in full as it is read whatever share of the run the stage is, at a planning size for a dense page's answer" : "")
+      + (args.unmeasuredDocuments ? `; ${args.unmeasuredDocuments} not yet measured counted at the most pages their size allows` : "")
       + "; modeled averages, not measured for this corpus"
+      + (readsPages ? ". Very dense pages (long tables) can bill more than the high end; the run's cost cap, when set, and the organization's credit balance, checked as the run spends (the run pauses when it runs out), limit it" : "")
+      + (highFeatures > 0 ? ". Summaries, structured fields, graphs and propositions bill on the text they read, which can exceed the page count for text-dense documents" : "")
       + (visuals.note ?? ""),
   });
 }
