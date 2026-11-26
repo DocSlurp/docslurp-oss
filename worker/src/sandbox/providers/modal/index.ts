@@ -25,7 +25,7 @@ import {
   type SandboxSession,
 } from "../../types.js";
 import { asParserUser, commandScratchDirs, commandScratchEnv, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, resetArgv } from "./control.js";
-import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
+import { isPlainChildPath, SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../concurrency.js";
 import { VmBudget } from "./vm-budget.js";
@@ -484,7 +484,8 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
     async stat(p) {
       try {
         const info = await fs.stat(p);
-        return info.type === "symlink" ? null : toRemoteEntry(info);
+        // The path is the one asked about, never the one the VM reports back.
+        return info.type === "symlink" ? null : { ...toRemoteEntry(info), path: p };
       } catch (error) {
         if (error instanceof sdk.SandboxFilesystemNotFoundError) return null;
         throw error;
@@ -510,8 +511,9 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
       const [data, , status] = await Promise.all([boundedJobOutput(proc.stdout, 4 * 1024 * 1024, "parser VM output directory listing"), boundedVmStream(proc.stderr, 64 * 1024).catch(() => null), proc.wait()]);
       if (status !== 0) throw new SandboxOutputError("parser VM output directory could not be listed (unreadable, or over the entry limit)");
       return data.toString("utf8").split("\n").filter(Boolean).map((line) => {
-        const entry = JSON.parse(line) as RemoteEntry;
-        if (typeof entry.path !== "string" || path.dirname(entry.path) !== p || !Number.isSafeInteger(entry.size) || entry.size < 0 || typeof entry.isDir !== "boolean" || !Number.isFinite(entry.mtime)) throw new SandboxOutputError("invalid parser VM directory entry");
+        let entry: RemoteEntry;
+        try { entry = JSON.parse(line) as RemoteEntry; } catch { throw new SandboxOutputError("invalid parser VM directory entry"); }
+        if (entry === null || typeof entry !== "object" || typeof entry.path !== "string" || path.dirname(entry.path) !== p || !isPlainChildPath(entry.path) || !Number.isSafeInteger(entry.size) || entry.size < 0 || typeof entry.isDir !== "boolean" || !Number.isFinite(entry.mtime)) throw new SandboxOutputError("invalid parser VM directory entry");
         return entry;
       });
     },
