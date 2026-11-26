@@ -70,6 +70,12 @@ test("a completed run or job with failed documents says how many failed and exit
   assert.equal(succeeded.code, 0, succeeded.stderr);
   const failed = await invoke(["jobs", "watch", "job"], () => ({ body: job({ status: "failed", outcome: "failed" }) }));
   assert.equal(failed.code, 1, failed.stderr);
+  // Completed with every document failed: a failure (1), not a partial success.
+  const allFailedJob = await invoke(["jobs", "watch", "job"], () => ({ body: job({ outcome: "failed", progress: { documents: 3, documentsTotal: 3, documentsFailed: 3, pages: 3, pagesTotal: 3 } }) }));
+  assert.equal(allFailedJob.code, 1, allFailedJob.stderr);
+  const allFailedRun = await invoke(["status", "run"], () => ({ body: { run: run("completed", { totalDocuments: 3, processedDocuments: 3, failedDocuments: 3, outcome: "failed" }) } }));
+  assert.equal(allFailedRun.code, 1, allFailedRun.stderr);
+  assert.doesNotMatch(allFailedRun.stdout, /Done/);
 });
 
 test("status shows indexed pages only when the server reports them", async () => {

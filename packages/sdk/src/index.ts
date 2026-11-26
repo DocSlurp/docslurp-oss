@@ -493,11 +493,13 @@ export type RunOutcome = "succeeded" | "partial" | "failed";
  * The run's outcome: the server's `outcome` when it reports one, else derived from `status` and `failedDocuments`
  * (so it works against older servers too). Null while the run is not finished.
  */
-export function runOutcome(run: Pick<ProjectRun, "status" | "failedDocuments" | "outcome">): RunOutcome | null {
+export function runOutcome(run: Pick<ProjectRun, "status" | "failedDocuments" | "outcome"> & { totalDocuments?: number | null }): RunOutcome | null {
   if (run.outcome !== undefined) return run.outcome;
   if (run.status === "failed") return "failed";
   if (run.status !== "completed") return null;
-  return (run.failedDocuments ?? 0) > 0 ? "partial" : "succeeded";
+  const failed = run.failedDocuments ?? 0;
+  if (failed <= 0) return "succeeded";
+  return (run.totalDocuments ?? 0) > 0 && failed >= (run.totalDocuments ?? 0) ? "failed" : "partial";
 }
 
 export type DocumentRecord = JsonObject & {
@@ -2280,8 +2282,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
           throw new DocSlurpRunError("We couldn’t finish processing this run. Check its status and try again.", run);
         }
         if (run.status === "completed") {
-          if (waitOptions.failOnDocumentFailures && runOutcome(run) === "partial") {
-            throw new DocSlurpRunError(`${run.failedDocuments ?? "Some"} of ${run.totalDocuments ?? "the"} documents in this run failed; the rest are searchable.`, run);
+          if (waitOptions.failOnDocumentFailures && runOutcome(run) !== "succeeded") {
+            throw new DocSlurpRunError(runOutcome(run) === "failed"
+              ? "Every document in this run failed. Check its status and try again."
+              : `${run.failedDocuments ?? "Some"} of ${run.totalDocuments ?? "the"} documents in this run failed; the rest are searchable.`, run);
           }
           return run;
         }

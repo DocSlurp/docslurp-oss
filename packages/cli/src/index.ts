@@ -1176,9 +1176,9 @@ type JobStatus = {
   progress?: { documents?: number; documentsTotal?: number; documentsFailed?: number; pages?: number; pagesTotal?: number; pagesSearchable?: number };
 };
 
-/** Exit code for `--wait` (or a job read): 0 succeeded, 1 failed or cancelled, 2 completed with failed documents. */
+/** Exit code for `--wait` (or a job read): 0 succeeded, 1 failed or cancelled (or every document failed), 2 completed with some documents failed. */
 export function jobExitCode(job: Pick<JobStatus, "status" | "outcome" | "progress">): number {
-  if (job.status !== "completed") return 1;
+  if (job.status !== "completed" || job.outcome === "failed") return 1;
   const partial = job.outcome === "partial" || (job.outcome === undefined && (job.progress?.documentsFailed ?? 0) > 0);
   return partial ? 2 : 0;
 }
@@ -1829,7 +1829,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
     const stopped = !spendPaused && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
     const done = run.status === "completed" || run.status === "failed" || stopped;
     if (done) {
-      const succeeded = run.status === "completed" && !stopped;
+      const succeeded = run.status === "completed" && !stopped && run.outcome !== "failed";
       const partial = succeeded && (run.outcome === "partial" || (run.outcome === undefined && (run.failedDocuments ?? 0) > 0));
       console.log(`\n${succeeded ? partial ? "Done with failures" : "Done" : "Stopped"}: run ${run.controlState ?? run.status} in ${elapsed}${partial ? `; ${run.failedDocuments ?? "some"} of ${run.totalDocuments} documents failed` : ""}`);
       if (!succeeded) {
