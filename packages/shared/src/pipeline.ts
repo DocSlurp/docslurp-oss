@@ -25,7 +25,7 @@ import {
   visionModelUriProblem,
   parseLlmModelUri,
 } from "./embedding.js";
-import { storedModelEndpointRefusal } from "./model-endpoints.js";
+import { storedModelEndpointRefusal, isLocalServerModelUri } from "./model-endpoints.js";
 import { isProviderCallAllowed } from "./privacy.js";
 import { piiPatternTypeSchema } from "./pii.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
@@ -1260,9 +1260,9 @@ function sanitizeStoredPipelineReport<T>(stored: T, source: string): { value: T;
   // such row fails every read. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
   // A model URI whose endpoint the shared rule refuses for its own shape (model-endpoints.ts storedModelEndpointRefusal:
   // a hosted provider with a baseUrl, or a local server URL with user info, a query, a fragment or a non-loopback host)
-  // can never be sent, so the URI is dropped, with the target and sizes that described it. The profile is never
-  // rewritten: a row with an explicit profile keeps it and reads that profile's model, and a row without one reads the
-  // product default every reader applies for a missing setting. What an operator setting decides (the flag, the port
+  // can never be sent, so the URI is dropped, with the target and sizes that described it. A row with an explicit
+  // profile keeps it and reads that profile's model, and a row without one reads the product default every reader
+  // applies for a missing setting; the one exception is a dropped local-server route, which never reads a hosted model. What an operator setting decides (the flag, the port
   // list) is not judged here: such a row stays as written and the worker refuses it before each request with its code,
   // so a self-hoster sees that error rather than a silent model switch. Logged by path and reason code only (the URL can
   // hold credentials).
@@ -1272,8 +1272,13 @@ function sanitizeStoredPipelineReport<T>(stored: T, source: string): { value: T;
     const keys = (head === "embedding" ? ["modelUri"] : ["modelUri", "remoteFallbackModelUri"])
       .filter((key) => storedModelEndpointRefusal(current[key]) !== null);
     if (keys.length === 0) continue;
+    // A dropped primary that named a local model server must not read a hosted model next (the schema fills a hosted
+    // profile at save, so "keep the profile" alone would send this deployment's pages or chunks to a provider its
+    // operator never chose): unless the row's profile is already a local one, it reads the in-process local profile.
+    const localRoute = keys.includes("modelUri") && isLocalServerModelUri(current.modelUri);
     for (const key of keys) delete current[key];
     if (keys.includes("modelUri")) for (const key of ["target", "dimensions", "batchSize"]) delete current[key];
+    if (localRoute && !(typeof current.profile === "string" && current.profile.endsWith("-local"))) current.profile = "cheapest-local";
     next = { ...next, [head]: current };
     dropped.push(...keys.map((key) => `${head}.${key}`));
     reasons.add("model-endpoint-refused");

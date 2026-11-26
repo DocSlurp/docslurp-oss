@@ -269,7 +269,7 @@ const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
   ["unreadable_file", /password[- ]protected|requires? a password|(?:incorrect|wrong|missing) password|\bencrypted\b|corrupt|truncated|malformed|damaged|invalid (?:pdf|zip|xref|header|image)|cross-reference|xref|not a valid|bad (?:zip|header)|unexpected end of file|premature end/i],
   ["timeout", /timed? ?out|timeout|deadline exceeded|ETIMEDOUT/i],
   ["policy_blocked", /privacy mode|local-only|strict-privacy|cost cap|spend cap|maxCostCents|budget|\bpii\b|policy/i],
-  ["provider_failed", /rate.?limit|\b429\b|\bprovider\b|openrouter|upstream|overloaded|quota|\b50[0234]\b/i],
+  ["provider_failed", /rate.?limit|\b429\b|\bprovider\b|openrouter|upstream|overloaded|quota|\b50[0234]\b|auth-refused|payment-required|redirect-refused|network-error|not-found|bad-request|http-error/i],
   ["extractor_failed", /no extractor produced output|extractor/i],
   // A converter that is missing or did not start (an executable absent from the image, a plan marked unavailable): the
   // extractor could not run at all.

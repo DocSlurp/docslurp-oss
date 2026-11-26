@@ -660,7 +660,7 @@ async function attachGenerationReceipt(args: GuardedCompletionArgs, attempt: Vis
     attempt.usage = { ...attempt.usage,
       ...(receipt.metadata.providerUsage as Record<string, unknown>),
       prompt_tokens: receipt.inputTokens, completion_tokens: receipt.outputTokens, generation_receipt: true };
-    if (typeof receipt.metadata.providerName === "string") attempt.provider = receipt.metadata.providerName;
+    attempt.provider = readRemoteLabel(receipt.metadata.providerName) ?? attempt.provider;
   } catch (error) {
     console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} receipt lookup failed: ${error instanceof Error ? error.message : String(error)}`);
   }

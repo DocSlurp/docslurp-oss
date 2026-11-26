@@ -72,7 +72,7 @@ export function providerNetworkErrorCode(error: unknown): ProviderErrorCode {
 export function isRefusedRedirectError(error: unknown): boolean {
   for (let current = error, depth = 0; current && depth < 5; current = (current as { cause?: unknown }).cause, depth += 1) {
     const message = current instanceof Error ? current.message : typeof current === "string" ? current : "";
-    if (/redirect/i.test(message)) return true;
+    if (/unexpected redirect|redirect mode is set to error|redirect count exceeded/i.test(message)) return true;
   }
   return false;
 }

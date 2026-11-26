@@ -67,8 +67,8 @@ Where each rule is enforced:
 
 - **Worker, at call time (this repository):** every vision read and every local-server embedding call checks the
   provider, flag, host, shape and port of the base URL it is about to use (the resolved one, so a route without a
-  `baseUrl` is judged at its standard address), whatever wrote the setting. A refused primary vision route skips the
-  page's vision read (the page keeps its own text) rather than failing the document. A project fallback is judged
+  `baseUrl` is judged at its standard address), whatever wrote the setting. In the page-reading stage a refused primary
+  vision route skips the page's vision read (the page keeps its own text) rather than failing the document. A project fallback is judged
   before the primary request is sent; a fallback refused by these rules is dropped with a logged code
   (`[vision-fallback] dropped refused fallback code=...`) and the primary runs without it.
 - **Stored settings:** a stored embedding or vision model URI (`modelUri`, `remoteFallbackModelUri`) whose endpoint

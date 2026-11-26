@@ -306,6 +306,13 @@ export function storedModelEndpointRefusal(modelUri: unknown): TenantModelEndpoi
   return null;
 }
 
+/** Whether a stored model URI names a local model server (`ollama`, `vllm`, `lmstudio`): its owner chose a local route. */
+export function isLocalServerModelUri(modelUri: unknown): boolean {
+  if (typeof modelUri !== "string") return false;
+  const parsed = parseModelUri(modelUri);
+  return parsed !== null && isLocalServerProvider(parsed.provider);
+}
+
 /** Throws `TenantModelEndpointRefusedError` when `tenantModelEndpointProblem` refuses the URI. */
 export function assertTenantModelEndpointAllowed(modelUri: string, env: Env = process.env): void {
   const problem = tenantModelEndpointProblem(modelUri, env);

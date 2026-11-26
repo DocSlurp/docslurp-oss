@@ -15,7 +15,7 @@ import { blankPages, embedPerplexity, imageAnchorsToAltText, pageImageReferenceP
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { createSerialQueue, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
-import { isQuotaExhaustedBody, logProviderErrorDetail, providerErrorCodeForStatus, ProviderRetryableError, providerErrorSummary, providerLimiter, providerNetworkErrorCode, toProviderRequestError, toProviderRetryableError } from "../lib/provider-retry.js";
+import { isQuotaExhaustedBody, isRefusedRedirectError, logProviderErrorDetail, providerErrorCodeForStatus, ProviderRetryableError, providerErrorSummary, providerLimiter, providerNetworkErrorCode, toProviderRequestError, toProviderRetryableError } from "../lib/provider-retry.js";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 
 import type { Config } from "../config.js";
@@ -717,6 +717,8 @@ export function estimateEmbeddingTokens(batch: string[]): number {
 export function classifyEmbeddingError(error: unknown, provider: string): ProviderRetryableError | null {
   const byStatus = toProviderRetryableError(error, provider, "embedding request");
   if (byStatus) return byStatus;
+  // A refused redirect gets the same redirect again: never retried, whatever the SDK marks it.
+  if (isRefusedRedirectError(error)) return null;
   const retryable = Boolean(error && typeof error === "object" && (error as { isRetryable?: unknown }).isRetryable === true);
   if (!retryable) return null;
   // A response the status rule does not retry here but the SDK marks retryable (a quota 429): labelled by its status,
