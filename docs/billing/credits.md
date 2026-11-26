@@ -70,6 +70,23 @@ migration `0137_run_completion_overdraft.sql`.
 Credits are checked atomically when the run row is inserted (`admitRunSpend`). An admitted run is paused, not failed,
 when the balance goes negative mid-run (`server/src/services/run-creation.ts`).
 
+## Converted documents and copies
+
+Word, OpenDocument, RTF, slide, sheet and EPUB files arrive counted as one assumed page. The worker counts their pages after
+conversion, from the extractor's output (slides, sheet cells and the text rule), stores the count in
+`documents.billing_pages`, and the completion charge bills that one stored number once per run
+(`worker/src/lib/office-page-count.ts`, `worker/src/db/page-base-fee.ts`). Counts a document declares about itself
+(`docProps/app.xml` pages or slides, "Page 1 of 1" in the text) never move a charge. One file measures at most 100,000
+pages.
+
+A content-deduplicated copy (an upload whose bytes match a completed document of the same organization, so its conversion
+is reused) bills its original's measured pages at completion, like the original did. `DOCSLURP_BILL_DEDUP_COPIES=0` on the
+worker restores the earlier rule, under which copies bill nothing.
+
+The upload quote cannot know these pages before conversion, so it prices them over a range of bytes per page
+(`packages/shared/src/upload-pages.ts`). Its high end covers dense files (repeated clauses, generated tables, columns of
+ids, one-line slides) and, when the client sends a file profile, the uncompressed body size the profile measured.
+
 ## Stripe
 
 Credits are prepaid packs bought through one-off Checkout payments. There are no plans or subscriptions. The server's

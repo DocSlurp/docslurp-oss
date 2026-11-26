@@ -104,6 +104,17 @@ export function splitLegacyRemainingPages(
 }
 
 /**
+ * Whether a content-deduplicated copy (documents.deduped_from_document_id: intake reused an earlier, completed conversion of
+ * the same bytes in the same organization) bills its original's measured pages at completion, like the original did. The
+ * reuse is the platform's saving, never a discount. On unless DOCSLURP_BILL_DEDUP_COPIES is `0`, `false` or `off`, which
+ * restores the earlier rule (copies bill nothing).
+ */
+export function dedupCopiesBill(env: Record<string, string | undefined> = process.env): boolean {
+  const value = (env.DOCSLURP_BILL_DEDUP_COPIES ?? "").trim().toLowerCase();
+  return !(value === "0" || value === "false" || value === "off");
+}
+
+/**
  * What the completion charge decided: `fastPages` it charged now, `ocrPages` and `richPages` already charged as they were read
  * (counted, not charged here; a page upgraded from OCR to Rich counts as Rich), the share of the fee this run pays and the
  * Fast credits it charged.
@@ -112,8 +123,8 @@ export type RunPageCharges = { fastPages: number; ocrPages: number; richPages: n
 
 /**
  * Charge the run's remaining pages once it completes (deterministic ids per
- * run, so a retry charges nothing twice), excluding content-deduplicated,
- * failed and media documents and pages an OCR or vision read already charged (OCR or Rich).
+ * run, so a retry charges nothing twice), excluding failed and media documents and pages an OCR or vision read already
+ * charged (OCR or Rich). A content-deduplicated copy bills its original's measured pages (dedupCopiesBill).
  */
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
@@ -134,9 +145,11 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       client<{ document_id: string; pages: number; rich_read: number; rich_only: number; image: boolean; scanned: number }[]>`
       with docs as (
         -- billing_pages: the worker's measured count of an Office, slide, sheet or EPUB file; page_count (the page basis the text
-        -- splits into) bills for every other document.
+        -- splits into) bills for every other document. A content-deduplicated copy (dedupCopiesBill) reuses its original's
+        -- conversion, so it bills its original's measured count: the same organization's document, never another's.
         select d.id, d.page_count as page_count, coalesce(d.mime_type, '') like 'image/%' as image,
-          greatest(0, coalesce(d.billing_pages, d.page_count) - case when ${state.run.kind === "full-index"} then (
+          greatest(0, (case when d.deduped_from_document_id is null then coalesce(d.billing_pages, d.page_count)
+            else coalesce(owner.billing_pages, owner.page_count) end) - case when ${state.run.kind === "full-index"} then (
             select count(*) from document_page_states s where s.document_id = d.previous_version_id
               -- A stale stamp (its run charged nothing and can no longer commit) paid nothing, so this run charges it.
               -- A page whose read was charged and then failed (read_billed_run) paid its one charge.
@@ -146,12 +159,16 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
                   and au.metadata ->> 'documentId' = d.id and au.metadata ->> 'pageNumber' = s.page_number::text)
           ) else 0 end)::int as pages
         from documents d
-        where d.run_id = ${state.run.id} and d.deduped_from_document_id is null and d.status <> 'failed'
+        left join documents owner on ${dedupCopiesBill()} and owner.id = d.deduped_from_document_id and owner.org_id = d.org_id
+        where d.run_id = ${state.run.id} and d.status <> 'failed'
+          and (d.deduped_from_document_id is null or owner.id is not null)
           and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
           and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
           -- Only measured counts bill: the worker's billing_pages, or a page_count counted from the bytes or by the worker. A count
-          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing.
-          and (d.billing_pages is not null or d.page_count_source = 'counted')
+          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing. A copy
+          -- is measured when its original is.
+          and (case when d.deduped_from_document_id is null then d.billing_pages is not null or d.page_count_source = 'counted'
+            else owner.billing_pages is not null or owner.page_count_source = 'counted' end)
       )
       select docs.id as document_id, docs.pages, docs.image,
         -- Runs started before the per-read rule only (splitLegacyRemainingPages): pages the facts show as scans.
