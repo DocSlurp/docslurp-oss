@@ -1,3 +1,11 @@
+## Pages route and bill on measured evidence, never on their words (2026-11-25)
+
+DocSlurp/app issue 601, items 2 and 5. Evidence routing (v3, pinned on every run started since 2026-11-06) and the per-read page rule already decided reads and charges from page facts and recorded reads; the fallbacks for a run without those pins did not.
+
+- `classifyAdaptivePage` no longer makes a page `chart-or-figure` or `image-heavy` (a `vision-rescue` hint) from words such as "photo", "image", "diagram", "figure" or chart markers, in v1 either; v1's vision selector no longer reads sparse `form` pages, whose route comes from label words. v1 keeps its character-class degradation measures and raster evidence.
+- `recordPageBaseFee` retires the earlier release's completion rule for runs without a page billing pin (image files and pages with no or unknown text bytes billed Rich from page facts). Every run bills OCR and Rich from the reads recorded per page and Fast for every other page; `rich-scan:<run>` charges are no longer written. Facts rows are written for such runs again (no charge reads them).
+- Tests: `word-evidence-routing.test.ts` (false-positive words, scans, full-page figures, text-less charts, garbled layers, a page claiming to be text), `rich-billing-evidence.test.ts` (routing to ledger, unpinned runs).
+
 ## Runs report searchable pages, a final page total and worker pickup (2026-11-25)
 
 `pagesProcessed` counts page checkpoints of the extraction stages, so it reaches `pagesTotal` before routing, page reading and indexing run; clients that divided the two showed 100% long before a run could be searched.
