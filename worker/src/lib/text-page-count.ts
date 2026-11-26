@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 
-import { TEXT_PAGE_CHARS, TEXT_PAGE_LINES, type FileEncoding, type NormalizedFormat } from "@docslurp/shared";
+import { sniffFileBytes, TEXT_PAGE_CHARS, TEXT_PAGE_LINES, type FileEncoding, type NormalizedFormat } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -54,36 +54,73 @@ export function textPagesRequestFor(document: Pick<Document, "pageCountSource">,
 
 /**
  * Facts the host takes from the bytes by fixed per-byte comparisons while it streams them for their hash (no decoder, no
- * state machine; the same class of work as the hash): the size, the number of 0x0A bytes, and the number of printable
- * ASCII bytes other than space (0x21-0x7E). They bound the guest's count from both sides (textPagesBounds).
+ * state machine; the same class of work as the hash): the size; the counts of 0x0A, NUL, bytes at or above 0x80, printable
+ * ASCII other than space (0x21-0x7E) and `<`; the first and last byte that is not ASCII white space (0x09-0x0D, 0x20); and
+ * the byte-order mark the first two or three bytes name. A file with no NUL and no byte at or above 0x80 is pure ASCII,
+ * whose plain-text pages the host computes itself (hostTextPages); everything else bounds the guest's count
+ * (textPagesBounds).
  */
 export interface HostTextEvidence {
   bytes: number;
   newlines: number;
   printableAscii: number;
+  nul: number;
+  high: number;
+  lt: number;
+  /** Offset of the first and last byte that is not ASCII white space; -1 when there is none. */
+  firstContent: number;
+  lastContent: number;
+  bom: FileEncoding | null;
 }
 
 export class TextEvidenceCounter {
   private bytes = 0;
   private newlines = 0;
   private printableAscii = 0;
+  private nul = 0;
+  private high = 0;
+  private lt = 0;
+  private firstContent = -1;
+  private lastContent = -1;
+  private readonly head = new Uint8Array(3);
 
   update(data: Uint8Array): void {
-    this.bytes += data.length;
-    // One pass, two comparisons per byte: about 2 ms of CPU per MiB whatever the content (an indexOf loop costs 35 ms per
-    // MiB on a file of newlines).
-    let newlines = 0, printable = 0;
+    const base = this.bytes;
+    for (let index = 0; index < data.length && base + index < 3; index++) this.head[base + index] = data[index]!;
+    // One pass of fixed comparisons per byte (measured in the PR: see core TODO.md), nothing decoded.
+    let newlines = 0, printable = 0, nul = 0, high = 0, lt = 0, last = -1, first = -1;
     for (let index = 0; index < data.length; index++) {
       const byte = data[index]!;
-      if (byte === 0x0a) newlines++;
-      else if (byte > 0x20 && byte < 0x7f) printable++;
+      if (byte > 0x20 && byte < 0x7f) {
+        printable++;
+        if (byte === 0x3c) lt++;
+      } else if (byte === 0x0a) {
+        newlines++;
+        continue;
+      } else if (byte >= 0x80) high++;
+      else if (byte === 0x20 || (byte >= 0x09 && byte <= 0x0d)) continue;
+      else if (byte === 0) nul++;
+      last = index;
+      if (first < 0) first = index;
     }
+    this.bytes += data.length;
     this.newlines += newlines;
     this.printableAscii += printable;
+    this.nul += nul;
+    this.high += high;
+    this.lt += lt;
+    if (last >= 0) {
+      this.lastContent = base + last;
+      if (this.firstContent < 0) this.firstContent = base + first;
+    }
   }
 
   result(): HostTextEvidence {
-    return { bytes: this.bytes, newlines: this.newlines, printableAscii: this.printableAscii };
+    const head = this.head.subarray(0, Math.min(3, this.bytes));
+    const bom: FileEncoding | null = head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf ? "utf-8-bom"
+      : head[0] === 0xff && head[1] === 0xfe ? "utf-16le" : head[0] === 0xfe && head[1] === 0xff ? "utf-16be" : null;
+    return { bytes: this.bytes, newlines: this.newlines, printableAscii: this.printableAscii, nul: this.nul, high: this.high, lt: this.lt,
+      firstContent: this.firstContent, lastContent: this.lastContent, bom };
   }
 }
 
@@ -94,21 +131,84 @@ export async function hostTextEvidenceOfFile(file: string): Promise<HostTextEvid
   return counter.result();
 }
 
-/** Encodings in which every 0x0A byte is a line feed and every printable ASCII byte one character (8-bit and UTF-8 forms). */
-const ASCII_COMPATIBLE: ReadonlySet<FileEncoding> = new Set<FileEncoding>(["utf-8", "utf-8-bom", "8-bit"]);
+/**
+ * Whether the host counts a file's text byte facts while it hashes it: when its provisional format uses the text rule, or
+ * when no binary magic number (fixed comparisons at the start, shared sniffFileBytes at header depth) claims its header.
+ * A PDF, Office, image or media upload is not scanned for them.
+ */
+export function textEvidenceWanted(header: Uint8Array, filename: string, format: NormalizedFormat): boolean {
+  if (TEXT_RULE_FORMATS.has(format)) return true;
+  const sniffed = sniffFileBytes(header, filename, { depth: "header" });
+  return sniffed.mimeType === null || sniffed.encoding !== null;
+}
+
+/** No NUL and no byte at or above 0x80: every decoder reads it as the same ASCII text. */
+export function isPureAscii(evidence: HostTextEvidence): boolean {
+  return evidence.nul === 0 && evidence.high === 0;
+}
+
+/** Formats counted by the plain rule (no markup removed): every text-rule format but HTML. */
+function plainRuleFormat(format: NormalizedFormat): boolean {
+  return TEXT_RULE_FORMATS.has(format) && format !== "html";
+}
+
+/** Whether the host counts this document's pages itself, without the guest: pure-ASCII text of a plain-rule format. */
+export function hostCountsTextPages(evidence: HostTextEvidence | null | undefined, format: NormalizedFormat): boolean {
+  return !!evidence && plainRuleFormat(format) && isPureAscii(evidence);
+}
 
 /**
- * The fewest and most pages the text rule can give bytes with this evidence. Upper, any encoding: lines are at most the
- * 0x0A bytes plus one (a UTF-16 line feed holds one), and weighted characters at most 1.5 per byte (UTF-16 East Asian
- * text: two bytes, weight three); with markup every tag may also break a line, a tag being at least three bytes. Lower,
- * only when the sniffed encoding is ASCII-compatible and without markup: the lines are exactly the 0x0A bytes plus one, and
- * every printable ASCII byte is a character trimming keeps. Otherwise the lower bound is one page (see core TODO.md).
+ * The plain text rule (shared measuredTextPages) from the host's counters, exact for pure ASCII: lines are the 0x0A bytes
+ * plus one, and characters the bytes between the first and last that are not white space (what `trim` keeps).
+ */
+export function hostTextPages(evidence: HostTextEvidence): number {
+  if (!isPureAscii(evidence)) throw new TextPageCountRefusedError("the host counts only pure-ASCII text");
+  const chars = evidence.firstContent < 0 ? 0 : evidence.lastContent - evidence.firstContent + 1;
+  return Math.max(1, Math.ceil((evidence.newlines + 1) / TEXT_PAGE_LINES), Math.ceil(chars / TEXT_PAGE_CHARS));
+}
+
+/**
+ * How the guest may have decoded these bytes, from the host's own facts and the encoding the guest's sniff claims. A claim
+ * the bytes contradict is refused: a byte-order mark names the encoding, UTF-8's mark is never claimed without it, and
+ * UTF-16 without a mark needs NUL bytes (the sniff recognises it by them). `utf-16`: a 0x0A byte need not be a line feed
+ * and two bytes make one code unit; `ascii-compatible`: every 0x0A is a line feed and every byte at most one character.
+ */
+export function hostEncodingClass(evidence: HostTextEvidence, claimed: FileEncoding | null): "utf-16" | "ascii-compatible" {
+  const wide = (encoding: FileEncoding | null) => encoding === "utf-16le" || encoding === "utf-16be";
+  if (evidence.bom === "utf-16le" || evidence.bom === "utf-16be") {
+    if (claimed !== null && claimed !== evidence.bom) throw new TextPageCountRefusedError("text page count result contradicts the byte-order mark");
+    return "utf-16";
+  }
+  if (evidence.bom === "utf-8-bom") {
+    if (claimed !== null && claimed !== "utf-8-bom") throw new TextPageCountRefusedError("text page count result contradicts the byte-order mark");
+    return "ascii-compatible";
+  }
+  if (claimed === "utf-8-bom") throw new TextPageCountRefusedError("text page count result claims a byte-order mark the file does not have");
+  if (wide(claimed) && evidence.nul === 0) throw new TextPageCountRefusedError("text page count result claims UTF-16 for bytes without NUL");
+  // No claim (a forced count of bytes the sniff did not call text): the guest's detection may still read NUL-bearing bytes as UTF-16.
+  return wide(claimed) || (claimed === null && evidence.nul > 0) ? "utf-16" : "ascii-compatible";
+}
+
+/**
+ * The fewest and most pages the text rule can give bytes with this evidence, decoded as `encoding` claims (refused when the
+ * bytes contradict it: hostEncodingClass). Characters (East Asian weighted three) are at most the bytes between the first
+ * and last non-space byte for an ASCII-compatible decoding, and at most 1.5 per byte less one per NUL for UTF-16 (a code
+ * unit holding a NUL byte is never East Asian); at least the printable ASCII bytes, or half of them for UTF-16. Lines are
+ * exactly the 0x0A bytes plus one for an ASCII-compatible decoding, and at most the 0x0A bytes that can be line feeds (no
+ * more than the NUL bytes) plus one for UTF-16. With markup every tag may break a line (at most one per `<`), and scripts
+ * and styles may hide everything, so the lower bound is one page. core TODO.md tabulates the worst-case ratios.
  */
 export function textPagesBounds(evidence: HostTextEvidence, options: { encoding: FileEncoding | null; markup: boolean }): { min: number; max: number } {
-  const lineCap = options.markup ? Math.min(evidence.bytes, evidence.newlines + 1 + Math.floor(evidence.bytes / 3)) : evidence.newlines + 1;
-  const max = Math.max(1, Math.ceil(lineCap / TEXT_PAGE_LINES), Math.ceil((evidence.bytes * 1.5) / TEXT_PAGE_CHARS));
-  const exact = !options.markup && options.encoding !== null && ASCII_COMPATIBLE.has(options.encoding);
-  const min = exact ? Math.max(1, Math.ceil((evidence.newlines + 1) / TEXT_PAGE_LINES), Math.ceil(evidence.printableAscii / TEXT_PAGE_CHARS)) : 1;
+  const wide = hostEncodingClass(evidence, options.encoding) === "utf-16";
+  const span = evidence.firstContent < 0 ? 0 : evidence.lastContent - evidence.firstContent + 1;
+  const maxChars = wide ? Math.max(evidence.bytes / 2, evidence.bytes * 1.5 - evidence.nul) : span;
+  const feeds = wide ? Math.min(evidence.newlines, evidence.nul) : evidence.newlines;
+  const maxLines = feeds + 1 + (options.markup ? evidence.lt : 0);
+  const max = Math.max(1, Math.ceil(maxLines / TEXT_PAGE_LINES), Math.ceil(maxChars / TEXT_PAGE_CHARS));
+  if (options.markup) return { min: 1, max };
+  const minChars = wide ? evidence.printableAscii / 2 : evidence.printableAscii;
+  const minLines = wide ? 1 : evidence.newlines + 1;
+  const min = Math.max(1, Math.ceil(minLines / TEXT_PAGE_LINES), Math.ceil(minChars / TEXT_PAGE_CHARS));
   return { min: Math.min(min, max), max };
 }
 

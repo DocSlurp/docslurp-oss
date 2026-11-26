@@ -3,18 +3,18 @@ import type { Document } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
-import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
+import { cleanupTempFile, StorageObjectTooLargeError, type ArtifactStore } from "../tools/storage.js";
 import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
-import { hostTextEvidenceOfFile, recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES, TextPageCountUnavailableError } from "../lib/text-page-count.js";
+import { hostCountsTextPages, hostTextEvidenceOfFile, hostTextPages, recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES, TextPageCountUnavailableError } from "../lib/text-page-count.js";
 import { inspectTextPages, type TextPagesInspection, type TextPagesRequest } from "../lib/text-pages-guest.js";
 import { inspectQuarantine, type QuarantinePolicy } from "../lib/quarantine.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { detectDocumentFormat } from "../lib/document-format.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { resolvePdfMode } from "@docslurp/shared";
+import { resolvePdfMode, type NormalizedFormat } from "@docslurp/shared";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 
@@ -33,7 +33,7 @@ export class FormatDetectStage implements Stage {
    * hash-verified staged source, its count bounded by this host's byte facts of that file; never a host decode. In
    * development: the shared rule in-process.
    */
-  private async measureText(document: Document, request: TextPagesRequest, signal?: AbortSignal): Promise<TextPagesInspection | null | undefined> {
+  private async measureText(document: Document, format: NormalizedFormat, request: TextPagesRequest, signal?: AbortSignal): Promise<TextPagesInspection | null | undefined> {
     if (!vmOnlyParsing()) {
       const bytes = await readSourceBytes(this.storage, document, { maxBytes: TEXT_MEASURE_MAX_BYTES });
       if (bytes.length > TEXT_MEASURE_MAX_BYTES) throw new Error(`text file too large to measure (over ${TEXT_MEASURE_MAX_BYTES} bytes)`);
@@ -41,9 +41,13 @@ export class FormatDetectStage implements Stage {
       return inspectTextPages(bytes, { mimeType: document.fileFacts?.sniffedMimeType ?? null, encoding }, request);
     }
     if (!this.runner || !this.config) throw new TextPageCountUnavailableError("text page count unavailable: no parser VM runner is configured, so no host decoder runs");
-    const temp = await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-text-pages-", document), { maxBytes: TEXT_MEASURE_MAX_BYTES });
+    // A plain-rule format is staged whole: if it is pure ASCII this host counts it from its byte facts at any size.
+    const plain = format !== "html";
+    const temp = await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-text-pages-", document), plain ? undefined : { maxBytes: TEXT_MEASURE_MAX_BYTES });
     try {
       const evidence = await hostTextEvidenceOfFile(temp);
+      if (hostCountsTextPages(evidence, format)) return { bytes: evidence.bytes, pages: hostTextPages(evidence) };
+      if (evidence.bytes > TEXT_MEASURE_MAX_BYTES) throw new StorageObjectTooLargeError(document.sourceKey, evidence.bytes, TEXT_MEASURE_MAX_BYTES);
       const inspection = await inspectQuarantine({
         bytes: Buffer.alloc(0), filename: document.filename, tempFile: temp, runner: this.runner as CommandRunner, policy: this.config,
         text: request, textEvidence: evidence, ...(signal ? { signal } : {}),
@@ -101,7 +105,7 @@ export class FormatDetectStage implements Stage {
           // VM-only floor, in-process only in development. Rare: quarantine counts every other one in the inspection it runs.
           const textPages = await recordMeasuredTextPageCount({
             state, document, format: normalizedFormat,
-            measure: (request) => this.measureText(document, request, signal),
+            measure: (request) => this.measureText(document, normalizedFormat, request, signal),
           });
           // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
           // what admission priced, from durable state (intake_page_count), before any later stage runs.

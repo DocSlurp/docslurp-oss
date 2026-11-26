@@ -39,7 +39,7 @@ describe("the text page rule", () => {
   it("matches the split-based rule exactly on varied and hostile text", () => {
     let seed = 7;
     const random = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
-    const alphabet = ["a", " ", "\n", "\r\n", "\r", "\t", "<p>", "</p>", "<script>", "</script>", "<!--", "-->", "日", "　", " ", "﻿", " ", "𠀀", "\ud800", "<", ">", "x".repeat(40)];
+    const alphabet = ["a", " ", "\n", "\r\n", "\r", "\t", "<p>", "</p>", "<script>", "</script>", "<!--", "-->", "日", "　", " ", "﻿", " ", "𠀀", "\ud800", "\udc00", "<", ">", "<STYLE ", "</style>", "<b/>", "x".repeat(40)];
     for (let sample = 0; sample < 300; sample++) {
       const parts: string[] = [];
       const length = Math.floor(random() * 4000);
@@ -54,6 +54,14 @@ describe("the text page rule", () => {
     const before = process.memoryUsage().heapUsed;
     expect(measuredTextPages(text)).toBe(Math.ceil(20_000_001 / TEXT_PAGE_LINES));
     // Splitting would allocate twenty million strings (hundreds of MB); the scan allocates nothing proportional.
+    expect(process.memoryUsage().heapUsed - before).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  it("counts tag-dense HTML without building the visible text or a part per tag", () => {
+    const text = "<tr><td>1</td><td>2</td></tr>\n".repeat(600_000);
+    const before = process.memoryUsage().heapUsed;
+    expect(measuredTextPages(text, { markup: true })).toBe(Math.ceil(1_200_000 / TEXT_PAGE_LINES));
+    // stripHtmlMarkup would hold about five million parts (hundreds of MB); the walk allocates nothing per tag.
     expect(process.memoryUsage().heapUsed - before).toBeLessThan(64 * 1024 * 1024);
   });
 });
