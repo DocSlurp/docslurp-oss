@@ -24,25 +24,57 @@ llm://<provider>/<model-id>
 
 ### Model endpoints and provider keys
 
-A model URI never moves a platform credential. The worker and API send each provider key (OpenRouter, DeepInfra,
-OpenAI) only to that provider's configured base URL, compared on scheme, host, port and path after URL normalisation;
-a look-alike host, user info (`https://api.openai.com@other.example`), another port or any other destination gets
-no key. Base URLs for hosted providers come only from the operator's environment (`OPENAI_BASE_URL`) or the
-[private endpoint registry](#private-model-endpoints).
+A model URI never moves a platform credential. For OpenRouter, DeepInfra and OpenAI vision and embedding calls, the
+worker picks the provider key in one place and sends it only to that provider's configured base URL, compared on
+scheme, host, port and path after URL normalisation; a look-alike host, user info (`https://api.openai.com@other.example`),
+another port, another path or any other destination gets no key. Base URLs for hosted providers come only from the
+operator's environment (`OPENAI_BASE_URL`) or the [private endpoint registry](#private-model-endpoints).
+`OPENAI_BASE_URL` must be a plain http(s) URL with no user info, query or fragment: with an OpenAI key configured,
+any other value fails each OpenAI call with an `OPENAI_BASE_URL must be a plain http(s) URL` error instead of
+sending it without its key (a gateway that needs a version query parameter is not supported).
 
-A `baseUrl` query parameter is accepted only on the local providers `ollama`, `vllm` and `lmstudio`, only on a
-loopback host (`localhost`, `127.0.0.1`, `[::1]`), and only when the operator sets
-`DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS=true`. The flag is off by default, including in `.env.example`; turn it
-on only on a trusted single-tenant host where those servers run next to the worker and API. With it off, a project
-setting that names one of these providers is refused when saved and again before any request is sent (stable code
-`tenant-local-endpoints-disabled`); with it on, a non-loopback, link-local, private-range or internal host is refused
-(`tenant-base-url-not-loopback`). Hosted providers never take a `baseUrl` (`tenant-base-url-not-allowed`). A stored
-setting these rules refuse is never sent: one that no longer validates is dropped when the project is read (it keeps
-its profile's model, and other projects and settings are unaffected); a local endpoint stored while the flag was on
-is refused before each request once it is off.
+Other key-carrying calls go to fixed provider URLs that no setting can change, so no destination is judged there:
+the text stages, Perplexity embeddings, media transcription and vision, the page router's decision models, and the
+page-image embedders (Gemini's key travels in the URL's query string). Model and provider requests that carry a key
+or go to a tenant-set endpoint never follow an HTTP redirect.
 
-Errors from a model server are reported to the project as stable codes (for example a vision fallback reason of
-`unavailable`, `timeout` or `routing`); the server's response text goes only to the worker and API logs.
+A `baseUrl` query parameter is accepted only on the local providers `ollama`, `vllm` and `lmstudio`, and only when the
+operator sets `DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS=true`. The flag is off by default, including in
+`.env.example`; turn it on only on a trusted host where those servers run next to the worker and API. The base URL
+must then be:
+
+- an http(s) URL on a loopback host: `localhost`, `127.0.0.1` or `[::1]`, compared after URL normalisation, so
+  numeric spellings such as `127.1` count as `127.0.0.1` (link-local, private-range and internal hosts are refused,
+  code `tenant-base-url-not-loopback`);
+- with no user info, query or fragment (`tenant-base-url-invalid`);
+- on a port listed in `DOCSLURP_TENANT_LOCAL_MODEL_PORTS` (comma-separated; unset means the standard ports 11434 for
+  Ollama, 8000 for vLLM and 1234 for LM Studio; `tenant-base-url-port-not-allowed`). A server on another port needs
+  that port listed.
+
+Requests are built from the parsed base URL: `/chat/completions` or `/embeddings` is appended to its resolved path.
+Hosted providers never take a `baseUrl` (`tenant-base-url-not-allowed`). With the flag off, a setting that names a
+local provider is refused before any request is sent (`tenant-local-endpoints-disabled`).
+
+Where each rule is enforced:
+
+- **Worker, at call time (this repository):** every vision read (primary and project fallback, the fallback admitted
+  before the primary request is sent) and every local-server embedding call checks the provider, flag, host, shape
+  and port of the base URL it is about to use, whatever wrote the setting.
+- **Stored settings:** a stored embedding or vision model URI (`modelUri`, `remoteFallbackModelUri`) whose endpoint
+  these rules refuse is dropped when the project or run is read, logged by setting path and reason only, and the
+  section reads with the local profile (`cheapest-local`), never a hosted model; other settings and projects are
+  unaffected. A local endpoint stored while the flag was on is kept and refused before each request once it is off.
+- **Schemas:** the shared vision and embedding config schemas refuse a hosted provider with a `baseUrl` and a local
+  base URL that is not a loopback URL of the shape above (the port and the flag are judged at call time).
+- **The API that saves settings:** `@docslurp/shared` exports the save-time checks (`tenantPipelineEndpointProblems`
+  for every model URI field of a pipeline, `assertTenantModelEndpointAllowed` for one URI, and
+  `assertTenantModelBaseUrlAllowed` for a resolved provider and base URL). An API should apply them to project
+  settings, run overrides and per-request options and answer a refusal with HTTP 400 and its code; the worker's
+  call-time check is the backstop whatever the API does.
+
+Errors from a model server are reported as stable codes with the HTTP status (for example
+`vision request failed after 1 attempt(s): overloaded (503)`, a vision fallback reason of `unavailable`, `timeout` or
+`routing`); the server's response text goes only to the worker log and traces (`[provider-error]`).
 
 ## Managed models: callers choose categories
 
