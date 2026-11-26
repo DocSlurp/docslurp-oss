@@ -628,8 +628,9 @@ export async function materializePageRange(
   } else if (scanProgress.scan && scannedNow.size > 0) {
     // Nothing matched: one locked update records the scanned pages (none when the scan is already complete).
     await deps.sql.begin((tx) => recordDeferredPiiMatch(tx as never, documentId, {
+      // No match: nothing is withheld, so the source URI is not used.
       pages: new Map(), action: policy.action, runId: input.runId, pageCount: document.pageCount,
-      sourceUri: deps.storage.uri(document.sourceKey), ...scanProgress,
+      sourceUri: "", ...scanProgress,
     }));
   }
 
