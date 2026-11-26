@@ -4,8 +4,10 @@
  *
  * Pure functions over bytes: no I/O, no process spawning. There are two depths:
  *
- * - `header` is all the API does with customer bytes: magic numbers in the first few KB and a text-encoding check of the
- *   first 8 KB. A ZIP or OLE file stays a generic container, and text is not classified (CSV, JSON, HTML).
+ * - `header` is all the API does with customer bytes: fixed magic-number comparisons at the start of the file, nothing
+ *   decoded. Text is recognised only by a byte-order mark (its encoding then follows from the mark); text without one is
+ *   left unrecognised, so the declared type and extension decide until the worker inspects it. A ZIP or OLE file stays a
+ *   generic container, and text is not classified (CSV, JSON, HTML).
  * - `full` (the default, run by the worker inside its quarantine stage, before any parser) lists the ZIP central
  *   directory or walks an OLE2 file's directory entries, which tells OOXML from OLE and EPUB from a plain ZIP, and
  *   classifies text. The worker persists its result over the API's header facts.
@@ -254,6 +256,17 @@ function looksLikeText(decoded: string): boolean {
   return controls / decoded.length < 0.02;
 }
 
+/**
+ * The encoding a byte-order mark at offset 0 names, else null: a fixed comparison of at most three bytes, nothing decoded.
+ * The header-depth (API) text check; the full check is detectTextEncoding, which only the worker runs (in its parser VM).
+ */
+export function byteOrderMarkEncoding(bytes: Uint8Array): FileEncoding | null {
+  if (startsWith(bytes, [0xef, 0xbb, 0xbf])) return "utf-8-bom";
+  if (startsWith(bytes, [0xff, 0xfe])) return "utf-16le";
+  if (startsWith(bytes, [0xfe, 0xff])) return "utf-16be";
+  return null;
+}
+
 /** Decodes a text file's bytes the way it is encoded (a UTF-16 CSV is not a UTF-8 one). */
 export function decodeTextBytes(bytes: Uint8Array, encoding: FileEncoding | null = detectTextEncoding(bytes)): string {
   switch (encoding) {
@@ -317,8 +330,9 @@ export function sniffFileBytes(input: Uint8Array, filename = "", options: SniffO
   if (ascii(bytes, 0, 4) === "OggS") return { ...none, mimeType: "audio/ogg" };
   if (ascii(bytes, 0, 4) === "fLaC") return { ...none, mimeType: "audio/flac" };
   if (ascii(bytes, 0, 3) === "ID3") return { ...none, mimeType: "audio/mpeg" };
-  // Text before the MPEG frame check: a UTF-16LE byte-order mark (FF FE) looks like an MPEG sync word.
-  const encoding = detectTextEncoding(bytes);
+  // Text before the MPEG frame check: a UTF-16LE byte-order mark (FF FE) looks like an MPEG sync word. Header depth decodes
+  // nothing: only a byte-order mark makes the bytes text there.
+  const encoding = header ? byteOrderMarkEncoding(bytes) : detectTextEncoding(bytes);
   const wide = encoding === "utf-16le" || encoding === "utf-16be";
   if (!wide) {
     if (isMpegAudioFrame(bytes)) return { ...none, mimeType: "audio/mpeg" };
