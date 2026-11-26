@@ -84,113 +84,210 @@ export function pinRunPageBillingRules(state: RunArtifactsState): string {
 }
 
 /**
- * What the completion charge decided: `fastPages` it charged now, `ocrPages` and `richPages` already charged as they were read
+ * What a terminal charge decided: `fastPages` it charged now, `ocrPages` and `richPages` already charged as they were read
  * (counted, not charged here; a page upgraded from OCR to Rich counts as Rich), the share of the fee this run pays and the
- * Fast credits it charged.
+ * Fast credits it charged. `fastPagesOwed` is every Fast page the run's billed documents owe, `fastPagesCharged` what earlier
+ * terminal charges of the run already covered, and `unmeasuredDocuments` the billed documents whose page count is still an
+ * intake estimate (they bill nothing until measured; see recordPageBaseFee).
  */
-export type RunPageCharges = { fastPages: number; ocrPages: number; richPages: number; multiplier: number; credits: number };
+export type RunPageCharges = {
+  fastPages: number; ocrPages: number; richPages: number; multiplier: number; credits: number;
+  fastPagesOwed?: number; fastPagesCharged?: number; unmeasuredDocuments?: number;
+};
+
+/** How a run's execution generation ended: its terminal transaction (run-ledger finalizeRun) calls recordPageBaseFee. */
+export type PageBaseFeeTerminal = {
+  /**
+   * `completed`: completeRun, every document not failed is being completed in the same transaction. `failed`: failRun (a
+   * failure or a cancel), only documents already completed (indexed, searchable) bill; the others never completed.
+   */
+  outcome: "completed" | "failed";
+  /** The execution generation ending (ExecutionOwner.executionGeneration); a resumed run starts a new one. */
+  generation?: string | null;
+};
+
+/** The run's first Fast charge: the id every release has written, so an older worker's charge and this one's are one row. */
+export function firstFastChargeId(runId: string): string {
+  return `fast:${runId}`;
+}
+
+/** A later terminal charge of the same run (a resumed or retried run): only the Fast pages earlier charges did not cover. */
+export function fastChargeDeltaId(runId: string, generation: string | null | undefined): string {
+  return `fast:${runId}:g:${generation ?? "none"}`;
+}
 
 /**
- * Charge the run's remaining pages once it completes (deterministic ids per
- * run, so a retry charges nothing twice), excluding content-deduplicated,
- * failed and media documents and pages an OCR or vision read already charged (OCR or Rich).
+ * Fast pages a terminal charge owes now: what the run's billed documents owe in all, less what its earlier Fast charges (and an
+ * earlier release's `rich-scan:` charge, which billed some of those pages Rich instead) already covered. Never negative: a
+ * document never earns a refund here, and pages charged once are never charged again.
  */
-export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
+export function fastPagesDue(owed: number, charged: number): number {
+  return Math.max(0, Math.trunc(owed) - Math.max(0, Math.trunc(charged)));
+}
+
+/**
+ * Charge the Fast pages of a run's billed documents when one of its execution generations ends (completeRun or failRun, inside
+ * the terminal transaction). Excludes content-deduplicated, failed and media documents and pages an OCR or vision read already
+ * charged (OCR or Rich).
+ *
+ * Exactly once per page, however the run ends and however often it is resumed:
+ * - the charge is a delta. Inside the transaction, after locking the run row, it sums the Fast pages the run's earlier terminal
+ *   charges recorded (`fast:<run>` and `fast:<run>:g:<generation>`, plus a pre-OCR-class `rich-scan:<run>`) and charges only
+ *   what the documents owe beyond that. A retried run's earlier documents are covered; its retried documents are not, so they
+ *   bill now. A completed document stays completed when its run is resumed, so what it owes never changes between charges.
+ * - the first charge of a run keeps the id every release writes (`fast:<run>`), so an older worker that completes the same run
+ *   conflicts on it (charging nothing twice); later charges are `fast:<run>:g:<generation>`, one per generation.
+ * - terminal transactions are once per generation (finalizeRun's receipt), refuse a stale generation (ownership check), and lock
+ *   the run row before reading earlier charges, so a cancel racing a completion, or two workers finishing the same run, serialize
+ *   and the second sees the first's charge.
+ * The pending debit rides on the insert, as for every charge: a run that already indexed its documents records the debt rather
+ * than refusing it (a cancelled run's searchable documents are billed like a completed run's).
+ */
+export async function recordPageBaseFee(
+  sql: Sql<Record<string, unknown>>,
+  state: WorkflowState,
+  transaction?: { afterCommit: Array<() => void> },
+  terminal: PageBaseFeeTerminal = { outcome: "completed" },
+): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
   let charges: RunPageCharges = { fastPages: 0, ocrPages: 0, richPages: 0, multiplier, credits: 0 };
   if (!state.artifactLedger.read(PAGE_BILLING_RULES_SLOT)) {
     console.warn(`[page-charges] run=${state.run.id} has no page billing pin: billing its recorded reads and Fast for every other page`);
   }
+  const runId = state.run.id;
+  const firstId = firstFastChargeId(runId);
+  const deltaPrefix = `${firstId}:`;
   const write = async () => {
     let total = 0;
     await (transaction ? pipelineInTransaction : pipelineTransaction)(sql, (client) => [
       // FOR NO KEY UPDATE: serializes charge recording without blocking FK checks on child rows.
-      client<{ spent_cents: number | string }[]>`select spent_cents from project_runs where id = ${state.run.id} for no key update`,
+      client<{ spent_cents: number | string }[]>`select spent_cents from project_runs where id = ${runId} for no key update`,
       // A full-index run re-indexes documents whose pages may already have paid through query
       // materialization (stamped on the source version's ledger). Those pages are not charged twice.
       // A stamped page this run read again is already left out through rich_read, so it is not subtracted
       // twice (which would leave another page unbilled).
       // OCR and Rich reads are read through usage_attribution (the one spend reader the worker may use).
-      client<{ document_id: string; pages: number; rich_read: number; rich_only: number }[]>`
+      client<{ document_id: string; pages: number; measured: boolean; rich_read: number; rich_only: number }[]>`
       with docs as (
         -- billing_pages: the worker's measured count of an Office, slide, sheet or EPUB file; page_count (the page basis the text
         -- splits into) bills for every other document.
         select d.id, d.page_count as page_count,
+          -- Only measured counts bill: the worker's billing_pages, or a page_count counted from the bytes or by the worker. A count
+          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing here,
+          -- and is reported (unmeasuredDocuments), never guessed.
+          (d.billing_pages is not null or d.page_count_source = 'counted') as measured,
           greatest(0, coalesce(d.billing_pages, d.page_count) - case when ${state.run.kind === "full-index"} then (
             select count(*) from document_page_states s where s.document_id = d.previous_version_id
               -- A stale stamp (its run charged nothing and can no longer commit) paid nothing, so this run charges it.
               -- A page whose read was charged and then failed (read_billed_run) paid its one charge.
               and ((s.fee_billed_run is not null and not ${staleStampSql(client)}) or s.read_billed_run is not null)
               and not exists (select 1 from usage_attribution au
-                where au.run_id = ${state.run.id} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
+                where au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
                   and au.metadata ->> 'documentId' = d.id and au.metadata ->> 'pageNumber' = s.page_number::text)
           ) else 0 end)::int as pages
         from documents d
-        where d.run_id = ${state.run.id} and d.deduped_from_document_id is null and d.status <> 'failed'
+        where d.run_id = ${runId} and ${billedDocumentSql(client, terminal.outcome)}
           and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
           and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
-          -- Only measured counts bill: the worker's billing_pages, or a page_count counted from the bytes or by the worker. A count
-          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing.
-          and (d.billing_pages is not null or d.page_count_source = 'counted')
       )
-      select docs.id as document_id, docs.pages,
+      select docs.id as document_id, docs.pages, docs.measured,
         -- Distinct pages of this document a read charged (OCR or Rich): by page number, inside the document's pages.
         coalesce((select count(distinct (au.metadata ->> 'pageNumber')::int) from usage_attribution au
-          where au.run_id = ${state.run.id} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
+          where docs.measured and au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
             and au.metadata ->> 'documentId' = docs.id
             and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
             and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_read,
         -- Of those, the pages a Rich read charged (an OCR page upgraded to Rich counts here), for the report.
         coalesce((select count(distinct (au.metadata ->> 'pageNumber')::int) from usage_attribution au
-          where au.run_id = ${state.run.id} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
+          where docs.measured and au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
             and au.metadata ->> 'documentId' = docs.id
             and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
             and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_only
       from docs
     `,
-    ], async (client, [lockedRows, rows]) => {
+      // The Fast pages earlier terminal charges of this run covered (read after the run row lock above, so a concurrent terminal
+      // charge of the run has committed or not started). An earlier release's completion billed some pages Rich instead
+      // (`rich-scan:<run>`): those are covered too. Scoped to the run and its organization.
+      client<{ first: number; pages: string | number }[]>`
+      select count(*) filter (where au.id = ${firstId})::int as first, coalesce(sum(au.amount), 0)::text as pages
+      from usage_attribution au
+      where au.run_id = ${runId} and (${state.run.orgId ?? null}::text is null or au.org_id = ${state.run.orgId ?? null})
+        and ((au.metric = ${BILLABLE_UNIT_METRICS.fastPage} and (au.id = ${firstId} or left(au.id, ${deltaPrefix.length}) = ${deltaPrefix}))
+          or (au.metric = ${BILLABLE_UNIT_METRICS.richPage} and au.id = ${`rich-scan:${runId}`}))
+    `,
+    ], async (client, [lockedRows, rows, priorRows]) => {
       const locked = lockedRows[0];
-      let fastPages = 0;
+      let owed = 0;
+      const unmeasured: string[] = [];
       // Report shape kept for readers of `documents` (`rich` is always 0 here: Rich pages are charged as they are read).
       const documents: Record<string, { fast: number; rich: number }> = {};
       for (const row of rows) {
+        if (!row.measured) {
+          unmeasured.push(row.document_id);
+          continue;
+        }
         const fast = remainingFastPages({ pages: Number(row.pages), richRead: Number(row.rich_read) });
-        fastPages += fast;
+        owed += fast;
         if (fast > 0) documents[row.document_id] = { fast, rich: 0 };
       }
+      if (unmeasured.length > 0) {
+        // Visible, never guessed: a billed document whose page count is still an intake estimate bills no Fast page here.
+        console.warn(`[page-charges] run=${runId} unmeasured-documents=${unmeasured.length} billed-pages=0 documents=${unmeasured.slice(0, 20).join(",")}${unmeasured.length > 20 ? ",..." : ""}`);
+      }
+      const prior = priorRows[0];
+      const first = !(Number(prior?.first ?? 0) > 0);
+      const charged = Number(prior?.pages ?? 0) || 0;
+      const fastPages = fastPagesDue(owed, charged);
       // OCR and Rich pages are charged as they are read (the ledger); here they are only counted, for the report: the distinct
-      // pages of the completed documents a read charged this run, inside each document's pages. A page OCR read and a vision
+      // pages of the billed documents a read charged this run, inside each document's pages. A page OCR read and a vision
       // model then upgraded counts as Rich.
-      const readPages = rows.reduce((sum, row) => sum + Math.min(Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
-      const richReadPages = rows.reduce((sum, row) => sum + Math.min(Number(row.rich_only) || 0, Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
-      const richPages = richReadPages;
-      const ocrPages = Math.max(0, readPages - richReadPages);
+      const measuredRows = rows.filter((row) => row.measured);
+      const readPages = measuredRows.reduce((sum, row) => sum + Math.min(Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
+      const richPages = measuredRows.reduce((sum, row) => sum + Math.min(Number(row.rich_only) || 0, Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
+      const ocrPages = Math.max(0, readPages - richPages);
       const fastCredits = pageCredits("fast", fastPages) * multiplier;
       charges = { fastPages, ocrPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
-        credits: fastCredits * speedBoostMultiplier(state.usageLedger.speedBoost) };
+        credits: fastCredits * speedBoostMultiplier(state.usageLedger.speedBoost),
+        fastPagesOwed: owed, fastPagesCharged: charged, unmeasuredDocuments: unmeasured.length };
+      // The run's first charge records its decision even at zero pages on completion (an older worker completing the run later
+      // conflicts on it). A failed generation with nothing to bill, and a later generation with nothing new, write nothing.
+      const writeRow = fastPages > 0 || (first && terminal.outcome === "completed");
       const base = { projectId: state.run.projectId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
-      // The insert and its pending debit (for exactly the rows it inserted) are one statement.
-      const usage = runUsageEventStatements({ client, state, usageEvents: [
-        // A fixed id per run also records a zero-page decision, so a retry cannot change it.
+      const usage = runUsageEventStatements({ client, state, usageEvents: writeRow ? [
         {
-          id: `fast:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
-          amount: fastPages, unit: "page", costCents: fastCredits, metadata: unitChargeMetadata({ ...base, pages: fastPages, pageRules: PAGE_BILLING_RULES_VERSION }),
+          id: first ? firstId : fastChargeDeltaId(runId, terminal.generation), provider: UNIT_CHARGE_PROVIDER, model: "price-card",
+          metric: BILLABLE_UNIT_METRICS.fastPage, amount: fastPages, unit: "page", costCents: fastCredits,
+          metadata: unitChargeMetadata({ ...base, pages: fastPages, pageRules: PAGE_BILLING_RULES_VERSION,
+            ...(first ? {} : { owedPages: owed, chargedPages: charged, generation: terminal.generation ?? null }),
+            ...(terminal.outcome === "failed" ? { runOutcome: "failed" } : {}) }),
         },
-      ] });
+      ] : [] });
+      // The insert and its pending debit (for exactly the rows it inserted) are one statement.
       const inserted = usage.cost(await Promise.all(usage.statements.map((statement) => statement.execute())));
       // The usage_events trigger added `inserted` to spent_cents (0056).
       // Pending debit, applied to the org's balance by the flusher.
-      // No credit-lease consumption: the charge is recorded in completeRun after
-      // the run turned completed, which already released its lease (0052).
+      // No credit-lease consumption: the charge is recorded after the run turned terminal (completed or failed), which already
+      // released its lease (0052).
       total = (Number(locked?.spent_cents ?? 0) || 0) + inserted;
     });
     return total;
   };
-  const charged = transaction ? await write() : await retryTransaction(`page-charges run=${state.run.id}`, write);
+  const charged = transaction ? await write() : await retryTransaction(`page-charges run=${runId}`, write);
   const commit = () => { state.run.spentCents = charged; };
   if (transaction) transaction.afterCommit.push(commit);
   else commit();
   return charges;
+}
+
+/**
+ * The documents a terminal charge bills (`documents d`). The one place that decides which of a run's documents owe Fast pages:
+ * not content-deduplicated copies (they pay nothing of their own here), and by how the generation ended. A completing run bills
+ * every document it does not leave failed (they are completed in the same transaction); a failed or cancelled one only those
+ * already completed, which search serves whatever the run's status (a document that never completed bills nothing).
+ */
+function billedDocumentSql(client: Sql<Record<string, unknown>>, outcome: PageBaseFeeTerminal["outcome"]) {
+  const status = outcome === "completed" ? client`d.status <> 'failed'` : client`d.status = 'completed'`;
+  return client`d.deduped_from_document_id is null and ${status}`;
 }
 
 /**

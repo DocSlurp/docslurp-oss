@@ -1018,7 +1018,7 @@ export class PostgresRunLedger implements CheckpointStore {
         }
         state.refreshStats();
         await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
-        const pageCharges = await recordPageBaseFee(client, state, { afterCommit });
+        const pageCharges = await recordPageBaseFee(client, state, { afterCommit }, { outcome: "completed", generation: owner.executionGeneration ?? null });
         // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
         state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
@@ -1099,8 +1099,17 @@ export class PostgresRunLedger implements CheckpointStore {
     });
   }
 
-  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner, options: { infrastructureRetriesExhausted?: boolean } = {}): Promise<void> {
+  /**
+   * Fail (or, on a cancel request, cancel) a run. With the run's loaded `state`, the documents it already completed (indexed and
+   * searchable, which they stay) are charged their Fast pages in the same terminal transaction (recordPageBaseFee, outcome
+   * `failed`): a cancelled or failed run's searchable documents pay like a completed run's, exactly once across resumes.
+   */
+  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner,
+    options: { infrastructureRetriesExhausted?: boolean; state?: WorkflowState } = {}): Promise<void> {
     if (owner.runId !== runId) throw new StaleExecutionError();
+    const state = options.state;
+    if (state && (state.run.id !== runId || state.run.orgId !== owner.orgId || state.run.projectId !== owner.projectId)) throw new StaleExecutionError();
+    const afterCommit: Array<() => void> = [];
     await this.finalizeRun(owner, "failed", async (client, logicalId) => {
       const [current] = await client<
         {
@@ -1175,6 +1184,13 @@ export class PostgresRunLedger implements CheckpointStore {
           options.infrastructureRetriesExhausted ? `${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}: ${message}` : message, client);
       }
       await this.failUnfinishedDocumentsForRun(runId, client);
+      if (state) {
+        // After the documents settle: only those still completed bill (the run is already failed, so its lease is released).
+        const pageCharges = await recordPageBaseFee(client, state, { afterCommit }, { outcome: "failed", generation: owner.executionGeneration ?? null });
+        if (pageCharges.fastPages > 0 || (pageCharges.unmeasuredDocuments ?? 0) > 0) {
+          await client`update project_runs set stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb where id = ${runId}`;
+        }
+      }
 
       await insertProjectRunEvents({ sql: client, events: [{
         id: logicalId,
@@ -1190,6 +1206,7 @@ export class PostgresRunLedger implements CheckpointStore {
       }] });
       await this.notifications.triggerWebhooks(runId, "run.failed", client, logicalId);
     });
+    for (const commit of afterCommit) commit();
   }
 
   async releaseRunLease(runId: string): Promise<boolean> {

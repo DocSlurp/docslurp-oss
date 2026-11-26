@@ -271,8 +271,8 @@ export function createStageExecution(deps: {
     // pin), and persisted with the run's artifacts by the progress write below, so every stage, shard and page
     // task agrees. There is no environment switch.
     const visionRoutingVersion = pinRunRoutingVersion(state);
-    // Page billing rules, pinned the same way: a run without the pin (started by an earlier release) keeps that release's
-    // completion charge for image files and scanned pages (db/page-base-fee.ts).
+    // Page billing rules, pinned the same way. A run without the pin (started by an earlier release) bills by the same per-read
+    // rule; the pin's absence only keeps page-facts rows off it until the earlier release is gone (db/page-base-fee.ts).
     const pageBillingRules = pinRunPageBillingRules(state);
     // The OCR page class, pinned the same way: on only when every live worker advertises it (pipeline/ocr-page-class.ts).
     const ocrPageClass = await pinRunOcrPageClass(state, async () => (await store.fleetAdvertises("billing.ocr-page-class")) === true);
@@ -780,7 +780,7 @@ export function createStageExecution(deps: {
       const noun = failed.length === 1 ? "document" : "documents";
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
-      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
+      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration }, { state });
       await noteRunOutcome(store, state.run, "failed", first?.[0] ?? state.stage);
       await notifyTerminal(input.runId, "run.failed");
       return;
@@ -812,7 +812,8 @@ export function createStageExecution(deps: {
     const state = await loadRunState(store, input.runId);
     await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration },
       // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
-      { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
+      // With the state, documents the run already completed (searchable) are charged their Fast pages (db/page-base-fee.ts).
+      { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED, state });
     await noteRunOutcome(store, state.run, "failed", stage);
 
     await notifyTerminal(input.runId, "run.failed");
