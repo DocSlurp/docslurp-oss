@@ -1514,7 +1514,7 @@ describe("serving contract and ownership of a building row", () => {
         },
       },
     });
-    expect(atWipe).toEqual(["building", "run:run-d1", "other-settings", "taken-over", 1]);
+    expect(atWipe).toEqual(["building", expect.stringMatching(/^run:run-d1#/), "other-settings", "taken-over", 1]);
     expect(result.status).toBe("ready");
     // The builder that lost the row is refused at its next write, so nothing of it lands after the wipe.
     await expect(writeSummaryTreeState(sql, { scope: W, documentId: "d1", runId: "run-d1", status: "partial", expectOwner: "job:j1#c1" })).rejects.toThrow(/took its tree over/);
@@ -1585,6 +1585,34 @@ describe("serving contract and ownership of a building row", () => {
       await sql`delete from documents where id = 'd1'`;
       await sql`delete from project_runs where id = 'run-d1'`;
     }
+  });
+
+  it("builds a page- or section-scoped document's tree from its rewritten text, even after the PII withdrawal (M7)", async () => {
+    for (const pii of [
+      { scope: "pages", withheldPages: [2], withheldArtifactUris: ["s3://b/source"] },
+      { scope: "sections", withheldSectionCount: 1, withheldArtifactUris: ["s3://b/source"] },
+    ]) {
+      const h = harness();
+      await seedDocument("d1", W);
+      h.putArtifact("d1", W, book());
+      await sql`update documents set metadata = ${JSON.stringify({ pii })}::text::jsonb where id = 'd1'`;
+      // The scan withdrew an earlier tree: that marker must not refuse the rebuild.
+      await sql`insert into document_summary_trees (document_id, org_id, project_id, run_id, status, error)
+        select id, org_id, project_id, run_id, 'partial', 'pii-withheld' from documents where id = 'd1'`;
+      const result = await h.build("d1", W);
+      expect(result.status, pii.scope).toBe("ready");
+      await sql`delete from document_summary_trees where document_id = 'd1'`;
+      await sql`delete from documents where id = 'd1'`;
+      await sql`delete from project_runs where id = 'run-d1'`;
+    }
+    // A whole-document outcome still refuses.
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    await sql`update documents set metadata = ${JSON.stringify({ pii: { scope: "document", blocked: true } })}::text::jsonb where id = 'd1'`;
+    expect(await h.build("d1", W, { register: false })).toMatchObject({ status: "refused" });
+    await sql`delete from documents where id = 'd1'`;
+    await sql`delete from project_runs where id = 'run-d1'`;
   });
 
   it("does not take over a live owner that appeared after the initial state read", async () => {

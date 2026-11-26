@@ -198,6 +198,53 @@ describe("buildDocumentExport", () => {
     await sql`update documents set metadata = '{}' where id = 'doc-1'`;
   });
 
+  it("ships no source or page-less artifact while a map-mode scan is incomplete, or before a withholding scan ran", async () => {
+    const policy = { piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing", allowlistPatterns: [] } };
+    await sql`update project_runs set pipeline = ${sql.json(policy)} where id = 'run'`;
+    try {
+      // Map mode, page 2 not scanned yet: the outcome is scan progress only, with an empty withheld list.
+      await sql`update documents set indexing_mode = 'map', metadata = ${sql.json({ pii: { scope: "none", action: "block_indexing", pageCount: 2, scanPending: true, scannedPages: [1], withheldArtifactUris: [] } })} where id = 'doc-1'`;
+      await queue("exp-scan", { documentId: "doc-1", content: "all", filename: "Q3 plan.zip" });
+      await buildDocumentExport({ sql, storage: storage as never }, "exp-scan");
+      let names = Object.keys(unzip("exp-scan").files);
+      expect(names.some((name) => name.includes("original/")), names.join(",")).toBe(false);
+      expect(names.some((name) => name.endsWith(".html") || name.includes("images/")), names.join(",")).toBe(false);
+      const files = unzip("exp-scan").files;
+      const pageTwo = Object.keys(files).find((name) => name.endsWith("page-0002.md"));
+      expect(pageTwo, Object.keys(files).join(",")).toBeDefined();
+      expect(strFromU8(files[pageTwo!]!)).toContain("privacy scan has not read it");
+      expect(strFromU8(files[pageTwo!]!)).not.toContain("Page two");
+      // A processing (or failed) document with no outcome and no completed pii-detect: no source either.
+      await sql`update documents set indexing_mode = 'full', metadata = '{}' where id = 'doc-2'`;
+      await queue("exp-pending", { content: "all", filename: "Finance.zip" });
+      await buildDocumentExport({ sql, storage: storage as never }, "exp-pending");
+      names = Object.keys(unzip("exp-pending").files);
+      expect(names.some((name) => name.includes("original/q3 plan.docx")), names.join(",")).toBe(false);
+      await sql`update documents set status = 'failed' where id = 'doc-2'`;
+      await queue("exp-failed", { content: "all", filename: "Finance.zip" });
+      await buildDocumentExport({ sql, storage: storage as never }, "exp-failed");
+      expect(Object.keys(unzip("exp-failed").files).some((name) => name.includes("original/q3 plan.docx"))).toBe(false);
+      // A document whose run row is gone (run_id set null) falls back to the project's current policy.
+      await sql`update projects set pipeline = ${sql.json(policy)} where id = 'w'`;
+      await sql`update documents set run_id = null, status = 'completed' where id = 'doc-2'`;
+      await queue("exp-norun", { content: "all", filename: "Finance.zip" });
+      await buildDocumentExport({ sql, storage: storage as never }, "exp-norun");
+      expect(Object.keys(unzip("exp-norun").files).some((name) => name.includes("original/q3 plan.docx"))).toBe(false);
+      await sql`update documents set run_id = 'run', status = 'processing' where id = 'doc-2'`;
+      await sql`update projects set pipeline = '{}' where id = 'w'`;
+      // flag_for_review withholds nothing: the same documents ship their sources.
+      await sql`update project_runs set pipeline = ${sql.json({ piiPolicy: { ...policy.piiPolicy, action: "flag_for_review" } })} where id = 'run'`;
+      await sql`update documents set metadata = '{}', indexing_mode = 'map' where id = 'doc-1'`;
+      await queue("exp-flag", { documentId: "doc-1", content: "all", filename: "Q3 plan.zip" });
+      await buildDocumentExport({ sql, storage: storage as never }, "exp-flag");
+      expect(Object.keys(unzip("exp-flag").files).some((name) => name.includes("original/"))).toBe(true);
+    } finally {
+      await sql`update project_runs set pipeline = '{}' where id = 'run'`;
+      await sql`update documents set metadata = '{}', indexing_mode = 'full' where id in ('doc-1', 'doc-2')`;
+      await sql`update documents set status = 'processing' where id = 'doc-2'`;
+    }
+  });
+
   it("skips files past the size limit and says so", async () => {
     await queue("exp-4", { documentId: "doc-1", content: "all", filename: "Q3 plan.zip" });
 

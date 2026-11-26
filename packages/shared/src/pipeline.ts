@@ -15,6 +15,8 @@ import {
   embeddingConfigSchema,
   embeddingProfileCatalog,
   visionProfileCatalog,
+  retiredVisionProfile,
+  type VisionProfileKey,
   inferenceLaneSchema,
   vectorBackendSchema,
   visionConfigSchema,
@@ -25,6 +27,7 @@ import {
   visionModelUriProblem,
   parseLlmModelUri,
 } from "./embedding.js";
+import { storedModelEndpointRefusal, isLocalServerModelUri } from "./model-endpoints.js";
 import { isProviderCallAllowed } from "./privacy.js";
 import { piiPatternTypeSchema } from "./pii.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
@@ -586,7 +589,7 @@ const pipelineFeaturesObjectSchema = z
             "private-key",
           ]),
         action: z
-          .enum(["flag_for_review", "redact_artifacts", "block_indexing"])
+          .enum(["flag_for_review", "redact_artifacts", "block_indexing", "block_document"])
           .default("flag_for_review"),
         allowlistPatterns: z.array(z.string()).default([]),
       })
@@ -1115,11 +1118,12 @@ export function normalizePipelineFeatures(
             defaultPipelineFeatures.embedding.lateChunkingWindow,
         }
       : fallbackEmbedding;
+  const visionProfile = retiredVisionProfile(source?.vision?.profile) ?? source?.vision?.profile;
   const visionBase =
-    source?.vision?.profile && source.vision.profile in visionProfileCatalog
+    visionProfile && Object.hasOwn(visionProfileCatalog, visionProfile)
       ? {
           ...defaultPipelineFeatures.vision,
-          ...visionProfileCatalog[source.vision.profile].config,
+          ...visionProfileCatalog[visionProfile as VisionProfileKey].config,
         }
       : defaultPipelineFeatures.vision;
 
@@ -1288,10 +1292,36 @@ function sanitizeStoredPipelineReport<T>(stored: T, source: string): { value: T;
   // image-token bound, removed from the catalog, repriced past the cap, a Pro/Ultra tier): the setting is dropped, so
   // the row reads with its profile's or the default model. No page is sent to such a model either way; without this one
   // such row fails every read. Rows name the model as a URI, or (older rows) as a catalog id in `model`/`remoteFallbackModel`.
+  // A model URI whose endpoint the shared rule refuses for its own shape (model-endpoints.ts storedModelEndpointRefusal:
+  // a hosted provider with a baseUrl, or a local server URL with user info, a query, a fragment or a non-loopback host)
+  // can never be sent, so the URI is dropped, with the target and sizes that described it. A row with an explicit
+  // profile keeps it and reads that profile's model, and a row without one reads the product default every reader
+  // applies for a missing setting; the one exception is a dropped local-server route, which never reads a hosted model. What an operator setting decides (the flag, the port
+  // list) is not judged here: such a row stays as written and the worker refuses it before each request with its code,
+  // so a self-hoster sees that error rather than a silent model switch. Logged by path and reason code only (the URL can
+  // hold credentials).
+  for (const head of ["embedding", "vision"] as const) {
+    if (!isPlainRecord(next[head])) continue;
+    const current = { ...next[head] } as Record<string, unknown>;
+    const keys = (head === "embedding" ? ["modelUri"] : ["modelUri", "remoteFallbackModelUri"])
+      .filter((key) => storedModelEndpointRefusal(current[key]) !== null);
+    if (keys.length === 0) continue;
+    // A dropped primary that named a local model server must not read a hosted model next (the schema fills a hosted
+    // profile at save, so "keep the profile" alone would send this deployment's pages or chunks to a provider its
+    // operator never chose): unless the row's profile is already a local one, it reads the in-process local profile.
+    const localRoute = keys.includes("modelUri") && isLocalServerModelUri(current.modelUri);
+    for (const key of keys) delete current[key];
+    if (keys.includes("modelUri")) for (const key of ["target", "dimensions", "batchSize"]) delete current[key];
+    if (localRoute && !(typeof current.profile === "string" && current.profile.endsWith("-local"))) current.profile = "cheapest-local";
+    next = { ...next, [head]: current };
+    dropped.push(...keys.map((key) => `${head}.${key}`));
+    reasons.add("model-endpoint-refused");
+  }
   if (isPlainRecord(next.vision)) {
     const vision = { ...next.vision } as Record<string, unknown>;
     // A URI that names its own endpoint (a `baseUrl`, or an operator's private route) was a deliberate destination: it
-    // is never swapped for the default hosted model. Such a row keeps failing, as before.
+    // is never swapped for the default hosted model here. One whose endpoint the shared rule refuses was already dropped
+    // above (its profile kept); an allowed one that fails for another reason keeps failing, as before.
     const pinsEndpoint = (value: string) => {
       // Judged on the decoded text as well, so a percent-encoded key or separator is not a way around it.
       let decoded = value;
@@ -1649,11 +1679,15 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
   },
   "pii-detect": {
     consumes: [...extractedText, "html"],
-    // Redaction rewrites the extracted text in place.
+    // Redaction and page/section withholding rewrite the extracted text in place, so every stage that reads it
+    // (summary, propositions, structured fields, page text) re-runs instead of reusing what was built from the
+    // unwithheld text. Redaction also rewrites the HTML rendering.
     produces: (features) =>
       features.piiPolicy.action === "redact_artifacts"
         ? ["pii-decision", ...extractedText, "html"]
-        : ["pii-decision"],
+        : features.piiPolicy.action === "block_indexing"
+          ? ["pii-decision", ...extractedText]
+          : ["pii-decision"],
     alwaysRerun: "PII policy decisions gate indexing of each document and are not copied",
   },
   "document-summary": { consumes: ["markdown"], requires: [["markdown"]], produces: ["summary"] },

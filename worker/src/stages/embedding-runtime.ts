@@ -1,4 +1,6 @@
-import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
+import { assertTenantModelBaseUrlAllowed, canonicalModelBaseUrl, noRedirectFetch } from "@docslurp/shared";
+import { configuredOpenAiBaseUrl } from "../lib/vision-pricing.js";
+import { platformModelKey } from "../lib/platform-model-keys.js";
 import { decodeDelimitedBytes, delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +15,7 @@ import { blankPages, embedPerplexity, imageAnchorsToAltText, pageImageReferenceP
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { createSerialQueue, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
-import { ProviderRetryableError, providerLimiter, toProviderRetryableError } from "../lib/provider-retry.js";
+import { isQuotaExhaustedBody, isRefusedRedirectError, logProviderErrorDetail, providerErrorCodeForStatus, ProviderRetryableError, providerErrorSummary, providerLimiter, providerNetworkErrorCode, toProviderRequestError, toProviderRetryableError } from "../lib/provider-retry.js";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 
 import type { Config } from "../config.js";
@@ -733,13 +735,24 @@ export function estimateEmbeddingTokens(batch: string[]): number {
 }
 
 /** 429/5xx, or an AI SDK error it marks retryable (network failures). */
-function classifyEmbeddingError(error: unknown, provider: string): ProviderRetryableError | null {
+export function classifyEmbeddingError(error: unknown, provider: string): ProviderRetryableError | null {
   const byStatus = toProviderRetryableError(error, provider, "embedding request");
   if (byStatus) return byStatus;
+  // A refused redirect gets the same redirect again: never retried, whatever the SDK marks it.
+  if (isRefusedRedirectError(error)) return null;
   const retryable = Boolean(error && typeof error === "object" && (error as { isRetryable?: unknown }).isRetryable === true);
   if (!retryable) return null;
-  const message = error instanceof Error ? error.message : String(error);
-  return new ProviderRetryableError(`embedding request failed: ${message}`.slice(0, 500), provider, null, null, 1);
+  // A response the status rule does not retry here but the SDK marks retryable (a quota 429): labelled by its status,
+  // with the same retry behaviour as before. No response (a dropped connection or timeout): the network code.
+  const withStatus = [error, (error as { lastError?: unknown }).lastError]
+    .find((candidate) => candidate && typeof candidate === "object" && typeof (candidate as { statusCode?: unknown }).statusCode === "number") as
+    { statusCode: number; responseBody?: unknown } | undefined;
+  const status = withStatus ? withStatus.statusCode : null;
+  const body = String(withStatus?.responseBody ?? "");
+  const code = status === null ? providerNetworkErrorCode(error)
+    : status === 429 && isQuotaExhaustedBody(body) ? "quota-exhausted" : providerErrorCodeForStatus(status);
+  logProviderErrorDetail(provider, "embedding request", code, status, `${error instanceof Error ? error.message : String(error)} ${body}`);
+  return new ProviderRetryableError(`embedding request failed: ${providerErrorSummary(code, status)}`, provider, status, null, 1, code);
 }
 
 function embeddingMaxRetries(): number {
@@ -791,11 +804,11 @@ async function embedRemoteChunks(args: {
       ? await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: args.profile.modelUri, capability: "embedding", operation: "worker.embedding" })
       : null;
     // OpenRouter batches get their own client so the reported charge is this batch's alone.
-    const openRouterCharge = !privateCall && args.profile.provider === "openrouter" ? createOpenRouterChargeTotal(createOpenRouterRoutingFetch()) : null;
+    const openRouterCharge = !privateCall && args.profile.provider === "openrouter" ? createOpenRouterChargeTotal(createOpenRouterRoutingFetch(noRedirectFetch())) : null;
     const model = privateCall
       ? createOpenAI({ apiKey: "private-endpoint", baseURL: privateCall.baseUrl, fetch: instrumentFetch("private", "embedding", privateCall.fetch) }).embedding(privateCall.model) as any
       : openRouterCharge
-        ? createOpenAI({ apiKey: requiredKey(args.config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", openRouterCharge.fetch) }).embedding(args.profile.model) as any
+        ? createOpenAI({ apiKey: requiredKey(platformModelKey("openrouter", OPENROUTER_BASE_URL, args.config), "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", openRouterCharge.fetch) }).embedding(args.profile.model) as any
         : sharedModel;
     const batchStartedAt = Date.now();
     const result = await withObservation(
@@ -811,6 +824,8 @@ async function embedRemoteChunks(args: {
         // Reserve fleet-wide TPM first, then a process concurrency slot. Retries
         // live here (not in the AI SDK) so every 429 feeds the fleet's AIMD
         // factor and Retry-After pause; exhausted retries fail retryably.
+        // A non-retryable HTTP failure leaves as a coded ProviderRequestError: the SDK's message quotes the
+        // response body, which goes to the worker log only (it would otherwise be stored on the run and stage).
         runWithProviderRateLimit({
           provider: args.profile.provider,
           model: args.profile.model,
@@ -839,7 +854,7 @@ async function embedRemoteChunks(args: {
               // Bounded per request (WORKER_AI_REQUEST_TIMEOUT_MS).
               abortSignal: withRequestTimeout(args.signal),
               providerOptions,
-            }), args.signal)),
+            }), args.signal)).catch((error: unknown) => { throw toProviderRequestError(error, args.profile.provider, "embedding request"); }),
     );
     noteWorkProgress("embeddings");
     const privateCost = privateCall
@@ -1348,37 +1363,39 @@ export function packEmbeddingBatches(chunks: readonly string[], maxInputs: numbe
 }
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
-  assertTenantModelEndpointAllowed(`llm://${profile.provider}/local`);
+  // Profiles come from validated settings; the base URL a local route will use is judged again here, at call time.
+  assertTenantModelBaseUrlAllowed(profile.provider, profile.baseUrl);
   switch (profile.provider) {
     case "deepinfra":
       if (profile.model !== "BAAI/bge-m3" || profile.dimensions !== 1024) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");
-      return createOpenAI({ apiKey: requiredKey(config.deepInfraApiKey ?? "", "DEEPINFRA_API_KEY"), baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding") }).embedding(profile.model) as any;
+      return createOpenAI({ apiKey: requiredKey(platformModelKey("deepinfra", DEEPINFRA_EMBEDDING_BASE_URL, config), "DEEPINFRA_API_KEY"), baseURL: DEEPINFRA_EMBEDDING_BASE_URL, fetch: instrumentFetch("deepinfra", "embedding", noRedirectFetch()) }).embedding(profile.model) as any;
     case "openrouter": {
       const route = openRouterEmbeddingRoute(profile.model);
       if (profile.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
-      return createOpenAI({ apiKey: requiredKey(config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) }).embedding(profile.model) as any;
+      return createOpenAI({ apiKey: requiredKey(platformModelKey("openrouter", OPENROUTER_BASE_URL, config), "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch(noRedirectFetch())) }).embedding(profile.model) as any;
     }
-    case "openai":
-      return (
-        config.openAiBaseUrl &&
-        config.openAiBaseUrl !== "https://api.openai.com/v1"
-          ? createOpenAI({
-              apiKey: requiredKey(config.openAiApiKey, "OPENAI_API_KEY"),
-              baseURL: config.openAiBaseUrl,
-              fetch: instrumentFetch("openai", "embedding"),
-            }).embedding(profile.model)
-          : createOpenAI({ apiKey: config.openAiApiKey || undefined, fetch: instrumentFetch("openai", "embedding") }).embedding(profile.model)
-      ) as any;
+    case "openai": {
+      // The configured OpenAI base URL (api.openai.com when unset) and only its key, passed explicitly: the SDK never
+      // falls back to reading a key from the process environment.
+      const baseURL = configuredOpenAiBaseUrl(config);
+      return createOpenAI({
+        apiKey: requiredKey(platformModelKey("openai", baseURL, config), "OPENAI_API_KEY"),
+        baseURL,
+        fetch: instrumentFetch("openai", "embedding", noRedirectFetch()),
+      }).embedding(profile.model) as any;
+    }
     case "ollama":
     case "vllm":
     case "lmstudio":
       if (!profile.baseUrl) {
         throw new Error(`${profile.provider} embedding route requires a base URL`);
       }
+      // A tenant-set server: a placeholder key only, the request URL from the parsed base URL, and no redirects (a
+      // loopback service must not be able to bounce the request body elsewhere).
       return createOpenAI({
         apiKey: "local",
-        baseURL: profile.baseUrl,
-        fetch: instrumentFetch(profile.provider, "embedding"),
+        baseURL: canonicalModelBaseUrl(profile.baseUrl),
+        fetch: instrumentFetch(profile.provider, "embedding", noRedirectFetch()),
       }).embedding(profile.model) as any;
     case "jina":
     case "nomic":

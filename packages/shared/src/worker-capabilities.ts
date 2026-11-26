@@ -59,6 +59,12 @@ export const WORKER_CAPABILITIES = [
    */
   "extraction.config-v1",
   /**
+   * Handles the PII policy action `block_document` (and fails closed on any action it does not know), and its schema
+   * (`pii_page_findings`) exists. An API offers `block_document` only when every live worker advertises this: an older
+   * worker does not know the action and would index such documents in full.
+   */
+  "pii.block-document",
+  /**
    * Measures every text document's pages itself, in the parser VM under the VM-only floor (DocSlurp/app issue 599): intake
    * may send a size-and-line-feed estimate instead of decoding the text on the API host. A VM-only worker whose parser image
    * cannot count text refuses to start, so it never advertises this.

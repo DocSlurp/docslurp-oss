@@ -8,6 +8,7 @@ import { buildExtractionContract } from "../lib/extraction-contract.js";
 import type { Document, ProjectRun } from "../models.js";
 import type { PdfRasterCache } from "../pipeline/pdf-asset-cache.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
+import { parsePageOffsets } from "../lib/page-offsets.js";
 import { buildSummaryEvidence } from "../stages/summary-evidence.js";
 import { refreshSummaryEvidence } from "../stages/summary-evidence-refresh.js";
 import { readSummarySource } from "../stages/summary-source.js";
@@ -188,10 +189,68 @@ describe("summary evidence follows the current markdown", () => {
     expect(ctx.storage.objects.has(evidenceKey)).toBe(false);
   });
 
+  it("keeps the page offset index in step with the evidence", async () => {
+    const ctx = setup();
+    const { evidenceKey } = seedExtraction(ctx);
+    const indexKey = "u1/run-1/summary-evidence/doc-1.pages.jsonl";
+    const args = { storage: ctx.storage, ledger: ctx.state.artifactLedger, document: ctx.document };
+    const text = "né\u{1F600}\fpage two";
+    expect(await refreshSummaryEvidence({ ...args, text, sourceUri: "s3://b/m.md", textIsStored: true })).toBe("rebuilt");
+    const index = parsePageOffsets(ctx.storage.objects.get(indexKey)!, { documentId: "doc-1", sourceUri: "s3://b/m.md", sourceBytes: Buffer.byteLength(text) });
+    expect(index?.lengths).toEqual([Buffer.byteLength("né\u{1F600}"), 8]);
+    // Text that is not what the object holds, or has the wrong page count: no index.
+    expect(await refreshSummaryEvidence({ ...args, text, sourceUri: "s3://b/m.md" })).toBe("rebuilt");
+    expect(ctx.storage.objects.has(indexKey)).toBe(false);
+    await refreshSummaryEvidence({ ...args, text, sourceUri: "s3://b/m.md", textIsStored: true });
+    await refreshSummaryEvidence({ ...args, text: "one page only", sourceUri: "s3://b/m.md", textIsStored: true });
+    expect(ctx.storage.objects.has(indexKey)).toBe(false);
+    await refreshSummaryEvidence({ ...args, text, sourceUri: "s3://b/m.md", textIsStored: true });
+    expect(ctx.storage.objects.has(indexKey)).toBe(true);
+    expect(await refreshSummaryEvidence({ ...args, text: null, sourceUri: "s3://b/m.md" })).toBe("deleted");
+    expect(ctx.storage.objects.has(evidenceKey)).toBe(false);
+    expect(ctx.storage.objects.has(indexKey)).toBe(false);
+  });
+
+  it("does not fail the refresh when the index cannot be written", async () => {
+    const ctx = setup();
+    seedExtraction(ctx);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const storage = Object.assign(Object.create(ctx.storage), { putBytes: async () => { throw new Error("boom"); } });
+    expect(await refreshSummaryEvidence({ storage, ledger: ctx.state.artifactLedger, document: ctx.document,
+      text: "a\fb", sourceUri: "s3://b/m.md", textIsStored: true })).toBe("rebuilt");
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
   it("rejects evidence outside the configured bucket", async () => {
     const ctx = setup();
     ctx.state.artifactLedger.recordDocument(ctx.document.id, "summary-evidence", "s3://other/evidence.json");
     await expect(refreshSummaryEvidence({ storage: ctx.storage, ledger: ctx.state.artifactLedger, document: ctx.document,
       text: "x", sourceUri: "s3://b/x.md" })).rejects.toThrow("configured bucket");
+  });
+});
+
+describe("readStoredMarkdown", () => {
+  const store = (objects: Record<string, Buffer>, fail = false) => ({
+    bucket: "b",
+    objectSize: async (key: string) => objects[key]?.length ?? null,
+    getByteRange: async (key: string, start: number, end: number) => {
+      if (fail) throw new Error("boom");
+      return objects[key]!.subarray(start, end + 1);
+    },
+  });
+
+  it("returns the stored bytes exactly, including bytes that are not valid UTF-8", async () => {
+    const { readStoredMarkdown } = await import("../stages/summary-evidence-refresh.js");
+    const bytes = Buffer.from([0x61, 0xff, 0x0c, 0x62]);
+    expect(await readStoredMarkdown(store({ "k/doc.md": bytes }), "s3://b/k/doc.md")).toEqual(bytes);
+  });
+
+  it("is null for another bucket, a missing or empty object and a failed read", async () => {
+    const { readStoredMarkdown } = await import("../stages/summary-evidence-refresh.js");
+    expect(await readStoredMarkdown(store({ "k/doc.md": Buffer.from("a") }), "s3://other/k/doc.md")).toBeNull();
+    expect(await readStoredMarkdown(store({}), "s3://b/k/doc.md")).toBeNull();
+    expect(await readStoredMarkdown(store({ "k/doc.md": Buffer.alloc(0) }), "s3://b/k/doc.md")).toBeNull();
+    expect(await readStoredMarkdown(store({ "k/doc.md": Buffer.from("a") }, true), "s3://b/k/doc.md")).toBeNull();
   });
 });

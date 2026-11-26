@@ -134,6 +134,13 @@ describe("records port: org o2's run cannot touch o1's document", () => {
     expect((await db.query<{ m: unknown }>(`select metadata->'pii'->'withheldArtifactUris' as m from documents where id = 'd1'`)).rows[0]!.m).toBeNull();
   }, 60_000);
 
+  it("page-scoped withholding and its PII categories: another org or run reads the whole document as withheld, never o1's pages or types", async () => {
+    await db.exec(`update documents set metadata = '{"pii":{"scope":"pages","withheldPages":[2],"patternTypes":["email"],"withheldPageTypes":{"2":["email"]},"withheldArtifactUris":["s3://x/p2"]}}' where id = 'd1'`);
+    expect(await store.records.documentPiiWithholding(D1)).toEqual({ scope: "pages", pages: new Set([2]), pageTypes: new Map([[2, ["email"]]]), types: ["email"] });
+    for (const scope of wrongScopes) expect(await store.records.documentPiiWithholding(scope)).toEqual({ scope: "document", reason: "missing-document" });
+    await db.exec(`update documents set metadata = '{}' where id = 'd1'`);
+  }, 60_000);
+
   it("title, file facts and parse source: another org's or run's write is a no-op", async () => {
     for (const scope of wrongScopes) {
       expect(await store.records.setDocumentTitleIfAbsent(scope, { title: "Foreign", source: "heading" })).toBe(false);

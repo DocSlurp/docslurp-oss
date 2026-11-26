@@ -239,32 +239,83 @@ const ibans: PiiDetector = (content) => {
 
 // ---------------------------------------------------- numbers needing context
 
-const BANK_CONTEXT = /\b(?:account|acct|a\/c|checking|savings|bank)(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$/i;
-const ROUTING_CONTEXT = /\b(?:routing|aba|rtn)(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$/i;
+const BANK_CONTEXT = /\b(?:account|acct|a\/c|checking|savings|bank)(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$/i;
+const ROUTING_CONTEXT = /\b(?:routing|aba|rtn)(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$/i;
+
+/**
+ * The label a Markdown table gives a cell: its column's header, as "Header: ". A cell in a row (`| Passport number |
+ * X1234567 |`) already has its label just before it (a `|` boundary is accepted by the context patterns); a value under
+ * a header row (`| Name | Passport number |`, `|---|---|`, `| Jane | X1234567 |`) gets it from here. Empty when the
+ * match is not in a table body. Cost: one linear pass over the content, on the first candidate whose own context did not
+ * match, cached for the rest of the scan (every table body line maps to its header cells).
+ */
+const tableHeaders = new Map<string, Map<number, string[]>>();
+let tableHeadersFor: string | null = null;
+
+function tableBodyHeaders(content: string): Map<number, string[]> {
+  if (tableHeadersFor === content) return tableHeaders.get(content)!;
+  const out = new Map<number, string[]>();
+  const separator = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  const cells = (line: string) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+  let header: string[] | null = null;
+  let previous: string | null = null;
+  let start = 0;
+  while (start <= content.length) {
+    const endAt = content.indexOf("\n", start);
+    const end = endAt < 0 ? content.length : endAt;
+    const line = content.slice(start, end);
+    const inTable = line.trimStart().startsWith("|");
+    if (!inTable) header = null;
+    else if (separator.test(line) && previous !== null && previous.trimStart().startsWith("|")) header = cells(previous);
+    else if (header) out.set(start, header);
+    previous = line;
+    if (endAt < 0) break;
+    start = endAt + 1;
+  }
+  tableHeaders.clear();
+  tableHeaders.set(content, out);
+  tableHeadersFor = content;
+  return out;
+}
+
+function tableHeaderContext(content: string, index: number): string {
+  const lineStart = content.lastIndexOf("\n", index - 1) + 1;
+  if (content[lineStart] !== "|" && !content.slice(lineStart, index).trimStart().startsWith("|")) return "";
+  const header = tableBodyHeaders(content).get(lineStart);
+  if (!header) return "";
+  const column = (content.slice(lineStart, index).match(/\|/g) ?? []).length - 1;
+  const cell = column >= 0 ? header[column] : undefined;
+  return cell ? `${cell}: ` : "";
+}
+
+/** Whether the label before a candidate (or its table column header) matches `context`. */
+function labelledBy(content: string, index: number, context: RegExp): boolean {
+  if (context.test(content.slice(Math.max(0, index - 40), index))) return true;
+  const header = tableHeaderContext(content, index);
+  return header !== "" && context.test(header);
+}
 
 const bankAccounts: PiiDetector = (content) => {
   const spans: PiiSpan[] = [];
   for (const match of matchAll(content, /(?<![\w.-])\d{8,17}(?![\w]|[.-]\d)/g)) {
     const span = { start: match.index, end: match.index + match[0].length };
-    const before = content.slice(Math.max(0, span.start - 40), span.start);
-    if (ROUTING_CONTEXT.test(before)) {
+    if (labelledBy(content, span.start, ROUTING_CONTEXT)) {
       if (match[0].length === 9 && abaChecksumValid(match[0])) spans.push(span);
-    } else if (BANK_CONTEXT.test(before) && !/^(\d)\1+$/.test(match[0])) {
+    } else if (labelledBy(content, span.start, BANK_CONTEXT) && !/^(\d)\1+$/.test(match[0])) {
       spans.push(span);
     }
   }
   return spans;
 };
 
-const PASSPORT_CONTEXT = /\bpassport(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$/i;
-const LICENSE_CONTEXT = /\b(?:driver'?s?|driving)\s+licen[cs]e(?:\s+(?:no|num|number|#))?\.?\s*[:#-]?\s*$|\bdl\s*(?:no|num|number|#)\s*[:#-]?\s*$|\blicen[cs]e\s+(?:no|num|number|#)\s*[:#-]?\s*$/i;
+const PASSPORT_CONTEXT = /\bpassport(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$/i;
+const LICENSE_CONTEXT = /\b(?:driver'?s?|driving)\s+licen[cs]e(?:\s+(?:no|num|number|#))?\.?\s*[:#|-]?\s*$|\bdl\s*(?:no|num|number|#)\s*[:#|-]?\s*$|\blicen[cs]e\s+(?:no|num|number|#)\s*[:#|-]?\s*$/i;
 
 function contextualId(context: RegExp, shape: RegExp, minDigits: number): PiiDetector {
   return (content) => {
     const spans: PiiSpan[] = [];
     for (const match of matchAll(content, shape)) {
-      const before = content.slice(Math.max(0, match.index - 40), match.index);
-      if (!context.test(before)) continue;
+      if (!labelledBy(content, match.index, context)) continue;
       if (digitsOf(match[0]).length < minDigits) continue;
       spans.push({ start: match.index, end: match.index + match[0].length });
     }
@@ -378,3 +429,35 @@ export const PII_DETECTORS: Record<PiiPatternType, PiiDetector> = {
   "jwt": jwts,
   "private-key": privateKeys,
 };
+
+/**
+ * How each detector proves a candidate, for the operator-only finding record (pii_page_findings): every detector is
+ * rule-based and produces no score, so its confidence is recorded as this basis, never as an invented number.
+ * - `checksum`: a check digit or modulus (Luhn, IBAN mod 97, ABA) must hold.
+ * - `structure`: structural rules (SSN area and group ranges, country calling codes, address ranges).
+ * - `context`: a bare number accepted only next to a label ("passport", "account number", "api_key =").
+ * - `format`: a published key or token format (vendor prefix, PEM armour, JWT segments) or an address shape.
+ */
+export type PiiDetectorValidation = "checksum" | "structure" | "context" | "format";
+
+export const PII_DETECTOR_VALIDATION: Readonly<Record<PiiPatternType, PiiDetectorValidation>> = Object.freeze({
+  "ssn": "structure",
+  "credit-card": "checksum",
+  "phone": "structure",
+  "email": "format",
+  "openai-api-key": "format",
+  "anthropic-api-key": "format",
+  "github-token": "format",
+  "generic-api-key": "context",
+  "ip-address": "structure",
+  "bank-account": "context",
+  "iban": "checksum",
+  "passport": "context",
+  "drivers-license": "context",
+  "aws-access-key": "format",
+  "stripe-api-key": "format",
+  "slack-token": "format",
+  "google-api-key": "format",
+  "jwt": "format",
+  "private-key": "format",
+});

@@ -1,4 +1,5 @@
 import { validateHostedEmbeddingVector } from "./embedding.js";
+import { noRedirectFetch } from "./model-endpoints.js";
 
 const models = new Map([["pplx-embed-v1-0.6b", 1024], ["pplx-embed-v1-4b", 2560]]);
 
@@ -24,7 +25,8 @@ export async function embedPerplexity(args: {
   }
   let response: Response;
   try {
-    response = await (args.fetch ?? globalThis.fetch)("https://api.perplexity.ai/v1/embeddings", {
+    // Carries the key: never follows a redirect.
+    response = await noRedirectFetch(args.fetch ?? globalThis.fetch)("https://api.perplexity.ai/v1/embeddings", {
       method: "POST",
       headers: { Authorization: `Bearer ${args.apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: args.model, input: args.values, encoding_format: "base64_int8" }),
@@ -39,11 +41,15 @@ export async function embedPerplexity(args: {
     data?: Array<{ index: number; embedding: string }>;
   };
   let body: EmbeddingResponse;
+  let text = "";
   try {
-    body = await response.json() as EmbeddingResponse;
-  } catch (cause) {
-    if (args.signal?.aborted) throw cause;
-    throw Object.assign(new Error("Native Perplexity embedding response could not be decoded", { cause }), {
+    text = await response.text();
+    body = JSON.parse(text) as EmbeddingResponse;
+  } catch (error) {
+    if (args.signal?.aborted) throw error;
+    // The parser's message quotes the body: it goes to the log, and the error keeps a fixed message with no cause.
+    console.warn(`[provider-error] provider=perplexity label="embedding response" code=invalid-json status=${response.status} detail=${JSON.stringify(text.replace(/\s+/g, " ").slice(0, 500))}`);
+    throw Object.assign(new Error("Native Perplexity embedding response could not be decoded"), {
       statusCode: response.status,
       isRetryable: response.ok || response.status === 429 || response.status >= 500,
       responseHeaders: { "retry-after": response.headers.get("retry-after") ?? "" },

@@ -4,6 +4,7 @@ import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema, type ChartExportTier
 import { chartTierForVisuals, normalizeQualityLevel, qualityLevelSchema, qualityPresetSchema, visualsLevelSchema, type VisualsLevel } from "./extraction-config.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
+import { piiPolicyActionSchema } from "./pii.js";
 import { documentTagsSchema } from "./document-tags.js";
 import { indexingModeSchema } from "./deferred-indexing.js";
 import {
@@ -154,6 +155,11 @@ export const projectSchema = z.object({
    * Present on project reads for the caller; clients offer only these. The server still checks every request.
    */
   extractionChoices: z.object({ quality: z.array(qualityLevelSchema), visuals: z.array(visualsLevelSchema) }).optional(),
+  /**
+   * The PII policy actions this deployment can run now. `block_document` is offered only when every live worker supports
+   * it (capability `pii.block-document`). Absent: the client offers the actions every worker has always supported.
+   */
+  piiActions: z.array(piiPolicyActionSchema).optional(),
   /** Retained versions per document for this project; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   /**
