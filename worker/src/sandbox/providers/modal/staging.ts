@@ -180,7 +180,8 @@ export class SessionStaging {
   private async walk(roots: string[]): Promise<Map<string, RemoteEntry>> {
     const entries = new Map<string, RemoteEntry>();
     const visit = async (entry: RemoteEntry): Promise<void> => {
-      if (!roots.some((root) => entry.path === root || entry.path.startsWith(root + path.sep))) throw new SandboxOutputError("parser VM output escaped staging roots");
+      // The listing is the guest's word: a `..` or `.` segment would pass a prefix test and still leave the root.
+      if (!isPlainChildPath(entry.path) || !roots.some((root) => entry.path === root || entry.path.startsWith(root + path.sep))) throw new SandboxOutputError("parser VM output escaped staging roots");
       if (entries.has(entry.path)) return;
       if (entries.size >= 8192 || entry.path.split(path.sep).length > 64) throw new SandboxOutputError("parser VM output entry/depth limit exceeded");
       entries.set(entry.path, entry);
@@ -188,6 +189,7 @@ export class SessionStaging {
     };
     for (const root of roots) {
       const entry = await this.remote.stat(root);
+      if (entry && entry.path !== root) throw new SandboxOutputError("parser VM output escaped staging roots");
       if (entry) await visit(entry);
     }
     return entries;
@@ -258,4 +260,9 @@ export class SessionStaging {
       this.claim(abs, "upload");
     }
   }
+}
+
+/** An absolute path with no `.`/`..` or empty segment: what a directory listing of our own roots can honestly contain. */
+export function isPlainChildPath(p: string): boolean {
+  return path.isAbsolute(p) && path.normalize(p) === p && !p.endsWith(path.sep);
 }

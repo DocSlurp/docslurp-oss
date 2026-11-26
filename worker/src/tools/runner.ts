@@ -41,7 +41,7 @@ import { admitCommandSource } from "../sandbox/source-quarantine.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import { assertSandboxPolicy } from "../sandbox/policy.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
-import { SandboxPolicyError, SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
+import { SandboxInfrastructureError, SandboxPolicyError, SandboxRunError, type SandboxCommand, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
 import {
   CommandTeardownError,
   containmentOf,
@@ -400,7 +400,8 @@ export class CommandRunner {
       }
       // Otherwise a lazy pip install into the venv (off in images; see tools/python-deps.ts).
       const missing = parseMissingPythonDependency(error.message);
-      if (!missing) throw error;
+      // Outside development the command ran in the VM: its output is the guest's word, and a host venv could not help it.
+      if (!missing || vmOnlyParsing()) throw error;
       // The caller's timeout signal bounds the install too: an optional
       // extractor must never hold a stage hostage while pip or a lock waits.
       const installed = await ensurePythonDistributions([missing], { venvBin: this.venvBin, signal });
@@ -1937,8 +1938,9 @@ export class CommandRunner {
     });
     const { session, release } = await this.acquireSession();
     try {
-      // Every parser command (Poppler, Doppler, pandoc, image tasks, guest scripts) starts here, so the VM-only floor is
-      // enforced per command, not only when the process's provider was chosen at startup.
+      // Every command that runs in a sandbox session (Poppler, Doppler, pandoc, image tasks, guest scripts) passes here,
+      // so the VM-only floor is enforced per command, not only when the process's provider was chosen at startup. The
+      // sandboxed PDF and OCR providers above are remote jobs by contract and do not use a session.
       const vmOnly = vmOnlyParsing();
       if (vmOnly) assertVmSession(session, plan);
       if (session.spawn && !vmOnly) {
@@ -2459,8 +2461,10 @@ async function stopRefusedChild(plan: CommandPlan, child: ChildProcess, containe
 /**
  * Outside development a command runs only in a session of the audited remote VM provider (the same allowlist startup applies,
  * sandbox/policy.ts), and only through its `run`: a local session (bubblewrap, landlock, none, or any session a caller opened
- * with its own `openSession`) would start the parser on this host, beside the worker's secrets. Refused before anything is
- * spawned or staged, and logged; never a fallback to the host.
+ * with its own `openSession`) would start the parser on this host, beside the worker's secrets. Refused before a command is
+ * spawned or its inputs staged (the session is already open, and is released), and logged; never a fallback to the host.
+ * The refusal is also noted as a sandbox infrastructure failure: a stage that catches it and carries on without the
+ * command's output still fails the activity, so a wiring mistake never completes a document on degraded output.
  */
 function assertVmSession(session: SandboxSession, plan: CommandPlan): void {
   let refusal: unknown = null;
@@ -2472,10 +2476,13 @@ function assertVmSession(session: SandboxSession, plan: CommandPlan): void {
   }
   if (refusal === null) return;
   console.error(
-    `[parser-sandbox] status=refused provider=${session.providerId} location=${session.isolation.location} reason=no-vm-boundary ` +
+    `[parser-sandbox] status=refused provider=${JSON.stringify(session.providerId)} location=${session.isolation.location} reason=no-vm-boundary ` +
       `binary=${JSON.stringify(path.basename(plan.binary))} detail=${JSON.stringify(refusal instanceof Error ? refusal.message : String(refusal))}`,
   );
-  throw refusal instanceof SandboxPolicyError ? refusal : new SandboxPolicyError(refusal instanceof Error ? refusal.message : String(refusal));
+  const policy = refusal instanceof SandboxPolicyError ? refusal : new SandboxPolicyError(refusal instanceof Error ? refusal.message : String(refusal));
+  // The worker's wiring, never the document: no strike (afterCommand unset), and the watching stage cannot swallow it.
+  noteSandboxInfrastructureError(new SandboxInfrastructureError(policy.message, undefined, { cause: policy }));
+  throw policy;
 }
 
 function assertProcessTeardown(session: SandboxSession): void {

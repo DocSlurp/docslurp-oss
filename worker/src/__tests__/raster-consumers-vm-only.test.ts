@@ -15,7 +15,8 @@ import { runLocalArtifactCommand } from "../extractors/local-artifact-adapters.j
 import type { Document } from "../models.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { setDefaultParserSandbox, type InitializedParserSandbox } from "../sandbox/startup.js";
-import { SandboxPolicyError, type SandboxCommand, type SandboxIsolation, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
+import { watchSandboxInfrastructure } from "../sandbox/session-context.js";
+import { SandboxInfrastructureError, SandboxPolicyError, type SandboxCommand, type SandboxIsolation, type SandboxResult, type SandboxSession } from "../sandbox/types.js";
 import { CommandRunner, type CommandPlan } from "../tools/runner.js";
 
 const roots: string[] = [];
@@ -179,7 +180,7 @@ describe("production: raster and text consumers never start Poppler on the worke
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reason=no-vm-boundary"));
   });
 
-  it("refuses an oversized PDF on a host session without reading it", async () => {
+  it("refuses an oversized PDF on a host session", async () => {
     const r = recorder();
     const runner = new CommandRunner({ openSession: async () => localSession(r) });
     const source = await oversizedPdf();
@@ -187,6 +188,36 @@ describe("production: raster and text consumers never start Poppler on the worke
     for (const [consumer, plan] of await consumerPlans(runner, source, out)) {
       await expect(runner.run({ ...plan, available: true }), consumer).rejects.toBeInstanceOf(SandboxPolicyError);
     }
+    expect(r.spawned).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reason=no-vm-boundary"));
+  });
+
+  it.each([
+    ["an unknown NODE_ENV", { NODE_ENV: "staging" }],
+    ["a service profile with NODE_ENV unset", { NODE_ENV: "", DOCSLURP_PROFILE: "service" }],
+    ["a service profile under development", { NODE_ENV: "development", DOCSLURP_PROFILE: "service" }],
+  ])("refuses a host session under %s", async (_label, env) => {
+    for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
+    const r = recorder();
+    const runner = new CommandRunner({ openSession: async () => localSession(r) });
+    await expect(runner.run({ ...(await runner.pdfInfo(await hostilePdf())), available: true })).rejects.toBeInstanceOf(SandboxPolicyError);
+    expect(r.spawned).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reason=no-vm-boundary"));
+  });
+
+  it("fails the activity when a stage swallows the refusal and carries on", async () => {
+    const r = recorder();
+    const runner = new CommandRunner({ openSession: async () => localSession(r) });
+    const source = await hostilePdf();
+    // A stage that treats a failed probe as "no evidence" (page facts does) must not complete the document on that.
+    const watched = await watchSandboxInfrastructure(async () => {
+      const info = await runner.run({ ...(await runner.pdfInfo(source)), available: true }).catch(() => null);
+      return info === null ? "degraded" : "ok";
+    });
+    expect(watched.result).toBe("degraded");
+    expect(watched.infrastructure).toBeInstanceOf(SandboxInfrastructureError);
+    expect(watched.infrastructure?.cause).toBeInstanceOf(SandboxPolicyError);
+    expect((watched.infrastructure as SandboxInfrastructureError).strikes).toBeFalsy();
     expect(r.spawned).toEqual([]);
   });
 
@@ -217,6 +248,7 @@ describe("production: raster and text consumers never start Poppler on the worke
     await expect(runLocalArtifactCommand("pdftoppm", ["-f", "1", "-l", "1", "-singlefile", "-png", source, path.join(await scratch("out"), "p")], 1024, 5_000))
       .rejects.toBeInstanceOf(SandboxPolicyError);
     expect(r.spawned).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reason=no-vm-boundary"));
   });
 
   it("document-map and the local artifact adapters run in the VM with the registered VM sandbox", async () => {
@@ -244,6 +276,7 @@ describe("production: raster and text consumers never start Poppler on the worke
       await sources.clear();
     }
     expect(r.spawned).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reason=no-vm-boundary"));
   });
 
   it("PdfRasterCache measures and renders a hostile PDF in the VM", async () => {
@@ -261,6 +294,8 @@ describe("production: raster and text consumers never start Poppler on the worke
     } finally {
       await sources.clear();
     }
+    expect(r.spawned).toEqual([]);
+    expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining("reason=no-vm-boundary"));
     const binaries = r.ran.map((command) => path.basename(command.binary));
     expect(binaries).toContain("pdfinfo");
     expect(binaries).toContain("pdftoppm");
