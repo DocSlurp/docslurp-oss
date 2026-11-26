@@ -145,52 +145,17 @@ const CONTEXTUAL_CHUNK_SUMMARY_LIMIT = 240;
 const CONTEXTUAL_CHUNK_SUMMARY_TOKENS = 96;
 const CONTEXTUAL_SOURCE_LIMIT = 12_000;
 
-/** A document whose source text could not be extracted in the parser VM (the embed fallback under the VM-only floor). */
+/**
+ * Refusal of the source-file text fallback under the VM-only parsing floor. Should be unreachable: the worker forces
+ * Markdown extraction whenever a stage reads the document's text (stage-execution.ts coerceMarkdownExtractionForVmFloor),
+ * so a document reaching here has no extraction artifact by a bug, not by an option. The source is never staged, decoded
+ * or parsed for it on this host.
+ */
 export class SourceTextUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SourceTextUnavailableError";
   }
-}
-
-/** The Pandoc reader for a fallback source in the VM: chosen by the format, never left to the file name for these. */
-function fallbackPandocReader(document: Document): string | undefined {
-  const ext = path.extname(document.filename).toLowerCase();
-  const mime = document.mimeType.toLowerCase();
-  if (ext === ".tsv" || mime === "text/tab-separated-values") return "tsv";
-  if (isCsvLike(document)) return "csv";
-  if (mime.startsWith("text/html") || ext === ".html" || ext === ".htm") return "html";
-  if (isJsonLike(document) || isTextLike(document)) return "markdown";
-  return undefined;
-}
-
-/**
- * The embed fallback under the VM-only floor: the staged, hash-verified source through the parser VM's tools (pdftotext for
- * a PDF, Pandoc otherwise), and only their stdout comes back. A text-like file Pandoc reads as Markdown, so its words are
- * all kept (JSON included); no extractor producing text fails the document with SourceTextUnavailableError.
- */
-async function extractSourceTextInVm(
-  document: Document,
-  runner: CommandRunner,
-  storage: ArtifactStore,
-  signal: AbortSignal | undefined,
-  canonicalDocument: CanonicalDocument | undefined,
-): Promise<{ text: string; extractor: string; canonicalDocument?: CanonicalDocument }> {
-  const tempFile = await stageSourceFile(storage, document, trustedTempDownloadPattern("docslurp-source-", document));
-  try {
-    const isPdf = path.extname(document.filename).toLowerCase() === ".pdf" || document.mimeType.toLowerCase().includes("pdf");
-    if (isPdf) {
-      const result = await runner.run(await runner.extractText(tempFile, Math.max(1, Math.trunc(Number(document.pageCount)) || 1)), signal).catch(() => null);
-      if (result?.stdout.trim()) return { text: result.stdout, extractor: "pdftotext", canonicalDocument };
-    } else {
-      const result = await runner.run(await runner.extractMarkdown(tempFile, fallbackPandocReader(document)), signal).catch(() => null);
-      if (result?.stdout.trim()) return { text: result.stdout, extractor: "pandoc", canonicalDocument };
-    }
-  } finally {
-    await cleanupTempFile(tempFile);
-  }
-  console.error(`[embed] refused document=${document.id}: Markdown extraction is off and the parser VM produced no text; the source is never decoded on this host`);
-  throw new SourceTextUnavailableError(`source-text-unavailable: no text could be extracted from ${document.filename} in the parser VM with Markdown extraction off; turn Markdown extraction on for this file`);
 }
 
 /**
@@ -268,11 +233,12 @@ async function extractTextForEmbeddingRaw(
     return { text: "", extractor: "no-extracted-text", canonicalDocument };
   }
 
-  // No Markdown or canonical artifact: the run turned Markdown extraction off (`pipeline.markdownExtraction: false`, an
-  // upload override). Under the VM-only floor this host never decodes or parses the source (DocSlurp/app issue 599): the
-  // text comes from Pandoc in the parser VM, with the reader the format needs, so CSV, JSON, Markdown, plain text and HTML
-  // keep their content; nothing found there is a loud document failure, never a host decode.
-  if (vmOnlyParsing()) return await extractSourceTextInVm(document, runner, storage, signal, canonicalDocument);
+  // No Markdown or canonical artifact. Under the VM-only floor this cannot come from an option (Markdown extraction always
+  // runs when a stage reads the text), so it is a refusal, never a read of the source on this host (DocSlurp/app issue 599).
+  if (vmOnlyParsing()) {
+    console.error(`[parser-sandbox] status=refused reason=source-text-fallback document=${document.id}: no extraction artifact; the source is never read for its text on this host`);
+    throw new SourceTextUnavailableError(`source-text-unavailable: ${document.id} has no extracted text`);
+  }
 
   if (isCsvLike(document)) {
     const data = await readSourceBytes(storage, document);

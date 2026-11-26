@@ -5,7 +5,8 @@ import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import type { PreloadedRunState } from "../db/run-ledger.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
-import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder } from "@docslurp/shared";
+import { compilePipelinePlan, deferredProfilesEnabled, getPipelineStageOrder, requireMarkdownExtraction } from "@docslurp/shared";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { noteRunMilestone, noteRunOutcome, workerStartKind } from "./run-milestones.js";
 import { withObservation, flushObservability } from "@docslurp/shared/observability";
 import { ApplicationFailure } from "@temporalio/common";
@@ -164,6 +165,20 @@ export function coerceIndexingModeForFlag<T extends { pipeline: { indexingMode?:
   return run;
 }
 
+/**
+ * Under the VM-only parsing floor a run never skips Markdown extraction while a later stage needs the document's text
+ * (`requireMarkdownExtraction`): with it off, the PII scan, summary, embed and indexes would each have to read the source
+ * file themselves, which no host process may do, and Office and EPUB files would go unmeasured. `markdownExtraction: false`
+ * stays accepted from every caller and only takes effect when no planned stage reads the text. Development keeps the stored
+ * setting.
+ */
+export function coerceMarkdownExtractionForVmFloor<T extends { pipeline: import("@docslurp/shared").PipelineFeatures }>(run: T, vmOnly = vmOnlyParsing()): T {
+  if (!vmOnly || !run.pipeline || run.pipeline.markdownExtraction !== false) return run;
+  const pipeline = requireMarkdownExtraction(run.pipeline);
+  if (pipeline !== run.pipeline) run.pipeline = pipeline;
+  return run;
+}
+
 /** The one Run hydration path for every activity entry point. */
 export async function loadRunState(
   store: Pick<StageExecutionStore, "loadRun" | "loadDocumentsForRun" | "hydrateState" | "pageBasisLedger"> & {
@@ -186,7 +201,7 @@ export async function loadRunState(
   const [run, documents] = options.preloaded
     ? [options.preloaded.run, options.preloaded.documents]
     : await Promise.all([store.loadRun(runId), store.loadDocumentsForRun(runId)]);
-  const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
+  const state = WorkflowState.create(coerceMarkdownExtractionForVmFloor(coerceIndexingModeForFlag(run)), documents);
   // Every loaded state checks spend through the store's page basis, hydrated or not (a page task leaves state.store unset so
   // it never flushes a stale run snapshot, but its OCR reads are still checked against the balance).
   state.pageBasis = new PageBasis(state, store.pageBasisLedger);
