@@ -124,7 +124,8 @@ function estimateTextCostCents(
 /** The generation receipt, null when not (yet) available, "incomplete" when BYOK accounting lacks the upstream cost. */
 async function fetchGenerationReceipt(apiKey: string, generationId: string, base: { inputTokens: number; outputTokens: number }): Promise<ProviderTextUsage | "incomplete" | null> {
   const response = await fetch(`https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(generationId)}`, {
-    headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5000),
+    // Carries the OpenRouter key: a redirect is refused, never followed to another host.
+    headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5000), redirect: "error",
   });
   if (!response.ok) return null;
   const { data } = await response.json() as { data?: Record<string, unknown> };

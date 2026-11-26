@@ -39,7 +39,7 @@ import {
 } from "@docslurp/shared";
 
 import type { UsageEvent } from "../models.js";
-import { fetchWithProviderRetry, type ProviderRetryOptions } from "../lib/provider-retry.js";
+import { fetchWithProviderRetry, logProviderErrorDetail, providerErrorCodeForStatus, providerErrorSummary, type ProviderRetryOptions } from "../lib/provider-retry.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { readRoutingFlags } from "./flags.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
@@ -411,11 +411,19 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
             fetchImpl: options.fetchImpl,
           },
         );
+        // The response text goes to the worker log only; the error carries the model id, a code and the status.
+        const text = await response.text().catch(() => "");
         if (!response.ok) {
-          const text = await response.text().catch(() => "");
-          throw new DecisionRequestError(`${model.id} returned ${response.status}: ${text.slice(0, 300)}`, response.status);
+          const code = providerErrorCodeForStatus(response.status);
+          logProviderErrorDetail(`decision-${spec.provider}`, "decision request", code, response.status, text);
+          throw new DecisionRequestError(`${model.id} returned ${providerErrorSummary(code, response.status)}`, response.status);
         }
-        body = await response.json();
+        try {
+          body = JSON.parse(text);
+        } catch {
+          logProviderErrorDetail(`decision-${spec.provider}`, "decision request", "invalid-json", response.status, text);
+          throw new DecisionRequestError(`${model.id} returned invalid-json (${response.status})`, response.status);
+        }
       }
 
       const parsed = parseDecisionResponse(body, questions);

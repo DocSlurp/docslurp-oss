@@ -395,13 +395,20 @@ function blankAttempt(streamed: boolean): VisionAttempt {
   return { text: "", finishReason: null, model: null, provider: null, usage: null, error: null, hadChoices: false, degenerate: null, streamed, id: null };
 }
 
-function readStringField(value: unknown): string | null {
-  return typeof value === "string" && value ? value : null;
+
+/**
+ * A short label the remote sends about itself (`provider`, `model`, `finish_reason`, a generation id): kept only when
+ * it is 1-80 characters of letters, digits, spaces and `._:/()+-`, else null. These reach stored attempt summaries
+ * and logs, so arbitrary response text never does.
+ */
+const REMOTE_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._:/()+-]{0,79}$/;
+export function readRemoteLabel(value: unknown): string | null {
+  return typeof value === "string" && REMOTE_LABEL.test(value) ? value : null;
 }
 
 /** OpenRouter sends `provider` as a name string on chunks; some gateways send `{ name }`. */
 function readProviderName(value: unknown): string | null {
-  return readStringField(value) ?? readStringField((value as { name?: unknown } | null)?.name);
+  return readRemoteLabel(value) ?? readRemoteLabel((value as { name?: unknown } | null)?.name);
 }
 
 async function consumeStream(response: Response, abort: () => void): Promise<VisionAttempt> {
@@ -415,15 +422,15 @@ async function consumeStream(response: Response, abort: () => void): Promise<Vis
       sawChunk = true;
       let chunk: Record<string, any>;
       try { chunk = JSON.parse(data); } catch { continue; }
-      attempt.id = readStringField(chunk.id) ?? attempt.id;
-      attempt.model = readStringField(chunk.model) ?? attempt.model;
+      attempt.id = readRemoteLabel(chunk.id) ?? attempt.id;
+      attempt.model = readRemoteLabel(chunk.model) ?? attempt.model;
       attempt.provider = readProviderName(chunk.provider) ?? attempt.provider;
       if (chunk.usage && typeof chunk.usage === "object") attempt.usage = chunk.usage;
       if (chunk.error && typeof chunk.error === "object") attempt.error = chunk.error;
       const choice = chunk.choices?.[0];
       if (choice) {
         attempt.hadChoices = true;
-        if (choice.finish_reason) attempt.finishReason = choice.finish_reason;
+        if (choice.finish_reason) attempt.finishReason = readRemoteLabel(choice.finish_reason) ?? "other";
         if (choice.error && typeof choice.error === "object") attempt.error = choice.error;
         const delta = chatText(choice.delta?.content ?? choice.message?.content);
         if (delta) {
@@ -450,15 +457,23 @@ async function consumeStream(response: Response, abort: () => void): Promise<Vis
 
 async function consumeJson(response: Response): Promise<VisionAttempt> {
   const attempt = blankAttempt(false);
-  const payload = (await response.json()) as Record<string, any>;
-  attempt.id = readStringField(payload.id);
-  attempt.model = readStringField(payload.model);
+  // A body that is not JSON fails with a fixed message: the parser's own message quotes the start of the body.
+  const body = await response.text();
+  let payload: Record<string, any>;
+  try {
+    payload = JSON.parse(body) as Record<string, any>;
+  } catch {
+    console.warn(`[provider-error] label="vision response" code=invalid-json status=${response.status} detail=${JSON.stringify(body.replace(/\s+/g, " ").slice(0, 500))}`);
+    throw new Error("vision response was not valid JSON");
+  }
+  attempt.id = readRemoteLabel(payload.id);
+  attempt.model = readRemoteLabel(payload.model);
   attempt.provider = readProviderName(payload.provider);
   attempt.usage = payload.usage && typeof payload.usage === "object" ? payload.usage : null;
   const choice = payload.choices?.[0];
   attempt.hadChoices = Boolean(choice);
   attempt.text = chatText(choice?.message?.content).trim();
-  attempt.finishReason = choice?.finish_reason ?? null;
+  attempt.finishReason = choice?.finish_reason ? readRemoteLabel(choice.finish_reason) ?? "other" : null;
   attempt.error = (choice?.error && typeof choice.error === "object" ? choice.error : null)
     ?? (payload.error && typeof payload.error === "object" ? payload.error : null);
   return attempt;
@@ -645,7 +660,7 @@ async function attachGenerationReceipt(args: GuardedCompletionArgs, attempt: Vis
     attempt.usage = { ...attempt.usage,
       ...(receipt.metadata.providerUsage as Record<string, unknown>),
       prompt_tokens: receipt.inputTokens, completion_tokens: receipt.outputTokens, generation_receipt: true };
-    if (typeof receipt.metadata.providerName === "string") attempt.provider = receipt.metadata.providerName;
+    attempt.provider = readRemoteLabel(receipt.metadata.providerName) ?? attempt.provider;
   } catch (error) {
     console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} receipt lookup failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -708,9 +723,12 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
 
   const rejected = (attempts: number, verdict: { kind: RetryableOutcome; detail: string }) => {
     const totals = totalsOf(log, args);
+    // The per-attempt trail (which host served each attempt) goes to the worker log; the error message, which can be
+    // stored, carries only fixed text.
     const trail = log.map((s) => `attempt ${s.attempt}: ${s.outcome} via ${s.provider ?? "unknown provider"}`).join("; ");
+    console.warn(`[vision-stream] rejected after ${attempts} attempt(s): ${trail}`);
     return new VisionOutputRejectedError(
-      `vision output rejected after ${attempts} attempt${attempts === 1 ? "" : "s"} (${verdict.kind}: ${verdict.detail}); ${trail}`,
+      `vision output rejected after ${attempts} attempt${attempts === 1 ? "" : "s"} (${verdict.kind}: ${verdict.detail})`,
       log.map(stripCharge), totals.inputTokens, totals.outputTokens, totals.costCents, degenerate, totals.chargedTokens,
     );
   };
