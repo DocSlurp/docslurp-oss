@@ -22,9 +22,12 @@ import { probePidNamespace, spawnContained } from "../sandbox/teardown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { selectRasterPagesFromClassification } from "../stages/render-images.js";
 
-/** pdfinfo -f/-l output: the "Pages:" line, then one numbered size line per page. */
+/** pdfinfo -f/-l output: the "Pages:" line, then a numbered size and rotation line per page. */
 function pdfinfoSizes(first: number, last: number): string {
-  return [`Pages:           ${last}`, "Encrypted:       no", ...Array.from({ length: last - first + 1 }, (_, i) => `Page ${String(first + i).padStart(4)} size: 612 x 792 pts (letter)`)].join("\n");
+  return [`Pages:           ${last}`, "Encrypted:       no", ...Array.from({ length: last - first + 1 }, (_, i) => [
+    `Page ${String(first + i).padStart(4)} size: 612 x 792 pts (letter)`,
+    `Page ${String(first + i).padStart(4)} rot:  0`,
+  ]).flat()].join("\n");
 }
 
 const tempRoots: string[] = [];
@@ -219,7 +222,6 @@ describe("PdfRasterCache", () => {
     { digits: 2, failure: null },
     { digits: 3, failure: null },
     { digits: 1, failure: "missing" },
-    { digits: 1, failure: "malformed" },
     { digits: 1, failure: "cancelled" },
   ])("renders bounded pairs (digits=$digits, failure=$failure)", async ({ digits, failure }) => {
     const controller = new AbortController();
@@ -261,7 +263,7 @@ describe("PdfRasterCache", () => {
           header.writeUInt32BE(0x89504e47);
           header.write("IHDR", 12);
           header.writeUInt32BE(1200, 16);
-          header.writeUInt32BE(page === 3 && failure === "malformed" ? 4000 : 1600, 20);
+          header.writeUInt32BE(1600, 20);
           await writeFile(`${prefix}-${String(page).padStart(digits, "0")}.png`, header);
         }
         if (failure === "cancelled") controller.abort(new Error("test cancelled"));
@@ -299,6 +301,56 @@ describe("PdfRasterCache", () => {
     expect(artifacts.size).toBe(3);
     expect(first.map((page) => page.sizeBytes)).toEqual([24, 24, 24]);
     expect(second.map((page) => page.sizeBytes)).toEqual([24, 24, 24]);
+    // The PNGs claim 1200 x 1600; the reported size is the render plan's (a letter page at 150 dpi: 1275 x 1650).
+    expect(first.map((page) => [page.widthPx, page.heightPx])).toEqual([[1275, 1650], [1275, 1650], [1275, 1650]]);
+    await sourceCache.clear();
+  });
+
+  it.each([
+    { name: "oversized dimensions", width: 0xffffffff, height: 0xffffffff, signature: true },
+    { name: "tiny dimensions", width: 1, height: 1, signature: true },
+    { name: "no PNG signature", width: 0, height: 0, signature: false },
+  ])("a forged PNG header ($name) changes nothing the host reports or decides", async ({ width, height, signature }) => {
+    const sourceStorage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        const root = await mkdtemp(path.join(tmpdir(), "raster-source-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "pdf bytes");
+        return filePath;
+      },
+    };
+    const artifacts = new Map<string, Uint8Array>();
+    const storage = {
+      async objectSize(key: string) { return artifacts.get(key)?.byteLength ?? null; },
+      async putBytes(key: string, bytes: Uint8Array) { artifacts.set(key, bytes); },
+      uri(key: string) { return `s3://test/${key}`; },
+    };
+    const sourceCache = new PdfSourceCache(sourceStorage as any);
+    const runner = {
+      async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
+      async renderPdfPageRange(_source: string, prefix: string, first: number, last: number) {
+        return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true };
+      },
+      async run(plan: { binary?: string; args: string[] }) {
+        if (plan.binary === "pdfinfo") return { stdout: pdfinfoSizes(Number(plan.args[0]), Number(plan.args[1])), stderr: "" };
+        const [prefix, firstText, lastText] = plan.args;
+        for (let page = Number(firstText); page <= Number(lastText); page += 1) {
+          // What a compromised renderer could write: any header at all.
+          const header = Buffer.alloc(32);
+          if (signature) header.writeUInt32BE(0x89504e47);
+          header.write("IHDR", 12);
+          header.writeUInt32BE(width, 16);
+          header.writeUInt32BE(height, 20);
+          await writeFile(`${prefix}-${page}.png`, header);
+        }
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const cache = new PdfRasterCache(runner as any, storage as any, sourceCache);
+    vi.stubEnv("DOCSLURP_PDF_RASTER_BATCHING", "on");
+    const pages = await cache.renderSelectedPages({ document: makeDocument(), runId: "run-1", pageNumbers: [2, 3, 5] });
+    expect(pages.map((page) => [page.pageNumber, page.widthPx, page.heightPx, page.sizeBytes])).toEqual([[2, 1275, 1650, 32], [3, 1275, 1650, 32], [5, 1275, 1650, 32]]);
     await sourceCache.clear();
   });
 

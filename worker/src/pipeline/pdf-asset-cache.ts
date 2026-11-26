@@ -15,7 +15,7 @@ import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
-import { longEdgeCappedDpi, longEdgeCappedEdge } from "../lib/raster-bounds.js";
+import { longEdgeCappedDpi, longEdgeCappedEdge, plannedPdftoppmDimensions } from "../lib/raster-bounds.js";
 import { pageAreaEquivalents, pageAreaEquivalentsPt } from "@docslurp/shared";
 import type { PageEquivalentRow } from "../db/page-equivalents.js";
 import { recordRenderedPageAreas } from "./page-area-sink.js";
@@ -23,7 +23,6 @@ import { pushPerfMetric } from "../lib/perf-context.js";
 import { isCommandTeardownError } from "../sandbox/teardown.js";
 import { SourceIntegrityError, verifyStagedSource } from "../sandbox/source-integrity.js";
 import { registerReadOnlySource, unregisterReadOnlySource } from "../sandbox/paths.js";
-import { readPngFileFacts } from "../lib/page-image-evidence.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 import {
@@ -35,8 +34,10 @@ import {
   pdfPageSizeMemo,
   readPageSizeReuse,
   serializePageSizes,
+  isPdfPageRotation,
   sharedBlockMeasurement,
   type PageSizeBinding,
+  type PdfPageRotation,
   type PdfPageSize,
   type PdfPageSizeMemo,
 } from "./pdf-page-sizes.js";
@@ -437,7 +438,7 @@ export class PdfRasterCache {
     first: number,
     last: number,
     signal: AbortSignal,
-  ): Promise<Map<number, { widthPt: number; heightPt: number }>> {
+  ): Promise<Map<number, PdfPageSize>> {
     // Reads the shared cached source; writes nothing (readOnlyInputs keeps its directory read-only).
     const sizePlan = { ...(await this.runner.pdfPageSizes(sourcePath, first, last)), readOnlyInputs: true };
     if (!sizePlan.available) throw new Error("pdfinfo unavailable for bounded rasterization");
@@ -722,18 +723,19 @@ export class PdfRasterCache {
               if (!paired) continue;
               signal.throwIfAborted();
               const file = path.join(laneDir, filename);
-              if (!(await lstat(file)).isFile()) throw new Error("Invalid raster output file");
-              const { sizeBytes, widthPx, heightPx } = await readPngFileFacts(file);
-              pairBytes += sizeBytes;
-              if (pairBytes > pairOutputLimit || !widthPx || !heightPx || Math.max(widthPx, heightPx) > batch.edge) {
-                throw new Error(`Invalid raster output for page ${pageNumber}`);
-              }
+              const info = await lstat(file);
+              if (!info.isFile()) throw new Error("Invalid raster output file");
+              // Sizes from the file system only: the PNG the VM wrote is never read here (its header could claim anything).
+              pairBytes += info.size;
+              if (pairBytes > pairOutputLimit) throw new Error(`Invalid raster output for page ${pageNumber}`);
             }
             for (let pageNumber = batch.first; pageNumber <= batch.last; pageNumber += 1) {
               const bytes = await readFile(path.join(laneDir, files.get(pageNumber)!));
               signal.throwIfAborted();
               await this.storage.putBytes(keys.get(pageNumber)!, bytes, "image/png");
-              generated.set(pageNumber, { sizeBytes: bytes.byteLength, ...readPngDimensions(bytes) });
+              // Dimensions from the render plan (pdfinfo's size and rotation, the edge chosen here), never from the PNG's header.
+              const planned = plannedPdftoppmDimensions(sizes.get(pageNumber)!, batch.edge);
+              generated.set(pageNumber, { sizeBytes: bytes.byteLength, widthPx: planned?.widthPx ?? null, heightPx: planned?.heightPx ?? null });
             }
           });
           const unrendered = pdftoppmPages.filter((pageNumber) => !generated.has(pageNumber));
@@ -847,13 +849,15 @@ export async function runLanes<T>(
  * unnumbered "Page size:" form instead; it applies to `first` only when first === last. Only lines after the last
  * line-start "Pages:" count: metadata such as the title prints before it and may contain newlines.
  */
-export function parsePdfPageSizes(stdout: string, first: number, last: number): Map<number, { widthPt: number; heightPt: number }> {
-  const sizes = new Map<number, { widthPt: number; heightPt: number }>();
+export function parsePdfPageSizes(stdout: string, first: number, last: number): Map<number, PdfPageSize> {
+  const sizes = new Map<number, PdfPageSize>();
+  const rotations = new Map<number, PdfPageRotation>();
   const lines = stdout.split(/\r?\n/);
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) if (/^Pages:\s/.test(lines[index]!)) start = index + 1;
   if (start < 0) return sizes;
   let single: { widthPt: number; heightPt: number } | null = null;
+  let singleRotation: PdfPageRotation | undefined;
   for (const line of lines.slice(start)) {
     const numbered = line.match(/^Page\s+(\d+)\s+size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
     if (numbered) {
@@ -863,19 +867,25 @@ export function parsePdfPageSizes(stdout: string, first: number, last: number): 
       }
       continue;
     }
+    // "Page    N rot:  R": the rotation pdftoppm applies, so a render's pixel size is planned without reading its PNG.
+    const rotated = line.match(/^Page\s+(\d+)\s+rot:\s+(\d+)\s*$/);
+    if (rotated) {
+      const pageNumber = Number(rotated[1]), rotate = Number(rotated[2]);
+      if (pageNumber >= first && pageNumber <= last && !rotations.has(pageNumber) && isPdfPageRotation(rotate)) rotations.set(pageNumber, rotate);
+      continue;
+    }
     const unnumbered = line.match(/^Page size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts/);
     if (unnumbered && !single) single = { widthPt: Number(unnumbered[1]), heightPt: Number(unnumbered[2]) };
+    const unnumberedRotation = line.match(/^Page rot:\s+(\d+)\s*$/);
+    if (unnumberedRotation && singleRotation === undefined && isPdfPageRotation(Number(unnumberedRotation[1]))) singleRotation = Number(unnumberedRotation[1]) as PdfPageRotation;
   }
-  if (first === last && !sizes.has(first) && single) sizes.set(first, single);
+  if (first === last && !sizes.has(first) && single) {
+    sizes.set(first, single);
+    if (singleRotation !== undefined && !rotations.has(first)) rotations.set(first, singleRotation);
+  }
+  for (const [pageNumber, rotate] of rotations) {
+    const size = sizes.get(pageNumber);
+    if (size) size.rotate = rotate;
+  }
   return sizes;
-}
-
-function readPngDimensions(bytes: Buffer): { widthPx: number | null; heightPx: number | null } {
-  if (bytes.length < 24 || bytes.toString("ascii", 1, 4) !== "PNG") {
-    return { widthPx: null, heightPx: null };
-  }
-  return {
-    widthPx: bytes.readUInt32BE(16),
-    heightPx: bytes.readUInt32BE(20),
-  };
 }
